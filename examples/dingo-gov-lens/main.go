@@ -236,9 +236,10 @@ type accountReward struct {
 	BoundarySlot uint64 `json:"boundarySlot"`
 }
 
-// withdrawalWitness is one CIP-0163 reward-withdrawal witness. Every valid
-// withdrawal-map entry is recorded, so a witness with no matching reward delta
-// is a zero-amount withdrawal that still counts as account activity.
+// withdrawalWitness is one CIP-0163 reward-withdrawal witness, or (when the
+// delegator-inactivity gate is off) a plain non-zero withdrawal reconstructed
+// from account_reward_delta. See accountWithdrawals for which source a given
+// row came from and what that implies about ZeroAmount coverage.
 type withdrawalWitness struct {
 	TxHash     string `json:"txHash"`
 	AddedSlot  uint64 `json:"addedSlot"`
@@ -1405,29 +1406,64 @@ func (a *app) accountRewards(
 	return ret, rows.Err()
 }
 
-// accountWithdrawals returns the account's CIP-0163 withdrawal witnesses joined
-// to the reward journal. A witness with no journal row is a zero-amount
-// withdrawal: the withdrawal path records a witness for every valid
-// withdrawal-map entry but only journals a delta when the amount is non-zero.
+// accountWithdrawals returns the account's reward withdrawals, preferring the
+// CIP-0163 witness history and falling back to the reward journal for
+// withdrawals the witness table never recorded.
+//
+// account_withdrawal_witness only gets a row when the node has the
+// delegator-inactivity gate enabled (see BatchedTxIngestOpts.
+// SkipWithdrawalWitnessWrite in database/batch.go): with the gate off -- the
+// default, and every node not running CIP-0163 -- that insert is elided
+// entirely as write amplification on a table nothing else reads. So on a
+// gate-off node the first branch below returns nothing, and every withdrawal
+// this endpoint shows comes from the second branch instead: non-zero
+// withdrawals reconstructed from account_reward_delta, which is written
+// unconditionally regardless of the gate. Zero-amount withdrawals leave no
+// trace in account_reward_delta (only a witness row would have recorded
+// them), so they are only visible here when the gate is on.
 func (a *app) accountWithdrawals(
 	ctx context.Context,
 	credential string,
 	credentialTag uint8,
 ) ([]withdrawalWitness, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT
-			encode(w.tx_hash, 'hex'),
-			w.added_slot,
-			COALESCE(d.amount::text, '')
-		FROM account_withdrawal_witness w
-		LEFT JOIN account_reward_delta d ON d.withdrawal = true
-			AND d.tx_hash = w.tx_hash
-			AND d.credential_tag = w.credential_tag
-			AND d.staking_key = w.staking_key
-			AND d.added_slot = w.added_slot
-		WHERE w.staking_key = decode($1, 'hex')
-			AND w.credential_tag = $2
-		ORDER BY w.added_slot DESC, w.tx_hash ASC
+		SELECT tx_hash, added_slot, amount FROM (
+			SELECT
+				encode(w.tx_hash, 'hex') AS tx_hash,
+				w.added_slot,
+				COALESCE(d.amount::text, '') AS amount
+			FROM account_withdrawal_witness w
+			LEFT JOIN account_reward_delta d ON d.withdrawal = true
+				AND d.tx_hash = w.tx_hash
+				AND d.credential_tag = w.credential_tag
+				AND d.staking_key = w.staking_key
+				AND d.added_slot = w.added_slot
+			WHERE w.staking_key = decode($1, 'hex')
+				AND w.credential_tag = $2
+
+			UNION ALL
+
+			-- Gate-off fallback: every non-zero withdrawal the witness table
+			-- above missed, reconstructed from the reward journal. Excludes
+			-- rows already covered by a witness so a gate-on database (which
+			-- has both) does not double-count a withdrawal.
+			SELECT
+				encode(d.tx_hash, 'hex') AS tx_hash,
+				d.added_slot,
+				d.amount::text AS amount
+			FROM account_reward_delta d
+			WHERE d.withdrawal = true
+				AND d.staking_key = decode($1, 'hex')
+				AND d.credential_tag = $2
+				AND NOT EXISTS (
+					SELECT 1 FROM account_withdrawal_witness w
+					WHERE w.tx_hash = d.tx_hash
+						AND w.credential_tag = d.credential_tag
+						AND w.staking_key = d.staking_key
+						AND w.added_slot = d.added_slot
+				)
+		) combined
+		ORDER BY added_slot DESC, tx_hash ASC
 		LIMIT 25
 	`, credential, credentialTag)
 	if err != nil {

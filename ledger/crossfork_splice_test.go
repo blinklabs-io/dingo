@@ -77,7 +77,7 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 	err = ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: fixture.connId,
 		Point:        abandonedPoint,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	assert.Equal(

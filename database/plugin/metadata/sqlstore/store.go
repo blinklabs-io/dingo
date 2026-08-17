@@ -53,6 +53,30 @@ type Config struct {
 	// them unset until a native snapshot mechanism is available.
 	BackupTo    func(context.Context, string) error
 	RestoreFrom func(context.Context, string) error
+	// Prepare is an optional provider-owned hook run once at the start of
+	// Start, before anything touches the pools. It is where a provider does
+	// setup that has to happen on a connection of its own and must not
+	// happen at construction time: SQLite uses it to put a new database into
+	// WAL mode, which materialises the file, and constructing a store is not
+	// allowed to do that -- RestoreFrom runs against a constructed but
+	// unstarted store and requires the destination not to exist.
+	Prepare func(context.Context) error
+	// Reset is an optional provider-owned hook clearing all data this store
+	// owns, using the still-open pool (it must run before the store is
+	// closed). See metadata.Resettable's doc comment for why this exists:
+	// a live client/server backend's restore orchestration needs a way to
+	// undo a brief resolve-and-start's real migrations against the actual
+	// remote database, which a directory wipe (sqlite/badger's mechanism)
+	// cannot touch. Left unset, Reset is a harmless no-op.
+	Reset func(context.Context) error
+	// ValidateBackup is an optional provider-owned hook checking a backup
+	// file's structural integrity without touching any database -- see
+	// metadata.BackupValidator's doc comment for why this exists
+	// specifically for Resettable providers: their restore orchestration
+	// resets a live remote target before RestoreFrom ever parses the
+	// backup, so an invalid backup needs to be caught before that reset,
+	// not after it. Left unset, ValidateBackup is a harmless no-op.
+	ValidateBackup func(context.Context, string) error
 }
 
 // Store owns the shared database/sql pools. Provider packages own DSN and
@@ -71,6 +95,9 @@ type Store struct {
 	maintenanceEvery  time.Duration
 	backupTo          func(context.Context, string) error
 	restoreFrom       func(context.Context, string) error
+	prepare           func(context.Context) error
+	reset             func(context.Context) error
+	validateBackup    func(context.Context, string) error
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceState  atomic.Uint32
@@ -128,6 +155,9 @@ func New(config Config) (*Store, error) {
 		maintenanceEvery: config.MaintenanceInterval,
 		backupTo:         config.BackupTo,
 		restoreFrom:      config.RestoreFrom,
+		prepare:          config.Prepare,
+		reset:            config.Reset,
+		validateBackup:   config.ValidateBackup,
 	}, nil
 }
 
@@ -151,6 +181,60 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 	return s.restoreFrom(ctx, srcPath)
 }
 
+// Reset clears all data this store owns, for providers that supply the
+// hook (see metadata.Resettable). A no-op for providers that don't --
+// unlike BackupTo/RestoreFrom, silently doing nothing here is correct,
+// not a lost user request: sqlite (the only file-based provider built on
+// this shared Store) has nothing for this to do, since restoreMetadataStore's
+// directory wipe already fully undoes its brief resolve-and-start. Every
+// backend built on this shared Store -- sqlite included -- therefore
+// satisfies metadata.Resettable's interface, but only postgres/mysql wire
+// a non-nil Config.Reset into it; sqlite's Reset is a documented no-op, not
+// evidence that it "needs more than a directory wipe" the way
+// metadata.Resettable's own doc comment describes for the backends that do.
+func (s *Store) Reset(ctx context.Context) error {
+	if s.reset == nil {
+		return nil
+	}
+	// Serialized with Start/CloseContext via the same startMu they already
+	// hold: without it, a concurrent CloseContext could close the pool
+	// while s.reset(ctx) is mid-flight (or land in the TOCTOU window right
+	// after the closed check below), leaving a live database partially
+	// reset with its connection pool pulled out from under it.
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("metadata reset: store is closed")
+	}
+	return s.reset(ctx)
+}
+
+// HasDestructiveReset reports whether Reset actually mutates a live target
+// (postgres/mysql, which wire a real Config.Reset callback) rather than
+// being a harmless no-op (sqlite, which never sets one). Every backend's
+// concrete *Store satisfies metadata.Resettable's Reset(ctx) error method
+// regardless, so a plain type assertion against that interface alone
+// cannot distinguish "genuinely destructive" from "no-op" -- callers that
+// need to know whether Reset already happening (or having failed partway)
+// means there is no safe pre-restore state left to resume on (see
+// node_lifecycle.go's Restore) must check this instead.
+func (s *Store) HasDestructiveReset() bool {
+	return s.reset != nil
+}
+
+// ValidateBackup checks a backup file's structural integrity, for
+// providers that supply the hook (see metadata.BackupValidator). A no-op
+// for providers that don't -- every backend built on this shared Store
+// therefore satisfies metadata.BackupValidator's interface, but only
+// providers whose restore orchestration needs it wire a non-nil
+// Config.ValidateBackup in.
+func (s *Store) ValidateBackup(ctx context.Context, srcPath string) error {
+	if s.validateBackup == nil {
+		return nil
+	}
+	return s.validateBackup(ctx, srcPath)
+}
+
 // DiskSize returns backend storage usage when the provider supplies it.
 func (s *Store) DiskSize() (int64, error) {
 	if s.diskSize == nil {
@@ -169,6 +253,11 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 	if s.ready.Load() {
 		return nil
+	}
+	if s.prepare != nil {
+		if err := s.prepare(ctx); err != nil {
+			return fmt.Errorf("sqlstore: prepare database: %w", err)
+		}
 	}
 	if err := s.writeDB.PingContext(ctx); err != nil {
 		return fmt.Errorf("sqlstore: ping write database: %w", err)

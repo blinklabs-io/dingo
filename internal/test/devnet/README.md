@@ -21,9 +21,16 @@ Two networks are available, selected by a Docker Compose profile:
 The Go test harness lives alongside this directory: `internal/test/devnet/`
 (helpers and config loader at the top level, runnable scenarios under
 `internal/test/devnet/scenarios/`). The layout mirrors
-`internal/test/antithesis/`. All test files are gated by the `devnet` build
-tag; conformance-only tests additionally require `devnet_conformance` (see
-Test scenarios below).
+`internal/test/antithesis/`. Everything that talks to a running network is
+gated by the `devnet` build tag, and conformance-only tests additionally
+require `devnet_conformance` (see Test scenarios below).
+
+The pure logic the harness is built on — the network-spec loader and its
+validation, the observed-chain state machine, and the scenario plan — is
+deliberately **not** tagged, so its unit tests run in the ordinary
+`go test ./...` with no Docker involved. That is what keeps an invalid
+accelerated spec or a broken rollback rule from only surfacing as a
+mysterious DevNet stall.
 
 ## Topology — dingo mode (default)
 
@@ -83,6 +90,38 @@ Dingo mode differs in pool count and pledge: `poolCount: 3`, `poolPledge: 0`,
 `delegatedSupply: 2100000000000` (divisible by 3, required by the
 generator). The zero pledge is deliberate — it's what makes the CIP-50
 pledge-leverage scenario meaningful (see Test scenarios below).
+
+### Accelerated network parameters
+
+`--accelerated` swaps the network spec for a compressed-timing variant —
+`testnet-dingo-accelerated.yaml` (dingo mode) or `testnet-accelerated.yaml`
+(conformance mode) — so a whole scenario fits the reference-runner budget:
+
+- `epochLength: 120` slots, `slotLength: 0.5s` → **60s epochs**
+- `activeSlotsCoeff: 0.4`, `securityParam (k): 10` → a block every ~1.25s
+- Byron `protocolConsts.k` tracks `securityParam`
+- Everything else (network magic, hard forks at epoch 0, supply) matches
+  the canonical specs.
+
+Shortening an epoch is only safe if the stability windows still fit inside
+it, and both are derived from `k` and `f` rather than configured directly:
+
+| Window | Formula | Accelerated | Canonical |
+|--------|---------|-------------|-----------|
+| nonce stability | `4k/f` | 100 slots | 400 slots |
+| blockfetch stability | `3k/f` | 75 slots | 300 slots |
+| epoch length | — | 120 slots | 500 slots |
+
+`DevNetConfig.Validate()` enforces `4k/f < epochLength` and
+`3k/f < epochLength`, and `TestCheckedInSpecsAreValid` in
+`internal/test/devnet/config_test.go` runs it against every checked-in
+spec. That test carries **no build tag**, so an edit that shrinks an epoch
+without shrinking `k` fails in the ordinary `go test ./...` run instead of
+turning into a DevNet stall nobody can explain.
+
+The canonical specs are deliberately *not* accelerated: they are what soak
+and canary runs use, and `TestCanonicalSpecsKeepCanonicalTiming` fails if
+someone quietly speeds them up.
 
 ## Prerequisites
 
@@ -159,8 +198,10 @@ standalone.
 ```bash
 ./start.sh               # dingo mode (default): 3 producers + relay
 ./start.sh --conformance # conformance mode: dingo + cardano-node
+./start.sh --accelerated # bring the network up on the accelerated spec
 ./stop.sh                 # tear down the default dingo network
 ./stop.sh --conformance   # tear down the conformance network
+./stop.sh --accelerated   # accepted and ignored; teardown is spec-independent
 ```
 
 Both scripts set `COMPOSE_PROFILES` for you (`dingo` or `conformance`), so
@@ -200,6 +241,8 @@ node's NtC endpoint.
 ```bash
 ./run-tests.sh                              # dingo mode (default): bring up, run devnet tests, tear down
 ./run-tests.sh --conformance                 # conformance mode: dingo + cardano-node
+./run-tests.sh --accelerated                # fast event-driven scenario timeline (see below)
+./run-tests.sh --accelerated --conformance  # the same timeline against the reference topology
 ./run-tests.sh -run TestBasicBlockForging   # forward -run (and other flags) to `go test`
 ./run-tests.sh --keep-up                    # leave the network running on success (for poking around)
 DEVNET_MEMPOOL_PROVIDER=dag ./run-tests.sh  # exercise the DAG mempool on every Dingo node
@@ -223,9 +266,113 @@ What it does:
    ./internal/test/devnet/...` — `devnet` alone in dingo mode, `devnet
    devnet_conformance` in conformance mode.
 6. Tears the network down. On failure it dumps the last 100 lines of compose
-   logs first. It also checks that `txpump` logged at least one accepted
-   submission; zero accepted submissions fails the run even if the Go tests
-   passed.
+   logs first, then preserves the full failure evidence (see Failure
+   artifacts below). It also checks that `txpump` logged at least one
+   accepted submission; zero accepted submissions fails the run even if the
+   Go tests passed.
+
+It also exports `DEVNET_TESTNET_YAML` pointing at the spec it actually
+brought the network up with, so `devnet.LoadDevNetConfig()` in the tests
+reads the same parameters the configurator generated genesis from rather
+than falling back to `testnet.yaml`.
+
+## Accelerated scenario timeline
+
+`--accelerated` is the fast path used for scheduled and release
+integration evidence. It brings the network up on the accelerated spec and
+runs one test — `TestAcceleratedScenarioTimeline` — instead of the full
+suite.
+
+What makes it fast is not just the shorter slots. The canonical suite
+queries each node's tip by opening a fresh Node-to-Node connection every
+couple of seconds, because a short-lived ChainSync client only ever
+reports the tip it captured when it intersected. The accelerated scenario
+instead opens **one persistent ChainSync session per node** and follows
+the chain, so `RollForward` and `RollBackward` arrive as the nodes produce
+them. Assertions are then conditions over those observed events bounded by
+a context deadline — there is no polling interval and no `time.Sleep`
+anywhere in the synchronisation path.
+
+The second difference is that every assertion shares **one timeline**.
+Each phase's deadline is measured from the scenario's start rather than
+from the end of the previous phase, so a phase that finishes early hands
+its slack forward instead of each test paying for its own relative slot
+window:
+
+| Phase | What it verifies |
+|-------|-------------------|
+| `readiness` | Every node accepted a ChainSync session and sent a header |
+| `propagation` | A block forged after the baseline reaches every node, including the relay, with matching hashes; and one carrying transactions does too |
+| `agreement` | Every node agrees on the block hash at the deepest slot they have all observed |
+| `epoch-transition` | The chain crosses the next epoch boundary and the nodes agree on a header built above it (exercising the new epoch nonce) |
+| `peer-interruption` | A producer is stopped, the network visibly advances without it, and it rejoins and reconverges |
+| `relay-restart` | The same for the relay |
+
+Both disruption phases hold the node down until the rest of the network
+has advanced a derived number of blocks — `k/2`, so the outage stays
+inside what the security parameter can reconcile — rather than for a fixed
+wall-clock time. That keeps the disruption equally meaningful on a fast
+and a slow runner.
+
+The whole schedule is derived from the network spec by
+`devnet.NewScenarioPlan`. For the accelerated spec it works out as
+`readiness<=45s propagation<=1m10s agreement<=1m22.5s
+epoch-transition<=2m50s peer-interruption<=3m33.75s relay-restart<=4m17.5s`
+— a **4m17.5s** worst case against a **5-minute hard timeout**. Those are
+ceilings, not expected times; the run ends as soon as the last condition
+is observed. Both bounds are asserted
+without Docker by `TestAcceleratedPlanFitsReferenceBudgetAndCanonicalDoesNot`,
+which also asserts that the canonical spec does *not* fit — so the fast
+scenario can never be quietly pointed at the soak configuration.
+
+Reference runner: a 4-vCPU / 16 GB Linux runner (GitHub Actions
+`ubuntu-latest` class) with images already built. Image build time is
+excluded from the budget; `run-tests.sh` rebuilds before starting, and the
+scenario's clock only starts once the containers are healthy.
+
+The scenario runs in **both topologies**: it derives the producer it
+interrupts and the relay it restarts from `LoadEndpoints()`, so
+`--accelerated` gives the all-Dingo network and `--accelerated
+--conformance` gives Dingo beside `cardano-node`. In both cases the node
+it interrupts is the last producer, which is never the node `txpump`
+submits to, so mempool traffic keeps flowing through the outage.
+
+To drive it by hand against a network you brought up yourself:
+
+```bash
+./start.sh --accelerated
+DEVNET_ACCELERATED=1 \
+  DEVNET_TESTNET_YAML=$PWD/testnet-dingo-accelerated.yaml \
+  DEVNET_COMPOSE_FILE=$PWD/docker-compose.yml \
+  go test -tags devnet -run TestAcceleratedScenarioTimeline -timeout 8m \
+  ./internal/test/devnet/scenarios/
+./stop.sh --accelerated
+```
+
+`TestAcceleratedScenarioTimeline` skips unless `DEVNET_ACCELERATED=1` is
+set, so it never runs against the canonical-timing network, where its
+budget could not be met.
+
+## Failure artifacts
+
+When a run fails, `run-tests.sh` keeps `DEVNET_ARTIFACT_DIR` (a temp
+directory it creates, or one you set) and prints its path instead of
+deleting it. On success the directory is removed.
+
+| Path | Contents |
+|------|----------|
+| `network/container-status.txt` | `docker compose ps --all` for the profile |
+| `network/compose.log` | Full compose logs for every service |
+| `network/generated-configs/` | The genesis and node configuration the configurator generated |
+| `network/testnet*.yaml` | The network spec the run used |
+| `accelerated-timeline/observed-chains.json` | Every node's observed chain: tip, retained headers, roll-forward/roll-backward counts, deepest rollback, connect/disconnect churn |
+| `accelerated-timeline/container-status.txt` | Container status as the scenario saw it |
+| `accelerated-timeline/<service>.log` | Per-service logs captured by the scenario |
+
+The `accelerated-timeline/` entries are written by the scenario itself
+through `NodeControl.CaptureFailureArtifacts`, so the observed chain
+events survive even though the network is torn down immediately
+afterwards.
 
 The harness reads endpoint addresses from mode-specific environment
 variables that `run-tests.sh` sets based on the host port mappings (dingo
@@ -252,7 +399,7 @@ and queries delegations + reward balances via
 `GetFilteredDelegationsAndRewardAccounts`.
 
 This TCP-based approach replaced an earlier unix-socket host bind-mount
-design: the Dingo image runs as uid 100 and cannot bind a socket inside a
+design: the Dingo image runs as uid 1000 and cannot bind a socket inside a
 host-owned bind mount, so the in-container socket (used by `txpump` and the
 healthcheck) stays on a named Docker volume, and the host harness talks NtC
 over TCP instead. There is no host socket bind mount and no
@@ -316,6 +463,7 @@ mode:
 | `TestRelayPropagation` | Blocks reach the non-forging relay |
 | `TestSustainedConsensus` | All nodes stay in agreement across multiple sampling intervals |
 | `TestEpochBoundaryConsensus` | All nodes remain in consensus across at least one epoch boundary (exercises candidate-nonce freeze, lab nonce roll, and new-epoch VRF verification) |
+| `TestAcceleratedScenarioTimeline` | The accelerated scenario timeline: readiness, block and transaction propagation, chain agreement, an epoch transition, a peer interruption with recovery, and a relay restart — all on one shared clock, driven by streamed ChainSync events. Skipped unless `DEVNET_ACCELERATED=1`; see Accelerated scenario timeline above. |
 
 Reference-conformance scenario (`//go:build devnet && devnet_conformance`),
 runs only with `--conformance`:
@@ -374,16 +522,23 @@ harness and the compose port mappings always agree.
 |------------------------------|---------|
 | `docker-compose.yml`         | Service, volume, and network definitions for both the `dingo` and `conformance` profiles |
 | `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.1.0) |
-| `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers |
-| `testnet-dingo.yaml`         | Network spec for dingo mode: 3 pools, `poolPledge: 0` |
-| `testnet.yaml`               | Network spec for conformance mode: 2 pools |
+| `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers and chowns each Dingo pool's keys to `DINGO_UID`/`DINGO_GID` (passed in by compose, defaulting to the `1000:1000` pinned in the repo root `Dockerfile`) |
+| `testnet-dingo.yaml`         | Canonical network spec for dingo mode: 3 pools, `poolPledge: 0` |
+| `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
+| `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
+| `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full bring-up → test → tear-down cycle used by CI; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
-| `harness.go`, `config.go`    | Go test harness package: Ouroboros NtN client, tip queries, consensus checks, `testnet*.yaml` loader (build tag `devnet`) |
+| `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, and the `WaitForChainStart` genesis gate (build tag `devnet`) |
+| `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (**no build tag** — its tests run in the ordinary `go test ./...`) |
+| `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (**no build tag**) |
+| `timeline.go`                | `ScenarioPlan`: derives the accelerated scenario's phases, deadlines, outage length, and hard timeout from the network spec (**no build tag**) |
+| `observer.go`                | Persistent per-node ChainSync sessions feeding `chainstate.go`, with automatic reconnect across container restarts (build tag `devnet`) |
+| `nodectl.go`                 | Stops/starts compose services for the disruption phases and captures failure artifacts (build tag `devnet`) |
 | `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |
 | `endpoints_conformance.go`   | Conformance-mode node endpoints (`//go:build devnet && devnet_conformance`) |
 | `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (build tag `devnet`) |
@@ -419,6 +574,27 @@ docker volume ls | grep devnet                       # inspect leftovers
 - Dingo image is stale. `run-tests.sh` rebuilds the active profile's Dingo
   images on every invocation; for `start.sh` runs, force a rebuild with
   `docker compose -f docker-compose.yml build` (scoped by `COMPOSE_PROFILES`).
+- A single scenario fails on its own but the whole suite passes. Every
+  scenario now calls `WaitForChainStart` before taking a baseline, so this
+  should no longer happen. The cause was that the configurator schedules
+  `systemStart` 30s after it exits while the compose health checks pass as
+  soon as a node opens its socket: a node answers tip queries reporting
+  slot 0 / block 0 for that whole window. Timeouts derived from slot
+  counts only measure chain time, so charging one against the pre-genesis
+  wait expired it before the chain produced anything — and a test only
+  passed because an earlier one in the package had already absorbed the
+  wait. If you add a scenario, gate it on `WaitForChainStart` rather than
+  relying on ordering.
+- `TestAcceleratedScenarioTimeline` skips. It requires
+  `DEVNET_ACCELERATED=1`, which `run-tests.sh --accelerated` sets. Running
+  it against the canonical-timing network is deliberately prevented: its
+  phase budgets are derived from the spec and cannot be met at
+  `epochLength: 500`, `slotLength: 1s`.
+- The accelerated scenario fails at `NewNodeControl`. It needs to reach
+  Docker Compose to stop and start nodes. Run it through `run-tests.sh`,
+  which exports `DEVNET_COMPOSE_FILE`, or set that variable yourself. It
+  fails rather than skipping the disruption phases on purpose — a pass
+  that quietly omitted them would not be release evidence.
 - `TestCIP50PledgeLeverageRewardEffect` skips. It requires
   `DEVNET_CIP50_TEST=1` and a non-empty `DEVNET_STAKE_KEYS_DIR` to run at
   all, and needs two separately launched networks (leverage off, then

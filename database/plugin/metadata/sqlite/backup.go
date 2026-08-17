@@ -23,7 +23,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
@@ -55,70 +54,31 @@ func backupSQLite(
 			"sqlite backup: in-memory database has nothing to back up",
 		)
 	}
-	if _, err := os.Stat(dstPath); err == nil {
-		return fmt.Errorf(
-			"sqlite backup: destination %q already exists",
-			dstPath,
-		)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("sqlite backup: stat %q: %w", dstPath, err)
-	}
-	dstDir := filepath.Dir(dstPath)
-	if err := os.MkdirAll(dstDir, 0o755); err != nil {
-		return fmt.Errorf(
-			"sqlite backup: create destination directory: %w",
-			err,
-		)
-	}
-
-	// VACUUM INTO targets a private, operation-owned temporary directory,
-	// not dstPath directly, and is only published to dstPath via the
-	// os.Link below once it has fully succeeded -- matching
+	// VACUUM INTO targets a private, operation-owned temporary directory
+	// (via sqlstore.PublishBackupFile), not dstPath directly, and is only
+	// published to dstPath once it has fully succeeded -- matching
 	// database/lifecycle/manifest.go's WriteManifest write-to-temp-then-
 	// rename pattern. VACUUM INTO targeting dstPath directly, cleaned up
-	// with an unconditional os.Remove(dstPath) on failure, is a TOCTOU
-	// race: a concurrent writer that creates a real file at dstPath in the
-	// window between the existence check above and this failure would
-	// have that file silently deleted too, even though it has nothing to
-	// do with this failed operation. os.MkdirTemp's uniquely-named
-	// directory can't collide with anything another goroutine/process is
-	// doing. Publishing with a hard link is no-clobber: unlike Rename,
-	// Link fails if another creator populated dstPath after the initial
-	// existence check.
-	tmpDir, err := os.MkdirTemp(dstDir, ".backup-tmp-*")
+	// with an unconditional os.Remove(dstPath) on failure, would be a
+	// TOCTOU race: a concurrent writer that creates a real file at dstPath
+	// in the window between the existence check and the failure would have
+	// that file silently deleted too, even though it has nothing to do
+	// with this failed operation.
+	err := sqlstore.PublishBackupFile(dstPath, func(stagedPath string) error {
+		backupDB, err := openSQLiteBackupDB(ctx, databasePath)
+		if err != nil {
+			return fmt.Errorf("open source: %w", err)
+		}
+		defer backupDB.Close() //nolint:errcheck
+		if err := runVacuumInto(ctx, backupDB, stagedPath); err != nil {
+			return fmt.Errorf("VACUUM INTO %q: %w", dstPath, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf(
-			"sqlite backup: create temporary directory: %w",
-			err,
-		)
+		return fmt.Errorf("sqlite backup: %w", err)
 	}
-	// Harmless once the success path below has already renamed the backup
-	// file out of tmpDir: RemoveAll on an empty (or, on failure,
-	// still-populated) directory either way only ever touches this
-	// attempt's own private directory, never dstPath.
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-	tmpPath := filepath.Join(tmpDir, filepath.Base(dstPath))
-
-	backupDB, err := openSQLiteBackupDB(ctx, databasePath)
-	if err != nil {
-		return fmt.Errorf("sqlite backup: open source: %w", err)
-	}
-	defer backupDB.Close() //nolint:errcheck
-	if err := runVacuumInto(ctx, backupDB, tmpPath); err != nil {
-		return fmt.Errorf("sqlite backup: VACUUM INTO %q: %w", dstPath, err)
-	}
-	if err := os.Link(tmpPath, dstPath); err != nil {
-		return fmt.Errorf(
-			"sqlite backup: publish %q: %w",
-			dstPath,
-			err,
-		)
-	}
-	// A file's own fsync (already done implicitly by VACUUM INTO closing
-	// the destination file) does not guarantee its directory entry is
-	// persisted -- sync dstDir so the link above is durable too, not
-	// just atomic.
-	return fsyncdir.Sync(dstDir)
+	return nil
 }
 
 // openSQLiteBackupDB opens a short-lived connection for VACUUM INTO. The
@@ -126,17 +86,25 @@ func backupSQLite(
 // deadlock a live snapshot when another metadata operation still owns that
 // connection. A dedicated connection preserves SQLite's WAL snapshot
 // semantics without contending with the pool's connection accounting.
+// backupSourceDSN builds the connection string for the dedicated backup
+// connection. busy_timeout leads for the reason given on
+// sqliteCommonPragmas, and it matters more here than at first open: this
+// connects to a database a running node already holds open, so it contends
+// by construction rather than only when two openers happen to race.
+func backupSourceDSN(databasePath string) string {
+	return sqliteFileURI(databasePath) +
+		"?_txlock=deferred" +
+		"&_pragma=busy_timeout(30000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)"
+}
+
 func openSQLiteBackupDB(
 	ctx context.Context,
 	databasePath string,
 ) (*sql.DB, error) {
-	dsn := sqliteFileURI(databasePath) +
-		"?_txlock=deferred" +
-		"&_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(30000)" +
-		"&_pragma=foreign_keys(1)"
-	db, err := sqlstore.OpenDB("sqlite", dsn, "sqlite")
+	db, err := sqlstore.OpenDB("sqlite", backupSourceDSN(databasePath), "sqlite")
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +136,7 @@ func restoreSQLite(ctx context.Context, dataDir, srcPath string) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("sqlite restore: stat %q: %w", dstPath, err)
 	}
-	if err := createDirDurable(dataDir); err != nil {
+	if err := sqlstore.CreateDirDurable(dataDir); err != nil {
 		return fmt.Errorf(
 			"sqlite restore: create data directory: %w",
 			err,
@@ -176,45 +144,6 @@ func restoreSQLite(ctx context.Context, dataDir, srcPath string) error {
 	}
 	if err := copyFile(ctx, srcPath, dstPath); err != nil {
 		return fmt.Errorf("sqlite restore: %w", err)
-	}
-	return nil
-}
-
-// createDirDurable is os.MkdirAll(dir, 0o755), but additionally fsyncs the
-// parent of every directory component it actually had to create, so each
-// new directory's own entry is durable -- not just, per copyFile's own
-// directory-sync, the eventual contents placed inside it. A directory's
-// fsync only guarantees ITS children's directory entries are persisted; a
-// power loss right after mkdir could otherwise leave the newly created
-// directory itself unreachable (or entirely absent) from its parent after
-// a crash, even though metadata.sqlite was safely and durably written
-// inside it a moment later.
-func createDirDurable(dir string) error {
-	var created []string
-	for cur := dir; ; {
-		if _, err := os.Stat(cur); err == nil {
-			break
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("stat %q: %w", cur, err)
-		}
-		created = append(created, cur)
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			// Reached the filesystem root without finding an existing
-			// ancestor -- MkdirAll below will fail on this same path.
-			break
-		}
-		cur = parent
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create directory %q: %w", dir, err)
-	}
-	// Shallowest first: each level's own directory entry should be
-	// durable before its child's existence under it is relied upon.
-	for _, dir := range slices.Backward(created) {
-		if err := fsyncdir.Sync(filepath.Dir(dir)); err != nil {
-			return err
-		}
 	}
 	return nil
 }

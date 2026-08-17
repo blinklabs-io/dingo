@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -52,11 +53,18 @@ type UtxorpcLedgerState interface {
 		epoch uint64,
 		era eras.EraDesc,
 	) (lcommon.ProtocolParameters, error)
+	// PoolStakeDistribution reports the active stake distribution across
+	// block-producing pools. A nil filter asks for every pool; see the method
+	// on ledger.LedgerState for why an empty non-nil filter differs.
+	PoolStakeDistribution(
+		poolFilter []lcommon.PoolKeyHash,
+	) (*ledger.PoolStakeDistribution, error)
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip
 	TransactionByHash(hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
+	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
 	UtxosByAddressWithOrdering(
 		q *models.UtxoWithOrderingQuery,
 	) ([]models.UtxoWithOrdering, error)

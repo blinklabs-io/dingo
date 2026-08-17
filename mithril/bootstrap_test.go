@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -102,7 +103,7 @@ func TestBootstrap(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:  "abc123def456789012345678",
+				Digest:  "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc",
 				Network: "preprod",
 				Beacon: Beacon{
 					Epoch:               270,
@@ -164,7 +165,7 @@ func TestBootstrap(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, "abc123def456789012345678", result.Snapshot.Digest)
+	require.Equal(t, "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc", result.Snapshot.Digest)
 	require.NotEmpty(t, result.ImmutableDir)
 	require.NotEmpty(t, result.ArchivePath)
 	assert.Greater(
@@ -180,7 +181,7 @@ func TestBootstrap(t *testing.T) {
 
 func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
 	archiveData := createChunkArchive(t)
-	digest := "newdigest1234567890abcdef"
+	digest := "b123456789abcdef0b123456789abcdef0b123456789abcdef0b123456789abc"
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
@@ -248,7 +249,7 @@ func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:          "abc123",
+				Digest:          "c123456789abcdef0c123456789abcdef0c123456789abcdef0c123456789abc",
 				Network:         "preprod",
 				Locations:       []string{"http://example.com/s"},
 				CertificateHash: "",
@@ -298,7 +299,7 @@ func TestBootstrapNoLocations(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:    "abc123",
+				Digest:    "d123456789abcdef0d123456789abcdef0d123456789abcdef0d123456789abc",
 				Network:   "preprod",
 				Locations: []string{},
 			},
@@ -346,6 +347,181 @@ func TestBootstrapUnknownNetwork(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "resolving aggregator URL")
+}
+
+// TestValidateSnapshotIdentity checks that validateSnapshotIdentity accepts
+// known networks with a bounded hex digest and rejects everything else,
+// including path-separator/traversal sequences in either field.
+func TestValidateSnapshotIdentity(t *testing.T) {
+	validDigest := "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+	tests := []struct {
+		name            string
+		expectedNetwork string
+		network         string
+		digest          string
+		wantErr         bool
+	}{
+		{"valid mainnet", "", "mainnet", validDigest, false},
+		{"valid preprod", "", "preprod", validDigest, false},
+		{"valid preview", "", "preview", validDigest, false},
+		{"too-short hex digest", "", "preprod", "abc123", true},
+		{"unknown network", "", "devnet", validDigest, true},
+		{"empty network", "", "", validDigest, true},
+		{"network with path traversal", "", "../../../etc", validDigest, true},
+		{"empty digest", "", "preprod", "", true},
+		{"digest with slash", "", "preprod", "abc/def", true},
+		{"digest with path traversal", "", "preprod", "../../etc/passwd", true},
+		{"digest with space", "", "preprod", "abc 123", true},
+		{"non-hex digest", "", "preprod", "not-hex-at-all", true},
+		{
+			"too-long digest",
+			"",
+			"preprod",
+			strings.Repeat("a", 65),
+			true,
+		},
+		{
+			"custom network matching operator config is trusted",
+			"devnet",
+			"devnet",
+			validDigest,
+			false,
+		},
+		{
+			"custom network not matching operator config is rejected",
+			"devnet",
+			"some-other-net",
+			validDigest,
+			true,
+		},
+		{
+			"path traversal rejected even with a custom expected network",
+			"devnet",
+			"../../../etc",
+			validDigest,
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSnapshotIdentity(
+				tt.expectedNetwork, tt.network, tt.digest,
+			)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestBootstrapRejectsPathTraversalInSnapshotNetwork verifies that a
+// malicious aggregator response with a path-traversal sequence in
+// snapshot.Network is rejected by Bootstrap before the archive download
+// (and thus any filesystem access derived from that field) is attempted.
+func TestBootstrapRejectsPathTraversalInSnapshotNetwork(t *testing.T) {
+	var downloadHit atomic.Bool
+	snapshots := []SnapshotListItem{
+		{
+			SnapshotBase: SnapshotBase{
+				Digest:  "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc",
+				Network: "../../../../tmp/evil",
+				Size:    203,
+				Locations: []string{
+					"placeholder",
+				},
+			},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"/artifact/snapshots",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(snapshots))
+		},
+	)
+	mux.HandleFunc(
+		"/download/snapshot.tar.zst",
+		func(w http.ResponseWriter, r *http.Request) {
+			downloadHit.Store(true)
+			w.WriteHeader(http.StatusOK)
+		},
+	)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	snapshots[0].Locations = []string{
+		server.URL + "/download/snapshot.tar.zst",
+	}
+
+	_, err := Bootstrap(context.Background(), BootstrapConfig{
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       t.TempDir(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validating snapshot metadata")
+	require.False(
+		t,
+		downloadHit.Load(),
+		"archive download must not be attempted for unvalidated metadata",
+	)
+}
+
+// TestBootstrapRejectsPathTraversalInSnapshotDigest is the digest-field
+// counterpart of TestBootstrapRejectsPathTraversalInSnapshotNetwork:
+// snapshot.Digest containing a path-traversal sequence must be rejected
+// before it can influence the cache-check or download path.
+func TestBootstrapRejectsPathTraversalInSnapshotDigest(t *testing.T) {
+	var downloadHit atomic.Bool
+	snapshots := []SnapshotListItem{
+		{
+			SnapshotBase: SnapshotBase{
+				Digest:  "../../../../tmp/evil",
+				Network: "preprod",
+				Size:    203,
+				Locations: []string{
+					"placeholder",
+				},
+			},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"/artifact/snapshots",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(snapshots))
+		},
+	)
+	mux.HandleFunc(
+		"/download/snapshot.tar.zst",
+		func(w http.ResponseWriter, r *http.Request) {
+			downloadHit.Store(true)
+			w.WriteHeader(http.StatusOK)
+		},
+	)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	snapshots[0].Locations = []string{
+		server.URL + "/download/snapshot.tar.zst",
+	}
+
+	_, err := Bootstrap(context.Background(), BootstrapConfig{
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       t.TempDir(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validating snapshot metadata")
+	require.False(
+		t,
+		downloadHit.Load(),
+		"archive download must not be attempted for unvalidated metadata",
+	)
 }
 
 func TestBootstrapResultCleanup(t *testing.T) {
@@ -821,7 +997,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:          "digest123",
+				Digest:          "e123456789abcdef0e123456789abcdef0e123456789abcdef0e123456789abc",
 				Network:         "preprod",
 				CertificateHash: "cert_leaf",
 				Locations: []string{
@@ -855,7 +1031,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 			},
 			ProtocolMessage: ProtocolMessage{
 				MessageParts: map[string]string{
-					"snapshot_digest": "digest123",
+					"snapshot_digest": "e123456789abcdef0e123456789abcdef0e123456789abcdef0e123456789abc",
 					"current_epoch":   "270",
 				},
 			},
@@ -1138,6 +1314,15 @@ func chunkDirUnder(base, rel string) *vettedDir {
 // v2 is closed by a different check: it refuses an artifact whose hash is not
 // the one it computes, and a computed hash is hex. v1 has no computed hash to
 // compare against, so the constraint has to be stated.
+//
+// Two checks state it, and this test asserts the outcome rather than which one
+// spoke. validateSnapshotIdentity constrains the digest to 64 hex characters
+// and runs first; validateSnapshotDigest, immediately after it, refuses
+// anything that is not a single path element. The second is narrower than the
+// first and so never fires on the inputs below — it is what still holds if the
+// format rule is ever loosened for a private aggregator, and it is exercised
+// directly in TestValidateSnapshotDigest. What matters here is the property
+// both exist for: the refusal lands before the digest names anything.
 func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 	archiveData := createChunkArchive(t)
 
@@ -1198,7 +1383,8 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 				DownloadDir:       downloadDir,
 			})
 			require.Error(t, err)
-			assert.ErrorIs(t, err, ErrUnsafeSnapshotDigest)
+			assert.Contains(t, err.Error(), digest,
+				"the refusal must name the digest it refused")
 
 			// Refused before anything is derived from it, so every level the
 			// digest could have named is untouched — including the two above
@@ -1221,6 +1407,34 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 				"a refused digest must not reach the download either")
 		})
 	}
+}
+
+// TestValidateSnapshotDigest exercises the path-safety guard on its own.
+//
+// Reached directly because the format check ahead of it in Bootstrap already
+// rejects everything here — going through Bootstrap would assert the format
+// rule and say nothing about this one. The guard is the constraint that
+// survives a loosened format rule, so it is worth holding to independently.
+func TestValidateSnapshotDigest(t *testing.T) {
+	for _, digest := range []string{
+		"",
+		"/../..",
+		"/../../..",
+		"/../../pwned",
+		"a/b",
+		"..",
+		".",
+		`a\b`,
+	} {
+		t.Run(digest, func(t *testing.T) {
+			assert.ErrorIs(t,
+				validateSnapshotDigest(digest), ErrUnsafeSnapshotDigest,
+			)
+		})
+	}
+	assert.NoError(t, validateSnapshotDigest(
+		"a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc",
+	))
 }
 
 // TestBootstrapSurvivesAnUnavailableAncillaryArchive covers the non-verified
@@ -1255,7 +1469,7 @@ func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
 	t.Run("v1", func(t *testing.T) {
 		archiveData := createChunkArchive(t)
 		snapshots := []SnapshotListItem{{SnapshotBase: SnapshotBase{
-			Digest:               "abc123def456789012345678",
+			Digest:               "b123456789abcdef0b123456789abcdef0b123456789abcdef0b123456789abc",
 			Network:              "preprod",
 			Beacon:               Beacon{Epoch: 270, ImmutableFileNumber: 5320},
 			Size:                 int64(len(archiveData)),

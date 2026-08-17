@@ -24,6 +24,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +51,14 @@ var ErrUnsafeSnapshotDigest = errors.New("unsafe snapshot digest")
 // single path element is not a digest — reducing it would silently give two
 // different snapshots the same cache key, which is how a stale extraction gets
 // reused for the wrong artifact.
+//
+// validateSnapshotIdentity runs ahead of this and is stricter today: a digest
+// of 64 hex characters holds no separator. This stays as the narrower rule it
+// is stating, because the two answer different questions — that one asks
+// whether the digest has the shape a digest has, this one whether it can name a
+// directory. A format rule relaxed for a private aggregator, the way the
+// network name already is, would take the first answer with it and not this
+// one.
 func validateSnapshotDigest(digest string) error {
 	if digest == "" {
 		return fmt.Errorf("%w: snapshot has no digest", ErrUnsafeSnapshotDigest)
@@ -397,6 +407,11 @@ func Bootstrap(
 			err,
 		)
 	}
+	if err := validateSnapshotIdentity(
+		cfg.Network, snapshot.Network, snapshot.Digest,
+	); err != nil {
+		return nil, fmt.Errorf("validating snapshot metadata: %w", err)
+	}
 	if cfg.Network != "" && snapshot.Network != "" &&
 		cfg.Network != snapshot.Network {
 		return nil, fmt.Errorf(
@@ -416,10 +431,21 @@ func Bootstrap(
 	cfg.Logger.Info(
 		"found latest snapshot",
 		"component", "mithril",
+		"network", snapshot.Network,
 		"digest", snapshot.Digest,
+		"snapshot_hash", snapshot.Digest,
 		"epoch", snapshot.Beacon.Epoch,
 		"immutable_file_number", snapshot.Beacon.ImmutableFileNumber,
 		"size", snapshot.Size,
+	)
+	cfg.Logger = cfg.Logger.With(
+		"network", snapshot.Network,
+		"snapshot_hash", snapshot.Digest,
+		"snapshot_epoch", snapshot.Beacon.Epoch,
+		"snapshot_immutable_file_number", snapshot.Beacon.ImmutableFileNumber,
+	)
+	cfg.OnProgress = withProgressContext(
+		cfg.OnProgress, "snapshot_archive", snapshot.Digest,
 	)
 
 	if len(snapshot.Locations) == 0 {
@@ -559,11 +585,11 @@ func Bootstrap(
 	}()
 
 	// Step 3: Download snapshot archive (skip if already complete)
-	archiveFilename := fmt.Sprintf(
+	archiveFilename := filepath.Base(fmt.Sprintf(
 		"%s-%s.tar.zst",
 		snapshot.Network,
 		truncateDigest(snapshot.Digest),
-	)
+	))
 	archivePath := filepath.Join(downloadDir, archiveFilename)
 	snapshotCacheKey := snapshot.Digest
 
@@ -615,7 +641,7 @@ func Bootstrap(
 	// vs ancillary/) so they are independent.
 	extractDir := filepath.Join(
 		downloadDir,
-		"immutable-"+snapshotCacheKey,
+		filepath.Base("immutable-"+snapshotCacheKey),
 	)
 	var ancillaryTree *vettedDir
 	var ancillaryArchivePath string
@@ -642,7 +668,7 @@ func Bootstrap(
 		ancWg.Go(func() {
 			candidateDir := filepath.Join(
 				downloadDir,
-				"ancillary-"+snapshotCacheKey,
+				filepath.Base("ancillary-"+snapshotCacheKey),
 			)
 			if cached := ledgerDir(candidateDir); cached != nil {
 				cfg.Logger.Info(
@@ -657,13 +683,13 @@ func Bootstrap(
 				// a prior successful extraction).
 				candidateArchive := filepath.Join(
 					downloadDir,
-					fmt.Sprintf(
+					filepath.Base(fmt.Sprintf(
 						"%s-%s-ancillary.tar.zst",
 						snapshot.Network,
 						truncateDigest(
 							snapshot.Digest,
 						),
-					),
+					)),
 				)
 				if _, err := os.Stat(candidateArchive); err == nil {
 					ancillaryArchivePath = candidateArchive
@@ -736,7 +762,13 @@ func Bootstrap(
 		// Replace: a previous run may have left a partial extraction
 		// here, which the lookup above did not accept.
 		_, err = ExtractArchive(
-			ctx, archivePath, extractDir, cfg.Logger,
+			ctx,
+			archivePath,
+			extractDir,
+			cfg.Logger.With(
+				"phase", "snapshot_extraction",
+				"artifact", "snapshot_archive",
+			),
 			WithReplaceDestination(),
 		)
 		if err != nil {
@@ -816,13 +848,16 @@ func downloadAncillary(
 		"downloading ancillary data (ledger state)",
 		"component", "mithril",
 		"size", snapshot.AncillarySize,
+		"phase", "ancillary_download",
+		"artifact", "ancillary_ledger_state",
+		"destination", downloadDir,
 	)
 
-	ancillaryFilename := fmt.Sprintf(
+	ancillaryFilename := filepath.Base(fmt.Sprintf(
 		"%s-%s-ancillary.tar.zst",
 		snapshot.Network,
 		truncateDigest(snapshot.Digest),
-	)
+	))
 
 	// Where the download lands whether or not it completes: DownloadSnapshot
 	// resumes, so a failed attempt deliberately leaves a partial file here.
@@ -844,12 +879,16 @@ func downloadAncillary(
 	for i, loc := range snapshot.AncillaryLocations {
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:                 loc,
-				DestDir:             downloadDir,
-				Filename:            ancillaryFilename,
-				ExpectedSize:        snapshot.AncillarySize,
-				Logger:              cfg.Logger,
-				OnProgress:          cfg.OnProgress,
+				URL:          loc,
+				DestDir:      downloadDir,
+				Filename:     ancillaryFilename,
+				ExpectedSize: snapshot.AncillarySize,
+				Logger:       cfg.Logger,
+				OnProgress: withProgressContext(
+					cfg.OnProgress,
+					"ancillary_ledger_state",
+					snapshot.Digest,
+				),
 				IdleTimeout:         cfg.DownloadIdleTimeout,
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
@@ -879,12 +918,18 @@ func downloadAncillary(
 
 	ancillaryDir := filepath.Join(
 		downloadDir,
-		"ancillary-"+snapshot.Digest,
+		filepath.Base("ancillary-"+snapshot.Digest),
 	)
 	// Replace: the ancillary directory is keyed by digest, so a stale
 	// copy from an interrupted run may already be present.
 	if _, extractErr := ExtractArchive(
-		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
+		ctx,
+		ancillaryPath,
+		ancillaryDir,
+		cfg.Logger.With(
+			"phase", "ancillary_extraction",
+			"artifact", "ancillary_ledger_state",
+		),
 		WithReplaceDestination(),
 	); extractErr != nil {
 		return nil, ancillaryPath, fmt.Errorf(
@@ -1419,8 +1464,43 @@ func truncateDigest(digest string) string {
 	return digest
 }
 
-// hasFileInSubdirsIn is hasFileInSubdirs resolved through an open handle on an
-// ancestor, so every lookup stays inside the tree that was vetted.
+// snapshotDigestLength is the expected length of a Mithril snapshot digest:
+// a Blake2b-256 (v1) or SHA-256 (v2, see CardanoDatabaseSnapshot.ComputeHash)
+// hash, hex-encoded (32 bytes -> 64 hex characters).
+const snapshotDigestLength = 64
+
+// digestPattern matches a digest of exactly snapshotDigestLength hex
+// characters.
+var digestPattern = regexp.MustCompile(
+	fmt.Sprintf(`^[0-9a-fA-F]{%d}$`, snapshotDigestLength),
+)
+
+// validateSnapshotIdentity rejects Mithril aggregator-supplied network and
+// digest values before they are used to construct any filesystem path.
+// Both fields arrive unauthenticated at this point in the flow —
+// certificate/hash verification, when enabled, happens later — so they must
+// be constrained to a known network name and the expected hex digest format
+// first. expectedNetwork is the operator's own configured BootstrapConfig/
+// SyncConfig.Network (already restricted to alphanumeric/hyphen/underscore
+// by internal/config's ValidateNetworkName), which is trusted and accepted
+// in addition to the fixed default-network list — this lets an operator
+// bootstrap against a private/self-hosted aggregator for a non-default
+// network (e.g. a devnet) without loosening what an untrusted aggregator
+// response can put on a path. Pass "" when there is no such expectation.
+func validateSnapshotIdentity(expectedNetwork, network, digest string) error {
+	if network == "" ||
+		(network != expectedNetwork && !slices.Contains(AcceptedNetworks(), network)) {
+		return fmt.Errorf("unrecognized Mithril snapshot network %q", network)
+	}
+	if !digestPattern.MatchString(digest) {
+		return fmt.Errorf("invalid Mithril snapshot digest %q", digest)
+	}
+	return nil
+}
+
+// hasFileInSubdirsIn checks whether a file with the given name exists in dir
+// or any of its immediate subdirectories (one level deep), resolved through an
+// open handle on an ancestor so every lookup stays inside the vetted tree.
 func hasFileInSubdirsIn(root *os.Root, dir, name string) bool {
 	isFile := func(rel string) bool {
 		fi, err := root.Stat(rel)

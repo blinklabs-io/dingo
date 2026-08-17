@@ -588,6 +588,18 @@ var defaultNetworkConfigs = map[string]NetworkConfig{
 	},
 }
 
+// AcceptedNetworks returns the recognized Mithril network identifiers.
+// It is the single source for network-name validation: path-safety checks
+// on aggregator-supplied snapshot metadata verify parity against it.
+func AcceptedNetworks() []string {
+	networks := make([]string, 0, len(defaultNetworkConfigs))
+	for network := range defaultNetworkConfigs {
+		networks = append(networks, network)
+	}
+	slices.Sort(networks)
+	return networks
+}
+
 // NetworkConfigForNetwork returns the default Mithril network configuration
 // for the given network name, or an error if the network is not recognized.
 func NetworkConfigForNetwork(network string) (NetworkConfig, error) {

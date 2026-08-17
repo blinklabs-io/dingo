@@ -295,10 +295,12 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 	)
 }
 
-func TestPlutusBudgetMismatchUsesScriptFailureError(t *testing.T) {
+func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// A zero declared budget is intentional: restrictive validation should
 	// execute this script with the enormous budget and classify the resulting
-	// overage as a Plutus disagreement.
+	// overage as a Plutus disagreement. The script is small enough that its CEK
+	// steps remain in the trailing slippage batch. Haskell flushes that batch on
+	// a successful return, producing the complete 112100 CPU / 800 memory cost.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -425,7 +427,7 @@ func TestPlutusBudgetMismatchUsesScriptFailureError(t *testing.T) {
 			assert.Contains(
 				t,
 				plutusErr.Err.Error(),
-				"script exceeded declared budget",
+				"script exceeded declared budget: used (112100 cpu, 800 mem)",
 			)
 		})
 	}
@@ -1015,8 +1017,8 @@ func requireRuleIndexResolvesToFunc(
 	)
 	require.Equal(
 		t,
-		utxoValidationRulePtr(want),
-		utxoValidationRulePtr(rules[index]),
+		utxoValidationRuleName(want),
+		utxoValidationRuleName(rules[index]),
 		"%s hardcoded rule index no longer resolves to the expected function",
 		name,
 	)
@@ -1029,9 +1031,9 @@ func requireIndexedRulesIncludeFunc(
 	message string,
 ) {
 	t.Helper()
-	wantPtr := utxoValidationRulePtr(want)
+	wantName := utxoValidationRuleName(want)
 	for _, rule := range rules {
-		if utxoValidationRulePtr(rule.validationFunc) == wantPtr {
+		if utxoValidationRuleName(rule.validationFunc) == wantName {
 			return
 		}
 	}
@@ -1045,12 +1047,12 @@ func requireIndexedRulesExcludeFunc(
 	message string,
 ) {
 	t.Helper()
-	wantPtr := utxoValidationRulePtr(want)
+	wantName := utxoValidationRuleName(want)
 	for _, rule := range rules {
 		require.NotEqual(
 			t,
-			wantPtr,
-			utxoValidationRulePtr(rule.validationFunc),
+			wantName,
+			utxoValidationRuleName(rule.validationFunc),
 			message,
 		)
 	}

@@ -200,6 +200,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 		}
 		var consecutiveRateLimits int
 		var rateLimitTotal int
+		var consecutiveImpossibleOffers int
 		backoffTimer := time.NewTimer(0)
 		backoffTimer.Stop()
 		defer backoffTimer.Stop()
@@ -324,6 +325,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 				if limitAdmission {
 					if int64(txIds[0].Size) >
 						headroom.MaxAdmissionHeadroomBytes() {
+						consecutiveImpossibleOffers++
 						o.config.Logger.Warn(
 							"peer offered transaction larger than mempool admission capacity",
 							"component",
@@ -339,8 +341,17 @@ func (o *Ouroboros) txsubmissionServerInit(
 							"max_admission_bytes",
 							headroom.MaxAdmissionHeadroomBytes(),
 						)
+						backoffTimer.Reset(txsubmissionBackoffDuration(
+							consecutiveImpossibleOffers,
+						))
+						select {
+						case <-backoffTimer.C:
+						case <-conn.ErrorChan():
+							return
+						}
 						continue
 					}
+					consecutiveImpossibleOffers = 0
 					if !headroom.WaitForAdmissionHeadroom(
 						int64(txIds[0].Size),
 						conn.ErrorChan(),

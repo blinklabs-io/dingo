@@ -620,15 +620,23 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 						(p.Percent-lastLoggedPercent) < progressLogPercentStep {
 						return
 					}
+					artifact := p.Artifact
+					if artifact == "" {
+						artifact = "unknown"
+					}
 					logger.Info(
-						fmt.Sprintf(
-							"download progress: %.1f%% (%s / %s) at %s/s",
-							p.Percent,
-							HumanBytes(p.BytesDownloaded),
-							HumanBytes(p.TotalBytes),
-							HumanBytes(int64(p.BytesPerSecond)),
-						),
+						"download progress",
 						"component", "mithril",
+						"network", network,
+						"phase", "download",
+						"artifact", artifact,
+						"snapshot_hash", p.SnapshotHash,
+						"bytes_downloaded", p.BytesDownloaded,
+						"total_bytes", p.TotalBytes,
+						"percent", p.Percent,
+						"bytes_per_second", p.BytesPerSecond,
+						"artifacts_completed", p.ArtifactsCompleted,
+						"artifacts_total", p.ArtifactsTotal,
 					)
 					lastLogTime = now
 					lastLoggedPercent = p.Percent
@@ -1118,6 +1126,14 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
+		// point with the delegator-inactivity gate enabled
+		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
+		// always elided here. SyncConfig has no gate field to thread through
+		// (Mithril bootstrap and the gate are mutually exclusive by
+		// construction), so this is explicit rather than the zero-value
+		// default.
+		bf.SetDelegatorInactivityEnabled(false)
 		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(

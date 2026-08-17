@@ -30,28 +30,32 @@ func LoadEndpoints() []NodeEndpoint {
 	}
 	return []NodeEndpoint{
 		{
-			Name:    "dingo-1",
-			Address: addr("DEVNET_DINGO1_ADDR", "localhost:3010"),
-			Role:    "producer",
-			IsDingo: true,
+			Name:      "dingo-1",
+			Container: "dingo-1",
+			Address:   addr("DEVNET_DINGO1_ADDR", "localhost:3010"),
+			Role:      "producer",
+			IsDingo:   true,
 		},
 		{
-			Name:    "dingo-2",
-			Address: addr("DEVNET_DINGO2_ADDR", "localhost:3013"),
-			Role:    "producer",
-			IsDingo: true,
+			Name:      "dingo-2",
+			Container: "dingo-2",
+			Address:   addr("DEVNET_DINGO2_ADDR", "localhost:3013"),
+			Role:      "producer",
+			IsDingo:   true,
 		},
 		{
-			Name:    "dingo-3",
-			Address: addr("DEVNET_DINGO3_ADDR", "localhost:3014"),
-			Role:    "producer",
-			IsDingo: true,
+			Name:      "dingo-3",
+			Container: "dingo-3",
+			Address:   addr("DEVNET_DINGO3_ADDR", "localhost:3014"),
+			Role:      "producer",
+			IsDingo:   true,
 		},
 		{
-			Name:    "dingo-relay",
-			Address: addr("DEVNET_DINGO_RELAY_ADDR", "localhost:3015"),
-			Role:    "relay",
-			IsDingo: true,
+			Name:      "dingo-relay",
+			Container: "dingo-relay",
+			Address:   addr("DEVNET_DINGO_RELAY_ADDR", "localhost:3015"),
+			Role:      "relay",
+			IsDingo:   true,
 		},
 	}
 }

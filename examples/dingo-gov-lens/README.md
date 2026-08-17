@@ -47,9 +47,17 @@ behind a node flag. With the flag off, every `account.expiration_epoch` is 0 and
 the stake lookup reports the expiry as not enabled. Enabling it also requires a
 from-genesis sync, because the column cannot be reconstructed from a Mithril
 snapshot, so the Compose stack in this directory always reports it as not
-enabled. The withdrawal witnesses below it are recorded either way: Dingo
-records a witness for every valid reward-withdrawal map entry, so a withdrawal
-that moved no reward still appears, marked as a zero amount.
+enabled.
+
+The withdrawal history below it depends on that same flag. Dingo only records a
+witness row (`account_withdrawal_witness`) for a withdrawal when the flag is
+on -- with it off, as on this Compose stack, that write is skipped entirely, so
+a withdrawal that moved no reward leaves no trace anywhere and cannot appear.
+Withdrawals that moved a nonzero reward still show up either way: the UI falls
+back to the reward journal (`account_reward_delta`, written regardless of the
+flag) for any withdrawal the witness table didn't record. So on this Compose
+stack you will see every nonzero withdrawal but never a zero-amount one; with
+the flag on, both appear, and a zero-amount entry is marked as such.
 
 ### Retention
 
@@ -235,8 +243,9 @@ CIP-0163 activation has run and in which epoch.
 
 `/api/stake/{credential}` adds `expirationEpoch`, `inactivityActivated`,
 `rewards` (per-epoch reward outputs within the retained window), and
-`withdrawals` (reward-withdrawal witnesses, with `zeroAmount` set when the
-withdrawal moved nothing).
+`withdrawals` (reward withdrawals, `zeroAmount` set when the withdrawal moved
+nothing -- see "Inactivity And Expiry" above for when zero-amount withdrawals
+are visible at all).
 
 All query handlers use direct SQL against Dingo metadata tables. The browser
 never connects to Postgres directly.

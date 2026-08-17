@@ -168,11 +168,16 @@ type Config struct {
 	chainsyncStallTimeout time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
-	dataDir                                                                             string
-	bindAddr                                                                            string
-	pluginSelections                                                                    map[hostplugin.Capability]hostplugin.Selection
-	network                                                                             string
-	tlsCertFilePath, tlsKeyFilePath                                                     string
+	dataDir                         string
+	bindAddr                        string
+	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
+	network                         string
+	tlsCertFilePath, tlsKeyFilePath string
+	// apiConfig mirrors cfg.API -- the shared api.tls/api.auth policy
+	// defaults merged into every selected plugins.api.* provider's own
+	// config by node.go before that provider resolves. See
+	// ARCHITECTURE.md's "API security" section.
+	apiConfig                                                                           internalconfig.APIConfig
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
@@ -206,6 +211,7 @@ type Config struct {
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
+	blockPipelineEnabled                                                                bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -514,6 +520,28 @@ func (n *Node) configValidate() error {
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}
+	// The block-decode pipeline's vendored decode stage
+	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
+	// directly and has no hook for dingo's Leios-extended-header Conway
+	// fallback (database/models.DecodeConwayBlock), which the Musashi
+	// prototype network's blocks require. Enabling the pipeline there would
+	// not error loudly: a Leios-extended block would fail strict decode,
+	// decodeReadChainBatch would log and return ok=false,
+	// ledgerReadChainIterator would return (closing resultCh), and
+	// ledgerProcessBlocksFromSource treats a closed result channel as a
+	// clean, non-error exit -- so chain replay would silently and
+	// permanently stall until a full process restart, with no diagnostic.
+	// Refuse the combination outright rather than let an operator hit that.
+	if n.config.cfg.BlockPipelineEnabled && n.config.isMusashiNetwork() {
+		return errors.New(
+			"block pipeline is not supported on the Musashi prototype " +
+				"network: its decode stage does not apply dingo's " +
+				"Leios-extended Conway header fallback, so a Leios-extended " +
+				"block would fail to decode and silently stall chain replay; " +
+				"disable --block-pipeline-enabled (blockPipelineEnabled) to " +
+				"sync Musashi",
+		)
+	}
 	if n.config.cfg.FullPotRewardsEnabled &&
 		!n.config.cfg.UnsafeFullPotRewardsOnStandardNetworks {
 		if network, ok := internalconfig.FullPotRewardsStandardNetwork(n.config.cfg.Network, n.config.cfg.NetworkMagic); ok {
@@ -635,6 +663,7 @@ func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
+	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
@@ -704,6 +733,7 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -970,6 +1000,16 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	}
 }
 
+// WithAPIConfig sets the shared api.tls/api.auth policy applied to every
+// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
+// provider's own plugins.api.<name>.config.tls/auth overrides a field.
+// See internal/apiconfig and ARCHITECTURE.md's "API security" section.
+func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.API = cfg
+	}
+}
+
 // WithPeerSharing specifies whether to enable peer sharing. This is disabled by default
 func WithPeerSharing(peerSharing bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1025,9 +1065,9 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 }
 
 // WithEvictionWatermark sets the mempool eviction watermark
-// as a fraction of capacity (0.0-1.0). When a new TX would
+// as a fraction of capacity [0.0-1.0). When a new TX would
 // push the mempool past this fraction, oldest TXs are evicted
-// to make room. Default is 0.90 (90%).
+// to make room. A value of 0 disables eviction. Default is 0.
 func WithEvictionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
@@ -1037,9 +1077,8 @@ func WithEvictionWatermark(
 }
 
 // WithRejectionWatermark sets the mempool rejection watermark
-// as a fraction of capacity (0.0-1.0). New TXs are rejected
-// when the mempool would exceed this fraction even after
-// eviction. Default is 0.95 (95%).
+// as a fraction of capacity (0.0-1.0]. New TXs are rejected
+// when the mempool would exceed this fraction. Default is 1.0.
 func WithRejectionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
@@ -1658,6 +1697,13 @@ func (c *Config) TlsKeyFilePath() string {
 	return c.cfg.TlsKeyFilePath
 }
 
+// APIConfig returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider unless overridden. See
+// WithAPIConfig and ARCHITECTURE.md's "API security" section.
+func (c *Config) APIConfig() internalconfig.APIConfig {
+	return c.cfg.API
+}
+
 // IntersectTip returns whether to start chainsync at the current chain tip.
 func (c *Config) IntersectTip() bool {
 	return c.cfg.IntersectTip
@@ -1948,6 +1994,12 @@ func (c *Config) Midnight() internalconfig.MidnightConfig {
 // CORSAllowedOrigins returns the CORS allowed origins list.
 func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
+}
+
+// API returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider. See WithAPIConfig.
+func (c *Config) API() internalconfig.APIConfig {
+	return c.cfg.API
 }
 
 // SlotsPerKESPeriod returns the number of slots per KES period.

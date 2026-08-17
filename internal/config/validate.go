@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -373,6 +374,30 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// The shared api.tls/api.auth mode enums are checked here so a typo is
+	// caught once, with a single clear message, rather than surfacing
+	// identically from every one of the three API providers that inherit
+	// it. Certificate/key (and token) presence is deliberately NOT
+	// checked here: a provider legitimately may supply only its own
+	// certFilePath/keyFilePath while inheriting just `mode: server` from
+	// this shared default (see internal/apiconfig.MergeTLS), so
+	// completeness can only be judged after node.go merges this default
+	// into each provider's own plugins.api.<name>.config.tls/auth --
+	// which is where the full pair-completeness check runs, before that
+	// provider's listener starts.
+	if err := validateAPIMode(
+		"api.tls.mode", c.API.TLS.Mode,
+		string(apiconfig.TLSModeDisabled), string(apiconfig.TLSModeServer),
+	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAPIMode(
+		"api.auth.mode", c.API.Auth.Mode,
+		string(apiconfig.AuthModeDisabled), string(apiconfig.AuthModeToken),
+	); err != nil {
+		errs = append(errs, err)
+	}
+
 	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
 	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
 	// whenever bark is enabled with a snapshot directory configured —
@@ -415,10 +440,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// NaN is checked explicitly: every ordered comparison with NaN is
 	// false, so a NaN watermark would slip through the range checks
 	// alone and reach mempool threshold arithmetic.
+	// EvictionWatermark may be 0 to disable eviction, or a value in (0, 1).
 	if math.IsNaN(evictionWatermark) ||
-		evictionWatermark <= 0 || evictionWatermark >= 1.0 {
+		evictionWatermark < 0 || evictionWatermark >= 1.0 {
 		errs = append(errs, fmt.Errorf(
-			"invalid plugins.mempool.config.evictionWatermark: %f (must be in range (0, 1))",
+			"invalid plugins.mempool.config.evictionWatermark: %f (must be 0 or in range (0, 1))",
 			evictionWatermark,
 		))
 	}
@@ -429,7 +455,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			rejectionWatermark,
 		))
 	}
-	if evictionWatermark >= rejectionWatermark {
+	// Only enforce ordering if eviction is enabled (non-zero).
+	if evictionWatermark > 0 && evictionWatermark >= rejectionWatermark {
 		errs = append(errs, fmt.Errorf(
 			"plugins.mempool.config.evictionWatermark (%f) must be less than rejectionWatermark (%f)",
 			evictionWatermark,
@@ -637,6 +664,29 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"databaseLifecycle.snapshotDir is required when databaseLifecycle.snapshotEnabled is true",
 		))
 	}
+	// snapshotDir is only actually live for a run mode that starts the
+	// full node (serving): that's the only path wiring up dblifecycle.
+	// Manager, whose Start reads SnapshotEnabled and whose Bark-triggered
+	// CreateSnapshot/Restore needs barkPort > 0 (matching the
+	// barkClientCaFilePath gate above) -- neither ever runs under a
+	// one-shot load/sync/mithril/database invocation, even if the same
+	// shared config file has snapshotEnabled or Bark turned on for its
+	// normal serve deployment. Gating on serving avoids those one-shot
+	// commands eagerly creating the directory and probe-writing into it
+	// (see checkDirWritable) for a subsystem they never start.
+	if serving &&
+		(c.DatabaseLifecycle.SnapshotEnabled || c.BarkPort > 0) &&
+		c.DatabaseLifecycle.SnapshotDir != "" {
+		if err := checkDirWritable(c.DatabaseLifecycle.SnapshotDir); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"databaseLifecycle.snapshotDir %q is not usable: %w (if "+
+					"running the official Docker image, a directory outside "+
+					"/data/db must be pre-chowned on the host to the "+
+					"container's UID:GID, 1000:1000)",
+				c.DatabaseLifecycle.SnapshotDir, err,
+			))
+		}
+	}
 	if c.DatabaseLifecycle.SnapshotRetention < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid databaseLifecycle.snapshotRetention: %d (must not be negative)",
@@ -703,6 +753,25 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	return errors.Join(errs...)
 }
 
+// validateAPIMode rejects a mode value that is neither unset (inherit/
+// default) nor one of the two accepted enum values.
+func validateAPIMode(
+	setting string,
+	mode *string,
+	disabled, enabled string,
+) error {
+	if mode == nil || *mode == "" {
+		return nil
+	}
+	if *mode == disabled || *mode == enabled {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s: invalid mode %q (must be %q or %q)",
+		setting, *mode, disabled, enabled,
+	)
+}
+
 // validatePort checks a configured TCP port. Ports are uints, so
 // values above 65535 are representable but unbindable; ports below
 // minBindable are privileged ports the process may not bind; and 0
@@ -758,6 +827,33 @@ func isWildcardAddr(addr string) bool {
 	default:
 		return false
 	}
+}
+
+// checkDirWritable ensures dir exists (creating it if needed) and that this
+// process can actually create files in it, surfacing a clear, actionable
+// error at startup instead of a raw filesystem permission error surfacing
+// later, deep inside a snapshot attempt. This is the common failure mode
+// for a --db-snapshot-dir bind-mounted from a host directory the
+// container's non-root user doesn't own (see the Docker image's pinned
+// UID:GID note in dingo.yaml.example).
+func checkDirWritable(dir string) (err error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+	probe, err := os.CreateTemp(dir, ".dingo-writable-check-*")
+	if err != nil {
+		return fmt.Errorf("directory is not writable: %w", err)
+	}
+	name := probe.Name()
+	// Deferred (rather than a plain call after Close) so the probe file is
+	// still cleaned up on every path, including one a later change might
+	// add between Close and here that returns early.
+	defer func() {
+		if removeErr := os.Remove(name); removeErr != nil && err == nil {
+			err = fmt.Errorf("remove writability probe file: %w", removeErr)
+		}
+	}()
+	return probe.Close()
 }
 
 // validatePathNoTraversal rejects paths containing a ".." component.

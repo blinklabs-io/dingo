@@ -113,7 +113,7 @@ func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
 	for range attempts {
 		// Callers treat this error as advisory (several only log it), so
 		// the recovery cannot depend on any caller acting on it.
-		_ = ls.startQueuedBlockfetchLocked(connId)
+		_ = ls.startQueuedBlockfetchLocked(connId, nil)
 	}
 
 	assert.LessOrEqual(
@@ -187,7 +187,7 @@ func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
 
 			connId := testChainsyncConnId(6110, 3001)
 			for range blockfetchMaxSameRangeFailures * 3 {
-				err := ls.startQueuedBlockfetchLocked(connId)
+				err := ls.startQueuedBlockfetchLocked(connId, nil)
 				require.Error(t, err)
 			}
 
@@ -229,7 +229,7 @@ func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	for range attempts {
 		// Mirrors the fork-resolution call sites, which discard the error
 		// after logging it.
-		_ = ls.restartQueuedBlockfetchAfterForkLocked(connId)
+		_ = ls.restartQueuedBlockfetchAfterForkLocked(connId, nil)
 	}
 
 	assert.LessOrEqual(
@@ -263,7 +263,7 @@ func TestBlockfetchRangeFailureClearedWhenRangeIsDelivered(t *testing.T) {
 	stuckStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
 
 	for range blockfetchMaxSameRangeFailures * 3 {
-		_ = ls.startQueuedBlockfetchLocked(connId)
+		_ = ls.startQueuedBlockfetchLocked(connId, nil)
 		require.Positive(
 			t,
 			ls.chain.HeaderCount(),
@@ -313,7 +313,7 @@ func TestBlockfetchRangeFailuresAccumulatePerRangeDespiteInterleavedActivity(
 			"stuck header must be queued for attempt %d",
 			attempt,
 		)
-		_ = ls.startQueuedBlockfetchLocked(connId)
+		_ = ls.startQueuedBlockfetchLocked(connId, nil)
 		if attempt == blockfetchMaxSameRangeFailures {
 			break
 		}
@@ -359,7 +359,7 @@ func TestBlockfetchRangeFailuresDoNotAccumulateAcrossDifferentRanges(
 	connId := testChainsyncConnId(6106, 3001)
 
 	for attempt := range blockfetchMaxSameRangeFailures * 3 {
-		_ = ls.startQueuedBlockfetchLocked(connId)
+		_ = ls.startQueuedBlockfetchLocked(connId, nil)
 		// Each attempt is against a different queued header, as happens
 		// when the chain keeps moving and every miss is a one-off.
 		ls.clearQueuedHeaders()
@@ -460,7 +460,7 @@ func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 			ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 				ConnectionId: connId,
 				BatchDone:    true,
-			}),
+			}, nil),
 			"batch done %d", i,
 		)
 	}
@@ -537,7 +537,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 			ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 				ConnectionId: connId,
 				BatchDone:    true,
-			}),
+			}, nil),
 		)
 		// Stand in for a delivered block: handleEventBlockfetchBlock both
 		// counts the block and discards that range's failure record.
@@ -548,7 +548,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 			ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 				ConnectionId: connId,
 				BatchDone:    true,
-			}),
+			}, nil),
 		)
 	}
 

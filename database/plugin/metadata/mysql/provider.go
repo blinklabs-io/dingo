@@ -189,6 +189,20 @@ func openStore(
 			0x64696e676f6d6574,
 			30*time.Second,
 		),
+		BackupTo: func(ctx context.Context, dstPath string) error {
+			return backupMySQL(ctx, dsn, dstPath)
+		},
+		RestoreFrom: func(ctx context.Context, srcPath string) error {
+			return restoreMySQL(ctx, dsn, srcPath)
+		},
+		Reset: func(ctx context.Context) error {
+			_, _, database, err := connArgs(dsn)
+			if err != nil {
+				return err
+			}
+			return resetDatabase(ctx, db, database)
+		},
+		ValidateBackup: validateMySQLBackup,
 	})
 	if err != nil {
 		_ = db.Close()

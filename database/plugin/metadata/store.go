@@ -976,6 +976,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Utxo, error)
 
+	// GetUtxosByRefs retrieves multiple live unspent transaction outputs
+	// by their (transaction ID, index) references in a single batch.
+	// Refs with no matching live UTxO are simply absent from the result.
+	GetUtxosByRefs(
+		[]models.UtxoId, // refs
+		types.Txn,
+	) ([]models.Utxo, error)
+
 	// GetTransactionByHash retrieves a transaction by its hash.
 	GetTransactionByHash(
 		[]byte, // hash
@@ -1278,6 +1286,7 @@ type MetadataStore interface {
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
+		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
 		types.Txn,
 	) error
 
@@ -1298,6 +1307,7 @@ type MetadataStore interface {
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits
+		bool, // skipWithdrawalWitness: see SetTransaction
 		types.MetadataBatchAccumulator,
 		types.Txn,
 	) error
@@ -1418,11 +1428,14 @@ type MetadataStore interface {
 	// window for historical transaction queries.
 	GetUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
 
-	// GetUtxosByAddress retrieves coarse SQL candidates for an explicit
-	// address pattern. The database layer performs full exact-address CBOR
-	// filtering when ExactAddress is set.
+	// GetUtxosByAddress retrieves coarse SQL candidates matching any of the
+	// given address patterns (OR-joined, mirroring
+	// GetUtxosByAddressWithOrdering). The database layer performs full
+	// exact-address CBOR filtering when ExactAddress is set. An empty
+	// patterns slice returns (nil, nil), matching the coordinated
+	// Database.UtxosByAddress's empty-input handling.
 	GetUtxosByAddress(
-		models.UtxoAddressPattern,
+		[]models.UtxoAddressPattern,
 		types.Txn,
 	) ([]models.Utxo, error)
 

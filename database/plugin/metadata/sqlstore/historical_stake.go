@@ -930,6 +930,40 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 )`, args
 }
 
+// historicalExpirationSQL reconstructs each active-delegation credential's
+// CIP-0163 expiration_epoch as of slot from witness history
+// (accountWitnessTables, account_reward_delta, account_withdrawal_witness).
+// Absent the one-time activation floor described below: a witness at or
+// before slot wins outright; failing that, a witness only after slot falls
+// back to a creation-epoch-derived expiration instead (the account existed
+// but nothing proves it was witnessed by slot); failing that -- no witness at
+// all, before or after slot -- it falls back to the mutable
+// account.expiration_epoch; a missing account row produces 0.
+//
+// When the query's expiryEpoch is at or after the recorded CIP-0163
+// activation epoch (activation != nil && *activation <= expiryEpoch), a
+// credential recorded in the one-time activation membership
+// (account_inactivity_activation) instead floors at
+// activation_epoch + inactivityPeriod whenever its witness at or before slot
+// is older than the activation epoch or altogether absent -- overriding
+// every other branch above (the witness-at-or-before-slot match, the
+// creation-epoch fallback, and the mutable-column fallback) for that
+// credential. Only a witness at or before slot that is itself at or after
+// the activation epoch, or a credential outside the activation membership,
+// falls through to the ordinary fallback chain described above.
+//
+// This is only exact if two from-genesis nodes retain the same witness
+// history for the same slot -- none of those tables is ever pruned by age,
+// storage mode, or configurable retention; the only deletes are the
+// rollback/lifecycle-truncate added_slot > slot statements
+// (DeleteCertificatesAfterSlot and the account.go equivalents), which are
+// keyed on consensus chain state, not per-node config. That is a guarantee
+// about rows already written, not about whether a row is written at all:
+// account_withdrawal_witness inserts are separately elided when
+// DelegatorInactivityEnabled is off (issue #2919), which is the same
+// network-wide setting this function's caller already requires to match, so
+// it introduces no new divergence. See ARCHITECTURE.md's CIP-0163 section
+// (issue #2920) before adding any other deletion path for these tables.
 func historicalExpirationSQL(
 	db queryer,
 	slot uint64,

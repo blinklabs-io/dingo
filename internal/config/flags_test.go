@@ -37,6 +37,12 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
+		// Deliberately has no CLI flag (unlike every sibling api.auth/
+		// api.tls field): a raw inline secret should not be encouraged
+		// onto a command line, where it is visible via `ps` and shell
+		// history. Use --api-auth-token-file-path (API.Auth.TokenFilePath)
+		// or YAML instead. See AuthPolicy.Token's own doc comment.
+		"API.Auth.Token":                       {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Mempool.Config":               {},
@@ -140,6 +146,26 @@ func TestFullPotRewardsEnvBinding(t *testing.T) {
 	}
 	if !cfg.UnsafeFullPotRewardsOnStandardNetworks {
 		t.Fatal("expected env var to enable unsafe full-pot rewards override")
+	}
+}
+
+func TestBlockPipelineEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCK_PIPELINE_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockPipelineEnabled {
+		t.Fatal("expected env var to enable the block-decode pipeline")
 	}
 }
 

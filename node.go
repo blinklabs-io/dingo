@@ -39,6 +39,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -101,7 +103,7 @@ type Node struct {
 	cancel                           context.CancelFunc
 	shutdownOnce                     sync.Once
 	shutdownErr                      error
-	chainsyncStallRecyclerWG         sync.WaitGroup
+	chainsyncStallRecycler           *chainsyncrecycler.Recycler
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
 
@@ -174,6 +176,24 @@ func New(cfg Config) (*Node, error) {
 		destinationRegistry: destinationRegistry,
 	}
 	for capability, selection := range cfg.pluginSelections {
+		// API capabilities are validated against their *merged* config
+		// (shared api.tls/api.auth defaults folded in) so an invalid
+		// effective TLS/auth policy -- e.g. a partial certificate/key
+		// pair -- is rejected here, before any listener starts, using
+		// the exact same merge apiPluginSelection applies at Start()/
+		// reinitializeAPIServers time. See apiProviderConfig.
+		if configPath, ok := apiProviderConfigPath[capability]; ok {
+			var err error
+			selection, err = cfg.apiProviderConfig(capability, selection)
+			if err != nil {
+				return nil, fmt.Errorf("invalid plugin selection: %w", err)
+			}
+			if err := validateAPIProviderSecurityPolicy(
+				configPath, selection.Config,
+			); err != nil {
+				return nil, fmt.Errorf("invalid plugin selection: %w", err)
+			}
+		}
 		if err := pluginHost.ValidateSelection(
 			capability, selection.Provider, selection.Config,
 		); err != nil {
@@ -211,6 +231,98 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
+// legacyUtxorpcTLSPolicy expresses the pre-#2996 root tlsCertFilePath/
+// tlsKeyFilePath fields as an apiconfig.TLSPolicy, for UTxORPC only. It
+// deliberately does not feed cfg.apiConfig.TLS (the shared api.tls default
+// every provider inherits from): UTxORPC was the only provider these root
+// fields ever configured TLS for, and promoting them to a shared default
+// would silently switch Blockfrost/Mesh from plaintext to TLS on upgrade
+// for any deployment that set them, breaking existing plaintext clients.
+// See ARCHITECTURE.md's "API security" section for this compatibility
+// decision. Returns the zero TLSPolicy (no effect on the merge) unless
+// both root fields are set.
+func legacyUtxorpcTLSPolicy(cfg *Config) apiconfig.TLSPolicy {
+	if cfg.tlsCertFilePath == "" || cfg.tlsKeyFilePath == "" {
+		return apiconfig.TLSPolicy{}
+	}
+	mode := string(apiconfig.TLSModeServer)
+	return apiconfig.TLSPolicy{
+		Mode:         &mode,
+		CertFilePath: &cfg.tlsCertFilePath,
+		KeyFilePath:  &cfg.tlsKeyFilePath,
+	}
+}
+
+// apiProviderConfig merges the shared api.tls/api.auth policy (and, for
+// UTxORPC only, the legacy root TLS compatibility fields) into selection's
+// own "tls"/"auth" config sections, field by field, and returns the result.
+// It is the single place this merge happens, called both by the early
+// plugin-selection validation in New() and by apiPluginSelection, so a
+// provider config validated at startup and the one actually resolved at
+// Start()/reinitializeAPIServers time can never diverge.
+func (c *Config) apiProviderConfig(
+	capability plugin.Capability,
+	selection plugin.Selection,
+) (plugin.Selection, error) {
+	var legacyTLS apiconfig.TLSPolicy
+	if capability == plugin.CapabilityAPIUtxorpc {
+		legacyTLS = legacyUtxorpcTLSPolicy(c)
+	}
+	merged, err := apiconfig.MergeProviderConfig(
+		selection.Config,
+		legacyTLS,
+		c.apiConfig.TLS,
+		c.apiConfig.Auth,
+	)
+	if err != nil {
+		return selection, fmt.Errorf(
+			"merge api security policy for capability %s: %w",
+			capability, err,
+		)
+	}
+	selection.Config = merged
+	return selection, nil
+}
+
+// apiProviderConfigPath maps each API capability to the dotted config path
+// its provider config lives at, for error messages -- see
+// validateAPIProviderSecurityPolicy and each provider's own
+// cfg.TLS.Resolve/cfg.Auth.Resolve call, which use the identical path.
+var apiProviderConfigPath = map[plugin.Capability]string{
+	plugin.CapabilityAPIBlockfrost: "plugins.api.blockfrost.config",
+	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
+	plugin.CapabilityAPIUtxorpc:    "plugins.api.utxorpc.config",
+}
+
+// validateAPIProviderSecurityPolicy resolves and validates the merged
+// tls/auth sections of an API provider's config (already merged with the
+// shared api.tls/api.auth defaults by apiProviderConfig), surfacing a
+// partial certificate/key pair or an invalid mode before any listener
+// starts -- the same validation each provider's own RegisterProvider
+// factory performs at Resolve()/Start() time, run here again so New()
+// itself rejects it at construction, before Run() ever attempts to start
+// a listener.
+func validateAPIProviderSecurityPolicy(
+	configPath string,
+	rawConfig map[string]any,
+) error {
+	tlsPolicy, err := apiconfig.DecodeTLSPolicy(rawConfig)
+	if err != nil {
+		return fmt.Errorf("%s.tls: %w", configPath, err)
+	}
+	if _, err := tlsPolicy.Resolve(configPath + ".tls"); err != nil {
+		return err
+	}
+	authPolicy, err := apiconfig.DecodeAuthPolicy(rawConfig)
+	if err != nil {
+		return fmt.Errorf("%s.auth: %w", configPath, err)
+	}
+	if _, err := authPolicy.Resolve(configPath + ".auth"); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (n *Node) apiPluginSelection(
 	capability plugin.Capability,
 ) (plugin.Selection, uint, error) {
@@ -226,6 +338,13 @@ func (n *Node) apiPluginSelection(
 			"plugin provider is empty for capability %s",
 			capability,
 		)
+	}
+	if _, ok := apiProviderConfigPath[capability]; ok {
+		var err error
+		selection, err = n.config.apiProviderConfig(capability, selection)
+		if err != nil {
+			return selection, 0, err
+		}
 	}
 	portValue, ok := selection.Config["port"]
 	if !ok {
@@ -596,6 +715,9 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical: n.config.validateHistorical,
 			EnableDijkstra:     enableDijkstra,
 			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			// Parallel block-decode pipeline for the chainsync replay loop
+			// (issue #1894 phase 1). Not consensus-affecting; off by default.
+			BlockPipelineEnabled: n.config.blockPipelineEnabled,
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
@@ -1156,99 +1278,8 @@ func (n *Node) Run(ctx context.Context) error {
 			"min_corroborating_peers", n.config.genesisCorroborationPeers,
 		)
 	}
-	// Subscribe chain selector to peer tip update events
-	n.eventBus.SubscribeFunc(
-		chainselection.PeerTipUpdateEventType,
-		n.chainSelector.HandlePeerTipUpdateEvent,
-	)
-	n.eventBus.SubscribeFunc(
-		chainselection.PeerTipUpdateEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
-			if !ok || n.peerGov == nil {
-				return
-			}
-			n.peerGov.TouchPeerByConnId(e.ConnectionId)
-		},
-	)
-	n.eventBus.SubscribeFunc(
-		chainselection.PeerActivityEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(chainselection.PeerActivityEvent)
-			if !ok {
-				return
-			}
-			n.chainSelector.TouchPeerActivity(e.ConnectionId)
-			if n.peerGov != nil {
-				n.peerGov.TouchPeerByConnId(e.ConnectionId)
-			}
-		},
-	)
-	// Subscribe to chain switch events to update active connection
-	n.eventBus.SubscribeFunc(
-		chainselection.ChainSwitchEventType,
-		n.handleChainSwitchEvent,
-	)
-	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
-	// uncorroborated Genesis fast source). Enforcement that the stalled source
-	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
-	// this handler surfaces the stall for observability.
-	n.eventBus.SubscribeFunc(
-		chainselection.ChainSelectedNoneEventType,
-		n.handleChainSelectedNoneEvent,
-	)
-	// Subscribe to chain fork events for monitoring
-	n.eventBus.SubscribeFunc(
-		chain.ChainForkEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(chain.ChainForkEvent)
-			if !ok {
-				return
-			}
-			n.config.logger.Warn(
-				"chain fork detected",
-				"fork_point_slot", e.ForkPoint.Slot,
-				"fork_depth", e.ForkDepth,
-				"alternate_head_slot", e.AlternateHead.Slot,
-				"canonical_head_slot", e.CanonicalHead.Slot,
-			)
-		},
-	)
-	// Subscribe to connection closed events to remove peers from chain selector
-	n.eventBus.SubscribeFunc(
-		connmanager.ConnectionClosedEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
-			if !ok {
-				return
-			}
-			n.chainSelector.RemovePeer(e.ConnectionId)
-			n.deleteChainsyncIngressEligibility(e.ConnectionId)
-		},
-	)
-	// Forward peer-governance eligibility and priority updates to the chain
-	// selector. Subscription is placed here (node composition layer) so that
-	// chainselection/ has no dependency on peergov/.
-	n.eventBus.SubscribeFunc(
-		peergov.PeerEligibilityChangedEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
-			if !ok {
-				return
-			}
-			n.chainSelector.SetConnectionEligible(e.ConnectionId, e.Eligible)
-		},
-	)
-	n.eventBus.SubscribeFunc(
-		peergov.PeerPriorityChangedEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
-			if !ok {
-				return
-			}
-			n.chainSelector.SetConnectionPriority(e.ConnectionId, e.Priority)
-		},
-	)
+	// Wire chain-selector event subscriptions.
+	n.subscribeChainSelectorEvents()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start chain selector: %w", err)
@@ -1268,73 +1299,8 @@ func (n *Node) Run(ctx context.Context) error {
 			MaxInboundConns:     n.config.maxInboundConns,
 		},
 	)
-	// Subscriber ID captured for the same reason as chainManager's above —
-	// n.connManager is rebuilt during a live database restore/truncate.
-	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
-		connmanager.ConnectionRecycleRequestedEventType,
-		n.connManager.HandleConnectionRecycleRequestedEvent,
-	)
-	// Translate ledger-owned recycle events to connmanager recycle events so
-	// ledger/ does not import connmanager/.
-	n.eventBus.SubscribeFunc(
-		ledger.ConnectionRecycleRequestedEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
-			if !ok {
-				return
-			}
-			n.eventBus.Publish(
-				connmanager.ConnectionRecycleRequestedEventType,
-				event.NewEvent(
-					connmanager.ConnectionRecycleRequestedEventType,
-					connmanager.ConnectionRecycleRequestedEvent{
-						ConnectionId: e.ConnectionId,
-						Reason:       e.Reason,
-						// ConnKey is intentionally omitted: HandleConnectionRecycleRequestedEvent
-						// closes the connection by ConnectionId alone and never reads ConnKey.
-					},
-				),
-			)
-		},
-	)
-	n.ouroboros.ConnManager = n.connManager
-	// Subscribe ouroboros to chainsync resync events from the
-	// ledger. This replaces the previous ChainsyncResyncFunc
-	// closure so all stop/restart orchestration lives in the
-	// ouroboros/chainsync component. Registered after ConnManager
-	// is wired so the handler can look up connections.
-	n.ouroboros.SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
-	// Subscribe to connection events BEFORE starting listeners so that
-	// inbound connections from peers that connect immediately are not lost.
-	n.eventBus.SubscribeFunc(
-		connmanager.ConnectionClosedEventType,
-		n.ouroboros.HandleConnClosedEvent,
-	)
-	// Translate connmanager connection-closed events to ledger-owned events so
-	// ledger/ does not import connmanager/.
-	n.eventBus.SubscribeFunc(
-		connmanager.ConnectionClosedEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
-			if !ok {
-				return
-			}
-			n.eventBus.Publish(
-				ledger.ConnectionClosedEventType,
-				event.NewEvent(
-					ledger.ConnectionClosedEventType,
-					ledger.ConnectionClosedEvent{
-						ConnectionId: e.ConnectionId,
-						Error:        e.Error,
-					},
-				),
-			)
-		},
-	)
-	n.eventBus.SubscribeFunc(
-		connmanager.InboundConnectionEventType,
-		n.ouroboros.HandleInboundConnEvent,
-	)
+	// Wire connection-manager and inbound/outbound connection events.
+	n.subscribeConnectionEvents()
 	// Configure peer governor before opening listeners so topology-driven
 	// outbound connections start first and do not lose the race to inbounds.
 	// Create ledger relay provider for discovering peers from stake pool relays.
@@ -1451,27 +1417,12 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	})
 	// Detect stalled chainsync clients and recycle truly stuck connections.
-	// Use a grace period + cooldown to avoid flapping healthy but quiet peers.
-	stallCheckInterval := min(
-		max(chainsyncCfg.StallTimeout/2, 10*time.Second),
-		30*time.Second,
-	)
-	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
-	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
-	//nolint:gosec // G118: cancel func stored in started slice.
-	recyclerCancel := n.startChainsyncStallRecycler(
-		n.ctx,
-		chainsyncCfg,
-		stallCheckInterval,
-		stallRecoveryGrace,
-		stallRecycleCooldown,
-	)
-	// On startup failure or panic, cancel the recycler and wait for it before
+	if err := n.startChainsyncStallRecycler(n.ctx, chainsyncCfg); err != nil { //nolint:contextcheck
+		return fmt.Errorf("chainsync stall recycler start failed: %w", err)
+	}
+	// On startup failure or panic, stop the recycler and wait for it before
 	// unwinding later components that the recycler can still touch.
-	started = append(started, func() {
-		recyclerCancel()
-		n.chainsyncStallRecyclerWG.Wait()
-	})
+	started = append(started, n.waitChainsyncStallRecycler)
 	// Resolve UTxO RPC only in API mode with a non-zero configured port.
 	utxorpcSelection, utxorpcPort, err := n.apiPluginSelection(
 		plugin.CapabilityAPIUtxorpc,
@@ -1487,8 +1438,6 @@ func (n *Node) Run(ctx context.Context) error {
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
 				Host:               n.config.bindAddr,
-				TLSCertFilePath:    n.config.tlsCertFilePath,
-				TLSKeyFilePath:     n.config.tlsKeyFilePath,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1797,6 +1746,184 @@ func taintValue(relaxed bool) string {
 		return nodesettings.LatchOn
 	}
 	return nodesettings.LatchOff
+}
+
+// subscribeConnectionEvents wires the connection-manager side of the EventBus:
+// recycle requests, connection-closed and inbound-connection delivery to
+// ouroboros, and the ledger<->connmanager event translation that keeps ledger/
+// from importing connmanager/. Subscriptions are registered before listeners
+// start so inbound connections from peers that connect immediately are not
+// lost.
+func (n *Node) subscribeConnectionEvents() {
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.connManager is rebuilt during a live database restore/truncate.
+	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
+		connmanager.ConnectionRecycleRequestedEventType,
+		n.connManager.HandleConnectionRecycleRequestedEvent,
+	)
+	// Translate ledger-owned recycle events to connmanager recycle events so
+	// ledger/ does not import connmanager/.
+	n.eventBus.SubscribeFunc(
+		ledger.ConnectionRecycleRequestedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
+			if !ok {
+				return
+			}
+			n.eventBus.Publish(
+				connmanager.ConnectionRecycleRequestedEventType,
+				event.NewEvent(
+					connmanager.ConnectionRecycleRequestedEventType,
+					connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionId: e.ConnectionId,
+						Reason:       e.Reason,
+						// ConnKey is intentionally omitted: HandleConnectionRecycleRequestedEvent
+						// closes the connection by ConnectionId alone and never reads ConnKey.
+					},
+				),
+			)
+		},
+	)
+	n.ouroboros.ConnManager = n.connManager
+	// Subscribe ouroboros to chainsync resync events from the
+	// ledger. This replaces the previous ChainsyncResyncFunc
+	// closure so all stop/restart orchestration lives in the
+	// ouroboros/chainsync component. Registered after ConnManager
+	// is wired so the handler can look up connections.
+	n.ouroboros.SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
+	// Subscribe to connection events BEFORE starting listeners so that
+	// inbound connections from peers that connect immediately are not lost.
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		n.ouroboros.HandleConnClosedEvent,
+	)
+	// Translate connmanager connection-closed events to ledger-owned events so
+	// ledger/ does not import connmanager/.
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+			if !ok {
+				return
+			}
+			n.eventBus.Publish(
+				ledger.ConnectionClosedEventType,
+				event.NewEvent(
+					ledger.ConnectionClosedEventType,
+					ledger.ConnectionClosedEvent{
+						ConnectionId: e.ConnectionId,
+						Error:        e.Error,
+					},
+				),
+			)
+		},
+	)
+	n.eventBus.SubscribeFunc(
+		connmanager.InboundConnectionEventType,
+		n.ouroboros.HandleInboundConnEvent,
+	)
+}
+
+// subscribeChainSelectorEvents wires the EventBus subscriptions that feed the
+// chain selector: peer tip/activity observations, chain switch and
+// selected-to-none transitions, fork monitoring, connection teardown, and the
+// peer-governance eligibility/priority forwarding. The peergov forwarding lives
+// here in the node composition layer so chainselection/ keeps no dependency on
+// peergov/.
+func (n *Node) subscribeChainSelectorEvents() {
+	// Subscribe chain selector to peer tip update events
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerTipUpdateEventType,
+		n.chainSelector.HandlePeerTipUpdateEvent,
+	)
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerTipUpdateEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
+			if !ok || n.peerGov == nil {
+				return
+			}
+			n.peerGov.TouchPeerByConnId(e.ConnectionId)
+		},
+	)
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerActivityEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chainselection.PeerActivityEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.TouchPeerActivity(e.ConnectionId)
+			if n.peerGov != nil {
+				n.peerGov.TouchPeerByConnId(e.ConnectionId)
+			}
+		},
+	)
+	// Subscribe to chain switch events to update active connection
+	n.eventBus.SubscribeFunc(
+		chainselection.ChainSwitchEventType,
+		n.handleChainSwitchEvent,
+	)
+	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
+	// uncorroborated Genesis fast source). Enforcement that the stalled source
+	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
+	// this handler surfaces the stall for observability.
+	n.eventBus.SubscribeFunc(
+		chainselection.ChainSelectedNoneEventType,
+		n.handleChainSelectedNoneEvent,
+	)
+	// Subscribe to chain fork events for monitoring
+	n.eventBus.SubscribeFunc(
+		chain.ChainForkEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chain.ChainForkEvent)
+			if !ok {
+				return
+			}
+			n.config.logger.Warn(
+				"chain fork detected",
+				"fork_point_slot", e.ForkPoint.Slot,
+				"fork_depth", e.ForkDepth,
+				"alternate_head_slot", e.AlternateHead.Slot,
+				"canonical_head_slot", e.CanonicalHead.Slot,
+			)
+		},
+	)
+	// Subscribe to connection closed events to remove peers from chain selector
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.RemovePeer(e.ConnectionId)
+			n.deleteChainsyncIngressEligibility(e.ConnectionId)
+		},
+	)
+	// Forward peer-governance eligibility and priority updates to the chain
+	// selector. Subscription is placed here (node composition layer) so that
+	// chainselection/ has no dependency on peergov/.
+	n.eventBus.SubscribeFunc(
+		peergov.PeerEligibilityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.SetConnectionEligible(e.ConnectionId, e.Eligible)
+		},
+	)
+	n.eventBus.SubscribeFunc(
+		peergov.PeerPriorityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.SetConnectionPriority(e.ConnectionId, e.Priority)
+		},
+	)
 }
 
 // nodeSettingsGateValues assembles the phase 2 gate values -- the era

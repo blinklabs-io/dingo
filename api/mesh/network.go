@@ -62,7 +62,7 @@ func (s *Server) handleNetworkOptions(
 			OperationStatuses:       OperationStatuses(),
 			OperationTypes:          OperationTypes(),
 			Errors:                  AllErrors(),
-			HistoricalBalanceLookup: false,
+			HistoricalBalanceLookup: true,
 			MempoolCoins:            false,
 		},
 	}

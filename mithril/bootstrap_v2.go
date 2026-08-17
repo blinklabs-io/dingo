@@ -81,6 +81,11 @@ func bootstrapV2(
 			artifact.Hash,
 		)
 	}
+	if err := validateSnapshotIdentity(
+		cfg.Network, artifact.Network, artifact.Hash,
+	); err != nil {
+		return nil, fmt.Errorf("validating artifact metadata: %w", err)
+	}
 	if cfg.Network != "" && artifact.Network != "" &&
 		cfg.Network != artifact.Network {
 		return nil, fmt.Errorf(
@@ -110,10 +115,19 @@ func bootstrapV2(
 	cfg.Logger.Info(
 		"found latest Cardano database snapshot",
 		"component", "mithril",
+		"network", artifact.Network,
 		"hash", artifact.Hash,
+		"snapshot_hash", artifact.Hash,
 		"epoch", artifact.Beacon.Epoch,
 		"immutable_file_number", artifact.Beacon.ImmutableFileNumber,
 		"total_db_size", artifact.TotalDbSizeUncompressed,
+	)
+	cfg.Logger = cfg.Logger.With(
+		"network", artifact.Network,
+		"snapshot_hash", artifact.Hash,
+		"snapshot_epoch", artifact.Beacon.Epoch,
+		"snapshot_immutable_file_number", artifact.Beacon.ImmutableFileNumber,
+		"artifact_backend", BackendV2,
 	)
 
 	if len(artifact.Immutables.Locations) == 0 {
@@ -133,6 +147,8 @@ func bootstrapV2(
 		cfg.Logger.Info(
 			"certificate chain verified",
 			"component", "mithril",
+			"phase", "certificate_verification",
+			"artifact", "cardano_database",
 		)
 	}
 
@@ -184,7 +200,7 @@ func bootstrapV2(
 
 	extractDir := filepath.Join(
 		downloadDir,
-		"immutable-"+artifact.Hash,
+		filepath.Base("immutable-"+artifact.Hash),
 	)
 	var ancillaryTree *vettedDir
 	var ancillaryDigests map[string]string
@@ -211,15 +227,15 @@ func bootstrapV2(
 		ancWg.Go(func() {
 			candidateDir := filepath.Join(
 				downloadDir,
-				"ancillary-"+artifact.Hash,
+				filepath.Base("ancillary-"+artifact.Hash),
 			)
 			candidateArchive := filepath.Join(
 				downloadDir,
-				fmt.Sprintf(
+				filepath.Base(fmt.Sprintf(
 					"%s-%s-ancillary.tar.zst",
 					artifact.Network,
 					truncateDigest(artifact.Hash),
-				),
+				)),
 			)
 			// One handle spans the cache check, the manifest verification,
 			// and the ledger-state import downstream. A directory substituted
@@ -357,6 +373,7 @@ func bootstrapV2(
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
+		"phase", "bootstrap_ready",
 		"immutable_dir", immutableTree.Path(),
 		"ancillary_dir", ancillaryTree.Path(),
 	)
@@ -422,6 +439,8 @@ func verifyArtifactCertificateV2(
 	cfg.Logger.Info(
 		"verifying certificate chain",
 		"component", "mithril",
+		"phase", "certificate_verification",
+		"artifact", "cardano_database",
 		"certificate_hash", artifact.CertificateHash,
 	)
 	verificationMode := VerificationModeStructural
@@ -596,6 +615,8 @@ func fetchVerifiedDigests(
 	cfg.Logger.Info(
 		"digest list verified against certified merkle root",
 		"component", "mithril",
+		"phase", "digest_verification",
+		"artifact", "immutable_digest_list",
 		"digests", len(digests),
 	)
 	return digests, nil
@@ -633,12 +654,12 @@ func removeDigestsCache(
 	downloadDir string,
 ) {
 	suffix := truncateDigest(artifact.Hash)
-	_ = os.Remove(filepath.Join(downloadDir, fmt.Sprintf(
+	_ = os.Remove(filepath.Join(downloadDir, filepath.Base(fmt.Sprintf(
 		"digests-%s.tar.zst",
 		suffix,
-	)))
+	))))
 	_ = os.RemoveAll(
-		filepath.Join(downloadDir, "digests-"+suffix),
+		filepath.Join(downloadDir, filepath.Base("digests-"+suffix)),
 	)
 }
 
@@ -655,11 +676,16 @@ func downloadDigestsArchive(
 		ctx, DownloadConfig{
 			URL:     uri,
 			DestDir: downloadDir,
-			Filename: fmt.Sprintf(
+			Filename: filepath.Base(fmt.Sprintf(
 				"digests-%s.tar.zst",
 				truncateDigest(artifact.Hash),
+			)),
+			Logger: cfg.Logger,
+			OnProgress: withProgressContext(
+				cfg.OnProgress,
+				"immutable_digest_list",
+				artifact.Hash,
 			),
-			Logger:              cfg.Logger,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
@@ -671,12 +697,18 @@ func downloadDigestsArchive(
 	}
 	destDir := filepath.Join(
 		downloadDir,
-		"digests-"+truncateDigest(artifact.Hash),
+		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
 	)
 	// Replace: removeDigestsCache may not have run if a previous attempt
 	// was interrupted, leaving a stale digests directory.
 	if _, err := ExtractArchive(
-		ctx, archivePath, destDir, cfg.Logger,
+		ctx,
+		archivePath,
+		destDir,
+		cfg.Logger.With(
+			"phase", "digest_extraction",
+			"artifact", "immutable_digest_list",
+		),
 		WithReplaceDestination(),
 	); err != nil {
 		return nil, fmt.Errorf("extracting digests archive: %w", err)
@@ -732,7 +764,7 @@ func downloadImmutables(
 	defer immutableRoot.Close()
 	archiveDir := filepath.Join(
 		downloadDir,
-		"immutable-archives-"+truncateDigest(artifact.Hash),
+		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
 	)
 	if err := os.MkdirAll(archiveDir, 0o750); err != nil {
 		return fmt.Errorf("creating archive directory: %w", err)
@@ -777,8 +809,23 @@ func downloadImmutables(
 	if immutableTotalBytes <= 0 {
 		immutableTotalBytes = artifact.TotalDbSizeUncompressed
 	}
-	onArchiveDone := newImmutableProgress(
-		cfg, downloadArchives, immutableTotalBytes,
+	cfg.Logger.Info(
+		"downloading immutable archives",
+		"component", "mithril",
+		"phase", "immutable_download",
+		"artifact", "immutable_archives",
+		"immutable_file_start", startArchive,
+		"immutable_file_end", totalArchives-1,
+		"immutable_archives_total", downloadArchives,
+		"estimated_bytes", immutableTotalBytes,
+		"destination", extractDir,
+	)
+	onArchiveDone := newImmutableProgressWithContext(
+		cfg,
+		downloadArchives,
+		immutableTotalBytes,
+		"immutable_archives",
+		artifact.Hash,
 	)
 	// Per-archive extraction is too chatty for the main log at
 	// mainnet scale (tens of thousands of archives); aggregate
@@ -948,12 +995,14 @@ func downloadImmutables(
 	return err
 }
 
-// newImmutableProgress returns a callback that aggregates per-archive
-// completion into OnProgress updates and throttled log lines.
-func newImmutableProgress(
+// newImmutableProgressWithContext aggregates the concurrent immutable
+// workers into one progress stream while retaining the artifact identity.
+func newImmutableProgressWithContext(
 	cfg BootstrapConfig,
 	totalArchives uint64,
 	totalBytes int64,
+	artifact string,
+	snapshotHash string,
 ) func(bytesAdded int64) {
 	var mu sync.Mutex
 	var doneArchives uint64
@@ -991,10 +1040,14 @@ func newImmutableProgress(
 			// archive. Clamp so the reported percent never exceeds 100.
 			percent = min(percent, 100)
 			cfg.OnProgress(DownloadProgress{
-				BytesDownloaded: doneBytes,
-				TotalBytes:      totalBytes,
-				Percent:         percent,
-				BytesPerSecond:  speed,
+				BytesDownloaded:    doneBytes,
+				TotalBytes:         totalBytes,
+				Percent:            percent,
+				BytesPerSecond:     speed,
+				Artifact:           artifact,
+				SnapshotHash:       snapshotHash,
+				ArtifactsCompleted: doneArchives,
+				ArtifactsTotal:     totalArchives,
 			})
 		}
 		now := time.Now()
@@ -1005,13 +1058,13 @@ func newImmutableProgress(
 			return
 		}
 		cfg.Logger.Info(
-			fmt.Sprintf(
-				"immutable archives: %d/%d (%.1f%%)",
-				doneArchives,
-				totalArchives,
-				archivePercent,
-			),
+			"immutable archives: progress",
 			"component", "mithril",
+			"phase", "immutable_download",
+			"artifact", artifact,
+			"immutable_archives_completed", doneArchives,
+			"immutable_archives_total", totalArchives,
+			"percent", archivePercent,
 		)
 		lastLog = now
 		lastLoggedPercent = archivePercent
@@ -1228,13 +1281,16 @@ func downloadAncillaryV2(
 		"downloading ancillary data (ledger state)",
 		"component", "mithril",
 		"size", artifact.Ancillary.SizeUncompressed,
+		"phase", "ancillary_download",
+		"artifact", "ancillary_ledger_state",
+		"destination", downloadDir,
 	)
 
-	ancillaryFilename := fmt.Sprintf(
+	ancillaryFilename := filepath.Base(fmt.Sprintf(
 		"%s-%s-ancillary.tar.zst",
 		artifact.Network,
 		truncateDigest(artifact.Hash),
-	)
+	))
 
 	var ancillaryPath string
 	var err error
@@ -1244,11 +1300,15 @@ func downloadAncillaryV2(
 		}
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:                 loc.URI,
-				DestDir:             downloadDir,
-				Filename:            ancillaryFilename,
-				Logger:              cfg.Logger,
-				OnProgress:          cfg.OnProgress,
+				URL:      loc.URI,
+				DestDir:  downloadDir,
+				Filename: ancillaryFilename,
+				Logger:   cfg.Logger,
+				OnProgress: withProgressContext(
+					cfg.OnProgress,
+					"ancillary_ledger_state",
+					artifact.Hash,
+				),
 				IdleTimeout:         cfg.DownloadIdleTimeout,
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
@@ -1289,12 +1349,18 @@ func downloadAncillaryV2(
 
 	ancillaryDir := filepath.Join(
 		downloadDir,
-		"ancillary-"+artifact.Hash,
+		filepath.Base("ancillary-"+artifact.Hash),
 	)
 	// Replace: the resume path above may have removed an unverified
 	// extraction, but an interrupted run can still leave one behind.
 	if _, extractErr := ExtractArchive(
-		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
+		ctx,
+		ancillaryPath,
+		ancillaryDir,
+		cfg.Logger.With(
+			"phase", "ancillary_extraction",
+			"artifact", "ancillary_ledger_state",
+		),
 		WithReplaceDestination(),
 	); extractErr != nil {
 		return nil, nil, ancillaryPath, fmt.Errorf(

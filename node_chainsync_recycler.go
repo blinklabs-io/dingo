@@ -16,20 +16,15 @@ package dingo
 
 import (
 	"context"
-	"runtime/debug"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
-
-func plateauThreshold(stallTimeout time.Duration) time.Duration {
-	return max(2*stallTimeout, 4*time.Minute)
-}
 
 // chainsyncObservePeerTip synchronously feeds a peer tip update into chain
 // selection (and peergov) when the Genesis corroboration gate is active, so the
@@ -152,619 +147,6 @@ func (n *Node) handlePeerEligibilityChangedEvent(evt event.Event) {
 	n.setChainsyncIngressEligibility(e.ConnectionId, e.Eligible)
 }
 
-func shouldRecycleLocalTipPlateau(
-	now time.Time,
-	lastProgressAt time.Time,
-	localTipSlot uint64,
-	bestPeerTipSlot uint64,
-	lastRecycledAt *time.Time,
-	cooldown time.Duration,
-	threshold time.Duration,
-) bool {
-	if bestPeerTipSlot <= localTipSlot {
-		return false
-	}
-	if now.Sub(lastProgressAt) <= threshold {
-		return false
-	}
-	if lastRecycledAt != nil && now.Sub(*lastRecycledAt) < cooldown {
-		return false
-	}
-	return true
-}
-
-// isLedgerApplicationBacklog reports whether a local-tip plateau is caused by
-// the ledger pipeline replaying a backlog of already-fetched blocks rather than
-// by a stalled chainsync stream.
-//
-// A plateau only means the APPLIED ledger tip stopped advancing while a peer is
-// ahead. That is a chainsync problem only when headers are actually missing. On
-// Leios (and any deep catch-up) the header/primary chain routinely runs far
-// ahead of the applied ledger tip while the ledger pipeline replays a large
-// backlog of blocks it has already fetched. When the primary chain has covered
-// the bulk of the distance to the best peer and the remaining gap is dominated
-// by downloaded-but-not-yet-applied blocks, the chainsync stream is healthy and
-// caught up: recycling it cannot advance the applied tip and only churns the
-// connection. Requiring the apply backlog to be at least as large as the
-// residual header gap keeps a genuinely lagging header chain (headers missing,
-// nothing applied) on the recycle path.
-func isLedgerApplicationBacklog(
-	appliedTipSlot uint64,
-	primaryChainTipSlot uint64,
-	bestPeerTipSlot uint64,
-) bool {
-	if primaryChainTipSlot <= appliedTipSlot {
-		// Header chain is not ahead of the applied tip, so there is no
-		// backlog to drain: any plateau here is an upstream/header stall.
-		return false
-	}
-	var headerGap uint64
-	if bestPeerTipSlot > primaryChainTipSlot {
-		headerGap = bestPeerTipSlot - primaryChainTipSlot
-	}
-	applyBacklog := primaryChainTipSlot - appliedTipSlot
-	return applyBacklog >= headerGap
-}
-
-func (n *Node) startChainsyncStallRecycler(
-	ctx context.Context,
-	chainsyncCfg chainsync.Config,
-	interval time.Duration,
-	grace time.Duration,
-	cooldown time.Duration,
-) context.CancelFunc {
-	recyclerCtx, recyclerCancel := context.WithCancel(ctx)
-	// Track the recycler as a node-owned background worker so shutdown can
-	// wait for it before closing the dependencies it reads or publishes to.
-	n.chainsyncStallRecyclerWG.Go(func() {
-		// Mark the worker complete no matter whether it exits by cancellation
-		// or after a recovered panic stops the outer loop.
-		n.runChainsyncStallRecycler(
-			recyclerCtx,
-			chainsyncCfg,
-			interval,
-			grace,
-			cooldown,
-		)
-	})
-	return recyclerCancel
-}
-
-// chainsyncStallRecyclerStartupHook runs immediately before the
-// recycler's one-time startup liveLifecycleMu.TryLock() attempt below --
-// a test seam so a test can deterministically wait for this code to
-// actually be reached instead of guessing with a fixed wall-clock window
-// before cancelling. No-op in production.
-var chainsyncStallRecyclerStartupHook = func() {}
-
-func (n *Node) runChainsyncStallRecycler(
-	ctx context.Context,
-	chainsyncCfg chainsync.Config,
-	interval time.Duration,
-	grace time.Duration,
-	cooldown time.Duration,
-) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		// Keep the existing panic-recovery behavior: a panic in the loop is
-		// logged and the recycler restarts unless shutdown was requested.
-		if !n.runStallCheckerLoop(func() {
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			recycleAt := make(map[string]time.Time)
-			lastRecycled := make(map[string]time.Time)
-			// n.ledgerState is a plain, unsynchronized field that a live
-			// restore/truncate reassigns while holding n.liveLifecycleMu
-			// (see the tick handler below) -- take the same lock here so
-			// this one-time read can't land on a nil or mid-swap value if
-			// this loop happens to (re)start during a live lifecycle op
-			// (e.g. after a caught panic restarts it).
-			//
-			// TryLock, not Lock: shutdown waits for this worker
-			// (chainsyncStallRecyclerWG) before tearing anything down, and
-			// a blocking Lock() here cannot be interrupted by ctx
-			// cancellation — if a recycler restart landed on this line
-			// while a live restore/truncate was holding liveLifecycleMu for
-			// its full quiesce-through-reinitialize duration, shutdown
-			// would hang behind it past its configured timeout. Skipping
-			// the read on contention is safe: lastProgressSlot just stays
-			// its zero value, and the first tick that successfully reads a
-			// nonzero localTipSlot resets the plateau baseline anyway (see
-			// processChainsyncRecyclerTick) — this can only make plateau
-			// detection more lenient at startup, never trigger it early.
-			chainsyncStallRecyclerStartupHook()
-			var lastProgressSlot uint64
-			if n.liveLifecycleMu.TryLock() {
-				if n.ledgerState != nil {
-					lastProgressSlot = n.ledgerState.Tip().Point.Slot
-				}
-				n.liveLifecycleMu.Unlock()
-			}
-			lastProgressAt := time.Now()
-			plateauRecoveryThreshold := plateauThreshold(
-				chainsyncCfg.StallTimeout,
-			)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					n.runStallCheckerTick(func() {
-						// A live database restore/truncate briefly nils
-						// n.ledgerState and n.chainsyncState while it swaps
-						// in rebuilt ones, and holds n.liveLifecycleMu for
-						// its entire quiesce-through-reinitialize duration.
-						// TryLock, not Lock: this is a best-effort periodic
-						// check, so it must skip a contended tick rather
-						// than block waiting behind a possibly long-running
-						// truncate. Holding the lock for this whole tick
-						// (not just the nil-check) matters because
-						// processChainsyncRecyclerTick below dereferences
-						// n.ledgerState/n.chainsyncState many more times
-						// after the initial check — without holding the
-						// lock across all of them, a restore/truncate
-						// starting mid-tick could still race a later
-						// dereference even though the check up front
-						// passed. The two fields are also not nilled/
-						// reassigned atomically together — reinitializeCoreStorage
-						// rebuilds n.ledgerState before reinitializeNetworkingCore
-						// rebuilds n.chainsyncState — so both are checked
-						// even under the lock.
-						if !n.liveLifecycleMu.TryLock() {
-							return
-						}
-						defer n.liveLifecycleMu.Unlock()
-						if n.ledgerState == nil || n.chainsyncState == nil {
-							return
-						}
-						now := time.Now()
-						localTip := n.ledgerState.Tip()
-						localTipSlot := localTip.Point.Slot
-						if n.chainSelector != nil {
-							n.chainSelector.SetLocalTip(localTip)
-							if k := n.ledgerState.SecurityParam(); k > 0 {
-								n.chainSelector.SetSecurityParam(
-									uint64(k),
-								) //nolint:gosec
-							}
-						}
-						n.processChainsyncRecyclerTick(
-							now,
-							localTipSlot,
-							chainsyncCfg,
-							recycleAt,
-							lastRecycled,
-							&lastProgressSlot,
-							&lastProgressAt,
-							plateauRecoveryThreshold,
-							grace,
-							cooldown,
-						)
-					})
-				}
-			}
-		}) {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Second):
-		}
-	}
-}
-
-func (n *Node) waitChainsyncStallRecycler() {
-	// This wait is intentionally not bounded by the shutdown timeout: advancing
-	// while the recycler is still active can race dependency teardown.
-	n.chainsyncStallRecyclerWG.Wait()
-}
-
-func (n *Node) processChainsyncRecyclerTick(
-	now time.Time,
-	localTipSlot uint64,
-	chainsyncCfg chainsync.Config,
-	recycleAt map[string]time.Time,
-	lastRecycled map[string]time.Time,
-	lastProgressSlot *uint64,
-	lastProgressAt *time.Time,
-	plateauRecoveryThreshold time.Duration,
-	grace time.Duration,
-	cooldown time.Duration,
-) {
-	if localTipSlot > *lastProgressSlot {
-		*lastProgressSlot = localTipSlot
-		*lastProgressAt = now
-	}
-	// During catch-up, extend all recycling thresholds to avoid
-	// churning connections while the node is making progress.
-	// Connection recycling during bulk sync causes pipeline resets,
-	// TIME_WAIT socket exhaustion, and dropped rollbacks that slow
-	// catch-up far more than the stall itself.
-	catchUpMultiplier := 1
-	if n.ledgerState != nil && !n.ledgerState.IsAtTip() {
-		catchUpMultiplier = 5
-	}
-	effectiveGrace := time.Duration(catchUpMultiplier) * grace
-	effectivePlateau := time.Duration(
-		catchUpMultiplier,
-	) * plateauRecoveryThreshold
-	effectiveCooldown := time.Duration(catchUpMultiplier) * cooldown
-	n.chainsyncState.CheckStalledClients()
-	// Rotate the round-robin header-ingress driver on the stall-check
-	// cadence. No-op under the primary/parallel strategies.
-	n.chainsyncState.AdvanceHeaderSyncRotation()
-	trackedClients := n.chainsyncState.GetTrackedClients()
-	trackedByID := make(
-		map[string]chainsync.TrackedClient,
-		len(trackedClients),
-	)
-	eligibleCount := 0
-	for _, conn := range trackedClients {
-		connKey := conn.ConnId.String()
-		trackedByID[connKey] = conn
-		if conn.Status != chainsync.ClientStatusStalled {
-			delete(recycleAt, connKey)
-		}
-		if !conn.ObservabilityOnly {
-			eligibleCount++
-		}
-	}
-	// Prune expired cooldown entries so this map does
-	// not grow without bound over long runtimes.
-	for connKey, last := range lastRecycled {
-		if now.Sub(last) >= effectiveCooldown {
-			delete(lastRecycled, connKey)
-		}
-	}
-	// Safety net: if local tip has not moved for a long time
-	// while peers are ahead, recycle the selected chainsync
-	// connection even if it is not marked stalled.
-	if n.chainSelector != nil {
-		if bestPeer := n.chainSelector.GetBestPeer(); bestPeer != nil {
-			if bestPeerTip := n.chainSelector.GetPeerTip(*bestPeer); bestPeerTip != nil &&
-				bestPeerTip.Tip.Point.Slot > localTipSlot {
-				targetConn := n.chainsyncState.GetClientConnId()
-				if targetConn == nil {
-					targetCopy := *bestPeer
-					targetConn = &targetCopy
-				}
-				connKey := targetConn.String()
-				var lastRecycledAt *time.Time
-				if last, ok := lastRecycled[connKey]; ok {
-					lastCopy := last
-					lastRecycledAt = &lastCopy
-				}
-				if shouldRecycleLocalTipPlateau(
-					now,
-					*lastProgressAt,
-					localTipSlot,
-					bestPeerTip.Tip.Point.Slot,
-					lastRecycledAt,
-					effectiveCooldown,
-					effectivePlateau,
-				) {
-					// First, always attempt the LOCAL ledger reconcile.
-					// It repairs a silent primary-chain / ledger
-					// divergence (chain.Tip() advanced, or the ledger
-					// tip fell off the primary chain, while the ledger
-					// pipeline stayed pinned on an abandoned fork so
-					// fetched blocks "do not fit on current chain tip")
-					// by rolling the ledger back to the latest common
-					// ancestor. The two call sites in
-					// ledger/chainsync.go only fire on
-					// ErrRollbackExceedsSecurityParam; sub-K fork
-					// resolutions leave no error to trigger reconcile.
-					// This is a purely local repair -- it does not touch
-					// the peer connection -- so it is safe, and the only
-					// available recovery, even with a single eligible
-					// upstream (e.g. a one-relay devnet/leios topology),
-					// which would otherwise wedge here permanently.
-					reconciledByLedger := false
-					reconcileFailed := false
-					if n.ledgerState != nil {
-						reconciled, err := n.ledgerState.ReconcileLivePrimaryChainLedgerDivergence(
-							"local tip plateau",
-							*targetConn,
-						)
-						if err != nil {
-							reconcileFailed = true
-							n.config.logger.Warn(
-								"plateau reconcile failed",
-								"connection_id", connKey,
-								"error", err.Error(),
-							)
-						} else if reconciled {
-							n.config.logger.Warn(
-								"local tip plateau resolved via ledger reconcile",
-								"connection_id", connKey,
-								"local_tip_slot", localTipSlot,
-								"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-								"plateau_duration", now.Sub(*lastProgressAt),
-							)
-							// Reset the plateau clock so we don't
-							// immediately re-trigger on the next tick
-							// before forward application has had a chance
-							// to advance the ledger.
-							*lastProgressAt = now
-							lastRecycled[connKey] = now
-							reconciledByLedger = true
-						}
-					}
-					// A local-tip plateau on Leios is usually the ledger
-					// pipeline replaying a backlog of already-fetched blocks,
-					// not a stalled header stream. When the primary chain is
-					// already caught up to the peer, recycling the (healthy)
-					// chainsync connection cannot advance the applied tip and
-					// only churns the connection -- dropped pipelines,
-					// MustReply timeouts from ingress backpressure, and
-					// TIME_WAIT/goroutine growth. Only trust this heuristic
-					// after the local reconcile had a chance to repair, or at
-					// least rule out, a primary-chain / ledger divergence.
-					var primaryChainTipSlot uint64
-					if n.ledgerState != nil {
-						primaryChainTipSlot = n.ledgerState.PrimaryChainTipSlot()
-					}
-					isBacklog := isLedgerApplicationBacklog(
-						localTipSlot,
-						primaryChainTipSlot,
-						bestPeerTip.Tip.Point.Slot,
-					)
-					if reconciledByLedger {
-						// Reconciliation already reset the plateau clock and
-						// recorded cooldown. Give ledger replay a chance to
-						// resume from the repaired tip before trying any
-						// connection-level recovery.
-					} else if isBacklog && !reconcileFailed {
-						// The header chain is already caught up to the peer;
-						// the plateau is the ledger pipeline draining a
-						// backlog of already-fetched blocks. Recycling the
-						// chainsync stream cannot help and only churns the
-						// connection, so leave it running and let the pipeline
-						// advance. Surfacing this at INFO also stops a wedged
-						// ledger pipeline from being masked as a chainsync
-						// stall.
-						n.config.logger.Info(
-							"local tip plateau is a ledger-application backlog; header chain already caught up, not recycling chainsync",
-							"connection_id", connKey,
-							"applied_tip_slot", localTipSlot,
-							"primary_chain_tip_slot", primaryChainTipSlot,
-							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-							"plateau_duration", now.Sub(*lastProgressAt),
-						)
-						// Reset the plateau clock so we re-evaluate only after
-						// another full plateau window instead of every tick
-						// while the ledger pipeline drains.
-						*lastProgressAt = now
-						delete(recycleAt, connKey)
-					} else {
-						// The local reconcile found nothing to repair (or
-						// failed), so the stall is in the upstream chainsync
-						// stream itself: the active peer's server-side cursor
-						// has stopped advancing (a flaky/stalled relay) while
-						// chain selection still tracks it AT a higher tip.
-						//
-						// A plateau resync is NOT a peer recycle. Recycling
-						// (the stalled path below) drops the peer and fails
-						// over to a SPARE, so it genuinely needs a spare and
-						// is suppressed at eligibleCount <= 1. A plateau
-						// resync instead closes the connection so peer
-						// governance reconnects to the SAME remote and
-						// re-enters FindIntersect with fresh intersect points
-						// anchored at the current local tip (see
-						// chainsyncResyncRequiresFreshConnection). That is
-						// exactly the recovery a single-peer plateau needs:
-						// it restarts header delivery from local-tip+1 on the
-						// only upstream we have. The plateau predicate
-						// (peer ahead AND no local progress for the full
-						// plateau threshold) plus the recycle cooldown gate
-						// this so a healthy single peer is never churned.
-						n.config.logger.Warn(
-							"local tip plateau detected, resyncing chainsync client",
-							"connection_id", connKey,
-							"local_tip_slot", localTipSlot,
-							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-							"plateau_duration", now.Sub(*lastProgressAt),
-							"eligible_peer_count", eligibleCount,
-						)
-						n.eventBus.Publish(
-							event.ChainsyncResyncEventType,
-							event.NewEvent(
-								event.ChainsyncResyncEventType,
-								event.ChainsyncResyncEvent{
-									ConnectionId: *targetConn,
-									Reason:       event.ChainsyncResyncReasonLocalTipPlateau,
-								},
-							),
-						)
-						// Realign only matters when there are spare peers
-						// whose cursors raced ahead while the active peer was
-						// stuck; with a single eligible peer it is a no-op.
-						if eligibleCount > 1 {
-							n.realignOtherPeersAfterPlateau(
-								*targetConn,
-								trackedClients,
-								localTipSlot,
-							)
-						}
-						delete(recycleAt, connKey)
-						lastRecycled[connKey] = now
-						*lastProgressAt = now
-					}
-				}
-			}
-		}
-	}
-	for _, conn := range trackedClients {
-		if conn.Status != chainsync.ClientStatusStalled {
-			continue
-		}
-		connKey := conn.ConnId.String()
-		desiredDueAt := now.Add(effectiveGrace)
-		if dueAt, exists := recycleAt[connKey]; !exists {
-			recycleAt[connKey] = desiredDueAt
-			n.config.logger.Info(
-				"chainsync client stalled, scheduling guarded recycle",
-				"connection_id", connKey,
-				"stall_timeout", chainsyncCfg.StallTimeout,
-				"grace_period", effectiveGrace,
-			)
-		} else if dueAt.After(desiredDueAt) {
-			// Shrink deadline when transitioning from catch-up
-			// to at-tip so stalls aren't delayed unnecessarily.
-			recycleAt[connKey] = desiredDueAt
-		}
-	}
-	for connKey, dueAt := range recycleAt {
-		if now.Before(dueAt) {
-			continue
-		}
-		tracked, ok := trackedByID[connKey]
-		if !ok || tracked.Status != chainsync.ClientStatusStalled {
-			delete(recycleAt, connKey)
-			continue
-		}
-		connId := tracked.ConnId
-		if last, ok := lastRecycled[connKey]; ok &&
-			now.Sub(last) < effectiveCooldown {
-			recycleAt[connKey] = now.Add(effectiveCooldown - now.Sub(last))
-			continue
-		}
-		// Never recycle the only eligible peer. A block producer
-		// with a single relay would lose its only propagation
-		// path during the reconnect window. Observability-only
-		// connections are not eligible, so recycling them does
-		// not reduce the eligible count.
-		if eligibleCount <= 1 && !tracked.ObservabilityOnly {
-			n.config.logger.Warn(
-				"chainsync client stalled but is only eligible peer, skipping recycle",
-				"connection_id",
-				connKey,
-				"stall_timeout",
-				chainsyncCfg.StallTimeout,
-			)
-			recycleAt[connKey] = now.Add(grace)
-			continue
-		}
-		active := n.chainsyncState.GetClientConnId()
-		if active == nil {
-			// If no active client is selected and this client
-			// is overdue + stalled, recycle to force a fresh
-			// connection attempt and avoid indefinite stalls.
-			n.config.logger.Warn(
-				"chainsync client stalled with no active selection, recycling connection",
-				"connection_id",
-				connKey,
-				"stall_timeout",
-				chainsyncCfg.StallTimeout,
-				"grace_period",
-				grace,
-				"recycle_cooldown",
-				cooldown,
-			)
-			n.eventBus.PublishAsync(
-				connmanager.ConnectionRecycleRequestedEventType,
-				event.NewEvent(
-					connmanager.ConnectionRecycleRequestedEventType,
-					connmanager.ConnectionRecycleRequestedEvent{
-						ConnectionId: connId,
-						ConnKey:      connKey,
-						Reason:       "stalled_connection_no_active_selection",
-					},
-				),
-			)
-			delete(recycleAt, connKey)
-			lastRecycled[connKey] = now
-			continue
-		}
-		if active.String() != connKey {
-			// Don't recycle non-primary stalled clients. Keep state clean.
-			n.eventBus.PublishAsync(
-				chainsync.ClientRemoveRequestedEventType,
-				event.NewEvent(
-					chainsync.ClientRemoveRequestedEventType,
-					chainsync.ClientRemoveRequestedEvent{
-						ConnId:  connId,
-						ConnKey: connKey,
-						Reason:  "stalled_non_primary_connection",
-					},
-				),
-			)
-			delete(recycleAt, connKey)
-			continue
-		}
-		n.config.logger.Warn(
-			"chainsync client stalled, recycling active connection",
-			"connection_id", connKey,
-			"stall_timeout", chainsyncCfg.StallTimeout,
-			"grace_period", grace,
-			"recycle_cooldown", cooldown,
-		)
-		n.eventBus.PublishAsync(
-			connmanager.ConnectionRecycleRequestedEventType,
-			event.NewEvent(
-				connmanager.ConnectionRecycleRequestedEventType,
-				connmanager.ConnectionRecycleRequestedEvent{
-					ConnectionId: connId,
-					ConnKey:      connKey,
-					Reason:       "stalled_active_connection",
-				},
-			),
-		)
-		delete(recycleAt, connKey)
-		lastRecycled[connKey] = now
-	}
-}
-
-// realignOtherPeersAfterPlateau requests a fresh-connection chainsync
-// resync for every ingress-eligible tracked peer
-// other than the one being closed for plateau. Without realignment, a
-// peer that has been streaming RollForwards while the active peer was
-// stuck holds a server-side cursor far past our local tip; the chain
-// selector will promote one of these peers as the next active, and its
-// next RollForward delivers a header beyond the local block tip with
-// no in-memory ancestor history to bridge the gap. The local fork
-// resolver then fails and closes that peer too, cycling through peers
-// until process restart. Realigning candidate peers' cursors to the
-// current local tip lets whichever peer is promoted next deliver
-// headers from local-tip+1 onward.
-func (n *Node) realignOtherPeersAfterPlateau(
-	closedConnId ouroboros.ConnectionId,
-	trackedClients []chainsync.TrackedClient,
-	localTipSlot uint64,
-) {
-	closedKey := closedConnId.String()
-	for _, conn := range trackedClients {
-		if conn.ObservabilityOnly {
-			continue
-		}
-		if conn.ConnId.String() == closedKey {
-			continue
-		}
-		if conn.Cursor.Slot <= localTipSlot {
-			continue
-		}
-		n.config.logger.Info(
-			"realigning peer chainsync cursor after plateau",
-			"connection_id", conn.ConnId.String(),
-			"cursor_slot", conn.Cursor.Slot,
-			"local_tip_slot", localTipSlot,
-		)
-		n.eventBus.Publish(
-			event.ChainsyncResyncEventType,
-			event.NewEvent(
-				event.ChainsyncResyncEventType,
-				event.ChainsyncResyncEvent{
-					ConnectionId: conn.ConnId,
-					Reason:       event.ChainsyncResyncReasonPostPlateauRealign,
-				},
-			),
-		)
-	}
-}
-
 func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	e, ok := evt.Data.(chainselection.ChainSwitchEvent)
 	if !ok {
@@ -774,7 +156,7 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	// database restore/truncate, which briefly nils n.chainsyncState while
 	// swapping in a rebuilt one and holds n.liveLifecycleMu for its entire
 	// quiesce-through-reinitialize duration -- so this event can still fire
-	// mid-operation. TryLock, not Lock, matching runStallCheckerTick's
+	// mid-operation. TryLock, not Lock, matching nodeRecyclerComponents'
 	// identical guard below: this handler runs on the EventBus's own
 	// per-subscriber dispatch goroutine, so blocking it for a possibly
 	// long-running truncate is worse than dropping one update, since
@@ -826,32 +208,89 @@ func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
 	)
 }
 
-func (n *Node) runStallCheckerTick(fn func()) {
-	defer func() {
-		if r := recover(); r != nil {
-			stack := debug.Stack()
-			n.config.logger.Error(
-				"panic in stall checker tick, continuing",
-				"panic", r,
-				"stack", string(stack),
-			)
-		}
-	}()
-	fn()
+// nodeRecyclerComponents adapts the node's swappable storage/networking
+// components to the recycler's ComponentProvider contract.
+type nodeRecyclerComponents struct {
+	node *Node
 }
 
-func (n *Node) runStallCheckerLoop(fn func()) (recovered bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			recovered = true
-			stack := debug.Stack()
-			n.config.logger.Error(
-				"panic in stall checker goroutine",
-				"panic", r,
-				"stack", string(stack),
-			)
-		}
-	}()
-	fn()
-	return false
+// recyclerComponents returns the provider the stall recycler reads live
+// components through.
+func (n *Node) recyclerComponents() chainsyncrecycler.ComponentProvider {
+	return nodeRecyclerComponents{node: n}
+}
+
+// WithLiveComponents runs fn against the node's current ledger, chainsync
+// state, and chain selector while holding liveLifecycleMu, so a live database
+// restore/truncate cannot swap them mid-tick.
+//
+// A live restore/truncate briefly nils n.ledgerState and n.chainsyncState while
+// it swaps in rebuilt ones, and holds n.liveLifecycleMu for its entire
+// quiesce-through-reinitialize duration. TryLock, not Lock: the recycler's tick
+// is a best-effort periodic check, so it must skip a contended tick rather than
+// block waiting behind a possibly long-running truncate — and a blocking Lock()
+// cannot be interrupted by context cancellation, so shutdown (which waits for
+// the recycler) would hang behind it past its configured timeout. The lock is
+// held for the whole callback, not just the nil check, because the tick
+// dereferences both fields many more times after that check. The two fields are
+// also not nilled/reassigned atomically together — reinitializeCoreStorage
+// rebuilds n.ledgerState before reinitializeNetworkingCore rebuilds
+// n.chainsyncState — so both are checked even under the lock.
+func (c nodeRecyclerComponents) WithLiveComponents(
+	fn func(chainsyncrecycler.LiveComponents),
+) bool {
+	n := c.node
+	if !n.liveLifecycleMu.TryLock() {
+		return false
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.ledgerState == nil || n.chainsyncState == nil {
+		return false
+	}
+	live := chainsyncrecycler.LiveComponents{
+		Ledger:         n.ledgerState,
+		ChainsyncState: n.chainsyncState,
+	}
+	// Assign the interface only when the selector exists: a typed-nil
+	// *ChainSelector in the interface would be non-nil to the recycler.
+	if n.chainSelector != nil {
+		live.ChainSelector = n.chainSelector
+	}
+	fn(live)
+	return true
+}
+
+// startChainsyncStallRecycler builds and starts the chainsync stall recycler.
+// It detects stalled chainsync clients and recycles truly stuck connections,
+// using a grace period + cooldown to avoid flapping healthy but quiet peers.
+func (n *Node) startChainsyncStallRecycler(
+	ctx context.Context,
+	chainsyncCfg chainsync.Config,
+) error {
+	n.chainsyncStallRecycler = chainsyncrecycler.New(
+		chainsyncrecycler.Config{
+			Components:   n.recyclerComponents(),
+			EventBus:     n.eventBus,
+			Logger:       n.config.logger,
+			StallTimeout: chainsyncCfg.StallTimeout,
+			Interval: min(
+				max(chainsyncCfg.StallTimeout/2, 10*time.Second),
+				30*time.Second,
+			),
+			Grace:    max(chainsyncCfg.StallTimeout, 30*time.Second),
+			Cooldown: max(2*chainsyncCfg.StallTimeout, 2*time.Minute),
+		},
+	)
+	return n.chainsyncStallRecycler.Start(ctx)
+}
+
+// waitChainsyncStallRecycler stops the recycler and waits for it to exit.
+//
+// This wait is intentionally not bounded by the shutdown timeout: advancing
+// while the recycler is still active can race dependency teardown.
+func (n *Node) waitChainsyncStallRecycler() {
+	if n.chainsyncStallRecycler == nil {
+		return
+	}
+	n.chainsyncStallRecycler.Stop()
 }

@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -208,8 +209,8 @@ func openVerifiedParent(
 	parent := root
 	var opened []*os.Root
 	release := func() {
-		for i := len(opened) - 1; i >= 0; i-- {
-			_ = opened[i].Close()
+		for _, r := range slices.Backward(opened) {
+			_ = r.Close()
 		}
 	}
 	for _, part := range parts[:len(parts)-1] {

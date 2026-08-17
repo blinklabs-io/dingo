@@ -16,15 +16,25 @@ package blockfrost
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
+// ProviderConfig's TLS and Auth fields are documented in ARCHITECTURE.md's
+// "API security" section. Composition (node.go) merges the top-level
+// api.tls/api.auth defaults into these fields before this provider ever
+// decodes them, so from this package's point of view they are always
+// already-resolved-for-this-provider settings, identical in shape to a
+// provider that set every field inline.
 type ProviderConfig struct {
-	Port uint `yaml:"port"`
+	Port uint                 `yaml:"port"`
+	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
+	Auth apiconfig.AuthPolicy `yaml:"auth"`
 }
 
 type ProviderDependencies struct {
@@ -44,12 +54,24 @@ func RegisterProvider(host *plugin.Host) error {
 		},
 		func() ProviderConfig { return ProviderConfig{Port: 3000} },
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Blockfrost, plugin.Instance, error) {
+			tls, err := cfg.TLS.Resolve("plugins.api.blockfrost.config.tls")
+			if err != nil {
+				return nil, nil, fmt.Errorf("blockfrost: %w", err)
+			}
+			auth, err := cfg.Auth.Resolve(
+				"plugins.api.blockfrost.config.auth",
+			)
+			if err != nil {
+				return nil, nil, fmt.Errorf("blockfrost: %w", err)
+			}
 			server := New(BlockfrostConfig{
 				ListenAddress: net.JoinHostPort(
 					deps.Host,
 					strconv.FormatUint(uint64(cfg.Port), 10),
 				),
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
+				TLS:                tls,
+				Auth:               auth,
 			}, deps.Node, deps.Logger)
 			return server, server, nil
 		},

@@ -578,7 +578,10 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     pool = excluded.pool,
     drep = excluded.drep,
     added_slot = excluded.added_slot,
-    created_slot = MIN(account.created_slot, excluded.created_slot),
+    created_slot = CASE
+        WHEN account.created_slot <= excluded.created_slot THEN account.created_slot
+        ELSE excluded.created_slot
+    END,
     drep_type = excluded.drep_type,
     active = excluded.active`,
 		key,
@@ -619,18 +622,35 @@ func applyPoolRegistrationCertificate(
 		return 0, err
 	}
 	margin := nullableRat(&types.Rat{Rat: cert.Margin.Rat})
+	// LeiosKey's proof of possession is deliberately not checked here: the
+	// database layer stores whatever gouroboros decoded (length-validated
+	// only), the same way vrf_key_hash is stored without ledger-level proof
+	// validation at write time. PoP verification happens at read time in
+	// ledger/leios's on-chain key provider, which is allowed to depend on
+	// ledger/leios's BLS primitives; this package is not (see
+	// internal/architecture/import_boundary_test.go). An invalid-PoP key is
+	// therefore excluded there, not here -- both layers still end up
+	// treating it as absent, matching upstream.
+	var leiosKeyPublic, leiosKeyPoP []byte
+	if cert.LeiosKey != nil {
+		leiosKeyPublic = cert.LeiosKey.PublicKey
+		leiosKeyPoP = cert.LeiosKey.PossessionProof
+	}
 	poolID, err := queryReturnedID(db, `
 INSERT INTO pool (
     margin, pool_key_hash, vrf_key_hash, reward_account,
-    latest_op_cert_sequence, reward_account_credential_tag, pledge, cost
-) VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+    latest_op_cert_sequence, reward_account_credential_tag, pledge, cost,
+    leios_key_public, leios_key_possession_proof
+) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
 ON CONFLICT (pool_key_hash) DO UPDATE SET
     margin = excluded.margin,
     vrf_key_hash = excluded.vrf_key_hash,
     reward_account = excluded.reward_account,
     reward_account_credential_tag = excluded.reward_account_credential_tag,
     pledge = excluded.pledge,
-    cost = excluded.cost
+    cost = excluded.cost,
+    leios_key_public = excluded.leios_key_public,
+    leios_key_possession_proof = excluded.leios_key_possession_proof
 RETURNING id`,
 		margin,
 		cert.Operator[:],
@@ -639,6 +659,8 @@ RETURNING id`,
 		rewardTag,
 		decimalUint64(types.Uint64(cert.Pledge)),
 		decimalUint64(types.Uint64(cert.Cost)),
+		nullBytes(leiosKeyPublic),
+		nullBytes(leiosKeyPoP),
 	)
 	if err != nil {
 		return 0, err
@@ -663,6 +685,8 @@ RETURNING id`,
 		poolID,
 		slot,
 		decimalUint64(types.Uint64(deposit)),
+		nullBytes(leiosKeyPublic),
+		nullBytes(leiosKeyPoP),
 	}, poolID, slot)
 	if err != nil {
 		return 0, err

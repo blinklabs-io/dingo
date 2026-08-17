@@ -239,7 +239,7 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 	case "postgres":
 		// Defaults match postgres.RegisterProvider's descriptor default
 		// (Config{Host: "localhost", Port: 5432, User: "postgres", Database:
-		// "postgres", SSLMode: "disable", TimeZone: "UTC"}), which is what a
+		// "postgres", SSLMode: "require", TimeZone: "UTC"}), which is what a
 		// bare `provider: postgres` config section resolves to before
 		// Start() builds its connection string the same way below.
 		if host == "" {
@@ -252,7 +252,7 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 			database = "postgres"
 		}
 		if sslMode == "" {
-			sslMode = "disable"
+			sslMode = "require"
 		}
 		if timeZone == "" {
 			timeZone = "UTC"

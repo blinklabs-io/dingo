@@ -554,7 +554,16 @@ func LoadWithDB(
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()
-		<-replayErrCh
+		// A non-nil, non-context.Canceled replayErr here is the real
+		// cause: it's what made ProcessTrustedBlockBatches call
+		// cancelReplay in the first place, which is what unblocked
+		// copyBlocksDirect's channel send and produced err (usually
+		// just "context canceled"). Join both so the operator sees the
+		// actual failure instead of only its downstream symptom.
+		replayErr := <-replayErrCh
+		if replayErr != nil && !errors.Is(replayErr, context.Canceled) {
+			return errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr)
+		}
 		return fmt.Errorf("loading blocks: %w", err)
 	}
 	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
