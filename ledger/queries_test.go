@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -25,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -179,6 +181,110 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
 	require.Empty(t, m)
+}
+
+// TestQueryShelleyUtxoByTxIn_MultipleInputs proves the GetUTxOByTxIn query
+// resolves every requested TxIn in one call (#392), not just the first, and
+// silently omits a requested TxIn that has no matching live UTxO instead of
+// failing the whole query.
+//
+// The two real TxIns are deliberately drawn from two distinct blocks'
+// (rather than a single transaction's) produced outputs so the test does
+// not depend on any one fixture transaction producing more than one UTxO:
+// with only one genuinely resolvable input, a regression back to resolving
+// just txIns[0] would still pass a count-based assertion.
+//
+// Blocks are stored in chain order, so a later block's transaction could
+// spend an earlier block's collected candidate output before the test gets
+// to use it. Liveness of every collected candidate is re-checked after each
+// new block is stored, and only candidates still live at that point are
+// kept; the loop stops as soon as two remain, so no further block storage
+// (and thus no further spends) can happen before they're used below.
+func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
+	db := newUtxoStorageTestDB(t)
+	iter := newUtxoStorageTestIterator(t)
+
+	utxoIdKey := func(id models.UtxoId) string {
+		return fmt.Sprintf("%x:%d", id.Hash, id.Idx)
+	}
+
+	var candidates []models.UtxoId
+	var live []models.UtxoId
+	for len(live) < 2 {
+		block, blockCbor := nextProducingBlock(t, db, iter)
+		txn := db.Transaction(true)
+		var produced lcommon.Utxo
+		err := txn.Do(func(txn *database.Txn) error {
+			tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
+			produced = tx.Produced()[0]
+			return nil
+		})
+		require.NoError(t, err)
+		candidates = append(candidates, models.UtxoId{
+			Hash: produced.Id.Id().Bytes(),
+			Idx:  produced.Id.Index(),
+		})
+
+		results, err := db.UtxosByRefs(candidates, nil)
+		require.NoError(t, err)
+		liveSet := make(map[string]struct{}, len(results))
+		for _, u := range results {
+			liveSet[utxoIdKey(models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})] = struct{}{}
+		}
+		live = live[:0]
+		for _, c := range candidates {
+			if _, ok := liveSet[utxoIdKey(c)]; ok {
+				live = append(live, c)
+			}
+		}
+	}
+	live = live[:2]
+
+	realTxIns := make([]ledger.ShelleyTransactionInput, len(live))
+	for i, ref := range live {
+		realTxIns[i] = ledger.NewShelleyTransactionInput(
+			hex.EncodeToString(ref.Hash),
+			int(ref.Idx),
+		)
+	}
+
+	// A TxIn with no matching live UTxO must be silently omitted from the
+	// result, not fail the whole batch.
+	txIns := append(
+		realTxIns,
+		ledger.NewShelleyTransactionInput(strings.Repeat("00", 32), 9999),
+	)
+
+	ls := &LedgerState{db: db}
+	result, err := ls.queryShelleyUtxoByTxIn(txIns)
+	require.NoError(t, err)
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any result")
+	require.Len(t, arr, 1)
+	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	require.True(t, ok, "expected UtxoId map")
+	require.Len(
+		t,
+		m,
+		len(realTxIns),
+		"exactly the real TxIns should resolve; bogus TxIn should be silently omitted",
+	)
+
+	for _, txIn := range realTxIns {
+		utxoId := olocalstatequery.UtxoId{
+			Hash: ledger.NewBlake2b256(txIn.Id().Bytes()),
+			Idx:  int(txIn.Index()),
+		}
+		_, ok := m[utxoId]
+		require.True(
+			t,
+			ok,
+			"missing result for %s#%d",
+			txIn.Id().String(),
+			txIn.Index(),
+		)
+	}
 }
 
 // --- GetStakePools (ShelleyStakePoolsQuery) ---------------------------------

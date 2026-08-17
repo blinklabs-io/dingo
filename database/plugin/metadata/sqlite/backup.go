@@ -86,17 +86,25 @@ func backupSQLite(
 // deadlock a live snapshot when another metadata operation still owns that
 // connection. A dedicated connection preserves SQLite's WAL snapshot
 // semantics without contending with the pool's connection accounting.
+// backupSourceDSN builds the connection string for the dedicated backup
+// connection. busy_timeout leads for the reason given on
+// sqliteCommonPragmas, and it matters more here than at first open: this
+// connects to a database a running node already holds open, so it contends
+// by construction rather than only when two openers happen to race.
+func backupSourceDSN(databasePath string) string {
+	return sqliteFileURI(databasePath) +
+		"?_txlock=deferred" +
+		"&_pragma=busy_timeout(30000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)"
+}
+
 func openSQLiteBackupDB(
 	ctx context.Context,
 	databasePath string,
 ) (*sql.DB, error) {
-	dsn := sqliteFileURI(databasePath) +
-		"?_txlock=deferred" +
-		"&_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(30000)" +
-		"&_pragma=foreign_keys(1)"
-	db, err := sqlstore.OpenDB("sqlite", dsn, "sqlite")
+	db, err := sqlstore.OpenDB("sqlite", backupSourceDSN(databasePath), "sqlite")
 	if err != nil {
 		return nil, err
 	}

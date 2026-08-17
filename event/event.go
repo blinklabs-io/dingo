@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -246,6 +247,50 @@ type channelSubscriber struct {
 	// bus-owned goroutine to wait for; the caller there owns its own read
 	// loop. See waitDone.
 	done chan struct{}
+
+	// stallWaiters counts publishers currently parked waiting for capacity.
+	// Reported with the stall warning: the count is what separates ordinary
+	// backpressure from a subscriber that has stopped draining entirely.
+	stallWaiters atomic.Int64
+	// stallMu guards the stall-warning rate limiter below.
+	stallMu sync.Mutex
+	// stallNextWarn is the earliest time the next stall warning may be
+	// emitted, and stallSuppressed counts the warnings withheld since the
+	// last one was. The limit is per subscriber rather than per delivery:
+	// every parked publisher observes the same stall, so a per-delivery
+	// limit lets the log volume scale with the number of publishers instead
+	// of with time. See TestDeliverStallWarningIsRateLimitedPerSubscriber.
+	stallNextWarn   time.Time
+	stallSuppressed int
+}
+
+// warnStalled reports a subscriber that is not draining, at most once per
+// deliveryStallWarnInterval for the whole subscriber no matter how many
+// publishers are parked on it.
+func (c *channelSubscriber) warnStalled(evtType EventType) {
+	now := time.Now()
+	c.stallMu.Lock()
+	if now.Before(c.stallNextWarn) {
+		c.stallSuppressed++
+		c.stallMu.Unlock()
+		return
+	}
+	suppressed := c.stallSuppressed
+	c.stallSuppressed = 0
+	c.stallNextWarn = now.Add(deliveryStallWarnInterval)
+	c.stallMu.Unlock()
+
+	if c.logger == nil {
+		return
+	}
+	c.logger.Warn(
+		"event delivery stalled: subscriber not draining",
+		"type", evtType,
+		"buffer", cap(c.ch),
+		"stalled_for", deliveryStallWarnInterval,
+		"blocked_publishers", c.stallWaiters.Load(),
+		"suppressed_warnings", suppressed,
+	)
 }
 
 func newChannelSubscriber(
@@ -305,6 +350,8 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 	if c.onBlocked != nil {
 		c.onBlocked()
 	}
+	c.stallWaiters.Add(1)
+	defer c.stallWaiters.Add(-1)
 	stall := time.NewTimer(deliveryStallWarnInterval)
 	defer stall.Stop()
 	for {
@@ -316,14 +363,7 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 		case <-c.busStop:
 			return errChannelSubscriberClosed
 		case <-stall.C:
-			if c.logger != nil {
-				c.logger.Warn(
-					"event delivery stalled: subscriber not draining",
-					"type", evt.Type,
-					"buffer", cap(c.ch),
-					"stalled_for", deliveryStallWarnInterval,
-				)
-			}
+			c.warnStalled(evt.Type)
 			stall.Reset(deliveryStallWarnInterval)
 		}
 	}

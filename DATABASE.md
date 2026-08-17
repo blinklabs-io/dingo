@@ -757,7 +757,14 @@ own barriers, and `Sync` is a store-wide flush, so the next combined commit also
 makes those earlier batches durable.
 
 The ordering exists because the two stores fail asymmetrically. SQLite runs
-`journal_mode=WAL` with `synchronous=NORMAL`, so committed metadata reaches disk
+`journal_mode=WAL` with `synchronous=NORMAL` (WAL is set once at open by
+`ensureWALJournalMode` rather than as a per-connection `_pragma`: SQLite takes
+the rollback-to-WAL transition's exclusive lock without consulting the busy
+handler, so running it on every connection makes a concurrent open fail
+outright with `SQLITE_BUSY` instead of waiting, and journal mode is persistent
+in the database header so once is enough; `busy_timeout` leads the remaining
+pragma list, because the driver applies `_pragma` directives in DSN order and
+anything ahead of it would run with no busy handler installed), so committed metadata reaches disk
 at WAL checkpoints (every 1000 pages by default). Badger is opened with its
 default `SyncWrites=false` and a 128MiB memtable, so committed blob writes can
 sit unflushed far longer — at chain tip dingo writes only a few MiB of blocks per
@@ -1191,6 +1198,30 @@ FROM utxo u
 LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.tx_id = decode($1, 'hex')
   AND u.output_idx = $2;
+```
+
+### `GetUtxosByRefs`
+
+Batched live-UTxO lookup by a list of (tx hash, output index) references —
+used by the `GetUTxOByTxIn` n2c query and the `utxorpc` `ReadUtxos` RPC to
+resolve multiple TxIns/keys in one round trip instead of one query per input
+(#392). Refs with no matching live UTxO are simply absent from the result;
+callers must not treat a partial result as an error. Builds an OR-chain of
+`(tx_id = ? AND output_idx = ?)` predicates — the same portable pattern used
+by `MarkUtxosDeletedAtSlot`/`utxoIDPredicate` elsewhere in this file — chunked
+at 400 refs (800 bind variables) to stay within SQLite's conservative
+999-parameter limit:
+
+```sql
+SELECT u.*, a.*
+FROM utxo u
+LEFT JOIN asset a ON a.utxo_id = u.id
+WHERE u.deleted_slot = 0
+  AND (
+    (u.tx_id = decode($1, 'hex') AND u.output_idx = $2)
+    OR (u.tx_id = decode($3, 'hex') AND u.output_idx = $4)
+    -- ... one pair of bind variables per requested ref
+  );
 ```
 
 ### `GetTransactionsByAddress` and `CountTransactionsByAddress`

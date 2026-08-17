@@ -64,6 +64,7 @@ type UtxorpcLedgerState interface {
 	Tip() ochainsync.Tip
 	TransactionByHash(hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
+	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
 	UtxosByAddressWithOrdering(
 		q *models.UtxoWithOrderingQuery,
 	) ([]models.UtxoWithOrdering, error)

@@ -744,8 +744,19 @@ func (c *ConnectionManager) addConnectionImpl(
 		if !c.RemoveConnection(connId, conn) {
 			return
 		}
-		// Generate event
-		if c.config.EventBus != nil {
+		// Generate event, but only for node-to-node connections. Every
+		// subscriber to this event does node-to-node peer management --
+		// chain selection, peer governance, chainsync client state, the
+		// mempool consumer set -- and the payload gives them no way to
+		// recognise a node-to-client connection and ignore it.
+		//
+		// It is not just wasted work. A local client that reconnects in a
+		// tight loop publishes at that rate, which fills the delivery
+		// buffer and wedges the subscriber for good ("event delivery
+		// stalled: subscriber not draining"). The NtN chainsync recovery
+		// these events drive then never runs again, and the node silently
+		// stops following the chain while continuing to forge.
+		if c.config.EventBus != nil && !isNtC {
 			c.config.EventBus.Publish(
 				ConnectionClosedEventType,
 				event.NewEvent(
