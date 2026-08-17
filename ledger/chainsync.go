@@ -2252,16 +2252,6 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 	return LocalRollbackRecoveryResult{}
 }
 
-// handleEventChainsyncBlockHeader preserves the direct helper used by focused
-// tests. It owns a queue for the locks it may take internally; production
-// lock holders call handleEventChainsyncBlockHeaderWithPending so their outer
-// queue is threaded through the whole call chain.
-func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
-	var pending pendingPublishes
-	defer pending.flush()
-	return ls.handleEventChainsyncBlockHeaderWithPending(e, &pending)
-}
-
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
