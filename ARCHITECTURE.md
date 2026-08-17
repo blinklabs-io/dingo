@@ -4443,6 +4443,13 @@ The `EventBus` implements publisher/subscriber communication, decoupling compone
 
 Database operations and event delivery use worker pools for controlled concurrency and backpressure.
 
+The ledger blockfetch subscriber must not synchronously start the next
+`GetBlockRange` from its `ledger.blockfetch` handler: the request completes
+only after the peer's `BatchDone` is delivered through that same EventBus
+subscription. Batch continuation requests therefore run on tracked workers;
+the blockfetch state mutex protects the handoff and shutdown drains those
+workers before unsubscribing the ledger.
+
 ## Threading and Concurrency
 
 | Pattern | Usage |

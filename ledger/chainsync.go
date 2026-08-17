@@ -713,7 +713,9 @@ func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
-	if ls.chainsyncBlockfetchReadyChan != nil || ls.chain.HeaderCount() == 0 {
+	if ls.chainsyncBlockfetchReadyChan != nil ||
+		ls.blockfetchContinuationPending ||
+		ls.chain.HeaderCount() == 0 {
 		return
 	}
 	ls.selectedBlockfetchConnId = e.ConnectionId
@@ -875,6 +877,7 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 	}
 
 	if ls.chainsyncBlockfetchReadyChan == nil &&
+		!ls.blockfetchContinuationPending &&
 		headerCount > 0 {
 		ls.config.Logger.Debug(
 			"restarting queued blockfetch on selected connection",
@@ -2207,7 +2210,8 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 			"header_count", headerCount,
 		)
 		ls.chainsyncBlockfetchMutex.Lock()
-		if ls.chainsyncBlockfetchReadyChan == nil {
+		if ls.chainsyncBlockfetchReadyChan == nil &&
+			!ls.blockfetchContinuationPending {
 			if err := ls.startQueuedBlockfetchLocked(connId, &pending); err != nil {
 				// Recovery connection may have closed. Retry with
 				// the current active best peer before giving up,
@@ -2516,7 +2520,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	// Don't start fetch if there's already one in progress
-	if ls.chainsyncBlockfetchReadyChan != nil {
+	if ls.chainsyncBlockfetchReadyChan != nil ||
+		ls.blockfetchContinuationPending {
 		ls.config.Logger.Debug(
 			"blockfetch in progress, queuing header",
 			"component", "ledger",
@@ -3382,6 +3387,71 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		}
 	}
 	return nil
+}
+
+// startQueuedBlockfetchFromEventLocked schedules a continuation without
+// running the synchronous blockfetch request on the ledger.blockfetch
+// subscriber. GetBlockRange does not return until the peer sends BatchDone;
+// invoking it from handleEventBlockfetchBatchDone would block the only
+// subscriber that can consume that BatchDone and the following block events.
+//
+// The caller owns chainsyncBlockfetchMutex. The continuation worker acquires
+// it before entering startQueuedBlockfetchLocked, so the pending flag closes
+// the small gap where a chainsync handler could otherwise start a competing
+// batch after the current handler releases the lock.
+func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
+	connId ouroboros.ConnectionId,
+	resyncConnId ouroboros.ConnectionId,
+	reason string,
+) {
+	if ls.blockfetchContinuationPending {
+		return
+	}
+	ls.blockfetchContinuationPending = true
+	ls.blockfetchContinuationMu.Lock()
+	if ls.closed.Load() {
+		ls.blockfetchContinuationPending = false
+		ls.blockfetchContinuationMu.Unlock()
+		return
+	}
+	ls.blockfetchContinuationWG.Add(1)
+	ls.blockfetchContinuationMu.Unlock()
+	go func() {
+		defer ls.blockfetchContinuationWG.Done()
+		var pending pendingPublishes
+		ls.chainsyncBlockfetchMutex.Lock()
+		if ls.closed.Load() {
+			ls.blockfetchContinuationPending = false
+			ls.chainsyncBlockfetchMutex.Unlock()
+			return
+		}
+		ls.blockfetchContinuationPending = false
+		err := ls.startQueuedBlockfetchLocked(connId, &pending)
+		if err != nil {
+			// A continuation can race a peer disconnect just as the previous
+			// batch completes. Try the next tracked peer before abandoning the
+			// queued headers, matching the synchronous continuation path.
+			retryConnId := ls.selectRetryBlockfetchConn(connId)
+			if connIdKey(retryConnId) != "" &&
+				!sameConnectionId(retryConnId, connId) {
+				err = ls.startQueuedBlockfetchLocked(
+					retryConnId,
+					&pending,
+				)
+			}
+			if err != nil {
+				ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+				ls.clearQueuedHeaders()
+				ls.requestChainsyncResync(
+					resyncConnId,
+					fmt.Sprintf("%s: %v", reason, err),
+					&pending,
+				)
+			}
+		}
+		ls.chainsyncBlockfetchMutex.Unlock()
+		pending.flush()
+	}()
 }
 
 func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
@@ -5208,19 +5278,11 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 				"remaining_headers",
 				remainingHeaders,
 			)
-			if err := ls.startQueuedBlockfetchLocked(retryConnId, pending); err != nil {
-				ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
-				ls.clearQueuedHeaders()
-				ls.requestChainsyncResync(
-					e.ConnectionId,
-					fmt.Sprintf(
-						"empty blockfetch batch alternate retry failed: %v",
-						err,
-					),
-					pending,
-				)
-				return nil
-			}
+			ls.startQueuedBlockfetchFromEventLocked(
+				retryConnId,
+				e.ConnectionId,
+				"empty blockfetch batch alternate retry failed",
+			)
 			return nil
 		}
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
@@ -5262,40 +5324,14 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return nil
 	}
-	// Mark blockfetch as in progress for next batch
-	err := ls.startQueuedBlockfetchLocked(nextConnId, pending)
-	if err != nil {
-		// The connection's blockfetch protocol may have shut down
-		// (e.g. peer disconnected mid-batch). Try an alternate
-		// connection; if none available, clear all stale queued
-		// headers and trigger a resync so the pipeline can restart.
-		retryConnId := ls.selectRetryBlockfetchConn(nextConnId)
-		if connIdKey(retryConnId) != "" &&
-			!sameConnectionId(retryConnId, nextConnId) {
-			ls.config.Logger.Warn(
-				"blockfetch continuation failed, retrying on alternate connection",
-				"component",
-				"ledger",
-				"failed_connection_id",
-				nextConnId.String(),
-				"retry_connection_id",
-				retryConnId.String(),
-				"error",
-				err,
-			)
-			if retryErr := ls.startQueuedBlockfetchLocked(retryConnId, pending); retryErr == nil {
-				return nil
-			}
-		}
-		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
-		ls.clearQueuedHeaders()
-		ls.requestChainsyncResync(
-			nextConnId,
-			fmt.Sprintf("blockfetch continuation failed: %v", err),
-			pending,
-		)
-		return nil
-	}
+	// GetBlockRange waits for the BatchDone event that is being handled here.
+	// Continue on a worker so this subscriber remains available to drain the
+	// next batch's block and BatchDone events.
+	ls.startQueuedBlockfetchFromEventLocked(
+		nextConnId,
+		nextConnId,
+		"blockfetch continuation failed",
+	)
 	return nil
 }
 

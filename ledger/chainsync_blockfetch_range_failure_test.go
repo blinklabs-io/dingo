@@ -72,8 +72,12 @@ func handleEventBlockfetchBatchDoneForTest(
 	pending *pendingPublishes,
 ) error {
 	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	return ls.handleEventBlockfetchBatchDone(e, pending)
+	err := ls.handleEventBlockfetchBatchDone(e, pending)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	ls.blockfetchContinuationMu.Lock()
+	ls.blockfetchContinuationWG.Wait()
+	ls.blockfetchContinuationMu.Unlock()
+	return err
 }
 
 func handleBlockfetchTimeoutForTest(
@@ -119,6 +123,74 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 	ls.chainsyncBlockfetchMutex.Unlock()
 	require.NoError(t, err)
 
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+// TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation verifies that
+// the blockfetch EventBus subscriber does not synchronously enter the next
+// GetBlockRange call. GetBlockRange waits for the next BatchDone, so doing so
+// from this subscriber deadlocks once the subscriber buffer fills with the
+// next batch's blocks.
+func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
+	testChain := &chain.Chain{}
+	for blockNumber := uint64(1); blockNumber <= 2; blockNumber++ {
+		prevHash := lcommon.NewBlake2b256(nil)
+		if blockNumber > 1 {
+			prevHash = lcommon.NewBlake2b256([]byte{byte(blockNumber - 1)})
+		}
+		require.NoError(t, testChain.AddBlockHeader(mockHeader{
+			hash:        lcommon.NewBlake2b256([]byte{byte(blockNumber)}),
+			prevHash:    prevHash,
+			blockNumber: blockNumber,
+			slot:        blockNumber,
+		}))
+	}
+	connId := testChainsyncConnId(6112, 3001)
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	ls := &LedgerState{
+		chain:                        testChain,
+		activeBlockfetchConnId:       connId,
+		selectedBlockfetchConnId:     connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		batchBlocksReceived:          1,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) error {
+				close(requestStarted)
+				<-releaseRequest
+				return nil
+			},
+		},
+	}
+
+	handlerDone := make(chan struct{})
+	go func() {
+		ls.handleEventBlockfetch(event.NewEvent(
+			BlockfetchEventType,
+			BlockfetchEvent{ConnectionId: connId, BatchDone: true},
+		))
+		close(handlerDone)
+	}()
+	testutil.RequireReceive(
+		t,
+		handlerDone,
+		time.Second,
+		"blockfetch subscriber remained blocked in continuation request",
+	)
+	testutil.RequireReceive(t, requestStarted, time.Second, "continuation request did not start")
+
+	close(releaseRequest)
+	ls.blockfetchContinuationMu.Lock()
+	ls.blockfetchContinuationWG.Wait()
+	ls.blockfetchContinuationMu.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}

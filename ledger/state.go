@@ -670,6 +670,14 @@ type LedgerState struct {
 	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
 	shadowBlockfetchConnId        ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
 	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// blockfetchContinuationPending prevents a chainsync handler from starting
+	// a competing batch in the short interval after the blockfetch subscriber
+	// schedules its next request on a worker. The worker must run outside the
+	// subscriber goroutine because GetBlockRange waits for BatchDone, which is
+	// delivered back through that same subscriber.
+	blockfetchContinuationPending bool
+	blockfetchContinuationMu      sync.Mutex
+	blockfetchContinuationWG      sync.WaitGroup
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
@@ -1639,6 +1647,13 @@ func (ls *LedgerState) Close() error {
 			)
 		}
 	}
+
+	// Drain blockfetch continuation workers before unsubscribing from the
+	// EventBus. A worker may be waiting for BatchDone from the request it
+	// issued; keeping the subscriber alive lets that request finish cleanly.
+	ls.blockfetchContinuationMu.Lock()
+	ls.blockfetchContinuationWG.Wait()
+	ls.blockfetchContinuationMu.Unlock()
 
 	// Unsubscribe from event bus to stop receiving new events. Use
 	// UnsubscribeAndWait, not Unsubscribe: several of these handlers read
