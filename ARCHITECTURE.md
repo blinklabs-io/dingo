@@ -5707,6 +5707,93 @@ On chain rollback past an epoch boundary:
   treasury/reserves/fees) are frozen at or before the retained pot's slot, so the
   recomputed value is numerically identical
 
+### Block Processing Pipeline (Parallel Decode)
+
+`ledgerReadChainIterator` (`ledger/state.go`) reads raw blocks back from the
+primary chain (`chain.Chain`) and decodes them into
+`gouroboros/ledger.Block` values before handing a batch to
+`ledgerProcessBlocksFromSource` for validation and apply, exactly as
+before. When `LedgerStateConfig.BlockPipelineEnabled` is set (config
+`blockPipelineEnabled` / `DINGO_BLOCK_PIPELINE_ENABLED` /
+`--block-pipeline-enabled`; default off), `LedgerState` owns a
+`github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with 2 decode
+workers and validation disabled (`ValidateWorkers: 0`). Each gathered batch
+of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline up
+front and drained back from `Results()` in submission order — the
+pipeline's apply stage guarantees this ordering regardless of which worker
+decodes first — so decode work for multiple blocks can overlap while
+downstream ledger validation/apply remains fully serial and unchanged. The
+pipeline's own apply stage is a no-op here (`ApplyFunc` is nil): its only
+job in this phase is re-sequencing decoded results, not applying ledger
+state. A single decode failure anywhere in a batch discards the whole
+batch, matching the pre-pipeline behavior of never handing a
+partially-decoded batch downstream.
+
+The pipeline is started in `LedgerState.Start` (before the goroutine that
+is its only submitter) and stopped in `Close` (after that goroutine has
+drained), bounded by `CloseBlockPipelineDrainTimeout`, so its worker
+goroutines never outlive the `LedgerState`. `NewLedgerState` does not even
+construct `blockPipeline` when `ManualBlockProcessing` is set: that mode
+(the immutable-load/replay path, `internal/node/load.go`) feeds
+already-decoded batches directly into `ledgerProcessBlocksFromSource` via
+`ProcessTrustedBlockBatches`, bypassing `ledgerReadChainIterator` (the
+pipeline's only submitter) entirely, so a constructed-but-never-started
+pipeline would otherwise sit as dead weight for the `LedgerState`'s whole
+lifetime.
+
+**The pipeline is a single instance shared across every
+`ledgerProcessBlocks` retry attempt, not recreated per attempt** — retries
+happen whenever `ledgerProcessBlocksFromSource` returns
+`errRestartLedgerPipeline` (e.g. `errStaleChainIterator`, a rollback racing
+the read iterator into staleness — a normal occurrence near the tip, not an
+edge case). `ledgerProcessBlocks` runs each attempt through
+`runLedgerReadChainAttempt`, which launches that attempt's `ledgerReadChain`
+goroutine on a child context, hands the result channel to
+`ledgerProcessBlocksFromSource`, and — critically — **blocks until that
+goroutine has fully exited** before returning control to the retry loop, so
+the next attempt's goroutine (and its `Submit` calls) can never start while
+the previous one might still be running. This wait is load-bearing, not
+incidental: the pipeline's apply stage reorders decoded results purely by a
+single global sequence number with no notion of "whose submission is
+whose", so two attempts' reader goroutines submitting concurrently get each
+other's decoded blocks back from `Results()` — misattributing blocks across
+a restart. Without the wait, `completeReadResult()` (called by
+`ledgerProcessBlocksFromSource` right before it returns the restart error)
+wakes the *retiring* attempt's reader goroutine before the retry loop's
+`cancel()` even runs, and that goroutine could keep gathering and
+submitting blocks to the shared pipeline concurrently with the new
+attempt's own submissions (regression test:
+`TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts` in
+`ledger/read_chain_pipeline_test.go`, which fails reliably with the wait
+removed and passes with it in place). `decodeReadChainBatch` compounds this
+by design: once it starts submitting a batch it always runs the
+submit-and-drain to completion using a background context, not the
+per-attempt one, so a mere retry can never abort a submission partway
+through and leave an orphaned, already-sequenced item for a *later*
+attempt's call to mistakenly drain — only genuine pipeline shutdown
+(`Stop()`, which closes the `Results` channel) can still interrupt it.
+
+**Musashi is incompatible and rejected at startup.** The vendored decode
+stage (`gouroboros/pipeline.DecodeStage`) calls `ledger.NewBlockFromCbor`
+directly and has no hook for dingo's Leios-extended-header Conway fallback
+(`database/models.DecodeConwayBlock`), which blocks on the Musashi
+prototype network require. Enabling the pipeline there would not fail
+loudly: a Leios-extended block would fail strict decode,
+`decodeReadChainBatch` would log and return `ok=false`,
+`ledgerReadChainIterator` would return (closing its result channel), and
+`ledgerProcessBlocksFromSource` treats a closed result channel as a clean,
+non-error exit — so chain replay would silently and permanently stall with
+no diagnostic until a full process restart. `configValidate` (`config.go`)
+refuses `BlockPipelineEnabled` combined with the Musashi network identity
+outright (checked with `Config.isMusashiNetwork()`, the same predicate used
+by the other Musashi-only checks), so this can only be reached by an
+embedder that builds a `LedgerStateConfig` directly and skips validation.
+
+This is phase 1 of issue #1894 (decode parallelism only, no ledger
+validation change). Later phases enable VRF/KES validation workers (via an
+`Eta0Provider` for the epoch nonce), pipeline metrics integration, and
+rollback-aware draining of in-flight blocks before a rollback proceeds.
+
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 
 `ledgerProcessBlocks` (`ledger/state.go`) reads batches from the primary

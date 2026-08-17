@@ -536,6 +536,11 @@ var flagSpecs = []flagSpec{
 		"backfill-batch-size",
 		"API-mode metadata backfill block batch size",
 	),
+	boolFlag(
+		"BlockPipelineEnabled",
+		"block-pipeline-enabled",
+		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default off)",
+	),
 
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
