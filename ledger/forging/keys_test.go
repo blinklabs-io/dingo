@@ -22,10 +22,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -74,10 +76,13 @@ func createTestKeys(t *testing.T) (string, string, string) {
 
 func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	loadedVRF, err := loadSecretKeyFromFile(vrfPath)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Base(vrfPath), loadedVRF.File)
 
 	// Load credentials
 	pc := NewPoolCredentials()
-	err := pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
+	err = pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
 	require.NoError(t, err)
 
 	// Verify VRF keys
@@ -110,6 +115,64 @@ func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 
 	// Verify IsLoaded
 	assert.True(t, pc.IsLoaded())
+}
+
+func TestPoolCredentialsRejectsPermissiveSecretKeyModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode test; Windows DACL checks are covered by keystore tests")
+	}
+
+	tests := []struct {
+		name      string
+		keyName   string
+		selectKey func(vrfPath, kesPath string) string
+	}{
+		{
+			name:    "VRF",
+			keyName: "VRF signing key",
+			selectKey: func(vrfPath, _ string) string {
+				return vrfPath
+			},
+		},
+		{
+			name:    "KES",
+			keyName: "KES signing key",
+			selectKey: func(_, kesPath string) string {
+				return kesPath
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			vrfPath, kesPath, opCertPath := createTestKeys(t)
+			keyPath := test.selectKey(vrfPath, kesPath)
+			require.NoError(t, os.Chmod(keyPath, 0o644))
+
+			err := NewPoolCredentials().LoadFromFiles(
+				vrfPath,
+				kesPath,
+				opCertPath,
+			)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, keystore.ErrInsecureFileMode)
+			assert.Contains(t, err.Error(), "failed to load "+test.keyName)
+			assert.Contains(t, err.Error(), "mode 0644")
+			assert.Contains(t, err.Error(), "group/other access not permitted")
+		})
+	}
+}
+
+func TestPoolCredentialsAllowsPermissiveOpCertMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode test")
+	}
+
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	require.NoError(t, os.Chmod(opCertPath, 0o644))
+
+	err := NewPoolCredentials().LoadFromFiles(vrfPath, kesPath, opCertPath)
+	require.NoError(t, err)
 }
 
 func TestVRFProve(t *testing.T) {

@@ -104,6 +104,11 @@ func TestInsecureFileModeWindows(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrInsecureFileMode)
 	assert.Contains(t, err.Error(), "Everyone")
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	err = checkOpenFilePermissions(file)
+	assert.ErrorIs(t, err, ErrInsecureFileMode)
 }
 
 func TestInsecureFileModeWindowsBuiltinUsers(t *testing.T) {
@@ -184,4 +189,25 @@ func TestSecureFileModeWindows(t *testing.T) {
 
 	err := checkFilePermissions(testFile)
 	assert.NoError(t, err)
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	assert.NoError(t, checkOpenFilePermissions(file))
+}
+
+func TestNullDACLFileModeWindows(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.skey")
+	require.NoError(t, os.WriteFile(testFile, []byte("test"), 0o600))
+	require.NoError(t, windows.SetNamedSecurityInfo(
+		testFile,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+		nil, nil, nil, nil,
+	))
+
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	assert.ErrorIs(t, checkOpenFilePermissions(file), ErrInsecureFileMode)
 }
