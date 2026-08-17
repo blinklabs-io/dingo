@@ -7525,6 +7525,23 @@ func (ls *LedgerState) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return ls.config.CardanoNodeConfig
 }
 
+// ByronProtocolMagic returns the protocol magic configured in Byron genesis.
+func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
+	if ls == nil || ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("cardano node config is unavailable")
+	}
+	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if byronGenesis == nil {
+		return 0, errors.New("byron genesis is unavailable")
+	}
+	if byronGenesis.ProtocolConsts.ProtocolMagic < 0 {
+		return 0, errors.New("byron protocol magic is negative")
+	}
+	// #nosec G115 -- the negative value is rejected above and the genesis
+	// protocol magic is defined as a non-negative uint32 value.
+	return uint32(byronGenesis.ProtocolConsts.ProtocolMagic), nil
+}
+
 // UtxoByRef returns a single UTxO by reference
 func (ls *LedgerState) UtxoByRef(
 	txId []byte,

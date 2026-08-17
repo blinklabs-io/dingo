@@ -35,6 +35,14 @@ var ByronEraDesc = EraDesc{
 	ValidateTxFunc:  ValidateTxByron,
 }
 
+// ByronProtocolMagicProvider supplies the protocol magic from the active
+// Byron genesis configuration. It must come from ledger state rather than
+// being inferred from the Shelley network ID because private networks can use
+// custom Byron protocol magic values.
+type ByronProtocolMagicProvider interface {
+	ByronProtocolMagic() (uint32, error)
+}
+
 func EpochLengthByron(
 	nodeConfig *cardano.CardanoNodeConfig,
 ) (uint, uint, error) {
@@ -318,9 +326,13 @@ func byronValidateWitnesses(
 	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
 		redeemWitnesses = byronRedeemWitnesses(byronTx.Twit)
 		txHash := tx.Hash()
-		protocolMagic := uint32(byron.TestnetProtocolMagic)
-		if ls.NetworkId() == lcommon.AddressNetworkMainnet {
-			protocolMagic = byron.MainnetProtocolMagic
+		protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
+		if !ok {
+			return errors.New("ledger state does not provide Byron protocol magic")
+		}
+		protocolMagic, err := protocolMagicProvider.ByronProtocolMagic()
+		if err != nil {
+			return fmt.Errorf("get Byron protocol magic: %w", err)
 		}
 		for _, witness := range redeemWitnesses {
 			message, err := byronRedeemSignatureMessage(
@@ -379,7 +391,7 @@ func byronRedeemWitnesses(
 		if !ok || len(fields) != 2 {
 			continue
 		}
-		ctor, ok := byronWitnessUint(fields[0])
+		ctor, ok := fields[0].(uint64)
 		if !ok || ctor != lcommon.ByronAddressTypeRedeem {
 			continue
 		}
@@ -400,26 +412,6 @@ func byronRedeemWitnesses(
 		})
 	}
 	return ret
-}
-
-func byronWitnessUint(value any) (uint64, bool) {
-	switch value := value.(type) {
-	case uint64:
-		return value, true
-	case uint32:
-		return uint64(value), true
-	case uint:
-		return uint64(value), true
-	case int:
-		if value >= 0 {
-			return uint64(value), true
-		}
-	case int64:
-		if value >= 0 {
-			return uint64(value), true
-		}
-	}
-	return 0, false
 }
 
 func validateByronInputWitnesses(
@@ -520,12 +512,20 @@ func byronAddressRoot(
 			len(witness.ChainCode),
 		)
 	}
-	// Byron public-key address root:
-	// blake2b_224(sha3_256(cbor([0, [0, pubkey || chaincode], attrs])))
-	root := []byte{0x83, 0x00, 0x82, 0x00, 0x58, 0x40}
-	root = append(root, witness.PublicKey...)
-	root = append(root, witness.ChainCode...)
-	root = append(root, witness.Attributes...)
+	// gouroboros v0.143 exposes the redeem-address constructor but not the
+	// corresponding bootstrap-address root helper. Encode the public-key
+	// address structure through its CBOR package so the shape stays explicit.
+	pubkey := make([]byte, 0, len(witness.PublicKey)+len(witness.ChainCode))
+	pubkey = append(pubkey, witness.PublicKey...)
+	pubkey = append(pubkey, witness.ChainCode...)
+	root, err := cbor.Encode([]any{
+		uint64(lcommon.ByronAddressTypePubkey),
+		[]any{uint64(lcommon.ByronAddressTypePubkey), pubkey},
+		witness.Attributes,
+	})
+	if err != nil {
+		return lcommon.Blake2b224{}, fmt.Errorf("encode Byron address root: %w", err)
+	}
 	hash := sha3.Sum256(root)
 	return lcommon.Blake2b224Hash(hash[:]), nil
 }

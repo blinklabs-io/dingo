@@ -136,6 +136,7 @@ func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 
 	ls := newMockLedgerState()
 	ls.networkId = lcommon.AddressNetworkMainnet
+	ls.protocolMagic = byron.MainnetProtocolMagic
 	ls.addUtxo(redeemTx.Inputs()[0], producerOutput)
 	assert.NoError(t, ValidateTxByron(redeemTx, 3313, ls, nil))
 }
@@ -330,6 +331,7 @@ var errUtxoNotFound = errors.New("UTxO not found")
 type mockLedgerState struct {
 	utxos                map[string]lcommon.Utxo
 	networkId            uint
+	protocolMagic        uint32
 	skipPhase2Validation bool
 	utxoLookups          int
 }
@@ -364,6 +366,10 @@ func (m *mockLedgerState) UtxoById(
 }
 
 func (m *mockLedgerState) NetworkId() uint { return m.networkId }
+
+func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
+	return m.protocolMagic, nil
+}
 
 func (m *mockLedgerState) SkipPhase2Validation() bool {
 	return m.skipPhase2Validation
