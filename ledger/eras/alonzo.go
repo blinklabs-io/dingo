@@ -305,7 +305,6 @@ func ValidateTxAlonzo(
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
-			evalContext.SkipFinalSlippageFlush = true
 			usedBudget, err := s.Evaluate(
 				datum,
 				redeemer.Data,
