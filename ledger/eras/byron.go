@@ -325,34 +325,36 @@ func byronValidateWitnesses(
 	var redeemWitnesses []lcommon.VkeyWitness
 	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
 		redeemWitnesses = byronRedeemWitnesses(byronTx.Twit)
-		txHash := tx.Hash()
-		protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
-		if !ok {
-			return errors.New("ledger state does not provide Byron protocol magic")
-		}
-		protocolMagic, err := protocolMagicProvider.ByronProtocolMagic()
-		if err != nil {
-			return fmt.Errorf("get Byron protocol magic: %w", err)
-		}
-		for _, witness := range redeemWitnesses {
-			message, err := byronRedeemSignatureMessage(
-				protocolMagic,
-				txHash,
-			)
-			if err != nil {
-				return err
+		if len(redeemWitnesses) > 0 {
+			txHash := tx.Hash()
+			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
+			if !ok {
+				return errors.New("ledger state does not provide Byron protocol magic")
 			}
-			if err := lcommon.VerifyVKeySignature(
-				witness.Vkey,
-				witness.Signature,
-				message,
-			); err != nil {
-				return lcommon.NewValidationError(
-					lcommon.ValidationErrorTypeTransaction,
-					"invalid vkey signature",
-					map[string]any{"err": err.Error()},
-					err,
+			protocolMagic, err := protocolMagicProvider.ByronProtocolMagic()
+			if err != nil {
+				return fmt.Errorf("get Byron protocol magic: %w", err)
+			}
+			for _, witness := range redeemWitnesses {
+				message, err := byronRedeemSignatureMessage(
+					protocolMagic,
+					txHash,
 				)
+				if err != nil {
+					return err
+				}
+				if err := lcommon.VerifyVKeySignature(
+					witness.Vkey,
+					witness.Signature,
+					message,
+				); err != nil {
+					return lcommon.NewValidationError(
+						lcommon.ValidationErrorTypeTransaction,
+						"invalid vkey signature",
+						map[string]any{"err": err.Error()},
+						err,
+					)
+				}
 			}
 		}
 	}
@@ -521,7 +523,7 @@ func byronAddressRoot(
 	root, err := cbor.Encode([]any{
 		uint64(lcommon.ByronAddressTypePubkey),
 		[]any{uint64(lcommon.ByronAddressTypePubkey), pubkey},
-		witness.Attributes,
+		cbor.RawMessage(witness.Attributes),
 	})
 	if err != nil {
 		return lcommon.Blake2b224{}, fmt.Errorf("encode Byron address root: %w", err)
