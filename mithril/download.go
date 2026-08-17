@@ -802,7 +802,7 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			cfg.Logger.Info(
+			cfg.Logger.Debug(
 				"resuming download",
 				"component", "mithril",
 				"existing_bytes", existingSize,
@@ -846,7 +846,7 @@ func downloadSnapshotOnce(
 				destPath,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download already complete",
 			"component", "mithril",
 			"path", destPath,
@@ -877,7 +877,7 @@ func downloadSnapshotOnce(
 		}
 	}() // safety net for panics/early returns
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
 		"url", cfg.URL,
@@ -934,7 +934,7 @@ func downloadSnapshotOnce(
 		})
 	}
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"download complete",
 		"component", "mithril",
 		"bytes", pw.written,
@@ -960,7 +960,7 @@ func downloadSnapshotOnce(
 				fi.Size(), cfg.ExpectedSize,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download size verified",
 			"component", "mithril",
 			"bytes", fi.Size(),

@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"log/slog"
 	"testing"
 
@@ -28,8 +29,9 @@ import (
 // lines like "45.3% (8.2 GB / 14.2 GB)" where 8.2/14.2 is 57.7%.
 func TestNewImmutableProgressByteBased(t *testing.T) {
 	var last DownloadProgress
+	var logs bytes.Buffer
 	cfg := BootstrapConfig{
-		Logger:     slog.New(slog.DiscardHandler),
+		Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
 		OnProgress: func(p DownloadProgress) { last = p },
 	}
 	// 4 archives of uneven size summing to 1000 bytes.
@@ -52,6 +54,7 @@ func TestNewImmutableProgressByteBased(t *testing.T) {
 	onDone(400)
 	assert.Equal(t, int64(1000), last.BytesDownloaded)
 	assert.InDelta(t, 100.0, last.Percent, 0.001)
+	assert.Contains(t, logs.String(), "immutable archives:")
 }
 
 // TestNewImmutableProgressClamp verifies the byte-percent is clamped to 100
