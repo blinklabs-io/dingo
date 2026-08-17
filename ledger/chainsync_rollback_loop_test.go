@@ -36,7 +36,7 @@ func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	err := fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: fixture.connId,
 		Point:        fixture.ancestorTip.Point,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 
@@ -61,7 +61,7 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 	require.NoError(t, fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: fixture.connId,
 		Point:        fixture.ancestorTip.Point,
-	}))
+	}, nil))
 	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 
 	// Re-extend the chain past the fork point so a second rollback to it is
@@ -85,7 +85,7 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 	err := fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: fixture.connId,
 		Point:        fixture.ancestorTip.Point,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.NotErrorIs(t, err, ErrRollbackLoopDetected)
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
@@ -125,7 +125,7 @@ func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 	err := fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: fixture.connId,
 		Point:        uncrossablePoint,
-	})
+	}, nil)
 	require.ErrorIs(t, err, ErrRollbackLoopDetected)
 
 	_, ok := fixture.ls.unrecoverableRollbacks[unrecoverableRollbackKey(
@@ -164,7 +164,7 @@ func TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold(
 	err := fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: fixture.connId,
 		Point:        fixture.ancestorTip.Point,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.NotErrorIs(t, err, ErrRollbackLoopDetected)
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
