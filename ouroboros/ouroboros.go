@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
@@ -52,6 +53,17 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+// Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
+// this interface local prevents networking from depending on FIFO internals.
+type Mempool interface {
+	AddTransaction(txType uint, txBytes []byte) error
+	Transactions() []mempool.MempoolTransaction
+	CapacityBytes() int64
+	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+	RemoveConsumer(connId ouroboros.ConnectionId)
+	Consumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+}
+
 func blockfetchConfig(
 	opts ...oblockfetch.BlockFetchOptionFunc,
 ) oblockfetch.Config {
@@ -67,7 +79,7 @@ type Ouroboros struct {
 	PeerGov                  *peergov.PeerGovernor
 	ChainsyncState           *chainsync.State
 	EventBus                 *event.EventBus
-	Mempool                  *mempool.Mempool
+	Mempool                  mempool.Service
 	LedgerState              *ledger.LedgerState
 	LeiosVotes               LeiosVoteHandler
 	LeiosPipeline            LeiosPipelineHandler
@@ -89,6 +101,12 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// Waiters blocked in the NtC serving path until an endorser block's
+	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
+	// channel is closed once a complete closure is stored for that key.
+	leiosClosureWaiters map[string][]chan struct{}
+	// NtC CertRB closure-resolution metrics.
+	leiosMetrics *leiosMetrics
 
 	// Per-connection serialization and bound for asynchronous leios-fetch
 	// client operations (manifest and EB-tx fetches). The leios-fetch client
@@ -103,6 +121,23 @@ type Ouroboros struct {
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
+	// leiosVoteEnqueueCount counts EnqueueLeiosPrototypeVote calls -- see
+	// LeiosVoteEnqueueCount's doc comment for why this, not a queue-depth
+	// check, is what tests must use.
+	leiosVoteEnqueueCount atomic.Uint64
+	// LeiosNotify ranking-block announcements observed on this node. The map
+	// is keyed by announcing ranking-block hash and prevents an inconsistent
+	// second description of the same ranking block from being relayed.
+	leiosAnnouncementsMu       sync.Mutex
+	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosDeferredMu            sync.Mutex
+	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
+	leiosAnnouncementSizes     map[string]uint64
+	// LeiosNotify permits at most two distinct announcements for one election
+	// (slot plus issuer) from each peer. Keep that bound per source so one
+	// equivocating peer cannot inject an unbounded stream without suppressing
+	// independent observations from other peers.
+	leiosAnnouncementElections map[string]map[string]struct{}
 
 	// Asynchronous best-effort persistence of fetched endorser blocks to the
 	// blob store for historical serving. The blob write (CBOR encode + commit)
@@ -153,8 +188,42 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncApplyEligible reports whether a peer's chainsync headers
+	// and rollbacks may be APPLIED to the ledger. It is a second gate,
+	// stricter than ChainsyncIngressEligible: a peer can be ingress-
+	// eligible (so its tips are observed for chain selection) yet not
+	// apply-eligible, so its blocks are not applied. This enforces the
+	// Ouroboros Genesis corroboration stall — an uncorroborated fast source
+	// is observed but cannot steer the ledger. When nil, every ingress-
+	// eligible peer is apply-eligible (no behavior change).
+	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerTipUpdateEvent (avoids a double update). This
+	// lets the node update chain-selection state synchronously before the
+	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
+	// currently being admitted (closing the race where an async tip update that
+	// revokes corroboration is not yet processed). Returning false (or nil hook)
+	// falls back to the async PeerTipUpdateEvent path.
+	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncObservePeerRollback observes a peer rollback. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerRollbackEvent (avoids a double update). It
+	// mirrors ChainsyncObservePeerTip for the roll-backward path: a rollback
+	// trims the peer's observed frontier (ApplyRollback) and can therefore
+	// change its corroboration status, so the node applies it to chain selection
+	// synchronously before the ChainsyncApplyEligible gate runs, so the rollback
+	// apply decision reflects the post-rollback state. Returning false (or nil
+	// hook) falls back to the async PeerRollbackEvent path.
+	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
+	// server waits for a certifying ranking block's endorser block transaction
+	// closure to become available before closing the connection. When 0 (the
+	// default) the wait is derived from the ledger's Leios pipeline timing
+	// (EndorserBlockWaitSlots × slot length), matching ledger application.
+	LeiosClosureWaitTimeout time.Duration
 	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol
 	// (protocol 20) toward peers. This is a dingo extension that is ahead
 	// of the IOG Leios prototype: the prototype Haskell node does not run a
@@ -214,14 +283,23 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.ChainsyncBlockTimeout,
 	)
 	o := &Ouroboros{
-		config:                   cfg,
-		EventBus:                 cfg.EventBus,
-		ConnManager:              cfg.ConnManager,
-		blockFetchStarts:         make(map[ouroboros.ConnectionId]time.Time),
-		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
-		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
-		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosEBLog:               newLeiosForgedEBLog(),
+		config:           cfg,
+		EventBus:         cfg.EventBus,
+		ConnManager:      cfg.ConnManager,
+		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
+		blockfetchNoBlocksCounts: make(
+			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
+		),
+		chainsyncStats: make(
+			map[ouroboros.ConnectionId]*chainsyncPeerStats,
+		),
+		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters:        make(map[string][]chan struct{}),
+		leiosEBLog:                 newLeiosForgedEBLog(),
+		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
+		leiosAnnouncementSizes:     make(map[string]uint64),
+		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -236,7 +314,9 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
+		o.initLeiosMetrics()
 	}
+	o.subscribeLeiosAnnouncementRetries()
 	return o
 }
 
@@ -249,28 +329,36 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "total blocks served to clients",
 		},
 	)
-	o.blockfetchMetrics.blockDelay = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
-		Help: "delay in seconds for the most recent block fetch",
-	})
-	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(prometheus.CounterOpts{
-		Name: "cardano_node_metrics_blockfetchclient_lateblocks",
-		Help: "blocks that took more than 5 seconds to fetch",
-	})
-	o.blockfetchMetrics.blockDelayCdfOne = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
-		Help: "percentage of blocks fetched in less than 1 second",
-	})
+	o.blockfetchMetrics.blockDelay = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
+			Help: "delay in seconds for the most recent block fetch",
+		},
+	)
+	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_blockfetchclient_lateblocks",
+			Help: "blocks that took more than 5 seconds to fetch",
+		},
+	)
+	o.blockfetchMetrics.blockDelayCdfOne = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
+			Help: "percentage of blocks fetched in less than 1 second",
+		},
+	)
 	o.blockfetchMetrics.blockDelayCdfThree = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree",
 			Help: "percentage of blocks fetched in less than 3 seconds",
 		},
 	)
-	o.blockfetchMetrics.blockDelayCdfFive = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
-		Help: "percentage of blocks fetched in less than 5 seconds",
-	})
+	o.blockfetchMetrics.blockDelayCdfFive = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
+			Help: "percentage of blocks fetched in less than 5 seconds",
+		},
+	)
 }
 
 func (o *Ouroboros) ConfigureListeners(
@@ -511,8 +599,10 @@ func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
 	if !ok {
 		o.config.Logger.Warn(
 			"received unexpected event data type for peer eligibility change event",
-			"expected", "peergov.PeerEligibilityChangedEvent",
-			"got", fmt.Sprintf("%T", evt.Data),
+			"expected",
+			"peergov.PeerEligibilityChangedEvent",
+			"got",
+			fmt.Sprintf("%T", evt.Data),
 		)
 		return
 	}
@@ -680,7 +770,8 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 
 	// Only start client protocols if the peer negotiated full duplex
 	_, versionData := conn.ProtocolVersion()
-	if versionData == nil || versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
+	if versionData == nil ||
+		versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
 		o.config.Logger.Debug(
 			"inbound connection is not full-duplex, skipping client start",
 			"connection_id", connId.String(),
@@ -717,8 +808,10 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(
 					"chainsync client failed on inbound connection, closing to free per-IP slot",
-					"error", err,
-					"connection_id", connId.String(),
+					"error",
+					err,
+					"connection_id",
+					connId.String(),
 				)
 				conn.Close()
 				return

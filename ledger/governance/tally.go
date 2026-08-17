@@ -70,6 +70,12 @@ type TallyContext struct {
 	// proposal loop, mirroring CommitteeState.
 	DRepState *DRepVotingState
 	SPOState  *SPOVotingState
+	// DelegatorInactivityOn mirrors the CIP-0163 reward-account inactivity
+	// gate (ledger LedgerStateConfig.DelegatorInactivityEnabled) into the
+	// lazy tallyDRepVotes fallback path (used when DRepState is nil, i.e.
+	// standalone/test callers). ProcessEpoch always uses the precomputed
+	// DRepState instead, loaded via LoadDRepVotingState with this same gate.
+	DelegatorInactivityOn bool
 }
 
 // CommitteeVotingState is the ratification view of the seated CC:
@@ -224,13 +230,26 @@ type DRepVotingState struct {
 // LoadDRepVotingState computes the DRep voting denominators for the
 // given epoch. It is the single heavy query (active DReps + batched
 // voting power) hoisted out of the per-proposal tally path.
+// delegatorInactivityOn mirrors the CIP-0163 reward-account inactivity gate
+// (ledger LedgerStateConfig.DelegatorInactivityEnabled): when true, the
+// voting-power queries exclude reward accounts whose expiration_epoch is
+// nonzero and stale relative to currentEpoch; when false the queries are
+// byte-identical to the pre-CIP behavior (no account is excluded).
 func LoadDRepVotingState(
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
+	delegatorInactivityOn bool,
 ) (*DRepVotingState, error) {
 	if db == nil {
 		return nil, errors.New("nil database")
+	}
+	// expiryEpoch encodes the CIP-0163 gate for the voting-power queries:
+	// 0 = off (byte-identical SQL/args), >0 = exclude accounts whose
+	// expiration_epoch is nonzero and less than expiryEpoch.
+	var expiryEpoch uint64
+	if delegatorInactivityOn {
+		expiryEpoch = currentEpoch
 	}
 	allDreps, err := db.GetActiveDreps(txn)
 	if err != nil {
@@ -256,9 +275,12 @@ func LoadDRepVotingState(
 		// avoid the N+1 round-trip that the per-DRep lookup produced.
 		creds := make([]models.StakeCredentialRef, len(dreps))
 		for i, drep := range dreps {
-			creds[i] = models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
+			creds[i] = models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			}
 		}
-		powers, err = db.GetDRepVotingPowerBatch(creds, txn)
+		powers, err = db.GetDRepVotingPowerBatch(creds, expiryEpoch, txn)
 		if err != nil {
 			return nil, fmt.Errorf("batch drep voting power: %w", err)
 		}
@@ -269,6 +291,7 @@ func LoadDRepVotingState(
 			models.DrepTypeAlwaysAbstain,
 			models.DrepTypeAlwaysNoConfidence,
 		},
+		expiryEpoch,
 		txn,
 	)
 	if err != nil {
@@ -295,7 +318,9 @@ func tallyDRepVotes(
 	state := ctx.DRepState
 	if state == nil {
 		var err error
-		state, err = LoadDRepVotingState(ctx.DB, ctx.Txn, ctx.CurrentEpoch)
+		state, err = LoadDRepVotingState(
+			ctx.DB, ctx.Txn, ctx.CurrentEpoch, ctx.DelegatorInactivityOn,
+		)
 		if err != nil {
 			return err
 		}
@@ -313,7 +338,10 @@ func tallyDRepVotes(
 		}
 
 		for _, drep := range state.Dreps {
-			ref := models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
+			ref := models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			}
 			power := state.Powers[ref.MapKey()]
 			tally.DRepTotalStake += power
 

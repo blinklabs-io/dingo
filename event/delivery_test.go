@@ -45,13 +45,13 @@ func TestDeliverFailureUnregisters(t *testing.T) {
 	}
 }
 
-// TestChannelSubscriberDeliverNonBlocking verifies that channelSubscriber.Deliver
-// does not block when the channel buffer is full. This is the core fix for the
-// MEM-06 goroutine leak: previously, Deliver used a blocking send which caused
-// goroutines spawned by publishWithTimeout to leak.
-func TestChannelSubscriberDeliverNonBlocking(t *testing.T) {
+// TestChannelSubscriberDeliverWaitsForCapacity verifies that
+// channelSubscriber.Deliver waits for buffer capacity instead of dropping the
+// event. Regression test for blinklabs-io/dingo#2932: the non-blocking send
+// this replaces silently discarded events under sustained load.
+func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
 	const bufferSize = 5
-	sub := newChannelSubscriber(bufferSize, nil)
+	sub := newChannelSubscriber("test", bufferSize, nil)
 
 	// Fill the buffer completely
 	for i := range bufferSize {
@@ -61,45 +61,57 @@ func TestChannelSubscriberDeliverNonBlocking(t *testing.T) {
 		}
 	}
 
-	// Deliver to the full buffer should return immediately without blocking.
+	// Deliver to the full buffer must wait rather than drop.
 	done := make(chan error, 1)
 	go func() {
 		done <- sub.Deliver(NewEvent("test", "overflow"))
 	}()
 
 	select {
+	case <-done:
+		t.Fatal("Deliver returned while the buffer was full; event was dropped")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: Deliver is waiting for capacity.
+	}
+
+	// Draining one slot releases the waiting Deliver.
+	first := <-sub.ch
+
+	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("unexpected error on non-blocking deliver: %v", err)
+			t.Fatalf("unexpected error after capacity freed: %v", err)
 		}
-		// Good: Deliver returned without blocking
-	case <-time.After(1 * time.Second):
-		t.Fatal("Deliver blocked on full channel buffer; expected non-blocking drop")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Deliver did not complete after buffer capacity was freed")
 	}
 
-	// Verify the original buffered events are still present
+	// Every event is accounted for: the drained one, the rest of the
+	// original batch, and the event that had to wait.
+	got := []any{first.Data}
 	for range bufferSize {
 		select {
-		case <-sub.ch:
-			// Expected
+		case evt := <-sub.ch:
+			got = append(got, evt.Data)
 		default:
-			t.Fatal("expected buffered event not found")
+			t.Fatalf("expected %d events, only got %d", bufferSize+1, len(got))
 		}
 	}
-
-	// Verify no extra event was inserted (the overflow should have been dropped)
-	select {
-	case evt := <-sub.ch:
-		t.Fatalf("unexpected extra event in channel: %v", evt)
-	default:
-		// Good: buffer only contains the original events
+	want := []any{0, 1, 2, 3, 4, "overflow"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("event %d: expected %v, got %v", i, want[i], got[i])
+		}
 	}
 }
 
 // TestChannelSubscriberDeliverAfterClose verifies that Deliver to a closed
 // subscriber returns nil (not a panic) and does not block.
 func TestChannelSubscriberDeliverAfterClose(t *testing.T) {
-	sub := newChannelSubscriber(5, nil)
+	sub := newChannelSubscriber("test", 5, nil)
 	sub.Close()
 
 	done := make(chan error, 1)

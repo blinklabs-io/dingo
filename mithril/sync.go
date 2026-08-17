@@ -30,7 +30,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/node"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledgerstate"
+	"github.com/blinklabs-io/dingo/plugin"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"golang.org/x/sync/errgroup"
 )
@@ -42,6 +45,37 @@ const (
 	syncStatusInProgress = "in_progress"
 	syncStatusBackfill   = "backfill"
 )
+
+func setStableMithrilLedgerTip(
+	db *database.Database,
+	slot uint64,
+	hash []byte,
+) error {
+	point := ocommon.NewPoint(slot, hash)
+	block, err := database.BlockByPoint(db, point)
+	if err != nil {
+		return fmt.Errorf(
+			"stable ledger state point %d.%x is not present in certified ImmutableDB: %w",
+			slot,
+			hash,
+			err,
+		)
+	}
+	// Ledger snapshots do not carry the absolute block number. Populate it
+	// from the same certified immutable block while keeping the metadata
+	// cursor at the stable point; otherwise envelope validation would compare
+	// the first replayed block against a synthetic block number zero.
+	if err := db.SetTip(ochainsync.Tip{
+		Point:       point,
+		BlockNumber: block.Number,
+	}, nil); err != nil {
+		return fmt.Errorf(
+			"recording stable Mithril anchor block number: %w",
+			err,
+		)
+	}
+	return nil
+}
 
 // syncMode is the state-detected disposition of a Sync run, decided from the
 // database alone (no artifact comparison). It selects between the existing
@@ -105,6 +139,7 @@ func decideCatchUp(
 	backend string,
 	storageMode string,
 	aggregatorURL string,
+	allowInsecureHTTP bool,
 	logger *slog.Logger,
 ) (catchUpDecision, error) {
 	if backend != BackendV2 {
@@ -173,7 +208,7 @@ func decideCatchUp(
 			)
 			return catchUpDecision{engage: true}, nil
 		}
-		target, targetErr := NewClient(aggregatorURL).
+		target, targetErr := newMithrilClient(aggregatorURL, allowInsecureHTTP).
 			GetLatestCardanoDatabaseSnapshot(ctx)
 		if targetErr != nil {
 			return catchUpDecision{}, fmt.Errorf(
@@ -246,18 +281,26 @@ type SyncConfig struct {
 	CardanoConfigPath      string                     // optional explicit config.json path (else "<network>/config.json")
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
 	AggregatorURL          string                     // optional; defaults per-network
+	AllowInsecureHTTP      bool                       // permit plain-HTTP aggregator/artifact URLs; local dev/test only
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
-	BlobPlugin             string // database plugin selection (match the node's)
-	MetadataPlugin         string
+	StoragePlugins         StoragePlugins
 	RunMode                string
 	BackfillBatchSize      int
 	DatabaseWorkers        int
 	Logger                 *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress             SyncProgressFunc // optional
+}
+
+// StoragePlugins contains canonical storage provider selections used during
+// Mithril bootstrap. Empty provider names select Badger blob storage and
+// SQLite metadata storage.
+type StoragePlugins struct {
+	Blob     plugin.Selection
+	Metadata plugin.Selection
 }
 
 // SyncResult summarises a completed bootstrap.
@@ -332,7 +375,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			cardano.EmbeddedConfigFS,
 		)
 		if err != nil {
-			return SyncResult{}, fmt.Errorf("loading cardano node config: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"loading cardano node config: %w",
+				err,
+			)
 		}
 	}
 
@@ -375,21 +421,23 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// Open the database before bootstrap so the immutable copy can overlap the
 	// download: chunks are copied into the blob store in contiguous order as
 	// they finish downloading, instead of waiting for the whole download.
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DataDir,
-		Logger:         logger,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        cfg.RunMode,
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
-		StorageMode:    cfg.StorageMode,
-		Network:        cfg.Network,
-	})
+	runtime, err := openDatabase(ctx, cfg, logger, cfg.DatabaseWorkers)
 	if err != nil {
+		return SyncResult{}, fmt.Errorf("opening database: %w", err)
+	}
+	if runtime == nil || runtime.Database == nil {
+		return SyncResult{}, errors.New(
+			"opening database: runtime did not provide a database",
+		)
+	}
+	db := runtime.Database
+	defer runtime.Close(context.Background()) //nolint:contextcheck
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Tolerate a recoverable commit-timestamp mismatch from a previously
 		// interrupted run; mithril import heals it on forward progress.
-		var cte database.CommitTimestampError
-		if errors.As(err, &cte) && db != nil {
+		if cte, ok := errors.AsType[database.CommitTimestampError](
+			recoveryErr,
+		); ok {
 			logger.Warn(
 				"opened database with commit timestamp mismatch; "+
 					"continuing mithril sync — import will heal it",
@@ -398,10 +446,12 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"blob_timestamp", cte.BlobTimestamp,
 			)
 		} else {
-			return SyncResult{}, fmt.Errorf("opening database: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"opening database: %w",
+				recoveryErr,
+			)
 		}
 	}
-	defer db.Close()
 
 	// Catch-up dispatch. A complete core database (chain data present,
 	// sync_status clear) running against the v2 backend is advanced with
@@ -417,7 +467,8 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
 	dec, decErr := decideCatchUp(
-		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL, logger,
+		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL,
+		cfg.AllowInsecureHTTP, logger,
 	)
 	if decErr != nil {
 		return SyncResult{}, decErr
@@ -497,9 +548,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 
 	// Catch-up disables the download<->copy pipeline: it downloads the bounded
 	// [catchUpStart..N] range fully, then runs the divergence check before any
-	// mutation. A fresh bootstrap keeps the pipeline (copy overlaps download).
+	// mutation. Verified Mithril bootstrap also waits for the ancillary
+	// signature and ledger-state checks before allowing database mutation.
 	chunkHook := onChunkContiguous
-	if catchUp {
+	if catchUp || cfg.VerifyCertChain {
 		chunkHook = nil
 	}
 
@@ -512,6 +564,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			Network:                network,
 			Backend:                cfg.Backend,
 			AggregatorURL:          aggregatorURL,
+			AllowInsecureHTTP:      cfg.AllowInsecureHTTP,
 			DownloadDir:            downloadDir,
 			CleanupAfterLoad:       cfg.CleanupAfterLoad,
 			VerifyCertificateChain: cfg.VerifyCertChain,
@@ -640,6 +693,31 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// the next startup.
 	deferredIndexes := node.WithDeferredIndexes(db, logger)
 
+	// The Mithril certificate commits to ImmutableDB content. Ancillary ledger
+	// states can be newer than that certified point because they come from the
+	// source node's volatile database. Select only a ledger state at or below
+	// the certified immutable tip; later blocks must go through normal ledger
+	// validation when the node starts.
+	immutableDB, err := immutable.New(result.ImmutableDir)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"opening certified ImmutableDB for trust-boundary selection: %w",
+			err,
+		)
+	}
+	certifiedTip, err := immutableDB.GetTip()
+	if err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"reading certified ImmutableDB tip: %w",
+			err,
+		)
+	}
+	if certifiedTip == nil {
+		return SyncResult{}, errors.New(
+			"certified ImmutableDB has no tip",
+		)
+	}
+
 	// Import ledger state and copy blocks in parallel.
 	// Ledger state goes to metadata (SQLite), blocks go to the blob
 	// store (Badger) — completely independent data stores.
@@ -653,6 +731,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
 		slot, hash, importErr := importLedgerState(
 			gctx, db, logger, nodeCfg, result, catchUp,
+			certifiedTip.Slot,
 			func(p ledgerstate.ImportProgress) {
 				cfg.emit(SyncProgress{
 					Phase:       PhaseLedgerImport,
@@ -670,7 +749,13 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		ledgerStateSlot = slot
 		ledgerStateHash = hash
 		if len(hash) > 0 {
-			cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true, CurrentSlot: slot})
+			cfg.emit(
+				SyncProgress{
+					Phase:       PhaseLedgerImport,
+					Active:      true,
+					CurrentSlot: slot,
+				},
+			)
 		}
 		return nil
 	})
@@ -717,6 +802,20 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if err := g.Wait(); err != nil {
 		return SyncResult{}, err
 	}
+	if ledgerStateSlot > certifiedTip.Slot {
+		return SyncResult{}, fmt.Errorf(
+			"selected ledger state slot %d is past certified ImmutableDB tip slot %d",
+			ledgerStateSlot,
+			certifiedTip.Slot,
+		)
+	}
+	if err := setStableMithrilLedgerTip(
+		db,
+		ledgerStateSlot,
+		ledgerStateHash,
+	); err != nil {
+		return SyncResult{}, err
+	}
 
 	// The pipelined copy stores produced-UTxO offsets per block but does not
 	// advance the offsets-complete marker, and the post-bootstrap copy only
@@ -734,11 +833,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		}
 	}
 
-	// Fetch volatile blocks between the ImmutableDB tip and the
-	// ledger state tip. The Mithril snapshot's UTxO set is at the
-	// ledger state tip, but the ImmutableDB only has blocks up to
-	// an earlier point. We must close this gap so the node has a
-	// continuous chain matching the UTxO state.
+	// The imported ledger state is deliberately at or behind the certified
+	// ImmutableDB tip. Raw blocks after it remain in the primary chain, but
+	// the metadata ledger cursor stays at the imported state so normal node
+	// startup replays and validates that entire suffix.
 	recentBlocks, err := database.BlocksRecent(db, 1)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("reading chain tip: %w", err)
@@ -837,12 +935,18 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		if validateErr != nil {
 			logger.Warn(
 				"stored volatile gap blocks failed continuity check, refetching from relay",
-				"component", "mithril",
-				"immutable_tip_slot", immutableTipSlot,
-				"resume_gap_end_slot", resumeGapEnd,
-				"ledger_state_slot", ledgerStateSlot,
-				"ledger_state_hash", hex.EncodeToString(ledgerStateHash),
-				"error", validateErr,
+				"component",
+				"mithril",
+				"immutable_tip_slot",
+				immutableTipSlot,
+				"resume_gap_end_slot",
+				resumeGapEnd,
+				"ledger_state_slot",
+				ledgerStateSlot,
+				"ledger_state_hash",
+				hex.EncodeToString(ledgerStateHash),
+				"error",
+				validateErr,
 			)
 			// Drop the rejected blob blocks so neither the upcoming
 			// BlocksRecent query nor any slot-ordered iterator can
@@ -921,9 +1025,18 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
 		)
 		if fetchErr != nil {
-			return SyncResult{}, fmt.Errorf("fetching volatile blocks: %w", fetchErr)
+			return SyncResult{}, fmt.Errorf(
+				"fetching volatile blocks: %w",
+				fetchErr,
+			)
 		}
-		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: true, Count: len(gapBlocks)})
+		cfg.emit(
+			SyncProgress{
+				Phase:  PhaseGapBlocks,
+				Active: true,
+				Count:  len(gapBlocks),
+			},
+		)
 		// Store gap blocks to the blob store, then index
 		// their metadata. These two steps are not atomic:
 		// if processGapBlocks fails, re-running the sync
@@ -932,11 +1045,17 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		// writes, so re-processing is safe.
 		for _, block := range gapBlocks {
 			if err := db.BlockCreate(block, nil); err != nil {
-				return SyncResult{}, fmt.Errorf("storing volatile block: %w", err)
+				return SyncResult{}, fmt.Errorf(
+					"storing volatile block: %w",
+					err,
+				)
 			}
 		}
 		if err := processGapBlocks(ctx, db, logger, gapBlocks); err != nil {
-			return SyncResult{}, fmt.Errorf("processing gap block transactions: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"processing gap block transactions: %w",
+				err,
+			)
 		}
 		logger.Info(
 			"volatile blocks stored",
@@ -945,25 +1064,6 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		)
 		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: false})
 	}
-	// Skip post-ledger-state processing when no ledger state was imported.
-	// importLedgerState returns (0, nil, nil) for a snapshot with no ledger
-	// state file. In that case there is no ledger-state tip to chain from,
-	// and validateStoredGapContinuity would compare the first stored block's
-	// PrevHash against a nil hash and always fail.
-	if len(ledgerStateHash) > 0 {
-		cfg.emit(SyncProgress{Phase: PhasePostLedger, Active: true})
-		if err := processPostLedgerStateBlocks(
-			ctx,
-			db,
-			logger,
-			ledgerStateSlot,
-			ledgerStateHash,
-		); err != nil {
-			return SyncResult{}, err
-		}
-		cfg.emit(SyncProgress{Phase: PhasePostLedger, Active: false})
-	}
-
 	if isAPIMode(cfg.StorageMode) {
 		if err := updateMithrilReadyState(
 			db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
@@ -973,9 +1073,9 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		}
 	}
 
-	// Backfill historical metadata if storage mode is API.
-	// This replays all stored blocks to populate transaction
-	// records needed for API queries (Blockfrost, UTxO RPC).
+	// Backfill historical metadata through the stable ledger anchor if storage
+	// mode is API. Blocks after the anchor are left for ordinary ledger replay,
+	// which also populates the API indexes.
 	if isAPIMode(cfg.StorageMode) {
 		cfg.emit(SyncProgress{Phase: PhaseBackfill, Active: true})
 		logger.Info(
@@ -983,9 +1083,21 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			"component", "mithril",
 		)
 		if err := node.RunPlannerStats(db, logger); err != nil {
-			return SyncResult{}, fmt.Errorf("running planner statistics before backfill: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"running planner statistics before backfill: %w",
+				err,
+			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
+		// point with the delegator-inactivity gate enabled
+		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
+		// always elided here. SyncConfig has no gate field to thread through
+		// (Mithril bootstrap and the gate are mutually exclusive by
+		// construction), so this is explicit rather than the zero-value
+		// default.
+		bf.SetDelegatorInactivityEnabled(false)
+		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(
 				"invalid backfill batch size %d in SetBatchSize: %w",
@@ -1022,12 +1134,20 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, err
 	}
 	indexRebuildElapsed := time.Since(indexRebuildStart)
-	cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: true, Description: indexRebuildElapsed.String()})
+	cfg.emit(
+		SyncProgress{
+			Phase:       PhaseIndexRebuild,
+			Active:      true,
+			Description: indexRebuildElapsed.String(),
+		},
+	)
 	cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
 	logger.Info(
 		"critical deferred metadata indexes rebuilt; lazy indexes deferred to maintenance",
-		"component", "mithril",
-		"duration", indexRebuildElapsed,
+		"component",
+		"mithril",
+		"duration",
+		indexRebuildElapsed,
 	)
 
 	if err := updateMithrilReadyState(
@@ -1069,7 +1189,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		"lazy_index_rebuild_mode", "maintenance",
 	)
 
-	return SyncResult{Snapshot: result.Snapshot, LedgerSlot: ledgerStateSlot}, nil
+	return SyncResult{
+		Snapshot:   result.Snapshot,
+		LedgerSlot: ledgerStateSlot,
+	}, nil
 }
 
 // NeedsSync reports whether the database at cfg.DataDir requires a (re)sync —
@@ -1079,23 +1202,23 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DataDir,
-		Logger:         logger,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        cfg.RunMode,
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: 1,
-		StorageMode:    cfg.StorageMode,
-		Network:        cfg.Network,
-	})
+	runtime, err := openDatabase(context.Background(), cfg, logger, 1)
 	if err != nil {
+		return false, fmt.Errorf("opening database: %w", err)
+	}
+	if runtime == nil || runtime.Database == nil {
+		return false, errors.New(
+			"opening database: runtime did not provide a database",
+		)
+	}
+	db := runtime.Database
+	defer runtime.Close(context.Background())
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) || db == nil {
-			return false, fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return false, fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
-	defer db.Close()
 	val, err := db.GetSyncState("sync_status", nil)
 	if err != nil {
 		return false, fmt.Errorf("checking sync state: %w", err)
@@ -1113,6 +1236,37 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 		return len(recent) == 0, nil
 	}
 	return val != syncStatusBackfill, nil
+}
+
+func openDatabase(
+	ctx context.Context,
+	cfg SyncConfig,
+	logger *slog.Logger,
+	maxConnections int,
+) (*internalplugins.DatabaseRuntime, error) {
+	storagePlugins := cfg.StoragePlugins
+	if storagePlugins.Blob.Provider == "" {
+		storagePlugins.Blob.Provider = "badger"
+	}
+	if storagePlugins.Metadata.Provider == "" {
+		storagePlugins.Metadata.Provider = "sqlite"
+	}
+	return internalplugins.OpenDatabase(
+		ctx,
+		&database.Config{
+			DataDir: cfg.DataDir, Logger: logger,
+			StorageMode: cfg.StorageMode, Network: cfg.Network,
+		},
+		internalplugins.StorageSelections{
+			Blob:     storagePlugins.Blob,
+			Metadata: storagePlugins.Metadata,
+		},
+		internalplugins.StorageDependencies{
+			DataDir: cfg.DataDir, RunMode: cfg.RunMode,
+			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
+			Logger: logger,
+		},
+	)
 }
 
 // parseOptionalDuration parses an optional duration string.

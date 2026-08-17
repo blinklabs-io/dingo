@@ -143,26 +143,40 @@ func seedDRepYesVote(
 	}, nil))
 }
 
-func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(t *testing.T) {
+func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
+	t *testing.T,
+) {
 	db, _ := newTallyTestDB(t)
 	// pre-Conway: no governance state machine yet
-	in := NewStabilityCheckInputs(db, nil, stabilityTestEpoch, nil, nil, nil)
+	in := NewStabilityCheckInputs(
+		db,
+		nil,
+		stabilityTestEpoch,
+		false,
+		nil,
+		nil,
+		nil,
+	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "pre-Conway pparams must short-circuit to nil")
 }
 
-func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(t *testing.T) {
+func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(
+	t *testing.T,
+) {
 	db, _ := newTallyTestDB(t)
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "empty active proposal set must yield nil")
 }
 
-func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(t *testing.T) {
+func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
+	t *testing.T,
+) {
 	db, _ := newTallyTestDB(t)
 
 	// A TreasuryWithdrawal — active but not a HardForkInitiation, so
@@ -184,7 +198,7 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(t *
 	}, nil))
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -197,7 +211,9 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(t *
 // ratifiable, regardless of thresholds. The mid-epoch helper must
 // surface this as an upcoming transition with the correct target major
 // version (extracted from the proposal's encoded action).
-func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testing.T) {
+func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(
+	t *testing.T,
+) {
 	db, _ := newTallyTestDB(t)
 
 	const targetMajor uint = 11
@@ -208,7 +224,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testin
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -219,16 +235,64 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testin
 		"the helper must return the proposal that ratifies")
 }
 
+func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
+	t *testing.T,
+) {
+	db, _ := newTallyTestDB(t)
+
+	proposal := seedHardForkInitiationProposal(
+		t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx,
+	)
+	drepCred := seedDRepWithStake(t, db, 1_000)
+	seedDRepYesVote(t, db, proposal.ID, drepCred)
+	rewardCred := models.NewStakeCredentialRef(
+		0,
+		testBytes(28, stabilityStakeCred),
+	)
+	require.NoError(t, db.RenewAccountExpirations(
+		[]models.StakeCredentialRef{rewardCred},
+		stabilityTestEpoch-1,
+		nil,
+	))
+
+	gateOff := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+	)
+	got, err := EvaluateRatifiableHardForkInitiation(gateOff)
+	require.NoError(t, err)
+	require.NotNil(t, got, "gate off must preserve the expired account's vote")
+
+	gateOn := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, true, stabilityConwayPParams(9), nil, nil,
+	)
+	got, err = EvaluateRatifiableHardForkInitiation(gateOn)
+	require.NoError(t, err)
+	assert.Nil(
+		t,
+		got,
+		"gate on must match boundary tally and exclude expired stake",
+	)
+}
+
 // TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable
 // pins the negative side of bootstrap: even though thresholds are zero,
 // at least ONE yes vote (DRep, SPO, or CC) is required. With zero votes
 // of any kind, the proposal does not ratify.
-func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(t *testing.T) {
+func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(
+	t *testing.T,
+) {
 	db, _ := newTallyTestDB(t)
-	seedHardForkInitiationProposal(t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx)
+	seedHardForkInitiationProposal(
+		t,
+		db,
+		stabilityTestEpoch,
+		11,
+		1,
+		stabilityProposalTx,
+	)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -240,7 +304,9 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(t *
 // lower added_slot — matching the order ProcessEpoch's RATIFY phase
 // would select. This pins the parity between the mid-epoch and
 // boundary paths without a full integration test.
-func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAddedSlot(t *testing.T) {
+func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAddedSlot(
+	t *testing.T,
+) {
 	db, _ := newTallyTestDB(t)
 
 	const (
@@ -264,7 +330,7 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 	seedDRepYesVote(t, db, late.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)

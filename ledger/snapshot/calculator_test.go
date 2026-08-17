@@ -17,8 +17,10 @@ package snapshot
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"math"
 	"math/big"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -26,37 +28,32 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"gorm.io/gorm"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// setupTestDB creates a database.Database backed by in-memory SQLite for
-// testing. The caller should defer db.Close().
+// setupTestDB creates a database.Database backed by temporary Badger and
+// SQLite stores. Cleanup is registered with the test.
 func setupTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
 	})
 	require.NoError(t, err, "create database")
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 
 	return db
 }
 
-type snapshotMetadataDB interface {
-	DB() *gorm.DB
-}
-
-func snapshotGormDB(t *testing.T, db *database.Database) *gorm.DB {
+func snapshotSQLDB(t *testing.T, db *database.Database) *sql.DB {
 	t.Helper()
-	provider, ok := db.Metadata().(snapshotMetadataDB)
-	require.True(t, ok, "metadata store should expose DB() for test seeding")
-	return provider.DB()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	return raw
 }
 
 // seedPoolAndDelegations creates a pool, accounts, and UTxOs for testing
@@ -128,7 +125,12 @@ func seedPoolAndDelegationsWithRewardAccount(
 			AddedSlot:  slot,
 			Active:     true,
 		}
-		require.NoError(t, db.CreateAccount(nil, &account), "create account %d", i)
+		require.NoError(
+			t,
+			db.CreateAccount(nil, &account),
+			"create account %d",
+			i,
+		)
 
 		for j, amount := range d.utxoAmounts {
 			txId := make([]byte, 32)
@@ -189,7 +191,7 @@ func seedEpochs(t *testing.T, db *database.Database, epochs []models.Epoch) {
 // delegation/registration/deregistration rows at a specific slot/ordering.
 func seedCertificate(
 	t *testing.T,
-	gormDB *gorm.DB,
+	raw *sql.DB,
 	slot uint64,
 	blockIndex uint32,
 	certIndex uint,
@@ -202,20 +204,109 @@ func seedCertificate(
 	txHash[2] = byte(blockIndex)
 	txHash[3] = byte(certIndex)
 	txHash[4] = byte(certType)
-	tx := models.Transaction{
-		Hash:       txHash,
-		Slot:       slot,
-		BlockIndex: blockIndex,
+	result, err := raw.Exec(`
+INSERT INTO "transaction" (hash, slot, block_index)
+VALUES (?, ?, ?)`,
+		txHash, slot, blockIndex,
+	)
+	require.NoError(t, err, "create tx for cert")
+	txID, err := result.LastInsertId()
+	require.NoError(t, err)
+	result, err = raw.Exec(`
+INSERT INTO certs (transaction_id, slot, cert_index, cert_type)
+VALUES (?, ?, ?, ?)`,
+		txID, slot, certIndex, uint(certType),
+	)
+	require.NoError(t, err, "create cert")
+	certID, err := result.LastInsertId()
+	require.NoError(t, err)
+	return uint(certID)
+}
+
+func seedStakeRegistration(
+	t *testing.T,
+	raw *sql.DB,
+	registration models.StakeRegistration,
+) {
+	t.Helper()
+	_, err := raw.Exec(`
+INSERT INTO stake_registration (
+    staking_key, credential_tag, certificate_id, added_slot, deposit_amount
+) VALUES (?, ?, ?, ?, ?)`,
+		registration.StakingKey,
+		registration.CredentialTag,
+		registration.CertificateID,
+		registration.AddedSlot,
+		strconv.FormatUint(uint64(registration.DepositAmount), 10),
+	)
+	require.NoError(t, err)
+}
+
+func seedStakeDelegation(
+	t *testing.T,
+	raw *sql.DB,
+	delegation models.StakeDelegation,
+) {
+	t.Helper()
+	_, err := raw.Exec(`
+INSERT INTO stake_delegation (
+    staking_key, credential_tag, pool_key_hash, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?)`,
+		delegation.StakingKey,
+		delegation.CredentialTag,
+		delegation.PoolKeyHash,
+		delegation.CertificateID,
+		delegation.AddedSlot,
+	)
+	require.NoError(t, err)
+}
+
+func seedStakeDeregistration(
+	t *testing.T,
+	raw *sql.DB,
+	deregistration models.StakeDeregistration,
+) {
+	t.Helper()
+	_, err := raw.Exec(`
+INSERT INTO stake_deregistration (
+    staking_key, credential_tag, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`,
+		deregistration.StakingKey,
+		deregistration.CredentialTag,
+		deregistration.CertificateID,
+		deregistration.AddedSlot,
+	)
+	require.NoError(t, err)
+}
+
+func seedRewardLiveStake(
+	t *testing.T,
+	raw *sql.DB,
+	rows []models.RewardLiveStake,
+) {
+	t.Helper()
+	for i := range rows {
+		row := &rows[i]
+		_, err := raw.Exec(`
+INSERT INTO reward_live_stake (
+    pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,
+    total_stake, registered, pool_delegation_slot,
+    pool_delegation_block_index, pool_delegation_cert_index, updated_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			row.PoolKeyHash,
+			row.StakingKey,
+			row.CredentialTag,
+			strconv.FormatUint(uint64(row.UtxoStake), 10),
+			strconv.FormatUint(uint64(row.RewardStake), 10),
+			strconv.FormatUint(uint64(row.TotalStake), 10),
+			row.Registered,
+			row.PoolDelegationSlot,
+			row.PoolDelegationBlockIndex,
+			row.PoolDelegationCertIndex,
+			row.UpdatedSlot,
+		)
+		require.NoError(t, err)
 	}
-	require.NoError(t, gormDB.Create(&tx).Error, "create tx for cert")
-	cert := models.Certificate{
-		TransactionID: tx.ID,
-		Slot:          slot,
-		CertIndex:     certIndex,
-		CertType:      uint(certType),
-	}
-	require.NoError(t, gormDB.Create(&cert).Error, "create cert")
-	return cert.ID
 }
 
 // TestCalculateStakeDistribution_NonZeroStake verifies that the calculator
@@ -310,7 +401,7 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 ) {
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
-	gormDB := snapshotGormDB(t, db)
+	raw := snapshotSQLDB(t, db)
 
 	poolAHash := []byte("poolA_hist_12345678901234567")
 	poolBHash := []byte("poolB_hist_12345678901234567")
@@ -321,75 +412,75 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 
 	regCertID := seedCertificate(
 		t,
-		gormDB,
+		raw,
 		100,
 		0,
 		0,
 		lcommon.CertificateTypeStakeRegistration,
 	)
-	require.NoError(t, gormDB.Create(&models.StakeRegistration{
+	seedStakeRegistration(t, raw, models.StakeRegistration{
 		StakingKey:    stakeKey,
 		AddedSlot:     100,
 		CertificateID: regCertID,
-	}).Error, "create stake registration")
+	})
 
 	delegationACertID := seedCertificate(
 		t,
-		gormDB,
+		raw,
 		100,
 		0,
 		1,
 		lcommon.CertificateTypeStakeDelegation,
 	)
-	require.NoError(t, gormDB.Create(&models.StakeDelegation{
+	seedStakeDelegation(t, raw, models.StakeDelegation{
 		StakingKey:    stakeKey,
 		PoolKeyHash:   poolAHash,
 		AddedSlot:     100,
 		CertificateID: delegationACertID,
-	}).Error, "create pool A delegation")
+	})
 
 	delegationBCertID := seedCertificate(
 		t,
-		gormDB,
+		raw,
 		300,
 		0,
 		0,
 		lcommon.CertificateTypeStakeDelegation,
 	)
-	require.NoError(t, gormDB.Create(&models.StakeDelegation{
+	seedStakeDelegation(t, raw, models.StakeDelegation{
 		StakingKey:    stakeKey,
 		PoolKeyHash:   poolBHash,
 		AddedSlot:     300,
 		CertificateID: delegationBCertID,
-	}).Error, "create pool B delegation")
+	})
 
 	deregCertID := seedCertificate(
 		t,
-		gormDB,
+		raw,
 		500,
 		0,
 		0,
 		lcommon.CertificateTypeStakeDeregistration,
 	)
-	require.NoError(t, gormDB.Create(&models.StakeDeregistration{
+	seedStakeDeregistration(t, raw, models.StakeDeregistration{
 		StakingKey:    stakeKey,
 		AddedSlot:     500,
 		CertificateID: deregCertID,
-	}).Error, "create deregistration")
+	})
 
 	reregCertID := seedCertificate(
 		t,
-		gormDB,
+		raw,
 		600,
 		0,
 		0,
 		lcommon.CertificateTypeStakeRegistration,
 	)
-	require.NoError(t, gormDB.Create(&models.StakeRegistration{
+	seedStakeRegistration(t, raw, models.StakeRegistration{
 		StakingKey:    stakeKey,
 		AddedSlot:     600,
 		CertificateID: reregCertID,
-	}).Error, "create plain re-registration")
+	})
 
 	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
 		TxId:       []byte("tx_hist_123456789012345678901234"),
@@ -414,17 +505,17 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 	bootstrapKey := []byte("hist_bootstrap_key_123456789")
 	bootstrapRegCertID := seedCertificate(
 		t,
-		gormDB,
+		raw,
 		610,
 		0,
 		0,
 		lcommon.CertificateTypeStakeRegistration,
 	)
-	require.NoError(t, gormDB.Create(&models.StakeRegistration{
+	seedStakeRegistration(t, raw, models.StakeRegistration{
 		StakingKey:    bootstrapKey,
 		AddedSlot:     610,
 		CertificateID: bootstrapRegCertID,
-	}).Error, "create bootstrap plain registration")
+	})
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: bootstrapKey,
 		Pool:       poolBHash,
@@ -538,7 +629,7 @@ func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
 func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
-	gormDB := snapshotGormDB(t, db)
+	raw := snapshotSQLDB(t, db)
 
 	poolHash := []byte("poolD_12345678901234567890AB")
 	activeKey := []byte("activ_staking_key_1234567890")
@@ -556,15 +647,17 @@ func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 		Amount: 7000000, AddedSlot: 100,
 	}))
 
-	// Inactive account with 15 ADA UTxO.
-	// Note: GORM's Create skips zero-value fields when the model has a
-	// `default` tag, so Active: false would be stored as true. Create
-	// the account first, then explicitly set Active = false via Update.
+	// Inactive account with 15 ADA UTxO. Create it as active, then exercise
+	// the explicit deactivation path used by the ledger.
 	inactiveAcct := models.Account{
 		StakingKey: inactiveKey, Pool: poolHash, AddedSlot: 100, Active: true,
 	}
 	require.NoError(t, db.CreateAccount(nil, &inactiveAcct))
-	require.NoError(t, gormDB.Model(&inactiveAcct).Update("active", false).Error)
+	_, err := raw.Exec(
+		"UPDATE account SET active = FALSE WHERE id = ?",
+		inactiveAcct.ID,
+	)
+	require.NoError(t, err)
 	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
 		TxId:      []byte("tx_inact_567890123456789012345678901234"),
 		OutputIdx: 0, StakingKey: inactiveKey,
@@ -664,7 +757,260 @@ func TestCalculateStakeDistribution_EmptyDatabase(t *testing.T) {
 
 	require.Zero(t, dist.TotalStake, "empty database should have zero stake")
 	require.Zero(t, dist.TotalPools, "empty database should have zero pools")
-	require.Empty(t, dist.PoolStakes, "empty database should have no pool stakes")
+	require.Empty(
+		t,
+		dist.PoolStakes,
+		"empty database should have no pool stakes",
+	)
+}
+
+func seedBoundaryPathFixture(
+	t *testing.T,
+	db *database.Database,
+) ([]byte, []byte) {
+	t.Helper()
+	seedSnapshotEpoch(t, db)
+
+	poolHash := bytes.Repeat([]byte{0xa6}, 28)
+	expiredKey := bytes.Repeat([]byte{0x16}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  bytes.Repeat([]byte{0x14}, 28),
+			utxoAmounts: []types.Uint64{100},
+		},
+		{
+			stakingKey:  expiredKey,
+			utxoAmounts: []types.Uint64{40},
+		},
+		{
+			stakingKey: bytes.Repeat([]byte{0x15}, 28),
+		},
+	}, 100)
+	raw := snapshotSQLDB(t, db)
+	_, err := raw.Exec(
+		"UPDATE account SET expiration_epoch = 2 WHERE staking_key = ?",
+		expiredKey,
+	)
+	require.NoError(t, err)
+	return poolHash, expiredKey
+}
+
+func TestCalculateEpochBoundaryStakeLivePathExcludesExpiredAccount(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+	poolHash, expiredKey := seedBoundaryPathFixture(t, db)
+
+	calc := NewCalculator(db)
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Commit() }()
+	dist, err := calc.calculateStakeDistributionInTxn(
+		context.Background(), txn, 100, 3,
+	)
+	require.NoError(t, err)
+
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	require.Equal(t, uint64(100), dist.PoolStakes[pool])
+	require.Equal(
+		t,
+		uint64(2),
+		dist.DelegatorCount[pool],
+		"the expired credential is excluded while the active zero-stake credential counts",
+	)
+	require.Equal(t, uint64(100), dist.TotalStake)
+	require.Len(t, dist.StakeInputs, 1)
+	require.NotEqual(t, expiredKey, dist.StakeInputs[0].StakingKey)
+}
+
+func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		expiryEpoch      uint64
+		inactivityPeriod uint64
+	}{
+		{name: "CIP-0163 gate off"},
+		{
+			name:             "CIP-0163 gate on",
+			expiryEpoch:      3,
+			inactivityPeriod: 2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			seedBoundaryPathFixture(t, db)
+			calc := NewCalculator(db)
+
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 100,
+					Hash: bytes.Repeat([]byte{0x01}, 32),
+				},
+				BlockNumber: 1,
+			}, nil))
+			liveTxn := db.Transaction(false)
+			live, err := calc.calculateBoundaryStakeDistributionInTxn(
+				context.Background(),
+				liveTxn,
+				100,
+				0,
+				test.expiryEpoch,
+				test.inactivityPeriod,
+			)
+			require.NoError(t, err)
+			require.NoError(t, liveTxn.Commit())
+
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 101,
+					Hash: bytes.Repeat([]byte{0x02}, 32),
+				},
+				BlockNumber: 2,
+			}, nil))
+			historicalTxn := db.Transaction(false)
+			historical, err := calc.calculateBoundaryStakeDistributionInTxn(
+				context.Background(),
+				historicalTxn,
+				100,
+				0,
+				test.expiryEpoch,
+				test.inactivityPeriod,
+			)
+			require.NoError(t, err)
+			require.NoError(t, historicalTxn.Commit())
+
+			require.Equal(t, live.PoolStakes, historical.PoolStakes)
+			require.Equal(t, live.DelegatorCount, historical.DelegatorCount)
+			require.Equal(t, live.TotalStake, historical.TotalStake)
+		})
+	}
+}
+
+func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
+	db := setupTestDB(t)
+	seedSnapshotEpoch(t, db)
+
+	poolHash := bytes.Repeat([]byte{0xa7}, 28)
+	positiveKey := bytes.Repeat([]byte{0x17}, 28)
+	zeroKey := bytes.Repeat([]byte{0x18}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  positiveKey,
+			utxoAmounts: []types.Uint64{50},
+		},
+		{
+			stakingKey: zeroKey,
+		},
+	}, 100)
+
+	// Make the maintained live aggregate deliberately differ from the
+	// historical UTxO reconstruction. The authoritative SNAP-point path must
+	// consume this table directly; rebuilding history here is issue #2948.
+	raw := snapshotSQLDB(t, db)
+	_, err := raw.Exec(
+		"UPDATE reward_live_stake SET total_stake = '75' WHERE staking_key = ?",
+		positiveKey,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 100,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 1,
+	}, nil))
+
+	calc := NewCalculator(db)
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Commit() }()
+	dist, err := calc.calculateBoundaryStakeDistributionInTxn(
+		context.Background(), txn, 100, 0, 0, 0,
+	)
+	require.NoError(t, err)
+
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	require.Equal(t, uint64(75), dist.PoolStakes[pool])
+	require.Equal(t, uint64(2), dist.DelegatorCount[pool],
+		"zero-stake registered credentials still count as delegators")
+	require.Equal(t, uint64(75), dist.TotalStake)
+	require.Len(t, dist.StakeInputs, 1,
+		"zero-stake credentials are not persisted as reward inputs")
+}
+
+func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		setTip bool
+	}{
+		{
+			name:   "tip beyond requested slot",
+			setTip: true,
+		},
+		{
+			name: "no persisted tip",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			seedSnapshotEpoch(t, db)
+
+			poolHash := bytes.Repeat([]byte{0xa8}, 28)
+			positiveKey := bytes.Repeat([]byte{0x19}, 28)
+			zeroKey := bytes.Repeat([]byte{0x1a}, 28)
+			seedPoolAndDelegations(t, db, poolHash, []struct {
+				stakingKey  []byte
+				utxoAmounts []types.Uint64
+			}{
+				{
+					stakingKey:  positiveKey,
+					utxoAmounts: []types.Uint64{50},
+				},
+				{
+					stakingKey: zeroKey,
+				},
+			}, 100)
+
+			// Deliberately differ from the historical UTxO reconstruction so
+			// the selected branch is observable.
+			raw := snapshotSQLDB(t, db)
+			_, err := raw.Exec(
+				"UPDATE reward_live_stake SET total_stake = '75' WHERE staking_key = ?",
+				positiveKey,
+			)
+			require.NoError(t, err)
+			if test.setTip {
+				require.NoError(t, db.SetTip(ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 101,
+						Hash: bytes.Repeat([]byte{0x02}, 32),
+					},
+					BlockNumber: 2,
+				}, nil))
+			}
+
+			calc := NewCalculator(db)
+			txn := db.Transaction(false)
+			defer func() { _ = txn.Commit() }()
+			dist, err := calc.calculateBoundaryStakeDistributionInTxn(
+				context.Background(), txn, 100, 0, 0, 0,
+			)
+			require.NoError(t, err)
+
+			var pool lcommon.PoolKeyHash
+			copy(pool[:], poolHash)
+			require.Equal(t, uint64(50), dist.PoolStakes[pool])
+			require.Equal(t, uint64(2), dist.DelegatorCount[pool])
+			require.Equal(t, uint64(50), dist.TotalStake)
+			require.Len(t, dist.StakeInputs, 1)
+		})
+	}
 }
 
 func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
@@ -673,7 +1019,7 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 
 	poolHash := bytes.Repeat([]byte{0xee}, 28)
 	seedPoolAndDelegations(t, db, poolHash, nil, 100)
-	require.NoError(t, snapshotGormDB(t, db).Create(&[]models.RewardLiveStake{
+	seedRewardLiveStake(t, snapshotSQLDB(t, db), []models.RewardLiveStake{
 		{
 			CredentialTag:            0,
 			StakingKey:               bytes.Repeat([]byte{0x01}, 28),
@@ -694,7 +1040,7 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 			PoolDelegationBlockIndex: 0,
 			PoolDelegationCertIndex:  0,
 		},
-	}).Error)
+	})
 
 	calc := NewCalculator(db)
 	txn := db.Transaction(false)
@@ -703,6 +1049,7 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 		context.Background(),
 		txn,
 		1000,
+		0,
 	)
 	require.ErrorContains(t, err, "delegated stake overflow")
 	require.Nil(t, dist)
@@ -716,7 +1063,7 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 	poolB := bytes.Repeat([]byte{0xeb}, 28)
 	seedPoolAndDelegations(t, db, poolA, nil, 100)
 	seedPoolAndDelegations(t, db, poolB, nil, 100)
-	require.NoError(t, snapshotGormDB(t, db).Create(&[]models.RewardLiveStake{
+	seedRewardLiveStake(t, snapshotSQLDB(t, db), []models.RewardLiveStake{
 		{
 			CredentialTag:            0,
 			StakingKey:               bytes.Repeat([]byte{0x03}, 28),
@@ -737,7 +1084,7 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 			PoolDelegationBlockIndex: 0,
 			PoolDelegationCertIndex:  0,
 		},
-	}).Error)
+	})
 
 	calc := NewCalculator(db)
 	txn := db.Transaction(false)
@@ -746,7 +1093,55 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 		context.Background(),
 		txn,
 		1000,
+		0,
 	)
 	require.ErrorContains(t, err, "total active stake overflow")
 	require.Nil(t, dist)
+}
+
+func TestDedupeStakeInputsIsIndependentOfInputOrder(t *testing.T) {
+	poolA := bytes.Repeat([]byte{0x11}, 28)
+	poolB := bytes.Repeat([]byte{0x22}, 28)
+	credential := bytes.Repeat([]byte{0x31}, 28)
+	rows := []StakeInput{
+		{PoolKeyHash: poolB, StakingKey: credential, Stake: 70},
+		{PoolKeyHash: poolA, StakingKey: credential, Stake: 40},
+	}
+	first := dedupeStakeInputs(rows)
+	second := dedupeStakeInputs([]StakeInput{rows[1], rows[0]})
+	require.Equal(t, first, second)
+	require.Len(t, first, 1)
+	require.Equal(t, poolB, first[0].PoolKeyHash)
+	require.Equal(t, uint64(70), first[0].Stake)
+}
+
+func TestDedupeStakeInputsTieBreaks(t *testing.T) {
+	credential := bytes.Repeat([]byte{0x32}, 28)
+	poolA := bytes.Repeat([]byte{0x11}, 28)
+	poolB := bytes.Repeat([]byte{0x22}, 28)
+
+	t.Run("registered preference", func(t *testing.T) {
+		got := dedupeStakeInputs([]StakeInput{
+			{PoolKeyHash: poolA, StakingKey: credential, Stake: 40},
+			{
+				PoolKeyHash: poolA,
+				StakingKey:  credential,
+				Stake:       40,
+				Registered:  true,
+			},
+		})
+		require.Len(t, got, 1)
+		require.True(t, got[0].Registered)
+	})
+
+	t.Run("greatest stake then pool", func(t *testing.T) {
+		got := dedupeStakeInputs([]StakeInput{
+			{PoolKeyHash: poolB, StakingKey: credential, Stake: 40},
+			{PoolKeyHash: poolA, StakingKey: credential, Stake: 70},
+			{PoolKeyHash: poolB, StakingKey: credential, Stake: 70},
+		})
+		require.Len(t, got, 1)
+		require.Equal(t, poolB, got[0].PoolKeyHash)
+		require.Equal(t, uint64(70), got[0].Stake)
+	})
 }

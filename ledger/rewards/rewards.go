@@ -113,6 +113,39 @@ type Parameters struct {
 	// reward prefilter; final unregistered rewards are still routed away from
 	// spendable accounts at application time.
 	ProtocolMajorVersion uint64
+	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee).
+	// When non-nil, a pool's effective margin in the reward split is
+	// max(pool.Margin, MinPoolMargin), so a pool registered below the floor is
+	// paid out as if it registered at the floor. It is nil unless the operator
+	// sets a nonzero minPoolMargin AND the calculation is for Dijkstra or later;
+	// nil reproduces the pre-CIP-23 split byte-for-byte. Must be in [0, 1] when
+	// set.
+	MinPoolMargin *big.Rat
+	// PledgeLeverageEnabled turns on the CIP-50 pledge-leverage cap. It is a
+	// consensus-affecting feature gate that defaults off; enable it only on a
+	// network where every node also enables it.
+	PledgeLeverageEnabled bool
+	// PledgeLeverage is L, the maximum ratio of total stake to pledge before a
+	// pool's reward-eligible stake plateaus. It is used only when
+	// PledgeLeverageEnabled is true and must be in the range [1, 10000].
+	PledgeLeverage *big.Rat
+	// FullPotRewardsEnabled turns on CIP-0163 full-pot reward distribution: the
+	// entire available reward pot is apportioned across pools that earned a base
+	// reward (largest-remainder scaling of each pool's base reward), instead of
+	// returning the saturation/pledge/performance residual to reserves. It is a
+	// consensus-affecting feature gate that defaults off; enable it only on a
+	// network where every node also enables it. When off, Calculate is
+	// byte-for-byte identical to the pre-CIP-0163 calculation.
+	FullPotRewardsEnabled bool
+}
+
+// pledgeLeverageCap returns L for the CIP-50 pledge-leverage cap when the
+// feature is enabled, or nil when it is disabled (the pre-CIP-50 formula).
+func (p Parameters) pledgeLeverageCap() *big.Rat {
+	if !p.PledgeLeverageEnabled {
+		return nil
+	}
+	return p.PledgeLeverage
 }
 
 // Pots captures the pot values available at the start of reward calculation.
@@ -200,7 +233,11 @@ const (
 // reflects the reward calculation alone: reserves lose incentives and regain
 // rewards not paid or sent to treasury, treasury receives the tax and
 // unspendable rewards, and fees are cleared.
-func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error) {
+func Calculate(
+	pots Pots,
+	snapshot Snapshot,
+	params Parameters,
+) (*Result, error) {
 	if err := validateParameters(params); err != nil {
 		return nil, err
 	}
@@ -228,7 +265,11 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 			ErrInvalidParameters,
 		)
 	}
-	efficiency := rewardEfficiency(totalBlocks, expectedBlocks, params.Decentralization)
+	efficiency := rewardEfficiency(
+		totalBlocks,
+		expectedBlocks,
+		params.Decentralization,
+	)
 	incentives, err := floorMulChecked(
 		minRat(oneRat(), efficiency),
 		params.MonetaryExpansion,
@@ -241,14 +282,20 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 	if overflow {
 		return nil, fmt.Errorf("%w: reward pot overflow", ErrInvalidParameters)
 	}
-	treasuryTax, err := floorMulChecked(params.TreasuryExpansion, uintRat(totalRewardPot))
+	treasuryTax, err := floorMulChecked(
+		params.TreasuryExpansion,
+		uintRat(totalRewardPot),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate treasury tax: %w", err)
 	}
 	availableRewards := totalRewardPot - treasuryTax
 	treasuryAfterTax, overflow := addUint64(pots.Treasury, treasuryTax)
 	if overflow {
-		return nil, fmt.Errorf("%w: treasury tax overflow", ErrInvalidParameters)
+		return nil, fmt.Errorf(
+			"%w: treasury tax overflow",
+			ErrInvalidParameters,
+		)
 	}
 
 	totalCirculation := params.MaxLovelaceSupply - pots.Reserves
@@ -284,7 +331,12 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 		return pools[i].ID.String() < pools[j].ID.String()
 	})
 
-	for _, pool := range pools {
+	// Pass 1: compute each pool's base reward B_i (the pre-CIP-0163 pool
+	// reward) in canonical pool-ID order, accumulating the base totals used by
+	// the CIP-0163 full-pot apportionment below.
+	poolRewards := make([]PoolReward, len(pools))
+	baseTotals := make([]uint64, len(pools))
+	for i, pool := range pools {
 		poolReward, err := calculatePoolRewards(
 			pool,
 			availableRewards,
@@ -300,6 +352,47 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 				err,
 			)
 		}
+		poolRewards[i] = poolReward
+		baseTotals[i] = poolReward.PoolReward
+	}
+
+	// CIP-0163: when full-pot distribution is enabled, scale the base rewards
+	// up with the largest-remainder method so the per-pool totals sum to the
+	// entire available pot R, then re-derive each pool's leader reward from its
+	// scaled total. When no pool earned a base reward (W == 0) ApportionFullPot
+	// returns the base totals unchanged, so the whole pot falls through to
+	// reserves via the reconciliation below, matching the disabled path. The
+	// leader/member split reuses the same checked helpers as the disabled path,
+	// so the two paths cannot drift.
+	if params.FullPotRewardsEnabled {
+		scaled := ApportionFullPot(baseTotals, availableRewards)
+		for i := range poolRewards {
+			if scaled[i] == poolRewards[i].PoolReward {
+				continue
+			}
+			poolRewards[i].PoolReward = scaled[i]
+			leader, err := leaderRewardChecked(
+				scaled[i],
+				pools[i].Cost,
+				params.effectiveMargin(pools[i].Margin),
+				pools[i].OwnerStake,
+				pools[i].DelegatedStake,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"calculate leader reward for pool %s: %w",
+					pools[i].ID.String(),
+					err,
+				)
+			}
+			poolRewards[i].LeaderReward = leader
+		}
+	}
+
+	// Pass 2: credit each pool's leader and member rewards from its (possibly
+	// scaled) pool total, in the same order as the disabled path.
+	for i, pool := range pools {
+		poolReward := poolRewards[i]
 		result.PoolRewards = append(result.PoolRewards, poolReward)
 		result.poolAccounted = append(result.poolAccounted, 0)
 
@@ -329,7 +422,7 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 			amount, err := memberRewardChecked(
 				poolReward.PoolReward,
 				pool.Cost,
-				normalizedMargin(pool.Margin),
+				params.effectiveMargin(pool.Margin),
 				delegator.Stake,
 				pool.DelegatedStake,
 			)
@@ -371,7 +464,10 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 		result.PoolRewards[i] = poolReward
 	}
 
-	accounted, overflow := addUint64(result.EffectiveRewards, result.Unspendable)
+	accounted, overflow := addUint64(
+		result.EffectiveRewards,
+		result.Unspendable,
+	)
 	if overflow || accounted > result.AvailableRewards {
 		return nil, fmt.Errorf(
 			"%w: rewards exceed available pot",
@@ -513,7 +609,10 @@ func (r *Result) addUndistributedToReserves() error {
 func (r *Result) addUnspendableToTreasury() error {
 	treasury, overflow := addUint64(r.UpdatedPots.Treasury, r.Unspendable)
 	if overflow {
-		return fmt.Errorf("%w: unspendable treasury overflow", ErrInvalidParameters)
+		return fmt.Errorf(
+			"%w: unspendable treasury overflow",
+			ErrInvalidParameters,
+		)
 	}
 	r.UpdatedPots.Treasury = treasury
 	return nil
@@ -575,7 +674,11 @@ func (params Parameters) Validate() error {
 // it to the [0,1] interval and positive rejects a zero value. It returns an
 // ErrInvalidParameters error so callers can convert malformed snapshot/config
 // data into an error instead of dereferencing a nil *big.Rat.
-func validateRatParameter(name string, rat *big.Rat, unit, positive bool) error {
+func validateRatParameter(
+	name string,
+	rat *big.Rat,
+	unit, positive bool,
+) error {
 	if rat == nil {
 		return fmt.Errorf("%w: missing %s", ErrInvalidParameters, name)
 	}
@@ -587,6 +690,24 @@ func validateRatParameter(name string, rat *big.Rat, unit, positive bool) error 
 	}
 	if unit && rat.Cmp(oneRat()) > 0 {
 		return fmt.Errorf("%w: %s greater than one", ErrInvalidParameters, name)
+	}
+	return nil
+}
+
+// validateMinPoolMargin enforces that a set CIP-23 MinPoolMargin lies in [0, 1].
+// It is a no-op when MinPoolMargin is nil, so parameters built with the zero
+// value are unaffected.
+func validateMinPoolMargin(params Parameters) error {
+	if params.MinPoolMargin == nil {
+		return nil
+	}
+	if params.MinPoolMargin.Sign() < 0 ||
+		params.MinPoolMargin.Cmp(oneRat()) > 0 {
+		return fmt.Errorf(
+			"%w: min pool margin %s outside [0,1]",
+			ErrInvalidParameters,
+			params.MinPoolMargin.RatString(),
+		)
 	}
 	return nil
 }
@@ -619,10 +740,43 @@ func validateParameters(params Parameters) error {
 		}
 	}
 	if params.OptimalPoolCount == 0 {
-		return fmt.Errorf("%w: optimal pool count is zero", ErrInvalidParameters)
+		return fmt.Errorf(
+			"%w: optimal pool count is zero",
+			ErrInvalidParameters,
+		)
 	}
 	if params.EpochLength == 0 {
 		return fmt.Errorf("%w: epoch length is zero", ErrInvalidParameters)
+	}
+	if err := validateMinPoolMargin(params); err != nil {
+		return err
+	}
+	return validatePledgeLeverage(params)
+}
+
+// validatePledgeLeverage enforces the CIP-50 constraint that, when the
+// pledge-leverage feature is enabled, L is supplied and lies in [1, 10000]. It
+// is a no-op when the feature is disabled. Both Calculate (via
+// validateParameters) and CalculatePoolReward (via validatePoolRewardParameters)
+// run it, since a nil L reaching optimalPoolRewardChecked while enabled would
+// otherwise be silently ignored.
+func validatePledgeLeverage(params Parameters) error {
+	if !params.PledgeLeverageEnabled {
+		return nil
+	}
+	if params.PledgeLeverage == nil {
+		return fmt.Errorf(
+			"%w: pledge leverage enabled without a value",
+			ErrInvalidParameters,
+		)
+	}
+	if params.PledgeLeverage.Cmp(oneRat()) < 0 ||
+		params.PledgeLeverage.Cmp(big.NewRat(10_000, 1)) > 0 {
+		return fmt.Errorf(
+			"%w: pledge leverage %s outside [1, 10000]",
+			ErrInvalidParameters,
+			params.PledgeLeverage.RatString(),
+		)
 	}
 	return nil
 }
@@ -641,12 +795,18 @@ func validatePoolRewardParameters(params Parameters) error {
 	); err != nil {
 		return err
 	}
-	return validateRatParameter(
+	if err := validatePledgeLeverage(params); err != nil {
+		return err
+	}
+	if err := validateRatParameter(
 		"pledge influence",
 		params.PledgeInfluence,
 		false,
 		false,
-	)
+	); err != nil {
+		return err
+	}
+	return validateMinPoolMargin(params)
 }
 
 func validateSnapshot(snapshot Snapshot) error {
@@ -799,7 +959,10 @@ func validateCredentialEligibility(
 	return nil
 }
 
-func poolDelegatorStake(delegators []Delegator, credential Credential) (uint64, bool) {
+func poolDelegatorStake(
+	delegators []Delegator,
+	credential Credential,
+) (uint64, bool) {
 	for _, delegator := range delegators {
 		if delegator.Credential == credential {
 			return delegator.Stake, true
@@ -899,6 +1062,7 @@ func calculatePoolRewards(
 		pool.DelegatedStake,
 		pool.Pledge,
 		totalCirculation,
+		params.pledgeLeverageCap(),
 	)
 	if err != nil {
 		return PoolReward{}, err
@@ -915,7 +1079,7 @@ func calculatePoolRewards(
 	leader, err := leaderRewardChecked(
 		ret.PoolReward,
 		pool.Cost,
-		normalizedMargin(pool.Margin),
+		params.effectiveMargin(pool.Margin),
 		pool.OwnerStake,
 		pool.DelegatedStake,
 	)
@@ -926,13 +1090,24 @@ func calculatePoolRewards(
 	return ret, nil
 }
 
-// CalculatePoolReward re-derives a single pool's reward fields (OptimalReward,
-// PoolReward, LeaderReward, ApparentPerformance) from frozen snapshot inputs
-// using the same arithmetic Calculate applies per pool. It lets callers
-// validate persisted pool reward outputs against the inputs instead of trusting
-// the stored values. Member distribution (MemberRewardTotal, Undistributed) is
-// not derived here because it depends on per-delegator eligibility, not the
-// pool-level reward that leader and member payouts are computed from.
+// CalculatePoolReward re-derives a single pool's BASE reward fields
+// (OptimalReward, PoolReward, LeaderReward, ApparentPerformance) from frozen
+// snapshot inputs using the same arithmetic Calculate applies per pool. It lets
+// callers validate persisted pool reward outputs against the inputs instead of
+// trusting the stored values. Member distribution (MemberRewardTotal,
+// Undistributed) is not derived here because it depends on per-delegator
+// eligibility, not the pool-level reward that leader and member payouts are
+// computed from.
+//
+// The returned PoolReward is always the base (pre-CIP-0163) reward: it is a
+// single-pool computation and has no visibility into the pool set, so it cannot
+// know the full-pot apportionment. When Parameters.FullPotRewardsEnabled is set,
+// Calculate scales these base rewards across the whole pot, so its persisted
+// PoolReward/LeaderReward differ from this function's output. A caller
+// validating full-pot outputs must first collect every pool's base PoolReward
+// from this function, apply ApportionFullPot to obtain each pool's scaled total,
+// and then re-derive the leader split from that scaled total with LeaderReward
+// (this is exactly what precomputedRewardPoolRewardsMatchInputs does).
 //
 // It validates the pool-reward parameters it dereferences (Decentralization and
 // PledgeInfluence) before computing, so malformed snapshot/config data yields an
@@ -956,6 +1131,72 @@ func CalculatePoolReward(
 		totalBlocks,
 		params,
 	)
+}
+
+// ApportionFullPot implements the CIP-0163 full-pot distribution: it scales each
+// pool's base reward B_i up so the per-pool totals sum to the entire available
+// reward pot R exactly, using the largest-remainder (Hamilton) method on
+// integer lovelace. baseRewards holds each pool's B_i in the caller's canonical
+// pool ordering (Calculate sorts pools by ID ascending; the precompute verifier
+// sorts by key hash ascending, which is the same order). availableRewards is R.
+//
+// f_pool_exact(i) = B_i * R / W, where W = sum(B_i). Each pool receives
+// floor(B_i * R / W); the D = R - sum(floor) leftover lovelace go to the D pools
+// with the largest remainders (B_i * R) mod W, ties broken by ascending index
+// (i.e. ascending pool ID, matching the caller's sort). All arithmetic is
+// big.Int, so there is no floating point and no intermediate overflow; the
+// result sums to exactly R.
+//
+// If W == 0 (no pool earned a base reward) it returns a copy of baseRewards
+// unchanged and leaves the residual for the caller to return to reserves; the
+// caller is expected to guard this case explicitly.
+func ApportionFullPot(baseRewards []uint64, availableRewards uint64) []uint64 {
+	scaled := make([]uint64, len(baseRewards))
+	w := new(big.Int)
+	for _, b := range baseRewards {
+		w.Add(w, new(big.Int).SetUint64(b))
+	}
+	if w.Sign() == 0 {
+		copy(scaled, baseRewards)
+		return scaled
+	}
+	r := new(big.Int).SetUint64(availableRewards)
+	remainders := make([]*big.Int, len(baseRewards))
+	allocated := new(big.Int)
+	for i, b := range baseRewards {
+		// prod = B_i * R; q = floor(prod / W); rem = prod mod W.
+		prod := new(big.Int).Mul(new(big.Int).SetUint64(b), r)
+		q := new(big.Int)
+		rem := new(big.Int)
+		q.QuoRem(prod, w, rem)
+		// q <= B_i*R/W <= R (B_i <= W), so it fits uint64.
+		scaled[i] = q.Uint64()
+		remainders[i] = rem
+		allocated.Add(allocated, q)
+	}
+	// D = R - sum(floor); 0 <= D <= number of pools with B_i > 0.
+	d := new(big.Int).Sub(r, allocated)
+	if d.Sign() <= 0 {
+		return scaled
+	}
+	order := make([]int, len(baseRewards))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		ia, ib := order[a], order[b]
+		if cmp := remainders[ia].Cmp(remainders[ib]); cmp != 0 {
+			// Larger remainder first.
+			return cmp > 0
+		}
+		// Tie-break by ascending index (ascending pool ID).
+		return ia < ib
+	})
+	extra := int(d.Int64())
+	for k := 0; k < extra && k < len(order); k++ {
+		scaled[order[k]]++
+	}
+	return scaled
 }
 
 func expectedBlocks(params Parameters) *big.Rat {
@@ -1056,6 +1297,7 @@ func optimalPoolRewardChecked(
 	poolStake uint64,
 	pledge uint64,
 	totalStake uint64,
+	pledgeLeverage *big.Rat,
 ) (uint64, error) {
 	if totalStake == 0 || optimalPoolCount == 0 {
 		return 0, nil
@@ -1073,6 +1315,16 @@ func optimalPoolRewardChecked(
 		new(big.Int).SetUint64(totalStake),
 	)
 	s := minRat(sigma, z0)
+	// CIP-50: when pledgeLeverage (L) is set, a pool's reward-eligible stake is
+	// additionally capped at L*p (the pledge fraction times L), so sigma' =
+	// min(sigma, z0, L*p). A zero-pledge pool then has sigma' = 0 and earns no
+	// rewards. Because L >= 1 and poolStake always includes pledge, the capped
+	// sigma' still satisfies sigma' >= p', so the pledge-influence term below
+	// stays non-negative.
+	if pledgeLeverage != nil {
+		leverageCap := new(big.Rat).Mul(pledgeLeverage, pledgeRatio)
+		s = minRat(s, leverageCap)
+	}
 	p := minRat(pledgeRatio, z0)
 
 	left := new(big.Rat).Quo(
@@ -1122,7 +1374,10 @@ func leaderRewardChecked(
 	}
 	ret, overflow := addUint64(cost, marginReward)
 	if overflow {
-		return 0, fmt.Errorf("%w: leader reward overflow", ErrRewardAmountOverflow)
+		return 0, fmt.Errorf(
+			"%w: leader reward overflow",
+			ErrRewardAmountOverflow,
+		)
 	}
 	return ret, nil
 }
@@ -1146,6 +1401,75 @@ func MemberReward(
 		cost,
 		normalizedMargin(margin),
 		memberStake,
+		poolStake,
+	)
+}
+
+// MemberRewardWithParameters computes a member reward using the same effective
+// pool margin as Calculate. In particular, it applies the CIP-23 minimum pool
+// margin from params when one is enabled. Callers that validate rewards produced
+// by Calculate must use this form so their arithmetic cannot drift from the
+// authoritative reward split.
+func MemberRewardWithParameters(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	memberStake uint64,
+	poolStake uint64,
+	params Parameters,
+) (uint64, error) {
+	return memberRewardChecked(
+		poolReward,
+		cost,
+		params.effectiveMargin(margin),
+		memberStake,
+		poolStake,
+	)
+}
+
+// LeaderReward computes a pool operator's leader reward from the pool's total
+// reward, fixed cost, margin, the owner (pledge) stake, and the pool's total
+// delegated stake, using the plainly normalized margin (no CIP-23 floor). It is
+// the leader-side sibling of MemberReward. Callers that must match Calculate's
+// authoritative split when the CIP-23 minimum pool margin may be active should
+// use LeaderRewardWithParameters instead.
+func LeaderReward(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	ownerStake uint64,
+	poolStake uint64,
+) (uint64, error) {
+	return leaderRewardChecked(
+		poolReward,
+		cost,
+		normalizedMargin(margin),
+		ownerStake,
+		poolStake,
+	)
+}
+
+// LeaderRewardWithParameters computes a leader reward using the same effective
+// pool margin as Calculate, applying the CIP-23 minimum pool margin from params
+// when one is enabled. It is the leader-side sibling of MemberRewardWithParameters.
+// Under CIP-0163 full-pot distribution the pool total is the apportioned reward
+// rather than the base reward, so the precompute-reuse validator computes the
+// leader split from the scaled total via this form; using it (rather than the
+// unfloored LeaderReward) keeps the validator consistent with Calculate when both
+// CIP-23 and full-pot are active.
+func LeaderRewardWithParameters(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	ownerStake uint64,
+	poolStake uint64,
+	params Parameters,
+) (uint64, error) {
+	return leaderRewardChecked(
+		poolReward,
+		cost,
+		params.effectiveMargin(margin),
+		ownerStake,
 		poolStake,
 	)
 }
@@ -1197,7 +1521,11 @@ func floorRatChecked(value *big.Rat) (uint64, error) {
 	den := value.Denom()
 	q := new(big.Int).Quo(num, den)
 	if !q.IsUint64() {
-		return 0, fmt.Errorf("%w: floor %s", ErrRewardAmountOverflow, q.String())
+		return 0, fmt.Errorf(
+			"%w: floor %s",
+			ErrRewardAmountOverflow,
+			q.String(),
+		)
 	}
 	return q.Uint64(), nil
 }
@@ -1207,6 +1535,26 @@ func minRat(a, b *big.Rat) *big.Rat {
 		return new(big.Rat).Set(a)
 	}
 	return new(big.Rat).Set(b)
+}
+
+func maxRat(a, b *big.Rat) *big.Rat {
+	if a.Cmp(b) >= 0 {
+		return new(big.Rat).Set(a)
+	}
+	return new(big.Rat).Set(b)
+}
+
+// effectiveMargin returns the pool margin used in the reward split, applying the
+// CIP-23 minimum pool margin floor when set: max(normalizedMargin(margin),
+// MinPoolMargin). When MinPoolMargin is nil (feature off or pre-Dijkstra) it
+// returns normalizedMargin(margin) unchanged, so the split is byte-for-byte the
+// pre-CIP-23 calculation. A nil pool margin is treated as 0.
+func (p Parameters) effectiveMargin(margin *big.Rat) *big.Rat {
+	m := normalizedMargin(margin)
+	if p.MinPoolMargin == nil {
+		return m
+	}
+	return maxRat(m, p.MinPoolMargin)
 }
 
 func uintRat(v uint64) *big.Rat {

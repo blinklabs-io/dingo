@@ -133,7 +133,11 @@ func TestEmbedFS_AllNetworks(t *testing.T) {
 			}
 			for _, expectedFile := range expectedFiles {
 				if !foundFiles[expectedFile] {
-					t.Errorf("expected to find %s in %s directory", expectedFile, network)
+					t.Errorf(
+						"expected to find %s in %s directory",
+						expectedFile,
+						network,
+					)
 				}
 			}
 			// Verify config can be loaded

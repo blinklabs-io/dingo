@@ -16,10 +16,10 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -82,7 +82,17 @@ func TestCborArrayHeaderLen(t *testing.T) {
 		},
 		{
 			name: "uint64 length",
-			data: []byte{gcbor.CborTypeArray + 27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00},
+			data: []byte{
+				gcbor.CborTypeArray + 27,
+				0x00,
+				0x00,
+				0x00,
+				0x00,
+				0x00,
+				0x01,
+				0x00,
+				0x00,
+			},
 			want: 9,
 		},
 		{
@@ -136,7 +146,11 @@ func TestCborArrayHeaderLen(t *testing.T) {
 				t.Fatalf("cborArrayHeaderLen returned error: %v", err)
 			}
 			if got != test.want {
-				t.Fatalf("unexpected header len: got %d want %d", got, test.want)
+				t.Fatalf(
+					"unexpected header len: got %d want %d",
+					got,
+					test.want,
+				)
 			}
 		})
 	}
@@ -216,7 +230,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
-	// SetPluginOption and the in-memory schema migration.
+	// instance-local provider setup and the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
 		"..",
@@ -379,7 +393,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 ) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
-	// SetPluginOption and the in-memory schema migration.
+	// instance-local provider setup and the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
 		"..",
@@ -483,6 +497,137 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.True(t, captured.ManualBlockProcessing)
 }
 
+// TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot
+// feature gate flows from the loaded config into the load-mode ledger config,
+// so `dingo load` computes the same reward state as an enabled serve node
+// instead of the legacy residual-to-reserves behavior.
+func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stopAfterCapture := errors.New("stop after ledger config capture")
+
+	run := func(enabled bool) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		oldNewLedgerStateForLoad := newLedgerStateForLoad
+		newLedgerStateForLoad = func(
+			cfg ledger.LedgerStateConfig,
+		) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stopAfterCapture
+		}
+		t.Cleanup(func() {
+			newLedgerStateForLoad = oldNewLedgerStateForLoad
+		})
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                                "preview",
+				FullPotRewardsEnabled:                  enabled,
+				UnsafeFullPotRewardsOnStandardNetworks: enabled,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stopAfterCapture)
+		return captured
+	}
+
+	require.True(t, run(true).FullPotRewardsEnabled)
+	require.False(t, run(false).FullPotRewardsEnabled)
+}
+
+func TestLoadWithDBRejectsFullPotRewardsOnStandardNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := LoadWithDB(
+		context.Background(),
+		&config.Config{
+			Network:               "preview",
+			FullPotRewardsEnabled: true,
+		},
+		logger,
+		"unused",
+		nil,
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+	)
+}
+
+func TestLoadWithDBRejectsFullPotRewardsFromCardanoConfigNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, test := range []struct {
+		name         string
+		network      string
+		networkMagic uint32
+	}{
+		{name: "configured identity unset"},
+		{
+			name:         "configured identity claims custom network",
+			network:      "devnet",
+			networkMagic: 42,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := LoadWithDB(
+				context.Background(),
+				&config.Config{
+					Network:               test.network,
+					NetworkMagic:          test.networkMagic,
+					CardanoConfig:         "preview/config.json",
+					FullPotRewardsEnabled: true,
+				},
+				logger,
+				"unused",
+				nil,
+			)
+			require.ErrorContains(
+				t,
+				err,
+				"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+			)
+		})
+	}
+}
+
+// TestLoadWithDBPropagatesDelegatorInactivity verifies that load mode
+// (`dingo load`) sets LedgerStateConfig.DelegatorInactivityEnabled /
+// DelegatorInactivity from the operator config, matching serve mode, since a
+// mismatch between load and serve would diverge consensus on replay.
+func TestLoadWithDBPropagatesDelegatorInactivity(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := errors.New("stop after ledger config capture")
+	run := func(enabled bool, epochs uint64) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		old := newLedgerStateForLoad
+		newLedgerStateForLoad = func(cfg ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stop
+		}
+		t.Cleanup(func() { newLedgerStateForLoad = old })
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                    "preview",
+				DelegatorInactivityEnabled: enabled,
+				DelegatorInactivity:        epochs,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stop)
+		return captured
+	}
+	on := run(true, 90)
+	require.True(t, on.DelegatorInactivityEnabled)
+	require.Equal(t, uint64(90), on.DelegatorInactivity)
+	require.False(t, run(false, 0).DelegatorInactivityEnabled)
+}
+
 // TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
 // recorded failures reports success, so a clean load is never turned into an
 // error.
@@ -547,7 +692,7 @@ func TestCaptureLoadGenesisSnapshot_BlockProducerFatal(t *testing.T) {
 	mgr := snapshot.NewManager(db, nil, logger)
 
 	// Close the database so the capture call fails deterministically.
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDB(db))
 
 	err := captureLoadGenesisSnapshot(
 		context.Background(),
@@ -567,7 +712,7 @@ func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr := snapshot.NewManager(db, nil, logger)
 
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDB(db))
 
 	err := captureLoadGenesisSnapshot(
 		context.Background(),
@@ -595,7 +740,7 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	t *testing.T,
 ) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state (see
-	// database.go:164), so concurrent test runs race on SetPluginOption and
+	// database construction, so concurrent test runs share no provider options and
 	// the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
@@ -689,7 +834,7 @@ func decodeImmutableBlockHeader(
 // TestRunPlannerStats_WithSQLiteStore verifies that RunPlannerStats succeeds
 // against an in-memory SQLite database and populates sqlite_stat1.
 func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
-	db := newTestDB(t)
+	db := newFileTestDB(t)
 	require.NoError(t, db.Metadata().ImportUtxos([]models.Utxo{
 		{
 			TxId:      []byte("run_planner_stats_tx_id_00000001"),
@@ -701,13 +846,12 @@ func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
 
 	require.NoError(t, RunPlannerStats(db, slog.Default()))
 
-	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "test database should use SQLite metadata")
-
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	var count int64
-	err := sqliteStore.DB().Raw(
+	err = raw.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_stat1",
-	).Scan(&count).Error
+	).Scan(&count)
 	require.NoError(t, err)
 	assert.Positive(t, count, "sqlite_stat1 should be populated")
 }
@@ -715,25 +859,24 @@ func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
 // TestRunPlannerStats_Idempotent verifies that repeated planner-stat
 // maintenance stays safe for resume/restart paths.
 func TestRunPlannerStats_Idempotent(t *testing.T) {
-	db := newTestDB(t)
+	db := newFileTestDB(t)
 
 	require.NoError(t, RunPlannerStats(db, slog.Default()))
 	require.NoError(t, RunPlannerStats(db, slog.Default()))
 
-	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "test database should use SQLite metadata")
-
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	var count int64
-	err := sqliteStore.DB().Raw(
+	err = raw.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_stat1",
-	).Scan(&count).Error
+	).Scan(&count)
 	require.NoError(t, err)
 	assert.Positive(t, count, "sqlite_stat1 should remain populated")
 }
 
 func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
 	db := newTestDB(t)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDB(db))
 
 	err := RunPlannerStats(db, slog.Default())
 	require.Error(t, err)

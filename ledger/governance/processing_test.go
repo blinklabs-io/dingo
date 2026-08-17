@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 func testHash32(seed string) []byte {
@@ -105,6 +106,73 @@ func TestMapVoterType(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestProcessDRepActivityCertificates(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	credentialBytes := testHash28("shared-drep-hash")
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        credentialBytes,
+		AddedSlot:         10,
+		LastActivityEpoch: 5,
+		ExpiryEpoch:       25,
+		Active:            true,
+	}))
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     1,
+		Credential:        credentialBytes,
+		AddedSlot:         20,
+		LastActivityEpoch: 6,
+		ExpiryEpoch:       26,
+		Active:            true,
+	}))
+
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.RegistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: credentialHash,
+			},
+		},
+		&lcommon.UpdateDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeUpdateDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeScriptHash,
+				Credential: credentialHash,
+			},
+		},
+	)
+	require.True(t, HasDRepActivityCertificates(tx))
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ProcessDRepActivityCertificates(tx, 100, 20, db, txn)
+	}))
+
+	keyDRep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), keyDRep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), keyDRep.ExpiryEpoch)
+
+	scriptDRep, err := db.GetDrepByCredential(1, credentialBytes, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), scriptDRep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), scriptDRep.ExpiryEpoch)
+
+	expired, err := db.GetExpiredDReps(100, nil)
+	require.NoError(t, err)
+	assert.Empty(t, expired)
 }
 
 func TestExtractGovActionInfo_ParameterChange(t *testing.T) {
@@ -276,14 +344,12 @@ func TestExtractGovActionInfo_Info(t *testing.T) {
 }
 
 func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
-	db, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	proposalTxHash := testHash32("proposal")
 	returnAddress := append([]byte{0xE1}, testHash28("reward-account")...)
@@ -360,14 +426,12 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	const (
 		proposalEpoch     = uint64(100)

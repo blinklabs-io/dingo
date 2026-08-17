@@ -546,6 +546,102 @@ func (b *Blockfrost) handleAssetAddresses(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handlePoolsRetiring handles GET /api/v0/pools/retiring and returns
+// the paginated list of pools with a pending retirement.
+func (b *Blockfrost) handlePoolsRetiring(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, errMsg := ParsePaginationStrict(r)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, "Bad Request", errMsg)
+		return
+	}
+	pools, total, err := b.node.PoolsRetiring(params)
+	if err != nil {
+		b.logger.Error(
+			"failed to list retiring pools",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve retiring pools",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]PoolRetiringResponse, 0, len(pools))
+	for _, pool := range pools {
+		resp = append(resp, PoolRetiringResponse(pool))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handlePoolMetadata handles GET /api/v0/pools/{pool_id}/metadata and
+// returns the pool's registered metadata.
+func (b *Blockfrost) handlePoolMetadata(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	poolID := r.PathValue("pool_id")
+	info, err := b.node.PoolMetadata(poolID)
+	if err != nil {
+		if errors.Is(err, ErrInvalidPoolID) {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Invalid or malformed pool id format.",
+			)
+			return
+		}
+		if errors.Is(err, models.ErrPoolNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested component has not been found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get pool metadata",
+			"pool_id", poolID,
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve pool metadata",
+		)
+		return
+	}
+	// A pool without a registered metadata anchor answers with an
+	// empty JSON object, matching hosted Blockfrost.
+	if info.URL == nil {
+		writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
+	resp := PoolMetadataResponse{
+		PoolID:      info.PoolID,
+		Hex:         info.Hex,
+		URL:         info.URL,
+		Hash:        info.Hash,
+		Ticker:      info.Ticker,
+		Name:        info.Name,
+		Description: info.Description,
+		Homepage:    info.Homepage,
+	}
+	if info.Error != nil {
+		respErr := OffchainFetchErrorResponse(*info.Error)
+		resp.Error = &respErr
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handlePoolsExtended handles GET /api/v0/pools/extended
 // and returns active pools with extended details.
 func (b *Blockfrost) handlePoolsExtended(
@@ -607,33 +703,32 @@ func (b *Blockfrost) handlePoolsExtended(
 
 	resp := make([]PoolExtendedResponse, 0, end-start)
 	for _, pool := range pools[start:end] {
-		relays := make([]PoolRelayResponse, 0, len(pool.Relays))
-		for _, relay := range pool.Relays {
-			tmpRelay := PoolRelayResponse{}
-			if relay.IPv4 != "" {
-				tmpRelay.IPv4 = &relay.IPv4
+		var metadata *PoolExtendedMetadataResponse
+		if pool.Metadata != nil {
+			metadata = &PoolExtendedMetadataResponse{
+				URL:         pool.Metadata.URL,
+				Hash:        pool.Metadata.Hash,
+				Ticker:      pool.Metadata.Ticker,
+				Name:        pool.Metadata.Name,
+				Description: pool.Metadata.Description,
+				Homepage:    pool.Metadata.Homepage,
 			}
-			if relay.IPv6 != "" {
-				tmpRelay.IPv6 = &relay.IPv6
+			if pool.Metadata.Error != nil {
+				respErr := OffchainFetchErrorResponse(*pool.Metadata.Error)
+				metadata.Error = &respErr
 			}
-			if relay.DNS != "" {
-				tmpRelay.DNS = &relay.DNS
-			}
-			if relay.Port != nil {
-				tmpRelay.Port = relay.Port
-			}
-			relays = append(relays, tmpRelay)
 		}
 		resp = append(resp, PoolExtendedResponse{
 			PoolID:         pool.PoolID,
 			Hex:            pool.Hex,
-			VrfKey:         pool.VrfKey,
 			ActiveStake:    pool.ActiveStake,
 			LiveStake:      pool.LiveStake,
+			BlocksMinted:   pool.BlocksMinted,
+			LiveSaturation: pool.LiveSaturation,
 			DeclaredPledge: pool.DeclaredPledge,
-			FixedCost:      pool.FixedCost,
 			MarginCost:     pool.MarginCost,
-			Relays:         relays,
+			FixedCost:      pool.FixedCost,
+			Metadata:       metadata,
 		})
 	}
 
@@ -683,6 +778,139 @@ func (b *Blockfrost) handleDRep(
 	}
 
 	writeJSON(w, http.StatusOK, DRepResponse(drep))
+}
+
+// handleDReps handles GET /api/v0/governance/dreps and returns the
+// paginated list of registered DReps.
+func (b *Blockfrost) handleDReps(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	pagination, errMsg := ParsePaginationStrict(r)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, "Bad Request", errMsg)
+		return
+	}
+	params := DRepListParams{Pagination: pagination}
+
+	query := r.URL.Query()
+	switch query.Get("order_by") {
+	case "", "amount":
+		params.OrderByAmount = query.Get("order_by") == "amount"
+	default:
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"querystring/order_by must be equal to one of the allowed values",
+		)
+		return
+	}
+	for _, flag := range []struct {
+		name string
+		dest **bool
+	}{
+		{"retired", &params.Retired},
+		{"expired", &params.Expired},
+	} {
+		switch query.Get(flag.name) {
+		case "":
+		case "true":
+			v := true
+			*flag.dest = &v
+		case "false":
+			v := false
+			*flag.dest = &v
+		default:
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"querystring/"+flag.name+" must be boolean",
+			)
+			return
+		}
+	}
+
+	items, total, err := b.node.DReps(params)
+	if err != nil {
+		b.logger.Error(
+			"failed to list dreps",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve DReps",
+		)
+		return
+	}
+
+	SetPaginationHeaders(w, total, pagination)
+	resp := make([]DRepListItemResponse, 0, len(items))
+	for _, item := range items {
+		var metadata *DRepMetadataResponse
+		if item.Metadata != nil {
+			metadata = &DRepMetadataResponse{
+				URL:          item.Metadata.URL,
+				Hash:         item.Metadata.Hash,
+				JSONMetadata: item.Metadata.JSONMetadata,
+				Bytes:        item.Metadata.Bytes,
+			}
+		}
+		resp = append(resp, DRepListItemResponse{
+			DRepID:          item.DRepID,
+			Hex:             item.Hex,
+			Amount:          item.Amount,
+			HasScript:       item.HasScript,
+			Retired:         item.Retired,
+			Expired:         item.Expired,
+			LastActiveEpoch: item.LastActiveEpoch,
+			Metadata:        metadata,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAddress handles GET /api/v0/addresses/{address}
+// and returns summary information for an address.
+func (b *Blockfrost) handleAddress(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	address := r.PathValue("address")
+	info, err := b.node.Address(address)
+	if err != nil {
+		if errors.Is(err, ErrAddressNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested component has not been found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get address",
+			"address", address,
+			"error", err,
+		)
+		writeNodeQueryError(
+			w,
+			err,
+			"failed to retrieve address",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AddressResponse{
+		Address:      info.Address,
+		Amount:       convertAddressAmounts(info.Amount),
+		StakeAddress: info.StakeAddress,
+		Type:         info.Type,
+		Script:       info.Script,
+	})
 }
 
 // handleAddressUTXOs handles GET /api/v0/addresses/{address}/utxos
@@ -1520,8 +1748,8 @@ func parsePaginationOrWriteError(
 	w http.ResponseWriter,
 	r *http.Request,
 ) (PaginationParams, bool) {
-	params, err := ParsePagination(r)
-	if err != nil {
+	params, errMsg := ParsePaginationStrict(r)
+	if errMsg != "" {
 		writeError(
 			w,
 			http.StatusBadRequest,
@@ -1587,6 +1815,15 @@ func parseDRepIdentifier(
 	if id == "" {
 		return DRepCredential{}, errors.New("empty DRep identifier")
 	}
+	// The special DReps carry no credential hash.
+	switch id {
+	case "drep_always_abstain":
+		drepType := models.DrepTypeAlwaysAbstain
+		return DRepCredential{ID: id, Predefined: &drepType}, nil
+	case "drep_always_no_confidence":
+		drepType := models.DrepTypeAlwaysNoConfidence
+		return DRepCredential{ID: id, Predefined: &drepType}, nil
+	}
 	// Blockfrost accepts the raw credential hash as hex. Storage uses the
 	// raw 28-byte hash for lookup.
 	if len(id) == drepCredentialHexLen {
@@ -1644,27 +1881,25 @@ func parseDRepIdentifier(
 }
 
 func parseCIP129DRepScriptFlag(header byte) (bool, error) {
+	// CIP-129 header: high nibble is the governance credential kind
+	// (0x2 = DRep), low nibble the credential type (0x2 = key hash,
+	// 0x3 = script hash) — so 0x22 is a key DRep and 0x23 a script
+	// DRep.
 	voterType := header >> 4
 	credentialNibble := header & 0x0f
-	switch voterType {
-	case 2:
-		if credentialNibble != 0x2 {
-			return false, fmt.Errorf(
-				"invalid DRep key credential nibble 0x%x",
-				credentialNibble,
-			)
-		}
+	if voterType != 0x2 {
+		return false, fmt.Errorf("invalid DRep voter type %d", voterType)
+	}
+	switch credentialNibble {
+	case 0x2:
 		return false, nil
-	case 3:
-		if credentialNibble != 0x3 {
-			return false, fmt.Errorf(
-				"invalid DRep script credential nibble 0x%x",
-				credentialNibble,
-			)
-		}
+	case 0x3:
 		return true, nil
 	default:
-		return false, fmt.Errorf("invalid DRep voter type %d", voterType)
+		return false, fmt.Errorf(
+			"invalid DRep credential nibble 0x%x",
+			credentialNibble,
+		)
 	}
 }
 
@@ -1678,7 +1913,7 @@ func writeNodeQueryError(
 			w,
 			http.StatusBadRequest,
 			"Bad Request",
-			"Invalid address provided.",
+			"Invalid address for this network or malformed address format.",
 		)
 		return
 	}

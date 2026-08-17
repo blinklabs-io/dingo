@@ -35,10 +35,10 @@ func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
 	stakeCred := testBytes(28, 2)
 	abstainStakeCred := testBytes(28, 3)
 
-	require.NoError(t, store.DB().Create(&models.Drep{
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
-	}).Error)
+	}))
 	seedDRepStake(
 		t, store, stakeCred, drepCred, models.DrepTypeAddrKeyHash, 60, 1,
 	)
@@ -57,7 +57,7 @@ func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
 	}
 	require.NoError(t, tallyDRepVotes(&TallyContext{DB: db}, votes, lazyTally))
 
-	state, err := LoadDRepVotingState(db, nil, 0)
+	state, err := LoadDRepVotingState(db, nil, 0, false)
 	require.NoError(t, err)
 	precomputedTally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -86,7 +86,7 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 		t, store, stakeCred, nil, models.DrepTypeAlwaysNoConfidence, 30, 3,
 	)
 
-	state, err := LoadDRepVotingState(db, nil, 0)
+	state, err := LoadDRepVotingState(db, nil, 0, false)
 	require.NoError(t, err)
 
 	noConfidence := &ProposalTally{

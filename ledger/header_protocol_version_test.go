@@ -50,7 +50,11 @@ func shelleyGenesisJSON(networkId string, magic uint32) string {
 	}`, networkId, magic)
 }
 
-func newLedgerStateForNetwork(t *testing.T, networkId string, magic uint32) *LedgerState {
+func newLedgerStateForNetwork(
+	t *testing.T,
+	networkId string,
+	magic uint32,
+) *LedgerState {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
@@ -66,7 +70,10 @@ func newLedgerStateForNetwork(t *testing.T, networkId string, magic uint32) *Led
 
 // shelleyHeaderWithMajor builds a Shelley-family header (covers Shelley,
 // Allegra, Mary, Alonzo) with the given protocol major version.
-func shelleyHeaderWithMajor(t *testing.T, major uint64) *shelley.ShelleyBlockHeader {
+func shelleyHeaderWithMajor(
+	t *testing.T,
+	major uint64,
+) *shelley.ShelleyBlockHeader {
 	t.Helper()
 	return &shelley.ShelleyBlockHeader{
 		Body: shelley.ShelleyBlockHeaderBody{
@@ -77,7 +84,10 @@ func shelleyHeaderWithMajor(t *testing.T, major uint64) *shelley.ShelleyBlockHea
 
 // babbageHeaderWithMajor builds a Babbage-family header (covers Babbage,
 // Conway) with the given protocol major version.
-func babbageHeaderWithMajor(t *testing.T, major uint64) *babbage.BabbageBlockHeader {
+func babbageHeaderWithMajor(
+	t *testing.T,
+	major uint64,
+) *babbage.BabbageBlockHeader {
 	t.Helper()
 	return &babbage.BabbageBlockHeader{
 		Body: babbage.BabbageBlockHeaderBody{
@@ -91,7 +101,10 @@ func babbageHeaderWithMajor(t *testing.T, major uint64) *babbage.BabbageBlockHea
 // dijkstraHeaderWithMajor builds a Dijkstra header (a distinct concrete
 // type that embeds a Babbage header) with the given protocol major
 // version.
-func dijkstraHeaderWithMajor(t *testing.T, major uint64) *dijkstra.DijkstraBlockHeader {
+func dijkstraHeaderWithMajor(
+	t *testing.T,
+	major uint64,
+) *dijkstra.DijkstraBlockHeader {
 	t.Helper()
 	return &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, major),
@@ -386,7 +399,9 @@ func TestLedgerStateIsMainnet_NetworkIdNotMagic(t *testing.T) {
 // confirms the fail-closed contract reaches the wiring layer:
 // validateBlockHeaderProtocolVersion must return an error rather than
 // validating against an undeterminable network identity.
-func TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig(t *testing.T) {
+func TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig(
+	t *testing.T,
+) {
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -404,7 +419,9 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig
 	require.Error(t, err)
 }
 
-func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(t *testing.T) {
+func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
+	t *testing.T,
+) {
 	ls := newLedgerStateForNetwork(t, "Mainnet", byron.MainnetProtocolMagic)
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
@@ -421,7 +438,9 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(t *testing
 	require.True(t, errors.As(err, &typed))
 }
 
-func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(t *testing.T) {
+func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
+	t *testing.T,
+) {
 	// End-to-end: a node in the Dijkstra era (pparams major 12) on mainnet
 	// must reject a Dijkstra header whose protocol major is more than one
 	// ahead, exercising the GetProtocolVersion Dijkstra case, isMainnet,
@@ -442,7 +461,9 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(t *testin
 	require.True(t, errors.As(err, &typed))
 }
 
-func TestLedgerStateValidateBlockHeaderProtocolVersion_TestnetAllows(t *testing.T) {
+func TestLedgerStateValidateBlockHeaderProtocolVersion_TestnetAllows(
+	t *testing.T,
+) {
 	ls := newLedgerStateForNetwork(t, "Testnet", 42)
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{

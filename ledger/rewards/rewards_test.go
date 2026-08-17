@@ -51,8 +51,18 @@ func TestCalculateMatchesShelleyPoolRewardFormula(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: member, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -89,7 +99,9 @@ func TestCalculateMatchesShelleyPoolRewardFormula(t *testing.T) {
 	require.Equal(t, uint64(37049), result.AccountRewards[1].Amount)
 }
 
-func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(t *testing.T) {
+func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(
+	t *testing.T,
+) {
 	poolID := testPoolID(1)
 	ownerKey := testCredential(0, 2)
 	scriptWithOwnerHash := testCredential(1, 2)
@@ -117,7 +129,12 @@ func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(t *testing
 						ownerKey: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerKey, Stake: 0, Registered: true, Eligible: true},
+						{
+							Credential: ownerKey,
+							Stake:      0,
+							Registered: true,
+							Eligible:   true,
+						},
 						{
 							Credential: scriptWithOwnerHash,
 							Stake:      1_000,
@@ -165,7 +182,12 @@ func TestCalculatePledgeFailureZerosPoolReward(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -205,8 +227,18 @@ func TestCalculatePoolRewardAtOrBelowCostPaysOnlyLeader(t *testing.T) {
 						leader: {},
 					},
 					Delegators: []Delegator{
-						{Credential: leader, Stake: 500, Registered: true, Eligible: true},
-						{Credential: member, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: leader,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -284,7 +316,12 @@ func TestCalculateTreasuryTaxUsesIncentivesAndFees(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -327,7 +364,12 @@ func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -341,7 +383,9 @@ func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
 	require.Equal(t, uint64(1_000_000), result.Incentives)
 }
 
-func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T) {
+func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
+	t *testing.T,
+) {
 	poolID := testPoolID(1)
 	owner := testCredential(0, 2)
 	params := testParams()
@@ -363,7 +407,12 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T)
 					owner: {},
 				},
 				Delegators: []Delegator{
-					{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+					{
+						Credential: owner,
+						Stake:      500,
+						Registered: true,
+						Eligible:   true,
+					},
 				},
 			},
 		},
@@ -422,8 +471,18 @@ func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
-						{Credential: member, Stake: 500, Registered: false, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -479,8 +538,18 @@ func TestCalculatePotDeltasMatchReferenceSemantics(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: member, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -571,8 +640,18 @@ func TestCalculatePreBabbageFilteredRewardsReturnToReserves(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
-						{Credential: member, Stake: 500, Registered: false, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -618,8 +697,18 @@ func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: false},
-						{Credential: member, Stake: 500, Registered: true, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -637,7 +726,9 @@ func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
 	require.Equal(t, uint64(83_342), result.UpdatedPots.Treasury)
 }
 
-func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(t *testing.T) {
+func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(
+	t *testing.T,
+) {
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -666,8 +757,18 @@ func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(t *testi
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: true},
-						{Credential: member, Stake: 500, Registered: false, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -712,8 +813,18 @@ func TestCalculateShelleyFiltersMultipleRewardsForSameCredential(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -762,7 +873,12 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -781,7 +897,12 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -803,7 +924,9 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
 }
 
-func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) {
+func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(
+	t *testing.T,
+) {
 	shared := testCredential(0, 3)
 	ownerA := testCredential(0, 1)
 	ownerB := testCredential(0, 2)
@@ -833,8 +956,18 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: false, Eligible: false},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -853,7 +986,12 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -874,7 +1012,9 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
 }
 
-func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(t *testing.T) {
+func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
+	t *testing.T,
+) {
 	shared := testCredential(0, 3)
 	ownerA := testCredential(0, 1)
 	ownerB := testCredential(0, 2)
@@ -904,8 +1044,18 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -924,7 +1074,12 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -944,7 +1099,9 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
 }
 
-func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(t *testing.T) {
+func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(
+	t *testing.T,
+) {
 	owner := testCredential(0, 2)
 	shared := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -972,8 +1129,18 @@ func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(t *testing.T
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -1023,7 +1190,12 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -1042,7 +1214,12 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -1092,7 +1269,12 @@ func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -1110,7 +1292,12 @@ func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -1853,8 +2040,18 @@ func TestCalculateRejectsUnspendableTreasuryOverflow(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
-						{Credential: member, Stake: 500, Registered: false, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -1910,4 +2107,548 @@ func testPoolID(fill byte) PoolID {
 		hash[i] = fill
 	}
 	return hash
+}
+
+// --- CIP-23 minimum pool margin ---
+
+// minMarginCalc runs Calculate for a single pool sized to exercise both the
+// leader and member margin split. Pledge/owner stake are 100 of 1000 total, so
+// the owner fraction (0.1) makes the leader margin term matter; cost 1000 with a
+// ~70000 pool reward leaves a large variable reward to split. margin is the
+// pool's registered margin; minPoolMargin is the CIP-23 floor (nil = off).
+func minMarginCalc(margin, minPoolMargin *big.Rat) (*Result, error) {
+	owner := testCredential(0, 2)
+	member := testCredential(0, 3)
+	params := testParams()
+	params.MinPoolMargin = minPoolMargin
+	return Calculate(
+		Pots{Reserves: 100_000_000},
+		Snapshot{
+			TotalActiveStake: 1_000,
+			Pools: []Pool{
+				{
+					ID:                      testPoolID(1),
+					RewardAccount:           testCredential(0, 4),
+					Margin:                  margin,
+					Pledge:                  100,
+					Cost:                    1_000,
+					DelegatedStake:          1_000,
+					OwnerStake:              100,
+					BlocksProduced:          10,
+					TotalBlocks:             10,
+					RewardAccountRegistered: true,
+					RewardAccountEligible:   true,
+					Owners:                  map[Credential]struct{}{owner: {}},
+					Delegators: []Delegator{
+						{
+							Credential: owner,
+							Stake:      100,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      900,
+							Registered: true,
+							Eligible:   true,
+						},
+					},
+				},
+			},
+		},
+		params,
+	)
+}
+
+func minMarginMemberReward(
+	t *testing.T,
+	result *Result,
+	cred Credential,
+) uint64 {
+	t.Helper()
+	for _, r := range result.AccountRewards {
+		if r.Credential == cred && r.Type == RewardTypeMember {
+			return r.Amount
+		}
+	}
+	return 0
+}
+
+// effectiveMargin: max(margin, floor); margin when floor nil; nil margin == 0.
+func TestEffectiveMargin(t *testing.T) {
+	margin := big.NewRat(1, 50) // 2%
+	floor := big.NewRat(1, 10)  // 10%
+	require.Zero(t, margin.Cmp(Parameters{}.effectiveMargin(margin)))
+	require.Zero(t, margin.Cmp(
+		Parameters{MinPoolMargin: big.NewRat(1, 100)}.effectiveMargin(margin)))
+	require.Zero(t, floor.Cmp(
+		Parameters{MinPoolMargin: floor}.effectiveMargin(margin)))
+	require.Zero(
+		t,
+		floor.Cmp(Parameters{MinPoolMargin: floor}.effectiveMargin(nil)),
+	)
+	require.Zero(t, new(big.Rat).Cmp(Parameters{}.effectiveMargin(nil)))
+}
+
+// A below-floor pool with the feature on splits exactly like an at-floor pool
+// with the feature off: the clamp makes it behave as if registered at the floor.
+func TestCalculateMinPoolMarginBelowFloorEqualsAtFloor(t *testing.T) {
+	floor := big.NewRat(1, 10)
+	below := big.NewRat(1, 50)
+	member := testCredential(0, 3)
+
+	on, err := minMarginCalc(below, floor)
+	require.NoError(t, err)
+	atFloor, err := minMarginCalc(floor, nil)
+	require.NoError(t, err)
+
+	require.Equal(t,
+		atFloor.PoolRewards[0].LeaderReward, on.PoolRewards[0].LeaderReward)
+	require.Equal(t,
+		minMarginMemberReward(t, atFloor, member),
+		minMarginMemberReward(t, on, member))
+}
+
+// The clamp shifts the split toward the operator: same total pool reward, higher
+// leader share, lower member share than the unfloored baseline.
+func TestCalculateMinPoolMarginShiftsSplitTowardOperator(t *testing.T) {
+	floor := big.NewRat(1, 10)
+	below := big.NewRat(1, 50)
+	member := testCredential(0, 3)
+
+	base, err := minMarginCalc(below, nil)
+	require.NoError(t, err)
+	on, err := minMarginCalc(below, floor)
+	require.NoError(t, err)
+
+	require.Equal(t,
+		base.PoolRewards[0].PoolReward, on.PoolRewards[0].PoolReward)
+	require.Greater(t,
+		on.PoolRewards[0].LeaderReward, base.PoolRewards[0].LeaderReward)
+	require.Less(t,
+		minMarginMemberReward(t, on, member),
+		minMarginMemberReward(t, base, member))
+}
+
+// A floor at or below the pool's registered margin is a parity no-op.
+func TestCalculateMinPoolMarginBelowMarginIsParity(t *testing.T) {
+	member := testCredential(0, 3)
+	base, err := minMarginCalc(big.NewRat(1, 10), nil)
+	require.NoError(t, err)
+	on, err := minMarginCalc(big.NewRat(1, 10), big.NewRat(1, 50))
+	require.NoError(t, err)
+	require.Equal(t,
+		base.PoolRewards[0].LeaderReward, on.PoolRewards[0].LeaderReward)
+	require.Equal(t,
+		minMarginMemberReward(t, base, member),
+		minMarginMemberReward(t, on, member))
+}
+
+// A MinPoolMargin outside [0,1] is rejected; the inclusive bounds are accepted.
+func TestCalculateMinPoolMarginRange(t *testing.T) {
+	_, err := minMarginCalc(big.NewRat(1, 50), big.NewRat(3, 2))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	_, err = minMarginCalc(big.NewRat(1, 50), big.NewRat(-1, 2))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	_, err = minMarginCalc(big.NewRat(1, 50), new(big.Rat))
+	require.NoError(t, err)
+	_, err = minMarginCalc(big.NewRat(1, 50), big.NewRat(1, 1))
+	require.NoError(t, err)
+}
+
+// --- CIP-50 pledge leverage ---
+
+// leveragePoolResult runs Calculate for a single pool sized to exercise the
+// CIP-50 pledge-leverage cap. It reuses the shared testParams() economics
+// (rho=1/100, a0=1/2, k=10) with Reserves=100_000_000 and
+// MaxLovelaceSupply=100_010_000, giving totalCirculation=10_000 and
+// AvailableRewards=1_000_000. BlocksProduced==TotalBlocks and
+// DelegatedStake==TotalActiveStake make apparentPerformance==1, so
+// PoolReward==OptimalReward. enabled toggles the leverage cap; l is L and is
+// ignored when disabled.
+func leveragePoolResult(
+	t *testing.T,
+	pledge, ownerStake uint64,
+	enabled bool,
+	l *big.Rat,
+) *Result {
+	t.Helper()
+	result, err := leverageCalc(pledge, ownerStake, enabled, l)
+	require.NoError(t, err)
+	return result
+}
+
+func leverageCalc(
+	pledge, ownerStake uint64,
+	enabled bool,
+	l *big.Rat,
+) (*Result, error) {
+	owner := testCredential(0, 2)
+	member := testCredential(0, 3)
+
+	params := testParams()
+	params.PledgeLeverageEnabled = enabled
+	params.PledgeLeverage = l
+
+	return Calculate(
+		Pots{Reserves: 100_000_000},
+		Snapshot{
+			TotalActiveStake: 1_000,
+			Pools: []Pool{
+				{
+					ID:                      testPoolID(1),
+					RewardAccount:           testCredential(0, 4),
+					Margin:                  big.NewRat(1, 10),
+					Pledge:                  pledge,
+					Cost:                    1_000,
+					DelegatedStake:          1_000,
+					OwnerStake:              ownerStake,
+					BlocksProduced:          10,
+					TotalBlocks:             10,
+					RewardAccountRegistered: true,
+					RewardAccountEligible:   true,
+					Owners:                  map[Credential]struct{}{owner: {}},
+					Delegators: []Delegator{
+						{
+							Credential: owner,
+							Stake:      ownerStake,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      1_000 - ownerStake,
+							Registered: true,
+							Eligible:   true,
+						},
+					},
+				},
+			},
+		},
+		params,
+	)
+}
+
+// With pledge fraction p = 100/10_000 = 1/100 and L=5, the leverage cap
+// L*p = 1/20 is below min(sigma, z0) = 1/10, so eligible stake sigma' is
+// capped at 1/20 (halved), reducing the optimal reward from 70_000 to 34_833.
+func TestCalculatePledgeLeverageCapsEligibleStake(t *testing.T) {
+	result := leveragePoolResult(t, 100, 100, true, big.NewRat(5, 1))
+	require.Equal(t, uint64(34_833), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(34_833), result.PoolRewards[0].PoolReward)
+}
+
+// Disabled is the regression guard: the eligible stake and reward match the
+// current (pre-CIP-50) formula exactly.
+func TestCalculatePledgeLeverageDisabledMatchesBaseline(t *testing.T) {
+	result := leveragePoolResult(t, 100, 100, false, nil)
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].PoolReward)
+}
+
+// A well-pledged pool (here L=100 => L*p = 1, far above z0=1/10) is unaffected
+// by the cap and earns the same reward as with the feature disabled.
+func TestCalculatePledgeLeverageWellPledgedUnaffected(t *testing.T) {
+	result := leveragePoolResult(t, 100, 100, true, big.NewRat(100, 1))
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].PoolReward)
+}
+
+// A zero-pledge pool earns zero rewards under CIP-50 (L*p = 0 => sigma' = 0),
+// a break from the current formula where it would earn 66_666.
+func TestCalculatePledgeLeverageZeroPledgeZerosPoolReward(t *testing.T) {
+	result := leveragePoolResult(t, 0, 0, true, big.NewRat(5, 1))
+	require.Equal(t, uint64(0), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(0), result.PoolRewards[0].PoolReward)
+	require.Empty(t, result.AccountRewards)
+}
+
+// L below the minimum of 1 is rejected when the feature is enabled.
+func TestCalculateRejectsPledgeLeverageBelowMinimum(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(1, 2))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+}
+
+// L above the maximum of 10000 is rejected when the feature is enabled.
+func TestCalculateRejectsPledgeLeverageAboveMaximum(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(10_001, 1))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+}
+
+// Enabling the feature without supplying L is rejected rather than silently
+// treated as disabled.
+func TestCalculateRejectsPledgeLeverageEnabledWithoutValue(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, nil)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+}
+
+// The inclusive bounds L=1 and L=10000 are accepted.
+func TestCalculateAllowsPledgeLeverageAtBounds(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(1, 1))
+	require.NoError(t, err)
+	_, err = leverageCalc(100, 100, true, big.NewRat(10_000, 1))
+	require.NoError(t, err)
+}
+
+// --- CIP-0163 full-pot reward distribution -------------------------------
+
+// TestApportionFullPotSumsToTotal exercises the largest-remainder core: three
+// equal base rewards over a pot that does not divide evenly. floor(10*1/3)=3
+// for each (sum 9), leaving D=1 lovelace; the remainders are all equal, so the
+// tie breaks to the lowest index.
+func TestApportionFullPotSumsToTotal(t *testing.T) {
+	require.Equal(t, []uint64{4, 3, 3}, ApportionFullPot([]uint64{1, 1, 1}, 10))
+}
+
+// TestApportionFullPotLargestRemainderWins: base [2,1,1] over R=10, W=4 gives
+// floors [5,2,2] (sum 9, D=1). Remainders are [0,2,2]; the +1 lovelace lands on
+// the largest remainder, and the tie between indices 1 and 2 breaks to 1.
+func TestApportionFullPotLargestRemainderWins(t *testing.T) {
+	require.Equal(t, []uint64{5, 3, 2}, ApportionFullPot([]uint64{2, 1, 1}, 10))
+}
+
+// TestApportionFullPotNoRemainder: when R divides exactly by W there is no
+// leftover lovelace to allocate.
+func TestApportionFullPotNoRemainder(t *testing.T) {
+	require.Equal(t, []uint64{10}, ApportionFullPot([]uint64{3}, 10))
+	require.Equal(t, []uint64{4, 6}, ApportionFullPot([]uint64{2, 3}, 10))
+}
+
+// TestApportionFullPotZeroWeightUnchanged: W==0 returns the base rewards
+// unchanged (all zero); the caller returns the pot to reserves.
+func TestApportionFullPotZeroWeightUnchanged(t *testing.T) {
+	require.Equal(t, []uint64{0, 0}, ApportionFullPot([]uint64{0, 0}, 10))
+}
+
+// TestApportionFullPotBigProductNoOverflow: B_i*R overflows uint64 (~1.8e19);
+// the big.Int arithmetic keeps it exact.
+func TestApportionFullPotBigProductNoOverflow(t *testing.T) {
+	const b = uint64(10_000_000_000_000_000) // 1e16
+	require.Equal(
+		t,
+		[]uint64{b, b},
+		ApportionFullPot([]uint64{b, b}, 20_000_000_000_000_000),
+	)
+}
+
+func fullPotTwoPoolSnapshot() Snapshot {
+	ownerA := testCredential(0, 0x11)
+	memberA := testCredential(0, 0x12)
+	ownerB := testCredential(0, 0x21)
+	memberB := testCredential(0, 0x22)
+	return Snapshot{
+		TotalActiveStake: 1_000,
+		Pools: []Pool{
+			{
+				ID:                      testPoolID(0x01),
+				RewardAccount:           testCredential(0, 0x13),
+				Margin:                  big.NewRat(1, 10),
+				Pledge:                  100,
+				Cost:                    1_000,
+				DelegatedStake:          600,
+				OwnerStake:              100,
+				BlocksProduced:          6,
+				TotalBlocks:             10,
+				RewardAccountRegistered: true,
+				RewardAccountEligible:   true,
+				Owners:                  map[Credential]struct{}{ownerA: {}},
+				Delegators: []Delegator{
+					{
+						Credential: ownerA,
+						Stake:      100,
+						Registered: true,
+						Eligible:   true,
+					},
+					{
+						Credential: memberA,
+						Stake:      500,
+						Registered: true,
+						Eligible:   true,
+					},
+				},
+			},
+			{
+				ID:                      testPoolID(0x02),
+				RewardAccount:           testCredential(0, 0x23),
+				Margin:                  big.NewRat(1, 10),
+				Pledge:                  50,
+				Cost:                    1_000,
+				DelegatedStake:          400,
+				OwnerStake:              50,
+				BlocksProduced:          4,
+				TotalBlocks:             10,
+				RewardAccountRegistered: true,
+				RewardAccountEligible:   true,
+				Owners:                  map[Credential]struct{}{ownerB: {}},
+				Delegators: []Delegator{
+					{
+						Credential: ownerB,
+						Stake:      50,
+						Registered: true,
+						Eligible:   true,
+					},
+					{
+						Credential: memberB,
+						Stake:      350,
+						Registered: true,
+						Eligible:   true,
+					},
+				},
+			},
+		},
+	}
+}
+
+func fullPotCalc(t *testing.T, enabled bool) *Result {
+	t.Helper()
+	params := testParams()
+	params.FullPotRewardsEnabled = enabled
+	result, err := Calculate(
+		Pots{Reserves: 100_000_000},
+		fullPotTwoPoolSnapshot(),
+		params,
+	)
+	require.NoError(t, err)
+	return result
+}
+
+// TestCalculateFullPotDisabledMatchesBaseTotals anchors the shared two-pool
+// scenario: with the gate off each pool earns its pre-CIP-0163 base reward.
+func TestCalculateFullPotDisabledMatchesBaseTotals(t *testing.T) {
+	off := fullPotCalc(t, false)
+	require.Equal(t, uint64(41_866), off.PoolRewards[0].PoolReward)
+	require.Equal(t, uint64(27_283), off.PoolRewards[1].PoolReward)
+}
+
+// TestCalculateFullPotDistributesEntirePot checks that the gate-on pool totals
+// are exactly the Hamilton apportionment of the whole pot by base reward, never
+// reduce a pool below its base, and sum to the entire available pot, whereas the
+// disabled path leaves a large pot-scaling residual.
+func TestCalculateFullPotDistributesEntirePot(t *testing.T) {
+	off := fullPotCalc(t, false)
+	on := fullPotCalc(t, true)
+	require.Equal(t, off.AvailableRewards, on.AvailableRewards)
+
+	baseTotals := make([]uint64, len(off.PoolRewards))
+	for i, pr := range off.PoolRewards {
+		baseTotals[i] = pr.PoolReward
+	}
+	expected := ApportionFullPot(baseTotals, off.AvailableRewards)
+
+	var onTotal, offTotal uint64
+	for i := range on.PoolRewards {
+		require.Equal(t, expected[i], on.PoolRewards[i].PoolReward,
+			"pool %d scaled total", i)
+		require.GreaterOrEqual(t, on.PoolRewards[i].PoolReward, baseTotals[i],
+			"full pot must never reduce a pool reward")
+		onTotal += on.PoolRewards[i].PoolReward
+		offTotal += off.PoolRewards[i].PoolReward
+	}
+	require.Equal(t, on.AvailableRewards, onTotal,
+		"gate on: pool totals sum to the entire pot")
+	require.Less(t, offTotal, off.AvailableRewards,
+		"gate off: a pot-scaling residual remains")
+}
+
+// TestCalculateFullPotResidualIsOnlySplitRounding checks that the only reserves
+// inflow left under full pot is the per-pool leader/member split rounding, far
+// below the disabled path's pot-scaling residual.
+func TestCalculateFullPotResidualIsOnlySplitRounding(t *testing.T) {
+	off := fullPotCalc(t, false)
+	on := fullPotCalc(t, true)
+	accounted := on.EffectiveRewards + on.Unspendable
+	require.Equal(t, on.AvailableRewards-accounted, on.Undistributed)
+	require.Less(t, on.Undistributed, off.Undistributed)
+	require.Less(t, on.UpdatedPots.Reserves, off.UpdatedPots.Reserves)
+}
+
+// TestCalculateFullPotNoBaseRewardFallsBackToReserves: with no pool earning a
+// base reward (pledge exceeds owner stake => disqualified, W==0), the gate-on
+// result is identical to the disabled path — the whole pot returns to reserves.
+func TestCalculateFullPotNoBaseRewardFallsBackToReserves(t *testing.T) {
+	owner := testCredential(0, 0x11)
+	snap := Snapshot{
+		TotalActiveStake: 600,
+		Pools: []Pool{
+			{
+				ID:             testPoolID(0x01),
+				RewardAccount:  testCredential(0, 0x13),
+				Margin:         big.NewRat(1, 10),
+				Pledge:         200, // exceeds OwnerStake => disqualified
+				Cost:           1_000,
+				DelegatedStake: 600,
+				OwnerStake:     100,
+				BlocksProduced: 10,
+				TotalBlocks:    10,
+				Owners:         map[Credential]struct{}{owner: {}},
+				Delegators: []Delegator{
+					{
+						Credential: owner,
+						Stake:      100,
+						Registered: true,
+						Eligible:   true,
+					},
+				},
+			},
+		},
+	}
+	run := func(enabled bool) *Result {
+		params := testParams()
+		params.FullPotRewardsEnabled = enabled
+		r, err := Calculate(Pots{Reserves: 100_000_000}, snap, params)
+		require.NoError(t, err)
+		return r
+	}
+	on := run(true)
+	off := run(false)
+	require.Empty(t, on.AccountRewards)
+	require.Equal(t, on.AvailableRewards, on.Undistributed)
+	require.Equal(t, off.Undistributed, on.Undistributed)
+	require.Equal(t, off.UpdatedPots, on.UpdatedPots)
+}
+
+// TestCalculateFullPotComposesWithMinPoolMargin verifies that when BOTH CIP-0163
+// full-pot distribution and the CIP-23 minimum pool margin are enabled, each
+// pool's full-pot-scaled leader reward is computed with the CIP-23 effective
+// (floored) margin, not the pool's unfloored registered margin. This guards the
+// composition of the two independent reward features (a below-floor pool must
+// have its scaled leader split shifted toward the operator by the floor).
+func TestCalculateFullPotComposesWithMinPoolMargin(t *testing.T) {
+	snap := fullPotTwoPoolSnapshot() // pools register margin 1/10, IDs 0x01 < 0x02
+	params := testParams()
+	params.FullPotRewardsEnabled = true
+	params.MinPoolMargin = big.NewRat(
+		1,
+		5,
+	) // 20% floor, above the pools' 10% margin
+
+	result, err := Calculate(Pots{Reserves: 100_000_000}, snap, params)
+	require.NoError(t, err)
+	require.Len(t, result.PoolRewards, len(snap.Pools))
+
+	for i := range result.PoolRewards {
+		pr := result.PoolRewards[i]
+		pool := snap.Pools[i] // Calculate sorts by pool ID; snapshot is already in that order
+		floored, err := LeaderRewardWithParameters(
+			pr.PoolReward, pool.Cost, pool.Margin,
+			pool.OwnerStake, pool.DelegatedStake, params,
+		)
+		require.NoError(t, err)
+		unfloored, err := LeaderReward(
+			pr.PoolReward, pool.Cost, pool.Margin,
+			pool.OwnerStake, pool.DelegatedStake,
+		)
+		require.NoError(t, err)
+		// The credited leader reward uses the floored (effective) margin.
+		require.Equal(t, floored, pr.LeaderReward,
+			"pool %d scaled leader must use the CIP-23 effective margin", i)
+		// And the floor actually shifts the split (leader gets more than at 1/10).
+		require.Greater(
+			t,
+			floored,
+			unfloored,
+			"pool %d floor must raise the leader share above the registered margin",
+			i,
+		)
+	}
 }

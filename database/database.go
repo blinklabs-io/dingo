@@ -15,14 +15,14 @@
 package database
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -30,23 +30,17 @@ import (
 )
 
 var DefaultConfig = &Config{
-	BlobPlugin:     "badger",
-	DataDir:        ".dingo",
-	MetadataPlugin: "sqlite",
+	DataDir: ".dingo",
 }
 
 // Config represents the configuration for a database instance
 type Config struct {
-	PromRegistry   prometheus.Registerer
-	Logger         *slog.Logger
-	BlobPlugin     string
-	DataDir        string
-	RunMode        string
-	MetadataPlugin string
-	MaxConnections int    // Connection pool size for metadata plugin (should match DatabaseWorkers)
-	StorageMode    string // "core" or "api"
-	Network        string // Cardano network name (e.g. "preview", "mainnet")
-	CacheConfig    CborCacheConfig
+	PromRegistry prometheus.Registerer
+	Logger       *slog.Logger
+	DataDir      string
+	StorageMode  string // "core" or "api"
+	Network      string // Cardano network name (e.g. "preview", "mainnet")
+	CacheConfig  CborCacheConfig
 	// StrictUtxoValidation, when true, turns an unrecoverable consumed UTxO
 	// (not present in the metadata store and not reconstructable from the
 	// blob store) into a hard error for blocks past the recorded Mithril
@@ -57,6 +51,34 @@ type Config struct {
 	// from a non-genesis chainsync intersect point without a Mithril
 	// snapshot import, where pre-intersect UTxOs are legitimately absent.
 	StrictUtxoValidation bool
+	// NetworkMagic is the protocol magic. It is the real network
+	// discriminator: a custom or devnet database may have an empty Network
+	// while still needing identity enforcement.
+	NetworkMagic uint32
+	// StartEra is the experimental start era ("dijkstra" or empty).
+	StartEra string
+	// BlobPlugin and MetadataPlugin name the storage providers that
+	// produced this database.
+	BlobPlugin     string
+	MetadataPlugin string
+}
+
+// Stores contains the provider-owned storage services injected into a
+// Database. Their lifecycle remains owned by the plugin host.
+type Stores struct {
+	Blob     blob.BlobStore
+	Metadata metadata.MetadataStore
+}
+
+// isNilStore reports whether an injected store is a nil interface or an
+// interface wrapping a typed nil pointer, which would pass a plain == nil check
+// but panic when the store is used.
+func isNilStore(store any) bool {
+	if store == nil {
+		return true
+	}
+	v := reflect.ValueOf(store)
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // Database represents our data storage services
@@ -70,11 +92,77 @@ type Database struct {
 	sizeMetricsDone chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
+
+	// commitBarrier lets PauseCommits/PauseCommitsContext hold off every
+	// in-flight and new read-write Txn that opens a metadata write
+	// transaction, without a full quiesce, so database/lifecycle.Snapshot
+	// can back up the blob and metadata stores as of the same logical
+	// point. Only Txns holding the metadata store's single write
+	// connection participate (see acquireCommitBarrier) — a blob-only Txn
+	// never touches that connection and never writes the commit timestamp
+	// this guards, so it does not take part. Txn construction holds the
+	// read side (many concurrent read-write Txns proceed normally);
+	// PauseCommits/PauseCommitsContext hold the write side.
+	//
+	// A cancellableBarrier, not a plain sync.RWMutex: PauseCommitsContext
+	// needs to be able to fully abandon a queued exclusive-acquire attempt
+	// when its ctx is cancelled, which sync.RWMutex cannot do (see that
+	// type's doc comment for why a bare "stop waiting on the result"
+	// workaround still leaves new read-write Txns blocked behind a
+	// phantom queued writer). Its zero value is directly usable, same as
+	// the sync.RWMutex it replaces, so no constructor change is needed.
+	commitBarrier cancellableBarrier
 }
 
 // Blob returns the underling blob store instance
 func (d *Database) Blob() blob.BlobStore {
 	return d.blob
+}
+
+// PauseCommits blocks until every currently open read-write Txn that
+// participates in this barrier (see acquireCommitBarrier) has reached
+// Commit, Rollback, or Release — not merely until one already inside its
+// Commit call finishes, but until every such Txn opened before this call,
+// however far along it currently is, concludes one way or another — then
+// blocks any new one from being constructed until the returned resume
+// func is called. It does not stop reads, and it is not a quiesce —
+// nothing is torn down, no peers are disconnected, callers just see a new
+// read-write Txn's construction (not its eventual Commit) block briefly.
+//
+// database/lifecycle.Snapshot uses this to bracket its blob and metadata
+// backup calls: each backup is independently consistent as of whenever it
+// runs, but a commit landing between the two would write its timestamp to
+// one store's backup and not the other's, so the restored copy fails
+// checkCommitTimestamp's cross-check. Pausing commits for that window
+// keeps both backups describing the same set of committed writes.
+func (d *Database) PauseCommits() (resume func()) {
+	token := d.commitBarrier.Lock()
+	return func() { d.commitBarrier.Unlock(token) }
+}
+
+// PauseCommitsContext is PauseCommits, but the wait for the barrier can
+// be abandoned via ctx: if a long-running write transaction is currently
+// open, acquiring the exclusive side can block for as long as that
+// transaction takes to commit, and plain PauseCommits gives a caller like
+// lifecycle.Snapshot (which already accepts a ctx for the rest of its
+// work) no way to give up on that wait if its own operation is
+// cancelled.
+//
+// If ctx is cancelled before the barrier is acquired, this returns
+// ctx.Err() and a nil resume, having fully withdrawn its claim on the
+// barrier: unlike a plain sync.RWMutex (which has no cancellable Lock and
+// so would leave an abandoned Lock() call queued, blocking every new
+// read-write Txn behind it via writer preference until whatever it was
+// waiting on eventually releases — see cancellableBarrier's doc comment),
+// a cancelled wait here does not stall anything else.
+func (d *Database) PauseCommitsContext(
+	ctx context.Context,
+) (resume func(), err error) {
+	token, err := d.commitBarrier.LockContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func() { d.commitBarrier.Unlock(token) }, nil
 }
 
 // Config returns the config object used for the database instance
@@ -120,12 +208,6 @@ func (d *Database) Close() error {
 			close(d.sizeMetricsStop)
 			<-d.sizeMetricsDone
 		}
-		if d.metadata != nil {
-			d.closeErr = errors.Join(d.closeErr, d.metadata.Close())
-		}
-		if d.blob != nil {
-			d.closeErr = errors.Join(d.closeErr, d.blob.Close())
-		}
 	})
 	return d.closeErr
 }
@@ -141,195 +223,58 @@ func (d *Database) init() error {
 		return err
 	}
 	// Check immutable settings have not changed since initial sync
-	if err := d.checkNodeSettings(); err != nil {
+	if err := d.CheckNodeSettings(); err != nil {
 		return err
 	}
 	return nil
 }
 
-// New creates a new database instance with optional persistence using the provided data directory.
-// When config is nil, DefaultConfig is used (DataDir = ".dingo" for persistence).
-// When config is provided but DataDir is empty, storage is in-memory only.
-// When config.DataDir is non-empty, it specifies the persistent storage directory.
-func New(
-	config *Config,
-) (*Database, error) {
-	var err error
+// New creates a database over injected stores. The caller owns the store
+// lifecycle and must keep both stores alive until Database.Close returns.
+func New(config *Config, stores Stores) (*Database, error) {
 	if config == nil {
 		config = DefaultConfig
 	}
 	// Create a copy of the config to avoid mutating the original
 	cfgVal := *config
 	configCopy := &cfgVal
-	// Apply defaults for empty fields
-	if configCopy.BlobPlugin == "" {
-		configCopy.BlobPlugin = DefaultConfig.BlobPlugin
-	}
-	if configCopy.MetadataPlugin == "" {
-		configCopy.MetadataPlugin = DefaultConfig.MetadataPlugin
-	}
 	if configCopy.StorageMode == "" {
 		configCopy.StorageMode = types.StorageModeCore
 	}
-	// Handle DataDir configuration for plugins:
-	// - nil config → DefaultConfig.DataDir (".dingo" for persistence)
-	// - empty DataDir → in-memory storage
-	// - non-empty DataDir → persistent storage at specified path
-	// NOTE: SetPluginOption mutates global plugin state, so DataDir is effectively
-	// process-wide and not concurrency-safe. Multiple Database instances in the
-	// same process will share and overwrite these options.
-	err = plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		configCopy.BlobPlugin,
-		"data-dir",
-		configCopy.DataDir,
-	)
-	if err != nil {
-		return nil, err
+	if configCopy.Logger == nil {
+		configCopy.Logger = slog.New(slog.DiscardHandler)
 	}
-	err = plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		configCopy.BlobPlugin,
-		"run-mode",
-		configCopy.RunMode,
-	)
-	if err != nil {
-		return nil, err
+	// Stores is an exported injection boundary, so reject a typed nil (an
+	// interface wrapping a nil pointer) as well as an untyped nil; otherwise
+	// the plain == nil check passes and the nil underlying store panics later
+	// in init.
+	if stores.Blob == nil || isNilStore(stores.Blob) {
+		return nil, errors.New("blob store is required")
 	}
-	err = plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		configCopy.BlobPlugin,
-		"storage-mode",
-		configCopy.StorageMode,
-	)
-	if err != nil {
-		return nil, err
-	}
-	err = plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		configCopy.MetadataPlugin,
-		"data-dir",
-		configCopy.DataDir,
-	)
-	if err != nil {
-		return nil, err
-	}
-	// Set max-connections if configured (for SQLite plugin)
-	if configCopy.MaxConnections > 0 {
-		err = plugin.SetPluginOption(
-			plugin.PluginTypeMetadata,
-			configCopy.MetadataPlugin,
-			"max-connections",
-			configCopy.MaxConnections,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-	// Set storage-mode for metadata plugin
-	err = plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		configCopy.MetadataPlugin,
-		"storage-mode",
-		configCopy.StorageMode,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"setting storage-mode for metadata plugin %q: %w",
-			configCopy.MetadataPlugin,
-			err,
-		)
-	}
-	// Start blob plugin with logger injected before Start() so that
-	// startup logging (Badger GC, cache init) uses the configured logger.
-	blobPlugin := plugin.GetPlugin(
-		plugin.PluginTypeBlob,
-		configCopy.BlobPlugin,
-	)
-	if blobPlugin == nil {
-		return nil, plugin.MissingPluginError(
-			plugin.PluginTypeBlob,
-			configCopy.BlobPlugin,
-		)
-	}
-	if loggerSetter, ok := blobPlugin.(plugin.LoggerSetter); ok {
-		loggerSetter.SetLogger(configCopy.Logger)
-	}
-	if err := blobPlugin.Start(); err != nil {
-		return nil, fmt.Errorf(
-			"starting blob plugin %q: %w",
-			configCopy.BlobPlugin,
-			err,
-		)
-	}
-	blobDb, ok := blobPlugin.(blob.BlobStore)
-	if !ok {
-		stopErr := blobPlugin.Stop()
-		return nil, errors.Join(
-			fmt.Errorf(
-				"plugin %q does not implement BlobStore interface",
-				configCopy.BlobPlugin,
-			),
-			stopErr,
-		)
-	}
-	// Start metadata plugin with logger injected before Start() so that
-	// startup logging (GORM migrations) uses the configured logger.
-	metadataPlugin := plugin.GetPlugin(
-		plugin.PluginTypeMetadata,
-		configCopy.MetadataPlugin,
-	)
-	if metadataPlugin == nil {
-		closeErr := blobDb.Close()
-		return nil, errors.Join(
-			plugin.MissingPluginError(
-				plugin.PluginTypeMetadata,
-				configCopy.MetadataPlugin,
-			),
-			closeErr,
-		)
-	}
-	if loggerSetter, ok := metadataPlugin.(plugin.LoggerSetter); ok {
-		loggerSetter.SetLogger(configCopy.Logger)
-	}
-	if err := metadataPlugin.Start(); err != nil {
-		closeErr := blobDb.Close()
-		return nil, errors.Join(
-			fmt.Errorf(
-				"starting metadata plugin %q: %w",
-				configCopy.MetadataPlugin,
-				err,
-			),
-			closeErr,
-		)
-	}
-	metadataDb, ok := metadataPlugin.(metadata.MetadataStore)
-	if !ok {
-		stopErr := metadataPlugin.Stop()
-		closeErr := blobDb.Close()
-		return nil, errors.Join(
-			fmt.Errorf(
-				"plugin %q does not implement MetadataStore interface",
-				configCopy.MetadataPlugin,
-			),
-			stopErr,
-			closeErr,
-		)
+	if stores.Metadata == nil || isNilStore(stores.Metadata) {
+		return nil, errors.New("metadata store is required")
 	}
 	db := &Database{
-		blob:     blobDb,
-		metadata: metadataDb,
+		blob:     stores.Blob,
+		metadata: stores.Metadata,
 		logger:   configCopy.Logger,
 		config:   configCopy,
 	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)
+	db.cborCache.SetLogger(configCopy.Logger)
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)
 		if err := RegisterBlockByHashMetrics(configCopy.PromRegistry); err != nil {
 			configCopy.Logger.Warn(
 				"failed to register block-hash index metrics",
+				"error", err,
+			)
+		}
+		if err := db.cborCache.RegisterCASMetrics(configCopy.PromRegistry); err != nil {
+			configCopy.Logger.Warn(
+				"failed to register hot cache CAS metrics",
 				"error", err,
 			)
 		}

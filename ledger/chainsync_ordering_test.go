@@ -28,11 +28,20 @@ import (
 // wantOrder. It returns seen (which markers were found) and observed (the
 // markers in source order by first occurrence). Only the markers present in
 // wantOrder are considered.
-func observeProcessEpochRolloverCallOrder(t *testing.T, targetFunc string, wantOrder []string) (seen map[string]bool, observed []string) {
+func observeProcessEpochRolloverCallOrder(
+	t *testing.T,
+	targetFunc string,
+	wantOrder []string,
+) (seen map[string]bool, observed []string) {
 	t.Helper()
 
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "chainsync.go", nil, parser.SkipObjectResolution)
+	file, err := parser.ParseFile(
+		fset,
+		"chainsync.go",
+		nil,
+		parser.SkipObjectResolution,
+	)
 	require.NoError(t, err, "parse chainsync.go")
 
 	var fnDecl *ast.FuncDecl
@@ -114,17 +123,29 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	// In source order, the calls that must appear inside processEpochRollover.
 	// Each entry is the trailing identifier of a SelectorExpr (or a bare
 	// Ident for unqualified calls).
+	//
+	// applyMIRCerts precedes applyPoolRetirements because that is the reference
+	// sequence: Shelley's NEWEPOCH rule embeds MIR between applyRUpd and EPOCH,
+	// and EPOCH's own sub-rules are SNAP then POOLREAP. MIR is therefore both
+	// pre-SNAP (its credits belong in the mark snapshot) and pre-POOLREAP (its
+	// pot movements are visible to the deposit refunds). dingo ran POOLREAP
+	// before MIR until the epoch-boundary snapshot semantics were corrected.
 	wantOrder := []string{
-		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
-		"applyPoolRetirements",         // (2) embedded POOLREAP deposit refunds
-		"applyMIRCerts",                // (3) Shelley-era INSTANT rule
-		"ProcessEpoch",                 // (4) Conway-style governance enact
-		"SetPParams",                   // (5) persist enacted pparams
-		"isHardForkTransition",         // (6) inter-era boundary detection
-		"applyIntraEraHardForkRule",    // (7) per-major-version HARDFORK rule
+		"applyMIRCerts",                       // (1) Shelley-era INSTANT rule, pre-SNAP
+		"ComputeAndApplyPParamUpdates",        // (2) Shelley-style pparam updates
+		"applyPoolRetirements",                // (3) embedded POOLREAP deposit refunds
+		"activateDelegatorInactivityIfNeeded", // (4) CIP-0163 activation
+		"ProcessEpoch",                        // (5) Conway-style governance enact
+		"SetPParams",                          // (6) persist enacted pparams
+		"isHardForkTransition",                // (7) inter-era boundary detection
+		"applyIntraEraHardForkRule",           // (8) per-major-version HARDFORK rule
 	}
 
-	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)
+	seen, observed := observeProcessEpochRolloverCallOrder(
+		t,
+		targetFunc,
+		wantOrder,
+	)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],
@@ -168,7 +189,11 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
 	}
 
-	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)
+	seen, observed := observeProcessEpochRolloverCallOrder(
+		t,
+		targetFunc,
+		wantOrder,
+	)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],

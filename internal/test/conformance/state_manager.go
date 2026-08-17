@@ -13,12 +13,13 @@
 // limitations under the License.
 
 // Package conformance provides a DingoStateManager that implements the
-// ouroboros-mock conformance.StateManager interface using dingo's database
-// and ledger packages with an in-memory SQLite database.
+// ouroboros-mock conformance.StateManager interface using dingo's ledger
+// state models.
 package conformance
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"math/big"
@@ -29,11 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/blinklabs-io/plutigo/data"
-	"github.com/glebarez/sqlite"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
-	"gorm.io/gorm/logger"
 )
 
 // conformanceSlotsPerEpoch is the slots-per-epoch constant used by the
@@ -53,11 +50,34 @@ func conformanceCredentialTag(credential common.Credential) uint8 {
 	return credentialTag
 }
 
-// DingoStateManager implements conformance.StateManager using dingo's database
-// with an in-memory SQLite backend for testing.
+var errMirrorNotFound = errors.New("conformance mirror row not found")
+
+// mirrorDB keeps the existing conformance state-transition code compact while
+// making its SQL mirror explicitly inert. The conformance provider has always
+// read the manager's typed in-memory maps; these calls were write-only test
+// bookkeeping and must not retain an ORM dependency.
+type mirrorDB struct {
+	Error error
+}
+
+func (*mirrorDB) Create(any) *mirrorDB { return &mirrorDB{} }
+func (*mirrorDB) Model(any) *mirrorDB  { return &mirrorDB{} }
+func (*mirrorDB) Where(any, ...any) *mirrorDB {
+	return &mirrorDB{}
+}
+func (*mirrorDB) Update(string, any) *mirrorDB { return &mirrorDB{} }
+func (*mirrorDB) Delete(any) *mirrorDB         { return &mirrorDB{} }
+func (*mirrorDB) Exec(string, ...any) *mirrorDB {
+	return &mirrorDB{}
+}
+
+func (*mirrorDB) First(any) *mirrorDB {
+	return &mirrorDB{Error: errMirrorNotFound}
+}
+
+// DingoStateManager implements conformance.StateManager.
 type DingoStateManager struct {
-	// db is the GORM database connection
-	db *gorm.DB
+	db *mirrorDB
 
 	// protocolParams holds the current protocol parameters
 	protocolParams common.ProtocolParameters
@@ -99,23 +119,10 @@ type DingoStateManager struct {
 	committeeQuorums map[string]*big.Rat
 }
 
-// NewDingoStateManager creates a new DingoStateManager with an in-memory SQLite database.
+// NewDingoStateManager creates a new in-memory DingoStateManager.
 func NewDingoStateManager() (*DingoStateManager, error) {
-	// Open in-memory SQLite database
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to open in-memory database: %w", err)
-	}
-
-	// Run migrations for all models
-	if err := db.AutoMigrate(models.MigrateModels...); err != nil {
-		return nil, fmt.Errorf("failed to migrate database: %w", err)
-	}
-
 	return &DingoStateManager{
-		db:                   db,
+		db:                   &mirrorDB{},
 		govState:             conformance.NewGovernanceState(),
 		utxos:                make(map[string]common.Utxo),
 		stakeRegistrations:   make(map[common.Blake2b224]uint64),
@@ -324,7 +331,10 @@ func (m *DingoStateManager) ApplyTransaction(
 				Cbor:      collateralReturn.Cbor(),
 			}
 			if err := m.db.Create(&utxoModel).Error; err != nil {
-				return fmt.Errorf("failed to insert collateral return utxo: %w", err)
+				return fmt.Errorf(
+					"failed to insert collateral return utxo: %w",
+					err,
+				)
 			}
 		}
 
@@ -414,13 +424,18 @@ func (m *DingoStateManager) ApplyTransaction(
 			// the add-set, so stash the remove-set and quorum in local
 			// maps keyed by gov action id for use at enactment time.
 			if uca, ok := action.(*common.UpdateCommitteeGovAction); ok {
-				removed := make(map[common.Blake2b224]struct{}, len(uca.Credentials))
+				removed := make(
+					map[common.Blake2b224]struct{},
+					len(uca.Credentials),
+				)
 				for _, cred := range uca.Credentials {
 					removed[cred.Credential] = struct{}{}
 				}
 				m.committeeRemovals[govActionId] = removed
 				if uca.Quorum.Rat != nil {
-					m.committeeQuorums[govActionId] = new(big.Rat).Set(uca.Quorum.Rat)
+					m.committeeQuorums[govActionId] = new(
+						big.Rat,
+					).Set(uca.Quorum.Rat)
 				}
 			}
 
@@ -463,7 +478,10 @@ func (m *DingoStateManager) ApplyTransaction(
 }
 
 // processCertificate processes a single certificate and updates state.
-func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uint64) {
+func (m *DingoStateManager) processCertificate(
+	cert common.Certificate,
+	slot uint64,
+) {
 	certType := common.CertificateType(cert.Type())
 
 	//exhaustive:ignore
@@ -528,6 +546,7 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			m.govState.DRepDelegations[credential] = regCert.Drep
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -546,6 +565,7 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			m.govState.DRepDelegations[credential] = regCert.Drep
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -558,11 +578,24 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			m.db.Create(&account)
 		}
 
+	case common.CertificateTypeVoteDelegation:
+		if voteCert, ok := cert.(*common.VoteDelegationCertificate); ok {
+			credential := voteCert.StakeCredential.Credential
+			m.govState.DRepDelegations[credential] = voteCert.Drep
+		}
+
+	case common.CertificateTypeStakeVoteDelegation:
+		if voteCert, ok := cert.(*common.StakeVoteDelegationCertificate); ok {
+			credential := voteCert.StakeCredential.Credential
+			m.govState.DRepDelegations[credential] = voteCert.Drep
+		}
+
 	case common.CertificateTypeStakeDeregistration:
 		if deregCert, ok := cert.(*common.StakeDeregistrationCertificate); ok {
 			stakeCredential := deregCert.StakeCredential
 			credential := stakeCredential.Credential
 			delete(m.stakeRegistrations, credential)
+			delete(m.govState.DRepDelegations, credential)
 			m.govState.DeregisterStake(credential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
@@ -581,6 +614,7 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			stakeCredential := deregCert.StakeCredential
 			credential := stakeCredential.Credential
 			delete(m.stakeRegistrations, credential)
+			delete(m.govState.DRepDelegations, credential)
 			m.govState.DeregisterStake(credential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
@@ -617,7 +651,9 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 
 			// Insert retirement record
 			var pool models.Pool
-			if m.db.Where("pool_key_hash = ?", poolId[:]).First(&pool).Error == nil {
+			if m.db.Where("pool_key_hash = ?", poolId[:]).
+				First(&pool).
+				Error == nil {
 				retirement := models.PoolRetirement{
 					PoolKeyHash: poolId[:],
 					PoolID:      pool.ID,
@@ -923,20 +959,10 @@ func (m *DingoStateManager) enactProposal(
 			})
 		}
 		if len(dbMembers) > 0 {
-			m.db.Clauses(clause.OnConflict{
-				Columns: []clause.Column{{Name: "cold_cred_hash"}},
-				DoUpdates: clause.AssignmentColumns([]string{
-					"expires_epoch",
-					"added_slot",
-					"deleted_slot",
-				}),
-			}).Create(&dbMembers)
+			m.db.Create(&dbMembers)
 		}
 		if quorum, ok := m.committeeQuorums[id]; ok {
-			m.db.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "added_slot"}},
-				DoUpdates: clause.AssignmentColumns([]string{"quorum"}),
-			}).Create(&models.CommitteeQuorum{
+			m.db.Create(&models.CommitteeQuorum{
 				Quorum:    &types.Rat{Rat: new(big.Rat).Set(quorum)},
 				AddedSlot: deletedSlot,
 			})
@@ -1109,7 +1135,10 @@ func getActionType(action common.GovAction) common.GovActionType {
 	}
 }
 
-func extractActionSpecificData(action common.GovAction, info *conformance.GovActionInfo) {
+func extractActionSpecificData(
+	action common.GovAction,
+	info *conformance.GovActionInfo,
+) {
 	switch ga := action.(type) {
 	case *common.UpdateCommitteeGovAction:
 		if ga.ActionId != nil {
@@ -1205,13 +1234,9 @@ func (d *dingoTransactionInput) ToPlutusData() data.PlutusData {
 	)
 }
 
-// Close closes the database connection.
+// Close releases state-manager resources.
 func (m *DingoStateManager) Close() error {
-	sqlDB, err := m.db.DB()
-	if err != nil {
-		return err
-	}
-	return sqlDB.Close()
+	return nil
 }
 
 // Compile-time interface check

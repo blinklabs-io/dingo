@@ -24,11 +24,40 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
+
+func importTestPool(
+	t *testing.T,
+	db *database.Database,
+	pool *models.Pool,
+) {
+	t.Helper()
+	require.NoError(t, db.Metadata().ImportPool(
+		pool,
+		&models.PoolRegistration{
+			PoolKeyHash:                pool.PoolKeyHash,
+			VrfKeyHash:                 pool.VrfKeyHash,
+			RewardAccount:              pool.RewardAccount,
+			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
+			Margin:                     pool.Margin,
+			Pledge:                     pool.Pledge,
+			Cost:                       pool.Cost,
+			AddedSlot:                  1,
+		},
+		nil,
+	))
+}
+
+func testPoolKeyHash(value []byte) lcommon.PoolKeyHash {
+	var ret lcommon.PoolKeyHash
+	copy(ret[:], value)
+	return ret
+}
 
 func TestSnapshotImportTargetsAlignWithRotation(t *testing.T) {
 	snapshots := &ParsedSnapShots{}
@@ -235,10 +264,10 @@ func TestImportedEpochSummaryKeepsCurrentEpochMetadataWhenExisting(
 }
 
 func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	store := db.Metadata()
@@ -308,10 +337,10 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 }
 
 func TestPersistImportedActivePoolDistribution(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	poolKeyHash := make([]byte, 28)
@@ -360,10 +389,10 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 // fallback treats them as implicit no rather than freezing today's
 // delegation map into a historical boundary.
 func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	poolKeyHash := make([]byte, 28)
@@ -374,18 +403,16 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 	// Seed Pool + Account state so the resolver, if called, would
 	// produce a non-default outcome (Abstain). Set/go must NOT pick
 	// this up — that's the regression we're guarding against.
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok, "test requires the sqlite metadata backend")
-	require.NoError(t, store.DB().Create(&models.Pool{
+	importTestPool(t, db, &models.Pool{
 		PoolKeyHash:   poolKeyHash,
 		RewardAccount: rewardAccount,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Account{
+	})
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
 		StakingKey: rewardAccount,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
 		Active:     true,
-	}).Error)
+	}))
 
 	mkSnapshot := func(epoch uint64) []*models.PoolStakeSnapshot {
 		return []*models.PoolStakeSnapshot{
@@ -467,9 +494,9 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 // main correctness invariant from issue #2440: a missing pool row must not
 // produce an authoritative Resolved=true, AutoVote=None entry.
 func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := make([]byte, 28)
 	poolKeyHash[0] = 0x11
@@ -509,7 +536,11 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	require.Len(t, stored, 1)
 	require.False(t, stored[0].RewardAccountAutoVoteResolved,
 		"pool row absent: must NOT be falsely resolved")
-	require.Equal(t, models.PoolRewardAccountAutoVoteNone, stored[0].RewardAccountAutoVote)
+	require.Equal(
+		t,
+		models.PoolRewardAccountAutoVoteNone,
+		stored[0].RewardAccountAutoVote,
+	)
 }
 
 // TestPersistImportedSnapshotPoolPresentAccountStates exercises the
@@ -522,16 +553,22 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 //   - reward account present and active, delegated to AlwaysNoConfidence →
 //     Resolved=true, AutoVote=NoConfidence.
 func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok, "test requires the sqlite metadata backend")
-
-	poolAbsent := bytes.Repeat([]byte{0x60}, 28)   // pool present, account absent
-	poolInactive := bytes.Repeat([]byte{0x61}, 28) // pool present, account inactive
-	poolNoConf := bytes.Repeat([]byte{0x62}, 28)   // pool present, account active NoConf
+	poolAbsent := bytes.Repeat(
+		[]byte{0x60},
+		28,
+	) // pool present, account absent
+	poolInactive := bytes.Repeat(
+		[]byte{0x61},
+		28,
+	) // pool present, account inactive
+	poolNoConf := bytes.Repeat(
+		[]byte{0x62},
+		28,
+	) // pool present, account active NoConf
 	rewardAbsent := bytes.Repeat([]byte{0x70}, 28)
 	rewardInactive := bytes.Repeat([]byte{0x71}, 28)
 	rewardNoConf := bytes.Repeat([]byte{0x72}, 28)
@@ -546,27 +583,26 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 		{poolInactive, rewardInactive},
 		{poolNoConf, rewardNoConf},
 	} {
-		require.NoError(t, store.DB().Create(&models.Pool{
+		importTestPool(t, db, &models.Pool{
 			PoolKeyHash:   p.pool,
 			RewardAccount: p.reward,
-		}).Error)
+		})
 	}
 	// Inactive (deregistered) account that still carries an Always* flag.
 	inactive := models.Account{
 		StakingKey: rewardInactive,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
-		Active:     true,
+		Active:     false,
 	}
-	require.NoError(t, store.DB().Create(&inactive).Error)
-	require.NoError(t, store.DB().Model(&inactive).Update("active", false).Error)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &inactive))
 	// Active account delegated to AlwaysNoConfidence.
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
 		StakingKey: rewardNoConf,
 		DrepType:   models.DrepTypeAlwaysNoConfidence,
 		AddedSlot:  1,
 		Active:     true,
-	}).Error)
+	}))
 
 	cases := []struct {
 		name         string
@@ -574,9 +610,24 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 		wantResolved bool
 		wantAutoVote uint8
 	}{
-		{"account_absent", poolAbsent, false, models.PoolRewardAccountAutoVoteNone},
-		{"account_inactive", poolInactive, true, models.PoolRewardAccountAutoVoteNone},
-		{"account_active_noconfidence", poolNoConf, true, models.PoolRewardAccountAutoVoteNoConfidence},
+		{
+			"account_absent",
+			poolAbsent,
+			false,
+			models.PoolRewardAccountAutoVoteNone,
+		},
+		{
+			"account_inactive",
+			poolInactive,
+			true,
+			models.PoolRewardAccountAutoVoteNone,
+		},
+		{
+			"account_active_noconfidence",
+			poolNoConf,
+			true,
+			models.PoolRewardAccountAutoVoteNoConfidence,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -601,7 +652,8 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 				snaps,
 			))
 
-			stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
+			stored, err := db.Metadata().
+				GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
 			require.NoError(t, err)
 			var row *models.PoolStakeSnapshot
 			for i := range stored {
@@ -630,27 +682,25 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 // persist a value that was changed after the boundary, so the row is left
 // unresolved and the tally treats it as implicit no.
 func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x20}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x30}, 28)
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok, "test requires the sqlite metadata backend")
 	// Live account delegates to AlwaysAbstain. If historical resolution
 	// (incorrectly) used live state, the row would become Abstain/resolved.
-	require.NoError(t, store.DB().Create(&models.Pool{
+	importTestPool(t, db, &models.Pool{
 		PoolKeyHash:   poolKeyHash,
 		RewardAccount: rewardAccount,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Account{
+	})
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
 		StakingKey: rewardAccount,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
 		Active:     true,
-	}).Error)
+	}))
 
 	targetEpoch := uint64(101) // N-1, import epoch is 102
 	snaps := []*models.PoolStakeSnapshot{{
@@ -693,7 +743,11 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 	require.Len(t, stored, 1)
 	require.False(t, stored[0].RewardAccountAutoVoteResolved,
 		"historical N-1 row must remain unresolved (no historical DRep state)")
-	require.Equal(t, models.PoolRewardAccountAutoVoteNone, stored[0].RewardAccountAutoVote)
+	require.Equal(
+		t,
+		models.PoolRewardAccountAutoVoteNone,
+		stored[0].RewardAccountAutoVote,
+	)
 }
 
 // TestCollectPoolsFromSnapshotsMarkWins verifies that when a pool appears in
@@ -736,9 +790,9 @@ func TestCollectPoolsFromSnapshotsMarkWins(t *testing.T) {
 // an empty pool key set in the reconcile pass and retire the very pools the
 // fallback just imported.
 func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolHash := toFixed28([]byte("fallback pool for reconcile"))
 	vrfHash := bytes.Repeat([]byte{0x44}, 32)
@@ -793,21 +847,19 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 // (importPools runs before persistImportedSnapshot), the current-epoch snapshot
 // is correctly resolved rather than left with a false Resolved=true, AutoVote=None.
 func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x42}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x43}, 28)
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok, "test requires the sqlite metadata backend")
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
 		StakingKey: rewardAccount,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
 		Active:     true,
-	}).Error)
+	}))
 
 	cfg := ImportConfig{
 		Database: db,
@@ -857,15 +909,19 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 	require.Len(t, stored, 1)
 	require.True(t, stored[0].RewardAccountAutoVoteResolved,
 		"current-epoch snapshot must be resolved after pool fallback import")
-	require.Equal(t, models.PoolRewardAccountAutoVoteAbstain, stored[0].RewardAccountAutoVote,
-		"AlwaysAbstain reward account must produce Abstain auto-vote")
+	require.Equal(
+		t,
+		models.PoolRewardAccountAutoVoteAbstain,
+		stored[0].RewardAccountAutoVote,
+		"AlwaysAbstain reward account must produce Abstain auto-vote",
+	)
 }
 
 func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	pparamsCbor, err := cbor.Encode(testConwayPParams())
@@ -897,10 +953,10 @@ func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
 }
 
 func TestImportAccountsPreservesCredentialTag(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	stakeKey := bytes.Repeat([]byte{0xA4}, 28)
@@ -949,10 +1005,10 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 // TestImportPoolsPreservesRewardAccountCredentialTag verifies snapshot
 // pool import stores reward account tags on Pool and PoolRegistration.
 func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	poolKeyHash := bytes.Repeat([]byte{0x51}, 28)
@@ -980,29 +1036,213 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 		456,
 	))
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok, "test requires the sqlite metadata backend")
-
-	var pool models.Pool
-	require.NoError(t, store.DB().
-		Where("pool_key_hash = ?", poolKeyHash).
-		First(&pool).Error)
+	pool, err := db.Metadata().GetPool(
+		testPoolKeyHash(poolKeyHash),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, pool)
 	require.Equal(t, rewardAccount, []byte(pool.RewardAccount))
 	require.Equal(t, uint8(1), pool.RewardAccountCredentialTag)
 
-	var registration models.PoolRegistration
-	require.NoError(t, store.DB().
-		Where("pool_key_hash = ?", poolKeyHash).
-		First(&registration).Error)
-	require.Equal(t, rewardAccount, []byte(registration.RewardAccount))
-	require.Equal(t, uint8(1), registration.RewardAccountCredentialTag)
+	require.NotEmpty(t, pool.Registration)
+	require.Equal(t, rewardAccount, []byte(pool.Registration[0].RewardAccount))
+	require.Equal(
+		t,
+		uint8(1),
+		pool.Registration[0].RewardAccountCredentialTag,
+	)
+}
+
+// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
+// review finding on ledgerstate/utxo.go: the indefinite-length UTxO map's
+// running entry-count check can only reject entry `limit`+1 after earlier
+// batches have already been streamed to the UTxO callback and committed to
+// the database (there is no header count to check up front, unlike the
+// definite-length path). This is safe rather than a partial-import bug
+// because every UTxO write is an idempotent "insert if absent" upsert: a
+// later re-run over the same data (e.g. after the cap is raised or
+// corrupted data is replaced) reapplies the same rows without duplicating
+// them, converging to exactly one row per UTxO.
+func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	const (
+		// One more entry than the cap below, so the running check
+		// rejects the map — but only after two full utxoBatchSize
+		// (10,000-entry) batches were already committed.
+		totalEntries = 20001
+		limit        = 20000
+		slot         = uint64(500)
+	)
+	data := buildIndefiniteUTxOMapCbor(t, totalEntries)
+	store := db.Metadata()
+
+	importBatch := func(batch []ParsedUTxO) error {
+		utxos := make([]models.Utxo, 0, len(batch))
+		for i := range batch {
+			utxos = append(utxos, UTxOToModel(&batch[i], slot))
+		}
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		if err := store.ImportUtxos(utxos, txn.Metadata()); err != nil {
+			return err
+		}
+		return txn.Commit()
+	}
+
+	_, err = parseIndefiniteUTxOMapWithProgressLimit(
+		data, importBatch, nil, limit,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeded max entries")
+	require.Contains(t, err.Error(), "duplicate-safe")
+
+	committed, err := store.GetUtxosAddedAfterSlot(slot-1, nil)
+	require.NoError(t, err)
+	require.Len(
+		t, committed, limit,
+		"the two full batches before the rejected entry "+
+			"should already be committed",
+	)
+
+	// Simulate a retry (checkpoint-resumed or from scratch) once the
+	// underlying issue is resolved: re-running over a limit that now
+	// covers every entry must converge without duplicating the rows
+	// the first pass already committed.
+	total, err := parseIndefiniteUTxOMapWithProgressLimit(
+		data, importBatch, nil, totalEntries,
+	)
+	require.NoError(t, err)
+	require.Equal(t, totalEntries, total)
+
+	final, err := store.GetUtxosAddedAfterSlot(slot-1, nil)
+	require.NoError(t, err)
+	require.Len(
+		t, final, totalEntries,
+		"retry must converge to exactly one row per UTxO, no duplicates",
+	)
+}
+
+// TestSynthesizeRetiredScheduledPoolsResolvesVrfKey verifies that a pool
+// present only in the imported active pool distribution (absent from the live
+// pool table) becomes resolvable via GetPool(includeInactive=true) carrying the
+// VRF key hash from the distribution, and is tombstoned with a retirement at
+// the snapshot epoch. This mirrors a pool that retired at the epoch boundary
+// but still leads the current epoch's fixed schedule, whose header VRF-key
+// binding check would otherwise fail on a Mithril-imported node.
+func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	// A currently-registered pool that the import already wrote.
+	livePoolKeyHash := bytes.Repeat([]byte{0x11}, 28)
+	liveVrfKeyHash := bytes.Repeat([]byte{0x12}, 32)
+	importTestPool(t, db, &models.Pool{
+		PoolKeyHash: livePoolKeyHash,
+		VrfKeyHash:  liveVrfKeyHash,
+	})
+
+	// A retired-but-scheduled pool present only in the active pool distr.
+	retiredPoolKeyHash := bytes.Repeat([]byte{0x21}, 28)
+	retiredVrfKeyHash := bytes.Repeat([]byte{0x22}, 32)
+
+	const epoch = uint64(305)
+	const slot = uint64(130267768)
+
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	require.NoError(t, synthesizeRetiredScheduledPools(
+		context.Background(),
+		cfg,
+		[]ParsedActivePoolStake{
+			{
+				PoolKeyHash:      livePoolKeyHash,
+				StakeNumerator:   1,
+				StakeDenominator: 10,
+				VrfKeyHash:       liveVrfKeyHash,
+			},
+			{
+				PoolKeyHash:      retiredPoolKeyHash,
+				StakeNumerator:   2,
+				StakeDenominator: 10,
+				VrfKeyHash:       retiredVrfKeyHash,
+			},
+		},
+		epoch,
+		slot,
+	))
+	require.NoError(t, db.Metadata().SetEpoch(
+		slot-100,
+		epoch,
+		nil,
+		nil,
+		nil,
+		nil,
+		0,
+		1,
+		200,
+		nil,
+	))
+	active, err := db.Metadata().GetActivePoolKeyHashesAtSlot(slot, nil)
+	require.NoError(t, err)
+	require.Contains(t, active, livePoolKeyHash)
+	require.NotContains(t, active, retiredPoolKeyHash)
+
+	// The retired-but-scheduled pool now resolves with its VRF key hash on
+	// both the denormalized pool row and its registration, the two fields the
+	// header VRF-key binding check reads.
+	retired, err := db.Metadata().GetPool(
+		testPoolKeyHash(retiredPoolKeyHash),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, retired)
+	require.Equal(t, retiredVrfKeyHash, []byte(retired.VrfKeyHash))
+	require.NotEmpty(t, retired.Registration)
+	require.Equal(
+		t,
+		retiredVrfKeyHash,
+		retired.Registration[0].VrfKeyHash,
+	)
+	require.Equal(t, slot, retired.Registration[0].AddedSlot)
+
+	// It carries a retirement tombstone at the snapshot epoch (synthetic
+	// certificate_id 0), keeping it out of active-pool/stake/reward queries.
+	require.NotEmpty(t, retired.Retirement)
+	require.Equal(t, epoch, retired.Retirement[0].Epoch)
+	require.Equal(t, uint(0), retired.Retirement[0].CertificateID)
+
+	// The already-registered pool is left untouched: no duplicate registration
+	// and no retirement tombstone.
+	live, err := db.Metadata().GetPool(
+		testPoolKeyHash(livePoolKeyHash),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, live)
+	require.Len(t, live.Registration, 1)
+	require.Empty(t, live.Retirement)
 }
 
 func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	txHash := bytes.Repeat([]byte{0x91}, 32)

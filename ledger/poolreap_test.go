@@ -15,17 +15,18 @@
 package ledger
 
 import (
+	"database/sql"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 func reapCred28(seed byte) []byte {
@@ -37,27 +38,25 @@ func reapCred28(seed byte) []byte {
 }
 
 // newPoolreapTestLedger builds a LedgerState backed by an in-memory sqlite
-// metadata store and returns the gorm handle for seeding pool/account rows.
+// metadata store and returns the raw SQL handle for seeding pool/account rows.
 func newPoolreapTestLedger(
 	t *testing.T,
-) (*LedgerState, *database.Database, *gorm.DB) {
+) (*LedgerState, *database.Database, *sql.DB) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "expected sqlite metadata store")
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	return ls, db, store.DB()
+	return ls, db, raw
 }
 
 // seedRetiringPool inserts a pool with a registration (reward account +
@@ -65,26 +64,35 @@ func newPoolreapTestLedger(
 // return it at that epoch boundary.
 func seedRetiringPool(
 	t *testing.T,
-	gdb *gorm.DB,
+	raw *sql.DB,
 	keyHash, rewardAccount []byte,
 	deposit, regSlot, retireEpoch, retireSlot uint64,
 ) {
 	t.Helper()
-	pool := &models.Pool{PoolKeyHash: keyHash, RewardAccount: rewardAccount}
-	require.NoError(t, gdb.Create(pool).Error)
-	require.NoError(t, gdb.Create(&models.PoolRegistration{
-		PoolID:        pool.ID,
-		PoolKeyHash:   keyHash,
-		RewardAccount: rewardAccount,
-		DepositAmount: types.Uint64(deposit),
-		AddedSlot:     regSlot,
-	}).Error)
-	require.NoError(t, gdb.Create(&models.PoolRetirement{
-		PoolID:      pool.ID,
-		PoolKeyHash: keyHash,
-		Epoch:       retireEpoch,
-		AddedSlot:   retireSlot,
-	}).Error)
+	result, err := raw.Exec(`
+INSERT INTO pool (pool_key_hash, reward_account) VALUES (?, ?)`,
+		keyHash, rewardAccount,
+	)
+	require.NoError(t, err)
+	poolID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO pool_registration (
+    pool_id, pool_key_hash, reward_account, deposit_amount, added_slot
+) VALUES (?, ?, ?, ?, ?)`,
+		poolID,
+		keyHash,
+		rewardAccount,
+		strconv.FormatUint(deposit, 10),
+		regSlot,
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
+VALUES (?, ?, ?, ?)`,
+		poolID, keyHash, retireEpoch, retireSlot,
+	)
+	require.NoError(t, err)
 }
 
 func runApplyPoolRetirements(
@@ -112,7 +120,16 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 		boundarySlot = uint64(1_000)
 	)
 	rewardAccount := reapCred28(0x11)
-	seedRetiringPool(t, gdb, reapCred28(0xAA), rewardAccount, deposit, 100, newEpoch, 200)
+	seedRetiringPool(
+		t,
+		gdb,
+		reapCred28(0xAA),
+		rewardAccount,
+		deposit,
+		100,
+		newEpoch,
+		200,
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: rewardAccount,
 		Reward:     types.Uint64(0),
@@ -148,21 +165,40 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 		boundarySlot = uint64(1_000)
 	)
 	// Pool with no reward account at all.
-	seedRetiringPool(t, gdb, reapCred28(0xBB), reapCred28(0x22), 500, 100, newEpoch, 200)
+	seedRetiringPool(
+		t,
+		gdb,
+		reapCred28(0xBB),
+		reapCred28(0x22),
+		500,
+		100,
+		newEpoch,
+		200,
+	)
 	// Pool whose reward account exists but is inactive (deregistered). The
-	// Account.Active column defaults to true, so create it then flip the
-	// column the way a deregistration would, rather than relying on the
-	// zero value (which GORM replaces with the default on insert).
+	// test creates it active and then flips the column through the same update
+	// path a deregistration uses.
 	inactive := reapCred28(0x33)
-	seedRetiringPool(t, gdb, reapCred28(0xCC), inactive, 700, 100, newEpoch, 200)
+	seedRetiringPool(
+		t,
+		gdb,
+		reapCred28(0xCC),
+		inactive,
+		700,
+		100,
+		newEpoch,
+		200,
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: inactive,
 		Reward:     types.Uint64(0),
 		Active:     true,
 	}))
-	require.NoError(t, gdb.Model(&models.Account{}).
-		Where("staking_key = ?", inactive).
-		Update("active", false).Error)
+	_, err := gdb.Exec(
+		"UPDATE account SET active = FALSE WHERE staking_key = ?",
+		inactive,
+	)
+	require.NoError(t, err)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
 
 	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
@@ -225,8 +261,26 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 		preBoundary  = uint64(500)
 	)
 	registered := reapCred28(0x11)
-	seedRetiringPool(t, gdb, reapCred28(0xAA), registered, 500, 100, newEpoch, 200)
-	seedRetiringPool(t, gdb, reapCred28(0xBB), reapCred28(0x22), 300, 100, newEpoch, 200)
+	seedRetiringPool(
+		t,
+		gdb,
+		reapCred28(0xAA),
+		registered,
+		500,
+		100,
+		newEpoch,
+		200,
+	)
+	seedRetiringPool(
+		t,
+		gdb,
+		reapCred28(0xBB),
+		reapCred28(0x22),
+		300,
+		100,
+		newEpoch,
+		200,
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: registered,
 		Reward:     types.Uint64(0),

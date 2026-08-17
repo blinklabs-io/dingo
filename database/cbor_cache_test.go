@@ -161,12 +161,11 @@ func TestTieredCborCacheHotMissTx(t *testing.T) {
 }
 
 func TestResolveTxCborUsesCallerTxn(t *testing.T) {
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, db.Close())
@@ -296,7 +295,11 @@ func TestTieredCborCacheBatchHotHits(t *testing.T) {
 	assert.Equal(t, cbor1, result[ref1])
 	assert.Equal(t, cbor2, result[ref2])
 	_, hasRef3 := result[ref3]
-	assert.False(t, hasRef3, "ref3 should not be in result (not in cache, no db)")
+	assert.False(
+		t,
+		hasRef3,
+		"ref3 should not be in result (not in cache, no db)",
+	)
 
 	// Verify hot hit metrics
 	metrics := cache.Metrics()
@@ -352,7 +355,11 @@ func TestTieredCborCacheTxBatchHotHits(t *testing.T) {
 	assert.Equal(t, cbor1, result[hash1])
 	assert.Equal(t, cbor2, result[hash2])
 	_, hasHash3 := result[hash3]
-	assert.False(t, hasHash3, "hash3 should not be in result (not in cache, no db)")
+	assert.False(
+		t,
+		hasHash3,
+		"hash3 should not be in result (not in cache, no db)",
+	)
 
 	// Verify hot hit metrics
 	metrics := cache.Metrics()
@@ -485,10 +492,26 @@ func TestCacheMetricsPrometheus(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_utxo_hot_hits_total"])
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_utxo_hot_misses_total"])
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_tx_hot_hits_total"])
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_tx_hot_misses_total"])
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_utxo_hot_hits_total"],
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_utxo_hot_misses_total"],
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_tx_hot_hits_total"],
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_tx_hot_misses_total"],
+	)
 }
 
 func TestCacheMetricsRegisterNil(t *testing.T) {

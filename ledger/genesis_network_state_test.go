@@ -21,18 +21,17 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		"musashi/config.json",
@@ -66,13 +65,11 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 }
 
 func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		"musashi/config.json",

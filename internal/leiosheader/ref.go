@@ -56,7 +56,8 @@ func legacyExtensionRef(
 		return lcommon.Blake2b256{}, 0, false
 	}
 	var pair []cbor.RawMessage
-	if _, err := cbor.Decode(extension[0], &pair); err != nil || len(pair) != 2 {
+	if _, err := cbor.Decode(extension[0], &pair); err != nil ||
+		len(pair) != 2 {
 		return lcommon.Blake2b256{}, 0, false
 	}
 	var hashBytes []byte

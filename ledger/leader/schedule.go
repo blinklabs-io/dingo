@@ -33,11 +33,15 @@ import (
 // ScheduleFormatVersion identifies the in-memory and on-disk shape of a
 // computed Schedule. Bump it whenever a code change alters how schedules
 // are computed (e.g. the consensus mode threading added with the
-// per-era TPraos/CPraos split, or the epoch slot range becoming
-// era-aware): older persisted schedules then fail validatePersistedSchedule
-// and are recomputed from scratch instead of being silently reused with
-// stale assumptions.
-const ScheduleFormatVersion = 2
+// per-era TPraos/CPraos split, the epoch slot range becoming era-aware, or
+// the active slot coefficient switching from a float64 approximation to the
+// exact Shelley genesis rational): older persisted schedules then fail
+// validatePersistedSchedule and are recomputed from scratch instead of being
+// silently reused with stale assumptions. validatePersistedSchedule re-checks
+// the epoch nonce and both sigma inputs but not the active slot coefficient,
+// so the version bump is the only thing that retires a schedule computed with
+// a different f.
+const ScheduleFormatVersion = 3
 
 // EpochSlotRange identifies the absolute slot range covered by an epoch.
 // StartSlot is inclusive and SlotCount is the number of slots to evaluate.
@@ -56,6 +60,15 @@ type Schedule struct {
 	TotalStake    uint64              // Total active stake from active snapshot
 	EpochNonce    []byte              // Epoch nonce for VRF
 	LeaderSlots   []uint64            // Slots where pool is leader, ascending-sorted
+
+	// Threshold is the certified-natural leadership threshold every slot in
+	// this epoch was compared against, i.e. floor(2^bits * (1 - (1-f)^sigma)).
+	// It is written once by CalculateSchedule before the schedule is published
+	// to any other goroutine and is read-only afterwards, so it needs no lock.
+	// It is deliberately NOT persisted: a reloaded schedule carries only the
+	// inputs validatePersistedSchedule re-checks. Callers must treat a nil
+	// Threshold as "not recorded" (e.g. a schedule restored from the store).
+	Threshold *big.Int
 
 	mu sync.RWMutex
 }
@@ -136,8 +149,27 @@ func (s *Schedule) StakeRatio() float64 {
 
 // Calculator computes leader schedules using VRF and stake distribution.
 type Calculator struct {
+	// ActiveSlotCoeffRat (f) is the exact active slot coefficient as written
+	// in the Shelley genesis. When non-nil it is used verbatim and
+	// ActiveSlotCoeff is ignored.
+	//
+	// Prefer this over ActiveSlotCoeff. The genesis value is an exact rational
+	// (gouroboros decodes "activeSlotsCoeff": 0.05 to 1/20), and the reference
+	// node's leader check uses that exact rational. Routing it through float64
+	// perturbs it: 1/20 becomes 3602879701896397/2^56, which is strictly
+	// larger, so every per-slot threshold comes out strictly larger and the
+	// node's eligible-slot set becomes a strict superset of the reference's.
+	// The perturbation is ~5.6e-17 relative and so cannot by itself move a
+	// real epoch's leader count, but a leader check must not disagree with the
+	// reference at all, and dingo's own header verification
+	// (LedgerState.verifyLeaderEligibility) already uses the exact genesis
+	// rational — a schedule computed from the float64 form could forge at a
+	// slot dingo itself would then reject.
+	ActiveSlotCoeffRat *big.Rat
+
 	// ActiveSlotCoeff (f) determines block production rate.
-	// For mainnet, f = 0.05 (5% of slots have blocks on average)
+	// For mainnet, f = 0.05 (5% of slots have blocks on average).
+	// Used only when ActiveSlotCoeffRat is nil.
 	ActiveSlotCoeff float64
 }
 
@@ -148,10 +180,27 @@ func NewCalculator(activeSlotCoeff float64) *Calculator {
 	}
 }
 
-// activeSlotCoeffRat converts the float64 ActiveSlotCoeff to a *big.Rat
-// for use with the gouroboros consensus package. Returns an error if the
-// coefficient is not a finite value in the range (0, 1].
+// ratOne is the upper bound of the valid active slot coefficient range.
+var ratOne = big.NewRat(1, 1)
+
+// activeSlotCoeffRat resolves the active slot coefficient to a *big.Rat for
+// use with the gouroboros consensus package. The exact genesis rational is
+// preferred; the float64 field is only a fallback for callers that have no
+// rational available. Returns an error if the coefficient is not in the range
+// (0, 1].
 func (c *Calculator) activeSlotCoeffRat() (*big.Rat, error) {
+	if c.ActiveSlotCoeffRat != nil {
+		if c.ActiveSlotCoeffRat.Sign() <= 0 ||
+			c.ActiveSlotCoeffRat.Cmp(ratOne) > 0 {
+			return nil, fmt.Errorf(
+				"active slot coefficient must be in (0, 1], got %s",
+				c.ActiveSlotCoeffRat.RatString(),
+			)
+		}
+		// Copy so a caller-owned genesis value can never be mutated by the
+		// consensus package or by a later assignment through the same pointer.
+		return new(big.Rat).Set(c.ActiveSlotCoeffRat), nil
+	}
 	if math.IsNaN(c.ActiveSlotCoeff) || math.IsInf(c.ActiveSlotCoeff, 0) {
 		return nil, fmt.Errorf(
 			"active slot coefficient is not finite: %v",
@@ -244,12 +293,19 @@ func (c *Calculator) CalculateSchedule(
 	// for the epoch — so computing it inside the per-slot loop (which
 	// is what IsSlotLeaderWithMode does) wastes two 20-term big.Rat
 	// Taylor series and a 2^N multiply per slot.
-	threshold := consensus.CertifiedNatThresholdWithMode(
+	threshold, err := consensus.CertifiedNatThresholdWithMode(
 		poolStake,
 		totalStake,
 		activeSlotCoeff,
 		mode,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("compute leadership threshold: %w", err)
+	}
+	// Record the exact threshold every slot below is compared against so the
+	// sigma inputs of a computed schedule are auditable from one log line
+	// without recomputing anything (dingo #2798).
+	schedule.Threshold = threshold
 
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {
 		vrfInput, err := vrfInputForMode(mode, slot, epochNonce)
@@ -260,11 +316,15 @@ func (c *Calculator) CalculateSchedule(
 		if err != nil {
 			return nil, fmt.Errorf("check slot %d: %w", slot, err)
 		}
-		if consensus.IsVRFOutputBelowThresholdWithMode(
+		belowThreshold, err := consensus.IsVRFOutputBelowThresholdWithMode(
 			output,
 			threshold,
 			mode,
-		) {
+		)
+		if err != nil {
+			return nil, fmt.Errorf("check slot %d: %w", slot, err)
+		}
+		if belowThreshold {
 			schedule.AddLeaderSlot(slot)
 		}
 	}
@@ -292,7 +352,11 @@ func vrfInputForMode(
 	}
 	switch mode {
 	case consensus.ConsensusModeTPraos:
-		return vrf.MkSeedTPraos(int64(slot), epochNonce, vrf.SeedL()) //nolint:gosec
+		return vrf.MkSeedTPraos(
+			int64(slot),
+			epochNonce,
+			vrf.SeedL(),
+		) //nolint:gosec
 	case consensus.ConsensusModeCPraos:
 		return vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
 	default:

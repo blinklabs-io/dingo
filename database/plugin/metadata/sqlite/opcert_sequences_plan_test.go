@@ -1,0 +1,100 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package sqlite
+
+import (
+	"bytes"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// poolOpCertSequenceIndex is the index migration v2 declares for the counter
+// aggregate. Named here rather than in the store: nothing in the query
+// mentions it, since which index answers a statement is the planner's choice,
+// and that choice is exactly what this test checks.
+const poolOpCertSequenceIndex = "idx_pool_opcert_sequence_pool_sequence"
+
+// TestLatestPoolOpCertSequencesReadsIndexOnly pins the read plan of the
+// op-cert counter aggregate.
+//
+// pool_opcert_sequence takes a row per block minted and is never pruned, so on
+// a synced mainnet database this aggregate covers millions of rows to produce
+// one entry per pool that has ever minted -- a few thousand. There is no slot
+// bound available to narrow it: every row the table holds is at or below the
+// tip, so restricting to the tip would exclude nothing. What keeps it off the
+// table itself is an index carrying both columns it reads, which lets the
+// aggregate run without touching a single row.
+//
+// What this does NOT claim is that the aggregate stops being linear in the
+// table. SQLite has no loose index scan, so the plan below is a full scan of
+// the index -- every entry visited, none of the rows. MySQL 8 can skip through
+// the same index a group at a time; SQLite reads it end to end. The win pinned
+// here is dropping the row fetches, not dropping the scan, and it is worth
+// having because this is a one-shot query behind `leadership-schedule` rather
+// than something on a hot path.
+//
+// The plan is asserted rather than the index's mere existence: an index no
+// planner chooses is a write cost with no read benefit. It is EXPLAINed from
+// the store's own exported statement rather than a copy of it, so the plan
+// pinned here is the plan of the query that actually runs.
+func TestLatestPoolOpCertSequencesReadsIndexOnly(t *testing.T) {
+	t.Parallel()
+	store, db := newSharedSQLStore(t)
+
+	// Rows for two pools, so the group-by has something to fold.
+	pkhA := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xA1}, 28)),
+	)
+	pkhB := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xB2}, 28)),
+	)
+	require.NoError(t, store.UpdatePoolOpCertSequence(pkhA, 2, 10, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(pkhA, 9, 20, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(pkhB, 1, 15, nil))
+
+	rows, err := db.Query(
+		"EXPLAIN QUERY PLAN " + sqlstore.LatestPoolOpCertSequencesSQL,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var details string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		details += detail + "\n"
+	}
+	require.NoError(t, rows.Err())
+	require.NotEmpty(t, details, "the planner must describe the aggregate")
+
+	assert.Contains(t, details, "COVERING INDEX "+poolOpCertSequenceIndex,
+		"the counter aggregate must read the index alone, not the table:\n%s",
+		details,
+	)
+	// "COVERING INDEX" alone would still be satisfied by a plan that fell back
+	// to sorting for the GROUP BY, which is the cost the index exists to avoid:
+	// the entries already arrive grouped by pool_key_hash and ascending in
+	// sequence, so the aggregate folds them as it goes.
+	assert.NotContains(t, details, "USE TEMP B-TREE",
+		"the index's column order must supply the GROUP BY, so no sort is "+
+			"materialised:\n%s",
+		details,
+	)
+}

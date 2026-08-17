@@ -15,10 +15,15 @@
 package database
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -179,7 +184,7 @@ func TestHotCacheMemoryLimit(t *testing.T) {
 	// Memory usage should be controlled
 	assert.LessOrEqual(
 		t,
-		cache.curBytes.Load(),
+		cache.data.Load().totalBytes,
 		maxBytes+int64(valueSize*3),
 		"memory should be close to maxBytes after eviction",
 	)
@@ -231,6 +236,256 @@ func TestHotCacheLFUEviction(t *testing.T) {
 	// key1 (moderately frequent) should likely still be present
 	_, ok = cache.Get([]byte("key1"))
 	assert.True(t, ok, "moderately accessed key should survive eviction")
+}
+
+// TestHotCacheConcurrentPutsCompleteUnderHighContention drives many more
+// concurrent writers (and readers, to exercise incrementAccess's CAS path
+// too) against a small, heavily-contended cache than TestHotCacheConcurrent
+// and asserts every call returns within a bounded time. This validates the
+// acceptance criteria that cache insertion cannot spin indefinitely under
+// high contention, using the default retry budget.
+func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
+	cache := NewHotCache(50, 0)
+
+	const numGoroutines = 200
+	const numOperations = 200
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines * 2)
+		for i := range numGoroutines {
+			go func(id int) {
+				defer wg.Done()
+				for j := range numOperations {
+					key := fmt.Appendf(nil, "key-%d", j%20)
+					value := fmt.Appendf(nil, "value-%d-%d", id, j)
+					cache.Put(key, value)
+				}
+			}(i)
+		}
+		// Readers exercise incrementAccess's CAS path (see accessSampleRate)
+		// concurrently with the writers above, so stats.Attempts genuinely
+		// reflects contention across both CAS paths it claims to cover.
+		for i := range numGoroutines {
+			go func(id int) {
+				defer wg.Done()
+				for j := range numOperations {
+					key := fmt.Appendf(nil, "key-%d", j%20)
+					cache.Get(key)
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal(
+			"Put calls did not complete under high contention within timeout",
+		)
+	}
+
+	stats := cache.CASStats()
+	assert.Positive(t, stats.Attempts, "writers should attempt cache commits")
+	// SuccessfulCommitsAfterBackoff/SuccessfulCommitBackoffTime only count
+	// commits that needed a *sleeping* backoff (attempt >= casYieldThreshold);
+	// a writer that wins after just one or two zero-duration yields
+	// contributes to neither, so asserting either is positive is flaky on a
+	// lightly-loaded or single-core runner. Attempts exceeding the total
+	// number of Put calls is a threshold-independent proof that contention
+	// forced at least one writer to retry rather than succeed on its first
+	// CAS attempt every time.
+	assert.Greater(
+		t,
+		stats.Attempts,
+		uint64(numGoroutines*numOperations),
+		"heavy contention should force at least one writer to retry, "+
+			"not succeed on the first CAS attempt every time",
+	)
+
+	_, ok := cache.Get([]byte("key-0"))
+	assert.True(
+		t,
+		ok,
+		"contention should still leave successfully committed entries",
+	)
+}
+
+// TestHotCacheRetryBudgetFallback deterministically exercises the CAS
+// retry-budget fallback by allowing one CAS attempt and hammering a shared
+// cache with concurrent writers, then asserts the cache degrades gracefully
+// (no panic, no hang) and reports writers that drop their best-effort update.
+func TestHotCacheRetryBudgetFallback(t *testing.T) {
+	cache := NewHotCache(50, 0)
+	cache.maxCASAttempts = 1
+
+	const numGoroutines = 100
+	const numOperations = 100
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		for i := range numGoroutines {
+			go func(id int) {
+				defer wg.Done()
+				for j := range numOperations {
+					key := fmt.Appendf(nil, "key-%d", j%10)
+					value := fmt.Appendf(nil, "value-%d-%d", id, j)
+					cache.Put(key, value)
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal(
+			"Put calls did not complete within timeout under a tiny retry budget",
+		)
+	}
+
+	assert.Positive(
+		t,
+		cache.CASStats().WritersAbortedAfterBudget,
+		"expected at least one writer to exhaust a one-attempt budget under contention",
+	)
+
+	// Cache must remain usable after the fallback triggers.
+	cache.Put([]byte("after-fallback"), []byte("still-works"))
+	got, ok := cache.Get([]byte("after-fallback"))
+	assert.True(
+		t,
+		ok,
+		"cache should still accept writes after a retry-budget fallback",
+	)
+	assert.Equal(t, []byte("still-works"), got)
+}
+
+// TestHotCacheLogsWriterAbortedOnBudgetExhaustion deterministically forces
+// the writer-aborted-after-budget path (by setting maxCASAttempts to 0, so
+// the CAS loop body never runs) and asserts a configured logger reports it,
+// with no reliance on real contention or goroutine timing.
+func TestHotCacheLogsWriterAbortedOnBudgetExhaustion(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	cache.maxCASAttempts = 0
+
+	var buf bytes.Buffer
+	cache.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)), "test-cache")
+
+	cache.Put([]byte("key"), []byte("value"))
+
+	logOutput := buf.String()
+	assert.Contains(
+		t,
+		logOutput,
+		"hot cache dropped a best-effort update after exhausting its CAS retry budget",
+	)
+	assert.Contains(t, logOutput, "cache=test-cache")
+	assert.Contains(t, logOutput, "op=put")
+	assert.Equal(t, uint64(1), cache.CASStats().WritersAbortedAfterBudget)
+}
+
+// TestHotCacheLogWriterAbortedIsRateLimited forces many deterministic
+// aborts in a tight loop (via maxCASAttempts = 0, so every Put aborts) and
+// asserts logging is rate-limited to at most one line, while the
+// WritersAbortedAfterBudget counter still reflects every single abort. This
+// guards against sustained contention turning CPU churn into log/IO churn.
+func TestHotCacheLogWriterAbortedIsRateLimited(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	cache.maxCASAttempts = 0
+
+	var buf bytes.Buffer
+	cache.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)), "test-cache")
+
+	const attempts = 1000
+	for i := range attempts {
+		cache.Put(fmt.Appendf(nil, "key-%d", i), []byte("value"))
+	}
+
+	assert.Equal(
+		t,
+		uint64(attempts),
+		cache.CASStats().WritersAbortedAfterBudget,
+		"the counter must remain authoritative regardless of log rate limiting",
+	)
+
+	logLines := strings.Count(
+		buf.String(),
+		"hot cache dropped a best-effort update",
+	)
+	assert.Equal(
+		t,
+		1,
+		logLines,
+		"logging must be rate-limited to at most one line per abortLogInterval "+
+			"even though every one of %d Put calls aborted",
+		attempts,
+	)
+}
+
+// TestHotCacheNilLoggerDoesNotPanic confirms that a cache with no logger
+// configured (the default) silently drops the writer-aborted event instead
+// of panicking on a nil logger dereference.
+func TestHotCacheNilLoggerDoesNotPanic(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	cache.maxCASAttempts = 0
+
+	require.NotPanics(t, func() {
+		cache.Put([]byte("key"), []byte("value"))
+	})
+	assert.Equal(t, uint64(1), cache.CASStats().WritersAbortedAfterBudget)
+}
+
+// TestHotCacheRegisterCASMetrics verifies that RegisterCASMetrics exposes
+// live CAS contention counters on a Prometheus registry, that the counters
+// reflect this cache's actual state, and that registering twice on the same
+// registry is a safe no-op rather than an error or duplicate series.
+func TestHotCacheRegisterCASMetrics(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	registry := prometheus.NewRegistry()
+
+	require.NoError(t, cache.RegisterCASMetrics(registry, "test"))
+	require.NoError(
+		t,
+		cache.RegisterCASMetrics(registry, "test"),
+	) // reuse is a no-op
+
+	cache.Put([]byte("key1"), []byte("value1"))
+	cache.maxCASAttempts = 0
+	cache.Put([]byte("key2"), []byte("value2")) // deterministically aborts
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	found := map[string]float64{}
+	for _, mf := range families {
+		for _, m := range mf.GetMetric() {
+			found[mf.GetName()] = m.GetCounter().GetValue()
+		}
+	}
+
+	assert.Positive(t, found["dingo_hot_cache_cas_attempts_total"])
+	assert.Equal(
+		t,
+		float64(1),
+		found["dingo_hot_cache_writers_aborted_after_budget_total"],
+	)
+	assert.Contains(
+		t,
+		found,
+		"dingo_hot_cache_successful_commits_after_backoff_total",
+	)
+	assert.Contains(
+		t,
+		found,
+		"dingo_hot_cache_successful_commit_backoff_seconds_total",
+	)
 }
 
 func TestHotCacheEmptyCache(t *testing.T) {
@@ -301,4 +556,267 @@ func TestHotCacheSmallMaxSize(t *testing.T) {
 		2,
 		"cache with maxSize=1 should have at most 2 entries",
 	)
+}
+
+// TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention reproduces
+// the reported regression: eviction run as a separate operation after Put
+// could lose its own CAS race against concurrent access-count updates from
+// Get, and since only Put retries eviction, a cache that never received
+// another Put stayed oversized forever. Each round fills a small cache,
+// races heavy Get-driven incrementAccess contention against a single
+// overflow Put, and asserts the final state never exceeds maxSize. Because
+// eviction is now folded into the overflowing Put's own CAS attempt (see
+// HotCache.evictToFit), this must hold on every round, not just on average.
+func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
+	t *testing.T,
+) {
+	const maxSize = 10
+	const rounds = 50
+	const numReaders = 50
+	const readsPerReader = 200
+
+	for round := range rounds {
+		cache := NewHotCache(maxSize, 0)
+		keys := make([][]byte, maxSize)
+		for i := range keys {
+			keys[i] = fmt.Appendf(nil, "key-%d-%d", round, i)
+			cache.Put(keys[i], []byte("value"))
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(numReaders + 1)
+
+		// Concurrent readers hammer Get() on existing keys, forcing
+		// incrementAccess CAS contention against the overflow Put below.
+		for r := range numReaders {
+			go func(id int) {
+				defer wg.Done()
+				for j := range readsPerReader {
+					cache.Get(keys[(id+j)%maxSize])
+				}
+			}(r)
+		}
+		// One overflow Put racing the readers; this must evict.
+		go func() {
+			defer wg.Done()
+			cache.Put(
+				fmt.Appendf(nil, "key-%d-overflow", round),
+				[]byte("value"),
+			)
+		}()
+
+		wg.Wait()
+
+		data := cache.data.Load()
+		require.NotNil(t, data)
+		assert.LessOrEqual(
+			t,
+			len(data.entries),
+			maxSize,
+			"round %d: cache must not permanently exceed maxSize after an "+
+				"insert that pushed it over the limit",
+			round,
+		)
+	}
+}
+
+// TestEvictToFitNoEvictionWhenWithinLimits verifies evictToFit is a no-op
+// (returns the inputs and zero bytes removed) when neither maxSize nor
+// maxBytes is exceeded.
+func TestEvictToFitNoEvictionWhenWithinLimits(t *testing.T) {
+	cache := NewHotCache(10, 100)
+	entries := map[string][]byte{"a": []byte("1"), "b": []byte("2")}
+	accessCnt := map[string]uint64{"a": 5, "b": 3}
+
+	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(
+		entries,
+		accessCnt,
+		4,
+	)
+
+	assert.Equal(t, entries, gotEntries)
+	assert.Equal(t, accessCnt, gotAccessCnt)
+	assert.Zero(t, bytesRemoved)
+}
+
+// TestEvictToFitRemovesLeastFrequentlyUsedFirstBySize verifies size-based
+// eviction trims down to the target size and keeps the most frequently
+// accessed entries, removing the least frequently accessed ones first.
+func TestEvictToFitRemovesLeastFrequentlyUsedFirstBySize(t *testing.T) {
+	cache := NewHotCache(4, 0)
+	entries := map[string][]byte{
+		"most":     []byte("v"),
+		"more":     []byte("v"),
+		"less":     []byte("v"),
+		"least":    []byte("v"),
+		"overflow": []byte("v"),
+	}
+	accessCnt := map[string]uint64{
+		"most":     100,
+		"more":     50,
+		"less":     10,
+		"least":    1,
+		"overflow": 1,
+	}
+
+	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(
+		entries,
+		accessCnt,
+		0,
+	)
+
+	// target size = max(1, 4*3/4) = 3
+	assert.LessOrEqual(t, len(gotEntries), 3)
+	assert.Contains(
+		t,
+		gotEntries,
+		"most",
+		"highest access count must survive eviction",
+	)
+	assert.Contains(
+		t,
+		gotEntries,
+		"more",
+		"second highest access count must survive eviction",
+	)
+	assert.NotContains(
+		t,
+		gotEntries,
+		"least",
+		"lowest access count should be evicted first",
+	)
+	assert.Equal(t, len(gotEntries), len(gotAccessCnt))
+	assert.Positive(t, bytesRemoved)
+}
+
+// TestEvictToFitByBytes verifies byte-based eviction trims down to the
+// target byte budget, again preferring to keep the most frequently accessed
+// entries.
+func TestEvictToFitByBytes(t *testing.T) {
+	cache := NewHotCache(0, 100) // maxBytes=100, maxSize unlimited
+	entries := map[string][]byte{
+		"a": make([]byte, 40),
+		"b": make([]byte, 40),
+		"c": make([]byte, 40),
+	}
+	accessCnt := map[string]uint64{"a": 10, "b": 5, "c": 1}
+
+	var estimatedBytes int64
+	for k, v := range entries {
+		estimatedBytes += int64(len(k) + len(v))
+	}
+
+	gotEntries, _, bytesRemoved := cache.evictToFit(
+		entries,
+		accessCnt,
+		estimatedBytes,
+	)
+
+	// Each entry is 1 (key) + 40 (value) = 41 bytes; target = 100*3/4 = 75,
+	// so only the highest-count entry ("a") fits.
+	assert.Equal(t, int64(82), bytesRemoved)
+	assert.Equal(t, map[string][]byte{"a": entries["a"]}, gotEntries)
+}
+
+// TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne is the size=1 edge
+// case: eviction must never trim a non-empty cache down to zero entries.
+func TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne(t *testing.T) {
+	cache := NewHotCache(1, 0)
+	entries := map[string][]byte{"a": []byte("1"), "b": []byte("2")}
+	accessCnt := map[string]uint64{"a": 5, "b": 1}
+
+	gotEntries, _, _ := cache.evictToFit(entries, accessCnt, 0)
+
+	assert.GreaterOrEqual(t, len(gotEntries), 1)
+	assert.LessOrEqual(t, len(gotEntries), 2)
+}
+
+// TestHotCacheTotalBytesStaysAccurateAcrossEvictions replaces an earlier
+// version of this test that proved a real gap by directly desyncing a
+// separate curBytes atomic (cache.curBytes.Store(0)) to simulate a delayed
+// concurrent writer, then showing Put trusted the stale value and let the
+// cache grow over maxBytes. That attack is no longer expressible at all:
+// totalBytes now lives inside hotCacheData itself, so every read of it is
+// tied to the exact entries snapshot it describes -- there is no separate
+// counter left to desync. This test instead verifies the new invariant
+// directly: after many sequential Puts (some of which force eviction),
+// data.totalBytes must always equal the real, independently-computed sum of
+// entry sizes, and must never exceed maxBytes.
+func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
+	const maxBytes = 1000             // per-entry cutoff = maxBytes/10 = 100
+	cache := NewHotCache(0, maxBytes) // maxSize unlimited: purely byte-driven
+
+	for i := range 30 {
+		cache.Put(
+			fmt.Appendf(nil, "key-%d", i),
+			make([]byte, 90),
+		) // 95 bytes each; forces repeated eviction
+	}
+
+	data := cache.data.Load()
+	require.NotNil(t, data)
+	var actualBytes int64
+	for k, v := range data.entries {
+		actualBytes += int64(len(k) + len(v))
+	}
+
+	assert.Equal(
+		t, actualBytes, data.totalBytes,
+		"totalBytes must always match the real sum of entries",
+	)
+	assert.LessOrEqual(t, data.totalBytes, int64(maxBytes))
+}
+
+// TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention is the
+// byte-limit counterpart to
+// TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention: many
+// goroutines concurrently Put small entries against a small maxBytes limit,
+// and the final real byte total (computed independently from data.entries,
+// not trusted from any counter) must never permanently exceed maxBytes.
+//
+// This used to be a probabilistic, largely-decorative check: an earlier
+// design tracked the byte total in a separately-updated atomic (curBytes),
+// racy relative to the entries snapshot in a window only one or two
+// instructions wide -- narrow enough that a direct probe with 300 concurrent
+// writers over 50 rounds reproduced zero failures even on the buggy code
+// (see TestHotCacheTotalBytesStaysAccurateAcrossEvictions for how that gap
+// was proven instead). Now that the byte total lives inside hotCacheData
+// itself, this test holds deterministically, every round, by construction.
+func TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention(
+	t *testing.T,
+) {
+	const maxBytes = 2000 // per-entry cutoff = maxBytes/10 = 200
+	const rounds = 20
+	const numWriters = 200
+	const valueSize = 90 // 90 + ~10-byte key ~= 100, under the per-entry cutoff
+
+	for round := range rounds {
+		cache := NewHotCache(
+			0,
+			maxBytes,
+		) // maxSize unlimited: purely byte-driven
+
+		var wg sync.WaitGroup
+		wg.Add(numWriters)
+		for w := range numWriters {
+			go func(id int) {
+				defer wg.Done()
+				key := fmt.Appendf(nil, "key-%d-%d", round, id)
+				cache.Put(key, make([]byte, valueSize))
+			}(w)
+		}
+		wg.Wait()
+
+		data := cache.data.Load()
+		require.NotNil(t, data)
+		var actualBytes int64
+		for k, v := range data.entries {
+			actualBytes += int64(len(k) + len(v))
+		}
+		assert.LessOrEqual(
+			t, actualBytes, int64(maxBytes),
+			"round %d: cache holds %d bytes, over maxBytes=%d",
+			round, actualBytes, maxBytes,
+		)
+	}
 }

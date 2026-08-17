@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build archive_demo
+
 // Package archivedemo provides shared helpers for the archive-node demo
 // at internal/test/archive-demo/. The integration test (under build tag
 // archive_demo) and the demo-fetch CLI both consume it.
@@ -70,7 +72,11 @@ type Logger func(format string, args ...any)
 
 // dial opens an Ouroboros NtN connection to ep with optional extra config.
 // The caller is responsible for Close().
-func dial(ep Endpoint, magic uint32, extra ...ouroboros.ConnectionOptionFunc) (*ouroboros.Connection, error) {
+func dial(
+	ep Endpoint,
+	magic uint32,
+	extra ...ouroboros.ConnectionOptionFunc,
+) (*ouroboros.Connection, error) {
 	conn, err := net.DialTimeout("tcp", ep.Address, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", ep.Name, err)
@@ -111,7 +117,13 @@ func GetTip(ep Endpoint, magic uint32) (Tip, error) {
 
 // WaitForSlot polls ep until its tip slot reaches target or timeout fires.
 // Returns the final observed tip and an error on timeout.
-func WaitForSlot(ep Endpoint, magic uint32, target uint64, timeout time.Duration, log Logger) (Tip, error) {
+func WaitForSlot(
+	ep Endpoint,
+	magic uint32,
+	target uint64,
+	timeout time.Duration,
+	log Logger,
+) (Tip, error) {
 	deadline := time.Now().Add(timeout)
 	var last Tip
 	for {
@@ -119,7 +131,12 @@ func WaitForSlot(ep Endpoint, magic uint32, target uint64, timeout time.Duration
 		if err == nil {
 			last = tip
 			if log != nil {
-				log("WaitForSlot %s: slot=%d block=%d", ep.Name, tip.Slot, tip.Block)
+				log(
+					"WaitForSlot %s: slot=%d block=%d",
+					ep.Name,
+					tip.Slot,
+					tip.Block,
+				)
 			}
 			if tip.Slot >= target {
 				return tip, nil
@@ -128,7 +145,12 @@ func WaitForSlot(ep Endpoint, magic uint32, target uint64, timeout time.Duration
 			log("WaitForSlot %s: %v", ep.Name, err)
 		}
 		if time.Now().After(deadline) {
-			return last, fmt.Errorf("%s did not reach slot %d within %s", ep.Name, target, timeout)
+			return last, fmt.Errorf(
+				"%s did not reach slot %d within %s",
+				ep.Name,
+				target,
+				timeout,
+			)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -154,7 +176,11 @@ func FindBlockAtOrAfterSlot(
 		hdr, ok := blockOrHeader.(gcommon.BlockHeader)
 		if !ok {
 			if log != nil {
-				log("FindBlockAtOrAfterSlot: roll-forward got %T (blockType=%d), expected BlockHeader", blockOrHeader, blockType)
+				log(
+					"FindBlockAtOrAfterSlot: roll-forward got %T (blockType=%d), expected BlockHeader",
+					blockOrHeader,
+					blockType,
+				)
 			}
 			return nil
 		}
@@ -211,8 +237,12 @@ func FindBlockAtOrAfterSlot(
 		}
 		return pcommon.Point{}, fmt.Errorf("chainsync %s: %w", ep.Name, err)
 	case <-time.After(timeout):
-		return pcommon.Point{}, fmt.Errorf("FindBlockAtOrAfterSlot: did not find block at/after slot %d on %s within %s",
-			targetSlot, ep.Name, timeout)
+		return pcommon.Point{}, fmt.Errorf(
+			"FindBlockAtOrAfterSlot: did not find block at/after slot %d on %s within %s",
+			targetSlot,
+			ep.Name,
+			timeout,
+		)
 	}
 }
 
@@ -282,11 +312,22 @@ func FetchBlock(
 			defer mu.Unlock()
 			return gotCbor, nil
 		default:
-			return nil, fmt.Errorf("blockfetch %s: batch completed with no block delivered", ep.Name)
+			return nil, fmt.Errorf(
+				"blockfetch %s: batch completed with no block delivered",
+				ep.Name,
+			)
 		}
 	case err := <-oc.ErrorChan():
-		return nil, fmt.Errorf("blockfetch %s connection error: %w", ep.Name, err)
+		return nil, fmt.Errorf(
+			"blockfetch %s connection error: %w",
+			ep.Name,
+			err,
+		)
 	case <-time.After(timeout):
-		return nil, fmt.Errorf("blockfetch %s timed out after %s", ep.Name, timeout)
+		return nil, fmt.Errorf(
+			"blockfetch %s timed out after %s",
+			ep.Name,
+			timeout,
+		)
 	}
 }

@@ -242,7 +242,8 @@ func applyTreasuryWithdrawal(
 	if total > ctx.TreasuryWithdrawalRemaining {
 		return fmt.Errorf(
 			"treasury withdrawal of %d exceeds tracked treasury withdrawal capacity %d",
-			total, ctx.TreasuryWithdrawalRemaining,
+			total,
+			ctx.TreasuryWithdrawalRemaining,
 		)
 	}
 	ctx.TreasuryWithdrawalRemaining -= total
@@ -256,7 +257,10 @@ func applyTreasuryWithdrawal(
 		}
 		rewardAddrBytes, err := rewardAddr.Bytes()
 		if err != nil {
-			return fmt.Errorf("encode treasury withdrawal reward address: %w", err)
+			return fmt.Errorf(
+				"encode treasury withdrawal reward address: %w",
+				err,
+			)
 		}
 		credentialTag, stakeCredential, err := rewardAccountStakeCredential(
 			rewardAddrBytes,
@@ -264,7 +268,7 @@ func applyTreasuryWithdrawal(
 		if err != nil {
 			return fmt.Errorf("treasury withdrawal reward account: %w", err)
 		}
-		credited, err := CreditRegisteredRewardAccount(
+		credited, err := CreditRegisteredRewardAccountAfterSnapshot(
 			ctx.DB,
 			ctx.Txn,
 			credentialTag,
@@ -291,19 +295,18 @@ func applyTreasuryWithdrawal(
 	)
 }
 
-// CreditRegisteredRewardAccount credits a reward account by its stake
-// credential, returning (true, nil) when the account exists and is active. It
-// returns (false, nil) when no active account matches — the caller is expected
-// to route the amount to the treasury instead. Shared by governance deposit
-// refunds and POOLREAP pool-deposit refunds so both follow identical
-// registered-vs-unclaimed accounting.
+// CreditRegisteredRewardAccountAfterSnapshot credits a reward account for an
+// epoch-boundary rule that cardano-ledger runs AFTER the boundary stake snapshot
+// (SNAP): POOLREAP deposit refunds, enacted treasury withdrawals and
+// proposal-deposit refunds. The credit is journaled as post-snapshot so an
+// epoch-boundary stake reconstruction excludes it and still reproduces the
+// authoritative SNAP-point capture.
 //
-// sourceHash uniquely identifies the credit event (the refunded proposal
-// identity hash, reaped pool key hash, or MIR event discriminator). It
-// distinguishes two distinct refunds to the same account at the same epoch
-// boundary as separate journal rows and makes a crash-replayed boundary
-// idempotent. Pass nil when no per-event discriminator is available.
-func CreditRegisteredRewardAccount(
+// See CreditRegisteredRewardAccountBeforeSnapshot for the pre-SNAP counterpart.
+// There is deliberately no snapshot-agnostic spelling of this helper: which side
+// of SNAP a boundary credit falls on is a consensus decision per boundary rule,
+// and a caller that has not made it cannot pick correctly.
+func CreditRegisteredRewardAccountAfterSnapshot(
 	db *database.Database,
 	txn *database.Txn,
 	credentialTag uint8,
@@ -312,7 +315,65 @@ func CreditRegisteredRewardAccount(
 	slot uint64,
 	sourceHash []byte,
 ) (bool, error) {
-	err := db.AddAccountRewardByCredential(
+	return creditRegisteredRewardAccount(
+		db, txn, credentialTag, stakeCredential, amount, slot, sourceHash, true,
+	)
+}
+
+// CreditRegisteredRewardAccountBeforeSnapshot credits a reward account for an
+// epoch-boundary rule that cardano-ledger runs BEFORE the boundary stake
+// snapshot. Its only caller is the Shelley-era MIR (INSTANT) rule, which
+// Shelley's NEWEPOCH embeds between applyRUpd and EPOCH — so before SNAP. The
+// credit is left unstamped, exactly like the delayed reward update, so an
+// epoch-boundary stake reconstruction retains it.
+func CreditRegisteredRewardAccountBeforeSnapshot(
+	db *database.Database,
+	txn *database.Txn,
+	credentialTag uint8,
+	stakeCredential []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+) (bool, error) {
+	return creditRegisteredRewardAccount(
+		db,
+		txn,
+		credentialTag,
+		stakeCredential,
+		amount,
+		slot,
+		sourceHash,
+		false,
+	)
+}
+
+// creditRegisteredRewardAccount credits a reward account by its stake
+// credential, returning (true, nil) when the account exists and is active. It
+// returns (false, nil) when no active account matches — the caller is expected
+// to route the amount to the treasury instead. Shared by governance deposit
+// refunds, POOLREAP pool-deposit refunds and MIR so all follow identical
+// registered-vs-unclaimed accounting.
+//
+// sourceHash uniquely identifies the credit event (the refunded proposal
+// identity hash, reaped pool key hash, or MIR event discriminator). It
+// distinguishes two distinct refunds to the same account at the same epoch
+// boundary as separate journal rows and makes a crash-replayed boundary
+// idempotent. Pass nil when no per-event discriminator is available.
+func creditRegisteredRewardAccount(
+	db *database.Database,
+	txn *database.Txn,
+	credentialTag uint8,
+	stakeCredential []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+	afterSnapshot bool,
+) (bool, error) {
+	credit := db.AddAccountRewardByCredential
+	if afterSnapshot {
+		credit = db.AddPostSnapshotAccountRewardByCredential
+	}
+	err := credit(
 		credentialTag,
 		stakeCredential,
 		amount,
@@ -412,7 +473,10 @@ func applyUpdateCommittee(
 	// Sort by cold credential hash so the auto-increment ID assigned
 	// by the DB is stable across nodes (Go map iteration is random).
 	sort.Slice(members, func(i, j int) bool {
-		return bytes.Compare(members[i].ColdCredHash, members[j].ColdCredHash) < 0
+		return bytes.Compare(
+			members[i].ColdCredHash,
+			members[j].ColdCredHash,
+		) < 0
 	})
 	return ctx.DB.SetCommitteeMembers(members, ctx.Txn)
 }

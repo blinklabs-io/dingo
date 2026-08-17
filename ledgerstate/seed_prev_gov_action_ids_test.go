@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,10 +42,22 @@ func govStateWithRoots(
 	roots [4]*ParsedGovActionId,
 	committeePresent bool,
 ) []byte {
+	return govStateWithRootsAndProposals(
+		t, roots, committeePresent, nil, nil,
+	)
+}
+
+func govStateWithRootsAndProposals(
+	t *testing.T,
+	roots [4]*ParsedGovActionId,
+	committeePresent bool,
+	proposals []any,
+	drepPulsingState any,
+) []byte {
 	t.Helper()
 
 	rootsAny := encodeRootsAsAny(t, roots)
-	proposalsContainer := []any{rootsAny, []any{}}
+	proposalsContainer := []any{rootsAny, proposals}
 
 	var committee any
 	if committeePresent {
@@ -76,15 +89,80 @@ func govStateWithRoots(
 			nil,
 		},
 	}
+	if drepPulsingState != nil {
+		govState = append(
+			govState,
+			map[uint64]uint64{},
+			map[uint64]uint64{},
+			map[uint64]uint64{},
+			drepPulsingState,
+		)
+	}
 	data, err := cbor.Encode(govState)
 	require.NoError(t, err)
 	return data
 }
 
+func govActionStateForTest(
+	txHash []byte,
+	actionIdx uint64,
+	actionType uint8,
+	parent *ParsedGovActionId,
+	proposedEpoch uint64,
+) []any {
+	var parentAny any = []any{}
+	if parent != nil {
+		parentAny = []any{
+			[]any{parent.TxHash, uint64(parent.ActionIndex)},
+		}
+	}
+	govAction := []any{
+		actionType,
+		parentAny,
+		map[uint64]uint64{},
+		nil,
+	}
+	return []any{
+		[]any{txHash, actionIdx},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		[]any{
+			uint64(100_000_000),
+			bytes.Repeat([]byte{0xa1}, 29),
+			govAction,
+			[]any{
+				"https://example.com/proposal",
+				bytes.Repeat([]byte{0xb2}, 32),
+			},
+		},
+		proposedEpoch,
+		proposedEpoch + 5,
+	}
+}
+
+func drepPulsingStateWithRatified(
+	proposals ...any,
+) any {
+	return []any{
+		[]any{
+			[]any{},
+			map[uint64]uint64{},
+			map[uint64]uint64{},
+			map[uint64]uint64{},
+		},
+		[]any{
+			[]any{},
+			proposals,
+			[]any{},
+			false,
+		},
+	}
+}
+
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	pp := &ParsedGovActionId{
 		TxHash:      bytes.Repeat([]byte{0x11}, 32),
@@ -186,8 +264,18 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 				t, c.actionType, row.ActionType,
 				"unexpected action_type for %s", c.name,
 			)
-			require.NotNil(t, row.EnactedEpoch, "EnactedEpoch unset for %s", c.name)
-			require.NotNil(t, row.EnactedSlot, "EnactedSlot unset for %s", c.name)
+			require.NotNil(
+				t,
+				row.EnactedEpoch,
+				"EnactedEpoch unset for %s",
+				c.name,
+			)
+			require.NotNil(
+				t,
+				row.EnactedSlot,
+				"EnactedSlot unset for %s",
+				c.name,
+			)
 			assert.Equal(
 				t, uint64(0), row.AddedSlot,
 				"AddedSlot must be 0 to survive rollback for %s", c.name,
@@ -209,10 +297,68 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 	}
 }
 
-func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	ppRoot := &ParsedGovActionId{
+		TxHash:      bytes.Repeat([]byte{0x11}, 32),
+		ActionIndex: 0,
+	}
+	txHash := bytes.Repeat([]byte{0x22}, 32)
+	proposal := govActionStateForTest(
+		txHash,
+		0,
+		govActionTypeParameterChange,
+		ppRoot,
+		499,
+	)
+	govStateData := govStateWithRootsAndProposals(
+		t,
+		[4]*ParsedGovActionId{ppRoot, nil, nil, nil},
+		false,
+		[]any{proposal},
+		drepPulsingStateWithRatified(proposal),
+	)
+
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: &RawLedgerState{
+			GovStateData:  govStateData,
+			Epoch:         500,
+			EraIndex:      EraConway,
+			EraBoundEpoch: 100,
+			EraBoundSlot:  10_000,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 100, nil
+		},
+	}
+
+	require.NoError(t, importGovState(
+		context.Background(),
+		cfg,
+		func(ImportProgress) {},
+	))
+
+	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, row)
+	require.NotNil(t, row.RatifiedEpoch)
+	require.Equal(t, uint64(500), *row.RatifiedEpoch)
+	require.NotNil(t, row.RatifiedSlot)
+	require.Equal(t, uint64(50_000), *row.RatifiedSlot)
+}
+
+func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
 
 	cm := &ParsedGovActionId{
 		TxHash:      bytes.Repeat([]byte{0x55}, 32),
@@ -257,9 +403,8 @@ func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
 }
 
 func TestImportGovStateNoSeedingWhenAllSNothing(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	govStateData := govStateWithRoots(
 		t,

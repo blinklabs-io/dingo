@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -75,10 +76,9 @@ var installEpochBoundarySnapshotHookForLoad = func(
 // wedged. During normal operation the event-driven fallback re-captures the
 // snapshot; during load there is no fallback, so a suppressed capture error
 // would silently drop that epoch's mark/reward snapshot and load would still
-// report success. A post-hoc fallback cannot substitute either: the reward
-// inputs are copied from the live reward aggregate, which only matches the
-// boundary during the in-transaction capture. This tracker lets load fail
-// loudly instead, so the operator knows the resulting database is incomplete.
+// report success if both capture phases fail. The persist phase has a
+// boundary-aware historical fallback; this tracker surfaces a failure of that
+// complete capture so load cannot finish with an incomplete DB.
 type loadCaptureFailureTracker struct {
 	mu     sync.Mutex
 	first  error
@@ -112,7 +112,12 @@ func (t *loadCaptureFailureTracker) err() error {
 	)
 }
 
-func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
+func Load(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	immutableDir string,
+) error {
 	return LoadWithDB(ctx, cfg, logger, immutableDir, nil)
 }
 
@@ -128,35 +133,60 @@ func ensureDB(
 		return db, func() {}, nil
 	}
 	dbConfig := &database.Config{
-		DataDir:        cfg.DatabasePath,
-		Logger:         logger,
-		PromRegistry:   nil,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        string(cfg.RunMode),
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
+		DataDir: cfg.DatabasePath, Logger: logger,
+		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
+		NetworkMagic:   cfg.NetworkMagic,
+		StartEra:       string(cfg.StartEra),
+		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 	}
-	newDB, err := database.New(dbConfig)
+	runtime, err := internalplugins.OpenDatabase(
+		context.Background(),
+		dbConfig,
+		internalplugins.StorageSelections{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		internalplugins.StorageDependencies{
+			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
+			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
+			Logger: logger,
+		},
+	)
 	if err != nil {
+		return nil, nil, fmt.Errorf("creating database: %w", err)
+	}
+	if runtime == nil || runtime.Database == nil {
+		return nil, nil, errors.New(
+			"creating database: runtime did not provide a database",
+		)
+	}
+	newDB := runtime.Database
+	cleanup := func() {
+		_ = runtime.Close(context.Background())
+	}
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Bootstrap paths (load / mithril sync) tolerate a recoverable
 		// commit-timestamp mismatch: the import work that follows
 		// writes through full transactions which heal the timestamps.
 		// Returning the error here would leave the user unable to
 		// re-run a load / re-bootstrap from a previous interrupted
 		// import.
-		var cte database.CommitTimestampError
-		if errors.As(err, &cte) && newDB != nil {
+		if cte, ok := errors.AsType[database.CommitTimestampError](
+			recoveryErr,
+		); ok {
 			logger.Warn(
 				"opened database with commit timestamp mismatch; "+
 					"continuing — import will heal it",
 				"metadata_timestamp", cte.MetadataTimestamp,
 				"blob_timestamp", cte.BlobTimestamp,
 			)
-			return newDB, func() { newDB.Close() }, nil
+			return newDB, cleanup, nil
 		}
-		return nil, nil, fmt.Errorf("creating database: %w", err)
+		return nil, nil, fmt.Errorf("creating database: %w", recoveryErr)
 	}
-	return newDB, func() { newDB.Close() }, nil
+	return newDB, cleanup, nil
 }
 
 // captureLoadGenesisSnapshot captures the genesis (epoch 0) mark stake
@@ -345,7 +375,6 @@ func LoadWithDB(
 		}
 		cardanoConfigPath = network + "/config.json"
 	}
-
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
 		network,
@@ -356,13 +385,48 @@ func LoadWithDB(
 			"loading cardano node config: %w", err,
 		)
 	}
+	if cfg.FullPotRewardsEnabled &&
+		!cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		var genesisNetworkMagic uint32
+		if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil {
+			genesisNetworkMagic = shelleyGenesis.NetworkMagic
+		}
+		if network == "" && cfg.NetworkMagic == 0 && genesisNetworkMagic == 0 {
+			return errors.New(
+				"fullPotRewardsEnabled requires a resolvable network identity",
+			)
+		}
+		if networkName, ok := config.FullPotRewardsStandardNetwork(
+			network,
+			cfg.NetworkMagic,
+		); ok {
+			return fmt.Errorf(
+				"fullPotRewardsEnabled is not permitted on standard network %q "+
+					"without unsafeFullPotRewardsOnStandardNetworks",
+				networkName,
+			)
+		}
+		// The Shelley genesis drives ledger state during load, so validate its
+		// identity independently. Otherwise a custom configured name or magic
+		// could disguise a standard-network Cardano config and bypass the gate.
+		if networkName, ok := config.FullPotRewardsStandardNetwork(
+			"",
+			genesisNetworkMagic,
+		); ok {
+			return fmt.Errorf(
+				"fullPotRewardsEnabled is not permitted on standard network %q "+
+					"without unsafeFullPotRewardsOnStandardNetworks",
+				networkName,
+			)
+		}
+	}
 	logger.Debug(
 		"cardano network config",
 		"component", "node",
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db)
+	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
@@ -383,16 +447,35 @@ func LoadWithDB(
 		return errors.New("primary chain not available")
 	}
 	snapshotMgr := snapshot.NewManager(db, nil, logger)
+	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
+	// so replay matches serve mode (node.go) on the same DB.
+	if err := snapshotMgr.SetDelegatorInactivity(
+		cfg.DelegatorInactivityEnabled,
+		cfg.DelegatorInactivity,
+	); err != nil {
+		return fmt.Errorf("configuring snapshot manager: %w", err)
+	}
 	// Load state
 	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
-			Database:              db,
-			ChainManager:          cm,
-			Logger:                logger,
-			CardanoNodeConfig:     nodeCfg,
-			ValidateHistorical:    cfg.ValidateHistorical,
+			Database:           db,
+			ChainManager:       cm,
+			Logger:             logger,
+			CardanoNodeConfig:  nodeCfg,
+			ValidateHistorical: cfg.ValidateHistorical,
+			// CIP-0163 full-pot reward distribution is consensus-affecting and
+			// deterministically changes the reward state written during replay,
+			// so load must honor the same operator flag as serve mode; otherwise
+			// an import with the feature enabled would persist legacy
+			// residual-to-reserves reward state that disagrees with an enabled
+			// serve node.
+			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
 			ManualBlockProcessing: true,
+			// CIP-0163 reward-account inactivity expiry: consensus-affecting,
+			// must match serve mode (node.go) on replay of the same DB.
+			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
+			DelegatorInactivity:        cfg.DelegatorInactivity,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -404,6 +487,15 @@ func LoadWithDB(
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	captureFailures := &loadCaptureFailureTracker{}
+	// SNAP-point stake read: runs after MIR and before POOLREAP/enactment so the
+	// mark snapshot includes pre-SNAP credits but excludes post-SNAP credits. If
+	// that read fails, the persist hook uses boundary-aware historical
+	// reconstruction; the tracker reports only failure of the complete capture.
+	ls.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	)
 	if err := installEpochBoundarySnapshotHookForLoad(
 		ls,
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
@@ -462,7 +554,16 @@ func LoadWithDB(
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()
-		<-replayErrCh
+		// A non-nil, non-context.Canceled replayErr here is the real
+		// cause: it's what made ProcessTrustedBlockBatches call
+		// cancelReplay in the first place, which is what unblocked
+		// copyBlocksDirect's channel send and produced err (usually
+		// just "context canceled"). Join both so the operator sees the
+		// actual failure instead of only its downstream symptom.
+		replayErr := <-replayErrCh
+		if replayErr != nil && !errors.Is(replayErr, context.Canceled) {
+			return errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr)
+		}
 		return fmt.Errorf("loading blocks: %w", err)
 	}
 	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
@@ -535,7 +636,7 @@ func LoadBlobsWithDB(
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db)
+	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}
@@ -610,8 +711,10 @@ func copyBlocksDirect(
 	if chainTip.Point.Slot > immutableTip.Slot {
 		logger.Info(
 			"chain tip already beyond immutable DB tip; skipping immutable copy",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"immutable_tip_slot", immutableTip.Slot,
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"immutable_tip_slot",
+			immutableTip.Slot,
 		)
 		return 0, immutableTip.Slot, nil
 	}
@@ -853,8 +956,10 @@ func copyBlocksRawWithCallback(
 	if chainTip.Point.Slot > immutableTip.Slot {
 		logger.Info(
 			"chain tip already beyond immutable DB tip; skipping immutable copy",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"immutable_tip_slot", immutableTip.Slot,
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"immutable_tip_slot",
+			immutableTip.Slot,
 		)
 		if callback != nil && db != nil {
 			complete, err := immutableUtxoOffsetsComplete(
@@ -1134,7 +1239,9 @@ func backfillRawBlockCallbacks(
 	return blocksBackfilled, nil
 }
 
-func rawBlockFromImmutableBlock(block *immutable.Block) (chain.RawBlock, error) {
+func rawBlockFromImmutableBlock(
+	block *immutable.Block,
+) (chain.RawBlock, error) {
 	// Extract header CBOR from the block's outer array (first element for all
 	// eras), then decode just the header without decoding transaction bodies.
 	headerCbor, err := extractHeaderCbor(block.Cbor)
@@ -1428,6 +1535,14 @@ func maybeLogBlockCopyProgress(
 // extractHeaderCbor extracts the header CBOR from a full block's CBOR.
 // All Cardano block eras encode as a CBOR array where the first element
 // is the block header.
+//
+// This uses fxamacker/cbor's package-level UnmarshalFirst directly
+// (bare defaults: 131,072 max array elements/map pairs, 32 max
+// nested levels) rather than gouroboros's raised-limit wrapper,
+// because it only ever extracts a single block header's raw bytes
+// (at most a few KB, with shallow nesting) — not a mainnet-scale
+// map or array, so the fxamacker defaults are already more than
+// sufficient here.
 func extractHeaderCbor(blockCbor []byte) ([]byte, error) {
 	headerLen, err := cborArrayHeaderLen(blockCbor)
 	if err != nil {
@@ -1478,6 +1593,9 @@ func cborArrayHeaderLen(data []byte) (int, error) {
 	case additional == 31:
 		return 1, nil
 	default:
-		return 0, fmt.Errorf("unsupported CBOR array additional info: %d", additional)
+		return 0, fmt.Errorf(
+			"unsupported CBOR array additional info: %d",
+			additional,
+		)
 	}
 }

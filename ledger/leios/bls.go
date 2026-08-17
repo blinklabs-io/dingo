@@ -23,8 +23,25 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
-// LeiosVoteDST is the proof-of-possession ciphersuite used by
-// cardano-crypto-leios' minSigPoPDST.
+// LeiosVoteDST is the MinSig ciphersuite used for both ordinary vote
+// signatures and possession-proof verification (see
+// VerifyLeiosKeyProofOfPossession) -- deliberately one DST for both, not
+// two.
+//
+// The IETF BLS-signature draft's textbook PopProve/PopVerify construction
+// uses a second, "BLS_POP_"-prefixed DST for hash_pubkey_to_point, distinct
+// from CoreSign's hash_to_point DST. cardano-crypto-class does not
+// implement that: 'minSigPoPDST' in
+// Cardano.Crypto.DSIGN.BLS12381.Internal is defined identically to this
+// constant, and createPossessionProofDSIGN/verifyPossessionProofDSIGN take
+// their DST as a caller-supplied parameter and delegate straight to
+// ordinary signDSIGN/verifyDSIGN -- there is no separate
+// hash_pubkey_to_point step anywhere in that module. Its own documented
+// example uses one context for both a possession proof and an ordinary
+// signature. Matching that (rather than the generic IETF construction) is
+// what makes a real pool's on-chain proof of possession verify here;
+// diverging from it silently turns every correctly-registered pool into a
+// keyless seat.
 const LeiosVoteDST = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
 
 // Vote signatures follow the BLS MinSig variant on BLS12-381: signatures
@@ -46,10 +63,29 @@ var negG2Gen = func() bls12381.G2Affine {
 	return neg
 }()
 
+// prototypeRbHashCborHeader is the CBOR byte-string header for a 32-byte
+// payload: major type 2 with a one-byte length (0x58) followed by the length
+// itself (0x20). Equivalent to cbor.Encode of the hash, but the length is
+// fixed here, so the header is a constant and the encoding cannot fail.
+const prototypeRbHashCborHeader = "\x58\x20"
+
 // PrototypeVoteMessageBytes returns the current prototype's signed message:
-// the hash of the ranking block that announced the endorser block.
+// the hash of the ranking block that announced the endorser block, encoded
+// as a CBOR byte string.
+//
+// The reference signs the RbHash SignableRepresentation, which is
+// toStrictByteString (encodeRbHash h) == CBOR.encodeBytes of the hash, so
+// the signed preimage is the 34-byte CBOR encoding rather than the bare
+// 32 hash bytes. Signing the bare hash hashes a different preimage to the
+// curve and every pairing check fails, even with a correct key.
 func PrototypeVoteMessageBytes(announcingRbHash lcommon.Blake2b256) []byte {
-	return announcingRbHash.Bytes()
+	msg := make(
+		[]byte,
+		0,
+		len(prototypeRbHashCborHeader)+lcommon.Blake2b256Size,
+	)
+	msg = append(msg, prototypeRbHashCborHeader...)
+	return append(msg, announcingRbHash.Bytes()...)
 }
 
 // VoteMessageBytes retains the legacy standalone leios-votes message shape.
@@ -128,6 +164,52 @@ func VerifyVoteSignature(
 	}
 	if !ok {
 		return ErrInvalidSignature
+	}
+	return nil
+}
+
+// VerifyLeiosKeyProofOfPossession verifies that a registered Dijkstra pool
+// Leios key's possession proof is a valid signature, under LeiosVoteDST
+// (see that constant's comment for why this is not a separate DST), over
+// the key's own serialized public key. gouroboros decodes LeiosKey and
+// checks only field lengths (LeiosKey.validate), not the proof itself --
+// callers must not treat an on-chain leios_key as usable until this passes.
+//
+// NOT YET CHECKED AGAINST A REAL INTEROP VECTOR: this matches
+// cardano-crypto-class's documented usage (one DST, caller-supplied,
+// shared between signDSIGN and createPossessionProofDSIGN/
+// verifyPossessionProofDSIGN), but no test here has verified an actual
+// key/proof pair produced by cardano-crypto-leios itself -- every test in
+// this package both signs and verifies with the same code, so a shared,
+// still-wrong assumption (message encoding, HashToG1 parameters) would
+// pass here undetected. Get one real vector before relying on this
+// against a live network.
+func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
+	if key == nil {
+		return errors.New("nil leios key")
+	}
+	if len(key.PublicKey) != VotePublicKeySize {
+		return fmt.Errorf(
+			"leios key public key must be %d bytes, got %d",
+			VotePublicKeySize,
+			len(key.PublicKey),
+		)
+	}
+	var pub bls12381.G2Affine
+	// SetBytes validates curve membership and subgroup order, matching
+	// ParseVoterPublicKey's checks.
+	if _, err := pub.SetBytes(key.PublicKey); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPublicKey, err)
+	}
+	if pub.IsInfinity() {
+		return fmt.Errorf("%w: point is infinity", ErrInvalidPublicKey)
+	}
+	if err := VerifyVoteSignature(
+		&pub,
+		key.PublicKey,
+		key.PossessionProof,
+	); err != nil {
+		return fmt.Errorf("leios key proof of possession: %w", err)
 	}
 	return nil
 }

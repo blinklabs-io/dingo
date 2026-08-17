@@ -76,6 +76,12 @@ type LedgerDelta struct {
 	// reference ledger's ValidateNone closure apply; false for all ranking-block
 	// deltas so their behavior is unchanged.
 	skipConsumedInputRecovery bool
+	// strictConsumedInputs refuses to recover an absent consumed-input producer
+	// from the blob store and treats it as a hard error instead (issue #3005).
+	// Set only when the block is applied in the steady-state, at-tip, validated
+	// context, where every consumed input's producer must already be applied and
+	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.
+	strictConsumedInputs bool
 }
 
 func NewLedgerDelta(
@@ -90,6 +96,7 @@ func NewLedgerDelta(
 	delta.Offsets = nil // Reset offsets from previous use
 	delta.donation = 0
 	delta.skipConsumedInputRecovery = false
+	delta.strictConsumedInputs = false
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
 	delta.txSlicePtr = slicePtr          // Store original pointer
@@ -109,6 +116,7 @@ func (d *LedgerDelta) Release() {
 	d.Offsets = nil
 	d.donation = 0
 	d.skipConsumedInputRecovery = false
+	d.strictConsumedInputs = false
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
 }
@@ -176,7 +184,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			d.Offsets,
 			txn,
 			database.BatchedTxIngestOpts{
-				SkipConsumedInputRecovery: d.skipConsumedInputRecovery,
+				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+				StrictAppliedInputConservation: d.strictConsumedInputs,
+				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
 			},
 		)
 		// Return the map to pool
@@ -191,6 +201,36 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			if err := d.processGovernance(ls, tr.Tx, txn); err != nil {
 				return fmt.Errorf("process governance: %w", err)
 			}
+		}
+	}
+
+	// CIP-0163: renew reward-account expirations for the credentials witnessed
+	// by this block's transactions. This runs after every transaction's effects
+	// (including stake-key registrations that create account rows) have been
+	// written to the same DB transaction above, so a credential registered by
+	// this block already has a row for RenewAccountExpirations to update, and
+	// the renewal commits or rolls back atomically with the block. It is a
+	// no-op when the delegator-inactivity gate is off. The renewal is idempotent
+	// and monotonic, so applying it per delta (once per block outside
+	// validation, once per transaction while validating, where each tx is its
+	// own delta) yields the same final expiration as applying it once per block.
+	if ls.config.DelegatorInactivityEnabled {
+		ls.RLock()
+		currentEpoch := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		witnessTxs := make([]lcommon.Transaction, 0, len(d.Transactions))
+		for i, tr := range d.Transactions {
+			if !appliedTxs[i] {
+				continue
+			}
+			witnessTxs = append(witnessTxs, tr.Tx)
+		}
+		if err := ls.renewWitnessedAccountExpirations(
+			txn,
+			currentEpoch,
+			witnessTxs,
+		); err != nil {
+			return fmt.Errorf("renew witnessed account expirations: %w", err)
 		}
 	}
 
@@ -287,10 +327,11 @@ func (d *LedgerDelta) recordNetworkDonations(
 	return nil
 }
 
-// processGovernance handles governance proposals and votes from a transaction.
+// processGovernance handles governance proposals, votes, and DRep activity
+// certificates from a transaction.
 // This is called during delta application for valid Conway-era transactions.
-// Proposals and votes are only present in Conway-era transactions, so this is
-// a no-op for pre-Conway eras.
+// These items are only present in Conway-era transactions, so this is a no-op
+// for pre-Conway eras.
 func (d *LedgerDelta) processGovernance(
 	ls *LedgerState,
 	tx lcommon.Transaction,
@@ -298,9 +339,10 @@ func (d *LedgerDelta) processGovernance(
 ) error {
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
+	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
 
 	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 {
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
 		return nil
 	}
 
@@ -345,6 +387,18 @@ func (d *LedgerDelta) processGovernance(
 			txn,
 		); err != nil {
 			return fmt.Errorf("process governance votes: %w", err)
+		}
+	}
+
+	if hasDRepActivityCerts {
+		if err := governance.ProcessDRepActivityCertificates(
+			tx,
+			currentEpoch,
+			conwayPParams.DRepInactivityPeriod,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process DRep activity certificates: %w", err)
 		}
 	}
 

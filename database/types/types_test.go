@@ -94,7 +94,11 @@ func TestBlockTombstoneMarker(t *testing.T) {
 		t.Fatal("IsBlockTombstone returned false for BlockTombstone()")
 	}
 	if !bytes.Equal(enc[:4], types.BlockTombstoneMagic[:]) {
-		t.Fatalf("marker prefix = %x, want %x", enc[:4], types.BlockTombstoneMagic[:])
+		t.Fatalf(
+			"marker prefix = %x, want %x",
+			enc[:4],
+			types.BlockTombstoneMagic[:],
+		)
 	}
 }
 
@@ -104,7 +108,11 @@ func TestParseBlockBlobKeyRoundTrip(t *testing.T) {
 
 	key := types.BlockBlobKey(slot, hash)
 	if len(key) != types.BlockBlobKeySize {
-		t.Fatalf("encoded key length %d, want %d", len(key), types.BlockBlobKeySize)
+		t.Fatalf(
+			"encoded key length %d, want %d",
+			len(key),
+			types.BlockBlobKeySize,
+		)
 	}
 	gotSlot, gotHash, err := types.ParseBlockBlobKey(key)
 	if err != nil {

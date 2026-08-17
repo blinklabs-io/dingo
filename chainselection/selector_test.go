@@ -202,7 +202,10 @@ func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
 	leadingConn := newTestConnectionId(2)
 
 	laggingAdvertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 200, Hash: []byte("lagging-advertised")},
+		Point: ocommon.Point{
+			Slot: 200,
+			Hash: []byte("lagging-advertised"),
+		},
 		BlockNumber: 200,
 	}
 	laggingObservedTip := ochainsync.Tip{
@@ -210,7 +213,10 @@ func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
 		BlockNumber: 120,
 	}
 	leadingAdvertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 180, Hash: []byte("leading-advertised")},
+		Point: ocommon.Point{
+			Slot: 180,
+			Hash: []byte("leading-advertised"),
+		},
 		BlockNumber: 180,
 	}
 	leadingObservedTip := ochainsync.Tip{
@@ -516,7 +522,9 @@ func TestChainSelectorSkipsIneligiblePeers(t *testing.T) {
 	assert.Equal(t, eligibleConn, *bestPeer)
 }
 
-func TestChainSelectorDoesNotSwitchToIneligiblePeerAfterDisconnect(t *testing.T) {
+func TestChainSelectorDoesNotSwitchToIneligiblePeerAfterDisconnect(
+	t *testing.T,
+) {
 	eligibleConn := newTestConnectionId(1)
 	ineligibleConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -652,24 +660,20 @@ func TestChainSelectorSwitchesOnOneBlockObservedTipLead(t *testing.T) {
 
 	// Challenger has the same confirmed Tip but has received one block header
 	// ahead via ObservedTip — simulating "announced header before incumbent did".
-	// This is done by calling updatePeerTipObserved directly.
 	oneAheadTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 101, Hash: []byte("one-ahead")},
 		BlockNumber: 51,
 	}
-	cs.mutex.Lock()
-	if pt, ok := cs.peerTips[challengerConn]; ok {
-		pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
-	} else {
-		cs.mutex.Unlock()
-		// Add via normal path first, then update observed
-		cs.UpdatePeerTip(challengerConn, confirmedTip, nil)
+	// UpdatePeerTip takes cs.mutex itself, so the challenger must be registered
+	// before the lock is acquired to reach its PeerChainTip directly.
+	cs.UpdatePeerTip(challengerConn, confirmedTip, nil)
+	func() {
 		cs.mutex.Lock()
-		if pt, ok := cs.peerTips[challengerConn]; ok {
-			pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
-		}
-	}
-	cs.mutex.Unlock()
+		defer cs.mutex.Unlock()
+		pt, ok := cs.peerTips[challengerConn]
+		require.True(t, ok, "challenger must be registered before observing")
+		pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
+	}()
 
 	switched := cs.EvaluateAndSwitch()
 	assert.True(
@@ -1500,7 +1504,12 @@ func TestUpdatePeerTipRejectsImplausibleTip(t *testing.T) {
 		cs.GetPeerTip(connId),
 		"rejected tip should not be tracked",
 	)
-	assert.Equal(t, 1, cs.PeerCount(), "peer count should remain 1 (existing peer only)")
+	assert.Equal(
+		t,
+		1,
+		cs.PeerCount(),
+		"peer count should remain 1 (existing peer only)",
+	)
 }
 
 func TestUpdatePeerTipAcceptsPlausibleTip(t *testing.T) {

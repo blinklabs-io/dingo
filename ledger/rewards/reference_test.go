@@ -42,26 +42,39 @@ func TestHaskellReferenceApparentPerformanceBranches(t *testing.T) {
 }
 
 func TestHaskellReferenceOperatorRewardBranches(t *testing.T) {
-	t.Run("pool reward at or below cost pays all to operator", func(t *testing.T) {
-		require.Equal(
-			t,
-			uint64(90),
-			requireLeaderReward(t, 90, 100, big.NewRat(1, 50), 100, 1_000),
-		)
-		require.Equal(
-			t,
-			uint64(0),
-			requireMemberReward(t, 90, 100, big.NewRat(1, 50), 300, 1_000),
-		)
-	})
+	t.Run(
+		"pool reward at or below cost pays all to operator",
+		func(t *testing.T) {
+			require.Equal(
+				t,
+				uint64(90),
+				requireLeaderReward(t, 90, 100, big.NewRat(1, 50), 100, 1_000),
+			)
+			require.Equal(
+				t,
+				uint64(0),
+				requireMemberReward(t, 90, 100, big.NewRat(1, 50), 300, 1_000),
+			)
+		},
+	)
 
-	t.Run("cost plus margin plus owner share uses exact floor", func(t *testing.T) {
-		require.Equal(
-			t,
-			uint64(417),
-			requireLeaderReward(t, 1_000, 340, big.NewRat(1, 50), 100, 1_000),
-		)
-	})
+	t.Run(
+		"cost plus margin plus owner share uses exact floor",
+		func(t *testing.T) {
+			require.Equal(
+				t,
+				uint64(417),
+				requireLeaderReward(
+					t,
+					1_000,
+					340,
+					big.NewRat(1, 50),
+					100,
+					1_000,
+				),
+			)
+		},
+	)
 }
 
 func TestHaskellReferenceMemberRewardBranches(t *testing.T) {
@@ -225,13 +238,48 @@ func TestAmaruReferenceRewardVector(t *testing.T) {
 
 	source := vector.Source.Repository + "@" + vector.Source.Commit +
 		":" + vector.Source.Path
-	require.Equal(t, uint64(vector.Expected.Incentives), result.Incentives, source)
-	require.Equal(t, uint64(vector.Expected.TotalRewardPot), result.TotalRewardPot, source)
-	require.Equal(t, uint64(vector.Expected.TreasuryTax), result.TreasuryTax, source)
-	require.Equal(t, uint64(vector.Expected.AvailableRewards), result.AvailableRewards, source)
-	require.Equal(t, uint64(vector.Expected.EffectiveRewards), result.EffectiveRewards, source)
-	require.Equal(t, uint64(vector.Expected.Undistributed), result.Undistributed, source)
-	require.Equal(t, vector.Expected.UpdatedPots.toPots(), result.UpdatedPots, source)
+	require.Equal(
+		t,
+		uint64(vector.Expected.Incentives),
+		result.Incentives,
+		source,
+	)
+	require.Equal(
+		t,
+		uint64(vector.Expected.TotalRewardPot),
+		result.TotalRewardPot,
+		source,
+	)
+	require.Equal(
+		t,
+		uint64(vector.Expected.TreasuryTax),
+		result.TreasuryTax,
+		source,
+	)
+	require.Equal(
+		t,
+		uint64(vector.Expected.AvailableRewards),
+		result.AvailableRewards,
+		source,
+	)
+	require.Equal(
+		t,
+		uint64(vector.Expected.EffectiveRewards),
+		result.EffectiveRewards,
+		source,
+	)
+	require.Equal(
+		t,
+		uint64(vector.Expected.Undistributed),
+		result.Undistributed,
+		source,
+	)
+	require.Equal(
+		t,
+		vector.Expected.UpdatedPots.toPots(),
+		result.UpdatedPots,
+		source,
+	)
 	require.Len(t, result.PoolRewards, len(vector.Expected.PoolRewards), source)
 	for i, want := range vector.Expected.PoolRewards {
 		got := result.PoolRewards[i]
@@ -239,15 +287,30 @@ func TestAmaruReferenceRewardVector(t *testing.T) {
 		require.Equal(t, uint64(want.OptimalReward), got.OptimalReward, source)
 		require.Equal(t, uint64(want.PoolReward), got.PoolReward, source)
 		require.Equal(t, uint64(want.LeaderReward), got.LeaderReward, source)
-		require.Equal(t, uint64(want.MemberRewardTotal), got.MemberRewardTotal, source)
+		require.Equal(
+			t,
+			uint64(want.MemberRewardTotal),
+			got.MemberRewardTotal,
+			source,
+		)
 		require.Equal(t, uint64(want.OwnerStake), got.OwnerStake, source)
 		require.Equal(t, uint64(want.Undistributed), got.Undistributed, source)
 		require.Equal(t, uint64(want.Unspendable), got.Unspendable, source)
 	}
-	require.Len(t, result.AccountRewards, len(vector.Expected.AccountRewards), source)
+	require.Len(
+		t,
+		result.AccountRewards,
+		len(vector.Expected.AccountRewards),
+		source,
+	)
 	for i, want := range vector.Expected.AccountRewards {
 		got := result.AccountRewards[i]
-		require.Equal(t, want.Credential.toCredential(t), got.Credential, source)
+		require.Equal(
+			t,
+			want.Credential.toCredential(t),
+			got.Credential,
+			source,
+		)
 		require.Equal(t, parsePoolID(t, want.PoolID), got.PoolID, source)
 		require.Equal(t, RewardType(want.Type), got.Type, source)
 		require.Equal(t, uint64(want.Amount), got.Amount, source)
@@ -464,6 +527,7 @@ func requireOptimalPoolReward(
 		poolStake,
 		pledge,
 		totalStake,
+		nil,
 	)
 	require.NoError(t, err)
 	return ret
@@ -478,7 +542,13 @@ func requireLeaderReward(
 	poolStake uint64,
 ) uint64 {
 	t.Helper()
-	ret, err := leaderRewardChecked(poolReward, cost, margin, ownerStake, poolStake)
+	ret, err := leaderRewardChecked(
+		poolReward,
+		cost,
+		margin,
+		ownerStake,
+		poolStake,
+	)
 	require.NoError(t, err)
 	return ret
 }
@@ -492,7 +562,13 @@ func requireMemberReward(
 	poolStake uint64,
 ) uint64 {
 	t.Helper()
-	ret, err := memberRewardChecked(poolReward, cost, margin, memberStake, poolStake)
+	ret, err := memberRewardChecked(
+		poolReward,
+		cost,
+		margin,
+		memberStake,
+		poolStake,
+	)
 	require.NoError(t, err)
 	return ret
 }

@@ -43,6 +43,94 @@ type stateMetrics struct {
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
 	// as a metric instead of only a WARN loop. See issue #2728.
 	unrecoverableRollbacks prometheus.Counter
+	// Incremented when at-tip validation recovery detects a non-converging,
+	// descending series of distinct failures and holds at the ledger tip
+	// instead of rewinding the primary chain ever deeper. A rising value
+	// means local ledger validation is diverging from the network (e.g. a
+	// false-positive validation rejection), not a peer/fork problem. See
+	// issue #2939.
+	atTipRecoveryNonConverging prometheus.Counter
+	// Incremented when unresolved-producer replay recovery repeatedly fails
+	// to move the applied ledger tip forward and holds at that tip instead of
+	// pruning another security-parameter window. See issue #3005.
+	replayRecoveryNonConverging prometheus.Counter
+	// Incremented when the cross-fork continuation audit finds a freshly
+	// fetched body spending an input whose producing transaction is not on
+	// the local applied chain. A rising value means a peer is feeding the
+	// node a continuation from a fork it never applied. See issue #3005.
+	continuationInputUnresolved prometheus.Counter
+	// Observed for every Praos leader-eligibility decision on an inbound
+	// header: (threshold - leaderValue) / threshold. Positive is eligible,
+	// and the magnitude is the headroom. dingo derives its leadership stake
+	// by independent reimplementation, so its relative stake error is never
+	// provably zero, and a threshold comparison turns an error of eps into a
+	// flipped decision with probability about eps per block. Recording every
+	// decision rather than only the failures is what makes that eps
+	// measurable in the field: a stake error clusters decisions near zero,
+	// while a derivation bug produces margins that are not marginal.
+	leaderThresholdMargin prometheus.Histogram
+	// Incremented when a header is rejected because its VRF leader value did
+	// not clear the stake-derived threshold. Read alongside the margin
+	// histogram: rejections whose margin sits just under zero indicate a
+	// stake discrepancy rather than a genuinely ineligible producer.
+	leaderThresholdRejections prometheus.Counter
+	// Set to the number of consecutive ledger-pipeline restarts that have
+	// made no tip progress, and to 1 while that count is past the point
+	// where the pipeline is treated as stuck. A deterministic failure (a
+	// rejected canonical block, say) repeats forever, so without this a
+	// wedged node is visible only as a repeating WARN. See issue #3165.
+	pipelineNoProgressRestarts prometheus.Gauge
+	pipelineStuck              prometheus.Gauge
+	// Incremented for each epoch-boundary reward round that could not be
+	// applied because one of its inputs was absent. Every increment leaves
+	// reward balances -- and the leadership stake derived from them --
+	// permanently short by that epoch's rewards, which is what makes a node
+	// reject canonical blocks near the eligibility threshold. A nonzero
+	// value on a Mithril-bootstrapped node explains a stake shortfall; a
+	// rising value on any node is a live divergence from the network.
+	skippedStakeRewardRounds prometheus.Counter
+}
+
+// The accessors below tolerate an uninitialised stateMetrics. A LedgerState
+// built directly -- as the ledger's own unit tests do -- never calls init, so
+// its metric fields are nil; instrumenting a path that those tests exercise
+// must not turn a metric into a nil dereference.
+
+func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
+	if m == nil || m.leaderThresholdMargin == nil {
+		return
+	}
+	m.leaderThresholdMargin.Observe(margin)
+}
+
+func (m *stateMetrics) incLeaderThresholdRejections() {
+	if m == nil || m.leaderThresholdRejections == nil {
+		return
+	}
+	m.leaderThresholdRejections.Inc()
+}
+
+func (m *stateMetrics) incSkippedStakeRewardRounds() {
+	if m == nil || m.skippedStakeRewardRounds == nil {
+		return
+	}
+	m.skippedStakeRewardRounds.Inc()
+}
+
+func (m *stateMetrics) setPipelineNoProgress(restarts int, stuck bool) {
+	if m == nil {
+		return
+	}
+	if m.pipelineNoProgressRestarts != nil {
+		m.pipelineNoProgressRestarts.Set(float64(restarts))
+	}
+	if m.pipelineStuck != nil {
+		stuckValue := float64(0)
+		if stuck {
+			stuckValue = 1
+		}
+		m.pipelineStuck.Set(stuckValue)
+	}
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -140,6 +228,62 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_chainsync_unrecoverable_rollback_total",
 			Help: "times a peer repeatedly requested a rollback we cannot cross to (local chain diverged, operator intervention required)",
+		},
+	)
+	m.atTipRecoveryNonConverging = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_attip_recovery_nonconverging_total",
+			Help: "times at-tip validation recovery held at the ledger tip instead of rewinding the primary chain deeper, because a descending series of distinct failures indicated local validation divergence (operator intervention required)",
+		},
+	)
+	m.replayRecoveryNonConverging = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_replay_recovery_nonconverging_total",
+			Help: "times unresolved-producer replay recovery held at the applied ledger tip because repeated recovery attempts made no forward progress",
+		},
+	)
+	m.continuationInputUnresolved = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_continuation_input_unresolved_total",
+			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
+		},
+	)
+	m.leaderThresholdMargin = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_leader_threshold_margin",
+			Help: "(threshold - VRF leader value) / threshold for every Praos leader-eligibility decision on an inbound header; positive is eligible, and values clustered near zero mean the local stake distribution is close enough to the threshold for a small stake error to flip the decision",
+			// Resolution is concentrated around zero: everything this
+			// metric exists to detect lives within a fraction of a percent
+			// of the boundary, and the bulk far from it carries no signal.
+			Buckets: []float64{
+				-1, -0.1, -0.01, -0.001, -0.0001, -0.00001,
+				0,
+				0.00001, 0.0001, 0.001, 0.01, 0.1, 1,
+			},
+		},
+	)
+	m.leaderThresholdRejections = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_leader_threshold_rejections_total",
+			Help: "headers rejected because the producer's VRF leader value did not clear the stake-derived threshold",
+		},
+	)
+	m.pipelineNoProgressRestarts = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_pipeline_no_progress_restarts",
+			Help: "consecutive ledger-pipeline restarts that made no tip progress; resets to zero as soon as the tip advances",
+		},
+	)
+	m.skippedStakeRewardRounds = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
+			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
+		},
+	)
+	m.pipelineStuck = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_pipeline_stuck",
+			Help: "1 while the ledger pipeline has restarted without tip progress often enough to be treated as stuck on a deterministic failure (operator intervention required), 0 otherwise",
 		},
 	)
 }

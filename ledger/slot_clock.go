@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
 // SlotTick represents a notification that a slot boundary has been reached
@@ -100,6 +102,12 @@ type SlotClock struct {
 	// Track last emitted epoch to avoid duplicates and detect discrepancies
 	lastEmittedEpoch uint64
 	epochEmitMu      sync.Mutex
+
+	// behindHorizon tracks whether the previous tick was skipped because the
+	// applied ledger's era history did not reach the current slot, so the
+	// transition into and out of that state is reported once instead of once
+	// per slot. Only touched by the single run goroutine.
+	behindHorizon bool
 
 	// For testing: allow injection of custom time source
 	nowFunc func() time.Time
@@ -417,6 +425,34 @@ func (sc *SlotClock) run() {
 		// Emit tick for the slot we're at (might have skipped some if drift is large)
 		tick, err := sc.buildSlotTick(actualSlot, actualNow)
 		if err != nil {
+			// A past-horizon slot is the expected state while the applied
+			// ledger is behind the wall clock (from-genesis sync, bulk load,
+			// restart after downtime): the era history simply does not reach
+			// the current slot yet, so its epoch is unknowable and there is
+			// nothing meaningful to emit. Deliberately not extrapolated -- the
+			// tick's Epoch and IsEpochStart drive subscriber epoch-boundary
+			// work, and a fabricated epoch would be worse than no tick.
+			//
+			// Report the transition once at info rather than an error per slot,
+			// which on a live network meant one error per second for the whole
+			// catch-up.
+			if errors.Is(err, hardfork.ErrPastHorizon) {
+				if !sc.behindHorizon {
+					sc.behindHorizon = true
+					logger.Info(
+						"applied ledger is behind the wall clock; "+
+							"slot ticks are paused until era history reaches "+
+							"the current slot",
+						"slot", actualSlot,
+					)
+				}
+				logger.Debug(
+					"skipping slot tick past era horizon",
+					"slot", actualSlot,
+					"error", err,
+				)
+				continue
+			}
 			logger.Error(
 				"failed to build slot tick",
 				"error",
@@ -425,6 +461,13 @@ func (sc *SlotClock) run() {
 				actualSlot,
 			)
 			continue
+		}
+		if sc.behindHorizon {
+			sc.behindHorizon = false
+			logger.Info(
+				"era history now covers the current slot; resuming slot ticks",
+				"slot", actualSlot,
+			)
 		}
 
 		sc.emitTick(tick)
@@ -475,32 +518,43 @@ func (sc *SlotClock) emitTick(tick SlotTick) {
 }
 
 // =============================================================================
-// LedgerState adapter
+// SlotTimeConverter adapter
 // =============================================================================
 
-// ledgerStateSlotProvider adapts LedgerState to the SlotTimeProvider interface.
-type ledgerStateSlotProvider struct {
-	ls *LedgerState
+// slotTimeConverterProvider adapts a SlotTimeConverter to the
+// SlotTimeProvider interface: only SlotToEpoch's return type differs
+// (models.Epoch vs. the tick-facing EpochInfo), so this is otherwise a thin
+// pass-through.
+type slotTimeConverterProvider struct {
+	conv *SlotTimeConverter
 }
 
-// newLedgerStateSlotProvider creates a new adapter wrapping the given LedgerState
-func newLedgerStateSlotProvider(ls *LedgerState) *ledgerStateSlotProvider {
-	return &ledgerStateSlotProvider{ls: ls}
+// newSlotTimeConverterProvider creates a new adapter wrapping the given
+// SlotTimeConverter.
+func newSlotTimeConverterProvider(
+	conv *SlotTimeConverter,
+) *slotTimeConverterProvider {
+	return &slotTimeConverterProvider{conv: conv}
 }
 
-// SlotToTime delegates to LedgerState.SlotToTime
-func (p *ledgerStateSlotProvider) SlotToTime(slot uint64) (time.Time, error) {
-	return p.ls.SlotToTime(slot)
+// SlotToTime delegates to SlotTimeConverter.SlotToTime
+func (p *slotTimeConverterProvider) SlotToTime(
+	slot uint64,
+) (time.Time, error) {
+	return p.conv.SlotToTime(slot)
 }
 
-// TimeToSlot delegates to LedgerState.TimeToSlot
-func (p *ledgerStateSlotProvider) TimeToSlot(t time.Time) (uint64, error) {
-	return p.ls.TimeToSlot(t)
+// TimeToSlot delegates to SlotTimeConverter.TimeToSlot
+func (p *slotTimeConverterProvider) TimeToSlot(t time.Time) (uint64, error) {
+	return p.conv.TimeToSlot(t)
 }
 
-// SlotToEpoch delegates to LedgerState.SlotToEpoch and converts the result
-func (p *ledgerStateSlotProvider) SlotToEpoch(slot uint64) (EpochInfo, error) {
-	epoch, err := p.ls.SlotToEpoch(slot)
+// SlotToEpoch delegates to SlotTimeConverter.SlotToEpoch and converts the
+// result
+func (p *slotTimeConverterProvider) SlotToEpoch(
+	slot uint64,
+) (EpochInfo, error) {
+	epoch, err := p.conv.SlotToEpoch(slot)
 	if err != nil {
 		return EpochInfo{}, err
 	}

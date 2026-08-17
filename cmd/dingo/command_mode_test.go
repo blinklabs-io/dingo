@@ -37,6 +37,7 @@ func newTestRootCmd() *cobra.Command {
 		versionCommand(),
 		mithrilCommand(),
 		syncCommand(),
+		databaseCommand(),
 	)
 	root.InitDefaultHelpCmd()
 	root.InitDefaultCompletionCmd()
@@ -114,6 +115,35 @@ func TestEffectiveRunMode(t *testing.T) {
 			[]string{"mithril"},
 			config.RunModeServe,
 			config.RunModeMithril,
+		},
+		// `dingo database snapshot|restore|truncate` are offline maintenance
+		// commands (dingo#1651 follow-up): they must resolve to
+		// RunModeDatabase regardless of the configured runMode, the same way
+		// `load`/`sync`/`mithril` ignore it, since main.go uses this to skip
+		// topology resolution (database never opens a peer connection).
+		{
+			"database snapshot is an offline maintenance command",
+			[]string{"database", "snapshot"},
+			config.RunModeServe,
+			config.RunModeDatabase,
+		},
+		{
+			"database restore is an offline maintenance command",
+			[]string{"database", "restore"},
+			config.RunModeServe,
+			config.RunModeDatabase,
+		},
+		{
+			"database truncate is an offline maintenance command",
+			[]string{"database", "truncate"},
+			config.RunModeServe,
+			config.RunModeDatabase,
+		},
+		{
+			"bare database is an offline maintenance command",
+			[]string{"database"},
+			config.RunModeServe,
+			config.RunModeDatabase,
 		},
 	}
 	for _, tt := range tests {

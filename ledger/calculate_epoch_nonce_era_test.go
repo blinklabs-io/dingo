@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/stretchr/testify/require"
 )
@@ -74,10 +75,12 @@ import (
 // All other era boundaries within TPraos (Shelley→Allegra, Allegra→Mary,
 // Mary→Alonzo) and within Praos (Babbage→Conway) use the same multiplier
 // either way and therefore mask the bug.
-func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cfg := newAlonzoToBabbageStabilityCfg(t)
 

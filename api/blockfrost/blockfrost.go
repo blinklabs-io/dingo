@@ -25,8 +25,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 )
+
+// blockfrostProjectIDHeader is the header real Blockfrost clients send
+// their API key in. Presenting the shared token there authenticates
+// exactly as presenting it via "Authorization: Bearer <token>" does --
+// see ARCHITECTURE.md/README.md's "API security" section for this
+// compatibility decision.
+const blockfrostProjectIDHeader = "project_id"
 
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
@@ -34,6 +43,7 @@ type Blockfrost struct {
 	logger     *slog.Logger
 	node       BlockfrostNode
 	httpServer *http.Server
+	verifier   *apiauth.Verifier
 	mu         sync.Mutex
 }
 
@@ -113,12 +123,36 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAssetAddresses,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/pools",
+		b.handlePoolsList,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/pools/extended",
 		b.handlePoolsExtended,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/pools/retiring",
+		b.handlePoolsRetiring,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}/metadata",
+		b.handlePoolMetadata,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}",
+		b.handlePoolDetail,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps",
+		b.handleDReps,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/governance/dreps/{drep_id}",
 		b.handleDRep,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}",
+		b.handleAddress,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}/utxos",
@@ -212,6 +246,18 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/accounts/{stake_address}/rewards",
 		b.handleAccountRewardHistory,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/utxos",
+		b.handleAccountUTXOs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/withdrawals",
+		b.handleAccountWithdrawals,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/transactions",
+		b.handleAccountTransactions,
+	)
 
 	// Catch-all for any path not matched above. Registered
 	// last so more specific patterns still take precedence;
@@ -222,8 +268,21 @@ func (b *Blockfrost) handler() http.Handler {
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
+	limited := http.MaxBytesHandler(mux, maxRequestBodyBytes)
+	// CORS must wrap authentication, not the reverse: httpcors.Handler
+	// fully answers an OPTIONS preflight itself and never calls the
+	// handler it wraps for one, so browsers -- which never attach
+	// Authorization to a preflight request -- never need a credential to
+	// pass CORS negotiation. Every other request, including a
+	// non-preflight OPTIONS, still reaches the mux normally. See
+	// internal/apiauth's Middleware doc comment for the general statement
+	// of this ordering rule.
+	authenticated := apiauth.Middleware(
+		b.verifier,
+		apiauth.WithAliasHeader(blockfrostProjectIDHeader),
+	)(limited)
 	return httpcors.Handler(
-		http.MaxBytesHandler(mux, maxRequestBodyBytes),
+		authenticated,
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 		},
@@ -234,11 +293,18 @@ func (b *Blockfrost) handler() http.Handler {
 func (b *Blockfrost) Start(
 	ctx context.Context,
 ) error {
+	// Built before the handler so handler() can install the shared
+	// credential-verification middleware (internal/apiauth).
+	verifier, err := apiauth.NewVerifier(b.config.Auth)
+	if err != nil {
+		return fmt.Errorf("blockfrost: %w", err)
+	}
 	b.mu.Lock()
 	if b.httpServer != nil {
 		b.mu.Unlock()
 		return errors.New("server already started")
 	}
+	b.verifier = verifier
 
 	server := &http.Server{
 		Addr:              b.config.ListenAddress,
@@ -330,6 +396,19 @@ func (b *Blockfrost) Stop(
 func (b *Blockfrost) startServer(
 	server *http.Server,
 ) error {
+	useTLS := b.config.TLS.Enabled
+	if useTLS {
+		if err := tlsutil.ConfigureServerTLS(
+			server,
+			b.config.TLS.CertFilePath,
+			b.config.TLS.KeyFilePath,
+		); err != nil {
+			return fmt.Errorf(
+				"failed to load TLS keypair for Blockfrost API server: %w",
+				err,
+			)
+		}
+	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		return fmt.Errorf(
@@ -339,11 +418,17 @@ func (b *Blockfrost) startServer(
 		)
 	}
 	go func() {
-		if err := server.Serve(ln); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
+		var serveErr error
+		if useTLS {
+			serveErr = server.ServeTLS(ln, "", "")
+		} else {
+			serveErr = server.Serve(ln)
+		}
+		if serveErr != nil &&
+			!errors.Is(serveErr, http.ErrServerClosed) {
 			b.logger.Error(
 				"Blockfrost API server error",
-				"error", err,
+				"error", serveErr,
 			)
 		}
 	}()

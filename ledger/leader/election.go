@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
 	"time"
 
@@ -80,10 +81,64 @@ type EpochInfoProvider interface {
 	ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode
 }
 
+// ActiveSlotCoeffRatProvider is an optional extension of EpochInfoProvider
+// for providers that can supply the active slot coefficient (f) as the exact
+// rational written in the Shelley genesis rather than a float64.
+//
+// It is a separate, optionally-implemented interface rather than a method on
+// EpochInfoProvider so existing implementations keep compiling. computeSchedule
+// prefers it whenever the provider satisfies it and returns a non-nil value,
+// and logs the coefficient actually used so a fallback to the float64 form is
+// visible in the "leader schedule calculated" record.
+//
+// The distinction matters because the reference node derives its leadership
+// threshold from the exact genesis rational. A float64 round trip of 1/20
+// yields 3602879701896397/2^56, which is strictly larger, so every per-slot
+// threshold is strictly larger and the resulting eligible-slot set is a strict
+// superset of the reference's. dingo's own header verification already uses the
+// exact rational, so the float64 form also let the forge path disagree with
+// dingo's own validation path. See Calculator.ActiveSlotCoeffRat.
+type ActiveSlotCoeffRatProvider interface {
+	// ActiveSlotCoeffRat returns the exact active slot coefficient, or nil
+	// when the genesis value is unavailable.
+	ActiveSlotCoeffRat() *big.Rat
+}
+
 // ScheduleStore persists computed schedules for later reuse.
 type ScheduleStore interface {
 	LoadSchedule(epoch uint64, poolId lcommon.PoolKeyHash) (*Schedule, error)
 	SaveSchedule(schedule *Schedule) error
+}
+
+// markSnapshotType names the stake snapshot generation the Praos leader check
+// reads, for the audit log only. StakeDistributionProvider is documented to
+// resolve the mark snapshot selected by praos.StakeSnapshotEpoch; the string is
+// duplicated here rather than imported from database/models to keep this
+// package free of a database dependency.
+const markSnapshotType = "mark"
+
+// consensusModeName renders a consensus mode for logging. gouroboros'
+// ConsensusMode is a bare int with no String method, and the numeric value is
+// not self-describing in an operator-facing audit record.
+func consensusModeName(mode consensus.ConsensusMode) string {
+	switch mode {
+	case consensus.ConsensusModeTPraos:
+		return "tpraos"
+	case consensus.ConsensusModeCPraos:
+		return "cpraos"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(mode))
+	}
+}
+
+// thresholdHex renders a leadership threshold for logging. The threshold is a
+// 256- or 512-bit integer, so hex keeps the record compact and directly
+// comparable against a certified-natural VRF value.
+func thresholdHex(threshold *big.Int) string {
+	if threshold == nil {
+		return ""
+	}
+	return threshold.Text(16)
 }
 
 // maxCachedSchedules is the number of epoch schedules to keep in memory.
@@ -117,6 +172,22 @@ type Election struct {
 	subscriptionId event.EventSubscriberId
 	nonceReadySub  event.EventSubscriberId
 	metrics        *electionMetrics
+
+	// wg tracks epochTransitionLoop, epochNonceReadyLoop,
+	// scheduleComputeLoop, and the ctx-monitor goroutine, so Stop can
+	// actually wait for all of them to exit rather than merely signaling
+	// them (closing stopCh/computeCh, cancelling ctx, unsubscribing) and
+	// returning immediately. A plain signal-and-return was fine when the
+	// only caller was a full process shutdown, but the live database
+	// restore/truncate path (node_lifecycle.go) calls Stop and then
+	// closes/reopens the node's *database.Database/*ledger.LedgerState
+	// while the process keeps running: RefreshScheduleForEpoch (driven by
+	// any of these goroutines) reads stakeProvider/epochProvider, both
+	// bound to whatever ledgerState existed at construction time
+	// (initBlockForger), so a goroutine still in flight when Stop returns
+	// can keep running against it after that ledgerState has already been
+	// closed and replaced.
+	wg sync.WaitGroup
 }
 
 // NewElection creates a new leader election manager for a stake pool.
@@ -196,7 +267,9 @@ func (e *Election) Start(ctx context.Context) error {
 			"component", "leader",
 		)
 	} else {
-		go e.epochTransitionLoop(ctx, evtCh)
+		e.wg.Go(func() {
+			e.epochTransitionLoop(ctx, evtCh)
+		})
 	}
 
 	var nonceReadyCh <-chan event.Event
@@ -206,12 +279,25 @@ func (e *Election) Start(ctx context.Context) error {
 	if nonceReadyCh == nil {
 		e.logger.Warn(
 			"event bus not available, next-epoch precompute will not be tracked",
-			"component", "leader",
+			"component",
+			"leader",
 		)
 	} else {
-		go e.epochNonceReadyLoop(ctx, nonceReadyCh)
+		e.wg.Go(func() {
+			e.epochNonceReadyLoop(ctx, nonceReadyCh)
+		})
 	}
-	go e.scheduleComputeLoop(ctx, e.computeCh)
+	// Captured into a local before spawning: e.computeCh is read here while
+	// Start still holds e.mu, but the goroutine below reads it again at
+	// whatever time it actually gets scheduled to run, with no lock -- an
+	// immediate Stop right after Start (as TestElectionStartStop does) can
+	// nil the field out first, racing this goroutine's read of the live
+	// field. The local copy is never touched by anything else, so passing
+	// it in is race-free regardless of scheduling order.
+	computeCh := e.computeCh
+	e.wg.Go(func() {
+		e.scheduleComputeLoop(ctx, computeCh)
+	})
 
 	// Kick off initial schedule computation for the current epoch.
 	currentEpoch := e.epochProvider.CurrentEpoch()
@@ -226,23 +312,53 @@ func (e *Election) Start(ctx context.Context) error {
 		}
 		e.logger.Info(
 			"next epoch nonce already stable at startup, precomputing leader schedule",
-			"component", "leader",
-			"current_epoch", currentEpoch,
-			"ready_epoch", nextEpoch,
+			"component",
+			"leader",
+			"current_epoch",
+			currentEpoch,
+			"ready_epoch",
+			nextEpoch,
 		)
 	}
 
 	// Monitor context cancellation to automatically stop.
 	// The goroutine exits when either the context is canceled or Stop() is called.
+	//
+	// Tracked in e.wg (like the three loops above), not left to dangle:
+	// otherwise a completed Stop() could return with this goroutine still
+	// alive, watching the now-defunct ctx/stopCh from this Start generation.
+	// A later Start() on the same *Election creates a new ctx/stopCh, but
+	// does nothing about a stale monitor from a previous generation still
+	// running -- if THAT ctx's parent is ever cancelled afterward, the
+	// stale goroutine would call e.Stop() on the new, currently-running
+	// generation it has no business touching.
 	stopCh := e.stopCh
-	go func() {
+	e.wg.Go(func() {
 		select {
-		case <-ctx.Done():
-			_ = e.Stop()
 		case <-stopCh:
-			// Stop() was called directly, goroutine should exit
+			// Stop() was called directly, goroutine should exit.
+			return
+		case <-ctx.Done():
+			// ctx can be canceled either because Stop() itself was called
+			// directly (which always closes stopCh strictly before its
+			// own e.cancel() call below) or because the caller's parent
+			// context died externally -- and since both channels can be
+			// simultaneously ready by the time this select actually runs,
+			// Go may have picked this case even though stopCh is also
+			// already closed. Re-check stopCh, non-blockingly: if it's
+			// already closed, a direct Stop() is the reason ctx died and
+			// must not be re-entered here -- a second, concurrent Stop()
+			// call would deadlock waiting on e.wg for this very goroutine
+			// (now tracked above). Only a genuinely external cancellation
+			// (stopCh still open) should trigger our own Stop() call.
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+			_ = e.Stop()
 		}
-	}()
+	})
 
 	e.logger.Info(
 		"leader election started",
@@ -392,12 +508,19 @@ func (e *Election) scheduleComputeLoop(
 	}
 }
 
-// Stop stops the leader election manager.
+// Stop stops the leader election manager, waiting for epochTransitionLoop,
+// epochNonceReadyLoop, and scheduleComputeLoop to actually exit before
+// returning -- not just signaling them to stop. A plain signal-and-return
+// was fine when the only caller was a full process shutdown, but the live
+// database restore/truncate path (node_lifecycle.go) calls Stop and then
+// closes/reopens the node's storage while the process keeps running: see
+// the wg field's doc comment for why a goroutine still in flight when Stop
+// returns is a real use-after-close risk here, not just a benign leak.
 func (e *Election) Stop() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	if !e.running {
+		e.mu.Unlock()
 		return nil
 	}
 
@@ -412,22 +535,31 @@ func (e *Election) Stop() error {
 	if e.cancel != nil {
 		e.cancel()
 	}
-	if e.subscriptionId != 0 {
-		e.eventBus.Unsubscribe(
-			event.EpochTransitionEventType,
-			e.subscriptionId,
-		)
-		e.subscriptionId = 0
-	}
-	if e.nonceReadySub != 0 {
-		e.eventBus.Unsubscribe(
-			event.EpochNonceReadyEventType,
-			e.nonceReadySub,
-		)
-		e.nonceReadySub = 0
-	}
+	subscriptionId := e.subscriptionId
+	nonceReadySub := e.nonceReadySub
+	e.subscriptionId = 0
+	e.nonceReadySub = 0
 	e.running = false
 	e.schedules = nil
+
+	e.mu.Unlock()
+
+	// Must run with e.mu released: RefreshScheduleForEpoch and
+	// scheduleComputeLoop both take e.mu (RLock), so waiting for them to
+	// exit while still holding the write lock here would deadlock.
+	if subscriptionId != 0 {
+		e.eventBus.UnsubscribeAndWait(
+			event.EpochTransitionEventType,
+			subscriptionId,
+		)
+	}
+	if nonceReadySub != 0 {
+		e.eventBus.UnsubscribeAndWait(
+			event.EpochNonceReadyEventType,
+			nonceReadySub,
+		)
+	}
+	e.wg.Wait()
 
 	e.logger.Info("leader election stopped", "component", "leader")
 	return nil
@@ -641,7 +773,9 @@ func (e *Election) computeSchedule(
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
 		if e.metrics != nil {
-			e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
+			e.metrics.stakeLookupDuration.Observe(
+				time.Since(stakeLookupStart).Seconds(),
+			)
 		}
 		return nil, fmt.Errorf("get pool stake: %w", err)
 	}
@@ -656,9 +790,12 @@ func (e *Election) computeSchedule(
 	if poolStake == 0 {
 		e.logger.Info(
 			"pool has no stake in active snapshot, skipping schedule computation",
-			"component", "leader",
-			"epoch", currentEpoch,
-			"snapshot_epoch", snapshotEpoch,
+			"component",
+			"leader",
+			"epoch",
+			currentEpoch,
+			"snapshot_epoch",
+			snapshotEpoch,
 		)
 		return nil, nil
 	}
@@ -666,7 +803,9 @@ func (e *Election) computeSchedule(
 	// Get total stake from the active snapshot.
 	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
 	if e.metrics != nil {
-		e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
+		e.metrics.stakeLookupDuration.Observe(
+			time.Since(stakeLookupStart).Seconds(),
+		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get total stake: %w", err)
@@ -704,8 +843,23 @@ func (e *Election) computeSchedule(
 	}
 
 	calc := NewCalculator(e.epochProvider.ActiveSlotCoeff())
+	// Prefer the exact Shelley genesis rational over the float64 form; see
+	// ActiveSlotCoeffRatProvider.
+	if ratProvider, ok := e.epochProvider.(ActiveSlotCoeffRatProvider); ok {
+		if exactCoeff := ratProvider.ActiveSlotCoeffRat(); exactCoeff != nil {
+			calc.ActiveSlotCoeffRat = exactCoeff
+		}
+	}
 
 	mode := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
+
+	// Resolve the coefficient up front so an invalid genesis value fails here
+	// with a clear message instead of deep inside the VRF loop, and so the
+	// audit log below can report the exact value that was used.
+	activeSlotCoeff, err := calc.activeSlotCoeffRat()
+	if err != nil {
+		return nil, fmt.Errorf("resolve active slot coefficient: %w", err)
+	}
 
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
@@ -719,20 +873,34 @@ func (e *Election) computeSchedule(
 		mode,
 	)
 	if e.metrics != nil {
-		e.metrics.vrfEvalDurationSeconds.Observe(time.Since(vrfEvalStart).Seconds())
+		e.metrics.vrfEvalDurationSeconds.Observe(
+			time.Since(vrfEvalStart).Seconds(),
+		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("calculate schedule: %w", err)
 	}
 
+	// One O(1)-per-epoch record carrying every input to the leader check, so a
+	// schedule that disagrees with `cardano-cli query leadership-schedule` can
+	// be diffed against the reference node's `query stake-snapshot` and
+	// `query protocol-state` from logs alone, without re-running with extra
+	// instrumentation (dingo #2798). Never log per slot.
 	e.logger.Info(
 		"leader schedule calculated",
 		"component", "leader",
 		"epoch", currentEpoch,
+		"snapshot_epoch", snapshotEpoch,
+		"snapshot_type", markSnapshotType,
+		"epoch_start_slot", epochRange.StartSlot,
+		"epoch_slot_count", epochRange.SlotCount,
 		"epoch_nonce", hex.EncodeToString(epochNonce),
 		"pool_stake", poolStake,
 		"total_stake", totalStake,
 		"stake_ratio", schedule.StakeRatio(),
+		"active_slot_coeff", activeSlotCoeff.RatString(),
+		"consensus_mode", consensusModeName(mode),
+		"leader_threshold", thresholdHex(schedule.Threshold),
 		"leader_slots", schedule.SlotCount(),
 		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
 	)

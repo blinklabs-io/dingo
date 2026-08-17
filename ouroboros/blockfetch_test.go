@@ -99,7 +99,9 @@ type stubBlockfetchIterator struct {
 	cancelCalls int
 }
 
-func (i *stubBlockfetchIterator) Next(bool) (*chain.ChainIteratorResult, error) {
+func (i *stubBlockfetchIterator) Next(
+	bool,
+) (*chain.ChainIteratorResult, error) {
 	if i.nextCalls >= len(i.steps) {
 		return nil, chain.ErrIteratorChainTip
 	}
@@ -364,6 +366,55 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
+func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	// The chain iterator surfaces a rollback as a sentinel result with
+	// Rollback=true and a zero-value Block. Serving that zero block streams a
+	// [0, null] block that a fetching peer decodes as a nil-header Byron EBB
+	// and crashes dereferencing it in SlotNumber(). The server must end the
+	// batch instead of serving the sentinel.
+	iter := &stubBlockfetchIterator{
+		steps: []blockfetchIteratorStep{
+			{result: &chain.ChainIteratorResult{
+				Point:    ocommon.NewPoint(150, []byte{0x03}),
+				Rollback: true,
+			}},
+		},
+	}
+	server := &stubBlockfetchBatchServer{}
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(200, []byte{0x02})
+
+	err := o.blockfetchServerSendBatch(
+		testConnId().String(),
+		start,
+		end,
+		iter,
+		server,
+		conn,
+	)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1, server.startBatchCalls)
+	// The rollback sentinel must NOT be streamed as a block.
+	assert.Equal(t, 0, server.blockCalls,
+		"rollback sentinel must not be streamed as a block")
+	// The batch ends cleanly so the client re-requests against its updated
+	// chain (blockfetch has no rollback message).
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
+	assert.Equal(t, 1, iter.cancelCalls)
+}
+
 func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	t *testing.T,
 ) {
@@ -448,7 +499,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 	assert.Equal(t, 2, server.drainCalls)
 }
 
-func TestReportBlockfetchServerAsyncError_ForwardsToConnectionErrorChan(
+func TestReportBlockfetchServerAsyncError_ClosesConnection(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -456,30 +507,21 @@ func TestReportBlockfetchServerAsyncError_ForwardsToConnectionErrorChan(
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	conn := &stubBlockfetchConnection{
-		errChan: make(chan error, 1),
-	}
+	conn := &stubBlockfetchConnection{errChan: make(chan error)}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
-	expectedErr := errors.New("async blockfetch failure")
-
 	o.reportBlockfetchServerAsyncError(
 		conn,
 		testConnId().String(),
 		start,
 		end,
-		expectedErr,
+		errors.New("async blockfetch failure"),
 	)
 
-	select {
-	case gotErr := <-conn.errChan:
-		assert.Equal(t, expectedErr, gotErr)
-	default:
-		t.Fatal("expected async error to be forwarded to connection error channel")
-	}
+	assert.Equal(t, 1, conn.closeCalls)
 }
 
-func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
+func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -488,9 +530,9 @@ func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
 		EventBus: event.NewEventBus(nil, logger),
 	})
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		errChan:  make(chan error),
+		closeErr: errors.New("close failed"),
 	}
-	close(conn.errChan)
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
 
@@ -503,6 +545,7 @@ func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
 			errors.New("closed channel test"),
 		)
 	})
+	assert.Equal(t, 1, conn.closeCalls)
 }
 
 // TestBlockfetchRecordNoBlocks_BelowThreshold verifies repeated NoBlocks stay
@@ -518,7 +561,11 @@ func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
 	start := ocommon.NewPoint(100, []byte{0x01})
 
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
-		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "should not trigger before threshold")
+		assert.False(
+			t,
+			o.blockfetchRecordNoBlocks(connId, start),
+			"should not trigger before threshold",
+		)
 	}
 }
 
@@ -537,7 +584,11 @@ func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		o.blockfetchRecordNoBlocks(connId, start)
 	}
-	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger on 5th consecutive request")
+	assert.True(
+		t,
+		o.blockfetchRecordNoBlocks(connId, start),
+		"should trigger on 5th consecutive request",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_ProgressResetsCounter verifies valid progress
@@ -559,9 +610,17 @@ func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 	o.blockfetchResetNoBlocks(connId)
 
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
-		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after progress")
+		assert.False(
+			t,
+			o.blockfetchRecordNoBlocks(connId, start),
+			"counter should reset after progress",
+		)
 	}
-	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should need another full sequence after progress")
+	assert.True(
+		t,
+		o.blockfetchRecordNoBlocks(connId, start),
+		"should need another full sequence after progress",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_IndependentPoints verifies changing start
@@ -580,8 +639,16 @@ func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, startA))
 	}
-	assert.False(t, o.blockfetchRecordNoBlocks(connId, startB), "different start point should not inherit count")
-	assert.False(t, o.blockfetchRecordNoBlocks(connId, startA), "interleaved start point should reset consecutive count")
+	assert.False(
+		t,
+		o.blockfetchRecordNoBlocks(connId, startB),
+		"different start point should not inherit count",
+	)
+	assert.False(
+		t,
+		o.blockfetchRecordNoBlocks(connId, startA),
+		"interleaved start point should reset consecutive count",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_IndependentConns verifies NoBlocks counts are
@@ -607,7 +674,11 @@ func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
 		o.blockfetchRecordNoBlocks(connA, start)
 	}
 	// Different connId at the same point must have its own independent counter
-	assert.False(t, o.blockfetchRecordNoBlocks(connB, start), "different connId should not inherit count")
+	assert.False(
+		t,
+		o.blockfetchRecordNoBlocks(connB, start),
+		"different connId should not inherit count",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_CleanupResetsCounter verifies connection-close
@@ -634,9 +705,17 @@ func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 
 	// Counter should be reset — needs another full sequence to trigger
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
-		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after cleanup")
+		assert.False(
+			t,
+			o.blockfetchRecordNoBlocks(connId, start),
+			"counter should reset after cleanup",
+		)
 	}
-	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger again after reset")
+	assert.True(
+		t,
+		o.blockfetchRecordNoBlocks(connId, start),
+		"should trigger again after reset",
+	)
 }
 
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {

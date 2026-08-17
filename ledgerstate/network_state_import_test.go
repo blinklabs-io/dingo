@@ -21,13 +21,13 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
 func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	const (
 		treasury = uint64(87_920_693_660_807)

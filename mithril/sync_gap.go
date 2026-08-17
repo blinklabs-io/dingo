@@ -444,55 +444,6 @@ func validateStoredGapBlocks(
 	return nil
 }
 
-func processPostLedgerStateBlocks(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-	ledgerStateSlot uint64,
-	ledgerStateHash []byte,
-) error {
-	recentBlocks, err := database.BlocksRecent(db, 1)
-	if err != nil {
-		return fmt.Errorf("reading chain tip for post-ledger processing: %w", err)
-	}
-	if len(recentBlocks) == 0 || recentBlocks[0].Slot <= ledgerStateSlot {
-		return nil
-	}
-	logger.Info(
-		"processing post-ledger-state blocks from blob store",
-		"component", "mithril",
-		"ledger_state_slot", ledgerStateSlot,
-		"stored_tip_slot", recentBlocks[0].Slot,
-	)
-	postLedgerBlocks, err := loadGapBlocksFromBlob(
-		db,
-		ledgerStateSlot+1,
-		recentBlocks[0].Slot,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"loading post-ledger-state blocks from blob store: %w",
-			err,
-		)
-	}
-	if err := validateStoredGapContinuity(
-		postLedgerBlocks,
-		models.Block{Slot: ledgerStateSlot, Hash: ledgerStateHash},
-	); err != nil {
-		return fmt.Errorf(
-			"validating post-ledger-state block continuity: %w",
-			err,
-		)
-	}
-	if err := processGapBlocks(ctx, db, logger, postLedgerBlocks); err != nil {
-		return fmt.Errorf(
-			"processing post-ledger-state block transactions: %w",
-			err,
-		)
-	}
-	return nil
-}
-
 // processGapBlocks computes byte offsets and stores transaction
 // metadata for gap blocks that were fetched from a relay peer.
 // BlockCreate only writes raw CBOR to the blob store; this function

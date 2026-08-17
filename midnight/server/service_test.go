@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -41,7 +42,9 @@ type fakeSlotTimer struct{}
 const fakeGenesisUnix = int64(1_600_000_000)
 
 func (fakeSlotTimer) SlotToTime(slot uint64) (time.Time, error) {
-	return time.Unix(fakeGenesisUnix, 0).Add(time.Duration(slot) * time.Second), nil
+	return time.Unix(fakeGenesisUnix, 0).
+			Add(time.Duration(slot) * time.Second),
+		nil
 }
 
 func (fakeSlotTimer) TimeToSlot(t time.Time) (uint64, error) {
@@ -54,13 +57,11 @@ func (fakeSlotTimer) TimeToSlot(t time.Time) (uint64, error) {
 // server's SlotTimer.
 func newTestDatabase(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	require.NoError(t, db.SetEpoch(
 		0, 0,
 		[]byte("epoch-0-nonce"), nil, nil, nil,
@@ -139,26 +140,49 @@ func callCtx(t *testing.T) context.Context {
 func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
 	db := newTestDatabase(t)
 	for i, blockNumber := range []uint64{10, 20, 30} {
-		require.NoError(t, db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
-			DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
-			TxHash:      []byte{byte(i), 1, 2, 3},
-			OutputIndex: 0,
-			Datum:       []byte{byte('a' + i)},
-			BlockNumber: blockNumber,
-		}))
+		require.NoError(
+			t,
+			db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
+				DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
+				TxHash:      []byte{byte(i), 1, 2, 3},
+				OutputIndex: 0,
+				Datum:       []byte{byte('a' + i)},
+				BlockNumber: blockNumber,
+			}),
+		)
 	}
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	_, err := client.GetTechnicalCommitteeDatum(callCtx(t), &midnight.TechnicalCommitteeDatumRequest{BlockNumber: 5})
-	require.Equal(t, codes.NotFound, status.Code(err), "before the first row must be NotFound")
+	_, err := client.GetTechnicalCommitteeDatum(
+		callCtx(t),
+		&midnight.TechnicalCommitteeDatumRequest{BlockNumber: 5},
+	)
+	require.Equal(
+		t,
+		codes.NotFound,
+		status.Code(err),
+		"before the first row must be NotFound",
+	)
 
-	resp, err := client.GetTechnicalCommitteeDatum(callCtx(t), &midnight.TechnicalCommitteeDatumRequest{BlockNumber: 25})
+	resp, err := client.GetTechnicalCommitteeDatum(
+		callCtx(t),
+		&midnight.TechnicalCommitteeDatumRequest{BlockNumber: 25},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(20), resp.GetSourceBlockNumber())
 	require.Equal(t, []byte{'b'}, resp.GetDatum())
 
-	resp, err = client.GetTechnicalCommitteeDatum(callCtx(t), &midnight.TechnicalCommitteeDatumRequest{BlockNumber: 1000})
+	resp, err = client.GetTechnicalCommitteeDatum(
+		callCtx(t),
+		&midnight.TechnicalCommitteeDatumRequest{BlockNumber: 1000},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(30), resp.GetSourceBlockNumber())
 	require.Equal(t, []byte{'c'}, resp.GetDatum())
@@ -168,24 +192,39 @@ func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
 // governance datum RPCs are scoped by datum_type and don't cross-contaminate.
 func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 	db := newTestDatabase(t)
-	require.NoError(t, db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
-		DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
-		TxHash:      []byte{1, 2, 3, 4},
-		OutputIndex: 0,
-		Datum:       []byte("tc"),
-		BlockNumber: 10,
-	}))
-	require.NoError(t, db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
-		DatumType:   models.MidnightGovernanceDatumTypeCouncil,
-		TxHash:      []byte{5, 6, 7, 8},
-		OutputIndex: 0,
-		Datum:       []byte("council"),
-		BlockNumber: 10,
-	}))
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	require.NoError(
+		t,
+		db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
+			DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
+			TxHash:      []byte{1, 2, 3, 4},
+			OutputIndex: 0,
+			Datum:       []byte("tc"),
+			BlockNumber: 10,
+		}),
+	)
+	require.NoError(
+		t,
+		db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
+			DatumType:   models.MidnightGovernanceDatumTypeCouncil,
+			TxHash:      []byte{5, 6, 7, 8},
+			OutputIndex: 0,
+			Datum:       []byte("council"),
+			BlockNumber: 10,
+		}),
+	)
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	resp, err := client.GetCouncilDatum(callCtx(t), &midnight.CouncilDatumRequest{BlockNumber: 100})
+	resp, err := client.GetCouncilDatum(
+		callCtx(t),
+		&midnight.CouncilDatumRequest{BlockNumber: 100},
+	)
 	require.NoError(t, err)
 	require.Equal(t, []byte("council"), resp.GetDatum())
 }
@@ -195,38 +234,82 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
 	db := newTestDatabase(t)
 	for i, epoch := range []uint64{1, 2, 3} {
-		require.NoError(t, db.UpsertMidnightAriadneParams(&models.MidnightAriadneParams{
-			Epoch: epoch,
-			Datum: []byte{byte('a' + i)},
-		}))
+		require.NoError(
+			t,
+			db.UpsertMidnightAriadneParams(&models.MidnightAriadneParams{
+				Epoch: epoch,
+				Datum: []byte{byte('a' + i)},
+			}),
+		)
 	}
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	_, err := client.GetAriadneParameters(callCtx(t), &midnight.AriadneParametersRequest{Epoch: 0})
+	_, err := client.GetAriadneParameters(
+		callCtx(t),
+		&midnight.AriadneParametersRequest{Epoch: 0},
+	)
 	require.Equal(t, codes.NotFound, status.Code(err))
 
-	resp, err := client.GetAriadneParameters(callCtx(t), &midnight.AriadneParametersRequest{Epoch: 2})
+	resp, err := client.GetAriadneParameters(
+		callCtx(t),
+		&midnight.AriadneParametersRequest{Epoch: 2},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), resp.GetSourceEpoch())
 	require.Equal(t, []byte{'b'}, resp.GetDatum())
 
-	resp, err = client.GetAriadneParameters(callCtx(t), &midnight.AriadneParametersRequest{Epoch: 50})
+	resp, err = client.GetAriadneParameters(
+		callCtx(t),
+		&midnight.AriadneParametersRequest{Epoch: 50},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), resp.GetSourceEpoch())
 }
 
 func TestGetEpochNonce(t *testing.T) {
 	db := newTestDatabase(t)
-	require.NoError(t, db.SetEpoch(100, 1, []byte("epoch-1-nonce"), nil, nil, nil, 0, 1000, 100, nil))
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	require.NoError(
+		t,
+		db.SetEpoch(
+			100,
+			1,
+			[]byte("epoch-1-nonce"),
+			nil,
+			nil,
+			nil,
+			0,
+			1000,
+			100,
+			nil,
+		),
+	)
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	resp, err := client.GetEpochNonce(callCtx(t), &midnight.EpochNonceRequest{Epoch: 1})
+	resp, err := client.GetEpochNonce(
+		callCtx(t),
+		&midnight.EpochNonceRequest{Epoch: 1},
+	)
 	require.NoError(t, err)
 	require.Equal(t, []byte("epoch-1-nonce"), resp.GetNonce())
 
-	_, err = client.GetEpochNonce(callCtx(t), &midnight.EpochNonceRequest{Epoch: 999})
+	_, err = client.GetEpochNonce(
+		callCtx(t),
+		&midnight.EpochNonceRequest{Epoch: 999},
+	)
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
@@ -254,43 +337,82 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 	}
 	blob, err := cbor.Marshal(entries)
 	require.NoError(t, err)
-	require.NoError(t, db.UpsertMidnightEpochCandidates(&models.MidnightEpochCandidates{
-		Epoch:          7,
-		BlockNumber:    700,
-		CandidatesCbor: blob,
-	}))
+	require.NoError(
+		t,
+		db.UpsertMidnightEpochCandidates(&models.MidnightEpochCandidates{
+			Epoch:          7,
+			BlockNumber:    700,
+			CandidatesCbor: blob,
+		}),
+	)
 
 	// Registration provenance is looked up separately from the snapshot, by
 	// (tx_hash, output_index); seed one row per candidate with distinct
 	// block/slot/tx-index/inputs so the assertions below can't pass by
 	// accident (e.g. by reading the same field twice).
-	inputsA, err := cbor.Marshal([]candidateInputRefCbor{{TxHash: []byte{0x11}, Index: 2}})
+	inputsA, err := cbor.Marshal(
+		[]candidateInputRefCbor{{TxHash: []byte{0x11}, Index: 2}},
+	)
 	require.NoError(t, err)
 	inputsB, err := cbor.Marshal([]candidateInputRefCbor{
 		{TxHash: []byte{0x22}, Index: 0},
 		{TxHash: []byte{0x33}, Index: 5},
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.Metadata().InsertMidnightCommitteeCandidateRegistration(nil, &models.MidnightCommitteeCandidateRegistration{
-		TxHash: []byte{0xAA}, OutputIndex: 0,
-		BlockNumber: 701, SlotNumber: 7010, TxIndex: 3,
-		TxInputsCbor: inputsA,
-	}))
-	require.NoError(t, db.Metadata().InsertMidnightCommitteeCandidateRegistration(nil, &models.MidnightCommitteeCandidateRegistration{
-		TxHash: []byte{0xBB}, OutputIndex: 1,
-		BlockNumber: 702, SlotNumber: 7020, TxIndex: 4,
-		TxInputsCbor: inputsB,
-	}))
+	require.NoError(
+		t,
+		db.Metadata().
+			InsertMidnightCommitteeCandidateRegistration(nil, &models.MidnightCommitteeCandidateRegistration{
+				TxHash: []byte{0xAA}, OutputIndex: 0,
+				BlockNumber: 701, SlotNumber: 7010, TxIndex: 3,
+				TxInputsCbor: inputsA,
+			}),
+	)
+	require.NoError(
+		t,
+		db.Metadata().
+			InsertMidnightCommitteeCandidateRegistration(nil, &models.MidnightCommitteeCandidateRegistration{
+				TxHash: []byte{0xBB}, OutputIndex: 1,
+				BlockNumber: 702, SlotNumber: 7020, TxIndex: 4,
+				TxInputsCbor: inputsB,
+			}),
+	)
 
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshots([]*models.PoolStakeSnapshot{
-		{Epoch: 7, SnapshotType: models.PoolStakeSnapshotTypeMark, PoolKeyHash: []byte{0x02}, TotalStake: 200, DelegatorCount: 1, CapturedSlot: 1},
-		{Epoch: 7, SnapshotType: models.PoolStakeSnapshotTypeMark, PoolKeyHash: []byte{0x01}, TotalStake: 100, DelegatorCount: 1, CapturedSlot: 1},
-	}, nil))
+	require.NoError(
+		t,
+		db.Metadata().SavePoolStakeSnapshots([]*models.PoolStakeSnapshot{
+			{
+				Epoch:          7,
+				SnapshotType:   models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:    []byte{0x02},
+				TotalStake:     200,
+				DelegatorCount: 1,
+				CapturedSlot:   1,
+			},
+			{
+				Epoch:          7,
+				SnapshotType:   models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:    []byte{0x01},
+				TotalStake:     100,
+				DelegatorCount: 1,
+				CapturedSlot:   1,
+			},
+		}, nil),
+	)
 
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	resp, err := client.GetEpochCandidates(callCtx(t), &midnight.EpochCandidatesRequest{Epoch: 7})
+	resp, err := client.GetEpochCandidates(
+		callCtx(t),
+		&midnight.EpochCandidatesRequest{Epoch: 7},
+	)
 	require.NoError(t, err)
 	require.Len(t, resp.GetCandidates(), 2)
 
@@ -321,7 +443,10 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 	require.Equal(t, uint64(100), resp.GetStakeDistribution()[0].GetStake())
 	require.Equal(t, []byte{0x02}, resp.GetStakeDistribution()[1].GetPoolHash())
 
-	_, err = client.GetEpochCandidates(callCtx(t), &midnight.EpochCandidatesRequest{Epoch: 999})
+	_, err = client.GetEpochCandidates(
+		callCtx(t),
+		&midnight.EpochCandidatesRequest{Epoch: 999},
+	)
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
@@ -331,24 +456,38 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 // indexer's write-before-track invariant, but could for a pre-migration
 // snapshot) still returns successfully with its datum/UTxO identity intact,
 // just without block/slot/tx-index/inputs.
-func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(t *testing.T) {
+func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(
+	t *testing.T,
+) {
 	db := newTestDatabase(t)
 	entries := []candidateEntryCbor{
 		{TxHash: []byte{0xCC}, OutputIndex: 0, Datum: []byte("candidate-c")},
 	}
 	blob, err := cbor.Marshal(entries)
 	require.NoError(t, err)
-	require.NoError(t, db.UpsertMidnightEpochCandidates(&models.MidnightEpochCandidates{
-		Epoch:          9,
-		BlockNumber:    900,
-		CandidatesCbor: blob,
-	}))
+	require.NoError(
+		t,
+		db.UpsertMidnightEpochCandidates(&models.MidnightEpochCandidates{
+			Epoch:          9,
+			BlockNumber:    900,
+			CandidatesCbor: blob,
+		}),
+	)
 	// Deliberately no InsertMidnightCommitteeCandidateRegistration call.
 
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	resp, err := client.GetEpochCandidates(callCtx(t), &midnight.EpochCandidatesRequest{Epoch: 9})
+	resp, err := client.GetEpochCandidates(
+		callCtx(t),
+		&midnight.EpochCandidatesRequest{Epoch: 9},
+	)
 	require.NoError(t, err)
 	require.Len(t, resp.GetCandidates(), 1)
 	c := resp.GetCandidates()[0]
@@ -371,15 +510,24 @@ func TestEmptyConfigImplementedRPCsReturnFailedPrecondition(t *testing.T) {
 
 	implemented := map[string]func(context.Context) error{
 		"GetTechnicalCommitteeDatum": func(ctx context.Context) error {
-			_, err := client.GetTechnicalCommitteeDatum(ctx, &midnight.TechnicalCommitteeDatumRequest{})
+			_, err := client.GetTechnicalCommitteeDatum(
+				ctx,
+				&midnight.TechnicalCommitteeDatumRequest{},
+			)
 			return err
 		},
 		"GetCouncilDatum": func(ctx context.Context) error {
-			_, err := client.GetCouncilDatum(ctx, &midnight.CouncilDatumRequest{})
+			_, err := client.GetCouncilDatum(
+				ctx,
+				&midnight.CouncilDatumRequest{},
+			)
 			return err
 		},
 		"GetAriadneParameters": func(ctx context.Context) error {
-			_, err := client.GetAriadneParameters(ctx, &midnight.AriadneParametersRequest{})
+			_, err := client.GetAriadneParameters(
+				ctx,
+				&midnight.AriadneParametersRequest{},
+			)
 			return err
 		},
 		"GetEpochNonce": func(ctx context.Context) error {
@@ -387,7 +535,10 @@ func TestEmptyConfigImplementedRPCsReturnFailedPrecondition(t *testing.T) {
 			return err
 		},
 		"GetEpochCandidates": func(ctx context.Context) error {
-			_, err := client.GetEpochCandidates(ctx, &midnight.EpochCandidatesRequest{})
+			_, err := client.GetEpochCandidates(
+				ctx,
+				&midnight.EpochCandidatesRequest{},
+			)
 			return err
 		},
 		"GetBlockByHash": func(ctx context.Context) error {
@@ -403,7 +554,10 @@ func TestEmptyConfigImplementedRPCsReturnFailedPrecondition(t *testing.T) {
 			return err
 		},
 		"GetLatestStableBlock": func(ctx context.Context) error {
-			_, err := client.GetLatestStableBlock(ctx, &midnight.LatestStableBlockRequest{})
+			_, err := client.GetLatestStableBlock(
+				ctx,
+				&midnight.LatestStableBlockRequest{},
+			)
 			return err
 		},
 	}
@@ -415,7 +569,10 @@ func TestEmptyConfigImplementedRPCsReturnFailedPrecondition(t *testing.T) {
 	}
 
 	// Unimplemented RPCs are unaffected by the missing backend.
-	_, err := client.GetAssetCreates(callCtx(t), &midnight.AssetCreatesRequest{})
+	_, err := client.GetAssetCreates(
+		callCtx(t),
+		&midnight.AssetCreatesRequest{},
+	)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 }
 
@@ -424,10 +581,19 @@ func TestGetLatestBlock(t *testing.T) {
 	insertPlaceholderBlock(t, db, 1, 1, 0x01)
 	tip := insertPlaceholderBlock(t, db, 2, 2, 0x02)
 
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	resp, err := client.GetLatestBlock(callCtx(t), &midnight.LatestBlockRequest{})
+	resp, err := client.GetLatestBlock(
+		callCtx(t),
+		&midnight.LatestBlockRequest{},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(tip.Number), resp.GetBlock().GetBlockNumber())
 	require.Equal(t, tip.Hash, resp.GetBlock().GetBlockHash())
@@ -442,18 +608,36 @@ func TestGetBlockByHash(t *testing.T) {
 	require.NoError(t, err)
 	wantTxCount := len(decoded.Transactions())
 
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
-	resp, err := client.GetBlockByHash(callCtx(t), &midnight.BlockByHashRequest{BlockHash: blk.Hash})
+	resp, err := client.GetBlockByHash(
+		callCtx(t),
+		&midnight.BlockByHashRequest{BlockHash: blk.Hash},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(blk.Number), resp.GetBlockNumber())
 	require.Equal(t, blk.Slot, resp.GetSlotNumber())
 	require.Equal(t, uint32(wantTxCount), resp.GetTxCount())
-	require.Equal(t, fakeGenesisUnix+int64(blk.Slot), resp.GetBlockTimestampUnix())
+	require.Equal(
+		t,
+		fakeGenesisUnix+int64(blk.Slot),
+		resp.GetBlockTimestampUnix(),
+	)
 	require.Equal(t, uint32(0), resp.GetEpochNumber())
 
-	_, err = client.GetBlockByHash(callCtx(t), &midnight.BlockByHashRequest{BlockHash: []byte("unknown-hash-000000000000000000")})
+	_, err = client.GetBlockByHash(
+		callCtx(t),
+		&midnight.BlockByHashRequest{
+			BlockHash: []byte("unknown-hash-000000000000000000"),
+		},
+	)
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
@@ -484,38 +668,81 @@ func TestStability_MatchesConfiguredKAndF(t *testing.T) {
 			target := insertPlaceholderBlock(t, db, 1000, 1000, 0xAA)
 			tip := insertPlaceholderBlock(t, db, 1000+offset, 1000+offset, 0xBB)
 
-			addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+			addr := startTestServerWithConfig(
+				t,
+				server.Config{
+					Database:  server.NewDatabase(db),
+					SlotTimer: fakeSlotTimer{},
+				},
+			)
 			client := dialClient(t, addr)
 
 			// Exactly at the offset: stable.
-			resp, err := client.GetStableBlock(callCtx(t), &midnight.StableBlockRequest{
-				BlockHash:       target.Hash,
-				StabilityOffset: uint32(offset), //nolint:gosec // test-only, small values
-			})
+			resp, err := client.GetStableBlock(
+				callCtx(t),
+				&midnight.StableBlockRequest{
+					BlockHash: target.Hash,
+					StabilityOffset: uint32(
+						offset,
+					), //nolint:gosec // test-only, small values
+				},
+			)
 			require.NoError(t, err)
-			require.NotNil(t, resp.GetBlock(), "block exactly %d behind tip must be stable", offset)
-			require.Equal(t, uint32(target.Number), resp.GetBlock().GetBlockNumber())
+			require.NotNil(
+				t,
+				resp.GetBlock(),
+				"block exactly %d behind tip must be stable",
+				offset,
+			)
+			require.Equal(
+				t,
+				uint32(target.Number),
+				resp.GetBlock().GetBlockNumber(),
+			)
 
 			// One more than the offset: not yet stable.
-			resp, err = client.GetStableBlock(callCtx(t), &midnight.StableBlockRequest{
-				BlockHash:       target.Hash,
-				StabilityOffset: uint32(offset + 1), //nolint:gosec // test-only, small values
-			})
+			resp, err = client.GetStableBlock(
+				callCtx(t),
+				&midnight.StableBlockRequest{
+					BlockHash: target.Hash,
+					StabilityOffset: uint32(
+						offset + 1,
+					), //nolint:gosec // test-only, small values
+				},
+			)
 			require.NoError(t, err)
-			require.Nil(t, resp.GetBlock(), "block one short of the offset must not be stable")
+			require.Nil(
+				t,
+				resp.GetBlock(),
+				"block one short of the offset must not be stable",
+			)
 
 			// GetLatestStableBlock at the same offset must resolve back to target.
-			latestResp, err := client.GetLatestStableBlock(callCtx(t), &midnight.LatestStableBlockRequest{
-				StabilityOffset: uint32(offset), //nolint:gosec // test-only, small values
-			})
+			latestResp, err := client.GetLatestStableBlock(
+				callCtx(t),
+				&midnight.LatestStableBlockRequest{
+					StabilityOffset: uint32(
+						offset,
+					), //nolint:gosec // test-only, small values
+				},
+			)
 			require.NoError(t, err)
 			require.NotNil(t, latestResp.GetBlock())
-			require.Equal(t, uint32(target.Number), latestResp.GetBlock().GetBlockNumber())
+			require.Equal(
+				t,
+				uint32(target.Number),
+				latestResp.GetBlock().GetBlockNumber(),
+			)
 
 			// No block is stable yet when the offset exceeds the whole chain height.
-			latestResp, err = client.GetLatestStableBlock(callCtx(t), &midnight.LatestStableBlockRequest{
-				StabilityOffset: uint32(tip.Number + 1), //nolint:gosec // test-only, small values
-			})
+			latestResp, err = client.GetLatestStableBlock(
+				callCtx(t),
+				&midnight.LatestStableBlockRequest{
+					StabilityOffset: uint32(
+						tip.Number + 1,
+					), //nolint:gosec // test-only, small values
+				},
+			)
 			require.NoError(t, err)
 			require.Nil(t, latestResp.GetBlock())
 		})
@@ -530,7 +757,13 @@ func TestGetStableBlock_AsOfTimestamp(t *testing.T) {
 	older := insertPlaceholderBlock(t, db, 10, 10, 0x01)
 	insertPlaceholderBlock(t, db, 20, 20, 0x02) // newer than the as-of time
 
-	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
 	client := dialClient(t, addr)
 
 	asOfMillis := uint64(time.Unix(fakeGenesisUnix+15, 0).UnixMilli())
@@ -540,6 +773,10 @@ func TestGetStableBlock_AsOfTimestamp(t *testing.T) {
 		AsOfTimestampUnixMillis: asOfMillis,
 	})
 	require.NoError(t, err)
-	require.NotNil(t, resp.GetBlock(), "older block must be stable relative to the as-of tip")
+	require.NotNil(
+		t,
+		resp.GetBlock(),
+		"older block must be stable relative to the as-of tip",
+	)
 	require.Equal(t, uint32(older.Number), resp.GetBlock().GetBlockNumber())
 }

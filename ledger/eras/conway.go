@@ -151,7 +151,7 @@ func CertDepositConway(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
@@ -181,7 +181,7 @@ func ValidateTxConway(
 	pp lcommon.ProtocolParameters,
 ) error {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -336,6 +336,9 @@ func ValidateTxPlutusConway(
 	ls lcommon.LedgerState,
 	pp *conway.ConwayProtocolParameters,
 ) error {
+	if pp == nil {
+		return ErrIncompatibleProtocolParams
+	}
 	return validateTxPlutusConway(tx, ls, pp, true)
 }
 
@@ -872,6 +875,12 @@ type conwayTxInfoCache struct {
 	txInfoV3Built  bool
 }
 
+// newConwayTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache.
+//
+// The cache takes no protocol version. gouroboros v0.192.0 renders the
+// PlutusV1/V2 txInfoMint the same way at every protocol version, matching
+// cardano-ledger's ungated transMintValue, so there is nothing left for a
+// version to select.
 func newConwayTxInfoCache(
 	ls lcommon.LedgerState,
 	tx lcommon.Transaction,
@@ -942,13 +951,17 @@ func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
 // restrictive (phase-2 ledger validation) mode. Instead of limiting the CEK
 // machine to the declared redeemer budget during execution — which causes
 // intermediate slippage-batch flush failures — we run with a virtually
-// unlimited budget and compare the consumed amount against the declared budget
-// after execution. This mirrors cardano-node's restrictingEnormous semantics:
-// the machine runs unconstrained; at the end, usedBudget (which excludes the
-// final unbudgeted step batch, per SkipFinalSlippageFlush) must fit within the
-// declared redeemer budget.
+// unlimited budget and compare the full consumed amount against the declared
+// budget after execution. This mirrors cardano-node's restrictingEnormous
+// semantics: the machine runs unconstrained, flushes its accumulated step
+// budget when evaluation succeeds, and then the complete usedBudget must fit
+// within the declared redeemer budget.
 //
 // math.MaxInt64/2 avoids overflow in ExBudget arithmetic (consumed = enormous - remaining).
+//
+// The Alonzo and Babbage phase-2 script validation helpers in this package use
+// the same value, so changing it changes script validation in every era from
+// Alonzo onward.
 const restrictiveEnormousBudget = int64(math.MaxInt64 / 2)
 
 func evaluateConwayPlutusScript(
@@ -959,17 +972,22 @@ func evaluateConwayPlutusScript(
 	budget lcommon.ExUnits,
 	pp *conway.ConwayProtocolParameters,
 	txInfos *conwayTxInfoCache,
-	skipFinalSlippageFlush bool,
+	restrictive bool,
 ) (lcommon.ExUnits, error, error) {
-	// In restrictive mode (skipFinalSlippageFlush=true), pass an enormous
-	// budget to gouroboros/plutigo so intermediate slippage-batch flushes
-	// never exhaust the budget mid-execution. After execution we compare the
-	// consumed amount (final batch already excluded by SkipFinalSlippageFlush)
-	// against the declared redeemer budget. This matches cardano-node's
-	// restrictingEnormous mode. In exact mode the declared budget is used as
-	// the machine limit (unchanged behavior).
+	// In restrictive mode, ignore the budget argument as a machine limit and
+	// pass an enormous budget to gouroboros/plutigo so intermediate
+	// slippage-batch flushes never exhaust the budget mid-execution. After
+	// execution we compare the complete consumed amount, including the final
+	// accumulated step batch, against the budget argument. Callers set that
+	// argument to the declared redeemer budget.
+	//
+	// In exact mode the caller-supplied budget argument is itself the machine
+	// limit, and no post-execution comparison is done. EvaluateTxConway uses
+	// that mode and passes tmpPparams.MaxTxExUnits, so the limit there is the
+	// protocol per-transaction maximum rather than any redeemer-declared
+	// budget.
 	evalBudget := budget
-	if skipFinalSlippageFlush {
+	if restrictive {
 		evalBudget = lcommon.ExUnits{
 			Steps:  restrictiveEnormousBudget,
 			Memory: restrictiveEnormousBudget,
@@ -993,7 +1011,6 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			ctx.ToPlutusData(),
 			evalBudget,
@@ -1002,7 +1019,7 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
 		}
-		if skipFinalSlippageFlush && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
 			return usedBudget, fmt.Errorf(
 				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
 				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
@@ -1026,7 +1043,6 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			datum,
 			redeemer.Data,
@@ -1037,7 +1053,7 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
 		}
-		if skipFinalSlippageFlush && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
 			return usedBudget, fmt.Errorf(
 				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
 				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
@@ -1061,7 +1077,6 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			datum,
 			redeemer.Data,
@@ -1072,7 +1087,7 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
 		}
-		if skipFinalSlippageFlush && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
 			return usedBudget, fmt.Errorf(
 				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
 				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
@@ -1104,7 +1119,7 @@ func buildConwayScriptPurpose(
 			ok = false
 		}
 	}()
-	purpose = script.BuildScriptPurpose(
+	purpose, _ = script.BuildScriptPurpose(
 		redeemerKey,
 		resolvedInputs,
 		inputs,
@@ -1181,7 +1196,7 @@ func EvaluateTxConway(
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
 	scriptInputs, err := resolveConwayScriptInputs(tx, ls, true)
@@ -1196,9 +1211,12 @@ func EvaluateTxConway(
 		tx,
 		scriptInputs.resolvedAllInputs,
 	)
-	txInfoV3, err := txInfos.v3()
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	var txInfoV3 script.TxInfoV3
+	if txHasRedeemers(tx) {
+		txInfoV3, err = txInfos.v3()
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV3.Redeemers {
 		purpose := redeemerPair.Key

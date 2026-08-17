@@ -37,6 +37,60 @@ type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
 }
 
+// MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
+// CIP-23 minimum pool margin to era validation, mirroring phase2ValidationSkipper.
+// Exported so implementers (e.g. *ledger.LedgerView) can assert conformance at
+// compile time; a signature drift here would otherwise silently disable the
+// CIP-23 pool-margin-floor certificate rule at runtime.
+type MinPoolMarginProvider interface {
+	MinPoolMargin() *big.Rat
+}
+
+// minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
+// state enforces, or nil when the state does not provide one (feature disabled).
+func minPoolMarginFromLedgerState(ls lcommon.LedgerState) *big.Rat {
+	provider, ok := ls.(MinPoolMarginProvider)
+	if !ok {
+		return nil
+	}
+	return provider.MinPoolMargin()
+}
+
+// checkPoolMarginFloor enforces the CIP-23 rule that each pool registration
+// certificate's margin (variable fee) is at least minMargin. It is a no-op when
+// minMargin is nil (feature disabled). A nil certificate margin is treated as 0.
+// Non-pool-registration certificates are ignored.
+func checkPoolMarginFloor(
+	certs []lcommon.Certificate,
+	minMargin *big.Rat,
+) error {
+	if minMargin == nil {
+		return nil
+	}
+	for _, cert := range certs {
+		reg, ok := cert.(*lcommon.PoolRegistrationCertificate)
+		if !ok {
+			continue
+		}
+		if reg == nil {
+			continue
+		}
+		margin := reg.Margin.Rat
+		if margin == nil {
+			margin = new(big.Rat)
+		}
+		if margin.Cmp(minMargin) < 0 {
+			return fmt.Errorf(
+				"pool %x margin %s below minimum pool margin %s",
+				reg.Operator,
+				margin.RatString(),
+				minMargin.RatString(),
+			)
+		}
+	}
+	return nil
+}
+
 type indexedUtxoValidationRule struct {
 	index          int
 	validationFunc lcommon.UtxoValidationRuleFunc
@@ -51,11 +105,11 @@ type utxoValidationRuleSkip struct {
 const (
 	noUtxoValidationRuleIndex = -1
 
-	// Positions in gouroboros v0.180.1 UtxoValidationRules. Function
+	// Positions in gouroboros v0.191.2 UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// function pointers before filtering by index.
-	alonzoUtxoValidatePlutusScriptsRuleIndex   = 26
-	babbageUtxoValidatePlutusScriptsRuleIndex  = 30
+	alonzoUtxoValidatePlutusScriptsRuleIndex   = 27
+	babbageUtxoValidatePlutusScriptsRuleIndex  = 31
 	conwayUtxoValidateFeeTooSmallRuleIndex     = 19
 	conwayUtxoValidateExUnitsTooBigRuleIndex   = 34
 	conwayUtxoValidatePlutusScriptsRuleIndex   = 38
@@ -69,6 +123,37 @@ func shouldSkipPhase2Validation(
 ) bool {
 	skipper, ok := ls.(phase2ValidationSkipper)
 	return ok && skipper.SkipPhase2Validation()
+}
+
+// txHasRedeemers reports whether the transaction carries at least one redeemer.
+//
+// Redeemers are what drive Plutus phase-2 evaluation: every Plutus script a
+// transaction runs needs one, so a transaction without any runs no Plutus
+// script. Native scripts are phase-1 and never reach evaluation.
+//
+// Callers use this to avoid building a Plutus script context (TxInfo) for a
+// transaction that has no script to evaluate. That is not merely wasted work:
+// the context embeds the transaction's validity interval translated to
+// wall-clock time, so building it converts the transaction's TTL through the
+// bounded HFC forecast horizon and fails with hardfork.ErrPastHorizon whenever
+// the TTL lies past that horizon — rejecting canonical, script-free
+// transactions. cardano-ledger only translates the validity interval while
+// assembling the context for the Plutus scripts a transaction actually needs
+// (Alonzo collectPlutusScriptsWithContext), and ValidateTxConway already
+// follows that shape here via conwayTxInfoCache.
+func txHasRedeemers(tx lcommon.Transaction) bool {
+	witnesses := tx.Witnesses()
+	if witnesses == nil {
+		return false
+	}
+	redeemers := witnesses.Redeemers()
+	if redeemers == nil {
+		return false
+	}
+	for range redeemers.Iter() {
+		return true
+	}
+	return false
 }
 
 func buildIndexedUtxoValidationRules(
@@ -149,7 +234,11 @@ func validateUtxoValidationSkipIndex(
 	if skipValidationFunc == nil {
 		panic(skipRuleName + " expected validation function is nil")
 	}
-	if utxoValidationRulePtr(rules[skipIndex]) != utxoValidationRulePtr(skipValidationFunc) {
+	if utxoValidationRulePtr(
+		rules[skipIndex],
+	) != utxoValidationRulePtr(
+		skipValidationFunc,
+	) {
 		panic(fmt.Sprintf(
 			"%s hardcoded rule index %d no longer resolves to the expected function",
 			skipRuleName,

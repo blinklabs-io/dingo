@@ -29,21 +29,30 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // fakeArchive serves FetchBlock responses pointing at downloadURL, where
 // downloadURL replies with the configured CBOR bytes per (slot, hash).
+//
+// substituteBody models a misbehaving or hostile archive: when set, the
+// download endpoint serves those bytes for every request regardless of which
+// block was actually asked for.
 type fakeArchive struct {
-	t           *testing.T
-	downloadURL string
-	blocks      map[string][]byte // hex(hash) -> CBOR bytes
-	prevHash    []byte
-	height      uint64
-	blockType   archive.BlockType
-	redirectURL string
-	oversize    bool
+	t              *testing.T
+	downloadURL    string
+	blocks         map[string][]byte // hex(hash) -> CBOR bytes
+	prevHash       []byte
+	height         uint64
+	blockType      archive.BlockType
+	redirectURL    string
+	oversize       bool
+	substituteBody []byte
 
 	fetchCalls int
 }
@@ -101,7 +110,14 @@ func startFakeArchive(
 			}
 			if a.oversize {
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(bytes.Repeat([]byte{0xFF}, maxArchiveBlockSize+1))
+				_, _ = w.Write(
+					bytes.Repeat([]byte{0xFF}, maxArchiveBlockSize+1),
+				)
+				return
+			}
+			if a.substituteBody != nil {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(a.substituteBody)
 				return
 			}
 			hashHex := r.URL.Query().Get("hash")
@@ -133,11 +149,8 @@ func startFakeArchive(
 // avoids reaching into a specific blob plugin.
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err, "failed to create test database")
-	t.Cleanup(func() {
-		require.NoError(t, db.Close())
-	})
 	return db
 }
 
@@ -145,7 +158,10 @@ func newTestDB(t *testing.T) *database.Database {
 // and pointed at baseURL. Direct struct construction lets the tests inject
 // a fake archive client while focusing on the iterator path.
 func newBarkBlobStoreForTest(
-	t *testing.T, db *database.Database, baseURL string, httpClient *http.Client,
+	t *testing.T,
+	db *database.Database,
+	baseURL string,
+	httpClient *http.Client,
 ) *BlobStoreBark {
 	t.Helper()
 	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
@@ -168,13 +184,32 @@ func TestValidateArchiveURL(t *testing.T) {
 		url     string
 		wantErr string
 	}{
-		{name: "valid expected host", url: "https://archive.example.com/block?sig=abc"},
+		{
+			name: "valid expected host",
+			url:  "https://archive.example.com/block?sig=abc",
+		},
 		{name: "valid HTTPS", url: "https://s3.example.com/block?sig=abc"},
-		{name: "non-HTTPS external", url: "http://s3.example.com/block", wantErr: "HTTPS"},
-		{name: "FTP scheme", url: "ftp://s3.example.com/block", wantErr: "HTTPS"},
-		{name: "embedded credentials", url: "https://user:pass@s3.example.com/block", wantErr: "credential"},
+		{
+			name:    "non-HTTPS external",
+			url:     "http://s3.example.com/block",
+			wantErr: "HTTPS",
+		},
+		{
+			name:    "FTP scheme",
+			url:     "ftp://s3.example.com/block",
+			wantErr: "HTTPS",
+		},
+		{
+			name:    "embedded credentials",
+			url:     "https://user:pass@s3.example.com/block",
+			wantErr: "credential",
+		},
 		{name: "missing host", url: "https:///block", wantErr: "host"},
-		{name: "disallowed host", url: "https://evil.example.com/block", wantErr: "not allowed"},
+		{
+			name:    "disallowed host",
+			url:     "https://evil.example.com/block",
+			wantErr: "not allowed",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -295,21 +330,465 @@ func TestGetBlock_CapsResponseSize(t *testing.T) {
 	assert.Contains(t, err.Error(), "limit")
 }
 
+// archiveBlockFixtures returns count real Conway blocks whose CBOR
+// round-trips through ledger.NewBlockFromCbor, so Hash(), SlotNumber(),
+// BlockNumber(), and PrevHash() are internally consistent with the bytes.
+// That consistency is precisely what the archive verification path checks,
+// so hand-rolled CBOR would not exercise it.
+func archiveBlockFixtures(t *testing.T, count int) []gledger.Block {
+	t.Helper()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,                    // startBlockNumber
+		lcommon.Blake2b256{}, // prevHash of the first block
+		1000,                 // startSlot
+		10,                   // slotIncrement
+		count,
+	)
+	require.NoError(t, err)
+	require.Len(t, blocks, count)
+	return blocks
+}
+
+// serveArchiveBlock points the fake archive at a real block: it serves the
+// block's CBOR and reports metadata consistent with the block contents.
+func serveArchiveBlock(
+	t *testing.T, block gledger.Block,
+) (map[string][]byte, func(*fakeArchive)) {
+	t.Helper()
+	hash := block.Hash()
+	prevHash := block.PrevHash()
+	return map[string][]byte{
+			hex.EncodeToString(hash[:]): block.Cbor(),
+		}, func(a *fakeArchive) {
+			a.height = block.BlockNumber()
+			a.prevHash = prevHash[:]
+			a.blockType = archive.BlockType_BLOCK_TYPE_CONWAY
+		}
+}
+
+// TestGetBlock_AcceptsVerifiedArchiveBlock is the happy path: an archive that
+// serves the block that was actually requested is accepted, and the returned
+// metadata is derived from the decoded block.
+//
+// The "archive omits metadata" case is what proves the derivation: with the
+// archive reporting nothing, correct height and previous hash can only have
+// come from decoding the block bytes.
+func TestGetBlock_AcceptsVerifiedArchiveBlock(t *testing.T) {
+	// Use the second block so PrevHash is a real hash rather than zeroes.
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	prevHash := block.PrevHash()
+
+	tests := []struct {
+		name   string
+		mutate func(*fakeArchive)
+	}{
+		{
+			name:   "archive reports consistent metadata",
+			mutate: func(*fakeArchive) {},
+		},
+		{
+			name: "archive omits metadata",
+			mutate: func(a *fakeArchive) {
+				a.height = 0
+				a.prevHash = nil
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			tc.mutate(fakeArch)
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			cbor, meta, err := store.GetBlock(
+				rTxn, block.SlotNumber(), hash[:],
+			)
+			require.NoError(t, err)
+			assert.Equal(t, block.Cbor(), cbor)
+			assert.Equal(t, uint(gledger.BlockTypeConway), meta.Type,
+				"type must come from the decoded block")
+			assert.Equal(t, block.BlockNumber(), meta.Height,
+				"height must come from the decoded block")
+			assert.Equal(t, prevHash[:], meta.PrevHash,
+				"previous hash must come from the decoded block")
+		})
+	}
+}
+
+// realEraBlock loads a block produced by the reference implementation for the
+// named era fixture, returning its CBOR and true block type. Generated blocks
+// are no use here: cross-era decoding has to be exercised against bytes whose
+// header layout is genuinely shared between eras.
+func realEraBlock(t *testing.T, name string) ([]byte, uint) {
+	t.Helper()
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	require.NoError(t, err)
+	f, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/"+name,
+	)
+	require.NoError(t, err)
+	raw, err := f.ConsensusLedgerBlockBytes()
+	require.NoError(t, err)
+	blockType, err := f.LedgerBlockType()
+	require.NoError(t, err)
+	return raw, blockType
+}
+
+// TestGetBlock_RejectsArchiveBlockTypeMismatch covers an archive that serves
+// genuine block bytes while misreporting their era.
+//
+// The block hash for Shelley and later is taken over the header alone, and
+// adjacent eras share that header layout, so the same bytes decode under more
+// than one era with an identical hash and slot. The hash check therefore
+// cannot police the era, and without an independent derivation the archive
+// would dictate BlockMetadata.Type.
+func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		fixture  string
+		claimed  archive.BlockType
+		claimedN uint
+	}{
+		{
+			name:     "babbage served as conway",
+			fixture:  "Block_Babbage",
+			claimed:  archive.BlockType_BLOCK_TYPE_CONWAY,
+			claimedN: gledger.BlockTypeConway,
+		},
+		{
+			name:     "shelley served as mary",
+			fixture:  "Block_Shelley",
+			claimed:  archive.BlockType_BLOCK_TYPE_MARY,
+			claimedN: gledger.BlockTypeMary,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, trueType := realEraBlock(t, tc.fixture)
+			require.NotEqual(t, trueType, tc.claimedN,
+				"fixture era must differ from the claimed era")
+
+			// The misreported era must still decode, otherwise the test
+			// would pass for the wrong reason.
+			decoded, err := gledger.NewBlockFromCbor(tc.claimedN, raw)
+			require.NoError(t, err,
+				"cross-era decode must succeed for this test to be meaningful")
+			hash := decoded.Hash()
+
+			db := newTestDB(t)
+			baseURL, fakeArch, httpClient := startFakeArchive(
+				t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+			)
+			fakeArch.blockType = tc.claimed
+			fakeArch.height = decoded.BlockNumber()
+			prevHash := decoded.PrevHash()
+			fakeArch.prevHash = prevHash[:]
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+			require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
+		})
+	}
+}
+
+// TestGetBlock_RejectsByronMainArchiveBlock covers the one era whose body
+// cannot be fully bound to its header.
+//
+// gouroboros validates a Byron main block's transaction, delegation, and
+// update proofs but not ssc_proof, so an alteration confined to the SSC
+// payload changes no value this package checks: the hash, slot, height, and
+// previous hash all come from the untouched header. Rather than serve bytes
+// whose body is only partly authenticated, the fetch is refused.
+func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
+	raw, trueType := realEraBlock(t, "Block_Byron_regular")
+	require.Equal(t, uint(gledger.BlockTypeByronMain), trueType,
+		"fixture must be a Byron main block")
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType_BLOCK_TYPE_BYRON_MAIN
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockNotFullyAuthenticated)
+}
+
+// TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock is the boundary of that
+// restriction. An epoch boundary block carries no transactions and no SSC
+// payload, so a single body hash covers the whole body and the block is fully
+// bound to its header. Refusing it too would give up history for no gain.
+func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
+	raw, trueType := realEraBlock(t, "Block_Byron_EBB")
+	require.Equal(t, uint(gledger.BlockTypeByronEbb), trueType,
+		"fixture must be a Byron epoch boundary block")
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType_BLOCK_TYPE_BYRON_EBB_UNSPECIFIED
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.NoError(t, err)
+	assert.Equal(t, raw, cbor)
+	assert.Equal(t, uint(gledger.BlockTypeByronEbb), meta.Type)
+}
+
+// TestGetBlock_RejectsUnclassifiableEra pins the fail-closed behaviour when a
+// block's era cannot be derived from its header.
+//
+// The consensus golden fixtures carry synthetic protocol versions that
+// DetermineBlockType does not map, which stands in for a block from an era
+// this node does not know. Trusting the archive's claim in that case would
+// hand era selection straight back to it, so the fetch is refused. A node that
+// cannot classify a block could not process it anyway.
+func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
+	raw, trueType := realEraBlock(t, "Block_Babbage")
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType(
+		trueType,
+	) //nolint:gosec // fixture-derived era
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	// Even though the archive reported the fixture's own era, the era cannot
+	// be confirmed from the header, so the block is not accepted.
+	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
+}
+
+// TestGetBlock_RejectsArchiveBlockForDifferentPoint is the core regression for
+// the finding: the archive is asked for one block and answers with a
+// different, individually valid block. The substituted block must not reach
+// the caller.
+func TestGetBlock_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
+	db := newTestDB(t)
+	chain := archiveBlockFixtures(t, 2)
+	requested, substituted := chain[0], chain[1]
+
+	blocks, configure := serveArchiveBlock(t, requested)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.substituteBody = substituted.Cbor()
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	requestedHash := requested.Hash()
+	_, _, err := store.GetBlock(
+		rTxn, requested.SlotNumber(), requestedHash[:],
+	)
+	require.ErrorIs(t, err, ErrArchiveBlockHashMismatch)
+}
+
+// TestGetBlock_RejectsUndecodableArchiveBlock covers an archive response that
+// is not a well-formed block at all.
+func TestGetBlock_RejectsUndecodableArchiveBlock(t *testing.T) {
+	db := newTestDB(t)
+	block := archiveBlockFixtures(t, 1)[0]
+
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.substituteBody = []byte("not-a-block")
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	hash := block.Hash()
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockUndecodable)
+}
+
+// TestGetBlock_RejectsArchiveBlockSlotMismatch covers a block whose bytes are
+// genuine but which does not sit at the slot the caller asked about.
+func TestGetBlock_RejectsArchiveBlockSlotMismatch(t *testing.T) {
+	db := newTestDB(t)
+	block := archiveBlockFixtures(t, 1)[0]
+
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	hash := block.Hash()
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber()+1, hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockSlotMismatch)
+}
+
+// TestGetBlock_RejectsArchiveMetadataMismatch covers Bark-supplied metadata
+// that contradicts the block it accompanies. The block bytes verify, so the
+// disagreement means the archive is misreporting and must not be trusted.
+func TestGetBlock_RejectsArchiveMetadataMismatch(t *testing.T) {
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+
+	tests := []struct {
+		name    string
+		mutate  func(*fakeArchive)
+		wantErr string
+	}{
+		{
+			name:    "height disagrees with block",
+			mutate:  func(a *fakeArchive) { a.height = block.BlockNumber() + 7 },
+			wantErr: "height",
+		},
+		{
+			name: "previous hash disagrees with block",
+			mutate: func(a *fakeArchive) {
+				a.prevHash = bytes.Repeat([]byte{0x99}, 32)
+			},
+			wantErr: "previous hash",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			tc.mutate(fakeArch)
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+			require.ErrorIs(t, err, ErrArchiveMetadataMismatch)
+			// The sentinel pins the code path; the detail distinguishes
+			// which field disagreed.
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// TestBarkIterator_RejectsArchiveBlockForDifferentPoint proves the iterator's
+// expired-history resolution is covered by the same verification as GetBlock,
+// rather than being a second, unchecked way into archive data.
+func TestBarkIterator_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
+	db := newTestDB(t)
+	chain := archiveBlockFixtures(t, 2)
+	requested, substituted := chain[0], chain[1]
+	hash := requested.Hash()
+
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: requested.SlotNumber(),
+		Hash: hash[:],
+		Cbor: requested.Cbor(),
+		Type: gledger.BlockTypeConway,
+	}, nil))
+
+	wTxn := db.BlobTxn(true)
+	require.NoError(t, wTxn.Do(func(txn *database.Txn) error {
+		return db.Blob().TombstoneBlock(
+			txn.Blob(), requested.SlotNumber(), hash[:],
+		)
+	}))
+
+	blocks, configure := serveArchiveBlock(t, requested)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.substituteBody = substituted.Cbor()
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	it := store.NewIterator(rTxn, types.BlobIteratorOptions{
+		Prefix: []byte(types.BlockBlobKeyPrefix),
+	})
+	require.NotNil(t, it)
+	t.Cleanup(it.Close)
+
+	var sawExpired bool
+	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix(
+		[]byte(types.BlockBlobKeyPrefix),
+	); it.Next() {
+		item := it.Item()
+		require.NotNil(t, item)
+		if bytes.HasSuffix(
+			item.Key(), []byte(types.BlockBlobMetadataKeySuffix),
+		) {
+			continue
+		}
+		sawExpired = true
+		_, err := item.ValueCopy(nil)
+		require.ErrorIs(t, err, ErrArchiveBlockHashMismatch,
+			"iterator must not surface a block the archive substituted")
+	}
+	require.NoError(t, it.Err())
+	require.True(t, sawExpired, "iterator did not visit the bp key")
+}
+
 // TestBarkIterator_ResolvesExpiredHistoryViaArchive seeds the database with a
 // block, marks it expired locally, then iterates through the bark wrapper.
 // ValueCopy must surface the archive's CBOR, not the local expiry marker.
 func TestBarkIterator_ResolvesExpiredHistoryViaArchive(t *testing.T) {
 	db := newTestDB(t)
 
-	const slot uint64 = 100
-	hash := bytes.Repeat([]byte{0xAB}, 32)
-	cbor := []byte("real-block-cbor-from-archive")
+	// A real block: the archive-resolved bytes are hash-verified against the
+	// requested point, so fabricated CBOR would be rejected on arrival.
+	block := archiveBlockFixtures(t, 2)[1]
+	blockHash := block.Hash()
+	slot := block.SlotNumber()
+	hash := blockHash[:]
+	cbor := block.Cbor()
 
 	require.NoError(t, db.BlockCreate(models.Block{
 		Slot: slot,
 		Hash: hash,
-		Cbor: []byte("local-cbor"),
-		Type: 1,
+		Cbor: cbor,
+		Type: gledger.BlockTypeConway,
 	}, nil))
 
 	wTxn := db.BlobTxn(true)
@@ -317,9 +796,9 @@ func TestBarkIterator_ResolvesExpiredHistoryViaArchive(t *testing.T) {
 		return db.Blob().TombstoneBlock(txn.Blob(), slot, hash)
 	}))
 
-	baseURL, archiveSrv, httpClient := startFakeArchive(t, map[string][]byte{
-		hex.EncodeToString(hash): cbor,
-	})
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, archiveSrv, httpClient := startFakeArchive(t, blocks)
+	configure(archiveSrv)
 	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
 
 	rTxn := store.NewTransaction(false)

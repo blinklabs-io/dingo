@@ -24,7 +24,10 @@ func TestDecodeTxIn_BinaryKeyUsesBigEndianOutputIndex(t *testing.T) {
 
 // buildShelleyAddr constructs a minimal Shelley address byte slice:
 // header (addrType<<4 | networkId), 28-byte payment hash, 28-byte staking hash (for base addrs).
-func buildShelleyAddr(addrType, networkID byte, paymentHash, stakingHash []byte) []byte {
+func buildShelleyAddr(
+	addrType, networkID byte,
+	paymentHash, stakingHash []byte,
+) []byte {
 	addr := []byte{(addrType << 4) | networkID}
 	addr = append(addr, paymentHash...)
 	if stakingHash != nil {
@@ -61,7 +64,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:         "type1_script_payment_key_staking",
 			addr:         buildShelleyAddr(1, 1, payHash, stakeHash),
 			wantScript:   true,
-			wantPayKey:   false,
+			wantPayKey:   true,
 			wantStakeKey: true,
 			wantStakeTag: 0,
 		},
@@ -79,7 +82,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:         "type3_script_payment_script_staking",
 			addr:         buildShelleyAddr(3, 1, payHash, stakeHash),
 			wantScript:   true,
-			wantPayKey:   false,
+			wantPayKey:   true,
 			wantStakeKey: true,
 			wantStakeTag: 1,
 		},
@@ -88,7 +91,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:       "type5_script_payment_pointer",
 			addr:       buildShelleyAddr(5, 1, payHash, nil),
 			wantScript: true,
-			wantPayKey: false,
+			wantPayKey: true,
 		},
 		{
 			// Type 6: enterprise key payment — NOT script
@@ -102,7 +105,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:       "type7_enterprise_script",
 			addr:       buildShelleyAddr(7, 1, payHash, nil),
 			wantScript: true,
-			wantPayKey: false,
+			wantPayKey: true,
 		},
 	}
 
@@ -111,15 +114,25 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			t.Parallel()
 			result := &ParsedUTxO{}
 			extractAddressKeys(tc.addr, result)
-			require.Equal(t, tc.wantScript, result.PaymentScript, "PaymentScript")
+			require.Equal(
+				t,
+				tc.wantScript,
+				result.PaymentScript,
+				"PaymentScript",
+			)
 			if tc.wantPayKey {
 				require.Equal(t, payHash, result.PaymentKey, "PaymentKey")
 			} else {
-				require.Empty(t, result.PaymentKey, "PaymentKey should be empty for script payment")
+				require.Empty(t, result.PaymentKey, "PaymentKey should be empty for truncated/unknown address types")
 			}
 			if tc.wantStakeKey {
 				require.Equal(t, stakeHash, result.StakingKey, "StakingKey")
-				require.Equal(t, tc.wantStakeTag, result.CredentialTag, "CredentialTag")
+				require.Equal(
+					t,
+					tc.wantStakeTag,
+					result.CredentialTag,
+					"CredentialTag",
+				)
 			} else {
 				require.Empty(t, result.StakingKey, "StakingKey should be empty for non-staking-key address types")
 			}

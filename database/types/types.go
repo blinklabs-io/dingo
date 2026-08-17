@@ -131,7 +131,7 @@ func (u *Uint64) Scan(val any) error {
 // until the UTxO is spent/referenced.
 //
 // Without a custom driver.Valuer, an empty/nil []byte can be bound by some
-// GORM + SQLite driver versions as an empty blob instead of SQL NULL. SQLite
+// SQLite drivers as an empty blob instead of SQL NULL. SQLite
 // enforces FK constraints against an empty blob (no transaction has an empty
 // hash), so such a row fails with SQLITE_CONSTRAINT_FOREIGNKEY (787).
 // This affects every UTxO not yet spent/referenced, including all genesis
@@ -315,6 +315,19 @@ type BlobIteratorOptions struct {
 type Txn interface {
 	Commit() error
 	Rollback() error
+}
+
+// IrreversibleTxn identifies a transaction whose Rollback cannot undo writes
+// already issued to its backing store.
+//
+// No current implementation reports true: the cloud plugins stage mutations and
+// apply them only in Commit, so their Rollback discards staged work with no
+// backing-store I/O. Callers must not infer "the store was mutated" from a
+// failed transaction; check errors.Is(err, ErrPartialCommit) instead, which is
+// the only case where a commit left the store partially applied.
+type IrreversibleTxn interface {
+	Txn
+	RollbackIsNoop() bool
 }
 
 // MetadataBatchAccumulator is an opaque plugin-owned accumulator used by

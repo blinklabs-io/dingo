@@ -16,9 +16,12 @@ package config
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,19 +29,14 @@ import (
 // validTestConfig returns a minimal configuration that passes
 // validation, mirroring the production defaults.
 func validTestConfig() *Config {
-	return &Config{
+	cfg := &Config{
+		Plugins:              defaultPluginsConfig(),
 		Network:              "preview",
 		RunMode:              RunModeServe,
 		StorageMode:          storageModeCore,
-		EvictionWatermark:    DefaultEvictionWatermark,
-		RejectionWatermark:   DefaultRejectionWatermark,
-		MempoolCapacity:      DefaultMempoolCapacityPraos,
 		RelayPort:            3001,
 		PrivatePort:          3002,
 		MetricsPort:          12798,
-		UtxorpcPort:          9090,
-		BlockfrostPort:       3000,
-		MeshPort:             8080,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 		Cache:                DefaultCacheConfig(),
@@ -50,6 +48,16 @@ func validTestConfig() *Config {
 			Backend: "v2",
 		},
 	}
+	cfg.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
+	return cfg
+}
+
+func setPluginPort(selection *hostplugin.Selection, port any) {
+	selection.Config["port"] = port
+}
+
+func setMempoolSetting(c *Config, name string, value any) {
+	c.Plugins.Mempool.Config[name] = value
 }
 
 func TestValidateDefaultsPass(t *testing.T) {
@@ -123,15 +131,15 @@ func TestValidate(t *testing.T) {
 			name: "port above maximum",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.UtxorpcPort = 99999999
+				setPluginPort(&c.Plugins.API.Utxorpc, 99999999)
 			},
-			wantErr: "invalid utxorpcPort: 99999999 (must be at most 65535)",
+			wantErr: "invalid plugins.api.utxorpc.config.port: 99999999 (must be at most 65535)",
 		},
 		{
 			name: "privileged port without privileges",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.BlockfrostPort = 443
+				setPluginPort(&c.Plugins.API.Blockfrost, 443)
 			},
 			wantErr: "privileged port",
 		},
@@ -149,7 +157,7 @@ func TestValidate(t *testing.T) {
 			name: "optional port disabled with zero",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.UtxorpcPort = 0
+				setPluginPort(&c.Plugins.API.Utxorpc, 0)
 			},
 		},
 		{
@@ -171,8 +179,8 @@ func TestValidate(t *testing.T) {
 			name: "core mode skips inactive API port validation",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeCore
-				c.UtxorpcPort = 99999999
-				c.BlockfrostPort = 443
+				setPluginPort(&c.Plugins.API.Utxorpc, 99999999)
+				setPluginPort(&c.Plugins.API.Blockfrost, 443)
 			},
 		},
 		{
@@ -181,7 +189,7 @@ func TestValidate(t *testing.T) {
 			name: "core mode ignores API/serving port collision",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeCore
-				c.MetricsPort = c.MeshPort
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 		},
 		{
@@ -190,7 +198,7 @@ func TestValidate(t *testing.T) {
 			name: "api mode rejects API/serving port collision",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.MetricsPort = c.MeshPort
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 			wantErr: "is assigned to both",
 		},
@@ -205,6 +213,14 @@ func TestValidate(t *testing.T) {
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
 				c.Midnight.Port = 13000
+			},
+		},
+		{
+			name: "bark on distinct bind address may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.1"
+				c.BarkHost = "127.0.0.2"
+				c.BarkPort = c.MetricsPort
 			},
 		},
 		{
@@ -271,37 +287,44 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:    "negative mempool capacity",
-			modify:  func(c *Config) { c.MempoolCapacity = -1 },
-			wantErr: "invalid mempoolCapacity",
+			modify:  func(c *Config) { setMempoolSetting(c, "capacity", -1) },
+			wantErr: "invalid plugins.mempool.config.capacity",
 		},
 		{
 			name:    "eviction watermark out of range",
-			modify:  func(c *Config) { c.EvictionWatermark = 1.5 },
-			wantErr: "invalid evictionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "evictionWatermark", 1.5) },
+			wantErr: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:    "rejection watermark out of range",
-			modify:  func(c *Config) { c.RejectionWatermark = 1.5 },
-			wantErr: "invalid rejectionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "rejectionWatermark", 1.5) },
+			wantErr: "invalid plugins.mempool.config.rejectionWatermark",
+		},
+		{
+			name: "non-positive mempool revalidation delta cap",
+			modify: func(c *Config) {
+				setMempoolSetting(c, "revalidationDeltaCap", 0)
+			},
+			wantErr: "invalid plugins.mempool.config.revalidationDeltaCap",
 		},
 		{
 			// Every ordered comparison with NaN is false, so a plain
 			// out-of-range check would let NaN through (e.g. from
 			// --eviction-watermark NaN, which strconv parses).
 			name:    "NaN eviction watermark",
-			modify:  func(c *Config) { c.EvictionWatermark = math.NaN() },
-			wantErr: "invalid evictionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "evictionWatermark", math.NaN()) },
+			wantErr: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:    "NaN rejection watermark",
-			modify:  func(c *Config) { c.RejectionWatermark = math.NaN() },
-			wantErr: "invalid rejectionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "rejectionWatermark", math.NaN()) },
+			wantErr: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name: "eviction above rejection",
 			modify: func(c *Config) {
-				c.EvictionWatermark = 0.95
-				c.RejectionWatermark = 0.90
+				setMempoolSetting(c, "evictionWatermark", 0.95)
+				setMempoolSetting(c, "rejectionWatermark", 0.90)
 			},
 			wantErr: "must be less than rejectionWatermark",
 		},
@@ -332,6 +355,45 @@ func TestValidate(t *testing.T) {
 			modify: func(c *Config) {
 				c.Network = ""
 				c.NetworkMagic = 2
+			},
+		},
+		{
+			name: "full pot rewards reject standard network by name",
+			modify: func(c *Config) {
+				c.FullPotRewardsEnabled = true
+			},
+			wantErr: "fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+		},
+		{
+			name: "full pot rewards reject standard network by magic",
+			modify: func(c *Config) {
+				c.Network = "private-preview-mirror"
+				c.NetworkMagic = 2
+				c.FullPotRewardsEnabled = true
+			},
+			wantErr: "fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+		},
+		{
+			name: "full pot rewards allow standard network with unsafe opt-in",
+			modify: func(c *Config) {
+				c.FullPotRewardsEnabled = true
+				c.UnsafeFullPotRewardsOnStandardNetworks = true
+			},
+		},
+		{
+			name: "full pot rewards allow custom network",
+			modify: func(c *Config) {
+				c.Network = "private-net"
+				c.NetworkMagic = 9_999
+				c.FullPotRewardsEnabled = true
+			},
+		},
+		{
+			name: "full pot rewards allow devnet",
+			modify: func(c *Config) {
+				c.Network = "devnet"
+				c.NetworkMagic = 42
+				c.FullPotRewardsEnabled = true
 			},
 		},
 		{
@@ -387,6 +449,19 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid chainsync.maxClients",
 		},
 		{
+			name: "negative genesis corroboration peers",
+			modify: func(c *Config) {
+				c.GenesisBootstrap.CorroborationPeers = -1
+			},
+			wantErr: "invalid genesisBootstrap.corroborationPeers",
+		},
+		{
+			name: "zero genesis corroboration peers allowed",
+			modify: func(c *Config) {
+				c.GenesisBootstrap.CorroborationPeers = 0
+			},
+		},
+		{
 			name:    "invalid mithril backend",
 			modify:  func(c *Config) { c.Mithril.Backend = "v3" },
 			wantErr: "invalid mithril.backend",
@@ -411,13 +486,342 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidatePledgeLeverage(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		l       uint
+		wantErr string
+	}{
+		{name: "disabled ignores out-of-range value", enabled: false, l: 0},
+		{name: "enabled at minimum", enabled: true, l: 1},
+		{name: "enabled within range", enabled: true, l: 100},
+		{name: "enabled at maximum", enabled: true, l: 10_000},
+		{
+			name:    "enabled below minimum",
+			enabled: true,
+			l:       0,
+			wantErr: "pledgeLeverage",
+		},
+		{
+			name:    "enabled above maximum",
+			enabled: true,
+			l:       10_001,
+			wantErr: "pledgeLeverage",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.PledgeLeverageEnabled = tt.enabled
+			cfg.PledgeLeverage = tt.l
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMidnightEnabled pins the contradiction check: the Midnight
+// indexer needs the api-mode indexes to function, so midnight.enabled
+// requires storageMode "api". Dev mode is exempted because node.Run
+// force-upgrades storage mode to api at startup regardless of what is
+// configured (see TestValidateMidnightEnabledAllowedInDevMode).
+func TestValidateMidnightEnabled(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     bool
+		storageMode string
+		wantErr     string
+	}{
+		{
+			name:        "disabled with core mode",
+			enabled:     false,
+			storageMode: storageModeCore,
+		},
+		{
+			name:        "disabled with api mode",
+			enabled:     false,
+			storageMode: storageModeAPI,
+		},
+		{
+			name:        "enabled with api mode",
+			enabled:     true,
+			storageMode: storageModeAPI,
+		},
+		{
+			name:        "enabled with core mode",
+			enabled:     true,
+			storageMode: storageModeCore,
+			wantErr:     `midnight.enabled requires storageMode "api"`,
+		},
+		{
+			name:        "enabled with unset storage mode",
+			enabled:     true,
+			storageMode: "",
+			wantErr:     `midnight.enabled requires storageMode "api"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Midnight.Enabled = tt.enabled
+			cfg.StorageMode = tt.storageMode
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMidnightEnabledAllowedInDevMode verifies that dev mode's
+// storage-mode force-upgrade (node.Run) is honored the same way it already
+// is for the API listener ports above: midnight.enabled with a configured
+// core storage mode must not be rejected when runMode is dev, because the
+// node will actually start in api mode.
+func TestValidateMidnightEnabledAllowedInDevMode(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.Midnight.Enabled = true
+	assert.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+	assert.NoError(t, cfg.validate(RunModeDev, minUnprivilegedPort))
+}
+
+// TestValidateDelegatorInactivity pins the CIP-0163 range check: the
+// inactivity window is only validated when the gate is enabled, and must
+// fall in [1, 10000] when it is.
+func TestValidateDelegatorInactivity(t *testing.T) {
+	tests := []struct {
+		name       string
+		enabled    bool
+		inactivity uint64
+		wantErr    string
+	}{
+		{
+			name:       "disabled ignores out-of-range value",
+			enabled:    false,
+			inactivity: 10_001,
+		},
+		{name: "enabled at minimum", enabled: true, inactivity: 1},
+		{name: "enabled within range", enabled: true, inactivity: 90},
+		{name: "enabled at maximum", enabled: true, inactivity: 10_000},
+		{
+			name:       "enabled below minimum",
+			enabled:    true,
+			inactivity: 0,
+			wantErr:    "delegatorInactivity",
+		},
+		{
+			name:       "enabled above maximum",
+			enabled:    true,
+			inactivity: 10_001,
+			wantErr:    "delegatorInactivity",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DelegatorInactivityEnabled = tt.enabled
+			cfg.DelegatorInactivity = tt.inactivity
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateDatabaseLifecycleSnapshotCloudDestination guards a config
+// that reaches Manager.Start with a malformed SnapshotCloudDestination:
+// without this check, the only place a bad URI ever surfaced was a
+// logged-and-swallowed failure inside handleEpochTransitionEvent, up to a
+// full epoch after the node had already started running with it.
+func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
+	tests := []struct {
+		name    string
+		dest    string
+		wantErr string
+	}{
+		{name: "empty is fine, no cloud mirroring configured", dest: ""},
+		{
+			name:    "well-formed s3 URI",
+			dest:    "s3://bucket/prefix",
+			wantErr: unsupportedCloudSchemeTestError("s3"),
+		},
+		{
+			name:    "well-formed gcs URI",
+			dest:    "gcs://bucket/prefix",
+			wantErr: unsupportedCloudSchemeTestError("gcs"),
+		},
+		{
+			name:    "typoed scheme",
+			dest:    "s33://bucket/prefix",
+			wantErr: "snapshotCloudDestination",
+		},
+		{
+			name:    "missing scheme separator",
+			dest:    "s3bucket/prefix",
+			wantErr: "snapshotCloudDestination",
+		},
+		{
+			name:    "scheme with no host",
+			dest:    "s3://",
+			wantErr: "snapshotCloudDestination",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotCloudDestination = tt.dest
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateDatabaseLifecycleSnapshotDirWritability guards against a raw
+// filesystem permission error surfacing deep inside a snapshot attempt
+// instead of a clean, actionable one at startup -- the failure mode for a
+// --db-snapshot-dir bind-mounted from a host directory the Docker image's
+// non-root user doesn't own (see dingo.yaml.example's snapshotDir entry).
+func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
+	t.Run(
+		"writable directory passes and is created if missing",
+		func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "nested", "snapshots")
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.True(t, info.IsDir())
+		},
+	)
+
+	t.Run(
+		"unwritable directory fails with an actionable error",
+		func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip(
+					"root can write anywhere regardless of mode -- skip when running as root",
+				)
+			}
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "readonly")
+			require.NoError(t, os.Mkdir(dir, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "snapshotDir")
+			assert.Contains(t, err.Error(), "1000:1000")
+		},
+	)
+
+	t.Run(
+		"disabled snapshots skip the writability check when bark is also disabled",
+		func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = false
+			cfg.BarkPort = 0
+			cfg.DatabaseLifecycle.SnapshotDir = filepath.Join(
+				t.TempDir(), "never-created",
+			)
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+		},
+	)
+
+	// TestValidateDatabaseLifecycleSnapshotDirWritability/bark-enabled
+	// guards against a real gap: snapshotDir also backs Bark's
+	// DatabaseService CreateSnapshot/Restore RPCs whenever bark is
+	// enabled (barkPort > 0) with a snapshotDir configured -- regardless
+	// of whether automatic epoch-boundary snapshots (snapshotEnabled) are
+	// on. Checking only snapshotEnabled left that combination (Bark
+	// snapshots without automatic ones) completely unvalidated.
+	t.Run(
+		"unwritable directory fails even with automatic snapshots disabled, when bark is enabled",
+		func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip(
+					"root can write anywhere regardless of mode -- skip when running as root",
+				)
+			}
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "readonly")
+			require.NoError(t, os.Mkdir(dir, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = false
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			cfg.BarkPort = 8091
+			cfg.BarkClientCAFilePath = "/certs/ca.crt"
+			cfg.TlsCertFilePath = "/certs/tls.crt"
+			cfg.TlsKeyFilePath = "/certs/tls.key"
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "snapshotDir")
+			assert.Contains(t, err.Error(), "1000:1000")
+		},
+	)
+}
+
+func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		prefix  string
+		wantErr bool
+	}{
+		{name: "empty", prefix: ""},
+		{name: "safe segment", prefix: "node-a"},
+		{name: "parent", prefix: "..", wantErr: true},
+		{name: "current directory", prefix: ".", wantErr: true},
+		{name: "forward slash", prefix: "nodes/a", wantErr: true},
+		{name: "backslash", prefix: `nodes\a`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotCloudDestinationPrefix = tt.prefix
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr {
+				require.ErrorContains(
+					t,
+					err,
+					"snapshotCloudDestinationPrefix",
+				)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 // TestValidatePrivilegedPortAllowedWhenBindable covers a process that
 // may bind any port (root, Windows, or CAP_NET_BIND_SERVICE):
 // minBindable is 0, so a sub-1024 port passes.
 func TestValidatePrivilegedPortAllowedWhenBindable(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BlockfrostPort = 443
+	setPluginPort(&cfg.Plugins.API.Blockfrost, 443)
 	assert.NoError(t, cfg.validate(cfg.RunMode, 0))
 }
 
@@ -428,9 +832,9 @@ func TestValidatePrivilegedPortAllowedWhenBindable(t *testing.T) {
 func TestValidateLoweredPrivilegedPortCutoff(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BlockfrostPort = 80
+	setPluginPort(&cfg.Plugins.API.Blockfrost, 80)
 	assert.NoError(t, cfg.validate(cfg.RunMode, 80))
-	cfg.BlockfrostPort = 79
+	setPluginPort(&cfg.Plugins.API.Blockfrost, 79)
 	err := cfg.validate(cfg.RunMode, 80)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "privileged port")
@@ -461,7 +865,7 @@ func TestValidateUtilityModesRelaxListenerAndSource(t *testing.T) {
 // collision and validation must pass.
 func TestValidateSyncModeIgnoresInactiveListenerCollision(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.MetricsPort = cfg.MeshPort // 8080, the default mesh port
+	cfg.MetricsPort = APIPluginPort(cfg.Plugins.API.Mesh)
 	cfg.RelayPort = 0
 	cfg.PrivatePort = 0
 	cfg.ImmutableDbPath = ""
@@ -498,10 +902,10 @@ func TestValidateDevConfigViaServeChecksApiPorts(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeDev
 	cfg.StorageMode = storageModeCore
-	cfg.UtxorpcPort = 99999999
+	setPluginPort(&cfg.Plugins.API.Utxorpc, 99999999)
 	err := cfg.validate(RunModeServe, minUnprivilegedPort)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid utxorpcPort")
+	assert.Contains(t, err.Error(), "invalid plugins.api.utxorpc.config.port")
 }
 
 // TestValidateLoadModeSkipsAllListenerPorts verifies that load, which
@@ -512,7 +916,7 @@ func TestValidateLoadModeSkipsAllListenerPorts(t *testing.T) {
 	cfg.RunMode = RunModeLoad
 	cfg.ImmutableDbPath = "/data/immutable"
 	cfg.MetricsPort = 99999999
-	cfg.UtxorpcPort = 99999999
+	setPluginPort(&cfg.Plugins.API.Utxorpc, 99999999)
 	assert.NoError(t, cfg.validate(RunModeLoad, minUnprivilegedPort))
 }
 
@@ -536,11 +940,41 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeLoad
 	cfg.ImmutableDbPath = ""
-	cfg.EvictionWatermark = 2.0
+	setMempoolSetting(cfg, "evictionWatermark", 2.0)
 	cfg.Chainsync.Strategy = "fastest"
 	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
-	assert.Contains(t, err.Error(), "invalid evictionWatermark")
+	assert.Contains(
+		t,
+		err.Error(),
+		"invalid plugins.mempool.config.evictionWatermark",
+	)
 	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
+}
+
+func TestValidateMinPoolMargin(t *testing.T) {
+	tests := []struct {
+		name    string
+		v       uint
+		wantErr string
+	}{
+		{name: "zero disabled", v: 0},
+		{name: "within range", v: 150},
+		{name: "at maximum", v: 10_000},
+		{name: "above maximum", v: 10_001, wantErr: "minPoolMargin"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.MinPoolMargin = tt.v
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

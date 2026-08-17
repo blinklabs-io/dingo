@@ -19,17 +19,29 @@ import (
 )
 
 type MempoolConsumer struct {
-	mempool     *Mempool
-	cache       map[string]*MempoolTransaction
+	mempool *Mempool
+	cache   map[string]*MempoolTransaction
+	// cacheSlot signals that a cache slot was freed, waking a blocking NextTx
+	// that parked on a full cache. Buffered by one and signaled without
+	// blocking: a pending wake-up is all a waiter needs, since it re-checks the
+	// cache after waking. A channel rather than a sync.Cond so the wait can also
+	// select on mempool shutdown.
+	cacheSlot   chan struct{}
+	cacheLimit  int
 	nextTxIdx   int
 	cacheMutex  sync.Mutex
 	nextTxIdxMu sync.Mutex
 }
 
-func newConsumer(mempool *Mempool) *MempoolConsumer {
+func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
+	if cacheLimit <= 0 {
+		cacheLimit = DefaultConsumerCacheSize
+	}
 	return &MempoolConsumer{
-		mempool: mempool,
-		cache:   make(map[string]*MempoolTransaction),
+		mempool:    mempool,
+		cache:      make(map[string]*MempoolTransaction),
+		cacheSlot:  make(chan struct{}, 1),
+		cacheLimit: cacheLimit,
 	}
 }
 
@@ -39,13 +51,46 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 	}
 
 	for {
+		// Stop handing out transactions once the body cache is full. NextTx is
+		// what puts a tx id on the wire, and the body is served to the peer
+		// later from this cache only. Dropping a cached body to make room would
+		// silently omit a tx the peer legitimately asked for, so bound the
+		// cache by declining to advertise instead. The peer's acknowledgement
+		// clears the cache and reopens the window. The protocol window
+		// (txsubmissionRequestTxIdsCount) is far below the default limit, so
+		// this is a backstop against an aggressive peer, not a normal path.
+		m.cacheMutex.Lock()
+		cacheFull := len(m.cache) >= m.cacheLimit
+		m.cacheMutex.Unlock()
+		if cacheFull {
+			if !blocking {
+				return nil
+			}
+			// A blocking request must wait, not answer empty. Returning nil
+			// here would have the peer immediately re-request -- its pull loop
+			// has no backoff for an empty reply -- producing an unpaced
+			// request/reply spin exactly in the aggressive-peer case this
+			// bound exists to contain. Park until a body is served or the
+			// peer acknowledges ids, which frees a slot.
+			select {
+			case <-m.cacheSlot:
+				continue
+			case <-m.mempool.done:
+				return nil
+			}
+		}
+
 		m.mempool.RLock()
 		m.nextTxIdxMu.Lock()
 
 		// Check if we have a transaction available
 		if m.nextTxIdx < len(m.mempool.transactions) {
-			nextTx := m.mempool.transactions[m.nextTxIdx]
-			if nextTx != nil {
+			poolTx := m.mempool.transactions[m.nextTxIdx]
+			if poolTx != nil {
+				// Clone while holding the pool read lock so neither the caller
+				// nor the consumer cache shares mutable CBOR with pool storage.
+				nextTx := cloneMempoolTransaction(poolTx)
+				cachedTx := cloneMempoolTransaction(poolTx)
 				// Increment next TX index atomically with reading it
 				m.nextTxIdx++
 				m.nextTxIdxMu.Unlock()
@@ -53,7 +98,7 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 
 				// Add transaction to cache (outside of locks)
 				m.cacheMutex.Lock()
-				m.cache[nextTx.Hash] = nextTx
+				m.cache[cachedTx.Hash] = cachedTx
 				m.cacheMutex.Unlock()
 
 				return nextTx
@@ -103,7 +148,7 @@ func (m *MempoolConsumer) GetTxFromCache(hash string) *MempoolTransaction {
 	if m != nil {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
-		return m.cache[hash]
+		return cloneMempoolTransaction(m.cache[hash])
 	}
 	var ret *MempoolTransaction
 	return ret
@@ -114,6 +159,7 @@ func (m *MempoolConsumer) ClearCache() {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
 		m.cache = make(map[string]*MempoolTransaction)
+		m.signalCacheSlotLocked()
 	}
 }
 
@@ -121,6 +167,23 @@ func (m *MempoolConsumer) RemoveTxFromCache(hash string) {
 	if m != nil {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
-		delete(m.cache, hash)
+		if _, existed := m.cache[hash]; existed {
+			delete(m.cache, hash)
+			m.signalCacheSlotLocked()
+		}
+	}
+}
+
+// signalCacheSlotLocked wakes one blocking NextTx parked on a full cache. The
+// send is non-blocking: the buffered slot already holds a pending wake-up, and a
+// waiter re-checks the cache after waking, so coalescing is correct. Caller must
+// hold cacheMutex.
+func (m *MempoolConsumer) signalCacheSlotLocked() {
+	if m.cacheSlot == nil {
+		return
+	}
+	select {
+	case m.cacheSlot <- struct{}{}:
+	default:
 	}
 }

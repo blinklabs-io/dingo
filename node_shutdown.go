@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/blinklabs-io/dingo/plugin"
 )
 
 func (n *Node) Stop() error {
@@ -74,8 +76,12 @@ func (n *Node) closeWithShutdownTimeout(
 }
 
 func (n *Node) configuredShutdownTimeout() time.Duration {
-	if n.config.shutdownTimeout > 0 {
-		return n.config.shutdownTimeout
+	if d, err := n.config.ShutdownTimeoutDuration(); err == nil {
+		if d > 0 {
+			return d
+		}
+	} else {
+		n.config.logger.Warn("invalid shutdown timeout, using default", "value", n.config.ShutdownTimeout(), "error", err)
 	}
 	return 30 * time.Second
 }
@@ -135,9 +141,12 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.utxorpc != nil {
-		if stopErr := n.utxorpc.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("utxorpc shutdown: %w", stopErr))
+	if n.dbLifecycleMgr != nil {
+		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
+			)
 		}
 	}
 
@@ -164,21 +173,16 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.blockfrostAPI != nil {
-		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
-			)
-		}
-	}
-
-	if n.meshAPI != nil {
-		if stopErr := n.meshAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("mesh API shutdown: %w", stopErr),
-			)
+	// API providers are stopped before consumers and stateful dependencies.
+	if n.pluginHost != nil {
+		for _, capability := range []plugin.Capability{
+			plugin.CapabilityAPIUtxorpc,
+			plugin.CapabilityAPIMesh,
+			plugin.CapabilityAPIBlockfrost,
+		} {
+			if stopErr := n.pluginHost.StopCapability(ctx, capability); stopErr != nil {
+				err = errors.Join(err, stopErr)
+			}
 		}
 	}
 
@@ -187,6 +191,23 @@ func (n *Node) shutdown() error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("off-chain metadata fetcher shutdown: %w", stopErr),
+			)
+		}
+	}
+
+	// Stop the Koios parity observer before phase 3 tears down n.db/
+	// n.pluginHost: the observer's background goroutine reads Dingo's
+	// committed reward state through its RewardParitySource, which is backed
+	// by n.db, so it must fully stop (Observer.Stop blocks until its
+	// goroutine has actually exited, not just been signaled) before that
+	// store is closed. This is the only place the observer is stopped on the
+	// normal/signal-driven shutdown path — startKoiosParityObserver's Run()
+	// registration only covers the startup-failure/panic rollback path.
+	if n.koiosParityObserver != nil {
+		if stopErr := n.koiosParityObserver.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("koios parity observer shutdown: %w", stopErr),
 			)
 		}
 	}
@@ -200,10 +221,24 @@ func (n *Node) shutdown() error {
 	n.config.logger.Info("shutdown phase 2: draining connections")
 	phase2Start := time.Now()
 
-	if n.mempool != nil {
-		if stopErr := n.mempool.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("mempool shutdown: %w", stopErr))
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(ctx, plugin.CapabilityMempool); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
+	}
+
+	// Close the EventBus before draining network connections. Since v0.68,
+	// event delivery applies backpressure instead of dropping events. A
+	// chainsync callback can therefore be blocked waiting for a full ledger
+	// subscriber while ConnectionManager.Stop waits for that callback to
+	// finish. Closing the terminal bus here releases those blocked publishers
+	// before connection teardown begins. The node context is already cancelled
+	// and mempool has stopped, so no component should produce useful work after
+	// this point; later component teardown treats an already-closed bus as
+	// harmless and idempotent.
+	if n.eventBus != nil {
+		n.config.logger.Info("closing event bus before connection drain")
+		n.eventBus.Close()
 	}
 
 	if n.connManager != nil {
@@ -247,8 +282,10 @@ func (n *Node) shutdown() error {
 		case <-ctx.Done():
 			n.config.logger.Warn(
 				"timed out waiting for deferred-index maintenance; continuing shutdown",
-				"timeout", shutdownTimeout,
-				"error", ctx.Err(),
+				"timeout",
+				shutdownTimeout,
+				"error",
+				ctx.Err(),
 			)
 			err = errors.Join(
 				err,
@@ -274,6 +311,14 @@ func (n *Node) shutdown() error {
 			)
 		}
 	}
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("plugin host shutdown: %w", stopErr),
+			)
+		}
+	}
 
 	n.config.logger.Info(
 		"shutdown phase 3 complete",
@@ -290,10 +335,6 @@ func (n *Node) shutdown() error {
 		}
 	}
 	n.shutdownFuncs = nil
-
-	if n.eventBus != nil {
-		n.eventBus.Stop()
-	}
 
 	n.config.logger.Info(
 		"graceful shutdown complete",

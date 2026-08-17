@@ -142,6 +142,11 @@ type Config struct {
 	// derived from the ledger's current stability window (falling back to
 	// defaultSeenHeadersRetention when no ledger state is available).
 	SeenHeadersRetention uint64
+	// ObservedHeaderLimitFunc returns the per-connection ancestry limit used
+	// by fork resolution. A non-positive result uses the bounded default.
+	// Genesis composition raises this to the active density window so a fully
+	// fetched candidate remains reconstructable from its intersection.
+	ObservedHeaderLimitFunc func() int
 	// PromRegistry, when non-nil, is used to register chainsync metrics
 	// such as the current header deduplication cache size.
 	PromRegistry prometheus.Registerer
@@ -159,7 +164,10 @@ func DefaultConfig() Config {
 // layer: local chain iteration for N2C server clients and the stability-window
 // value used to bound the seen-header deduplication cache.
 type ChainProvider interface {
-	GetChainFromPoint(point ocommon.Point, inclusive bool) (*chain.ChainIterator, error)
+	GetChainFromPoint(
+		point ocommon.Point,
+		inclusive bool,
+	) (*chain.ChainIterator, error)
 	StabilityWindow() uint64
 }
 
@@ -325,6 +333,25 @@ func (s *State) AddClient(
 	return s.clients[connId], nil
 }
 
+// LookupClient returns the registered server-side (N2C) chainsync client
+// state for a connection, or false if no client is registered for it.
+//
+// Unlike AddClient, this is a pure read: it never registers a client as a
+// side effect of being asked about one. Callers that need to assert whether
+// a connection was registered (rather than ensure it is) must use this, so
+// the question cannot create its own answer.
+func (s *State) LookupClient(
+	connId connection.ConnectionId,
+) (*ChainsyncClientState, bool) {
+	s.Lock()
+	defer s.Unlock()
+	clientState, ok := s.clients[connId]
+	if !ok || clientState == nil {
+		return nil, false
+	}
+	return clientState, true
+}
+
 // RemoveClient unregisters a server-side (N2C) chainsync
 // client.
 func (s *State) RemoveClient(connId connection.ConnectionId) {
@@ -428,7 +455,8 @@ func (s *State) promoteBestClientLocked() {
 			continue
 		}
 		if tc.Status == ClientStatusStalled {
-			if bestStalledId == nil || tc.LastActivity.After(bestStalledActivity) {
+			if bestStalledId == nil ||
+				tc.LastActivity.After(bestStalledActivity) {
 				idCopy := id
 				bestStalledId = &idCopy
 				bestStalledActivity = tc.LastActivity
@@ -814,12 +842,21 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 		header:   h,
 		prevHash: append([]byte(nil), prevHash...),
 	}
-	if len(chainHistory.order) <= maxObservedHeadersPerConn {
-		return
+	limit := s.observedHeaderLimit()
+	for len(chainHistory.order) > limit {
+		evictKey := chainHistory.order[0]
+		chainHistory.order = chainHistory.order[1:]
+		delete(chainHistory.byHash, evictKey)
 	}
-	evictKey := chainHistory.order[0]
-	chainHistory.order = chainHistory.order[1:]
-	delete(chainHistory.byHash, evictKey)
+}
+
+func (s *State) observedHeaderLimit() int {
+	if s.config.ObservedHeaderLimitFunc != nil {
+		if limit := s.config.ObservedHeaderLimitFunc(); limit > 0 {
+			return limit
+		}
+	}
+	return maxObservedHeadersPerConn
 }
 
 // LookupObservedHeader returns a previously observed header for the given

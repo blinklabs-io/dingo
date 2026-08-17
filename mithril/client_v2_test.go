@@ -181,8 +181,10 @@ func TestGetLatestCardanoDatabaseSnapshot(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
-	snapshot, err := client.GetLatestCardanoDatabaseSnapshot(context.Background())
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
+	snapshot, err := client.GetLatestCardanoDatabaseSnapshot(
+		context.Background(),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "newest", snapshot.Hash)
 	assert.Equal(t, "preprod", snapshot.Network)
@@ -200,7 +202,7 @@ func TestGetLatestCardanoDatabaseSnapshotEmpty(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
 	_, err := client.GetLatestCardanoDatabaseSnapshot(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no Cardano database snapshots")
@@ -221,7 +223,7 @@ func TestGetCardanoDatabaseDigests(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
 	entries, err := client.GetCardanoDatabaseDigests(context.Background())
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
@@ -232,7 +234,9 @@ func TestGetCardanoDatabaseDigests(t *testing.T) {
 func TestSignedEntityTypeCardanoDatabase(t *testing.T) {
 	var entity SignedEntityType
 	require.NoError(t, json.Unmarshal(
-		[]byte(`{"CardanoDatabase":{"epoch":294,"immutable_file_number":5810}}`),
+		[]byte(
+			`{"CardanoDatabase":{"epoch":294,"immutable_file_number":5810}}`,
+		),
 		&entity,
 	))
 	beacon := entity.CardanoDatabase()

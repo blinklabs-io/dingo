@@ -16,19 +16,24 @@ package blockfrost
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/hex"
 	"io"
 	"log/slog"
 	"math"
 	"math/big"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,15 +45,12 @@ import (
 // not perform slot/epoch/time math, and NewLedgerState tolerates a nil config.
 func newDBBackedAdapter(
 	t *testing.T,
-) (*NodeAdapter, *sqliteplugin.MetadataStoreSqlite, *database.Database) {
+) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -63,16 +65,297 @@ func newDBBackedAdapter(
 	adapter, err := NewNodeAdapter(ls, nil)
 	require.NoError(t, err)
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 
-	return adapter, store, db
+	return adapter, raw, db
+}
+
+func insertAdapterUtxo(
+	t *testing.T,
+	raw *sql.DB,
+	utxo *models.Utxo,
+) {
+	t.Helper()
+	result, err := raw.Exec(`
+INSERT INTO utxo (
+    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    staking_key, credential_tag, added_slot, deleted_slot, amount, output_idx,
+    payment_script
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		utxo.TransactionID,
+		utxo.CollateralReturnForTxID,
+		utxo.TxId,
+		utxo.PaymentKey,
+		utxo.StakingKey,
+		utxo.CredentialTag,
+		utxo.AddedSlot,
+		utxo.DeletedSlot,
+		strconv.FormatUint(uint64(utxo.Amount), 10),
+		utxo.OutputIdx,
+		utxo.PaymentScript,
+	)
+	require.NoError(t, err)
+	utxoID, err := result.LastInsertId()
+	require.NoError(t, err)
+	for i := range utxo.Assets {
+		asset := &utxo.Assets[i]
+		_, err = raw.Exec(`
+INSERT INTO asset (name, name_hex, policy_id, fingerprint, utxo_id, amount)
+VALUES (?, ?, ?, ?, ?, ?)`,
+			asset.Name,
+			asset.NameHex,
+			asset.PolicyId,
+			asset.Fingerprint,
+			utxoID,
+			strconv.FormatUint(uint64(asset.Amount), 10),
+		)
+		require.NoError(t, err)
+	}
+}
+
+func insertAdapterTransaction(
+	t *testing.T,
+	raw *sql.DB,
+	tx *models.Transaction,
+) {
+	t.Helper()
+	var id any
+	if tx.ID != 0 {
+		id = tx.ID
+	}
+	result, err := raw.Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, metadata, slot, type, fee, collateral_fee,
+    ttl, block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id,
+		tx.Hash,
+		tx.BlockHash,
+		tx.Metadata,
+		tx.Slot,
+		tx.Type,
+		strconv.FormatUint(uint64(tx.Fee), 10),
+		strconv.FormatUint(uint64(tx.CollateralFee), 10),
+		strconv.FormatUint(uint64(tx.TTL), 10),
+		tx.BlockIndex,
+		tx.Valid,
+	)
+	require.NoError(t, err)
+	if tx.ID == 0 {
+		lastID, err := result.LastInsertId()
+		require.NoError(t, err)
+		tx.ID = uint(lastID)
+	}
+	for i := range tx.Outputs {
+		tx.Outputs[i].TransactionID = &tx.ID
+		insertAdapterUtxo(t, raw, &tx.Outputs[i])
+	}
+	if tx.CollateralReturn != nil {
+		tx.CollateralReturn.CollateralReturnForTxID = &tx.ID
+		insertAdapterUtxo(t, raw, tx.CollateralReturn)
+	}
 }
 
 // fill32 returns a 32-byte slice filled with b, used for distinct hash/ID
 // values in tests.
 func fill32(b byte) []byte {
 	return bytes.Repeat([]byte{b}, 32)
+}
+
+func testPointerAddress(
+	t *testing.T,
+	paymentHash []byte,
+	pointer byte,
+) lcommon.Address {
+	t.Helper()
+	addrBytes := []byte{
+		(lcommon.AddressTypeKeyPointer << 4) |
+			lcommon.AddressNetworkTestnet,
+	}
+	addrBytes = append(addrBytes, paymentHash...)
+	addrBytes = append(addrBytes, pointer, 0x00, 0x00)
+	addr, err := lcommon.NewAddressFromBytes(addrBytes)
+	require.NoError(t, err)
+	return addr
+}
+
+func storePointerOutputCbor(
+	t *testing.T,
+	db *database.Database,
+	txID []byte,
+	outputIdx uint32,
+	addr lcommon.Address,
+	amount uint64,
+) {
+	t.Helper()
+	raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  amount,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		return db.Blob().SetUtxo(txn.Blob(), txID, outputIdx, raw)
+	}))
+}
+
+func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
+	adapter, store, db := newDBBackedAdapter(t)
+
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	wantAddr := testPointerAddress(t, paymentHash, 0x01)
+	otherAddr := testPointerAddress(t, paymentHash, 0x02)
+	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
+	assetName := []byte("TOKEN")
+
+	transactionID := uint(1)
+	insertAdapterTransaction(t, store, &models.Transaction{
+		ID:         transactionID,
+		Hash:       fill32(0x10),
+		Slot:       10,
+		BlockIndex: 2,
+	})
+
+	rows := []models.Utxo{
+		{
+			TransactionID: &transactionID,
+			TxId:          fill32(0x10),
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			AddedSlot:     10,
+			Amount:        types.Uint64(1_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(2),
+			}},
+		},
+		{
+			// Mithril snapshot imports intentionally have no TransactionID.
+			TxId:       fill32(0x20),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(2_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(3),
+			}},
+		},
+		{
+			// A different pointer payload sharing the payment credential must
+			// remain excluded by the full decoded-address comparison.
+			TxId:       fill32(0x30),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(4_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(7),
+			}},
+		},
+	}
+	for i := range rows {
+		insertAdapterUtxo(t, store, &rows[i])
+	}
+	storePointerOutputCbor(
+		t, db, rows[0].TxId, rows[0].OutputIdx, wantAddr, 1_000_000,
+	)
+	storePointerOutputCbor(
+		t, db, rows[1].TxId, rows[1].OutputIdx, wantAddr, 2_000_000,
+	)
+	storePointerOutputCbor(
+		t, db, rows[2].TxId, rows[2].OutputIdx, otherAddr, 4_000_000,
+	)
+
+	info, err := adapter.Address(wantAddr.String())
+	require.NoError(t, err)
+	require.Len(t, info.Amount, 2)
+	assert.Equal(t, "lovelace", info.Amount[0].Unit)
+	assert.Equal(t, "3000000", info.Amount[0].Quantity)
+	assert.Equal(
+		t,
+		hex.EncodeToString(policyID)+hex.EncodeToString(assetName),
+		info.Amount[1].Unit,
+	)
+	assert.Equal(t, "5", info.Amount[1].Quantity)
+}
+
+func TestNodeAdapterAddressPointerRejectsMissingCandidateCbor(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	addr := testPointerAddress(t, paymentHash, 0x01)
+	insertAdapterUtxo(t, store, &models.Utxo{
+		TxId:       fill32(0x40),
+		OutputIdx:  0,
+		PaymentKey: paymentHash,
+		AddedSlot:  20,
+		Amount:     types.Uint64(2_000_000),
+	})
+
+	_, err := adapter.Address(addr.String())
+	require.ErrorContains(t, err, "utxo cbor unavailable")
+}
+
+func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
+	adapter, store, db := newDBBackedAdapter(t)
+
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		nil,
+	)
+	require.NoError(t, err)
+	pointer := testPointerAddress(t, paymentHash, 0x01)
+	addresses := []lcommon.Address{enterprise, pointer}
+
+	for i := range addresses {
+		txID := uint(i + 1)
+		txHash := fill32(byte(i + 1))
+		insertAdapterTransaction(t, store, &models.Transaction{
+			ID:         txID,
+			Hash:       txHash,
+			BlockHash:  fill32(0xf0),
+			Slot:       uint64(i + 1),
+			BlockIndex: uint32(i),
+		})
+		insertAdapterUtxo(t, store, &models.Utxo{
+			TransactionID: &txID,
+			TxId:          txHash,
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			AddedSlot:     uint64(i + 1),
+			Amount:        types.Uint64((i + 1) * 1_000_000),
+		})
+		raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addresses[i],
+			OutputAmount:  uint64((i + 1) * 1_000_000),
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, raw)
+		}))
+	}
+
+	info, err := adapter.Address(enterprise.String())
+	require.NoError(t, err)
+	require.Len(t, info.Amount, 1)
+	assert.Equal(t, "1000000", info.Amount[0].Quantity)
+
+	utxos, total, err := adapter.AddressUTXOs(
+		enterprise.String(),
+		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, hex.EncodeToString(fill32(0x01)), utxos[0].TxHash)
 }
 
 // TestNodeAdapterBlockOutputAndFees exercises the real DB aggregation path,
@@ -95,7 +378,7 @@ func TestNodeAdapterBlockOutputAndFees(t *testing.T) {
 			{TxId: fill32(0x01), OutputIdx: 1, Amount: types.Uint64(2000)},
 		},
 	}
-	require.NoError(t, store.DB().Create(validTx).Error)
+	insertAdapterTransaction(t, store, validTx)
 
 	// Invalid transaction: fee 50, its outputs (9999) are discarded and the
 	// collateral return (500) is what actually reaches the chain.
@@ -114,7 +397,7 @@ func TestNodeAdapterBlockOutputAndFees(t *testing.T) {
 			Amount:    types.Uint64(500),
 		},
 	}
-	require.NoError(t, store.DB().Create(invalidTx).Error)
+	insertAdapterTransaction(t, store, invalidTx)
 
 	output, fees, err := adapter.blockOutputAndFees(blockHash)
 	require.NoError(t, err)
@@ -158,7 +441,7 @@ func TestNodeAdapterBlockOutputAndFeesNoOverflow(t *testing.T) {
 				{TxId: fill32(b), OutputIdx: 0, Amount: types.Uint64(maxU64)},
 			},
 		}
-		require.NoError(t, store.DB().Create(tx).Error)
+		insertAdapterTransaction(t, store, tx)
 	}
 
 	// Expected total = 2 * MaxUint64 for both output and fees.
@@ -223,4 +506,60 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	next, err = adapter.nextBlockHash(50, 100)
 	require.NoError(t, err)
 	assert.Nil(t, next)
+}
+
+// TestNodeAdapterPoolMetadataOffchainStoreError guards the error path at the
+// PoolMetadata boundary: a failing off-chain metadata store query must
+// propagate as an error rather than degrade into a successful URL/hash-only
+// response that hides the store failure.
+func TestNodeAdapterPoolMetadataOffchainStoreError(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	poolKeyHash := bytes.Repeat([]byte{0x0a}, 28)
+	pool := &models.Pool{
+		PoolKeyHash: poolKeyHash,
+		Registration: []models.PoolRegistration{
+			{
+				PoolKeyHash:  poolKeyHash,
+				MetadataUrl:  "https://example.com/pool.json",
+				MetadataHash: fill32(0x0b),
+				AddedSlot:    1,
+			},
+		},
+	}
+	result, err := store.Exec(`
+INSERT INTO pool (pool_key_hash) VALUES (?)`,
+		pool.PoolKeyHash,
+	)
+	require.NoError(t, err)
+	poolIDValue, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = store.Exec(`
+INSERT INTO pool_registration (
+    pool_id, pool_key_hash, metadata_url, metadata_hash, added_slot
+) VALUES (?, ?, ?, ?, ?)`,
+		poolIDValue,
+		pool.Registration[0].PoolKeyHash,
+		pool.Registration[0].MetadataUrl,
+		pool.Registration[0].MetadataHash,
+		pool.Registration[0].AddedSlot,
+	)
+	require.NoError(t, err)
+
+	poolID := hex.EncodeToString(poolKeyHash)
+
+	// Sanity check: with an intact store and no cached document, the lookup
+	// succeeds as a URL/hash-only partial response.
+	info, err := adapter.PoolMetadata(poolID)
+	require.NoError(t, err)
+	require.NotNil(t, info.URL)
+	assert.Equal(t, "https://example.com/pool.json", *info.URL)
+	assert.Nil(t, info.Name)
+
+	// Break the store so GetOffchainMetadata fails; the failure must surface
+	// instead of producing a successful partial response.
+	_, err = store.Exec("DROP TABLE offchain_metadata")
+	require.NoError(t, err)
+	_, err = adapter.PoolMetadata(poolID)
+	require.ErrorContains(t, err, "get offchain metadata")
 }

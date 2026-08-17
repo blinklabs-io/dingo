@@ -42,6 +42,12 @@ var ErrUtxoNotFound = types.ErrUtxoNotFound
 // that only need indexed metadata fields can ignore this error.
 var ErrUtxoCborUnavailable = errors.New("utxo cbor unavailable")
 
+const exactAddressCandidateScanLimit = 10_000
+
+var errExactAddressCandidateScanLimit = errors.New(
+	"exact address candidate scan limit reached",
+)
+
 // deleteUtxoBlobs performs best-effort deletion of blob data for the given
 // [models.Utxo] entries. Metadata remains the authoritative source of truth;
 // blob deletions are supplementary. The caller [*Txn] is ignored — this
@@ -169,7 +175,11 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 		}
 
 		// Get the block CBOR from blob store
-		blockCbor, _, err := blob.GetBlock(txn.Blob(), offset.BlockSlot, offset.BlockHash[:])
+		blockCbor, _, err := blob.GetBlock(
+			txn.Blob(),
+			offset.BlockSlot,
+			offset.BlockHash[:],
+		)
 		if err != nil {
 			return fmt.Errorf("get block for utxo extraction: %w", err)
 		}
@@ -467,6 +477,29 @@ func (d *Database) UtxoByRef(
 	return utxo, nil
 }
 
+// UtxosByRefs returns the live UTxOs matching the given references in a
+// single batch. Refs with no matching live UTxO are simply absent from the
+// result.
+func (d *Database) UtxosByRefs(
+	refs []models.UtxoId,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxos, err := d.metadata.GetUtxosByRefs(refs, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
+		}
+	}
+	return utxos, nil
+}
+
 // CreateUtxo inserts a Utxo row directly. The normal block-application
 // path uses AddUtxos with UtxoSlot inputs; this is the simple-insert
 // variant for callers that already have a populated model. When txn
@@ -517,7 +550,11 @@ func (d *Database) UtxosByAddress(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	utxos, err := d.metadata.GetUtxosByAddress(addr, txn.Metadata())
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	if err != nil {
+		return nil, err
+	}
+	utxos, err := d.metadata.GetUtxosByAddress(pattern, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +563,9 @@ func (d *Database) UtxosByAddress(
 			return nil, err
 		}
 	}
-	return utxos, nil
+	return filterUtxosByAddressPatterns(utxos, []models.UtxoAddressPattern{
+		pattern,
+	})
 }
 
 // GetControlledAmountByCredential returns the sum of live UTxO amounts
@@ -556,6 +595,35 @@ func (d *Database) GetControlledAmountByCredential(
 	return total, nil
 }
 
+// GetUtxoPaymentScriptByCredential returns, for the given bounded set of
+// payment-key hashes previously observed under a stake credential, whether
+// each payment credential is a script hash. See the metadata store
+// interface doc comment for the full contract.
+func (d *Database) GetUtxoPaymentScriptByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	paymentKeys [][]byte,
+	txn *Txn,
+) (map[string]bool, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	ret, err := d.metadata.GetUtxoPaymentScriptByCredential(
+		credentialTag,
+		stakingKey,
+		paymentKeys,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get payment script by stake credential: %w",
+			err,
+		)
+	}
+	return ret, nil
+}
+
 func (d *Database) UtxosByAddressWithOrdering(
 	q *models.UtxoWithOrderingQuery,
 	txn *Txn,
@@ -564,19 +632,72 @@ func (d *Database) UtxosByAddressWithOrdering(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	utxos, err := d.metadata.GetUtxosByAddressWithOrdering(
-		q,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, err
+	if q == nil {
+		return nil, models.ErrNilUtxoWithOrderingQuery
 	}
-	for i := range utxos {
-		if err := loadCbor(&utxos[i].Utxo, txn); err != nil {
+	if q.MatchAllAddresses ||
+		!models.RequiresExactAddressFilter(q.AddressPatterns) ||
+		q.Limit <= 0 {
+		utxos, err := d.metadata.GetUtxosByAddressWithOrdering(
+			q,
+			txn.Metadata(),
+		)
+		if err != nil {
 			return nil, err
 		}
+		return d.loadAndFilterOrderedUtxos(utxos, q.AddressPatterns, txn)
 	}
-	return utxos, nil
+
+	// Exact address identity is only available in output CBOR. Scan coarse SQL
+	// candidates in keyset order until Limit exact matches are collected, so a
+	// page full of enterprise/pointer siblings cannot truncate the result.
+	scanQuery := *q
+	scanQuery.Limit = max(q.Limit, 128)
+	ret := make([]models.UtxoWithOrdering, 0, q.Limit)
+	candidatesProcessed := 0
+	for len(ret) < q.Limit {
+		remainingCandidates := exactAddressCandidateScanLimit -
+			candidatesProcessed
+		if remainingCandidates <= 0 {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		scanQuery.Limit = min(scanQuery.Limit, remainingCandidates)
+		batch, err := d.metadata.GetUtxosByAddressWithOrdering(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		candidatesProcessed += len(batch)
+		filtered, err := d.loadAndFilterOrderedUtxos(
+			batch,
+			q.AddressPatterns,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		remaining := q.Limit - len(ret)
+		if len(filtered) > remaining {
+			filtered = filtered[:remaining]
+		}
+		ret = append(ret, filtered...)
+		if len(batch) < scanQuery.Limit || len(batch) == 0 {
+			break
+		}
+		if len(ret) < q.Limit &&
+			candidatesProcessed >= exactAddressCandidateScanLimit {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		last := batch[len(batch)-1]
+		scanQuery.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+		}
+	}
+	return ret, nil
 }
 
 func (d *Database) UtxosByAddressAtSlot(
@@ -588,8 +709,12 @@ func (d *Database) UtxosByAddressAtSlot(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	if err != nil {
+		return nil, err
+	}
 	utxos, err := d.metadata.GetUtxosByAddressAtSlot(
-		addr,
+		pattern,
 		slot,
 		txn.Metadata(),
 	)
@@ -601,7 +726,79 @@ func (d *Database) UtxosByAddressAtSlot(
 			return nil, err
 		}
 	}
-	return utxos, nil
+	return filterUtxosByAddressPatterns(utxos, []models.UtxoAddressPattern{
+		pattern,
+	})
+}
+
+func filterUtxosByAddressPatterns(
+	utxos []models.Utxo,
+	patterns []models.UtxoAddressPattern,
+) ([]models.Utxo, error) {
+	if !models.RequiresExactAddressFilter(patterns) {
+		return utxos, nil
+	}
+	ret := make([]models.Utxo, 0, len(utxos))
+	for i := range utxos {
+		output, err := utxos[i].Decode()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode UTxO %x#%d for exact address match: %w",
+				utxos[i].TxId,
+				utxos[i].OutputIdx,
+				err,
+			)
+		}
+		match, err := models.MatchesUtxoAddressPatterns(
+			output.Address(),
+			patterns,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if match {
+			ret = append(ret, utxos[i])
+		}
+	}
+	return ret, nil
+}
+
+func (d *Database) loadAndFilterOrderedUtxos(
+	utxos []models.UtxoWithOrdering,
+	patterns []models.UtxoAddressPattern,
+	txn *Txn,
+) ([]models.UtxoWithOrdering, error) {
+	for i := range utxos {
+		if err := loadCbor(&utxos[i].Utxo, txn); err != nil {
+			return nil, err
+		}
+	}
+	if !models.RequiresExactAddressFilter(patterns) {
+		return utxos, nil
+	}
+	ret := make([]models.UtxoWithOrdering, 0, len(utxos))
+	for i := range utxos {
+		output, err := utxos[i].Decode()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode UTxO %x#%d for exact address match: %w",
+				utxos[i].TxId,
+				utxos[i].OutputIdx,
+				err,
+			)
+		}
+		match, err := models.MatchesUtxoAddressPatterns(
+			output.Address(),
+			patterns,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if match {
+			ret = append(ret, utxos[i])
+		}
+	}
+	return ret, nil
 }
 
 // UtxosByAssets returns UTxOs that contain the specified assets

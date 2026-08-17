@@ -73,7 +73,7 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 	return nil
 }
 
-// mithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
+// MithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
 // or 0 if none is recorded (genesis sync, or a non-genesis chainsync
 // intersect point with no snapshot import). A failure to read the sync
 // state is logged and also treated as 0 (the caller cannot distinguish it
@@ -81,8 +81,15 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 // operator tell a transient storage problem apart from a genuinely
 // unrecoverable UTxO when StrictUtxoValidation turns the latter into an
 // ingest error.
-func (d *Database) mithrilTrustBoundarySlot(txn *Txn) uint64 {
-	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+//
+// This fail-open behavior is intentional for that caller (a best-effort
+// recovery heuristic), but wrong for a caller enforcing a safety check —
+// see MithrilTrustBoundarySlotStrict, used by database/lifecycle.Truncate,
+// where treating a failed read as "no boundary recorded" would silently
+// let a truncate proceed past a boundary that could not actually be
+// verified, rather than merely under-informing a heuristic.
+func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
+	slot, err := d.MithrilTrustBoundarySlotStrict(txn)
 	if err != nil {
 		d.logger.Warn(
 			"failed to read Mithril trust boundary from sync state; "+
@@ -91,19 +98,35 @@ func (d *Database) mithrilTrustBoundarySlot(txn *Txn) uint64 {
 		)
 		return 0
 	}
+	return slot
+}
+
+// MithrilTrustBoundarySlotStrict is MithrilTrustBoundarySlot, but returns
+// the underlying read error instead of swallowing it as "no boundary
+// recorded" — for a caller that must fail closed (refuse the operation)
+// rather than fail open when the boundary can't be verified. A malformed
+// stored value is also propagated as an error here (unlike
+// MithrilTrustBoundarySlot, which still treats it as absent): a corrupted
+// persisted boundary must not be indistinguishable from "no snapshot was
+// ever imported" for a caller enforcing a safety check, or the check is
+// defeated exactly when it matters most.
+func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
+	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
 	if val == "" {
-		return 0
+		return 0, nil
 	}
 	slot, err := strconv.ParseUint(val, 10, 64)
 	if err != nil {
-		d.logger.Warn(
-			"malformed mithril_ledger_slot sync state value, ignoring",
-			"value", val,
-			"error", err,
+		return 0, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			val,
+			err,
 		)
-		return 0
 	}
-	return slot
+	return slot, nil
 }
 
 func ledgerHashBytes(hash lcommon.Blake2b256) []byte {
@@ -257,8 +280,14 @@ func (d *Database) SetTransactionWithOpts(
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
-	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+	if err := d.metadata.SetTransaction(
+		tx, point, idx, certDeposits,
+		opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 
 	if updateEpoch > 0 && tx.IsValid() {
@@ -309,9 +338,21 @@ func (d *Database) SetTransactionMetadataOnly(
 		point,
 		idx,
 		certDeposits,
+		// skipWithdrawalWitness: value is moot since
+		// metadataOnlyTransaction.Withdrawals() is always empty, so the loop
+		// it would gate never runs either way. false (rather than true) for
+		// readability: it reads as the honest "do it normally" default
+		// instead of implying real gate logic applies here.
+		false,
 		metadataTxn,
 	); err != nil {
-		return fmt.Errorf("set transaction metadata only: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(),
+			idx,
+			point.Slot,
+			err,
+		)
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -475,6 +516,10 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
+	// Read the Mithril trust boundary once: below it, absent producer rows are
+	// legitimately expected (the snapshot does not carry pre-boundary history);
+	// past it the node should hold complete producer history.
+	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
 		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
@@ -535,9 +580,40 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
 			continue
 		}
+		// Steady-state at-tip validated application (issue #3005): a consumed
+		// input whose producer row is absent from the metadata store must never
+		// be recovered from the append-only blob store here. The blob retains
+		// blocks from abandoned forks, so recovering the producer would import a
+		// UTxO the applied chain never produced and persist an
+		// input-conservation violation. Past the Mithril boundary the producer
+		// is guaranteed to already be applied and live, so an absent row means
+		// the applied ledger has diverged from the header chain. Abort the
+		// block's transaction so the inconsistent state is never persisted and
+		// the node stalls loudly for resync rather than baking in a fork that
+		// later requires a rollback deeper than the security parameter K.
+		if opts.StrictAppliedInputConservation &&
+			d.config.StrictUtxoValidation &&
+			point.Slot > mithrilBoundarySlot {
+			return fmt.Errorf(
+				"consumed utxo %s not present in applied ledger at slot %d: "+
+					"refusing to recover it from the blob store and persist an "+
+					"input-conservation violation (issue #3005): %w",
+				input.String(),
+				point.Slot,
+				ErrUtxoNotFound,
+			)
+		}
+		// For a validated block past the Mithril trust boundary, refuse to
+		// blob-recover a producer that is not on the applied primary chain
+		// (issue #3005 cross-fork splice). This covers the catch-up case that
+		// the at-tip StrictAppliedInputConservation guard above does not reach:
+		// there reachedTip is not latched, so the guard is off, and a fork
+		// switched to during catch-up could otherwise silently resurrect an
+		// abandoned-fork producer from the append-only blob store.
 		recoveredUtxo, err := d.recoverConsumedUtxo(
 			input,
 			txn,
+			d.config.StrictUtxoValidation && point.Slot > mithrilBoundarySlot,
 		)
 		if err != nil {
 			// Past the Mithril trust boundary the node should have complete
@@ -547,7 +623,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// is recorded and we did not sync from genesis) the UTxO may
 			// legitimately predate the data we imported.
 			if d.config.StrictUtxoValidation &&
-				point.Slot > d.mithrilTrustBoundarySlot(txn) {
+				point.Slot > mithrilBoundarySlot {
 				return fmt.Errorf(
 					"consumed utxo %s not found at slot %d and could not be recovered: %w",
 					input.String(),
@@ -661,7 +737,10 @@ func (d *Database) ensureGapConsumedUtxos(
 				continue
 			}
 		}
-		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn)
+		// Mithril gap-closure recovers producers from imported history that
+		// legitimately has no block-index entry, so the primary-chain
+		// membership check is not applied on this path.
+		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn, false)
 		if err != nil {
 			return fmt.Errorf(
 				"recover gap input utxo %s at slot %d: %w",
@@ -693,9 +772,78 @@ func (d *Database) ensureGapConsumedUtxos(
 	return nil
 }
 
+// recoveredProducerOnPrimaryChain reports whether the block that produced a
+// blob-recovered UTxO is the block currently indexed on the applied primary
+// chain at that height. The append-only blob store retains blocks from
+// abandoned forks, so a producer found in the blob is not necessarily on the
+// applied chain. Mirrors LedgerState.primaryChainContainsPoint at the database
+// layer: BlockByIndex reveals which block is canonical at the producer's
+// height, and a hash mismatch means the producer was abandoned.
+//
+// The producer's block ID is supplied by the caller rather than resolved here.
+// Every recovery path has already loaded the producer -- from the blob's block
+// metadata in the offset case, or as a *models.Block in the others -- so
+// looking it up again by point would download the same full block CBOR from
+// cold cloud storage a second time, once per recovered input, on exactly the
+// Mithril catch-up path this check runs on.
+func (d *Database) recoveredProducerOnPrimaryChain(
+	txn *Txn,
+	producerID uint64,
+	hash []byte,
+) (bool, error) {
+	indexed, err := d.BlockByIndex(producerID, txn)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return bytes.Equal(indexed.Hash, hash), nil
+}
+
+// refuseOffPrimaryChainProducer returns a wrapped ErrUtxoNotFound when the
+// producer block of a blob-recovered consumed input is not on the applied
+// primary chain. Recovering such a producer would splice in a UTxO the applied
+// chain never produced (issue #3005 cross-fork input-conservation violation).
+// It is enforced for validated blocks past the Mithril trust boundary, where
+// the producer must be a live, applied, on-chain UTxO, so an abandoned-fork
+// producer is never legitimate. Below the boundary and on the Mithril
+// gap-closure path the check is not applied, because imported history need not
+// carry a block-index entry for the producer.
+func (d *Database) refuseOffPrimaryChainProducer(
+	txn *Txn,
+	producerID uint64,
+	slot uint64,
+	hash []byte,
+	input lcommon.TransactionInput,
+) error {
+	onChain, err := d.recoveredProducerOnPrimaryChain(txn, producerID, hash)
+	if err != nil {
+		return fmt.Errorf(
+			"check producer primary-chain membership for %s: %w",
+			input.String(),
+			err,
+		)
+	}
+	if !onChain {
+		return fmt.Errorf(
+			"producer block %x at slot %d for consumed utxo %s is not on the "+
+				"applied primary chain: refusing abandoned-fork blob recovery "+
+				"that would persist an input-conservation violation "+
+				"(issue #3005): %w",
+			hash,
+			slot,
+			input.String(),
+			ErrUtxoNotFound,
+		)
+	}
+	return nil
+}
+
 func (d *Database) recoverConsumedUtxo(
 	input lcommon.TransactionInput,
 	txn *Txn,
+	enforcePrimaryChain bool,
 ) (*models.Utxo, error) {
 	blob := txn.DB().Blob()
 	if blob == nil {
@@ -721,7 +869,7 @@ func (d *Database) recoverConsumedUtxo(
 		if err != nil {
 			return nil, fmt.Errorf("decode utxo offset: %w", err)
 		}
-		blockCbor, _, err := blob.GetBlock(
+		blockCbor, producerMeta, err := blob.GetBlock(
 			blobTxn,
 			offset.BlockSlot,
 			offset.BlockHash[:],
@@ -740,6 +888,17 @@ func (d *Database) recoverConsumedUtxo(
 		}
 		outputCbor = blockCbor[offset.ByteOffset:end]
 		addedSlot = offset.BlockSlot
+		if enforcePrimaryChain {
+			if err := d.refuseOffPrimaryChainProducer(
+				txn,
+				producerMeta.ID,
+				offset.BlockSlot,
+				offset.BlockHash[:],
+				input,
+			); err != nil {
+				return nil, err
+			}
+		}
 	case err == nil:
 		// Legacy format: raw output CBOR is already present in utxoData.
 		// Resolve the producer slot so addedSlot reflects when the UTxO
@@ -763,6 +922,29 @@ func (d *Database) recoverConsumedUtxo(
 			return nil, ErrUtxoNotFound
 		}
 		addedSlot = slot
+		if enforcePrimaryChain {
+			// The legacy metadata slot lookup yields neither the producer
+			// block hash nor its ID, so resolve the producer block to check
+			// primary-chain membership. Legacy raw-CBOR blob entries do not
+			// occur past the Mithril boundary in practice, so this extra
+			// lookup is exceptional.
+			prodBlock, bErr := utxoRecoveryBlockForTx(
+				txn.DB(), txn, ledgerInputIDBytes(input),
+			)
+			if bErr != nil {
+				return nil, fmt.Errorf(
+					"resolve producer block for primary-chain check: %w", bErr,
+				)
+			}
+			if prodBlock == nil {
+				return nil, ErrUtxoNotFound
+			}
+			if err := d.refuseOffPrimaryChainProducer(
+				txn, prodBlock.ID, prodBlock.Slot, prodBlock.Hash, input,
+			); err != nil {
+				return nil, err
+			}
+		}
 	default:
 		block, err := utxoRecoveryBlockForTx(
 			txn.DB(),
@@ -792,6 +974,13 @@ func (d *Database) recoverConsumedUtxo(
 			return nil, err
 		}
 		addedSlot = block.Slot
+		if enforcePrimaryChain {
+			if err := d.refuseOffPrimaryChainProducer(
+				txn, block.ID, block.Slot, block.Hash, input,
+			); err != nil {
+				return nil, err
+			}
+		}
 		indexer := NewBlockIndexer(block.Slot, block.Hash)
 		offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
 		if indexErr == nil {
@@ -1080,25 +1269,8 @@ func (d *Database) GetTransactionsByAddress(
 	offset int,
 	txn *Txn,
 ) ([]models.Transaction, error) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	var paymentKey []byte
-	var credentialTag uint8
-	var stakingKey []byte
-	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-		paymentKey = pkh.Bytes()
-	}
-	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		var ok bool
-		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
-		if !ok {
-			return nil, errors.New("derive stake credential tag from address")
-		}
-		stakingKey = skh.Bytes()
-	}
-	return d.GetTransactionsByAddressKeys(
-		paymentKey,
-		credentialTag,
-		stakingKey,
+	return d.getTransactionsByExactAddress(
+		addr,
 		limit,
 		offset,
 		"desc",
@@ -1115,6 +1287,18 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 	order string,
 	txn *Txn,
 ) ([]models.Transaction, error) {
+	return d.getTransactionsByExactAddress(
+		addr,
+		limit,
+		offset,
+		order,
+		txn,
+	)
+}
+
+func addressTransactionKeys(
+	addr lcommon.Address,
+) ([]byte, uint8, []byte, error) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	var paymentKey []byte
 	var credentialTag uint8
@@ -1126,19 +1310,146 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 		var ok bool
 		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
 		if !ok {
-			return nil, errors.New("derive stake credential tag from address")
+			return nil, 0, nil, errors.New(
+				"derive stake credential tag from address",
+			)
 		}
 		stakingKey = skh.Bytes()
 	}
-	return d.GetTransactionsByAddressKeys(
-		paymentKey,
-		credentialTag,
-		stakingKey,
-		limit,
-		offset,
-		order,
-		txn,
+	return paymentKey, credentialTag, stakingKey, nil
+}
+
+func (d *Database) getTransactionsByExactAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	paymentKey, credentialTag, stakingKey, err := addressTransactionKeys(addr)
+	if err != nil {
+		return nil, err
+	}
+	exactAddress, err := addr.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encode exact transaction address: %w", err)
+	}
+
+	const candidateBatchSize = 128
+	initialCapacity := min(max(limit, 0), candidateBatchSize)
+	ret := make([]models.Transaction, 0, initialCapacity)
+	candidateOffset := 0
+	candidatesProcessed := 0
+	matchesSkipped := 0
+	for {
+		remainingCandidates := exactAddressCandidateScanLimit -
+			candidatesProcessed
+		if remainingCandidates <= 0 {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		batchSize := min(candidateBatchSize, remainingCandidates)
+		candidates, err := d.metadata.GetTransactionsByAddress(
+			paymentKey,
+			credentialTag,
+			stakingKey,
+			batchSize,
+			candidateOffset,
+			order,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get exact-address transaction candidates: %w",
+				err,
+			)
+		}
+		candidatesProcessed += len(candidates)
+		for i := range candidates {
+			match, err := transactionContainsExactAddress(
+				&candidates[i],
+				exactAddress,
+				txn,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !match {
+				continue
+			}
+			if matchesSkipped < offset {
+				matchesSkipped++
+				continue
+			}
+			ret = append(ret, candidates[i])
+			if limit > 0 && len(ret) == limit {
+				return ret, nil
+			}
+		}
+		if len(candidates) < batchSize {
+			return ret, nil
+		}
+		if candidatesProcessed >= exactAddressCandidateScanLimit {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		candidateOffset += len(candidates)
+	}
+}
+
+func transactionContainsExactAddress(
+	tx *models.Transaction,
+	exactAddress []byte,
+	txn *Txn,
+) (bool, error) {
+	utxos := make([]*models.Utxo, 0,
+		len(tx.Inputs)+len(tx.Outputs)+len(tx.Collateral)+
+			len(tx.ReferenceInputs)+1,
 	)
+	for i := range tx.Inputs {
+		utxos = append(utxos, &tx.Inputs[i])
+	}
+	for i := range tx.Outputs {
+		utxos = append(utxos, &tx.Outputs[i])
+	}
+	for i := range tx.Collateral {
+		utxos = append(utxos, &tx.Collateral[i])
+	}
+	for i := range tx.ReferenceInputs {
+		utxos = append(utxos, &tx.ReferenceInputs[i])
+	}
+	if tx.CollateralReturn != nil {
+		utxos = append(utxos, tx.CollateralReturn)
+	}
+	for _, utxo := range utxos {
+		if err := loadCbor(utxo, txn); err != nil {
+			return false, fmt.Errorf(
+				"load transaction UTxO %x#%d for exact address match: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		output, err := utxo.Decode()
+		if err != nil {
+			return false, fmt.Errorf(
+				"decode transaction UTxO %x#%d for exact address match: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		addressBytes, err := output.Address().Bytes()
+		if err != nil {
+			return false, fmt.Errorf("encode transaction UTxO address: %w", err)
+		}
+		if bytes.Equal(addressBytes, exactAddress) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // GetTransactionsByAddressKeys returns transactions for a payment/staking
@@ -1185,27 +1496,36 @@ func (d *Database) CountTransactionsByAddress(
 	addr lcommon.Address,
 	txn *Txn,
 ) (int, error) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	var paymentKey []byte
-	var credentialTag uint8
-	var stakingKey []byte
-	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-		paymentKey = pkh.Bytes()
-	}
-	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		var ok bool
-		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
-		if !ok {
-			return 0, errors.New("derive stake credential tag from address")
-		}
-		stakingKey = skh.Bytes()
-	}
-	return d.CountTransactionsByAddressKeys(
-		paymentKey,
-		credentialTag,
-		stakingKey,
+	txs, err := d.getTransactionsByExactAddress(
+		addr,
+		0,
+		0,
+		"desc",
 		txn,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return len(txs), nil
+}
+
+// HasTransactionsByAddress reports whether at least one transaction involves
+// the given exact address.
+func (d *Database) HasTransactionsByAddress(
+	addr lcommon.Address,
+	txn *Txn,
+) (bool, error) {
+	txs, err := d.getTransactionsByExactAddress(
+		addr,
+		1,
+		0,
+		"desc",
+		txn,
+	)
+	if err != nil {
+		return false, err
+	}
+	return len(txs) > 0, nil
 }
 
 // CountTransactionsByAddressKeys returns the total number
@@ -1231,6 +1551,31 @@ func (d *Database) CountTransactionsByAddressKeys(
 			"count txs by address payment=%x staking=%x: %w",
 			paymentKey,
 			stakingKey,
+			err,
+		)
+	}
+	return count, nil
+}
+
+// CountTransactionsByPaymentCred returns the total number of transactions
+// involving a payment credential across every address that carries it,
+// regardless of staking part.
+func (d *Database) CountTransactionsByPaymentCred(
+	paymentKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountTransactionsByPaymentCred(
+		paymentKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count txs by payment cred %x: %w",
+			paymentKey,
 			err,
 		)
 	}

@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,8 +23,9 @@ import (
 	"runtime/pprof"
 	"strings"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -137,53 +138,21 @@ func parseLogLevel(level string) (slog.Level, bool) {
 	}
 }
 
-func listPlugins(
-	blobPlugin, metadataPlugin string,
-) (shouldExit bool, output string) {
-	var buf strings.Builder
-	listed := false
-
-	if blobPlugin == "list" {
-		buf.WriteString("Available blob plugins:\n")
-		blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-		for _, p := range blobPlugins {
-			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
-		}
-		listed = true
-	}
-
-	if metadataPlugin == "list" {
-		if listed {
-			buf.WriteString("\n")
-		}
-		buf.WriteString("Available metadata plugins:\n")
-		metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-		for _, p := range metadataPlugins {
-			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
-		}
-		listed = true
-	}
-
-	if listed {
-		return true, buf.String()
-	}
-	return false, ""
-}
-
 func listAllPlugins() string {
 	var buf strings.Builder
-	buf.WriteString("Available plugins:\n\n")
-
-	buf.WriteString("Blob Storage Plugins:\n")
-	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-	for _, p := range blobPlugins {
-		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
+	host, err := internalplugins.NewHost()
+	if err != nil {
+		return fmt.Sprintf("failed to build plugin host: %v\n", err)
 	}
-
-	buf.WriteString("\nMetadata Storage Plugins:\n")
-	metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-	for _, p := range metadataPlugins {
-		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
+	buf.WriteString("Available plugins:\n")
+	var previous string
+	for _, provider := range host.Providers() {
+		capability := string(provider.Capability)
+		if capability != previous {
+			fmt.Fprintf(&buf, "\n%s:\n", capability)
+			previous = capability
+		}
+		fmt.Fprintf(&buf, "  %s: %s\n", provider.Name, provider.Description)
 	}
 
 	return buf.String()
@@ -238,6 +207,11 @@ func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
 			return config.RunModeSync
 		}
 		return config.RunModeMithril
+	case "database":
+		// `dingo database snapshot|restore|truncate` are offline
+		// maintenance commands against the local data directory; none of
+		// them start any listener.
+		return config.RunModeDatabase
 	default:
 		// No other non-informational top-level command exists today;
 		// fall back to full serving validation so a future command's
@@ -315,8 +289,16 @@ func main() {
 	// Initialize CPU profiling (starts immediately, stops on exit)
 	if cpuprofile != "" {
 		cpuprofile = filepath.Clean(cpuprofile)
-		fmt.Fprintf(os.Stderr, "Starting CPU profiling to %q\n", cpuprofile)         //nolint:gosec // stderr output, no XSS risk
-		f, err := os.OpenFile(cpuprofile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // user-specified profiling output path
+		fmt.Fprintf(
+			os.Stderr,
+			"Starting CPU profiling to %q\n",
+			cpuprofile,
+		) //nolint:gosec // stderr output, no XSS risk
+		f, err := os.OpenFile(
+			cpuprofile,
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+			0o600,
+		) //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			os.Exit(1)
@@ -343,23 +325,16 @@ Configuration Precedence (highest to lowest):
   3. Config file        (dingo.yaml or --config path)
   4. Built-in defaults
 
-Data Directory:
-  The CARDANO_DATABASE_PATH env var (or databasePath in config) sets the
-  data directory for both blob and metadata storage plugins. Plugin-specific
-  flags override this global setting:
-
-    --blob-badger-data-dir      overrides the blob plugin data directory
-    --metadata-sqlite-data-dir  overrides the metadata plugin data directory
-
-  For example, to store metadata separately from block data:
-    dingo --blob-badger-data-dir /fast-ssd/blocks \
-          --metadata-sqlite-data-dir /nvme/indexes
+Plugins:
+  Provider selectors use --blob, --metadata, --mempool,
+  --blockfrost-provider, --mesh-provider, and --utxorpc-provider.
+  Provider configuration uses the plugins YAML tree or generic
+  DINGO_PLUGINS_* environment variables. Run 'dingo list' to see providers.
 
 Storage Mode:
   --storage-mode sets the global storage mode for all plugins. Use "core"
   for minimal validation data or "api" for full indexing (witnesses,
   scripts, datums, redeemers). Dev mode always enables "api" mode.
-  Per-plugin overrides: --blob-badger-storage-mode, --metadata-*-storage-mode.
 
 Network:
   --network sets the Cardano network name and automatically derives the
@@ -367,12 +342,16 @@ Network:
   This overrides the CARDANO_NETWORK env var and the network config field.
 
 Database Workers:
-  --db-workers controls the worker pool size. When using SQLite, set
-  --metadata-sqlite-max-connections to match (both default to 5).
-
-DSN Override:
-  --metadata-mysql-dsn and --metadata-postgres-dsn override all individual
-  connection flags (host, port, user, password, database) when set.`,
+  --db-workers controls the worker pool size.`,
+		// This feature's fatal startup errors (node settings gate
+		// mismatches, restore rejections) are carefully worded to name the
+		// exact conflicting values and source; roughly 200 lines of flag
+		// help printed underneath buries that message even though the
+		// Error: line still prints first. SilenceUsage only affects the
+		// automatic usage dump on an error return from RunE/
+		// PersistentPreRunE, not explicit `--help` or `-h` output, so this
+		// does not touch the help text itself.
+		SilenceUsage: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -406,23 +385,7 @@ DSN Override:
 		StringVar(&configFile, "config", "", "path to config file")
 	config.RegisterFlags(rootCmd)
 
-	// Add plugin-specific flags
-	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
-		fmt.Fprintf(os.Stderr, "Error adding plugin flags: %v\n", err)
-		os.Exit(1)
-	}
-
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		// Handle plugin listing before config loading
-		blobPlugin, _ := cmd.Root().PersistentFlags().GetString("blob")
-		metadataPlugin, _ := cmd.Root().PersistentFlags().GetString("metadata")
-
-		shouldExit, output := listPlugins(blobPlugin, metadataPlugin)
-		if shouldExit {
-			fmt.Print(output)
-			os.Exit(0)
-		}
-
 		top := topLevelCommand(cmd)
 
 		// The informational commands (version, list, help, completion)
@@ -438,8 +401,22 @@ DSN Override:
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
+		// Provenance is deliberately not populated by LoadConfig: an
+		// in-package test DeepEquals the whole struct it returns.
+		if err := cfg.RecordSourceProvenance(configFile); err != nil {
+			return fmt.Errorf("recording config provenance: %w", err)
+		}
+
 		if err := config.ApplyFlags(cmd, cfg); err != nil {
 			return fmt.Errorf("applying CLI flags: %w", err)
+		}
+
+		// Gated settings persisted in the database supply defaults, so a
+		// bare `dingo` resumes the network and storage mode it was created
+		// with. This must precede ApplyDefaults, Validate, and topology
+		// loading, all of which derive from Network.
+		if err := settingsresolve.Apply(cfg); err != nil {
+			return fmt.Errorf("resolving persisted node settings: %w", err)
 		}
 
 		// `dingo load <path>`: the positional argument is the
@@ -464,8 +441,18 @@ DSN Override:
 		// is resolved only now that the merged configuration is final and
 		// valid — resolving it earlier could reject a YAML/env value a
 		// CLI flag has since repaired.
-		if _, err := config.LoadTopologyConfig(); err != nil {
-			return fmt.Errorf("loading topology: %w", err)
+		//
+		// `dingo database snapshot|restore|truncate` never opens a peer
+		// connection (see RunModeDatabase's doc comment) and its --network
+		// is only used to validate the local data directory's own recorded
+		// settings, not to look up bootstrap peers — resolving topology for
+		// it would spuriously fail for any network without a bundled
+		// static topology.json (e.g. devnet, or any custom network name),
+		// even though the command never uses it.
+		if effectiveRunMode(cmd, cfg) != config.RunModeDatabase {
+			if _, err := config.LoadTopologyConfig(); err != nil {
+				return fmt.Errorf("loading topology: %w", err)
+			}
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
@@ -479,6 +466,7 @@ DSN Override:
 	rootCmd.AddCommand(versionCommand())
 	rootCmd.AddCommand(mithrilCommand())
 	rootCmd.AddCommand(syncCommand())
+	rootCmd.AddCommand(databaseCommand())
 
 	// Execute cobra command
 	exitCode := 0
@@ -489,7 +477,11 @@ DSN Override:
 	// Finalize memory profiling before exit
 	if memprofile != "" {
 		memprofile = filepath.Clean(memprofile)
-		f, err := os.OpenFile(memprofile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // user-specified profiling output path
+		f, err := os.OpenFile(
+			memprofile,
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+			0o600,
+		) //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 		} else {

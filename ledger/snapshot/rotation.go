@@ -107,9 +107,12 @@ func (m *Manager) saveSnapshot(
 		case errors.Is(err, errFallbackSupersededByAuthoritative):
 			m.logger.Debug(
 				"authoritative mark snapshot landed concurrently; discarding fallback capture",
-				"component", "snapshot",
-				"epoch", epoch,
-				"snapshot_type", snapshotType,
+				"component",
+				"snapshot",
+				"epoch",
+				epoch,
+				"snapshot_type",
+				snapshotType,
 			)
 			return false, nil
 		}
@@ -211,12 +214,13 @@ func (m *Manager) saveSnapshotInTxn(
 	for poolKeyHash, stake := range distribution.PoolStakes {
 		delegators := distribution.DelegatorCount[poolKeyHash]
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:          epoch,
-			SnapshotType:   snapshotType,
-			PoolKeyHash:    poolKeyHash[:], // Convert [28]byte to []byte
-			TotalStake:     types.Uint64(stake),
-			DelegatorCount: delegators,
-			CapturedSlot:   distribution.Slot,
+			Epoch:              epoch,
+			SnapshotType:       snapshotType,
+			PoolKeyHash:        poolKeyHash[:], // Convert [28]byte to []byte
+			TotalStake:         types.Uint64(stake),
+			DelegatorCount:     delegators,
+			CapturedSlot:       distribution.Slot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
 
@@ -341,15 +345,18 @@ func (m *Manager) buildRewardStateInputs(
 
 	return &rewardStateBundle{
 		snapshot: &models.RewardSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     snapshotType,
-			TotalActiveStake: types.Uint64(sumPoolStakes(effective.PoolStakes)),
-			TotalPoolCount:   uint64(len(effective.PoolStakes)),
-			TotalDelegators:  sumDelegators(effective.DelegatorCount),
-			CapturedSlot:     distribution.Slot,
-			BoundarySlot:     evt.BoundarySlot,
-			EpochNonce:       evt.EpochNonce,
-			ProtocolVersion:  evt.ProtocolVersion,
+			Epoch:        epoch,
+			SnapshotType: snapshotType,
+			TotalActiveStake: types.Uint64(
+				sumPoolStakes(effective.PoolStakes),
+			),
+			TotalPoolCount:     uint64(len(effective.PoolStakes)),
+			TotalDelegators:    sumDelegators(effective.DelegatorCount),
+			CapturedSlot:       distribution.Slot,
+			BoundarySlot:       evt.BoundarySlot,
+			EpochNonce:         evt.EpochNonce,
+			ProtocolVersion:    evt.ProtocolVersion,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		},
 		poolInputs:  poolInputs,
 		stakeInputs: stakeInputs,
@@ -365,13 +372,7 @@ func rewardStakeDistribution(
 	if dist == nil {
 		return nil, errors.New("missing stake distribution")
 	}
-	reward := &StakeDistribution{
-		Slot:           dist.Slot,
-		StakeInputs:    append([]StakeInput(nil), dist.StakeInputs...),
-		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
-		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
-	}
-	for _, input := range reward.StakeInputs {
+	for _, input := range dist.StakeInputs {
 		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
 			return nil, fmt.Errorf(
 				"invalid reward stake input pool key length %d",
@@ -390,6 +391,15 @@ func rewardStakeDistribution(
 				input.CredentialTag,
 			)
 		}
+	}
+	deduped := dedupeStakeInputs(dist.StakeInputs)
+	reward := &StakeDistribution{
+		Slot:           dist.Slot,
+		StakeInputs:    deduped,
+		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
+		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+	}
+	for _, input := range reward.StakeInputs {
 		if input.Stake == 0 {
 			continue
 		}
@@ -484,10 +494,14 @@ func (m *Manager) rewardInputsSkippingDegradedPools(
 		}
 		m.logger.Warn(
 			"skipping pool from reward inputs: missing or invalid pool registration data",
-			"component", "snapshot",
-			"epoch", epoch,
-			"pool_key_hash", hex.EncodeToString(poolErr.poolKeyHash),
-			"reason", err,
+			"component",
+			"snapshot",
+			"epoch",
+			epoch,
+			"pool_key_hash",
+			hex.EncodeToString(poolErr.poolKeyHash),
+			"reason",
+			err,
 		)
 	}
 }
@@ -514,12 +528,18 @@ func cloneStakeDistributionForRewardInputs(
 	dist *StakeDistribution,
 ) *StakeDistribution {
 	clone := &StakeDistribution{
-		Slot:           dist.Slot,
-		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64, len(dist.PoolStakes)),
-		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64, len(dist.DelegatorCount)),
-		StakeInputs:    append([]StakeInput(nil), dist.StakeInputs...),
-		TotalStake:     dist.TotalStake,
-		TotalPools:     dist.TotalPools,
+		Slot: dist.Slot,
+		PoolStakes: make(
+			map[lcommon.PoolKeyHash]uint64,
+			len(dist.PoolStakes),
+		),
+		DelegatorCount: make(
+			map[lcommon.PoolKeyHash]uint64,
+			len(dist.DelegatorCount),
+		),
+		StakeInputs: append([]StakeInput(nil), dist.StakeInputs...),
+		TotalStake:  dist.TotalStake,
+		TotalPools:  dist.TotalPools,
 	}
 	maps.Copy(clone.PoolStakes, dist.PoolStakes)
 	maps.Copy(clone.DelegatorCount, dist.DelegatorCount)
@@ -622,7 +642,10 @@ func (m *Manager) rewardInputs(
 		metaTxn,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get reward input pool registrations: %w", err)
+		return nil, nil, fmt.Errorf(
+			"get reward input pool registrations: %w",
+			err,
+		)
 	}
 	registrationByHash := make(
 		map[string]models.PoolRegistration,
@@ -771,7 +794,10 @@ func validateRewardStakeInputTotals(distribution *StakeDistribution) error {
 	if distribution == nil {
 		return errors.New("missing stake distribution")
 	}
-	stakeByPool := make(map[lcommon.PoolKeyHash]uint64, len(distribution.PoolStakes))
+	stakeByPool := make(
+		map[lcommon.PoolKeyHash]uint64,
+		len(distribution.PoolStakes),
+	)
 	for _, input := range distribution.StakeInputs {
 		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
 			return fmt.Errorf(
@@ -838,7 +864,9 @@ func rewardOwnerSets(
 		for _, owner := range registration.Owners {
 			if len(owner.KeyHash) != len(lcommon.PoolKeyHash{}) {
 				return nil, &rewardInputPoolError{
-					poolKeyHash: append([]byte(nil), registration.PoolKeyHash...),
+					poolKeyHash: append(
+						[]byte(nil),
+						registration.PoolKeyHash...),
 					msg: fmt.Sprintf(
 						"invalid pool owner key hash length while saving reward inputs: pool_key_hash=%s length=%d",
 						hex.EncodeToString(registration.PoolKeyHash),
@@ -924,9 +952,33 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 }
 
 // cleanupOldSnapshots removes snapshots older than needed for the rotation and
-// delayed reward models. We keep 4 epochs of snapshots: current, current-1,
-// current-2 for Go, and current-3 so reward calculation can be replayed after a
-// rollback across the boundary where those rewards were applied.
+// delayed reward models. We keep 4 epochs of per-pool and per-credential rows:
+// current, current-1, current-2 for Go, and current-3 so reward calculation can
+// be replayed after a rollback across the boundary where those rewards were
+// applied.
+//
+// reward_stake_input is pruned to that 4-epoch window in every storage mode:
+// it scales with delegator count (~1.3M rows/epoch on mainnet) and is not
+// needed once the epoch it snapshots has finished replaying. reward_account_output
+// is pruned to the same window in CORE storage mode (types.StorageModeCore),
+// matching dingo's original pruning behavior exactly, but retained WITHOUT BOUND
+// in API storage mode (types.StorageModeAPI) so the Blockfrost account
+// reward-history endpoint (GET /accounts/{stake_address}/rewards, dingo #1875)
+// can serve an account's full reward history instead of only the trailing few
+// epochs — the same "silently look empty past the window" failure mode #2987
+// already identified for epoch_summary. See
+// rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
+// rewardstate.DeleteStakeInputBeforeEpoch (API, prunes only
+// reward_stake_input) for the implementation and full rationale.
+//
+// epoch_summary is deliberately NOT pruned. It is a single small row per epoch
+// (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
+// slot), so retaining the full history costs one row per epoch — roughly a
+// thousand rows over a network's lifetime — while making historical epoch
+// aggregates permanently queryable. Pruning it also made a legitimately
+// captured boundary indistinguishable from one that was never captured, which
+// is what made dingo #2987 read as a missing epoch-2 snapshot on a node that
+// had in fact captured it correctly 400 epochs earlier.
 func (m *Manager) cleanupOldSnapshots(
 	ctx context.Context,
 	currentEpoch uint64,
@@ -953,15 +1005,16 @@ func (m *Manager) cleanupOldSnapshots(
 		return fmt.Errorf("cleanup pool snapshots: %w", err)
 	}
 
-	// Delete old epoch summaries
-	if err := meta.DeleteEpochSummariesBeforeEpoch(
-		deleteBeforeEpoch,
-		metaTxn,
-	); err != nil {
-		return fmt.Errorf("cleanup epoch summaries: %w", err)
-	}
-
-	if err := meta.DeleteRewardStateBeforeEpoch(
+	if m.db.StorageMode() == types.StorageModeAPI {
+		// API storage mode: retain reward_account_output without bound (see
+		// doc comment above) and prune only reward_stake_input.
+		if err := meta.DeleteRewardStakeInputBeforeEpoch(
+			deleteBeforeEpoch,
+			metaTxn,
+		); err != nil {
+			return fmt.Errorf("cleanup reward state: %w", err)
+		}
+	} else if err := meta.DeleteRewardStateBeforeEpoch(
 		deleteBeforeEpoch,
 		metaTxn,
 	); err != nil {

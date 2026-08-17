@@ -97,6 +97,7 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 		if err != nil {
 			return nil, err
 		}
+		defer func() { _ = middleSecondary.Close() }()
 		next, err := middleSecondary.Next()
 		if err != nil {
 			return nil, err
@@ -214,6 +215,7 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = secondary.Close() }()
 	var tmpPoint ocommon.Point
 	for {
 		next, err := secondary.Next()

@@ -16,41 +16,40 @@ package ledger
 
 import (
 	"bytes"
+	"database/sql"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 func newLeiosApplyTestLedger(
 	t *testing.T,
-) (*LedgerState, *database.Database, *gorm.DB) {
+) (*LedgerState, *database.Database, *sql.DB) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "expected sqlite metadata store")
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	return ls, db, store.DB()
+	return ls, db, raw
 }
 
 func leiosApplyTestTx(
@@ -90,12 +89,14 @@ func leiosApplyTestRankingPoint(seed byte) ocommon.Point {
 
 func requireLeiosApplyTestTxCount(
 	t *testing.T,
-	gdb *gorm.DB,
+	raw *sql.DB,
 	want int64,
 ) {
 	t.Helper()
 	var got int64
-	require.NoError(t, gdb.Model(&models.Transaction{}).Count(&got).Error)
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM "transaction"`,
+	).Scan(&got))
 	require.Equal(t, want, got)
 }
 
@@ -145,9 +146,10 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
 	// The transaction is recorded under the ranking block's point.
 	var got int64
-	require.NoError(t, gdb.Model(&models.Transaction{}).
-		Where("hash = ?", tx.Hash().Bytes()).
-		Count(&got).Error)
+	require.NoError(t, gdb.QueryRow(
+		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&got))
 	require.Equal(t, int64(1), got)
 }
 
@@ -289,7 +291,10 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	require.Equal(t, 1, applied)
 	requireLeiosApplyTestTxCount(t, gdb, 1)
 	var gotTx models.Transaction
-	require.NoError(t, gdb.Where("hash = ?", tx.Hash().Bytes()).First(&gotTx).Error)
+	require.NoError(t, gdb.QueryRow(
+		`SELECT slot FROM "transaction" WHERE hash = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&gotTx.Slot))
 	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
 	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
 }
@@ -359,13 +364,13 @@ func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 
 	// The endorser transaction's produced output is a live UTxO stamped at the
 	// ranking block's slot (rollback-safe) and not marked spent.
-	var utxos []models.Utxo
-	require.NoError(t, gdb.Model(&models.Utxo{}).
-		Where("tx_id = ?", tx.Hash().Bytes()).
-		Find(&utxos).Error)
-	require.Len(t, utxos, 1)
-	require.Equal(t, rbPoint.Slot, utxos[0].AddedSlot)
-	require.Equal(t, uint64(0), utxos[0].DeletedSlot)
+	var utxo models.Utxo
+	require.NoError(t, gdb.QueryRow(`
+SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&utxo.AddedSlot, &utxo.DeletedSlot))
+	require.Equal(t, rbPoint.Slot, utxo.AddedSlot)
+	require.Equal(t, uint64(0), utxo.DeletedSlot)
 }
 
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
@@ -402,7 +407,10 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 
 	requireLeiosApplyTestTxCount(t, gdb, 1)
 	var gotTx models.Transaction
-	require.NoError(t, gdb.Where("hash = ?", tx.Hash().Bytes()).First(&gotTx).Error)
+	require.NoError(t, gdb.QueryRow(`
+SELECT slot, block_index FROM "transaction" WHERE hash = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&gotTx.Slot, &gotTx.BlockIndex))
 	require.Equal(t, firstPoint.Slot, gotTx.Slot)
 	require.Equal(t, uint32(0), gotTx.BlockIndex)
 	requireLeiosApplyTestEndorserBlob(
@@ -412,13 +420,149 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 		leiosApplyTestEbHash(0x92),
 		append(append([]byte{}, bodyCbor...), bodyCbor...),
 	)
-	requireLeiosApplyTestEndorserBlob(t, db, 601, leiosApplyTestEbHash(0x94), bodyCbor)
+	requireLeiosApplyTestEndorserBlob(
+		t,
+		db,
+		601,
+		leiosApplyTestEbHash(0x94),
+		bodyCbor,
+	)
 }
 
 // leiosTestHash returns a distinct 32-byte hash whose bytes are all b, usable
 // as both a map key (string form) and an endorser-block hash.
 func leiosTestHash(b byte) []byte {
 	return bytes.Repeat([]byte{b}, lcommon.Blake2b256Size)
+}
+
+func leiosTestRaw(t *testing.T, value any) cbor.RawMessage {
+	t.Helper()
+	raw, err := cbor.Encode(value)
+	require.NoError(t, err)
+	return cbor.RawMessage(raw)
+}
+
+func leiosTestCertifiedBlockPair(
+	t *testing.T,
+) (*dijkstra.DijkstraBlock, *dijkstra.DijkstraBlock, lcommon.Blake2b256) {
+	t.Helper()
+	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE1))
+	parent := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 1,
+					Slot:        100,
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{
+				leiosTestRaw(t, false),
+				leiosTestRaw(t, []any{ebHash.Bytes(), uint64(4096)}),
+			},
+		},
+	}
+	certifier := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 2,
+					Slot:        140,
+					PrevHash:    parent.Hash(),
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{
+				leiosTestRaw(t, true),
+				{0xf6},
+			},
+		},
+	}
+	return parent, certifier, ebHash
+}
+
+func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
+	t *testing.T,
+) {
+	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
+	available := false
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				hash []byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return parent.SlotNumber(), nil,
+					available && bytes.Equal(hash, ebHash.Bytes())
+			},
+			// A zero wait disables best-effort announcement waiting. It must
+			// not disable the certified-closure consistency check.
+			EndorserBlockWaitSlots: 0,
+		},
+	}
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+
+	available = true
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	))
+
+	ls.config.EndorserBlockProvider = nil
+	err = ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.Contains(t, err.Error(), "no endorser block provider configured")
+}
+
+func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
+	t *testing.T,
+) {
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				[]byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return 0, nil, false
+			},
+			EndorserBlockWaitSlots:     0,
+			LeiosApplyEndorserBlockTxs: true,
+		},
+	}
+
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	))
+}
+
+func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
+	t *testing.T,
+) {
+	_, certifier, _ := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				[]byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return 0, nil, false
+			},
+		},
+	}
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.Contains(t, err.Error(), "no resolvable parent announcement")
 }
 
 // TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
@@ -437,7 +581,12 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	)
 	infos := []leiosBlockInfo{
 		{hash: string(hashA), slot: 100, announces: true, ebHash: ebA},
-		{hash: string(hashC), prevHash: string(hashA), slot: 140, certifies: true},
+		{
+			hash:      string(hashC),
+			prevHash:  string(hashA),
+			slot:      140,
+			certifies: true,
+		},
 		{hash: string(hashD), slot: 100_000, announces: true, ebHash: ebB},
 		{hash: string(hashE), slot: 200, announces: true, ebHash: ebE},
 	}
@@ -471,9 +620,16 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	nearCurrentEb := lcommon.NewBlake2b256(leiosTestHash(0x2F))
 	backfill, tipWait = classifyEndorserBlockFetches(
 		[]leiosBlockInfo{
-			{hash: string(nearParentHash), slot: 100_000, announces: true, ebHash: nearParentEb},
 			{
-				hash: string(nearCombinedHash), prevHash: string(nearParentHash),
+				hash:      string(nearParentHash),
+				slot:      100_000,
+				announces: true,
+				ebHash:    nearParentEb,
+			},
+			{
+				hash: string(
+					nearCombinedHash,
+				), prevHash: string(nearParentHash),
 				slot: 100_001, announces: true, ebHash: nearCurrentEb, certifies: true,
 			},
 		},

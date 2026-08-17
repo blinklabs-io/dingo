@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,12 +37,10 @@ func seedCompleteDB(
 	setMarker bool,
 ) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		DataDir:        dataDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		StorageMode:    storageMode,
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StorageMode: storageMode,
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -55,7 +54,7 @@ func seedCompleteDB(
 	if setMarker {
 		require.NoError(t, setImmutableImportMarker(db, marker))
 	}
-	require.NoError(t, db.Close())
+	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
 // TestSyncCatchUpDispatch covers the two state-detected catch-up decisions that
@@ -71,15 +70,15 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		seedCompleteDB(t, dataDir, "core", 5, true)
 
 		res, err := Sync(context.Background(), SyncConfig{
-			Network:         "preview",
-			DataDir:         dataDir,
-			StorageMode:     "core",
-			Backend:         BackendV2,
-			AggregatorURL:   fix.server.URL,
-			BlobPlugin:      "badger",
-			MetadataPlugin:  "sqlite",
-			DatabaseWorkers: 1,
-			Logger:          discard,
+			Network:           "preview",
+			DataDir:           dataDir,
+			StorageMode:       "core",
+			Backend:           BackendV2,
+			AggregatorURL:     fix.server.URL,
+			AllowInsecureHTTP: true,
+			StoragePlugins:    testStoragePlugins(),
+			DatabaseWorkers:   1,
+			Logger:            discard,
 		})
 		require.NoError(t, err)
 		require.Nil(t, res.Snapshot, "up-to-date catch-up should not sync")
@@ -94,8 +93,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			DataDir:         dataDir,
 			StorageMode:     "api",
 			Backend:         BackendV2,
-			BlobPlugin:      "badger",
-			MetadataPlugin:  "sqlite",
+			StoragePlugins:  testStoragePlugins(),
 			DatabaseWorkers: 1,
 			Logger:          discard,
 		})
@@ -151,7 +149,7 @@ func TestDecideCatchUp(t *testing.T) {
 		mode := modeOf(t)
 		require.Equal(t, syncModeBootstrap, mode)
 		dec, err := decideCatchUp(
-			ctx, db, mode, BackendV2, "core", noAggregator, discard,
+			ctx, db, mode, BackendV2, "core", noAggregator, true, discard,
 		)
 		require.NoError(t, err)
 		require.False(t, dec.engage)
@@ -174,7 +172,7 @@ func TestDecideCatchUp(t *testing.T) {
 			mode := modeOf(t)
 			require.Equal(t, syncModeCatchUp, mode)
 			dec, err := decideCatchUp(
-				ctx, db, mode, BackendV2, "core", noAggregator, discard,
+				ctx, db, mode, BackendV2, "core", noAggregator, true, discard,
 			)
 			require.NoError(t, err)
 			require.True(t, dec.engage,
@@ -187,7 +185,14 @@ func TestDecideCatchUp(t *testing.T) {
 		func(t *testing.T) {
 			setState(t, "", 0, false)
 			dec, err := decideCatchUp(
-				ctx, db, modeOf(t), BackendV2, "api", noAggregator, discard,
+				ctx,
+				db,
+				modeOf(t),
+				BackendV2,
+				"api",
+				noAggregator,
+				true,
+				discard,
 			)
 			require.NoError(t, err)
 			require.False(t, dec.engage)
@@ -197,7 +202,7 @@ func TestDecideCatchUp(t *testing.T) {
 	t.Run("v1 backend never engages", func(t *testing.T) {
 		setState(t, "", 2, true)
 		dec, err := decideCatchUp(
-			ctx, db, modeOf(t), BackendV1, "core", noAggregator, discard,
+			ctx, db, modeOf(t), BackendV1, "core", noAggregator, true, discard,
 		)
 		require.NoError(t, err)
 		require.False(t, dec.engage)
@@ -210,7 +215,7 @@ func TestDecideCatchUp(t *testing.T) {
 			setState(t, "", 2, true)
 			dec, err := decideCatchUp(
 				ctx, db, modeOf(t), BackendV2, "core", fix.server.URL,
-				discard,
+				true, discard,
 			)
 			require.NoError(t, err)
 			require.True(t, dec.engage)
@@ -221,7 +226,14 @@ func TestDecideCatchUp(t *testing.T) {
 		fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
 		setState(t, "", 5, true)
 		dec, err := decideCatchUp(
-			ctx, db, modeOf(t), BackendV2, "core", fix.server.URL, discard,
+			ctx,
+			db,
+			modeOf(t),
+			BackendV2,
+			"core",
+			fix.server.URL,
+			true,
+			discard,
 		)
 		require.NoError(t, err)
 		require.False(t, dec.engage)
@@ -232,7 +244,7 @@ func TestDecideCatchUp(t *testing.T) {
 		fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
 		setState(t, "", 1, true)
 		_, err := decideCatchUp(
-			ctx, db, modeOf(t), BackendV2, "api", fix.server.URL, discard,
+			ctx, db, modeOf(t), BackendV2, "api", fix.server.URL, true, discard,
 		)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "core storage mode only")
@@ -244,7 +256,7 @@ func TestDecideCatchUp(t *testing.T) {
 			mode := modeOf(t)
 			require.Equal(t, syncModeResume, mode)
 			dec, err := decideCatchUp(
-				ctx, db, mode, BackendV2, "core", noAggregator, discard,
+				ctx, db, mode, BackendV2, "core", noAggregator, true, discard,
 			)
 			require.NoError(t, err)
 			require.True(t, dec.engage,
@@ -256,7 +268,14 @@ func TestDecideCatchUp(t *testing.T) {
 		func(t *testing.T) {
 			setState(t, syncStatusInProgress, 7, true)
 			dec, err := decideCatchUp(
-				ctx, db, modeOf(t), BackendV2, "api", noAggregator, discard,
+				ctx,
+				db,
+				modeOf(t),
+				BackendV2,
+				"api",
+				noAggregator,
+				true,
+				discard,
 			)
 			require.NoError(t, err)
 			require.False(t, dec.engage)
@@ -267,7 +286,14 @@ func TestDecideCatchUp(t *testing.T) {
 		func(t *testing.T) {
 			setState(t, syncStatusInProgress, 0, false)
 			dec, err := decideCatchUp(
-				ctx, db, modeOf(t), BackendV2, "core", noAggregator, discard,
+				ctx,
+				db,
+				modeOf(t),
+				BackendV2,
+				"core",
+				noAggregator,
+				true,
+				discard,
 			)
 			require.NoError(t, err)
 			require.False(t, dec.engage)
@@ -281,7 +307,14 @@ func TestDecideCatchUp(t *testing.T) {
 			setState(t, syncStatusInProgress, 0, false)
 			require.NoError(t, setCatchUpActive(db))
 			dec, err := decideCatchUp(
-				ctx, db, modeOf(t), BackendV2, "core", noAggregator, discard,
+				ctx,
+				db,
+				modeOf(t),
+				BackendV2,
+				"core",
+				noAggregator,
+				true,
+				discard,
 			)
 			require.NoError(t, err)
 			require.True(t, dec.engage,

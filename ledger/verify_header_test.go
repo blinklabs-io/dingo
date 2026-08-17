@@ -30,19 +30,23 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ledgersnapshot "github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
@@ -139,7 +143,10 @@ func createTestBlock(
 
 	var result *realBabbageBlock
 	for slot := uint64(1); slot <= 200; slot++ {
-		vrfInput, vrfInputErr := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		vrfInput, vrfInputErr := vrf.MkInputVrf(
+			int64(slot),
+			epochNonce,
+		) //nolint:gosec
 		if vrfInputErr != nil {
 			continue
 		}
@@ -717,6 +724,71 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 	assert.Contains(t, err.Error(), "no epoch data for slot")
 }
 
+func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
+	t *testing.T,
+) {
+	const horizonSlot = uint64(532_000)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(200_000, []byte("tip")),
+		},
+		epochCache: []models.Epoch{
+			{
+				EpochId:       500,
+				StartSlot:     100_000,
+				SlotLength:    1_000,
+				LengthInSlots: 432_000,
+				EraId:         eras.ConwayEraDesc.Id,
+				Nonce:         []byte{0x01},
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	epoch, err := ls.headerVerificationEpoch(horizonSlot-1, true)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(500), epoch.EpochId)
+
+	_, err = ls.headerVerificationEpoch(horizonSlot, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+		"past-horizon rejection must happen before forecast cache mutation")
+}
+
+func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
+	const futureSlot = uint64(1001)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("tip"))},
+		epochCache: []models.Epoch{{
+			EpochId:       500,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 1_000,
+			EraId:         eras.ConwayEraDesc.Id,
+			Nonce:         []byte{0x01},
+		}},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateBlockHeaderCrypto(&mockBabbageBlock{slot: futureSlot})
+	require.Error(t, err)
+	assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+		"header-only validation must not advance the shared epoch cache")
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce verifies that a block
 // in an epoch that has no nonce (e.g., epoch rollover not yet processed)
 // is rejected.
@@ -765,13 +837,11 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 		epoch1Nonce[i] = byte(i + 1) //nolint:gosec
 	}
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	// Seed genesis snapshot (epoch 0, "mark") for the pool so leader
 	// eligibility succeeds for blocks in epoch 0.
@@ -864,6 +934,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.True(t, IsHeaderVerificationDeferred(err))
 
 	err = ls.verifyBlockHeaderCrypto(tb.block)
 	require.Error(t, err)
@@ -1013,7 +1084,9 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
+	err := cfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(shelleyGenesisJSON),
+	)
 	require.NoError(t, err)
 	return cfg
 }
@@ -1055,7 +1128,9 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		}
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
+	err := cfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(shelleyGenesisJSON),
+	)
 	require.NoError(t, err)
 	return cfg
 }
@@ -1066,9 +1141,22 @@ func seedGenesisDelegation(
 	row models.GenesisDelegation,
 ) {
 	t.Helper()
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-	require.NoError(t, store.DB().Create(&row).Error)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO genesis_delegation (
+    genesis_hash, genesis_delegate_hash, vrf_key_hash,
+    added_slot, block_index, cert_index, certificate_id
+) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		row.GenesisHash,
+		row.GenesisDelegateHash,
+		row.VrfKeyHash,
+		row.AddedSlot,
+		row.BlockIndex,
+		row.CertIndex,
+		row.CertificateID,
+	)
+	require.NoError(t, err)
 }
 
 // newEligibilityTestLedger builds a LedgerState backed by in-memory SQLite,
@@ -1080,13 +1168,11 @@ func newEligibilityTestLedger(
 	epochNonce []byte,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	ls := &LedgerState{
 		db: db,
@@ -1178,6 +1264,84 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveAtDZero(
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 }
 
+func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
+	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
+		t,
+		strings.Repeat("00", lcommon.Blake2b224Size),
+		strings.Repeat("00", lcommon.Blake2b256Size),
+		"0.05",
+	)
+	initialPParams := &alonzo.AlonzoProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.AlonzoEraDesc.Id,
+		},
+		currentEra:     eras.AlonzoEraDesc,
+		currentPParams: initialPParams,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       1,
+				StartSlot:     86_400,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.AlonzoEraDesc.Id,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     172_800,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.AlonzoEraDesc.Id,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: genesisCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	// The epoch-2 update is already part of historical metadata even though
+	// the in-memory current epoch is still epoch 1. This is the state observed
+	// while a boundary block is being checked.
+	nextPParams := &alonzo.AlonzoProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	nextPParamsCbor, err := cbor.Encode(nextPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		nextPParamsCbor,
+		172_800,
+		2,
+		eras.AlonzoEraDesc.Id,
+		nil,
+	))
+
+	// The preceding epoch remains genesis-overlay active, while canonical
+	// epoch-2 slots use decentralisationParam=0 and must fall through to the
+	// normal pool path. A current-epoch-only lookup regresses here by reading
+	// epoch-1's d=1 and returning genesisOverlayNonActive.
+	require.True(t, ls.genesisDelegationActiveForSlot(172_780))
+	require.False(t, ls.genesisDelegationActiveForSlot(172_836))
+	_, status, err := ls.genesisOverlayDelegationForSlot(
+		172_836,
+		genesisCfg.ShelleyGenesis(),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, genesisOverlayNone, status)
+}
+
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	t *testing.T,
 ) {
@@ -1203,6 +1367,13 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reserved for the genesis overlay schedule")
 	assert.Contains(t, err.Error(), "not active")
+
+	// Header verification can run ahead of ledger apply. In that path the
+	// current epoch's protocol parameters may still be in memory, so defer a
+	// state-dependent overlay rejection until the epoch rollover is committed.
+	err = ls.verifyBlockHeaderState(tb.block, 5, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
@@ -1228,6 +1399,13 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+
+	// A stale decentralized parameter set can classify this future slot as
+	// genesisOverlayNone. Header verification must defer before that
+	// classification can bypass the apply-time state recheck.
+	err = ls.verifyBlockHeaderState(tb.block, 5, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
@@ -1513,7 +1691,9 @@ func TestVerifyBlockLeaderEligibility_ByronSkipped(t *testing.T) {
 // TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot verifies that
 // epochs 0 and 1 query the genesis snapshot (epoch 0, "mark") rather than
 // skipping eligibility checks. A pool absent from that snapshot is rejected.
-func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(t *testing.T) {
+func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(
+	t *testing.T,
+) {
 	tb := createTestBlock(t, [32]byte{35}, 0, tamperNone)
 	// Use epoch 5 nonce for the genesis epoch cache entry; the actual nonce
 	// is not used by verifyBlockLeaderEligibility itself.
@@ -1521,7 +1701,12 @@ func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(t *testing.T
 
 	// Override epoch cache to place the block in epoch 1 (snapshotEpoch = 0).
 	ls.epochCache = []models.Epoch{
-		{EpochId: 1, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+		{
+			EpochId:       1,
+			StartSlot:     0,
+			LengthInSlots: 1_000_000,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -1551,6 +1736,110 @@ func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "eligible pool with full stake should pass")
+}
+
+// TestVerifyBlockLeaderEligibility_Issue2876RewardInclusiveStake is a golden
+// regression for Preview block 5ac88b23fb3060edbc1e478976b75033b82b64941d6b9830559f938b31e915a8
+// at slot 117744396. The block is a deliberately narrow CPraos winner: the
+// reward-stale distribution reported by dingo v0.65.1 rejects it, while the
+// reward-inclusive active distribution accepts it. This pins the fact that a
+// seemingly small stake discrepancy cannot be tolerated in consensus.
+func TestVerifyBlockLeaderEligibility_Issue2876RewardInclusiveStake(
+	t *testing.T,
+) {
+	const (
+		epoch               = uint64(1362)
+		snapshotEpoch       = uint64(1361)
+		slot                = uint64(117744396)
+		stalePoolStake      = uint64(21_256_151_898_192)
+		staleTotalStake     = uint64(3_267_403_053_048_802)
+		referencePoolStake  = uint64(21_281_013_692_685)
+		referenceTotalStake = uint64(3_268_194_725_993_512)
+	)
+
+	issuerVkey, err := hex.DecodeString(
+		"959dc65b2759195a259bce816606dfc6b4772c0544a2668595cb2629be0e48f7",
+	)
+	require.NoError(t, err)
+	vrfOutput, err := hex.DecodeString(
+		"ee98d65a916622d87cc9661dd9440884cf7fbca9bf6e183b99dfcf2bd915b7b" +
+			"e66ad2e184fdfa0bf7e4c5e5c47733b83b98fbe1e336e00c7ceca3a7832f04b64",
+	)
+	require.NoError(t, err)
+
+	var issuer lcommon.IssuerVkey
+	copy(issuer[:], issuerVkey)
+	headerBody := babbage.BabbageBlockHeaderBody{
+		Slot:       slot,
+		IssuerVkey: issuer,
+		VrfResult: lcommon.VrfResult{
+			Output: vrfOutput,
+		},
+	}
+	headerBodyCbor, err := cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerBody.SetCbor(headerBodyCbor)
+	block := &realBabbageBlock{
+		header: &babbage.BabbageBlockHeader{Body: headerBody},
+		era:    babbage.EraBabbage,
+		slot:   slot,
+	}
+
+	for _, test := range []struct {
+		name       string
+		poolStake  uint64
+		totalStake uint64
+		wantErr    bool
+	}{
+		{
+			name:       "v0.65.1 reward-stale snapshot rejects",
+			poolStake:  stalePoolStake,
+			totalStake: staleTotalStake,
+			wantErr:    true,
+		},
+		{
+			name:       "reward-inclusive snapshot accepts",
+			poolStake:  referencePoolStake,
+			totalStake: referenceTotalStake,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ls, db := newEligibilityTestLedger(t, nil)
+			ls.config.CardanoNodeConfig = newTestShelleyGenesisCfg(t)
+			ls.epochCache = []models.Epoch{{
+				EpochId:       epoch,
+				StartSlot:     slot - 1,
+				LengthInSlots: 2,
+				EraId:         eras.ConwayEraDesc.Id,
+			}}
+			ls.publishSnapshotsLocked()
+
+			poolKeyHash := block.IssuerVkey().Hash()
+			seedPoolStakeSnapshot(
+				t, db, snapshotEpoch, poolKeyHash[:], test.poolStake,
+			)
+			dummyPool := bytes.Repeat([]byte{0xff}, lcommon.Blake2b224Size)
+			seedPoolStakeSnapshot(
+				t,
+				db,
+				snapshotEpoch,
+				dummyPool,
+				test.totalStake-test.poolStake,
+			)
+
+			err := ls.verifyBlockLeaderEligibility(block, epoch)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Contains(
+					t,
+					err.Error(),
+					"VRF leader value exceeds stake-derived threshold",
+				)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
@@ -1625,7 +1914,11 @@ func TestVerifyBlockLeaderEligibility_ActiveDistributionVRFAboveThresholdFails(
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
 }
 
 // TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails verifies that a block
@@ -1674,7 +1967,11 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
 }
 
 func TestVerifyBlockLeaderEligibility_DecentralizationActiveSkipsThreshold(
@@ -1793,7 +2090,11 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err)
-	assert.Contains(t, logBuf.String(), "Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary")
+	assert.Contains(
+		t,
+		logBuf.String(),
+		"Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary",
+	)
 	assert.NotContains(t, logBuf.String(), "total active stake is zero")
 }
 
@@ -1844,7 +2145,11 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
 }
 
 // TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips verifies that
@@ -1853,13 +2158,11 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	// Seed a pool stake snapshot so the check reaches the coeff lookup.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
@@ -1868,7 +2171,12 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 	ls := &LedgerState{
 		db: db,
 		epochCache: []models.Epoch{
-			{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+			{
+				EpochId:       5,
+				StartSlot:     0,
+				LengthInSlots: 1_000_000,
+				Nonce:         tb.epochNonce,
+			},
 		},
 		config: LedgerStateConfig{
 			// No CardanoNodeConfig → ActiveSlotCoeff() returns 0 → skip.
@@ -1888,13 +2196,11 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
@@ -1916,7 +2222,12 @@ func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 	ls := &LedgerState{
 		db: db,
 		epochCache: []models.Epoch{
-			{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+			{
+				EpochId:       5,
+				StartSlot:     0,
+				LengthInSlots: 1_000_000,
+				Nonce:         tb.epochNonce,
+			},
 		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: zeroCfg,
@@ -1926,5 +2237,9 @@ func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "zero active slot coeff should skip, not reject all blocks")
+	assert.NoError(
+		t,
+		err,
+		"zero active slot coeff should skip, not reject all blocks",
+	)
 }

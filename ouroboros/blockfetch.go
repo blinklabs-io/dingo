@@ -42,6 +42,16 @@ const MaxBlockFetchRange = 129600
 
 // blockfetchMaxConsecutiveNoBlocks is the number of consecutive NoBlocks
 // responses for the same (connId, start) tuple before closing the connection.
+//
+// "Consecutive" is strict: blockfetchRecordNoBlocks restarts the count at 1
+// when the start point differs from the last one recorded, and every
+// successfully validated range request from that peer calls
+// blockfetchResetNoBlocks. The valve therefore fires only for a peer stuck
+// re-requesting one point it has been told we do not have, and stays silent
+// when a peer asks for a handful of different unavailable points among normal
+// traffic — which is what a tip slot battle produces, where both sides roll
+// their own block back and briefly ask each other for a body neither still
+// has. Not firing there is intended: those are healthy peers.
 const blockfetchMaxConsecutiveNoBlocks = 5
 
 // blockfetchServerSendDrainTimeout is the maximum time the range server waits
@@ -296,6 +306,17 @@ Loop:
 			if next == nil {
 				break Loop
 			}
+			if next.Rollback {
+				// A rollback raced this in-flight batch: the iterator
+				// surfaced a rollback sentinel with a zero-value Block.
+				// Serving it would stream a [0, null] block that a fetching
+				// peer decodes as a nil-header Byron EBB and crashes
+				// dereferencing it in SlotNumber(). Blockfetch has no
+				// rollback message, so end the batch cleanly; the client
+				// re-requests against its updated chain. Mirrors the
+				// next.Rollback handling in chainsync.
+				break Loop
+			}
 			if next.Block.Slot > end.Slot {
 				break Loop
 			}
@@ -414,25 +435,12 @@ func (o *Ouroboros) reportBlockfetchServerAsyncError(
 		"end_slot", end.Slot,
 		"error", err,
 	)
-	if !sendBlockfetchConnError(conn.ErrorChan(), err) {
+	if closeErr := conn.Close(); closeErr != nil {
 		o.config.Logger.Debug(
-			"blockfetch: failed to forward async server error to connection error channel",
+			"blockfetch: failed to close connection after async server error",
 			"connection_id", connectionID,
+			"error", closeErr,
 		)
-	}
-}
-
-func sendBlockfetchConnError(errCh chan error, err error) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	select {
-	case errCh <- err:
-		return true
-	default:
-		return false
 	}
 }
 
@@ -606,7 +614,8 @@ func (o *Ouroboros) blockfetchClientBlock(
 			)
 		}
 	}
-	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+	if o.EventBus != nil &&
+		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
 		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(
@@ -633,7 +642,8 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, ctx.ConnectionId)
 	o.blockFetchMutex.Unlock()
-	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+	if o.EventBus != nil &&
+		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
 		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(

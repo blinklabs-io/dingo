@@ -24,6 +24,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/config"
 )
 
 func TestWaitForSignalOrErrorPrefersQueuedError(t *testing.T) {
@@ -82,7 +87,10 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 	}
 	// Read after the goroutine finished, so no concurrent buffer access.
 	if logged := buf.String(); !strings.Contains(logged, "metrics") {
-		t.Fatalf("expected a log mentioning the metrics listener, got: %q", logged)
+		t.Fatalf(
+			"expected a log mentioning the metrics listener, got: %q",
+			logged,
+		)
 	}
 }
 
@@ -128,7 +136,10 @@ func TestShutdownNodeResourcesAggregatesErrors(t *testing.T) {
 	if !errors.Is(err, nodeErr) {
 		t.Fatalf("expected node stop error to be joined: %v", err)
 	}
-	if !strings.Contains(err.Error(), "metrics server shutdown: metrics failed") {
+	if !strings.Contains(
+		err.Error(),
+		"metrics server shutdown: metrics failed",
+	) {
 		t.Fatalf("expected metrics shutdown context in error: %v", err)
 	}
 	if !strings.Contains(err.Error(), "node stop: node failed") {
@@ -151,5 +162,63 @@ func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("expected nil shutdown error, got %v", err)
+	}
+}
+
+// TestBuildDingoConfigWiresAPIConfig asserts that a loaded
+// internal/config.Config's api.tls/api.auth policy (as set via YAML/env/CLI)
+// actually reaches the dingo.Config that Run() hands to dingo.New() --
+// regression test for the top-level API security defaults (dingo#2998)
+// being silently dropped because Run's real composition call never invoked
+// dingo.WithAPIConfig.
+func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		API: config.APIConfig{
+			TLS: apiconfig.TLSPolicy{
+				Mode:         new("server"),
+				CertFilePath: new("/shared/cert.pem"),
+				KeyFilePath:  new("/shared/key.pem"),
+			},
+			Auth: apiconfig.AuthPolicy{
+				Mode:  new("token"),
+				Token: new("shared-secret"),
+			},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	got := built.APIConfig()
+	if got.TLS.Mode == nil || *got.TLS.Mode != "server" {
+		t.Fatalf("expected api.tls.mode to flow through, got %+v", got.TLS)
+	}
+	if got.TLS.CertFilePath == nil ||
+		*got.TLS.CertFilePath != "/shared/cert.pem" {
+		t.Fatalf(
+			"expected api.tls.certFilePath to flow through, got %+v",
+			got.TLS,
+		)
+	}
+	if got.Auth.Mode == nil || *got.Auth.Mode != "token" {
+		t.Fatalf("expected api.auth.mode to flow through, got %+v", got.Auth)
+	}
+	if got.Auth.Token == nil || *got.Auth.Token != "shared-secret" {
+		t.Fatalf(
+			"expected api.auth.token to flow through, got %+v",
+			got.Auth,
+		)
 	}
 }

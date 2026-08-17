@@ -37,8 +37,11 @@ const (
 	ChainsyncResyncReasonForkResolutionExceedsK       = "fork resolution exceeds security parameter K"
 	ChainsyncResyncReasonLocalLedgerRollback          = "local ledger rollback"
 	ChainsyncResyncReasonLiveTxValidationRecovery     = "live tx validation recovery"
+	ChainsyncResyncReasonReplayRecoveryNonConverging  = "replay tx validation recovery not converging"
 	ChainsyncResyncReasonChainSwitchCursorAhead       = "chain switch cursor ahead of local tip"
 	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed = "blockfetch timeout retry failed on all available connections"
+	ChainsyncResyncReasonBlockfetchRangeUnavailable   = "blockfetch could not obtain the queued header range"
+	ChainsyncResyncReasonHeaderValidationRecovery     = "deferred header validation recovery"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

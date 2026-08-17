@@ -79,10 +79,44 @@ type BatchedTxIngestOpts struct {
 	// replay paths where producer rows may be absent.
 	SkipConsumedInputRecovery bool
 
+	// StrictAppliedInputConservation, when true, treats a consumed input whose
+	// producer row is absent from the metadata store as a hard error for blocks
+	// past the Mithril trust boundary, instead of recovering it from the
+	// append-only blob store (which retains abandoned-fork blocks) or silently
+	// skipping it. Set only by the ledger's steady-state, at-tip, validated
+	// block application: there every consumed input's producer must already be
+	// applied and live in the metadata store, so needing blob recovery signals
+	// that the applied ledger has diverged from the header chain (issue #3005).
+	// Recovering a producer from a retained fork block the applied chain never
+	// followed would bake an input-conservation violation into the persisted
+	// chain and, once it accumulates past K, wedge the node behind the security
+	// parameter guard. Erroring here instead aborts the block's transaction so
+	// the inconsistent state is never persisted and the node stalls loudly for
+	// resync. Left false for bootstrap, Mithril gap-closure, historical/trusted
+	// replay, and Leios endorser-block apply, where absent producer rows are
+	// legitimately recovered. Only takes effect when StrictUtxoValidation is
+	// also enabled on the Database.
+	StrictAppliedInputConservation bool
+
 	// Stats receives hot-path timings and row-ish counts for operator
 	// visibility during API-mode Mithril backfill. It is optional and is
 	// intentionally updated only at coarse stage boundaries.
 	Stats *types.BackfillHotPathStats
+
+	// SkipWithdrawalWitnessWrite elides the CIP-0163 account_withdrawal_witness
+	// insert for each reward withdrawal. That table is only ever read by the
+	// delegator-inactivity gate's rollback/renewal paths
+	// (MetadataStore.AccountsWitnessedAfterSlot, AccountLastWitnessSlots); with
+	// the gate off -- the default on every node not running CIP-0163 -- the
+	// insert is pure write amplification on a table nothing reads (issue
+	// #2919). The ledger sets this to !DelegatorInactivityEnabled on the live-
+	// apply path (ledger/delta.go), and internal/node.Backfill derives it the
+	// same way from its own delegatorInactivityEnabled field for the batched
+	// historical-replay path -- see that field's doc comment for why the
+	// gate can genuinely be on there too and why the value must always be set
+	// explicitly rather than assumed. Defaults to false here, preserving the
+	// unconditional write for any caller that does not opt in.
+	SkipWithdrawalWitnessWrite bool
 }
 
 type batchStatsSetter interface {
@@ -261,9 +295,13 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		setter.SetBackfillStats(opts.Stats)
 	}
 	if err := d.metadata.SetTransactionBatched(
-		tx, point, idx, certDeposits, acc, metadataTxn,
+		tx, point, idx, certDeposits,
+		opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
 	); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (batch idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 
 	if updateEpoch > 0 && tx.IsValid() {

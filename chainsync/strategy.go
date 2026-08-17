@@ -181,7 +181,9 @@ func (s *State) roundRobinDriverLocked() (ouroboros.ConnectionId, bool) {
 	}
 	// len(eligible) > 0, so the conversion is safe and the modulo result is
 	// always a valid index into eligible.
-	idx := s.roundRobinIndex % uint64(len(eligible)) //nolint:gosec // G115: len is non-negative
+	idx := s.roundRobinIndex % uint64(
+		len(eligible),
+	) //nolint:gosec // G115: len is non-negative
 	return eligible[idx], true
 }
 

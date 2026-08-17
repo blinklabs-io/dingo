@@ -299,11 +299,11 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 		stakeCred,
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(5),
 		Active:     true,
-	}).Error)
+	}))
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	a := &lcommon.TreasuryWithdrawalGovAction{
@@ -338,11 +338,11 @@ func TestApplyTreasuryWithdrawal_DistinguishesSameTxActionIndex(
 		stakeCred,
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	ctx := &EnactmentContext{DB: db, Slot: 123}
@@ -373,19 +373,55 @@ func TestApplyTreasuryWithdrawal_DistinguishesSameTxActionIndex(
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(82), uint64(state.Treasury))
 
+	rows, err := store.raw.Query(`
+SELECT tx_hash, amount FROM account_reward_delta
+WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
+		0, stakeCred, uint64(123),
+	)
+	require.NoError(t, err)
 	var deltas []models.AccountRewardDelta
-	require.NoError(t, store.DB().Where(
-		"credential_tag = ? AND staking_key = ? AND added_slot = ?",
-		0,
-		stakeCred,
-		uint64(123),
-	).Find(&deltas).Error)
+	for rows.Next() {
+		var delta models.AccountRewardDelta
+		require.NoError(t, rows.Scan(&delta.TxHash, &delta.Amount))
+		deltas = append(deltas, delta)
+	}
+	require.NoError(t, rows.Close())
+	require.NoError(t, rows.Err())
 	require.Len(t, deltas, 2)
 	assert.NotEqual(
 		t,
 		proposalRewardSourceHash(first),
 		proposalRewardSourceHash(second),
 	)
+	// Pin the caller contract: each journaled row must carry the per-proposal
+	// source hash as its replay discriminator, so the same tx hash at two
+	// action indexes cannot collapse into one row. Rows are matched by their
+	// stored discriminator rather than by query order.
+	bySourceHash := make(map[string]models.AccountRewardDelta, len(deltas))
+	for _, delta := range deltas {
+		bySourceHash[string(delta.TxHash)] = delta
+	}
+	require.Len(t, bySourceHash, 2, "journaled TxHash values must be distinct")
+	for _, tc := range []struct {
+		name     string
+		proposal *models.GovernanceProposal
+		amount   uint64
+	}{
+		{name: "first", proposal: first, amount: 7},
+		{name: "second", proposal: second, amount: 11},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantHash := proposalRewardSourceHash(tc.proposal)
+			delta, ok := bySourceHash[string(wantHash)]
+			require.True(
+				t,
+				ok,
+				"no reward delta journaled with proposalRewardSourceHash",
+			)
+			assert.Equal(t, wantHash, delta.TxHash)
+			assert.Equal(t, tc.amount, uint64(delta.Amount))
+		})
+	}
 }
 
 func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
@@ -400,11 +436,11 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 		stakeCred,
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(5),
 		Active:     true,
-	}).Error)
+	}))
 	require.NoError(t, store.SetNetworkState(6, 20, 1, nil))
 
 	a := &lcommon.TreasuryWithdrawalGovAction{
@@ -479,15 +515,16 @@ func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
 		stakeCred,
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(5),
 		Active:     true,
-	}).Error)
-	require.NoError(t, store.DB().
-		Model(&models.Account{}).
-		Where("staking_key = ?", stakeCred).
-		Update("active", false).Error)
+	}))
+	_, err = store.raw.Exec(
+		"UPDATE account SET active = FALSE WHERE staking_key = ?",
+		stakeCred,
+	)
+	require.NoError(t, err)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	a := &lcommon.TreasuryWithdrawalGovAction{

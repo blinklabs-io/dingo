@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ParseCertState decodes the CertState from raw CBOR.
@@ -747,6 +748,7 @@ var ErrNotPoolParams = errors.New("not pool params shape")
 //
 //	operator,      -- PoolKeyHash (28 bytes)
 //	vrfKeyHash,    -- 32 bytes
+//	leiosKey,      -- optional [96-byte BLS key, 48-byte PoP] (Dijkstra)
 //	pledge,        -- Coin
 //	cost,          -- Coin
 //	margin,        -- UnitInterval (tag 30, [num, denom])
@@ -805,25 +807,44 @@ func parsePoolParams(
 		)
 	}
 
-	// Pledge (index 2)
+	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 2)
+	if err != nil {
+		return nil, err
+	}
+	if len(params) < 7+leiosOffset {
+		return nil, fmt.Errorf(
+			"%w: pool params has %d elements, expected at least %d",
+			ErrNotPoolParams,
+			len(params),
+			7+leiosOffset,
+		)
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = leiosKey.PublicKey
+		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+	}
+
+	// Pledge (legacy index 2; Dijkstra index 3 when Leios key/null is present)
 	if _, err := cbor.Decode(
-		params[2],
+		params[2+leiosOffset],
 		&pool.Pledge,
 	); err != nil {
 		return nil, fmt.Errorf("decoding pledge: %w", err)
 	}
 
-	// Cost (index 3)
+	// Cost (legacy index 3)
 	if _, err := cbor.Decode(
-		params[3],
+		params[3+leiosOffset],
 		&pool.Cost,
 	); err != nil {
 		return nil, fmt.Errorf("decoding cost: %w", err)
 	}
 
-	// Margin (index 4) - CBOR tag 30 [num, denom]
+	// Margin (legacy index 4) - CBOR tag 30 [num, denom]
 	var marginOK bool
-	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[4])
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(
+		params[4+leiosOffset],
+	)
 	if !marginOK {
 		slog.Warn(
 			"failed to decode pool margin, defaulting to 0/1",
@@ -834,25 +855,30 @@ func parsePoolParams(
 		pool.MarginDen = 1
 	}
 
-	// Reward account (index 5)
-	rewardAccount, rewardAccountTag, ok := parseRewardAccount(params[5])
+	// Reward account (legacy index 5)
+	rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+		params[5+leiosOffset],
+	)
 	if !ok {
-		return nil, fmt.Errorf("decoding reward account for pool %x", poolKeyHash)
+		return nil, fmt.Errorf(
+			"decoding reward account for pool %x",
+			poolKeyHash,
+		)
 	}
 	pool.RewardAccount = rewardAccount
 	pool.RewardAccountCredentialTag = rewardAccountTag
 
-	// Owners (index 6) - set of 28-byte key hashes
-	pool.Owners = parsePoolOwners(params[6])
+	// Owners (legacy index 6) - set of 28-byte key hashes
+	pool.Owners = parsePoolOwners(params[6+leiosOffset])
 
-	// Relays (index 7) - array of relay entries
-	if len(params) > 7 {
-		pool.Relays = parseRelays(params[7])
+	// Relays (legacy index 7) - array of relay entries
+	if len(params) > 7+leiosOffset {
+		pool.Relays = parseRelays(params[7+leiosOffset])
 	}
 
-	// Pool metadata (index 8) - null or [url, hash]
-	if len(params) > 8 {
-		parsePoolMetadata(params[8], pool)
+	// Pool metadata (legacy index 8) - null or [url, hash]
+	if len(params) > 8+leiosOffset {
+		parsePoolMetadata(params[8+leiosOffset], pool)
 	}
 
 	return pool, nil
@@ -879,15 +905,39 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	if _, err := cbor.Decode(params[1], &pool.Pledge); err != nil {
+	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 1)
+	if err != nil {
+		return nil, true, err
+	}
+	if len(params) < 7+leiosOffset {
+		return nil, true, fmt.Errorf(
+			"pool state has %d elements, expected at least %d",
+			len(params),
+			7+leiosOffset,
+		)
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = leiosKey.PublicKey
+		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+	}
+
+	if _, err := cbor.Decode(
+		params[1+leiosOffset],
+		&pool.Pledge,
+	); err != nil {
 		return nil, true, fmt.Errorf("decoding pledge: %w", err)
 	}
-	if _, err := cbor.Decode(params[2], &pool.Cost); err != nil {
+	if _, err := cbor.Decode(
+		params[2+leiosOffset],
+		&pool.Cost,
+	); err != nil {
 		return nil, true, fmt.Errorf("decoding cost: %w", err)
 	}
 
 	var marginOK bool
-	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[3])
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(
+		params[3+leiosOffset],
+	)
 	if !marginOK {
 		slog.Warn(
 			"failed to decode pool margin, defaulting to 0/1",
@@ -898,20 +948,25 @@ func parsePoolParamsWithoutOperator(
 		pool.MarginDen = 1
 	}
 
-	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(params[4]); ok {
+	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+		params[4+leiosOffset],
+	); ok {
 		pool.RewardAccount = rewardAccount
 		pool.RewardAccountCredentialTag = rewardAccountTag
 	}
 
-	pool.Owners = parsePoolOwners(params[5])
-	if len(params) > 6 {
-		pool.Relays = parseRelays(params[6])
+	pool.Owners = parsePoolOwners(params[5+leiosOffset])
+	if len(params) > 6+leiosOffset {
+		pool.Relays = parseRelays(params[6+leiosOffset])
 	}
-	if len(params) > 7 {
-		parsePoolMetadata(params[7], pool)
+	if len(params) > 7+leiosOffset {
+		parsePoolMetadata(params[7+leiosOffset], pool)
 	}
-	if len(params) > 8 {
-		if _, err := cbor.Decode(params[8], &pool.Deposit); err != nil {
+	if len(params) > 8+leiosOffset {
+		if _, err := cbor.Decode(
+			params[8+leiosOffset],
+			&pool.Deposit,
+		); err != nil {
 			return nil, true, fmt.Errorf(
 				"decoding pool deposit: %w",
 				err,
@@ -920,6 +975,37 @@ func parsePoolParamsWithoutOperator(
 	}
 
 	return pool, true, nil
+}
+
+// optionalLeiosKeyOffset reports whether the given pool-parameter position is
+// occupied by Dijkstra's optional Leios key, decoding it when present. The
+// ledger's PV12 decoder accepts both an omitted field and an explicit null,
+// so snapshot import must preserve the same distinction when locating all
+// fields that follow it. The returned key is nil unless a real (non-null)
+// Leios key was decoded; its proof of possession is not verified here (see
+// ParsedPool.LeiosKeyPublic).
+func optionalLeiosKeyOffset(
+	params []cbor.RawMessage,
+	index int,
+) (int, *lcommon.LeiosKey, error) {
+	if len(params) <= index || len(params[index]) == 0 {
+		return 0, nil, nil
+	}
+	if len(params[index]) == 1 && params[index][0] == 0xf6 {
+		return 1, nil, nil
+	}
+	// A legacy pledge/cost is an unsigned integer. Only an array at this
+	// position can be the new Leios key; if it is an array, validate its
+	// exact key/proof shape through gouroboros rather than shifting on a
+	// malformed value.
+	if params[index][0]>>5 != 4 {
+		return 0, nil, nil
+	}
+	var key lcommon.LeiosKey
+	if _, err := cbor.Decode(params[index], &key); err != nil {
+		return 0, nil, fmt.Errorf("decoding Leios key: %w", err)
+	}
+	return 1, &key, nil
 }
 
 func parseRewardAccount(data []byte) ([]byte, uint8, bool) {
@@ -1011,6 +1097,15 @@ func parsePoolParamsOrDistr(
 	if !errors.Is(err, ErrNotPoolParams) {
 		return nil, err
 	}
+	// The snapshot layout carries the full parameters; try it before
+	// degrading to the VRF-only reading, which discards them.
+	if fields, arrErr := decodeRawArray(data); arrErr == nil {
+		if pool, snapErr := parseSnapshotPoolParams(
+			poolKeyHash, fields,
+		); snapErr == nil {
+			return pool, nil
+		}
+	}
 	pool, distrErr := parsePoolDistrEntry(poolKeyHash, data)
 	if distrErr == nil {
 		return pool, nil
@@ -1020,6 +1115,154 @@ func parsePoolParamsOrDistr(
 		err,
 		distrErr,
 	)
+}
+
+// snapshotPoolParamsFields is the field count of the UTxO-HD snapshot pool
+// record. The layout is the stake pair this record adds -- the pool's stake
+// and its share of the total -- followed by the registration parameters:
+//
+//	0  stake (coin)
+//	1  stake share (unit interval)
+//	2  owners (set of addr_keyhash)
+//	3  reserved: a second stake-shaped figure, unused here
+//	4  vrf_keyhash
+//	5  pledge (coin)
+//	6  cost (coin)
+//	7  margin (unit interval)
+//	8  reserved: a small counter, unused here
+//	9  reward account credential
+const snapshotPoolParamsFields = 10
+
+const (
+	snapshotPoolOwnersIdx        = 2
+	snapshotPoolVrfIdx           = 4
+	snapshotPoolPledgeIdx        = 5
+	snapshotPoolCostIdx          = 6
+	snapshotPoolMarginIdx        = 7
+	snapshotPoolRewardAccountIdx = 9
+)
+
+// parseSnapshotPoolParams decodes the registration parameters a UTxO-HD
+// snapshot keeps alongside each pool's stake.
+//
+// This is what makes a bootstrapped node able to seed the reward rounds for
+// the epochs its snapshots cover. Those epochs' parameters cannot be
+// recovered from cert state, which holds only pools registered *now*: a pool
+// that held stake in the go or set snapshot and retired before the snapshot's
+// own epoch is absent there, so its delegators' stake could not be
+// attributed and the whole epoch's basis was dropped. The snapshot describes
+// the pool set as it stood in that epoch, retired pools included, which is
+// exactly the set the reward round for that epoch needs.
+//
+// Every field read is checked rather than assumed. The layout is not part of
+// any published CDDL -- the on-chain pool_params is a different, 9-field
+// shape led by the operator -- so it was established by decoding real
+// snapshots, and a future format change must degrade to the VRF-only
+// fallback rather than quietly mapping a field onto the wrong parameter.
+// Pledge, cost and margin feed reward arithmetic directly, so a wrong value
+// there would be credited rather than visibly refused.
+func parseSnapshotPoolParams(
+	poolKeyHash []byte,
+	fields [][]byte,
+) (*ParsedPool, error) {
+	if len(fields) != snapshotPoolParamsFields {
+		return nil, fmt.Errorf(
+			"%w: snapshot pool params has %d fields, expected %d",
+			ErrNotPoolParams, len(fields), snapshotPoolParamsFields,
+		)
+	}
+
+	var vrfKeyHash []byte
+	if _, err := cbor.Decode(
+		fields[snapshotPoolVrfIdx], &vrfKeyHash,
+	); err != nil || len(vrfKeyHash) != 32 {
+		return nil, fmt.Errorf(
+			"%w: no 32-byte VRF key hash at field %d",
+			ErrNotPoolParams, snapshotPoolVrfIdx,
+		)
+	}
+
+	var pledge, cost uint64
+	if _, err := cbor.Decode(
+		fields[snapshotPoolPledgeIdx], &pledge,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding pledge: %w", ErrNotPoolParams, err,
+		)
+	}
+	if _, err := cbor.Decode(fields[snapshotPoolCostIdx], &cost); err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding cost: %w", ErrNotPoolParams, err,
+		)
+	}
+
+	marginNum, marginDen, ok := parseRational(
+		fields[snapshotPoolMarginIdx],
+	)
+	// A margin outside [0,1] means this field is not a margin. The gate
+	// downstream rejects such a basis anyway; failing here instead keeps a
+	// misread from being presented as a pool parameter at all.
+	if !ok || marginDen == 0 || marginNum > marginDen {
+		return nil, fmt.Errorf(
+			"%w: field %d is not a unit interval",
+			ErrNotPoolParams, snapshotPoolMarginIdx,
+		)
+	}
+
+	rewardAccount, err := parseCredential(
+		fields[snapshotPoolRewardAccountIdx],
+	)
+	if err != nil || len(rewardAccount.Hash) != credentialHashSize {
+		return nil, fmt.Errorf(
+			"%w: field %d is not a credential",
+			ErrNotPoolParams, snapshotPoolRewardAccountIdx,
+		)
+	}
+
+	owners, err := parseSnapshotPoolOwners(fields[snapshotPoolOwnersIdx])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding owners: %w", ErrNotPoolParams, err,
+		)
+	}
+
+	return &ParsedPool{
+		PoolKeyHash:   slices.Clone(poolKeyHash),
+		VrfKeyHash:    vrfKeyHash,
+		Pledge:        pledge,
+		Cost:          cost,
+		MarginNum:     marginNum,
+		MarginDen:     marginDen,
+		RewardAccount: slices.Clone(rewardAccount.Hash),
+		// #nosec G115 -- credential type is 0 or 1
+		RewardAccountCredentialTag: uint8(rewardAccount.Type),
+		Owners:                     owners,
+	}, nil
+}
+
+// parseSnapshotPoolOwners decodes the owner set, which is a CBOR set (tag
+// 258) or a plain array of 28-byte key hashes. An empty set is normal and is
+// not an error; anything that is not a list of key hashes is.
+func parseSnapshotPoolOwners(data []byte) ([][]byte, error) {
+	raw, err := decodeRawArray(data)
+	if err != nil {
+		return nil, err
+	}
+	owners := make([][]byte, 0, len(raw))
+	for _, entry := range raw {
+		var hash []byte
+		if _, err := cbor.Decode(entry, &hash); err != nil {
+			return nil, err
+		}
+		if len(hash) != credentialHashSize {
+			return nil, fmt.Errorf(
+				"owner hash is %d bytes, expected %d",
+				len(hash), credentialHashSize,
+			)
+		}
+		owners = append(owners, hash)
+	}
+	return owners, nil
 }
 
 // parsePoolDistrEntry decodes the compact PoolDistr/UTxO-HD pool
@@ -1415,7 +1658,9 @@ func parseDRepDelegation(data []byte) (Credential, error) {
 		)
 	}
 	if len(elems) < 1 {
-		return Credential{}, errors.New("drep delegation has 0 elements, expected at least 1")
+		return Credential{}, errors.New(
+			"drep delegation has 0 elements, expected at least 1",
+		)
 	}
 
 	var drepType uint64
@@ -1550,11 +1795,12 @@ type ParsedPrevGovActionIds struct {
 
 // ParsedGovState holds all decoded governance state components.
 type ParsedGovState struct {
-	Constitution     *ParsedConstitution
-	Committee        []ParsedCommitteeMember
-	CommitteeQuorum  *cbor.Rat
-	Proposals        []ParsedGovProposal
-	PrevGovActionIds *ParsedPrevGovActionIds
+	Constitution         *ParsedConstitution
+	Committee            []ParsedCommitteeMember
+	CommitteeQuorum      *cbor.Rat
+	Proposals            []ParsedGovProposal
+	PrevGovActionIds     *ParsedPrevGovActionIds
+	RatifiedGovActionIds []ParsedGovActionId
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -1630,6 +1876,18 @@ func ParseGovState(
 	}
 	result.Proposals = proposals
 	result.PrevGovActionIds = prevIds
+
+	if len(fields) >= 7 {
+		ratifiedIds, err := parseDRepPulsingStateRatifiedIds(
+			fields[6],
+		)
+		if err != nil {
+			warnings = append(warnings, fmt.Errorf(
+				"parsing drep pulsing state: %w", err,
+			))
+		}
+		result.RatifiedGovActionIds = ratifiedIds
+	}
 
 	return result, errors.Join(warnings...)
 }
@@ -1898,6 +2156,82 @@ func parseProposals(data []byte) (
 	}
 
 	return proposals, prevIds, errors.Join(propErrs...)
+}
+
+// parseDRepPulsingStateRatifiedIds decodes
+// ConwayGovState.cgsDRepPulsingState enough to recover the
+// GovActionIds in DRComplete's RatifyState.rsEnacted field.
+//
+// DRepPulsingState is persisted as DRComplete, even when the node was
+// still pulsing in memory:
+//
+//	[pulsingSnapshot, ratifyState]
+//
+// RatifyState then encodes as:
+//
+//	[enactState, enacted, expired, delayed]
+//
+// The enacted field is a sequence of GovActionState values in the same
+// representation used by cgsProposals, so parseGovActionState can
+// recover the exact action IDs without decoding the full enact state.
+func parseDRepPulsingStateRatifiedIds(
+	data []byte,
+) ([]ParsedGovActionId, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding DRepPulsingState: %w", err,
+		)
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	if len(fields) < 2 {
+		return nil, fmt.Errorf(
+			"DRepPulsingState has %d elements, expected 2",
+			len(fields),
+		)
+	}
+
+	ratifyState, err := decodeRawArray(fields[1])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding RatifyState: %w", err,
+		)
+	}
+	if len(ratifyState) < 2 {
+		return nil, fmt.Errorf(
+			"RatifyState has %d elements, expected 4",
+			len(ratifyState),
+		)
+	}
+
+	enacted, err := decodeRawArray(ratifyState[1])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding RatifyState enacted proposals: %w", err,
+		)
+	}
+	ratifiedIds := make([]ParsedGovActionId, 0, len(enacted))
+	var errs []error
+	for _, item := range enacted {
+		prop, err := parseGovActionState(item)
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"decoding enacted proposal: %w", err,
+			))
+			continue
+		}
+		ratifiedIds = append(ratifiedIds, ParsedGovActionId{
+			TxHash:      append([]byte(nil), prop.TxHash...),
+			ActionIndex: prop.ActionIndex,
+		})
+	}
+
+	return ratifiedIds, errors.Join(errs...)
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the

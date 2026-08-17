@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -29,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -36,6 +38,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -167,9 +170,12 @@ func (n *Node) validateBlockProducerLedgerWithView(
 			n.config.network == "devnet" {
 			n.config.logger.Warn(
 				"devnet block producer VRF cross-check failed; node will continue",
-				"component", "node",
-				"pool_id", creds.GetPoolID().String(),
-				"error", err,
+				"component",
+				"node",
+				"pool_id",
+				creds.GetPoolID().String(),
+				"error",
+				err,
 			)
 			return nil
 		}
@@ -180,8 +186,10 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	case !registered:
 		n.config.logger.Warn(
 			"block producer pool not yet registered on chain; node will continue",
-			"component", "node",
-			"pool_id", poolID,
+			"component",
+			"node",
+			"pool_id",
+			poolID,
 		)
 	case vrfMatched:
 		n.config.logger.Info(
@@ -304,6 +312,17 @@ func (n *Node) initBlockForger(
 		leiosEBCaster = n.ouroboros
 		leiosMempool = mempoolAdapter
 	}
+	blockForged := n.ledgerState.RecordForgedBlock
+	if n.ouroboros != nil {
+		blockForged = func(block gledger.Block, blockCbor []byte, latency time.Duration) {
+			n.ledgerState.RecordForgedBlock(block, blockCbor, latency)
+			if header, ok := block.Header().(*gdijkstra.DijkstraBlockHeader); ok {
+				if _, _, announces := header.LeiosAnnouncement(); announces {
+					n.ouroboros.EnqueueLeiosBlockAnnouncement(header.Cbor())
+				}
+			}
+		}
+	}
 
 	// Wire self-validation when the operator opts in. The validator runs
 	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
@@ -322,7 +341,8 @@ func (n *Node) initBlockForger(
 		LeaderChecker:                   election,
 		BlockBuilder:                    builder,
 		BlockBroadcaster:                broadcaster,
-		BlockForged:                     n.ledgerState.RecordForgedBlock,
+		ConfirmedTxs:                    mempoolAdapter,
+		BlockForged:                     blockForged,
 		SlotClock:                       slotClock,
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
@@ -421,6 +441,10 @@ func (a *forgingMempoolAdapter) Transactions() []forging.MempoolTransaction {
 		}
 	}
 	return result
+}
+
+func (a *forgingMempoolAdapter) RemoveTxsByHash(hashes []string) {
+	a.source.RemoveTxsByHash(hashes)
 }
 
 // blockBroadcaster implements forging.BlockBroadcaster by proposing locally
@@ -577,7 +601,40 @@ func (a *epochInfoAdapter) EpochSlotRange(
 ) (leader.EpochSlotRange, error) {
 	info, err := a.ledgerState.EpochInfo(epoch)
 	if err != nil {
-		return leader.EpochSlotRange{}, err
+		if !errors.Is(err, hardfork.ErrPastHorizon) {
+			return leader.EpochSlotRange{}, err
+		}
+		// The nonce-stability cutoff can precede the HFC header horizon. Once
+		// the next epoch's nonce is stable, leader election still needs that
+		// immediate Praos epoch's slot range to precompute its schedule. All
+		// Praos eras use the Shelley genesis epoch/slot dimensions.
+		readyEpoch, ready := a.ledgerState.NextEpochNonceReadyEpoch()
+		currentEpoch := a.ledgerState.CurrentEpoch()
+		if !ready ||
+			readyEpoch != epoch ||
+			currentEpoch == ^uint64(0) ||
+			epoch != currentEpoch+1 {
+			return leader.EpochSlotRange{}, err
+		}
+		currentInfo, currentErr := a.ledgerState.EpochInfo(
+			currentEpoch,
+		)
+		if currentErr != nil {
+			return leader.EpochSlotRange{}, currentErr
+		}
+		slotCount := uint64(currentInfo.LengthInSlots)
+		if slotCount == 0 ||
+			currentInfo.StartSlot > ^uint64(0)-slotCount {
+			return leader.EpochSlotRange{}, fmt.Errorf(
+				"current epoch slot range is invalid: start=%d count=%d",
+				currentInfo.StartSlot,
+				slotCount,
+			)
+		}
+		return leader.EpochSlotRange{
+			StartSlot: currentInfo.StartSlot + slotCount,
+			SlotCount: slotCount,
+		}, nil
 	}
 	return leader.EpochSlotRange{
 		StartSlot: info.StartSlot,
@@ -597,7 +654,17 @@ func (a *epochInfoAdapter) ActiveSlotCoeff() float64 {
 	return a.ledgerState.ActiveSlotCoeff()
 }
 
-func (a *epochInfoAdapter) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+// ActiveSlotCoeffRat satisfies leader.ActiveSlotCoeffRatProvider so the leader
+// schedule derives its threshold from the exact Shelley genesis rational, the
+// same value LedgerState.verifyLeaderEligibility uses, instead of a float64
+// approximation of it.
+func (a *epochInfoAdapter) ActiveSlotCoeffRat() *big.Rat {
+	return a.ledgerState.ActiveSlotCoeffRat()
+}
+
+func (a *epochInfoAdapter) ConsensusModeForEpoch(
+	epoch uint64,
+) consensus.ConsensusMode {
 	return a.ledgerState.ConsensusModeForEpoch(epoch)
 }
 
@@ -685,7 +752,9 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 	error,
 ) {
 	if a.chain == nil {
-		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, errors.New("chain unavailable")
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, errors.New(
+			"chain unavailable",
+		)
 	}
 	tip := a.chain.Tip()
 	if len(tip.Point.Hash) == 0 {

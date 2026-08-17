@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -300,153 +301,29 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		)
 		storageMode = dingo.StorageModeAPI
 	}
+	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
+	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
+	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
-		"blockfrost", storageMode.IsAPI() && cfg.BlockfrostPort > 0,
-		"utxorpc", storageMode.IsAPI() && cfg.UtxorpcPort > 0,
-		"mesh", storageMode.IsAPI() && cfg.MeshPort > 0,
-		"midnight_indexing", storageMode.IsAPI(),
+		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
+		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
+		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
 	)
 
 	d, err := dingo.New(
-		dingo.NewConfig(
-			dingo.WithIntersectTip(cfg.IntersectTip),
-			dingo.WithLogger(logger),
-			dingo.WithDatabasePath(cfg.DatabasePath),
-			dingo.WithBlobPlugin(cfg.BlobPlugin),
-			dingo.WithMetadataPlugin(cfg.MetadataPlugin),
-			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
-			dingo.WithEvictionWatermark(cfg.EvictionWatermark),
-			dingo.WithRejectionWatermark(cfg.RejectionWatermark),
-			dingo.WithNetwork(cfg.Network),
-			dingo.WithNetworkMagic(cfg.NetworkMagic),
-			dingo.WithCardanoNodeConfig(nodeCfg),
-			dingo.WithListeners(listeners...),
-			dingo.WithOutboundSourcePort(cfg.RelayPort),
-			dingo.WithPeerSharing(peerSharing),
-			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
-			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
-			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
-			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
-			dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
-			dingo.WithBarkPort(cfg.BarkPort),
-			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
-				Enabled:   cfg.HistoryExpiry.Enabled,
-				Frequency: cfg.HistoryExpiry.Frequency,
-			}),
-			dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
-			dingo.WithOffchainMetadataConfig(
-				dingo.OffchainMetadataConfig{
-					Interval: cfg.OffchainMetadata.Interval,
-					RequestTimeout: cfg.OffchainMetadata.
-						RequestTimeout,
-					UserAgent: cfg.OffchainMetadata.UserAgent,
-					IPFSGatewayURL: cfg.OffchainMetadata.
-						IPFSGatewayURL,
-					BatchSize: cfg.OffchainMetadata.BatchSize,
-					MaxBytes:  cfg.OffchainMetadata.MaxBytes,
-					AllowPrivateAddresses: cfg.OffchainMetadata.
-						AllowPrivateAddresses,
-				},
-			),
-			dingo.WithMidnightConfig(dingo.MidnightConfig{
-				Port:                        cfg.Midnight.Port,
-				Host:                        cfg.Midnight.Host,
-				CNightPolicyID:              cfg.Midnight.CNightPolicyID,
-				CNightAssetName:             cfg.Midnight.CNightAssetName,
-				MappingValidatorAddress:     cfg.Midnight.MappingValidatorAddress,
-				AuthTokenPolicyID:           cfg.Midnight.AuthTokenPolicyID,
-				AuthTokenAssetName:          cfg.Midnight.AuthTokenAssetName,
-				CommitteeCandidateAddress:   cfg.Midnight.CommitteeCandidateAddress,
-				TechnicalCommitteeAddress:   cfg.Midnight.TechnicalCommitteeAddress,
-				TechnicalCommitteePolicyID:  cfg.Midnight.TechnicalCommitteePolicyID,
-				CouncilAddress:              cfg.Midnight.CouncilAddress,
-				CouncilPolicyID:             cfg.Midnight.CouncilPolicyID,
-				PermissionedCandidatePolicy: cfg.Midnight.PermissionedCandidatePolicy,
-			}),
-			dingo.WithValidateHistorical(cfg.ValidateHistorical),
-			dingo.WithStrictUtxoValidation(cfg.StrictUtxoValidation),
-			dingo.WithRunMode(string(cfg.RunMode)),
-			dingo.WithStartEra(string(cfg.StartEra)),
-			dingo.WithShutdownTimeout(shutdownTimeout),
-			// Enable metrics with default prometheus registry
-			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
-			dingo.WithTracing(cfg.Tracing),
-			dingo.WithTracingStdout(cfg.TracingStdout),
-			dingo.WithTopologyConfig(config.GetTopologyConfig()),
-			dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
-				WorkerPoolSize: cfg.DatabaseWorkers,
-				TaskQueueSize:  cfg.DatabaseQueueSize,
-				Disabled:       false,
-			}),
-			dingo.WithPeerTargets(
-				cfg.TargetNumberOfKnownPeers,
-				cfg.TargetNumberOfEstablishedPeers,
-				cfg.TargetNumberOfActivePeers,
-			),
-			dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
-			dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
-			dingo.WithBootstrapPromotionMinDiversityGroups(
-				cfg.GenesisBootstrap.PromotionMinDiversityGroups,
-			),
-			dingo.WithActivePeersQuotas(
-				cfg.ActivePeersTopologyQuota,
-				cfg.ActivePeersGossipQuota,
-				cfg.ActivePeersLedgerQuota,
-			),
-			dingo.WithMinHotPeers(cfg.MinHotPeers),
-			dingo.WithReconcileInterval(cfg.ReconcileInterval),
-			dingo.WithInactivityTimeout(cfg.InactivityTimeout),
-			dingo.WithInboundPeerGovernance(
-				cfg.InboundWarmTarget,
-				cfg.InboundHotQuota,
-				cfg.InboundMinTenure,
-				cfg.InboundHotScoreThreshold,
-				cfg.InboundPruneAfter,
-				cfg.InboundDuplexOnlyForHot,
-				cfg.InboundCooldown,
-			),
-			dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
-			dingo.WithMaxInboundConns(cfg.MaxInboundConns),
-			dingo.WithCacheConfig(
-				cfg.Cache.BlockLRUEntries,
-				cfg.Cache.HotUtxoEntries,
-				cfg.Cache.HotTxEntries,
-				cfg.Cache.HotTxMaxBytes,
-			),
-			dingo.WithChainsyncMaxClients(
-				cfg.Chainsync.MaxClients,
-			),
-			dingo.WithChainsyncStallTimeout(
-				chainsyncStallTimeout,
-			),
-			dingo.WithChainsyncHeaderStrategy(
-				chainsyncStrategy,
-			),
-			dingo.WithBindAddr(cfg.BindAddr),
-			dingo.WithBlockfrostPort(cfg.BlockfrostPort),
-			dingo.WithMeshPort(cfg.MeshPort),
-			dingo.WithStorageMode(storageMode),
-			// Block production (SPO mode)
-			dingo.WithBlockProducer(cfg.BlockProducer),
-			dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),
-			dingo.WithShelleyKESKey(cfg.ShelleyKESKey),
-			dingo.WithShelleyOperationalCertificate(
-				cfg.ShelleyOperationalCertificate,
-			),
-			dingo.WithForgeSyncToleranceSlots(
-				cfg.ForgeSyncToleranceSlots,
-			),
-			dingo.WithForgeStaleGapThresholdSlots(
-				cfg.ForgeStaleGapThresholdSlots,
-			),
-			dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
-			// Leios voting (experimental)
-			dingo.WithLeiosVoteSigningKeyFile(
-				cfg.LeiosVoteSigningKeyFile,
-			),
-			dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
+		buildDingoConfig(
+			cfg,
+			logger,
+			nodeCfg,
+			listeners,
+			peerSharing,
+			storageMode,
+			shutdownTimeout,
+			chainsyncStallTimeout,
+			chainsyncStrategy,
 		),
 	)
 	if err != nil {
@@ -580,4 +457,210 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	}
 
 	return err
+}
+
+// buildDingoConfig translates the loaded internal/config.Config, plus the
+// values Run derives from it (the resolved cardano-node config, listeners,
+// peer-sharing decision, storage mode, and parsed durations/strategy), into
+// a dingo.Config. It is split out from Run so that the full field mapping
+// -- including cfg.API, the shared api.tls/api.auth policy defaults -- can
+// be asserted directly in tests without needing to start the node.
+func buildDingoConfig(
+	cfg *config.Config,
+	logger *slog.Logger,
+	nodeCfg *cardano.CardanoNodeConfig,
+	listeners []dingo.ListenerConfig,
+	peerSharing bool,
+	storageMode dingo.StorageMode,
+	shutdownTimeout time.Duration,
+	chainsyncStallTimeout time.Duration,
+	chainsyncStrategy chainsync.HeaderSyncStrategy,
+) dingo.Config {
+	return dingo.NewConfig(
+		dingo.WithIntersectTip(cfg.IntersectTip),
+		dingo.WithLogger(logger),
+		dingo.WithDatabasePath(cfg.DatabasePath),
+		dingo.WithPluginSelection(
+			plugin.CapabilityStorageBlob,
+			cfg.Plugins.Storage.Blob,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityStorageMetadata,
+			cfg.Plugins.Storage.Metadata,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityMempool,
+			cfg.Plugins.Mempool,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIBlockfrost,
+			cfg.Plugins.API.Blockfrost,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIMesh,
+			cfg.Plugins.API.Mesh,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIUtxorpc,
+			cfg.Plugins.API.Utxorpc,
+		),
+		dingo.WithNetwork(cfg.Network),
+		dingo.WithNetworkMagic(cfg.NetworkMagic),
+		dingo.WithCardanoNodeConfig(nodeCfg),
+		dingo.WithListeners(listeners...),
+		dingo.WithOutboundSourcePort(cfg.RelayPort),
+		dingo.WithPeerSharing(peerSharing),
+		dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
+		dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
+		dingo.WithAPIConfig(cfg.API),
+		dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
+		dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
+		dingo.WithBarkPort(cfg.BarkPort),
+		dingo.WithBarkHost(cfg.BarkHost),
+		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
+		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
+			Enabled:   cfg.HistoryExpiry.Enabled,
+			Frequency: cfg.HistoryExpiry.Frequency,
+		}),
+		dingo.WithKoiosParity(dingo.KoiosParityConfig{
+			Enabled:    cfg.KoiosParity.Enabled,
+			Network:    cfg.KoiosParity.Network,
+			CachePath:  cfg.KoiosParity.CachePath,
+			APIKey:     cfg.KoiosParity.APIKey,
+			Strict:     cfg.KoiosParity.Strict,
+			GraceHours: cfg.KoiosParity.GraceHours,
+		}),
+		dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
+		dingo.WithOffchainMetadataConfig(
+			dingo.OffchainMetadataConfig{
+				Interval: cfg.OffchainMetadata.Interval,
+				RequestTimeout: cfg.OffchainMetadata.
+					RequestTimeout,
+				UserAgent: cfg.OffchainMetadata.UserAgent,
+				IPFSGatewayURL: cfg.OffchainMetadata.
+					IPFSGatewayURL,
+				BatchSize: cfg.OffchainMetadata.BatchSize,
+				MaxBytes:  cfg.OffchainMetadata.MaxBytes,
+				AllowPrivateAddresses: cfg.OffchainMetadata.
+					AllowPrivateAddresses,
+			},
+		),
+		dingo.WithMidnightConfig(dingo.MidnightConfig{
+			Enabled:                     cfg.Midnight.Enabled,
+			Port:                        cfg.Midnight.Port,
+			Host:                        cfg.Midnight.Host,
+			CNightPolicyID:              cfg.Midnight.CNightPolicyID,
+			CNightAssetName:             cfg.Midnight.CNightAssetName,
+			MappingValidatorAddress:     cfg.Midnight.MappingValidatorAddress,
+			AuthTokenPolicyID:           cfg.Midnight.AuthTokenPolicyID,
+			AuthTokenAssetName:          cfg.Midnight.AuthTokenAssetName,
+			CommitteeCandidateAddress:   cfg.Midnight.CommitteeCandidateAddress,
+			TechnicalCommitteeAddress:   cfg.Midnight.TechnicalCommitteeAddress,
+			TechnicalCommitteePolicyID:  cfg.Midnight.TechnicalCommitteePolicyID,
+			CouncilAddress:              cfg.Midnight.CouncilAddress,
+			CouncilPolicyID:             cfg.Midnight.CouncilPolicyID,
+			PermissionedCandidatePolicy: cfg.Midnight.PermissionedCandidatePolicy,
+		}),
+		dingo.WithValidateHistorical(cfg.ValidateHistorical),
+		dingo.WithStrictUtxoValidation(cfg.StrictUtxoValidation),
+		dingo.WithRunMode(string(cfg.RunMode)),
+		dingo.WithStartEra(string(cfg.StartEra)),
+		dingo.WithShutdownTimeout(shutdownTimeout),
+		// Enable metrics with default prometheus registry
+		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
+		dingo.WithTracing(cfg.Tracing),
+		dingo.WithTracingStdout(cfg.TracingStdout),
+		dingo.WithTopologyConfig(config.GetTopologyConfig()),
+		dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
+			WorkerPoolSize: cfg.DatabaseWorkers,
+			TaskQueueSize:  cfg.DatabaseQueueSize,
+			Disabled:       false,
+		}),
+		dingo.WithPeerTargets(
+			cfg.TargetNumberOfKnownPeers,
+			cfg.TargetNumberOfEstablishedPeers,
+			cfg.TargetNumberOfActivePeers,
+		),
+		dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
+		dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
+		dingo.WithGenesisCorroborationPeers(
+			cfg.GenesisBootstrap.CorroborationPeers,
+		),
+		dingo.WithBootstrapPromotionMinDiversityGroups(
+			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+		),
+		dingo.WithActivePeersQuotas(
+			cfg.ActivePeersTopologyQuota,
+			cfg.ActivePeersGossipQuota,
+			cfg.ActivePeersLedgerQuota,
+		),
+		dingo.WithMinHotPeers(cfg.MinHotPeers),
+		dingo.WithReconcileInterval(cfg.ReconcileInterval),
+		dingo.WithInactivityTimeout(cfg.InactivityTimeout),
+		dingo.WithInboundPeerGovernance(
+			cfg.InboundWarmTarget,
+			cfg.InboundHotQuota,
+			cfg.InboundMinTenure,
+			cfg.InboundHotScoreThreshold,
+			cfg.InboundPruneAfter,
+			cfg.InboundDuplexOnlyForHot,
+			cfg.InboundCooldown,
+		),
+		dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
+		dingo.WithMaxInboundConns(cfg.MaxInboundConns),
+		dingo.WithCacheConfig(
+			cfg.Cache.BlockLRUEntries,
+			cfg.Cache.HotUtxoEntries,
+			cfg.Cache.HotTxEntries,
+			cfg.Cache.HotTxMaxBytes,
+		),
+		dingo.WithChainsyncMaxClients(
+			cfg.Chainsync.MaxClients,
+		),
+		dingo.WithChainsyncStallTimeout(
+			chainsyncStallTimeout,
+		),
+		dingo.WithChainsyncHeaderStrategy(
+			chainsyncStrategy,
+		),
+		dingo.WithBindAddr(cfg.BindAddr),
+		dingo.WithStorageMode(storageMode),
+		// CIP-23 minimum pool margin (consensus-affecting)
+		dingo.WithMinPoolMargin(cfg.MinPoolMargin),
+		// CIP-50 pledge-leverage staking rewards (consensus-affecting)
+		dingo.WithPledgeLeverage(
+			cfg.PledgeLeverageEnabled,
+			cfg.PledgeLeverage,
+		),
+		// CIP-0163 full-pot reward distribution (consensus-affecting)
+		dingo.WithFullPotRewards(cfg.FullPotRewardsEnabled),
+		dingo.WithUnsafeFullPotRewardsOnStandardNetworks(
+			cfg.UnsafeFullPotRewardsOnStandardNetworks,
+		),
+		// Block production (SPO mode)
+		dingo.WithBlockProducer(cfg.BlockProducer),
+		dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),
+		dingo.WithShelleyKESKey(cfg.ShelleyKESKey),
+		dingo.WithShelleyOperationalCertificate(
+			cfg.ShelleyOperationalCertificate,
+		),
+		dingo.WithForgeSyncToleranceSlots(
+			cfg.ForgeSyncToleranceSlots,
+		),
+		dingo.WithForgeStaleGapThresholdSlots(
+			cfg.ForgeStaleGapThresholdSlots,
+		),
+		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
+		dingo.WithDelegatorInactivity(
+			cfg.DelegatorInactivityEnabled,
+			cfg.DelegatorInactivity,
+		),
+		dingo.WithDatabaseLifecycle(cfg.DatabaseLifecycle),
+		// Leios voting (experimental)
+		dingo.WithLeiosVoteSigningKeyFile(
+			cfg.LeiosVoteSigningKeyFile,
+		),
+		dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
+	)
 }

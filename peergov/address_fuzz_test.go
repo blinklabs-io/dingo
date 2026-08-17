@@ -39,7 +39,8 @@ func FuzzNormalizeAddress(f *testing.F) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			if normalized != strings.ToLower(address) {
-				t.Fatalf("malformed address normalized to %q, want lowercase %q",
+				t.Fatalf(
+					"malformed address normalized to %q, want lowercase %q",
 					normalized,
 					strings.ToLower(address),
 				)
@@ -54,7 +55,11 @@ func FuzzNormalizeAddress(f *testing.F) {
 			t.Fatalf("normalized port = %q, want %q", normalizedPort, port)
 		}
 		if net.ParseIP(host) == nil && normalizedHost != strings.ToLower(host) {
-			t.Fatalf("normalized hostname = %q, want %q", normalizedHost, strings.ToLower(host))
+			t.Fatalf(
+				"normalized hostname = %q, want %q",
+				normalizedHost,
+				strings.ToLower(host),
+			)
 		}
 	})
 }
@@ -69,7 +74,11 @@ func FuzzAddressHost(f *testing.F) {
 		inputHost, _, err := net.SplitHostPort(address)
 		if err != nil {
 			if host != "" {
-				t.Fatalf("addressHost(%q) = %q, want empty on parse failure", address, host)
+				t.Fatalf(
+					"addressHost(%q) = %q, want empty on parse failure",
+					address,
+					host,
+				)
 			}
 			return
 		}
@@ -80,7 +89,11 @@ func FuzzAddressHost(f *testing.F) {
 			return
 		}
 		if host != strings.ToLower(inputHost) {
-			t.Fatalf("addressHost hostname = %q, want %q", host, strings.ToLower(inputHost))
+			t.Fatalf(
+				"addressHost hostname = %q, want %q",
+				host,
+				strings.ToLower(inputHost),
+			)
 		}
 	})
 }
@@ -101,7 +114,10 @@ func FuzzIsRoutableAddr(f *testing.F) {
 		ip := net.ParseIP(host)
 		if ip == nil {
 			if !routable {
-				t.Fatalf("hostname or malformed address %q should be treated as routable", address)
+				t.Fatalf(
+					"hostname or malformed address %q should be treated as routable",
+					address,
+				)
 			}
 			return
 		}

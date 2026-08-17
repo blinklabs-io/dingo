@@ -17,15 +17,16 @@ package models
 // AddressTransaction maps an address (payment and/or staking key) to a
 // transaction that references it as an input/output participant.
 type AddressTransaction struct {
-	ID            uint   `gorm:"primaryKey"`
-	PaymentKey    []byte `gorm:"index:idx_addr_tx_payment;size:28"`
-	StakingKey    []byte `gorm:"index:idx_addr_tx_staking,priority:2;size:28"`
-	CredentialTag uint8  `gorm:"not null;default:0;index:idx_addr_tx_staking,priority:1"`
-	TransactionID uint   `gorm:"index"`
-	Slot          uint64 `gorm:"index"`
-	TxIndex       uint32
-}
-
-func (AddressTransaction) TableName() string {
-	return "address_transaction"
+	ID uint
+	// PaymentKey backs bare payment-credential lookups and provides the final
+	// deterministic tie-break in the stake-position index.
+	PaymentKey    []byte
+	StakingKey    []byte
+	CredentialTag uint8
+	TransactionID uint
+	// Slot retains its standalone rollback index in addition to participating
+	// in the stake-position index.
+	Slot uint64
+	// TxIndex is queried as part of the stake-position ordering.
+	TxIndex uint32
 }

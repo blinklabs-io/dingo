@@ -55,6 +55,12 @@ type EpochInput struct {
 	// used until a live per-committee quorum is persisted in state.
 	// Nil falls back to the hardcoded default.
 	ConwayGenesis *conway.ConwayGenesis
+	// DelegatorInactivityOn mirrors LedgerStateConfig.DelegatorInactivityEnabled
+	// (CIP-0163): when true, the DRep voting-power denominator excludes
+	// reward accounts whose expiration_epoch is nonzero and stale relative
+	// to NewEpoch. Defaults false (gate off), keeping the tally
+	// byte-identical to the pre-CIP behavior.
+	DelegatorInactivityOn bool
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -291,10 +297,11 @@ func ProcessEpoch(
 	// ratification input here without updating the mid-epoch path
 	// will silently make the two answers diverge — keep them in sync.
 	tallyCtx := &TallyContext{
-		DB:           in.DB,
-		Txn:          in.Txn,
-		StakeEpoch:   stakeEpochFor(in.NewEpoch),
-		CurrentEpoch: in.NewEpoch,
+		DB:                    in.DB,
+		Txn:                   in.Txn,
+		StakeEpoch:            stakeEpochFor(in.NewEpoch),
+		CurrentEpoch:          in.NewEpoch,
+		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
 	// Active set changes as we ratify; snapshot once.
@@ -354,7 +361,9 @@ func ProcessEpoch(
 	drepState := &DRepVotingState{}
 	spoState := &SPOVotingState{}
 	if len(stillActive) > 0 {
-		drepState, err = LoadDRepVotingState(in.DB, in.Txn, in.NewEpoch)
+		drepState, err = LoadDRepVotingState(
+			in.DB, in.Txn, in.NewEpoch, in.DelegatorInactivityOn,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("load drep voting state: %w", err)
 		}
@@ -445,12 +454,18 @@ func ProcessEpoch(
 				purpose != purposeNone {
 				in.Logger.Warn(
 					"skipping chained proposal: no enacted root for purpose; possible mithril bootstrap gap (#2195)",
-					"component", "governance",
-					"tx_hash", shortHash(proposal.TxHash),
-					"action_index", proposal.ActionIndex,
-					"action_type", proposal.ActionType,
-					"parent_tx_hash", hex.EncodeToString(proposal.ParentTxHash),
-					"epoch", in.NewEpoch,
+					"component",
+					"governance",
+					"tx_hash",
+					shortHash(proposal.TxHash),
+					"action_index",
+					proposal.ActionIndex,
+					"action_type",
+					proposal.ActionType,
+					"parent_tx_hash",
+					hex.EncodeToString(proposal.ParentTxHash),
+					"epoch",
+					in.NewEpoch,
 				)
 			}
 			continue
@@ -481,10 +496,14 @@ func ProcessEpoch(
 				if in.Logger != nil {
 					in.Logger.Error(
 						"skipping proposal: failed to decode parameter change action",
-						"tx_hash", shortHash(proposal.TxHash),
-						"action_index", proposal.ActionIndex,
-						"error", decodeErr,
-						"component", "governance",
+						"tx_hash",
+						shortHash(proposal.TxHash),
+						"action_index",
+						proposal.ActionIndex,
+						"error",
+						decodeErr,
+						"component",
+						"governance",
 					)
 				}
 				continue
@@ -494,10 +513,14 @@ func ProcessEpoch(
 				if in.Logger != nil {
 					in.Logger.Error(
 						"skipping proposal: decoded action is not a parameter change",
-						"tx_hash", shortHash(proposal.TxHash),
-						"action_index", proposal.ActionIndex,
-						"got_type", fmt.Sprintf("%T", action),
-						"component", "governance",
+						"tx_hash",
+						shortHash(proposal.TxHash),
+						"action_index",
+						proposal.ActionIndex,
+						"got_type",
+						fmt.Sprintf("%T", action),
+						"component",
+						"governance",
 					)
 				}
 				continue
@@ -665,7 +688,7 @@ func refundProposalDeposit(
 	if err != nil {
 		return err
 	}
-	credited, err := CreditRegisteredRewardAccount(
+	credited, err := CreditRegisteredRewardAccountAfterSnapshot(
 		db,
 		txn,
 		credentialTag,

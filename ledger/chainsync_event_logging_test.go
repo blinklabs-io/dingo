@@ -44,7 +44,11 @@ func assertLogContains(t *testing.T, buf *bytes.Buffer, wants []string) {
 	logOutput := buf.String()
 	for _, want := range wants {
 		if !strings.Contains(logOutput, want) {
-			t.Fatalf("expected log output to contain %q, got %s", want, logOutput)
+			t.Fatalf(
+				"expected log output to contain %q, got %s",
+				want,
+				logOutput,
+			)
 		}
 	}
 }

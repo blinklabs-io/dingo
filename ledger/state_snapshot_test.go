@@ -12,6 +12,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -92,7 +93,7 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 		EraId:     ^uint(0),
 	}
 
-	err := ls.setEpochCache(nil, []models.Epoch{invalidEpoch})
+	err := ls.setEpochCache(&database.Txn{}, []models.Epoch{invalidEpoch})
 	require.ErrorContains(t, err, "unknown era ID")
 
 	// The deferred publication must expose the mutation through the atomic
@@ -224,13 +225,11 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	currentEpoch := models.Epoch{
 		EpochId:       5,
@@ -246,9 +245,10 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		nil,
 	))
 
-	// A pending update targeting the rollover's next epoch. Quorum defaults
-	// to 0 (no UpdateQuorum in the genesis JSON above), so a single proposal
-	// is enough for ComputeAndApplyPParamUpdates to apply it.
+	// A pending update submitted in the current epoch, which the rollover
+	// enacts as the next epoch's parameters (submission epoch e -> enacted
+	// for e+1). Quorum defaults to 0 (no UpdateQuorum in the genesis JSON
+	// above), so a single proposal is enough to apply it.
 	newMinFeeA := uint(99)
 	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
 		MinFeeA: &newMinFeeA,
@@ -258,7 +258,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		[]byte{0x01, 0x02, 0x03},
 		updateCbor,
 		currentEpoch.StartSlot+1,
-		currentEpoch.EpochId+1,
+		currentEpoch.EpochId, // submission epoch (enacted for EpochId+1)
 		nil,
 	))
 
@@ -295,6 +295,9 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		)
 		return rolloverErr
 	}))
+	if result == nil {
+		t.Fatal("epoch rollover returned no result")
+	}
 
 	updatedShelley, ok := result.NewCurrentPParams.(*shelley.ShelleyProtocolParameters)
 	require.True(t, ok)
@@ -338,9 +341,7 @@ func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 	// an accidental return to independently-read live fields fail logically as
 	// well as through the race detector.
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -367,7 +368,7 @@ func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	// Publish many generations while all readers are active. The existing
@@ -406,9 +407,7 @@ func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
 	done := make(chan struct{})
 
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -428,7 +427,7 @@ func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	for generation := 1; generation <= generations; generation++ {

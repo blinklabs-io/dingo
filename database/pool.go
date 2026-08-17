@@ -150,6 +150,20 @@ func (d *Database) LatestPoolOpCertSequence(
 	return d.metadata.LatestPoolOpCertSequence(pkh, txn.Metadata())
 }
 
+// LatestPoolOpCertSequences returns the highest observed op-cert sequence for
+// every pool that has issued a block, keyed by pool key hash. This backs the
+// GetChainDepState local-state-query, whose counters cover every cold key the
+// chain has accepted a certificate for rather than only the active pools.
+func (d *Database) LatestPoolOpCertSequences(
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.LatestPoolOpCertSequences(txn.Metadata())
+}
+
 // GetPools returns pools by key hash.
 func (d *Database) GetPools(
 	pkhs []lcommon.PoolKeyHash,
@@ -201,4 +215,32 @@ func (d *Database) GetActivePoolKeyHashes(
 		defer txn.Release()
 	}
 	return d.metadata.GetActivePoolKeyHashes(txn.Metadata())
+}
+
+// GetActivePoolKeyHashesOrdered returns the key hashes of all currently
+// active (registered, non-retired) stake pools, ordered oldest-first by
+// each pool's earliest on-chain registration certificate. See
+// metadata.MetadataStore.GetActivePoolKeyHashesOrdered for the full
+// ordering semantics. This backs the Blockfrost pool_list endpoint.
+func (d *Database) GetActivePoolKeyHashesOrdered(
+	txn *Txn,
+) ([][]byte, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetActivePoolKeyHashesOrdered(txn.Metadata())
+}
+
+// GetPoolCertificateHistory returns the transaction hashes of a pool's
+// registration and retirement certificates, in chronological order.
+func (d *Database) GetPoolCertificateHistory(
+	pkh lcommon.PoolKeyHash,
+	txn *Txn,
+) ([][]byte, [][]byte, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetPoolCertificateHistory(pkh, txn.Metadata())
 }

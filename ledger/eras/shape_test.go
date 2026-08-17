@@ -39,7 +39,10 @@ func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byron)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)))
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+	)
 	return cfg
 }
 
@@ -54,7 +57,10 @@ func newShelleyOnlyCfg(t *testing.T) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)))
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+	)
 	return cfg
 }
 
@@ -155,8 +161,20 @@ func TestBuildShape_OK(t *testing.T) {
 	for _, e := range shape.Eras {
 		w, ok := want[e.EraName]
 		require.True(t, ok, "unexpected era %q", e.EraName)
-		assert.Equal(t, w.min, e.MinMajorVersion, "%s MinMajorVersion", e.EraName)
-		assert.Equal(t, w.max, e.MaxMajorVersion, "%s MaxMajorVersion", e.EraName)
+		assert.Equal(
+			t,
+			w.min,
+			e.MinMajorVersion,
+			"%s MinMajorVersion",
+			e.EraName,
+		)
+		assert.Equal(
+			t,
+			w.max,
+			e.MaxMajorVersion,
+			"%s MaxMajorVersion",
+			e.EraName,
+		)
 	}
 
 	assert.NoError(t, shape.Validate(), "BuildShape must produce a valid Shape")
@@ -260,7 +278,9 @@ func TestBuildShape_NextEraTrigger_AtEpochOverride(t *testing.T) {
 
 // TestXHardForkAtEpoch is ignored when ExperimentalHardForksEnabled is not
 // set: HardForkEpoch returns false, so we fall through to AtVersion.
-func TestBuildShape_NextEraTrigger_NoOverrideWithoutExperimentalFlag(t *testing.T) {
+func TestBuildShape_NextEraTrigger_NoOverrideWithoutExperimentalFlag(
+	t *testing.T,
+) {
 	cfg := newTestCfg(t)
 	override := uint64(5)
 	cfg.TestShelleyHardForkAtEpoch = &override
@@ -296,9 +316,17 @@ func TestBuildShape_NextEraTrigger_MultipleOverrides(t *testing.T) {
 
 	assert.Equal(t, hardfork.TriggerAtEpoch, byEra["Byron"].NextEraTrigger.Kind)
 	assert.Equal(t, shelleyEpoch, byEra["Byron"].NextEraTrigger.Epoch)
-	assert.Equal(t, hardfork.TriggerAtEpoch, byEra["Babbage"].NextEraTrigger.Kind)
+	assert.Equal(
+		t,
+		hardfork.TriggerAtEpoch,
+		byEra["Babbage"].NextEraTrigger.Kind,
+	)
 	assert.Equal(t, conwayEpoch, byEra["Babbage"].NextEraTrigger.Epoch)
-	assert.Equal(t, hardfork.TriggerAtVersion, byEra["Shelley"].NextEraTrigger.Kind)
+	assert.Equal(
+		t,
+		hardfork.TriggerAtVersion,
+		byEra["Shelley"].NextEraTrigger.Kind,
+	)
 }
 
 // The Shape produced by BuildShape always validates, including the

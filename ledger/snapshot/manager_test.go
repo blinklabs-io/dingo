@@ -33,6 +33,64 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+func TestSetDelegatorInactivityRejectsInvalidPeriod(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+
+	require.ErrorContains(t, mgr.SetDelegatorInactivity(true, 0), "[1, 10000]")
+	require.ErrorContains(
+		t,
+		mgr.SetDelegatorInactivity(true, 10_001),
+		"[1, 10000]",
+	)
+	require.NoError(t, mgr.SetDelegatorInactivity(false, 90))
+	require.Zero(t, mgr.expiryEpoch(123))
+	require.Zero(t, mgr.inactivityPeriod())
+}
+
+func TestSetDelegatorInactivityLockedAfterStart(t *testing.T) {
+	db := setupTestDB(t)
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
+	require.NoError(t, mgr.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, mgr.Stop()) })
+
+	require.ErrorContains(
+		t,
+		mgr.SetDelegatorInactivity(false, 0),
+		"configuration is locked",
+	)
+	require.Equal(t, uint64(123), mgr.expiryEpoch(123))
+	require.Equal(t, uint64(90), mgr.inactivityPeriod())
+
+	require.NoError(t, mgr.Stop())
+	require.ErrorContains(
+		t,
+		mgr.SetDelegatorInactivity(true, 91),
+		"configuration is locked",
+	)
+}
+
+func TestSetDelegatorInactivityLockedAfterGenesisCapture(t *testing.T) {
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+	})
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	require.ErrorContains(
+		t,
+		mgr.SetDelegatorInactivity(true, 90),
+		"configuration is locked",
+	)
+}
+
+func TestSetDelegatorInactivityRemainsMutableAfterFailedStart(t *testing.T) {
+	mgr := NewManager(nil, event.NewEventBus(nil, nil), nil)
+	require.ErrorContains(t, mgr.Start(context.Background()), "nil database")
+	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
+}
+
 // TestCaptureGenesisSnapshot_PostMithril verifies that after a Mithril
 // bootstrap (where slot 0 has no pools but later epochs exist), the
 // snapshot manager seeds the recent historical window for the current epoch.
@@ -115,6 +173,55 @@ func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 		"current post-Mithril seed row keeps stake reward inputs")
 }
 
+func TestCaptureGenesisSnapshot_PostMithrilSkipsUnsafeExpiryHistory(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 148, StartSlot: 63936000, LengthInSlots: 432000},
+		{EpochId: 149, StartSlot: 64368000, LengthInSlots: 432000},
+		{EpochId: 150, StartSlot: 64800000, LengthInSlots: 432000},
+	})
+
+	poolHash := []byte("poolM_expiry_history_1234567")
+	activeCred := bytes.Repeat([]byte{0xa1}, 28)
+	expiredCred := bytes.Repeat([]byte{0xe1}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{stakingKey: activeCred, utxoAmounts: []types.Uint64{10_000_000}},
+		{stakingKey: expiredCred, utxoAmounts: []types.Uint64{50_000_000}},
+	}, 64800000)
+	require.NoError(t, db.RenewAccountExpirations(
+		[]models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, expiredCred),
+		},
+		149,
+		nil,
+	))
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	for _, epoch := range []uint64{148, 149} {
+		snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+			epoch, "mark", poolHash, nil,
+		)
+		require.NoError(t, err)
+		require.Nil(t, snapshot,
+			"epoch %d must not be synthesized from current expiry state", epoch)
+	}
+	current, err := db.Metadata().
+		GetPoolStakeSnapshot(150, "mark", poolHash, nil)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, uint64(10_000_000), uint64(current.TotalStake))
+}
+
 func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
 	db := setupTestDB(t)
 
@@ -162,7 +269,11 @@ func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Nil(t, snapshot, "existing post-Mithril window should skip epoch-0 reseed")
+	require.Nil(
+		t,
+		snapshot,
+		"existing post-Mithril window should skip epoch-0 reseed",
+	)
 }
 
 // TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch
@@ -175,7 +286,9 @@ func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
 // freeze today's delegation map into a historical snapshot, so those
 // rows must keep Resolved=false and the tally must treat them as
 // implicit no.
-func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(t *testing.T) {
+func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(
+	t *testing.T,
+) {
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -187,15 +300,22 @@ func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(t *tes
 
 	poolHash := []byte("poolM_12345678901234567890CD")
 	rewardAccount := bytes.Repeat([]byte{0xcd}, 28)
-	seedPoolAndDelegationsWithRewardAccount(t, db, poolHash, rewardAccount, []struct {
-		stakingKey  []byte
-		utxoAmounts []types.Uint64
-	}{
-		{
-			stakingKey:  bytes.Repeat([]byte{0xac}, 28),
-			utxoAmounts: []types.Uint64{50000000},
+	seedPoolAndDelegationsWithRewardAccount(
+		t,
+		db,
+		poolHash,
+		rewardAccount,
+		[]struct {
+			stakingKey  []byte
+			utxoAmounts []types.Uint64
+		}{
+			{
+				stakingKey:  bytes.Repeat([]byte{0xac}, 28),
+				utxoAmounts: []types.Uint64{50000000},
+			},
 		},
-	}, 64800000)
+		64800000,
+	)
 
 	// Seed an AlwaysAbstain delegation for the pool reward account. The
 	// resolver, if it runs, will produce Abstain. We then verify it only
@@ -348,24 +468,36 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 			utxoAmounts: []types.Uint64{50_000_000},
 		},
 	}, 500)
-	gormDB := snapshotGormDB(t, db)
-	var pool models.Pool
-	require.NoError(t, gormDB.Where("pool_key_hash = ?", poolHash).First(&pool).Error)
-	var effectiveRegistration models.PoolRegistration
-	require.NoError(t, gormDB.Where(
-		"pool_id = ? AND added_slot = ?", pool.ID, 500,
-	).First(&effectiveRegistration).Error)
+	raw := snapshotSQLDB(t, db)
+	var poolID uint
+	require.NoError(t, raw.QueryRow(
+		"SELECT id FROM pool WHERE pool_key_hash = ?",
+		poolHash,
+	).Scan(&poolID))
+	var registrationID uint
+	require.NoError(t, raw.QueryRow(`
+SELECT id FROM pool_registration
+WHERE pool_id = ? AND added_slot = ?`,
+		poolID, 500,
+	).Scan(&registrationID))
 	rewardAccount := []byte("reward_account_1234567890123")
 	require.Len(t, rewardAccount, 28)
-	require.NoError(t, gormDB.Model(&effectiveRegistration).Updates(map[string]any{
-		"reward_account":                rewardAccount,
-		"reward_account_credential_tag": uint8(1),
-	}).Error)
-	require.NoError(t, gormDB.Create(&models.PoolRegistrationOwner{
-		PoolRegistrationID: effectiveRegistration.ID,
-		PoolID:             pool.ID,
-		KeyHash:            []byte("reward_staking_key_123456789"),
-	}).Error)
+	_, err := raw.Exec(`
+UPDATE pool_registration
+SET reward_account = ?, reward_account_credential_tag = 1
+WHERE id = ?`,
+		rewardAccount, registrationID,
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO pool_registration_owner (
+    pool_registration_id, pool_id, key_hash
+) VALUES (?, ?, ?)`,
+		registrationID,
+		poolID,
+		[]byte("reward_staking_key_123456789"),
+	)
+	require.NoError(t, err)
 	// Reward balance is part of the historical Mark stake and therefore of
 	// owner stake as well.
 	require.NoError(t, db.AddAccountRewardByCredential(
@@ -376,31 +508,29 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 		nil,
 		nil,
 	))
-	require.NoError(t, gormDB.Create(&models.PoolRegistration{
-		PoolID:      pool.ID,
-		PoolKeyHash: poolHash,
-		// This in-epoch re-registration is future parameters and must not
-		// replace the registration active at the start of epoch 0.
-		AddedSlot: 750,
-		Pledge:    2_000_000,
-		Cost:      500_000_000,
-		Margin:    &types.Rat{Rat: big.NewRat(1, 10)},
-	}).Error)
-	require.NoError(t, gormDB.Create(&models.PoolOpCertSequence{
-		PoolKeyHash: poolHash,
-		Slot:        600,
-		Sequence:    1,
-	}).Error)
-	require.NoError(t, gormDB.Create(&models.PoolOpCertSequence{
-		PoolKeyHash: []byte("other_12345678901234567890AB"),
-		Slot:        700,
-		Sequence:    1,
-	}).Error)
-	require.NoError(t, gormDB.Create(&models.PoolOpCertSequence{
-		PoolKeyHash: poolHash,
-		Slot:        432000,
-		Sequence:    2,
-	}).Error)
+	_, err = raw.Exec(`
+INSERT INTO pool_registration (
+    pool_id, pool_key_hash, added_slot, pledge, cost, margin
+) VALUES (?, ?, 750, '2000000', '500000000', '1/10')`,
+		poolID, poolHash,
+	)
+	require.NoError(t, err)
+	for _, row := range []models.PoolOpCertSequence{
+		{PoolKeyHash: poolHash, Slot: 600, Sequence: 1},
+		{
+			PoolKeyHash: []byte("other_12345678901234567890AB"),
+			Slot:        700,
+			Sequence:    1,
+		},
+		{PoolKeyHash: poolHash, Slot: 432000, Sequence: 2},
+	} {
+		_, err = raw.Exec(`
+INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
+VALUES (?, ?, ?)`,
+			row.PoolKeyHash, row.Slot, row.Sequence,
+		)
+		require.NoError(t, err)
+	}
 
 	eventBus := event.NewEventBus(nil, nil)
 	mgr := NewManager(db, eventBus, nil)
@@ -417,7 +547,11 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
-	require.Equal(t, uint64(57_000_000), uint64(rewardSnapshot.TotalActiveStake))
+	require.Equal(
+		t,
+		uint64(57_000_000),
+		uint64(rewardSnapshot.TotalActiveStake),
+	)
 	require.Equal(t, uint64(1), rewardSnapshot.TotalPoolCount)
 	require.Equal(t, uint64(1), rewardSnapshot.TotalDelegators)
 	require.Equal(t, uint64(1000), rewardSnapshot.CapturedSlot)
@@ -447,11 +581,11 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 
 func TestCaptureMarkSnapshotReplacesPriorPoolSet(t *testing.T) {
 	db := setupTestDB(t)
-	require.NoError(t, snapshotGormDB(t, db).Create(&models.Epoch{
+	seedEpochs(t, db, []models.Epoch{{
 		EpochId:       0,
 		StartSlot:     0,
 		LengthInSlots: 1_000,
-	}).Error)
+	}})
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
 			Epoch:          7,
@@ -526,6 +660,8 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 	distribution, err := mgr.calculateSnapshotDistribution(
 		context.Background(),
 		evt.SnapshotSlot,
+		0,
+		0,
 	)
 	require.NoError(t, err)
 	saved, err := mgr.saveSnapshot(
@@ -560,8 +696,11 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 	// No reward bundle could be built, so no reward_snapshot marker is written.
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(7, "mark", nil)
 	require.NoError(t, err)
-	require.Nil(t, rewardSnapshot,
-		"no reward marker is written when the ended-epoch metadata is unavailable")
+	require.Nil(
+		t,
+		rewardSnapshot,
+		"no reward marker is written when the ended-epoch metadata is unavailable",
+	)
 }
 
 func TestFallbackWithoutRewardInputsPreservesAuthoritativeMark(t *testing.T) {
@@ -823,7 +962,9 @@ func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
 	require.Equal(t, 1, ownerRows)
 }
 
-func TestHandleEpochTransitionDoesNotTreatScriptCredentialAsOwner(t *testing.T) {
+func TestHandleEpochTransitionDoesNotTreatScriptCredentialAsOwner(
+	t *testing.T,
+) {
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -959,7 +1100,11 @@ func TestValidateRewardStakeInputTotals(t *testing.T) {
 				{PoolKeyHash: poolA[:], StakingKey: stakeA[:27], Stake: 100},
 			},
 		})
-		require.ErrorContains(t, err, "invalid reward stake input credential length")
+		require.ErrorContains(
+			t,
+			err,
+			"invalid reward stake input credential length",
+		)
 	})
 
 	t.Run("invalid credential tag", func(t *testing.T) {
@@ -976,8 +1121,88 @@ func TestValidateRewardStakeInputTotals(t *testing.T) {
 				},
 			},
 		})
-		require.ErrorContains(t, err, "invalid reward stake input credential tag")
+		require.ErrorContains(
+			t,
+			err,
+			"invalid reward stake input credential tag",
+		)
 	})
+}
+
+// TestRewardStakeDistributionDedupesDuplicateCredential verifies that duplicate
+// live-stake credential inputs collapse to a single row even when the corrupt
+// rows assign the credential to different pools. RewardLiveStake identity does
+// not include the pool, so retaining both assignments would reward one
+// credential twice.
+func TestRewardStakeDistributionDedupesDuplicateCredential(t *testing.T) {
+	var poolA lcommon.PoolKeyHash
+	var poolB lcommon.PoolKeyHash
+	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
+	copy(poolB[:], bytes.Repeat([]byte{0x22}, len(poolB)))
+	stakeA := bytes.Repeat([]byte{0x31}, len(poolA))
+	stakeB := bytes.Repeat([]byte{0x32}, len(poolA))
+
+	reward, err := rewardStakeDistribution(&StakeDistribution{
+		Slot: 100,
+		StakeInputs: []StakeInput{
+			// Duplicate credential across pools: last-writer-wins keeps the
+			// poolB assignment with stake 70.
+			{PoolKeyHash: poolA[:], StakingKey: stakeA, Stake: 40},
+			{PoolKeyHash: poolB[:], StakingKey: stakeA, Stake: 70},
+			{PoolKeyHash: poolA[:], StakingKey: stakeB, Stake: 30},
+		},
+	})
+	require.NoError(t, err)
+
+	// The duplicate collapses: two distinct credentials remain.
+	require.Len(t, reward.StakeInputs, 2)
+	require.Equal(t, poolB[:], reward.StakeInputs[0].PoolKeyHash)
+	require.Equal(t, stakeA, reward.StakeInputs[0].StakingKey)
+	require.Equal(t, uint64(1), reward.DelegatorCount[poolA])
+	require.Equal(t, uint64(1), reward.DelegatorCount[poolB])
+
+	// Pool totals equal the deduped stake assignments, not the double-counted
+	// 40 + 70 + 30.
+	var inputSum uint64
+	for _, input := range reward.StakeInputs {
+		inputSum += input.Stake
+	}
+	require.Equal(t, uint64(30), reward.PoolStakes[poolA])
+	require.Equal(t, uint64(70), reward.PoolStakes[poolB])
+	require.Equal(t, uint64(100), reward.TotalStake)
+	require.Equal(t, reward.TotalStake, inputSum)
+
+	// The invariant the reward application checks now holds by construction.
+	require.NoError(t, validateRewardStakeInputTotals(reward))
+}
+
+// TestRewardStakeDistributionPreservesDistinctCredentials verifies the dedup is a
+// no-op for input without duplicates: every distinct credential is preserved and
+// the pool total is the full sum.
+func TestRewardStakeDistributionPreservesDistinctCredentials(t *testing.T) {
+	var poolA lcommon.PoolKeyHash
+	var poolB lcommon.PoolKeyHash
+	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
+	copy(poolB[:], bytes.Repeat([]byte{0x22}, len(poolB)))
+	stakeA := bytes.Repeat([]byte{0x31}, len(poolA))
+	stakeB := bytes.Repeat([]byte{0x32}, len(poolA))
+	stakeC := bytes.Repeat([]byte{0x33}, len(poolA))
+
+	reward, err := rewardStakeDistribution(&StakeDistribution{
+		Slot: 100,
+		StakeInputs: []StakeInput{
+			{PoolKeyHash: poolA[:], StakingKey: stakeA, Stake: 40},
+			{PoolKeyHash: poolA[:], StakingKey: stakeB, Stake: 60},
+			{PoolKeyHash: poolB[:], StakingKey: stakeC, Stake: 50},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, reward.StakeInputs, 3)
+	require.Equal(t, uint64(100), reward.PoolStakes[poolA])
+	require.Equal(t, uint64(50), reward.PoolStakes[poolB])
+	require.Equal(t, uint64(2), reward.DelegatorCount[poolA])
+	require.Equal(t, uint64(1), reward.DelegatorCount[poolB])
+	require.Equal(t, uint64(150), reward.TotalStake)
 }
 
 func TestRewardInputsRejectMissingPoolRegistration(t *testing.T) {
@@ -1251,7 +1476,11 @@ func TestHandleEpochTransitionKeepsBoundaryCapturedSnapshot(t *testing.T) {
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
-	require.Equal(t, uint64(50_000_000), uint64(rewardSnapshot.TotalActiveStake))
+	require.Equal(
+		t,
+		uint64(50_000_000),
+		uint64(rewardSnapshot.TotalActiveStake),
+	)
 
 	inputs, err := db.Metadata().GetRewardStakeInputs(1, nil)
 	require.NoError(t, err)
@@ -1301,13 +1530,28 @@ func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 
 	blockEvt := slotEvt
 	blockEvt.EpochNonce = []byte{0x04, 0x05, 0x06}
-	require.NoError(t, mgr.handleEpochTransition(context.Background(), blockEvt))
+	require.NoError(
+		t,
+		mgr.handleEpochTransition(context.Background(), blockEvt),
+	)
 
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
 	require.Equal(t, []byte{0x04, 0x05, 0x06}, rewardSnapshot.EpochNonce)
-	require.Equal(t, uint64(75_000_000), uint64(rewardSnapshot.TotalActiveStake))
+	// Was 75_000_000: the reward basis used to come from the live reward
+	// aggregate, which has no slot predicate, so it picked up the 25_000_000
+	// UTxO added at the boundary slot while the leader-election total below
+	// stayed slot-accurate at 50_000_000 — one mark snapshot with two different
+	// stake answers for the same boundary. The fallback now reconstructs both
+	// halves from the same (snapshot slot, boundary slot) and cross-checks them,
+	// so the reward basis matches the leader-election total.
+	require.Equal(
+		t,
+		uint64(50_000_000),
+		uint64(rewardSnapshot.TotalActiveStake),
+		"the reward basis must agree with the leader-election Mark aggregate",
+	)
 
 	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
 		1, "mark", poolHash, nil,
@@ -1385,18 +1629,21 @@ func TestHandleEpochTransitionReplacesStaleSnapshotRows(t *testing.T) {
 			BoundarySlot:      432000,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
-		{
-			Epoch:        1,
-			PoolKeyHash:  poolB,
-			StakingKey:   stakeB,
-			RewardType:   "member",
-			Amount:       60,
-			Spendable:    true,
-			CapturedSlot: 1000,
-			BoundarySlot: 432000,
-		},
-	}, nil))
+	require.NoError(
+		t,
+		meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+			{
+				Epoch:        1,
+				PoolKeyHash:  poolB,
+				StakingKey:   stakeB,
+				RewardType:   "member",
+				Amount:       60,
+				Spendable:    true,
+				CapturedSlot: 1000,
+				BoundarySlot: 432000,
+			},
+		}, nil),
+	)
 
 	eventBus := event.NewEventBus(nil, nil)
 	mgr := NewManager(db, eventBus, nil)
@@ -1778,6 +2025,8 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
 			context.Background(),
 			fallbackEvt.SnapshotSlot,
+			0,
+			0,
 		)
 		require.NoError(t, err)
 		for poolKey := range fallbackDistribution.PoolStakes {
@@ -1885,6 +2134,8 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
 			context.Background(),
 			fallbackEvt.SnapshotSlot,
+			0,
+			0,
 		)
 		require.NoError(t, err)
 		fallbackTxn := db.Transaction(true)

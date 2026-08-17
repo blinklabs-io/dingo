@@ -24,7 +24,11 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
-func synthGenesis(slotsPerKES, maxKES int, slotLen time.Duration, systemStart time.Time) *shelley.ShelleyGenesis {
+func synthGenesis(
+	slotsPerKES, maxKES int,
+	slotLen time.Duration,
+	systemStart time.Time,
+) *shelley.ShelleyGenesis {
 	rat := big.NewRat(int64(slotLen), int64(time.Second))
 	return &shelley.ShelleyGenesis{
 		SystemStart:       systemStart,

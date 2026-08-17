@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -109,6 +110,114 @@ func TestStubServiceReturnsUnimplemented(t *testing.T) {
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 }
 
+// A real RPC through a real dialed connection must be recorded by the
+// metrics interceptor Start wires into the server's grpc.ServerOption list --
+// not just by calling the interceptor function directly. The RPC itself
+// returning Unimplemented (no Metadata backing configured) is irrelevant:
+// the interceptor records every request regardless of the handler's outcome.
+func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var foundCount, foundDuration bool
+	for _, mf := range families {
+		for _, metric := range mf.GetMetric() {
+			var isGetAssetCreates bool
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "method" &&
+					label.GetValue() == "GetAssetCreates" {
+					isGetAssetCreates = true
+				}
+			}
+			if !isGetAssetCreates {
+				continue
+			}
+			switch mf.GetName() {
+			case "dingo_midnight_grpc_requests_total":
+				foundCount = true
+				require.Equal(t, float64(1), metric.GetCounter().GetValue())
+			case "dingo_midnight_grpc_request_duration_seconds":
+				foundDuration = true
+				require.Equal(
+					t,
+					uint64(1),
+					metric.GetHistogram().GetSampleCount(),
+				)
+			}
+		}
+	}
+	require.True(
+		t,
+		foundCount,
+		"expected dingo_midnight_grpc_requests_total{method=\"GetAssetCreates\"} after a real RPC",
+	)
+	require.True(
+		t,
+		foundDuration,
+		"expected dingo_midnight_grpc_request_duration_seconds{method=\"GetAssetCreates\"} after a real RPC",
+	)
+}
+
+// The health service's unary Check method shares this server's interceptor
+// chain but must never show up in the MidnightState request/latency metrics
+// -- otherwise routine health-check polling would pollute a metric meant to
+// reflect real MidnightState API usage. Call Check first (must not be
+// recorded), then a real MidnightState RPC (must be the only thing
+// recorded).
+func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(
+	t *testing.T,
+) {
+	reg := prometheus.NewRegistry()
+	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hc := healthpb.NewHealthClient(dial(t, addr))
+	_, err := hc.Check(ctx, &healthpb.HealthCheckRequest{})
+	require.NoError(t, err)
+
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+	_, err = client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var found bool
+	for _, mf := range families {
+		if mf.GetName() != "dingo_midnight_grpc_requests_total" {
+			continue
+		}
+		found = true
+		require.Len(
+			t,
+			mf.GetMetric(),
+			1,
+			"only the MidnightState RPC must be recorded, not the health Check",
+		)
+		for _, label := range mf.GetMetric()[0].GetLabel() {
+			if label.GetName() == "method" {
+				require.Equal(t, "GetAssetCreates", label.GetValue())
+			}
+		}
+	}
+	require.True(
+		t,
+		found,
+		"expected dingo_midnight_grpc_requests_total to exist after a real MidnightState RPC",
+	)
+}
+
 // The health service must report SERVING for both the overall server and the
 // MidnightState service by name.
 func TestHealthCheckServing(t *testing.T) {
@@ -184,7 +293,10 @@ func TestShutdownOnContextCancel(t *testing.T) {
 
 	// While running, the stub answers Unimplemented.
 	client := midnight.NewMidnightStateClient(dial(t, addr))
-	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	callCtx, callCancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
 	defer callCancel()
 	_, err = client.GetAssetCreates(callCtx, &midnight.AssetCreatesRequest{})
 	require.Equal(t, codes.Unimplemented, status.Code(err))
@@ -207,7 +319,10 @@ func TestShutdownOnContextCancel(t *testing.T) {
 			200*time.Millisecond,
 		)
 		defer probeCancel()
-		_, probeErr := c.GetAssetCreates(probeCtx, &midnight.AssetCreatesRequest{})
+		_, probeErr := c.GetAssetCreates(
+			probeCtx,
+			&midnight.AssetCreatesRequest{},
+		)
 		return status.Code(probeErr) != codes.Unimplemented
 	}, 5*time.Second, "server did not shut down after context cancel")
 }

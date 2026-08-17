@@ -103,6 +103,13 @@ func BuildEbCertificate(
 // signature. sigChecked reports whether the signature was verified; it is
 // false when one or more signer public keys are unknown (lenient mode,
 // pending CIP-0164 key registration).
+//
+// Callers: sigChecked=false means "quorum met, signature not confirmed,"
+// not "invalid" -- but nothing here enforces that a caller checks it. This
+// function has no production caller today, so getting that distinction
+// wrong currently costs nothing; the first one added should either use a
+// named result type or treat !sigChecked as a hard failure explicitly,
+// since a bool return is easy to drop on the floor.
 func ValidateEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	committee *Committee,
@@ -172,35 +179,47 @@ func ValidateEbCertificate(
 
 // ValidatePrototypeEbCertificate validates a Musashi prototype certificate.
 // Prototype vote signatures cover the announcing ranking-block hash rather
-// than the legacy slot-plus-EB-hash message, and their public keys are
-// deterministically derived from committee pool ids.
+// than the legacy slot-plus-EB-hash message. Like ValidateEbCertificate,
+// sigChecked reports whether the aggregate signature was verified; it is
+// false when one or more signers have no resolvable key (a keyless
+// committee seat, or a key registered on-chain that this call was not
+// given -- registry here is deliberately limited to locally configured
+// keys, not the on-chain resolution VoteManager performs). See
+// ValidateEbCertificate's doc comment for the same caveat about callers
+// needing to check sigChecked -- nothing here enforces that they do.
 func ValidatePrototypeEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	announcingRbHash lcommon.Blake2b256,
 	committee *Committee,
 	quorumStakeThreshold *big.Rat,
-) error {
+	registry *VoterRegistry,
+) (sigChecked bool, err error) {
 	if cert == nil {
-		return errors.New("nil certificate")
+		return false, errors.New("nil certificate")
 	}
 	if committee == nil {
-		return errors.New("nil committee")
+		return false, errors.New("nil committee")
 	}
 	if err := cert.Validate(committee.Size()); err != nil {
-		return err
+		return false, err
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(committee.Members))
+	allKeysKnown := true
 	for _, member := range committee.Members {
 		if !cert.Signer(member.VoterId) {
 			continue
 		}
 		signerStake += member.Stake
-		key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
-		if err != nil {
-			return fmt.Errorf("derive prototype voter %d key: %w", member.VoterId, err)
+		var pub *bls12381.G2Affine
+		if registry != nil {
+			pub, _ = registry.PublicKeyFor(member.PoolKeyHash)
 		}
-		signerPubs = append(signerPubs, key.PublicKey())
+		if pub == nil {
+			allKeysKnown = false
+			continue
+		}
+		signerPubs = append(signerPubs, pub)
 	}
 	quorumMet, err := MeetsStakeQuorum(
 		signerStake,
@@ -208,10 +227,10 @@ func ValidatePrototypeEbCertificate(
 		quorumStakeThreshold,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !quorumMet {
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 			"%w: signer stake %d of total active stake %d below threshold %s",
 			ErrQuorumNotMet,
 			signerStake,
@@ -219,12 +238,15 @@ func ValidatePrototypeEbCertificate(
 			quorumStakeThreshold.String(),
 		)
 	}
+	if !allKeysKnown {
+		return false, nil
+	}
 	if err := VerifyAggregateSignature(
 		signerPubs,
 		PrototypeVoteMessageBytes(announcingRbHash),
 		cert.AggregatedSignature,
 	); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }

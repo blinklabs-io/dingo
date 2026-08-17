@@ -44,6 +44,36 @@ func setImmutableImportMarker(db *database.Database, num uint64) error {
 	return nil
 }
 
+// WasBootstrapped reports whether db was populated by a Mithril bootstrap. It
+// checks the durable immutable-import marker a completed Mithril sync leaves in
+// sync_state (written after the completion clear, and never removed by normal
+// serve operation), so it stays true for the life of a bootstrapped database.
+// Consensus features whose ledger state cannot be reconstructed from a Mithril
+// snapshot use it to refuse serving such a database -- notably CIP-0163
+// delegator inactivity, whose per-account expiration state is absent from the
+// cardano-ledger snapshot and cannot be recovered after import.
+//
+// Databases bootstrapped before the immutable-import marker existed (pre-v0.62.0,
+// #2694) carry only the older mithril_ledger_slot trust boundary, so we fall
+// back to it. That boundary is written solely by the Mithril import completion
+// path (updateMithrilReadyState, sync_import.go) and never by a genesis sync, so
+// keying on its presence cannot misclassify a genesis-synced database as
+// bootstrapped.
+func WasBootstrapped(db *database.Database) (bool, error) {
+	if _, ok, err := getImmutableImportMarker(db); err != nil || ok {
+		return ok, err
+	}
+	// Legacy fallback: the durable trust boundary written by every completed
+	// Mithril import before the immutable-import marker was introduced.
+	val, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	if err != nil {
+		return false, fmt.Errorf(
+			"reading mithril ledger-slot boundary: %w", err,
+		)
+	}
+	return val != "", nil
+}
+
 // getImmutableImportMarker returns the recorded highest imported immutable file
 // number. ok is false when no marker is present (a database bootstrapped before
 // this feature, or one that never completed a Mithril sync).

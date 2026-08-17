@@ -151,7 +151,11 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	)
 	assert.Equal(t, fixture.connId, e.ConnectionId)
 	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.activeBlockfetchConnId)
-	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.selectedBlockfetchConnId)
+	assert.Equal(
+		t,
+		ouroboros.ConnectionId{},
+		fixture.ls.selectedBlockfetchConnId,
+	)
 	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.shadowBlockfetchConnId)
 	assert.Nil(t, fixture.ls.chainsyncBlockfetchReadyChan)
 	assert.Nil(t, fixture.ls.chainsyncBlockfetchTimeoutTimer)
@@ -246,6 +250,35 @@ func TestLoadTipPrunesStaleBlockNonces(t *testing.T) {
 			rows[1].Nonce,
 		),
 	)
+}
+
+func TestRollbackRepairsTipAtDurableFloorOnNoOpAndSameSlotPaths(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	// Leave currentTip at a point whose nonce was never durably applied. A
+	// rollback request at the current tip is normally a no-op, but the durable
+	// floor repair must still move it back to the last applied block.
+	require.NoError(t, fixture.ls.db.DeleteBlockNoncesAfterPoint(
+		fixture.ancestorTip.Point,
+		nil,
+	))
+	require.NoError(t, fixture.ls.rollback(fixture.currentTip.Point))
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+
+	// A competing same-slot hash is not covered by a slot-only comparison. Put
+	// the in-memory tip on that unapplied point and ensure the canonical floor
+	// still repairs it.
+	fixture.ls.currentTip = ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			fixture.ancestorTip.Point.Slot,
+			[]byte("unapplied-same-slot"),
+		),
+		BlockNumber: fixture.ancestorTip.BlockNumber,
+	}
+	require.NoError(t, fixture.ls.rollback(fixture.ls.currentTip.Point))
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
 }
 
 func TestHandleEventChainsyncRollbackDoesNotSkipDifferentPeerHistory(
@@ -412,6 +445,260 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		return true, 15
+	}
+
+	// The local candidate has one block inside (10, 25]. The peer advertises
+	// a longer chain, but its first fetched fork block is outside that exact
+	// intersection-anchored window, so Genesis density must reject it.
+	forkHash := testHashBytes("genesis-sparse-fork")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        30,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.NewPoint(header.slot, forkHash),
+			BlockHeader:  header,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(header.slot, forkHash),
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+			},
+		},
+		notFitErr,
+	)
+
+	require.NoError(t, err)
+	assert.False(t, resolved)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+}
+
+func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(
+		t,
+		fixture.ls.config.ChainManager.SetLedger(
+			testSecurityParamLedger{securityParam: 10},
+		),
+	)
+	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		return true, 15
+	}
+
+	// Extend the local chain beyond the Genesis window. It is longer overall
+	// (block 4 versus the peer's block 3), but still has only the slot-20
+	// block inside (10, 25].
+	localHash3 := testHashBytes("genesis-local-3")
+	localHash4 := testHashBytes("genesis-local-4")
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        30,
+			Hash:        localHash3,
+			BlockNumber: 3,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+		{
+			Slot:        40,
+			Hash:        localHash4,
+			BlockNumber: 4,
+			Type:        1,
+			PrevHash:    localHash3,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	forkHash1 := testHashBytes("genesis-dense-fork-1")
+	forkHash2 := testHashBytes("genesis-dense-fork-2")
+	header1 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash1),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: 2,
+		slot:        12,
+	}
+	header2 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash2),
+		prevHash:    lcommon.NewBlake2b256(forkHash1),
+		blockNumber: 3,
+		slot:        14,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        ocommon.NewPoint(header1.slot, forkHash1),
+		BlockHeader:  header1,
+	})
+	err := fixture.ls.handleEventChainsyncBlockHeader(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.NewPoint(header2.slot, forkHash2),
+			BlockHeader:  header2,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(header2.slot, forkHash2),
+				BlockNumber: header2.blockNumber,
+			},
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
+}
+
+func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		return false, 15
+	}
+
+	// This candidate has no blocks in the Genesis window, but Genesis has
+	// exited and its greater block number must therefore win under Praos.
+	forkHash := testHashBytes("post-genesis-praos-fork")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        30,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.NewPoint(header.slot, forkHash),
+			BlockHeader:  header,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(header.slot, forkHash),
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+			},
+		},
+		notFitErr,
+	)
+
+	require.NoError(t, err)
+	require.True(t, resolved)
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+}
+
+func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
+	t *testing.T,
+) {
+	testCases := []struct {
+		name          string
+		differentPeer bool
+		replayTip     bool
+	}{
+		{
+			name:      "same_peer_duplicate_tip",
+			replayTip: true,
+		},
+		{
+			name:          "different_peer_reordered_predecessor",
+			differentPeer: true,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newChainsyncRollbackFixture(t)
+			fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+				return true, 15
+			}
+
+			firstHash := testHashBytes(
+				"observed-predecessor-first-" + testCase.name,
+			)
+			secondHash := testHashBytes(
+				"observed-predecessor-second-" + testCase.name,
+			)
+			firstHeader := mockHeader{
+				hash: lcommon.NewBlake2b256(firstHash),
+				prevHash: lcommon.NewBlake2b256(
+					fixture.currentTip.Point.Hash,
+				),
+				blockNumber: fixture.currentTip.BlockNumber + 1,
+				slot:        fixture.currentTip.Point.Slot + 1,
+			}
+			secondHeader := mockHeader{
+				hash:        lcommon.NewBlake2b256(secondHash),
+				prevHash:    lcommon.NewBlake2b256(firstHash),
+				blockNumber: fixture.currentTip.BlockNumber + 2,
+				slot:        fixture.currentTip.Point.Slot + 2,
+			}
+			require.NoError(t, fixture.ls.chain.AddBlockHeader(firstHeader))
+			require.NoError(t, fixture.ls.chain.AddBlockHeader(secondHeader))
+
+			historyConn := fixture.connId
+			if testCase.differentPeer {
+				historyConn = testChainsyncConnId(4301, 4302)
+			}
+			for _, header := range []mockHeader{firstHeader, secondHeader} {
+				fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+					ConnectionId: historyConn,
+					Point: ocommon.NewPoint(
+						header.SlotNumber(),
+						header.Hash().Bytes(),
+					),
+					BlockHeader: header,
+				})
+			}
+
+			replayedHeader := firstHeader
+			if testCase.replayTip {
+				replayedHeader = secondHeader
+			}
+			clearCalls := 0
+			fixture.ls.config.ClearSeenHeadersFromFunc = func(uint64) {
+				clearCalls++
+			}
+			fixture.ls.headerMismatchCount = 7
+			err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point: ocommon.NewPoint(
+					replayedHeader.SlotNumber(),
+					replayedHeader.Hash().Bytes(),
+				),
+				BlockHeader: replayedHeader,
+				Tip: ochainsync.Tip{
+					Point: ocommon.NewPoint(
+						secondHeader.SlotNumber(),
+						secondHeader.Hash().Bytes(),
+					),
+					BlockNumber: secondHeader.BlockNumber(),
+				},
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
+			assert.Equal(t, 7, fixture.ls.headerMismatchCount)
+			assert.Zero(t, clearCalls)
+			assert.True(
+				t,
+				pointMatches(
+					fixture.ls.chain.HeaderTip().Point,
+					ocommon.NewPoint(
+						secondHeader.SlotNumber(),
+						secondHeader.Hash().Bytes(),
+					),
+				),
+			)
+		})
+	}
+}
+
 func TestTryResolveForkExceedsKReconcilesDivergedLedgerTip(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-fork-resolution")
@@ -472,8 +759,10 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 
 	forkHash := testHashBytes("lookup-error-fork-block")
 	header := mockHeader{
-		hash:        lcommon.NewBlake2b256(forkHash),
-		prevHash:    lcommon.NewBlake2b256(testHashBytes("lookup-error-ancestor")),
+		hash: lcommon.NewBlake2b256(forkHash),
+		prevHash: lcommon.NewBlake2b256(
+			testHashBytes("lookup-error-ancestor"),
+		),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
@@ -517,8 +806,10 @@ func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupErr
 
 	forkHash := testHashBytes("handler-lookup-error-fork-block")
 	header := mockHeader{
-		hash:        lcommon.NewBlake2b256(forkHash),
-		prevHash:    lcommon.NewBlake2b256(testHashBytes("handler-lookup-error-ancestor")),
+		hash: lcommon.NewBlake2b256(forkHash),
+		prevHash: lcommon.NewBlake2b256(
+			testHashBytes("handler-lookup-error-ancestor"),
+		),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
@@ -1040,7 +1331,9 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	fixture.ls.blockfetchRequestRangeCleanup()
 }
 
-func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(t *testing.T) {
+func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(
+	t *testing.T,
+) {
 	fixture := newChainsyncRollbackFixture(t)
 
 	header := mockHeader{
@@ -1136,7 +1429,9 @@ func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRol
 	fixture := newChainsyncRollbackFixture(t)
 
 	queuedHeader := mockHeader{
-		hash:        lcommon.NewBlake2b256(testHashBytes("rollback-stale-queued")),
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("rollback-stale-queued"),
+		),
 		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
@@ -1527,7 +1822,9 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
-func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(t *testing.T) {
+func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
+	t *testing.T,
+) {
 	fixture := newChainsyncRollbackFixture(t)
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -1569,6 +1866,47 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.currentTip, dbTip)
+}
+
+// TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned
+// guards the other half of the stale-vs-current distinction that
+// TestProcessChainIteratorRollbackSkipsStaleRollback checks: staleness
+// (chain tip != point) alone must NOT decide whether to roll back --
+// ls.currentTip's own status against the current chain does. Here
+// putPrimaryChainOnForkBeyondK leaves ls.currentTip pointing at a block
+// Chain.Rollback has already physically removed (an abandoned fork),
+// while the chain itself has moved on to a new fork descended from the
+// same ancestor. A stale rollback event reporting that ancestor as the
+// fork point must still be applied -- skipping it here (the original bug)
+// leaves ls.currentTip stuck on the abandoned block forever, since every
+// subsequent pipeline restart re-derives expectedPrevHash from that same
+// un-rolled-back tip.
+func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "abandoned-ledger-tip")
+
+	// Chain tip is now three blocks into the new fork, well past
+	// ancestorTip -- reporting ancestorTip as the rollback point is
+	// exactly the stale-vs-current mismatch this function must not use,
+	// on its own, to decide whether ls.currentTip needs rolling back.
+	require.NotEqual(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+
+	err := fixture.ls.processChainIteratorRollback(
+		fixture.ancestorTip.Point,
+	)
+	require.ErrorIs(t, err, errRestartLedgerPipeline)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
 func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
@@ -1688,7 +2026,10 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		ancestorTip:   ancestorTip,
 		currentTip:    currentTip,
 		ancestorNonce: ancestorNonce,
-		forkPoint:     ocommon.NewPoint(currentBlock.Slot+10, testHashBytes("fork-point")),
+		forkPoint: ocommon.NewPoint(
+			currentBlock.Slot+10,
+			testHashBytes("fork-point"),
+		),
 	}
 }
 

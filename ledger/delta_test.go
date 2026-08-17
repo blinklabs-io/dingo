@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -32,13 +33,11 @@ import (
 )
 
 func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.GovActionValidityPeriod = 20
@@ -98,6 +97,56 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
 	require.Equal(t, uint64(32), got.ExpiresEpoch)
+}
+
+func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.DRepInactivityPeriod = 20
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId: 100,
+		},
+		currentPParams: &pparams,
+	}
+
+	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        credentialBytes,
+		AddedSlot:         10,
+		LastActivityEpoch: 5,
+		ExpiryEpoch:       25,
+		Active:            true,
+	}))
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.RegistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return (&LedgerDelta{}).processGovernance(ls, tx, txn)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(100), drep.LastActivityEpoch)
+	require.Equal(t, uint64(120), drep.ExpiryEpoch)
 }
 
 func TestConwayProtocolParametersDijkstra(t *testing.T) {

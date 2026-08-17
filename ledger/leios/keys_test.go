@@ -17,6 +17,7 @@ package leios
 import (
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -62,20 +63,23 @@ func TestParseVoteSigningKeyRejectsMalformed(t *testing.T) {
 	}
 }
 
-func TestDerivePrototypeVoteSigningKey(t *testing.T) {
-	poolHash := make([]byte, voterPoolKeyHashSize)
-	poolHash[0] = 0x12
-	poolHash[len(poolHash)-1] = 0x34
-	derived, err := DerivePrototypeVoteSigningKey(poolHash)
-	require.NoError(t, err)
-
+// TestParseVoteSigningKeyStillRejectsUnreducedScalars guards the strict
+// path: operator key files must never be silently reduced mod the scalar
+// field modulus.
+func TestParseVoteSigningKeyStillRejectsUnreducedScalars(t *testing.T) {
+	// An out-of-range scalar.
 	padded := make([]byte, voteSigningKeySize)
-	copy(padded, poolHash)
-	expected, err := ParseVoteSigningKey(hex.EncodeToString(padded))
-	require.NoError(t, err)
-	assert.Equal(t, expected.PublicKeyBytes(), derived.PublicKeyBytes())
-
-	_, err = DerivePrototypeVoteSigningKey(poolHash[:len(poolHash)-1])
+	padded[0] = 0xf3
+	_, err := ParseVoteSigningKey(hex.EncodeToString(padded))
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+	// r itself, r+1, and zero
+	_, err = ParseVoteSigningKey(fmt.Sprintf("%064x", fr.Modulus()))
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+	_, err = ParseVoteSigningKey(
+		fmt.Sprintf("%064x", new(big.Int).Add(fr.Modulus(), big.NewInt(1))),
+	)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+	_, err = ParseVoteSigningKey(fmt.Sprintf("%064x", 0))
 	assert.ErrorIs(t, err, ErrInvalidSigningKey)
 }
 
@@ -90,6 +94,52 @@ func TestLoadVoteSigningKeyFile(t *testing.T) {
 	expected, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
 	require.NoError(t, err)
 	assert.Equal(t, expected.PublicKeyBytes(), key.PublicKeyBytes())
+}
+
+func TestLoadVoteSigningKeyFileCardanoTextEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bls.skey")
+	scalar := make([]byte, voteSigningKeySize)
+	scalar[len(scalar)-1] = 42
+	cborBytes := append([]byte{0x58, voteSigningKeySize}, scalar...)
+	content := fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","description":"Leios BLS signing key","cborHex":"%s"}`,
+		hex.EncodeToString(cborBytes),
+	)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	key, err := LoadVoteSigningKeyFile(path)
+	require.NoError(t, err)
+	expected, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
+	require.NoError(t, err)
+	assert.Equal(t, expected.PublicKeyBytes(), key.PublicKeyBytes())
+}
+
+func TestLoadVoteSigningKeyFileRejectsTrailingCbor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bls.skey")
+	scalar := make([]byte, voteSigningKeySize)
+	scalar[len(scalar)-1] = 42
+	cborBytes := append([]byte{0x58, voteSigningKeySize}, scalar...)
+	cborBytes = append(cborBytes, 0x00)
+	content := fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","cborHex":"%s"}`,
+		hex.EncodeToString(cborBytes),
+	)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	_, err := LoadVoteSigningKeyFile(path)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+}
+
+func TestLoadVoteSigningKeyFileRejectsUnsupportedEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.skey")
+	content := `{"type":"Node KES Signing Key","description":"","cborHex":"582001"}`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	_, err := LoadVoteSigningKeyFile(path)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
 }
 
 func TestLoadVoteSigningKeyFileRejectsLoosePermissions(t *testing.T) {
@@ -175,6 +225,18 @@ func TestNewVoterRegistryEmpty(t *testing.T) {
 	assert.Equal(t, 0, registry.Size())
 	_, ok := registry.PublicKeyFor(make([]byte, 28))
 	assert.False(t, ok)
+}
+
+func TestVoterRegistryZeroValueRegister(t *testing.T) {
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
+	require.NoError(t, err)
+	var registry VoterRegistry
+	poolHash, err := hex.DecodeString(testPoolHash(1))
+	require.NoError(t, err)
+	require.NoError(t, registry.RegisterPublicKey(poolHash, key.PublicKey()))
+	pub, ok := registry.PublicKeyFor(poolHash)
+	require.True(t, ok)
+	assert.True(t, pub.Equal(key.PublicKey()))
 }
 
 func TestNewVoterRegistryRejectsInvalidEntries(t *testing.T) {

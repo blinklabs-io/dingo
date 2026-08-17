@@ -27,7 +27,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiauth"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
@@ -67,6 +70,11 @@ type ServerConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
+	// TLS and Auth are the resolved (merged, validated) TLS/authentication
+	// policy for this listener -- see ProviderConfig's doc comment and
+	// ARCHITECTURE.md's "API security" section.
+	TLS  apiconfig.EffectiveTLS
+	Auth apiconfig.EffectiveAuth
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -78,6 +86,7 @@ type Server struct {
 	genesisStartTimeSec int64
 	addrNetworkID       uint8
 	httpServer          *http.Server
+	verifier            *apiauth.Verifier
 	mu                  sync.Mutex
 }
 
@@ -165,19 +174,35 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 // Start starts the HTTP server in a background goroutine.
 func (s *Server) Start(ctx context.Context) error {
+	// Built before the handler chain so it can install the shared
+	// credential-verification middleware (internal/apiauth).
+	verifier, err := apiauth.NewVerifier(s.config.Auth)
+	if err != nil {
+		return fmt.Errorf("mesh: %w", err)
+	}
 	s.mu.Lock()
 	if s.httpServer != nil {
 		s.mu.Unlock()
 		return errors.New("server already started")
 	}
+	s.verifier = verifier
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
+	// CORS must wrap authentication, not the reverse: httpcors.Handler
+	// fully answers an OPTIONS preflight itself and never calls the
+	// handler it wraps for one, so browsers -- which never attach
+	// Authorization to a preflight request -- never need a credential to
+	// pass CORS negotiation. Every other request, including a
+	// non-preflight OPTIONS, still reaches the mux normally. See
+	// internal/apiauth's Middleware doc comment for the general statement
+	// of this ordering rule.
+	authenticated := apiauth.Middleware(s.verifier)(mux)
 	server := &http.Server{
 		Addr: s.config.ListenAddress,
 		Handler: httpcors.Handler(
-			mux,
+			authenticated,
 			httpcors.Config{
 				AllowedOrigins: s.config.CORSAllowedOrigins,
 			},
@@ -264,6 +289,19 @@ func (s *Server) Stop(ctx context.Context) error {
 func (s *Server) startServer(
 	server *http.Server,
 ) error {
+	useTLS := s.config.TLS.Enabled
+	if useTLS {
+		if err := tlsutil.ConfigureServerTLS(
+			server,
+			s.config.TLS.CertFilePath,
+			s.config.TLS.KeyFilePath,
+		); err != nil {
+			return fmt.Errorf(
+				"failed to load TLS keypair for Mesh API server: %w",
+				err,
+			)
+		}
+	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		return fmt.Errorf(
@@ -272,11 +310,17 @@ func (s *Server) startServer(
 		)
 	}
 	go func() {
-		if err := server.Serve(ln); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
+		var serveErr error
+		if useTLS {
+			serveErr = server.ServeTLS(ln, "", "")
+		} else {
+			serveErr = server.Serve(ln)
+		}
+		if serveErr != nil &&
+			!errors.Is(serveErr, http.ErrServerClosed) {
 			s.logger.Error(
 				"Mesh API server error",
-				"error", err,
+				"error", serveErr,
 			)
 		}
 	}()

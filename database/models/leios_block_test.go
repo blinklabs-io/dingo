@@ -18,10 +18,9 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
@@ -32,45 +31,7 @@ import (
 // block with empty transaction components and a correct block body hash.
 func buildStandardConwayBlock(t *testing.T) []byte {
 	t.Helper()
-	block := &conway.ConwayBlock{
-		BlockHeader: &conway.ConwayBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 7,
-					Slot:        42,
-					VrfKey:      make([]byte, 32),
-					VrfResult: lcommon.VrfResult{
-						Output: make([]byte, 32),
-						Proof:  make([]byte, 80),
-					},
-					OpCert: babbage.BabbageOpCert{
-						HotVkey:   make([]byte, 32),
-						Signature: make([]byte, 64),
-					},
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
-				},
-				Signature: make([]byte, 448),
-			},
-		},
-	}
-	// First pass: encode to obtain the exact body-component bytes so we can
-	// compute a correct block body hash (blake2b256 over the concatenated
-	// component hashes, per the Cardano spec / ValidateBlockBodyHash).
-	tmp, err := cbor.Encode(block)
-	require.NoError(t, err)
-	var comps []cbor.RawMessage
-	_, err = cbor.Decode(tmp, &comps)
-	require.NoError(t, err)
-	require.Len(t, comps, 5)
-	var concat []byte
-	for i := 1; i < 5; i++ {
-		h := lcommon.Blake2b256Hash(comps[i])
-		concat = append(concat, h.Bytes()...)
-	}
-	block.BlockHeader.Body.BlockBodyHash = lcommon.Blake2b256Hash(concat)
-	raw, err := cbor.Encode(block)
-	require.NoError(t, err)
-	return raw
+	return testutil.BuildDecodableConwayBlockBytes(t, 42, 7)
 }
 
 // extendConwayHeaderWithLeios rewrites a standard Conway block so its header

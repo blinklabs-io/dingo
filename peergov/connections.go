@@ -145,12 +145,42 @@ func (p *PeerGovernor) startOutboundConnections() {
 
 	for _, tmpPeer := range peers {
 		if tmpPeer != nil {
-			go p.createOutboundConnection(tmpPeer)
+			p.spawnOutboundConnection(tmpPeer)
 		}
 	}
 }
 
-func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
+// spawnOutboundConnection serializes work registration with Stop. Callers
+// already holding p.mu use spawnOutboundConnectionLocked instead.
+func (p *PeerGovernor) spawnOutboundConnection(peer *Peer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spawnOutboundConnectionLocked(peer)
+}
+
+func (p *PeerGovernor) spawnOutboundConnectionLocked(peer *Peer) {
+	if peer == nil || p.stopCh == nil {
+		return
+	}
+	idx := p.peerIndexByAddress(peer.NormalizedAddress)
+	if idx == -1 || p.peers[idx] == nil || p.peers[idx].Reconnecting {
+		return
+	}
+	// Reserve the reconnect slot while still holding p.mu. Connection-close
+	// events can arrive more quickly than the new goroutine is scheduled; if
+	// the goroutine sets Reconnecting itself, every queued duplicate event can
+	// launch another dial before the first one runs.
+	reconnectPeer := p.peers[idx]
+	reconnectPeer.Reconnecting = true
+	p.wg.Go(func() {
+		p.createOutboundConnection(reconnectPeer, true)
+	})
+}
+
+func (p *PeerGovernor) createOutboundConnection(
+	peer *Peer,
+	reserved bool,
+) {
 	if peer == nil {
 		return
 	}
@@ -164,7 +194,14 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		return
 	}
 	currentPeer := p.peers[idx]
+	if reserved && currentPeer != peer {
+		p.mu.Unlock()
+		return
+	}
 	if p.isPeerDeniedLocked(currentPeer) {
+		if reserved {
+			currentPeer.Reconnecting = false
+		}
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: peer denied, skipping connection attempts",
@@ -172,7 +209,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		)
 		return
 	}
-	if currentPeer.Reconnecting {
+	if currentPeer.Reconnecting && !reserved {
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: reconnect goroutine already active, skipping",
@@ -186,6 +223,9 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	// the close signal.
 	stopCh := p.stopCh
 	if stopCh == nil {
+		if reserved {
+			currentPeer.Reconnecting = false
+		}
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: peer governor stopped, skipping connection attempts",
@@ -262,9 +302,12 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: inbound reusable topology connections already satisfy valency, suppressing outbound attempts",
-				"address", peer.Address,
-				"group", currentPeer.GroupID,
-				"valency", currentPeer.Valency,
+				"address",
+				peer.Address,
+				"group",
+				currentPeer.GroupID,
+				"valency",
+				currentPeer.Valency,
 			)
 			return
 		}
@@ -276,7 +319,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: peer already connected via reusable duplex connection, stopping outbound attempts",
-				"address", peer.Address,
+				"address",
+				peer.Address,
 			)
 			return
 		}
@@ -295,7 +339,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
 			p.config.Logger.Info(
 				"outbound: inbound from same peer address exists before negotiation completes, waiting",
-				"address", peer.Address,
+				"address",
+				peer.Address,
 			)
 			select {
 			case <-stopCh:
@@ -396,7 +441,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			if p.ctx.Err() != nil {
 				p.config.Logger.Debug(
 					"outbound: connection attempt canceled, governor context done",
-					"address", peer.Address,
+					"address",
+					peer.Address,
 				)
 				return
 			}
@@ -457,10 +503,13 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.mu.Unlock()
 			if !currentPeerConnKnown &&
 				p.config.ConnManager != nil &&
-				p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
+				p.config.ConnManager.HasInboundPeerAddress(
+					peer.NormalizedAddress,
+				) {
 				p.config.Logger.Info(
 					"outbound: dial failed while exact inbound peer address is still negotiating, waiting",
-					"address", peer.Address,
+					"address",
+					peer.Address,
 				)
 				continue
 			}
@@ -513,9 +562,12 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: dropping never-connected discovered/public-root peer after failed connection",
-				"address", peerAddress,
-				"source", peerSource.String(),
-				"deny_duration", p.config.DenyDuration,
+				"address",
+				peerAddress,
+				"source",
+				peerSource.String(),
+				"deny_duration",
+				p.config.DenyDuration,
 			)
 			p.publishEvent(
 				PeerRemovedEventType,
@@ -800,7 +852,9 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// Reset burst when reconnects are no longer clustered inside the
 			// inbound cooldown window.
 			if !peer.LastInboundDisconnect.IsZero() &&
-				connClosedAt.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
+				connClosedAt.Sub(
+					peer.LastInboundDisconnect,
+				) >= p.config.InboundCooldown {
 				peer.InboundShortLivedCount = 0
 			}
 			if !peer.InboundConnectedAt.IsZero() &&
@@ -834,10 +888,14 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				if connDur < 0 {
 					p.config.Logger.Warn(
 						"connection close timestamp predates connection start, clamping duration",
-						"address", peer.Address,
-						"connected_at", peer.ConnectedAt,
-						"closed_at", connClosedAt,
-						"raw_duration", connDur,
+						"address",
+						peer.Address,
+						"connected_at",
+						peer.ConnectedAt,
+						"closed_at",
+						connClosedAt,
+						"raw_duration",
+						connDur,
 					)
 					connDur = 0
 				}
@@ -901,7 +959,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// here would cause the goroutine to see it as already
 			// active and immediately return.
 			if !peer.Reconnecting {
-				go p.createOutboundConnection(peer)
+				p.spawnOutboundConnectionLocked(peer)
 			}
 		}
 	}
@@ -924,7 +982,12 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	defer p.mu.Unlock()
 	expiry := time.Now().Add(duration)
 	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
-		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
+		p.addPeerDenyKeysLocked(
+			p.peers[idx],
+			expiry,
+			normalized,
+			hostnameNormalized,
+		)
 	} else if idx := p.peerIndexByConnectionRemoteAddressLocked(
 		normalized,
 		hostnameNormalized,
@@ -991,7 +1054,8 @@ func (p *PeerGovernor) peerIndexByConnectionRemoteAddressLocked(
 			if address == "" {
 				continue
 			}
-			if address == remoteNormalized || address == remoteHostnameNormalized {
+			if address == remoteNormalized ||
+				address == remoteHostnameNormalized {
 				return i
 			}
 		}

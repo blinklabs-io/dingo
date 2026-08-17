@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
@@ -35,6 +37,18 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
+		// Deliberately has no CLI flag (unlike every sibling api.auth/
+		// api.tls field): a raw inline secret should not be encouraged
+		// onto a command line, where it is visible via `ps` and shell
+		// history. Use --api-auth-token-file-path (API.Auth.TokenFilePath)
+		// or YAML instead. See AuthPolicy.Token's own doc comment.
+		"API.Auth.Token":                       {},
+		"Plugins.Storage.Blob.Config":          {},
+		"Plugins.Storage.Metadata.Config":      {},
+		"Plugins.Mempool.Config":               {},
+		"Plugins.API.Blockfrost.Config":        {},
+		"Plugins.API.Mesh.Config":              {},
+		"Plugins.API.Utxorpc.Config":           {},
 		"Midnight.CNightPolicyID":              {},
 		"Midnight.CNightAssetName":             {},
 		"Midnight.MappingValidatorAddress":     {},
@@ -84,10 +98,106 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	}
 }
 
+func TestPledgeLeverageEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLEDGE_LEVERAGE_ENABLED", "true")
+	t.Setenv("DINGO_PLEDGE_LEVERAGE", "42")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.PledgeLeverageEnabled {
+		t.Fatal("expected env var to enable pledge leverage")
+	}
+	if cfg.PledgeLeverage != 42 {
+		t.Fatalf(
+			"expected env var to set pledgeLeverage=42, got %d",
+			cfg.PledgeLeverage,
+		)
+	}
+}
+
+func TestFullPotRewardsEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_FULL_POT_REWARDS_ENABLED", "true")
+	t.Setenv("DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.FullPotRewardsEnabled {
+		t.Fatal("expected env var to enable full-pot rewards")
+	}
+	if !cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		t.Fatal("expected env var to enable unsafe full-pot rewards override")
+	}
+}
+
+func TestBlockPipelineEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCK_PIPELINE_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockPipelineEnabled {
+		t.Fatal("expected env var to enable the block-decode pipeline")
+	}
+}
+
+func TestDatabasePathEnvironmentShortcut(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	want := t.TempDir()
+	t.Setenv("CARDANO_DATABASE_PATH", want)
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.DatabasePath != want {
+		t.Fatalf(
+			"expected CARDANO_DATABASE_PATH to set databasePath to %q, got %q",
+			want,
+			cfg.DatabasePath,
+		)
+	}
+}
+
 func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CARDANO_MEMPOOL_CAPACITY", "123456")
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_CONFIG_CAPACITY", "123456")
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_PROVIDER", "environment")
 	t.Setenv("DINGO_DATABASE_WORKERS", "9")
 	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
 	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "15m")
@@ -109,10 +219,12 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
-	if cfg.MempoolCapacity != 123456 {
+	cfg.ApplyDefaults()
+	capacity, _, _ := cfg.MempoolSettings()
+	if capacity != 123456 {
 		t.Fatalf(
 			"expected env var to set mempoolCapacity=123456, got %d",
-			cfg.MempoolCapacity,
+			capacity,
 		)
 	}
 	if cfg.DatabaseWorkers != 9 {
@@ -161,7 +273,7 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
 	if err := cmd.ParseFlags([]string{
-		"--mempool-capacity=7890",
+		"--mempool=default",
 		"--data-dir=/tmp/override",
 		"--backfill-batch-size=200",
 		"--history-expiry-enabled=true",
@@ -178,10 +290,17 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		t.Fatalf("failed to apply flags: %v", err)
 	}
 
-	if cfg.MempoolCapacity != 7890 {
+	if cfg.Plugins.Mempool.Provider != "default" {
 		t.Fatalf(
-			"expected flag to override env mempoolCapacity to 7890, got %d",
-			cfg.MempoolCapacity,
+			"expected CLI mempool provider override, got %q",
+			cfg.Plugins.Mempool.Provider,
+		)
+	}
+	capacity, _, _ = cfg.MempoolSettings()
+	if capacity != 123456 {
+		t.Fatalf(
+			"expected environment mempool capacity to remain 123456, got %d",
+			capacity,
 		)
 	}
 	if cfg.DatabaseWorkers != 9 {
@@ -237,6 +356,66 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	}
 }
 
+func TestMempoolProviderSourcePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_PROVIDER", "environment")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(
+		t,
+		os.WriteFile(
+			configFile,
+			[]byte("plugins:\n  mempool:\n    provider: yaml\n"),
+			0o600,
+		),
+	)
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"environment",
+		cfg.Plugins.Mempool.Provider,
+		"environment overrides YAML",
+	)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{"--mempool=cli"}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	assert.Equal(
+		t,
+		"cli",
+		cfg.Plugins.Mempool.Provider,
+		"CLI overrides environment",
+	)
+}
+
+func TestDelegatorInactivityEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_DELEGATOR_INACTIVITY_ENABLED", "true")
+	t.Setenv("DINGO_DELEGATOR_INACTIVITY", "90")
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.DelegatorInactivityEnabled {
+		t.Fatal("expected env var to enable delegator inactivity")
+	}
+	if cfg.DelegatorInactivity != 90 {
+		t.Fatalf(
+			"expected delegatorInactivity=90, got %d",
+			cfg.DelegatorInactivity,
+		)
+	}
+}
+
 func TestRegisterFlags_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
 	resetGlobalConfig()
 
@@ -261,6 +440,88 @@ func TestRegisterFlags_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
 			t.Fatalf("expected --%s to be YAML/env only", flag)
 		}
 	}
+}
+
+// TestApplyFlags_MidnightEnabledFlag pins --midnight-enabled/
+// DINGO_MIDNIGHT_ENABLED end to end: default false, a flag can turn it on,
+// the env var can turn it on without any flag, and (mirroring the other
+// Midnight flags) a registered-but-unparsed flag never overrides whatever
+// LoadConfig already resolved from the env var.
+func TestApplyFlags_MidnightEnabledFlag(t *testing.T) {
+	t.Run("defaults to false", func(t *testing.T) {
+		resetGlobalConfig()
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if cfg.Midnight.Enabled {
+			t.Fatal("expected midnight.enabled to default to false")
+		}
+	})
+
+	t.Run("flag passed enables it", func(t *testing.T) {
+		resetGlobalConfig()
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		if err := cmd.ParseFlags([]string{"--midnight-enabled=true"}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+		if err := ApplyFlags(cmd, cfg); err != nil {
+			t.Fatalf("failed to apply flags: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal("expected --midnight-enabled=true to enable Midnight")
+		}
+	})
+
+	t.Run("env var enables it without any flag", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_MIDNIGHT_ENABLED", "true")
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal("expected DINGO_MIDNIGHT_ENABLED=true to enable Midnight")
+		}
+	})
+
+	t.Run("unparsed flag does not override the env var", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_MIDNIGHT_ENABLED", "true")
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		// --midnight-enabled is registered but deliberately never parsed
+		// here, the same as a real run where the operator never passes it.
+		// ApplyFlags's Changed(name) gate must leave cfg exactly as
+		// LoadConfig resolved it from the env var above, not reset it to
+		// the flag's own default.
+		if err := ApplyFlags(cmd, cfg); err != nil {
+			t.Fatalf("failed to apply flags: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal(
+				"expected ApplyFlags to leave midnight.enabled=true from " +
+					"the env var alone when --midnight-enabled was never passed",
+			)
+		}
+	})
 }
 
 func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
@@ -511,10 +772,11 @@ func TestPipeline_MempoolCapacityDefaultsFromFlagRunMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected validation error: %v", err)
 			}
-			if cfg.MempoolCapacity != tc.expected {
+			capacity, _, _ := cfg.MempoolSettings()
+			if capacity != tc.expected {
 				t.Errorf(
 					"MempoolCapacity = %d, want %d",
-					cfg.MempoolCapacity, tc.expected,
+					capacity, tc.expected,
 				)
 			}
 		})
@@ -615,7 +877,10 @@ func TestPipeline_NegativeHistoryExpiryFrequencyRejected(t *testing.T) {
 			}
 			cfg, err := loadConfigThroughPipeline(t, tc.yaml, tc.args)
 			if err == nil ||
-				!strings.Contains(err.Error(), "invalid historyExpiry.frequency") {
+				!strings.Contains(
+					err.Error(),
+					"invalid historyExpiry.frequency",
+				) {
 				t.Fatalf(
 					"expected invalid historyExpiry.frequency error, got: %v",
 					err,
@@ -636,7 +901,7 @@ func TestPipeline_NegativeHistoryExpiryFrequencyRejected(t *testing.T) {
 // so every problem must surface together in the single Validate pass.
 func TestPipeline_AggregatesErrorsAcrossSettings(t *testing.T) {
 	yaml := "runMode: \"bogus\"\n" +
-		"evictionWatermark: 2.0\n" +
+		"plugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 1048576\n      evictionWatermark: 2.0\n      rejectionWatermark: 0.95\n" +
 		"blockProducer: true\n" +
 		"chainsync:\n  strategy: \"fastest\"\n"
 	_, err := loadConfigThroughPipeline(t, yaml, nil)
@@ -645,7 +910,7 @@ func TestPipeline_AggregatesErrorsAcrossSettings(t *testing.T) {
 	}
 	for _, want := range []string{
 		"invalid runMode",
-		"invalid evictionWatermark",
+		"invalid plugins.mempool.config.evictionWatermark",
 		"blockProducer enabled but missing required key paths",
 		"invalid chainsync.strategy",
 	} {
@@ -673,5 +938,27 @@ func collectExportedLeafFields(
 			continue
 		}
 		out[path] = struct{}{}
+	}
+}
+
+func TestMinPoolMarginEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MIN_POOL_MARGIN", "150")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.MinPoolMargin != 150 {
+		t.Fatalf(
+			"expected env var to set minPoolMargin=150, got %d",
+			cfg.MinPoolMargin,
+		)
 	}
 }

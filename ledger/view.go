@@ -18,11 +18,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -56,6 +58,19 @@ type LedgerView struct {
 func (lv *LedgerView) SkipPhase2Validation() bool {
 	return lv.skipPhase2Validation
 }
+
+// MinPoolMargin forwards the CIP-23 minimum pool margin from the underlying
+// ledger state so that a *LedgerView (the value passed to ValidateTx*) satisfies
+// the eras.MinPoolMarginProvider interface. Without this, the Dijkstra
+// pool-margin-floor certificate rule would never see the configured floor.
+func (lv *LedgerView) MinPoolMargin() *big.Rat {
+	return lv.ls.MinPoolMargin()
+}
+
+// var _ eras.MinPoolMarginProvider = (*LedgerView)(nil) makes any future drift
+// in the MinPoolMarginProvider method signature a compile error instead of a
+// silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
+var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
@@ -641,6 +656,52 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	return registrations, nil
 }
 
+// DRepDelegation returns the DRep that the given stake credential is
+// vote-delegated to, or nil when the credential is not registered or is not
+// delegated to any DRep. It satisfies gouroboros' common.DRepDelegationState,
+// which the ledger rules use to validate reward withdrawals on protocol
+// versions 10 and 11 (a withdrawal from a credential not delegated to a DRep
+// is rejected).
+func (lv *LedgerView) DRepDelegation(
+	cred lcommon.Credential,
+) (*lcommon.Drep, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrAccountNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get account for drep delegation: %w", err)
+	}
+	if account == nil {
+		return nil, nil
+	}
+	// No DRep delegation: an empty credential together with the default
+	// key-hash type. An always-abstain / always-no-confidence delegation
+	// carries no credential but a non-default type, so it is a delegation.
+	if len(account.Drep) == 0 &&
+		account.DrepType == models.DrepTypeAddrKeyHash {
+		return nil, nil
+	}
+	// DrepType is a small ledger enum (0-3); guard the narrowing conversion
+	// so an out-of-range value degrades to "no DRep" rather than wrapping.
+	if account.DrepType > uint64(math.MaxInt) {
+		return nil, nil
+	}
+	return &lcommon.Drep{
+		Type:       int(account.DrepType),
+		Credential: account.Drep,
+	}, nil
+}
+
 // Constitution returns the current constitution.
 // Returns nil if no constitution has been established on-chain.
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
@@ -732,6 +793,38 @@ func (lv *LedgerView) GetStakeDistribution(
 	return dist, nil
 }
 
+// GetLeiosKeys returns the registered Dijkstra/Leios BLS key for each named
+// pool that has one, keyed by lowercase-hex pool key hash. A pool absent
+// from the result has no registered leios_key. The returned keys are raw
+// (gouroboros length-validated only); callers must verify proof of
+// possession themselves before treating a key as usable -- this mirrors
+// poolVrfKeyHashes, which similarly resolves current pool params rather
+// than the historical stake snapshot GetStakeDistribution reads.
+func (lv *LedgerView) GetLeiosKeys(
+	poolKeyHashes []lcommon.PoolKeyHash,
+) (map[string]*lcommon.LeiosKey, error) {
+	out := make(map[string]*lcommon.LeiosKey, len(poolKeyHashes))
+	if len(poolKeyHashes) == 0 {
+		return out, nil
+	}
+	pools, err := lv.ls.db.Metadata().
+		GetPools(poolKeyHashes, (*lv.txn).Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get pools: %w", err)
+	}
+	for _, pool := range pools {
+		if len(pool.LeiosKeyPublic) == 0 ||
+			len(pool.LeiosKeyPossessionProof) == 0 {
+			continue
+		}
+		out[hex.EncodeToString(pool.PoolKeyHash)] = &lcommon.LeiosKey{
+			PublicKey:       pool.LeiosKeyPublic,
+			PossessionProof: pool.LeiosKeyPossessionProof,
+		}
+	}
+	return out, nil
+}
+
 // GetPoolStake returns the stake for a specific pool from the snapshot.
 // Returns 0 if the pool has no stake in the snapshot.
 func (lv *LedgerView) GetPoolStake(
@@ -773,7 +866,14 @@ func (lv *LedgerView) GetDRepVotingPower(
 	credentialTag uint8,
 	drepCredential []byte,
 ) (uint64, error) {
-	power, err := lv.ls.db.GetDRepVotingPower(credentialTag, drepCredential, lv.txn)
+	// expiryEpoch 0: this point-in-time API query is not gated by the
+	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
+	power, err := lv.ls.db.GetDRepVotingPower(
+		credentialTag,
+		drepCredential,
+		0,
+		lv.txn,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}

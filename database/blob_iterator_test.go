@@ -38,7 +38,7 @@ func newTestDBWithMode(t *testing.T, mode string) *Database {
 		DataDir:     "", // In-memory
 		StorageMode: mode,
 	}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err, "failed to create test database")
 	t.Cleanup(func() {
 		require.NoError(t, db.Close(), "failed to close test database")
@@ -188,7 +188,12 @@ func TestBlobBlockIterator_Progress(t *testing.T) {
 	assert.Equal(t, uint64(100), result.Slot)
 
 	current, end = iter.Progress()
-	assert.Equal(t, uint64(100), current, "current should track last yielded slot")
+	assert.Equal(
+		t,
+		uint64(100),
+		current,
+		"current should track last yielded slot",
+	)
 	assert.Equal(t, uint64(500), end, "end should remain unchanged")
 }
 

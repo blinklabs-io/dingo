@@ -87,6 +87,61 @@ func (txsubmissionRejectingValidator) ValidateTxWithOverlay(
 	return errors.New("txsubmissionRejectingValidator: rejected")
 }
 
+func TestRetryTxsubmissionAdmissionBoundsContention(t *testing.T) {
+	var addCalls int
+	var waitCalls int
+	var retryStreaks []int
+	fullErr := &mempool.MempoolFullError{
+		CurrentSize: 10,
+		TxSize:      1,
+		Capacity:    10,
+	}
+
+	err := retryTxsubmissionAdmission(
+		func() error {
+			addCalls++
+			return fullErr
+		},
+		func() bool {
+			waitCalls++
+			return true
+		},
+		func(streak int) {
+			retryStreaks = append(retryStreaks, streak)
+		},
+	)
+
+	require.ErrorIs(t, err, errTxsubmissionAdmissionRetriesExhausted)
+	require.ErrorAs(t, err, &fullErr)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak, addCalls)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak-1, waitCalls)
+	require.Equal(t, []int{1, 2, 3}, retryStreaks)
+}
+
+func TestRetryTxsubmissionAdmissionSucceedsAfterContention(t *testing.T) {
+	var addCalls int
+	var waitCalls int
+
+	err := retryTxsubmissionAdmission(
+		func() error {
+			addCalls++
+			if addCalls < txsubmissionMaxAdmissionRetryStreak {
+				return &mempool.MempoolFullError{}
+			}
+			return nil
+		},
+		func() bool {
+			waitCalls++
+			return true
+		},
+		func(int) {},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak, addCalls)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak-1, waitCalls)
+}
+
 // TestTxSubmissionClientRequestTxIds verifies empty, partial, and capped
 // TxId responses when a peer asks what transactions this node can relay.
 func TestTxSubmissionClientRequestTxIds(t *testing.T) {
@@ -120,7 +175,7 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Arrange a peer consumer with the test's available tx set.
 			o, connId := newTxSubmissionTestOuroboros(t)
-			o.Mempool.AddConsumer(connId)
+			o.Mempool.NewConsumer(connId)
 			addTxSubmissionTestFixtures(t, o.Mempool, fixtures[:tt.txCount]...)
 
 			// Ask the handler for at most the peer-requested number of TxIds.
@@ -135,13 +190,21 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, ids, tt.wantCount)
 			for idx, id := range ids {
-				require.Equal(t, uint16(txsubmissionRelayTestEraId), id.TxId.EraId)
+				require.Equal(
+					t,
+					uint16(txsubmissionRelayTestEraId),
+					id.TxId.EraId,
+				)
 				require.Equal(
 					t,
 					uint32(len(fixtures[idx].body)),
 					id.Size,
 				)
-				require.Equal(t, fixtures[idx].hash, hex.EncodeToString(id.TxId.TxId[:]))
+				require.Equal(
+					t,
+					fixtures[idx].hash,
+					hex.EncodeToString(id.TxId.TxId[:]),
+				)
 			}
 		})
 	}
@@ -153,7 +216,7 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	// Arrange one cached transaction for a peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
@@ -181,7 +244,7 @@ func TestTxSubmissionClientRequestTxs(t *testing.T) {
 	// Arrange one known tx and one unknown tx id for the peer request.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	unknownHash := txsubmissionTestHash(99)
 	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
@@ -237,7 +300,7 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
 	// Arrange a valid consumer without advertising any txs to its cache.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 
 	// Verify an all-zero TxId request is treated as a cache miss, not a panic.
 	require.NotPanics(t, func() {
@@ -256,7 +319,7 @@ func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
 	// Arrange one available tx for the peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
@@ -287,12 +350,37 @@ func TestTxSubmissionServerInitMissingConnectionReturnsCleanly(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTxSubmissionClientStartMissingConnectionDoesNotAddConsumer(
+	t *testing.T,
+) {
+	o, connId := newTxSubmissionTestOuroboros(t)
+
+	err := o.txsubmissionClientStart(connId)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to lookup connection ID")
+	require.Nil(t, o.Mempool.FindConsumer(connId))
+}
+
+func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
+	h := newTxSubmissionRelayHarness(t)
+	defer h.close(t)
+	connId := h.connB.Id()
+
+	require.NoError(t, h.nodeB.txsubmissionClientStart(connId))
+	first := h.mB.Consumer(connId)
+	require.NotNil(t, first)
+
+	require.NoError(t, h.nodeB.txsubmissionClientStart(connId))
+	require.Same(t, first, h.mB.Consumer(connId))
+}
+
 // TestTxSubmissionConnectionClosedCleanup verifies connection close handling
 // removes txsubmission consumer and rate-limiter state for that peer.
 func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	// Arrange per-peer mempool and rate-limiter state.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	o.txSubmissionRateLimiter = newTxSubmissionRateLimiter(1, 1)
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 	require.False(t, o.txSubmissionRateLimiter.Allow(connId, 1))
@@ -306,7 +394,7 @@ func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	})
 
 	// Verify both txsubmission state holders have forgotten the peer.
-	require.Nil(t, o.Mempool.Consumer(connId))
+	require.Nil(t, o.Mempool.FindConsumer(connId))
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 }
 
@@ -331,15 +419,22 @@ func newTxSubmissionTestOuroboros(
 	}
 	m, err := mempool.NewMempool(cfg)
 	require.NoError(t, err)
+	require.NoError(t, m.Start(t.Context()))
 	t.Cleanup(func() {
-		require.NoError(t, m.Stop(t.Context()))
+		// context.Background, not t.Context: the latter is already
+		// cancelled by the time Cleanup funcs run, which used to be masked
+		// by Stop's ctx-deadline path always returning nil regardless of
+		// whether workers actually drained.
+		require.NoError(t, m.Stop(context.Background()))
 	})
 
 	o := NewOuroboros(OuroborosConfig{Logger: logger})
-	o.ConnManager = connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
-		Logger: logger,
-	})
-	o.Mempool = m
+	o.ConnManager = connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			Logger: logger,
+		},
+	)
+	o.Mempool = &mempool.FIFO{Mempool: m}
 	return o, txsubmissionTestConnId(t)
 }
 
@@ -393,7 +488,7 @@ func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
 
 func addTxSubmissionTestFixtures(
 	t *testing.T,
-	m *mempool.Mempool,
+	m mempool.Service,
 	fixtures ...txsubmissionTestFixture,
 ) {
 	t.Helper()
@@ -442,7 +537,10 @@ type txSubmissionRelayHarness struct {
 // deterministic teardown point rather than one deferred until after the
 // test function returns.
 func newTxSubmissionRelayHarness(t *testing.T) *txSubmissionRelayHarness {
-	return newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{})
+	return newTxSubmissionRelayHarnessWithOpts(
+		t,
+		txSubmissionRelayHarnessOpts{},
+	)
 }
 
 // txSubmissionRelayHarnessOpts overrides the harness's defaults. Every
@@ -453,6 +551,8 @@ type txSubmissionRelayHarnessOpts struct {
 	logger     *slog.Logger
 	validatorA mempool.TxValidator
 	validatorB mempool.TxValidator
+	capacityA  int64
+	dagA       bool
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -473,13 +573,30 @@ func newTxSubmissionRelayHarnessWithOpts(
 		validatorB = txsubmissionTestValidator{}
 	}
 
-	mA, err := mempool.NewMempool(mempool.MempoolConfig{
+	capacityA := opts.capacityA
+	if capacityA == 0 {
+		capacityA = 1024 * 1024
+	}
+	configA := mempool.MempoolConfig{
 		Logger:          logger,
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       validatorA,
-		MempoolCapacity: 1024 * 1024,
-	})
-	require.NoError(t, err)
+		MempoolCapacity: capacityA,
+	}
+	var (
+		mA           *mempool.Mempool
+		nodeAMempool mempool.Service
+		err          error
+	)
+	if opts.dagA {
+		dag, dagErr := mempool.NewDAG(configA)
+		require.NoError(t, dagErr)
+		mA, nodeAMempool = dag.Mempool, dag
+	} else {
+		mA, err = mempool.NewMempool(configA)
+		require.NoError(t, err)
+		nodeAMempool = &mempool.FIFO{Mempool: mA}
+	}
 	mB, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
 		PromRegistry:    prometheus.NewRegistry(),
@@ -496,9 +613,9 @@ func newTxSubmissionRelayHarnessWithOpts(
 	)
 
 	nodeA := NewOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
-	nodeA.Mempool = mA
+	nodeA.Mempool = nodeAMempool
 	nodeB := NewOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
-	nodeB.Mempool = mB
+	nodeB.Mempool = &mempool.FIFO{Mempool: mB}
 
 	serverPipe, clientPipe := net.Pipe()
 
@@ -629,6 +746,43 @@ func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
 	require.Equal(t, txBytes, relayed.Cbor)
 }
 
+func TestTxSubmissionDAGBackpressureResumesAfterRemoval(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	seed := fixtures[2]
+	offered := fixtures[0]
+	capacity := int64(len(seed.body))
+	for int64(len(seed.body)) >
+		int64(float64(capacity)*mempool.DefaultRejectionWatermark) {
+		capacity++
+	}
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		capacityA: capacity,
+		dagA:      true,
+	})
+	defer h.close(t)
+
+	require.NoError(
+		t,
+		h.mA.AddTransaction(txsubmissionRelayTestEraId, seed.body),
+	)
+	require.NoError(
+		t,
+		h.mB.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+	)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Never(t, func() bool {
+		_, ok := h.mA.GetTransaction(offered.hash)
+		return ok
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	h.mA.RemoveTxsByHash([]string{seed.hash})
+	require.Eventually(t, func() bool {
+		_, ok := h.mA.GetTransaction(offered.hash)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
 // TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect verifies the
 // server-init relay goroutine does not leak when the peer connection closes
 // while it is parked in a blocking RequestTxIds call. The mempool is seeded
@@ -686,15 +840,21 @@ func TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect(t *testing.T) {
 // from the mempool beforehand must fall straight through to "not found"
 // rather than erroring or panicking.
 func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
-	o, connId := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
-		cfg.TransactionTTL = 10 * time.Millisecond
-		cfg.CleanupInterval = 10 * time.Millisecond
-	})
-	o.Mempool.AddConsumer(connId)
+	o, connId := newTxSubmissionTestOuroboros(
+		t,
+		func(cfg *mempool.MempoolConfig) {
+			cfg.TransactionTTL = 10 * time.Millisecond
+			cfg.CleanupInterval = 10 * time.Millisecond
+		},
+	)
+	o.Mempool.NewConsumer(connId)
 
 	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
 	require.NoError(t, err)
-	require.NoError(t, o.Mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+	require.NoError(
+		t,
+		o.Mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes),
+	)
 	wantTx, err := gledger.NewTransactionFromCbor(
 		txsubmissionRelayTestEraId,
 		txBytes,
@@ -730,10 +890,15 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 // instead of panicking or wedging the connection. Node A's mempool rejects
 // every transaction so a real, well-formed relay reaches
 // Mempool.AddTransaction's error path inside txsubmissionServerInit.
-func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(t *testing.T) {
+func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
+	t *testing.T,
+) {
 	logBuf := &lockedBuffer{}
 	logger := slog.New(
-		slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
 	)
 
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{

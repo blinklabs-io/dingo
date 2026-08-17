@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
@@ -56,10 +57,12 @@ import (
 // iterating past the cutoff), the next epoch's nonce diverges from peers
 // and every header in that epoch fails VRF verification — the freeze
 // described in #2128.
-func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -220,10 +223,12 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(t *tes
 //
 // The rollover must therefore return candidate == importedNonce, NOT
 // some other value derived from a phantom pre-cutoff block.
-func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -344,10 +349,12 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(t *testing
 //
 // This test guards against any future change that makes the fast
 // path require a Branch B match.
-func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -475,10 +482,12 @@ func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(t *testing.T)
 // calculateEpochNonce. Disagreement means peer headers verifying
 // against one nonce while we recompute another — the freeze pattern
 // in #2128.
-func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 

@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -102,7 +103,7 @@ func TestBootstrap(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:  "abc123def456789012345678",
+				Digest:  "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc",
 				Network: "preprod",
 				Beacon: Beacon{
 					Epoch:               270,
@@ -152,18 +153,19 @@ func TestBootstrap(t *testing.T) {
 
 	var progressCalled atomic.Int32
 	result, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:          "preprod",
-		Backend:          BackendV1,
-		AggregatorURL:    server.URL,
-		DownloadDir:      downloadDir,
-		CleanupAfterLoad: true,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       downloadDir,
+		CleanupAfterLoad:  true,
 		OnProgress: func(p DownloadProgress) {
 			progressCalled.Add(1)
 		},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, "abc123def456789012345678", result.Snapshot.Digest)
+	require.Equal(t, "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc", result.Snapshot.Digest)
 	require.NotEmpty(t, result.ImmutableDir)
 	require.NotEmpty(t, result.ArchivePath)
 	assert.Greater(
@@ -179,7 +181,7 @@ func TestBootstrap(t *testing.T) {
 
 func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
 	archiveData := createChunkArchive(t)
-	digest := "newdigest1234567890abcdef"
+	digest := "b123456789abcdef0b123456789abcdef0b123456789abcdef0b123456789abc"
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
@@ -227,10 +229,11 @@ func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
 	)
 
 	result, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:       "preprod",
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
-		DownloadDir:   downloadDir,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       downloadDir,
 	})
 	require.NoError(t, err)
 	require.Equal(
@@ -246,7 +249,7 @@ func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:          "abc123",
+				Digest:          "c123456789abcdef0c123456789abcdef0c123456789abcdef0c123456789abc",
 				Network:         "preprod",
 				Locations:       []string{"http://example.com/s"},
 				CertificateHash: "",
@@ -266,6 +269,7 @@ func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 		Network:                "preprod",
 		Backend:                BackendV1,
 		AggregatorURL:          server.URL,
+		AllowInsecureHTTP:      true,
 		VerifyCertificateChain: true,
 	})
 	require.Error(t, err)
@@ -282,9 +286,10 @@ func TestBootstrapNoSnapshots(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:       "preprod",
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no snapshots available")
@@ -294,7 +299,7 @@ func TestBootstrapNoLocations(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:    "abc123",
+				Digest:    "d123456789abcdef0d123456789abcdef0d123456789abcdef0d123456789abc",
 				Network:   "preprod",
 				Locations: []string{},
 			},
@@ -313,9 +318,10 @@ func TestBootstrapNoLocations(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:       "preprod",
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no download locations")
@@ -341,6 +347,181 @@ func TestBootstrapUnknownNetwork(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "resolving aggregator URL")
+}
+
+// TestValidateSnapshotIdentity checks that validateSnapshotIdentity accepts
+// known networks with a bounded hex digest and rejects everything else,
+// including path-separator/traversal sequences in either field.
+func TestValidateSnapshotIdentity(t *testing.T) {
+	validDigest := "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+	tests := []struct {
+		name            string
+		expectedNetwork string
+		network         string
+		digest          string
+		wantErr         bool
+	}{
+		{"valid mainnet", "", "mainnet", validDigest, false},
+		{"valid preprod", "", "preprod", validDigest, false},
+		{"valid preview", "", "preview", validDigest, false},
+		{"too-short hex digest", "", "preprod", "abc123", true},
+		{"unknown network", "", "devnet", validDigest, true},
+		{"empty network", "", "", validDigest, true},
+		{"network with path traversal", "", "../../../etc", validDigest, true},
+		{"empty digest", "", "preprod", "", true},
+		{"digest with slash", "", "preprod", "abc/def", true},
+		{"digest with path traversal", "", "preprod", "../../etc/passwd", true},
+		{"digest with space", "", "preprod", "abc 123", true},
+		{"non-hex digest", "", "preprod", "not-hex-at-all", true},
+		{
+			"too-long digest",
+			"",
+			"preprod",
+			strings.Repeat("a", 65),
+			true,
+		},
+		{
+			"custom network matching operator config is trusted",
+			"devnet",
+			"devnet",
+			validDigest,
+			false,
+		},
+		{
+			"custom network not matching operator config is rejected",
+			"devnet",
+			"some-other-net",
+			validDigest,
+			true,
+		},
+		{
+			"path traversal rejected even with a custom expected network",
+			"devnet",
+			"../../../etc",
+			validDigest,
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSnapshotIdentity(
+				tt.expectedNetwork, tt.network, tt.digest,
+			)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestBootstrapRejectsPathTraversalInSnapshotNetwork verifies that a
+// malicious aggregator response with a path-traversal sequence in
+// snapshot.Network is rejected by Bootstrap before the archive download
+// (and thus any filesystem access derived from that field) is attempted.
+func TestBootstrapRejectsPathTraversalInSnapshotNetwork(t *testing.T) {
+	var downloadHit atomic.Bool
+	snapshots := []SnapshotListItem{
+		{
+			SnapshotBase: SnapshotBase{
+				Digest:  "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc",
+				Network: "../../../../tmp/evil",
+				Size:    203,
+				Locations: []string{
+					"placeholder",
+				},
+			},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"/artifact/snapshots",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(snapshots))
+		},
+	)
+	mux.HandleFunc(
+		"/download/snapshot.tar.zst",
+		func(w http.ResponseWriter, r *http.Request) {
+			downloadHit.Store(true)
+			w.WriteHeader(http.StatusOK)
+		},
+	)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	snapshots[0].Locations = []string{
+		server.URL + "/download/snapshot.tar.zst",
+	}
+
+	_, err := Bootstrap(context.Background(), BootstrapConfig{
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       t.TempDir(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validating snapshot metadata")
+	require.False(
+		t,
+		downloadHit.Load(),
+		"archive download must not be attempted for unvalidated metadata",
+	)
+}
+
+// TestBootstrapRejectsPathTraversalInSnapshotDigest is the digest-field
+// counterpart of TestBootstrapRejectsPathTraversalInSnapshotNetwork:
+// snapshot.Digest containing a path-traversal sequence must be rejected
+// before it can influence the cache-check or download path.
+func TestBootstrapRejectsPathTraversalInSnapshotDigest(t *testing.T) {
+	var downloadHit atomic.Bool
+	snapshots := []SnapshotListItem{
+		{
+			SnapshotBase: SnapshotBase{
+				Digest:  "../../../../tmp/evil",
+				Network: "preprod",
+				Size:    203,
+				Locations: []string{
+					"placeholder",
+				},
+			},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"/artifact/snapshots",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(snapshots))
+		},
+	)
+	mux.HandleFunc(
+		"/download/snapshot.tar.zst",
+		func(w http.ResponseWriter, r *http.Request) {
+			downloadHit.Store(true)
+			w.WriteHeader(http.StatusOK)
+		},
+	)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	snapshots[0].Locations = []string{
+		server.URL + "/download/snapshot.tar.zst",
+	}
+
+	_, err := Bootstrap(context.Background(), BootstrapConfig{
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       t.TempDir(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validating snapshot metadata")
+	require.False(
+		t,
+		downloadHit.Load(),
+		"archive download must not be attempted for unvalidated metadata",
+	)
 }
 
 func TestBootstrapResultCleanup(t *testing.T) {
@@ -593,7 +774,7 @@ func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -659,7 +840,7 @@ func TestVerifyCertificateChainWithModeSTMRejectsContentHashMismatch(
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	_, err = VerifyCertificateChainWithMode(
 		context.Background(),
 		client,
@@ -706,9 +887,15 @@ func TestVerifyCertificateChainWithModeReturnsDetails(t *testing.T) {
 			},
 			ProtocolMessage: ProtocolMessage{
 				MessageParts: map[string]string{
-					"current_epoch":                   "269",
-					"next_aggregate_verification_key": hex.EncodeToString(g2.Marshal()),
-					"next_protocol_parameters":        ProtocolParameters{K: 1, M: 2, PhiF: 0.5}.ComputeHash(),
+					"current_epoch": "269",
+					"next_aggregate_verification_key": hex.EncodeToString(
+						g2.Marshal(),
+					),
+					"next_protocol_parameters": ProtocolParameters{
+						K:    1,
+						M:    2,
+						PhiF: 0.5,
+					}.ComputeHash(),
 				},
 			},
 		},
@@ -746,7 +933,7 @@ func TestVerifyCertificateChainWithModeReturnsDetails(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	result, err := VerifyCertificateChainWithMode(
 		context.Background(),
 		client,
@@ -770,10 +957,12 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:          "digest123",
+				Digest:          "e123456789abcdef0e123456789abcdef0e123456789abcdef0e123456789abc",
 				Network:         "preprod",
 				CertificateHash: "cert_leaf",
-				Locations:       []string{"https://example.com/snapshot.tar.zst"},
+				Locations: []string{
+					"https://example.com/snapshot.tar.zst",
+				},
 				Beacon: Beacon{
 					Epoch:               270,
 					ImmutableFileNumber: 5320,
@@ -802,7 +991,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 			},
 			ProtocolMessage: ProtocolMessage{
 				MessageParts: map[string]string{
-					"snapshot_digest": "digest123",
+					"snapshot_digest": "e123456789abcdef0e123456789abcdef0e123456789abcdef0e123456789abc",
 					"current_epoch":   "270",
 				},
 			},
@@ -819,7 +1008,11 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 				MessageParts: map[string]string{
 					"current_epoch":                   "269",
 					"next_aggregate_verification_key": g2Hex,
-					"next_protocol_parameters":        ProtocolParameters{K: 1, M: 2, PhiF: 0.5}.ComputeHash(),
+					"next_protocol_parameters": ProtocolParameters{
+						K:    1,
+						M:    2,
+						PhiF: 0.5,
+					}.ComputeHash(),
 				},
 			},
 		},
@@ -883,6 +1076,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 		Network:                "preprod",
 		Backend:                BackendV1,
 		AggregatorURL:          server.URL,
+		AllowInsecureHTTP:      true,
 		VerifyCertificateChain: true,
 	})
 	require.Error(t, err)

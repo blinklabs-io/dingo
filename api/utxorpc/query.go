@@ -95,10 +95,12 @@ func parseSearchUtxosStartToken(
 		return nil, nil
 	}
 	parts := strings.Split(startToken, ":")
-	if len(parts) != 3 {
+	if len(parts) != 4 {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
-			errors.New("invalid start_token: expected slot:block_index:output_idx"),
+			errors.New(
+				"invalid start_token: expected slot:block_index:output_idx:tx_id",
+			),
 		)
 	}
 
@@ -126,14 +128,25 @@ func parseSearchUtxosStartToken(
 		)
 	}
 
+	cursorTxId, err := hex.DecodeString(parts[3])
+	if err != nil || len(cursorTxId) != 32 {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("invalid start_token tx_id"),
+		)
+	}
+
 	return &models.UtxoOrderingCursor{
 		Slot:       cursorSlot,
 		BlockIndex: uint32(cursorBlockIndex),
 		OutputIdx:  uint32(cursorOutputIdx),
+		TxId:       cursorTxId,
 	}, nil
 }
 
-func searchUtxoModelToAnyData(utxo *models.UtxoWithOrdering) (*query.AnyUtxoData, error) {
+func searchUtxoModelToAnyData(
+	utxo *models.UtxoWithOrdering,
+) (*query.AnyUtxoData, error) {
 	var aud query.AnyUtxoData
 	ret, err := utxo.Decode()
 	if err != nil {
@@ -170,33 +183,53 @@ func searchUtxoModelToAnyData(utxo *models.UtxoWithOrdering) (*query.AnyUtxoData
 	return &aud, nil
 }
 
-// dedupeSearchAddresses drops duplicate ledger addresses with the same full
-// payment credential identity (type + hash) and full stake credential identity
-// (type + hash). A key-hash payment and a script-hash payment that share the
-// same 28-byte hash are distinct addresses and must not be collapsed.
-func dedupeSearchAddresses(addrs []ledger.Address) []ledger.Address {
-	if len(addrs) < 2 {
-		return addrs
+func searchUtxoAddressPatterns(
+	addressPattern *utxorpcCardano.AddressPattern,
+) ([]models.UtxoAddressPattern, error) {
+	if addressPattern == nil {
+		return nil, nil
 	}
-	seen := make(map[string]struct{}, len(addrs))
-	out := make([]ledger.Address, 0, len(addrs))
-	for _, a := range addrs {
-		pkb := a.PaymentKeyHash().Bytes()
-		skb := a.StakeKeyHash().Bytes()
-		paymentTag := byte(a.Type() & lcommon.AddressTypeScriptBit)
-		stakeTag := byte(0)
-		if _, ok := a.StakingPayload().(lcommon.AddressPayloadScriptHash); ok {
-			stakeTag = 1
-		}
-		key := string([]byte{paymentTag}) + string(pkb) + "\x00" +
-			string([]byte{stakeTag}) + string(skb)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, a)
+	pattern := models.UtxoAddressPattern{
+		ExactAddress:   addressPattern.GetExactAddress(),
+		PaymentPart:    addressPattern.GetPaymentPart(),
+		DelegationPart: addressPattern.GetDelegationPart(),
 	}
-	return out
+	if len(pattern.ExactAddress) > 0 {
+		if _, err := lcommon.NewAddressFromBytes(
+			pattern.ExactAddress,
+		); err != nil {
+			return nil, connect.NewError(
+				connect.CodeInvalidArgument,
+				fmt.Errorf("failed to decode exact address: %w", err),
+			)
+		}
+	}
+	if len(pattern.PaymentPart) > 0 &&
+		len(pattern.PaymentPart) != lcommon.AddressHashSize {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"invalid payment part length %d",
+				len(pattern.PaymentPart),
+			),
+		)
+	}
+	if len(pattern.DelegationPart) > 0 &&
+		len(pattern.DelegationPart) != lcommon.AddressHashSize {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"invalid delegation part length %d",
+				len(pattern.DelegationPart),
+			),
+		)
+	}
+	if len(pattern.ExactAddress) == 0 &&
+		len(pattern.PaymentPart) == 0 &&
+		len(pattern.DelegationPart) == 0 {
+		return nil, nil
+	}
+	return []models.UtxoAddressPattern{pattern}, nil
 }
 
 // ReadParams
@@ -375,6 +408,13 @@ func (s *queryServiceServer) ReadEraSummary(
 	return connect.NewResponse(resp), nil
 }
 
+// utxoRefKey builds a comparable map key for a (tx hash, output index) UTxO
+// reference; models.UtxoId embeds a []byte and so cannot be used as a map
+// key directly.
+func utxoRefKey(hash []byte, idx uint32) string {
+	return string(hash) + ":" + strconv.FormatUint(uint64(idx), 10)
+}
+
 // ReadUtxos
 func (s *queryServiceServer) ReadUtxos(
 	ctx context.Context,
@@ -400,14 +440,26 @@ func (s *queryServiceServer) ReadUtxos(
 
 	resp := &query.ReadUtxosResponse{}
 
+	// Resolve all requested refs in a single batch, then correlate results
+	// back to each requested key below.
+	refs := make([]models.UtxoId, len(keys))
+	for i, txo := range keys {
+		refs[i] = models.UtxoId{Hash: txo.GetHash(), Idx: txo.GetIndex()}
+	}
+	utxos, err := s.utxorpc.config.LedgerState.UtxosByRefs(refs)
+	if err != nil {
+		return nil, err
+	}
+	utxoByRef := make(map[string]*models.Utxo, len(utxos))
+	for i := range utxos {
+		utxoByRef[utxoRefKey(utxos[i].TxId, utxos[i].OutputIdx)] = &utxos[i]
+	}
+
 	// Get UTxOs from ledger
 	for _, txo := range keys {
-		utxo, err := s.utxorpc.config.LedgerState.UtxoByRef(
-			txo.GetHash(),
-			txo.GetIndex(),
-		)
-		if err != nil {
-			return nil, err
+		utxo, ok := utxoByRef[utxoRefKey(txo.GetHash(), txo.GetIndex())]
+		if !ok {
+			return nil, database.ErrUtxoNotFound
 		}
 		var aud query.AnyUtxoData
 		ret, err := utxo.Decode()
@@ -506,7 +558,9 @@ func (s *queryServiceServer) SearchUtxos(
 	maxItems := req.Msg.GetMaxItems()     // int32
 	fieldMask := req.Msg.GetFieldMask()
 
-	maxAllowed := int32(s.utxorpc.config.MaxHistoryItems) // #nosec G115 -- DefaultMaxHistoryItems (10000)
+	maxAllowed := int32(
+		s.utxorpc.config.MaxHistoryItems,
+	) // #nosec G115 -- DefaultMaxHistoryItems (10000)
 	if maxItems < 0 {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
@@ -551,50 +605,12 @@ func (s *queryServiceServer) SearchUtxos(
 		assetPattern,
 	)
 
-	var addresses []ledger.Address
-	if addressPattern != nil {
-		exactAddressBytes := addressPattern.GetExactAddress()
-		if exactAddressBytes != nil {
-			var addr ledger.Address
-			err := addr.UnmarshalCBOR(exactAddressBytes)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"failed to decode exact address: %w",
-					err,
-				)
-			}
-			addresses = append(addresses, addr)
-		}
-
-		paymentPart := addressPattern.GetPaymentPart()
-		if paymentPart != nil {
-			s.utxorpc.config.Logger.Info("PaymentPart is present, decoding...")
-			var paymentAddr ledger.Address
-			err := paymentAddr.UnmarshalCBOR(paymentPart)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode payment part: %w", err)
-			}
-			addresses = append(addresses, paymentAddr)
-		}
-
-		delegationPart := addressPattern.GetDelegationPart()
-		if delegationPart != nil {
-			s.utxorpc.config.Logger.Info(
-				"DelegationPart is present, decoding...",
-			)
-			var delegationAddr ledger.Address
-			err := delegationAddr.UnmarshalCBOR(delegationPart)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"failed to decode delegation part: %w",
-					err,
-				)
-			}
-			addresses = append(addresses, delegationAddr)
-		}
+	addressPatterns, err := searchUtxoAddressPatterns(addressPattern)
+	if err != nil {
+		return nil, err
 	}
 
-	if !matchAllAddresses && len(addresses) == 0 {
+	if !matchAllAddresses && len(addressPatterns) == 0 {
 		resp.LedgerTip = s.searchUtxosLedgerTip()
 		return connect.NewResponse(resp), nil
 	}
@@ -618,10 +634,6 @@ func (s *queryServiceServer) SearchUtxos(
 		assetName = assetPattern.GetAssetName()
 	}
 
-	if !matchAllAddresses {
-		addresses = dedupeSearchAddresses(addresses)
-	}
-
 	after, err := parseSearchUtxosStartToken(startToken)
 	if err != nil {
 		return nil, err
@@ -629,7 +641,7 @@ func (s *queryServiceServer) SearchUtxos(
 
 	utxoQ := &models.UtxoWithOrderingQuery{
 		MatchAllAddresses: matchAllAddresses,
-		Addresses:         addresses,
+		AddressPatterns:   addressPatterns,
 		After:             after,
 		Limit:             int(effectiveMax) + 1,
 		FilterByAsset:     filterByAsset,
@@ -659,10 +671,11 @@ func (s *queryServiceServer) SearchUtxos(
 	if hasMore && len(utxos) > 0 {
 		last := utxos[len(utxos)-1]
 		resp.NextToken = fmt.Sprintf(
-			"%d:%d:%d",
+			"%d:%d:%d:%x",
 			last.TxSlot,
 			last.TxBlockIndex,
 			last.OutputIdx,
+			last.TxId,
 		)
 	}
 

@@ -63,7 +63,7 @@ func bootstrapV2(
 	cfg BootstrapConfig,
 	aggregatorURL string,
 ) (*BootstrapResult, error) {
-	client := NewClient(aggregatorURL)
+	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
 
 	// Step 1: Fetch latest artifact and verify its self-hash
 	artifact, err := client.GetLatestCardanoDatabaseSnapshot(ctx)
@@ -79,6 +79,36 @@ func bootstrapV2(
 			computed,
 			artifact.Hash,
 		)
+	}
+	if err := validateSnapshotIdentity(
+		cfg.Network, artifact.Network, artifact.Hash,
+	); err != nil {
+		return nil, fmt.Errorf("validating artifact metadata: %w", err)
+	}
+	if cfg.Network != "" && artifact.Network != "" &&
+		cfg.Network != artifact.Network {
+		return nil, fmt.Errorf(
+			"mithril artifact network mismatch: requested=%s artifact=%s",
+			cfg.Network,
+			artifact.Network,
+		)
+	}
+	// A certificate authenticates the immutable database content, while the
+	// ledger state and the final in-progress immutable trio are authenticated
+	// by the separately signed ancillary manifest. Do not start downloading
+	// immutable data when the second half of that trust boundary cannot be
+	// checked.
+	if cfg.VerifyCertificateChain {
+		if len(artifact.Ancillary.Locations) == 0 {
+			return nil, errors.New(
+				"verified Mithril bootstrap requires ancillary locations",
+			)
+		}
+		if cfg.AncillaryVerificationKey == "" {
+			return nil, errors.New(
+				"verified Mithril bootstrap requires an ancillary verification key",
+			)
+		}
 	}
 
 	cfg.Logger.Info(
@@ -158,14 +188,17 @@ func bootstrapV2(
 
 	extractDir := filepath.Join(
 		downloadDir,
-		"immutable-"+artifact.Hash,
+		filepath.Base("immutable-"+artifact.Hash),
 	)
 	var ancillaryDir string
 	var ancillaryArchivePath string
+	var ancillaryErr error
 
-	// Steps 4+5: Download immutable archives and the ancillary
-	// archive in parallel. The ancillary download is non-fatal; the
-	// node can close the gap from the network without ledger state.
+	// Steps 4+5: Download immutable archives and the ancillary archive in
+	// parallel. A verified bootstrap records ancillary failures and returns
+	// them after the immutable download completes; the sync caller disables
+	// database-copy pipelining for this path, so no imported state is exposed
+	// as ready before both trust inputs are present.
 	ancCtx, ancCancel := context.WithCancel(ctx)
 	var ancWg sync.WaitGroup
 	defer ancWg.Wait()
@@ -174,15 +207,15 @@ func bootstrapV2(
 		ancWg.Go(func() {
 			candidateDir := filepath.Join(
 				downloadDir,
-				"ancillary-"+artifact.Hash,
+				filepath.Base("ancillary-"+artifact.Hash),
 			)
 			candidateArchive := filepath.Join(
 				downloadDir,
-				fmt.Sprintf(
+				filepath.Base(fmt.Sprintf(
 					"%s-%s-ancillary.tar.zst",
 					artifact.Network,
 					truncateDigest(artifact.Hash),
-				),
+				)),
 			)
 			if hasLedgerFiles(candidateDir) {
 				if err := verifyAncillaryExtraction(
@@ -230,13 +263,7 @@ func bootstrapV2(
 				ancCtx, cfg, artifact, downloadDir,
 			)
 			if ancErr != nil {
-				cfg.Logger.Warn(
-					"failed to download ancillary "+
-						"data, continuing without "+
-						"ledger state",
-					"component", "mithril",
-					"error", ancErr,
-				)
+				ancillaryErr = ancErr
 				return
 			}
 			ancillaryDir = dir
@@ -264,6 +291,26 @@ func bootstrapV2(
 	// Wait for ancillary download to finish (also deferred above
 	// for the error-return path; calling Wait twice is safe).
 	ancWg.Wait()
+	if ancillaryErr != nil {
+		if cfg.VerifyCertificateChain {
+			return nil, fmt.Errorf(
+				"verified Mithril ancillary data unavailable: %w",
+				ancillaryErr,
+			)
+		}
+		cfg.Logger.Warn(
+			"failed to download ancillary data; continuing without ledger state",
+			"component",
+			"mithril",
+			"error",
+			ancillaryErr,
+		)
+	}
+	if cfg.VerifyCertificateChain && ancillaryDir == "" {
+		return nil, errors.New(
+			"verified Mithril bootstrap produced no ancillary data",
+		)
+	}
 
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
@@ -530,12 +577,12 @@ func removeDigestsCache(
 	downloadDir string,
 ) {
 	suffix := truncateDigest(artifact.Hash)
-	_ = os.Remove(filepath.Join(downloadDir, fmt.Sprintf(
+	_ = os.Remove(filepath.Join(downloadDir, filepath.Base(fmt.Sprintf(
 		"digests-%s.tar.zst",
 		suffix,
-	)))
+	))))
 	_ = os.RemoveAll(
-		filepath.Join(downloadDir, "digests-"+suffix),
+		filepath.Join(downloadDir, filepath.Base("digests-"+suffix)),
 	)
 }
 
@@ -552,14 +599,15 @@ func downloadDigestsArchive(
 		ctx, DownloadConfig{
 			URL:     uri,
 			DestDir: downloadDir,
-			Filename: fmt.Sprintf(
+			Filename: filepath.Base(fmt.Sprintf(
 				"digests-%s.tar.zst",
 				truncateDigest(artifact.Hash),
-			),
+			)),
 			Logger:              cfg.Logger,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
 	if err != nil {
@@ -567,7 +615,7 @@ func downloadDigestsArchive(
 	}
 	destDir := filepath.Join(
 		downloadDir,
-		"digests-"+truncateDigest(artifact.Hash),
+		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
 	)
 	if _, err := ExtractArchive(
 		ctx, archivePath, destDir, cfg.Logger,
@@ -592,7 +640,9 @@ func downloadDigestsArchive(
 			"no digest JSON file found in digests archive",
 		)
 	}
-	data, err := os.ReadFile(jsonPath) //nolint:gosec // path is constructed from our own extraction directory
+	data, err := os.ReadFile(
+		jsonPath,
+	) //nolint:gosec // path is constructed from our own extraction directory
 	if err != nil {
 		return nil, fmt.Errorf("reading digest JSON: %w", err)
 	}
@@ -622,7 +672,7 @@ func downloadImmutables(
 	}
 	archiveDir := filepath.Join(
 		downloadDir,
-		"immutable-archives-"+truncateDigest(artifact.Hash),
+		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
 	)
 	if err := os.MkdirAll(archiveDir, 0o750); err != nil {
 		return fmt.Errorf("creating archive directory: %w", err)
@@ -920,14 +970,17 @@ func fetchImmutableArchive(
 	dlLogger := cfg.Logger.With("immutable_file_number", num)
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
-			URL:                 location.ImmutableArchiveURI(num),
-			DestDir:             archiveDir,
-			Filename:            filepath.Base(immutableArchivePath(archiveDir, num)),
+			URL:     location.ImmutableArchiveURI(num),
+			DestDir: archiveDir,
+			Filename: filepath.Base(
+				immutableArchivePath(archiveDir, num),
+			),
 			Logger:              dlLogger,
 			HTTPClient:          cfg.httpClient,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
 	if err != nil {
@@ -990,13 +1043,17 @@ func checkImmutableTrio(
 func removeImmutableTrio(dir string, num uint64) {
 	for _, ext := range immutableFileExtensions {
 		path := filepath.Join(dir, fmt.Sprintf("%05d.%s", num, ext))
-		_ = os.Remove(path) //nolint:gosec // path is constructed from our own extraction directory
+		_ = os.Remove(
+			path,
+		) //nolint:gosec // path is constructed from our own extraction directory
 	}
 }
 
 // sha256File returns the hex SHA-256 digest and size of a file.
 func sha256File(path string) (string, int64, error) {
-	f, err := os.Open(path) //nolint:gosec // callers construct the path from controlled directories
+	f, err := os.Open(
+		path,
+	) //nolint:gosec // callers construct the path from controlled directories
 	if err != nil {
 		return "", 0, err
 	}
@@ -1012,8 +1069,7 @@ func sha256File(path string) (string, int64, error) {
 // downloadAncillaryV2 downloads and extracts the v2 ancillary archive
 // (ledger state plus the next in-progress immutable trio) and, when
 // certificate verification is enabled, verifies the signed ancillary
-// manifest. Mirrors the v1 non-fatal contract: the caller logs and
-// continues without ledger state on error.
+// manifest. A verified bootstrap fails closed when this data is unavailable.
 func downloadAncillaryV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
@@ -1032,11 +1088,11 @@ func downloadAncillaryV2(
 		"size", artifact.Ancillary.SizeUncompressed,
 	)
 
-	ancillaryFilename := fmt.Sprintf(
+	ancillaryFilename := filepath.Base(fmt.Sprintf(
 		"%s-%s-ancillary.tar.zst",
 		artifact.Network,
 		truncateDigest(artifact.Hash),
-	)
+	))
 
 	var ancillaryPath string
 	var err error
@@ -1054,6 +1110,7 @@ func downloadAncillaryV2(
 				IdleTimeout:         cfg.DownloadIdleTimeout,
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+				AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 			},
 		)
 		if err == nil {
@@ -1079,7 +1136,7 @@ func downloadAncillaryV2(
 
 	ancillaryDir := filepath.Join(
 		downloadDir,
-		"ancillary-"+artifact.Hash,
+		filepath.Base("ancillary-"+artifact.Hash),
 	)
 	if _, extractErr := ExtractArchive(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
@@ -1114,12 +1171,14 @@ func verifyAncillaryExtraction(
 		return nil
 	}
 	if cfg.AncillaryVerificationKey == "" {
-		cfg.Logger.Warn(
-			"no ancillary verification key configured, "+
-				"skipping ancillary manifest verification",
-			"component", "mithril",
+		return errors.New(
+			"ancillary verification key is required for verified bootstrap",
 		)
-		return nil
+	}
+	if !hasLedgerFiles(ancillaryDir) {
+		return errors.New(
+			"verified ancillary archive contains no ledger state",
+		)
 	}
 	if err := verifyAncillaryManifest(
 		ancillaryDir, cfg.AncillaryVerificationKey,
@@ -1237,6 +1296,37 @@ func verifyAncillaryManifest(
 				relPath,
 			)
 		}
+	}
+	// The signed manifest must cover the complete extracted payload. An
+	// attacker must not be able to add an unlisted ledger or immutable file
+	// that the importer could later select.
+	if err := filepath.WalkDir(
+		dir,
+		func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			relPath, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			relPath = filepath.ToSlash(relPath)
+			if relPath == ancillaryManifestFilename {
+				return nil
+			}
+			if _, ok := manifest.Data[relPath]; !ok {
+				return fmt.Errorf(
+					"ancillary file %s is not covered by manifest",
+					relPath,
+				)
+			}
+			return nil
+		},
+	); err != nil {
+		return err
 	}
 	return nil
 }

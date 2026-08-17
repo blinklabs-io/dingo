@@ -77,7 +77,13 @@ func NewPraosTiebreakerViewFull(
 	vrfOutput []byte,
 	config PraosTiebreakerConfig,
 ) PraosTiebreakerView {
-	return praos.NewPraosTiebreakerViewFull(tip, issuer, issueNo, vrfOutput, config)
+	return praos.NewPraosTiebreakerViewFull(
+		tip,
+		issuer,
+		issueNo,
+		vrfOutput,
+		config,
+	)
 }
 
 // GetPraosTiebreakerView delegates to consensus/praos.

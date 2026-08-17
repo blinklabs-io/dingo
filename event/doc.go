@@ -32,6 +32,28 @@
 // Use PublishAsync for events that do not need to be delivered
 // synchronously with the publisher's call stack.
 //
+// # Delivery guarantees
+//
+// The bus does not drop events. When a subscriber's channel buffer or
+// the shared async queue is full, the publisher waits for capacity
+// rather than discarding the event, so ingestion slows instead of
+// losing work that subscribers derive state from. Waiting is bounded
+// only by shutdown: Stop, Close, and Unsubscribe all release publishers
+// parked on a full buffer. Buffers themselves stay bounded, so
+// backpressure never trades event loss for unbounded memory.
+//
+// The practical consequence is that a subscriber which stops draining
+// stalls its publishers. It also means a publisher must not hold a lock
+// that a subscriber of the same event acquires: once the buffer fills,
+// the subscriber waits for the lock and the publisher waits for the
+// capacity the subscriber would free, and neither proceeds. Queue such
+// events and publish them after releasing the lock (see ledger's
+// pendingPublishes). Subscribers that take a channel from Subscribe
+// must drain it for as long as they hold the subscription and must
+// Unsubscribe when they stop. A delivery parked for a long time is
+// reported by the event_delivery_blocked_total metric and an "event
+// delivery stalled" warning.
+//
 // # Subscribing
 //
 //	eventBus.SubscribeFunc(chain.ChainForkEventType, func(evt event.Event) {
@@ -43,8 +65,9 @@
 // The bus runs a pool of async worker goroutines (default 4) to
 // dispatch subscribers. Subscriber callbacks must be non-blocking; if
 // a callback needs to do real work, push it onto its own goroutine.
-// A slow subscriber can backpressure the bus and delay delivery of
-// unrelated events.
+// A slow subscriber backpressures the bus and delays delivery of
+// unrelated events: the async workers are a shared pool, so a
+// subscriber that parks them holds up every async event type.
 //
 // Event type constants live alongside the package that owns the
 // event: ChainForkEventType in chain, ChainSwitchEventType in

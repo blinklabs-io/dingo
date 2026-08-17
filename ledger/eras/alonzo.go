@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"slices"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
@@ -262,13 +262,15 @@ func ValidateTxAlonzo(
 	}
 	// Evaluate scripts
 	var txInfoV1 script.TxInfoV1
-	txInfoV1, err = script.NewTxInfoV1FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return err
+	if txHasRedeemers(tx) {
+		txInfoV1, err = script.NewTxInfoV1FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return err
+		}
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key
@@ -303,23 +305,30 @@ func ValidateTxAlonzo(
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
-			evalContext.SkipFinalSlippageFlush = true
 			usedBudget, err := s.Evaluate(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				lcommon.ExUnits{Steps: math.MaxInt64 / 2, Memory: math.MaxInt64 / 2},
+				lcommon.ExUnits{
+					Steps:  restrictiveEnormousBudget,
+					Memory: restrictiveEnormousBudget,
+				},
 				evalContext,
 			)
 			if err != nil {
 				return err
 			}
 			if usedBudget.Steps > redeemer.ExUnits.Steps || usedBudget.Memory > redeemer.ExUnits.Memory {
-				return fmt.Errorf(
-					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-					usedBudget.Steps, usedBudget.Memory,
-					redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-				)
+				return conway.PlutusScriptFailedError{
+					ScriptHash: tmpScript.Hash(),
+					Tag:        redeemer.Tag,
+					Index:      redeemer.Index,
+					Err: fmt.Errorf(
+						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+						usedBudget.Steps, usedBudget.Memory,
+						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+					),
+				}
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
@@ -393,13 +402,16 @@ func EvaluateTxAlonzo(
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
-	txInfoV1, err := script.NewTxInfoV1FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	var txInfoV1 script.TxInfoV1
+	if txHasRedeemers(tx) {
+		txInfoV1, err = script.NewTxInfoV1FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key

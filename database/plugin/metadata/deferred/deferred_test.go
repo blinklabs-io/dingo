@@ -25,37 +25,39 @@ import (
 func TestNoDuplicateManifestEntries(t *testing.T) {
 	seen := map[string]int{}
 	for i, idx := range Manifest {
-		key := fmt.Sprintf("%T:%s:%s", idx.Model, idx.Field, idx.Name)
+		key := fmt.Sprintf("%s:%s", idx.Table, idx.Name)
 		if prev, ok := seen[key]; ok {
 			t.Errorf(
-				"duplicate manifest entry at indices %d and %d (model=%T field=%q name=%q)",
-				prev, i, idx.Model, idx.Field, idx.Name,
+				"duplicate manifest entry at indices %d and %d (table=%q name=%q)",
+				prev,
+				i,
+				idx.Table,
+				idx.Name,
 			)
 		}
 		seen[key] = i
 	}
 }
 
-// TestManifestEntriesHaveResolvableName confirms each entry has
-// either a Field (used by GORM to resolve to the auto-named index)
-// or a literal Name. An entry with neither is unusable.
+// TestManifestEntriesHaveResolvableName confirms each entry carries everything the
+// shared SQL store needs to rebuild it.
 func TestManifestEntriesHaveResolvableName(t *testing.T) {
 	for i, idx := range Manifest {
-		if idx.ResolvedName() == "" {
+		if idx.Name == "" {
 			t.Errorf(
-				"manifest entry %d (table=%q) has neither Field nor Name set",
+				"manifest entry %d (table=%q) has an empty Name",
 				i, idx.Table,
 			)
 		}
 		if idx.Table == "" {
 			t.Errorf(
-				"manifest entry %d (field=%q name=%q) has empty Table",
-				i, idx.Field, idx.Name,
+				"manifest entry %d (name=%q) has empty Table",
+				i, idx.Name,
 			)
 		}
-		if idx.Model == nil {
+		if len(idx.Columns) == 0 {
 			t.Errorf(
-				"manifest entry %d (table=%q) has nil Model",
+				"manifest entry %d (table=%q) has no columns",
 				i, idx.Table,
 			)
 		}
@@ -70,17 +72,24 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 		t.Fatal("CriticalManifest returned empty slice")
 	}
 	// Pin the expected count so accidental de-classification is caught.
-	const wantCritical = 13
+	// idx_utxo_staking_deleted_amount left the manifest entirely: the
+	// API-backfill per-batch live-stake SUM needs it during bulk load,
+	// so it is never dropped and no longer needs a critical rebuild slot.
+	const wantCritical = 12
 	if len(critical) != wantCritical {
-		t.Errorf("CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally", len(critical), wantCritical)
+		t.Errorf(
+			"CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally",
+			len(critical),
+			wantCritical,
+		)
 	}
 	// Every critical entry must exist in the full manifest.
 	full := map[string]bool{}
 	for _, idx := range Manifest {
-		full[fmt.Sprintf("%T:%s:%s", idx.Model, idx.Field, idx.Name)] = true
+		full[fmt.Sprintf("%s:%s", idx.Table, idx.Name)] = true
 	}
 	for _, idx := range critical {
-		key := fmt.Sprintf("%T:%s:%s", idx.Model, idx.Field, idx.Name)
+		key := fmt.Sprintf("%s:%s", idx.Table, idx.Name)
 		if !full[key] {
 			t.Errorf("critical entry %q not found in full Manifest", key)
 		}

@@ -17,7 +17,9 @@ package txpump
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -65,6 +67,63 @@ func TestLoadConfig_LoadsConfirmationSlots(t *testing.T) {
 	require.Equal(t, uint64(42), cfg.ConfirmationSlots)
 }
 
+func TestLoadConfig_StartUpTimeout(t *testing.T) {
+	clearTxpumpEnv(t)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 60*time.Second, cfg.StartupTimeout)
+
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "7")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 7*time.Second, cfg.StartupTimeout)
+
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "0")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Zero(t, cfg.StartupTimeout)
+}
+
+func TestLoadConfig_RejectsInvalidStartupTimeout(t *testing.T) {
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "-1")
+
+	_, err := LoadConfig()
+	require.ErrorContains(t, err, "TXPUMP_STARTUP_TIMEOUT")
+}
+
+func TestParseStartupTimeoutBounds(t *testing.T) {
+	timeout, err := parseStartupTimeout(
+		strconv.FormatInt(maxStartupTimeoutSeconds, 10),
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		time.Duration(maxStartupTimeoutSeconds)*time.Second,
+		timeout,
+	)
+
+	_, err = parseStartupTimeout(
+		strconv.FormatInt(maxStartupTimeoutSeconds+1, 10),
+	)
+	require.Error(t, err)
+	_, err = parseStartupTimeout("-1")
+	require.Error(t, err)
+}
+
+func TestStopStartupTimeoutRemainsDisabledPastDeadline(t *testing.T) {
+	timer := time.NewTimer(10 * time.Millisecond)
+	deadline := timer.C
+	stopStartupTimeout(&timer, &deadline)
+
+	select {
+	case <-deadline:
+		t.Fatal("startup deadline remained active after readiness")
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
 func clearTxpumpEnv(t *testing.T) {
 	t.Helper()
 
@@ -76,6 +135,7 @@ func clearTxpumpEnv(t *testing.T) {
 		"TXPUMP_COOLDOWN_MIN",
 		"TXPUMP_COOLDOWN_MAX",
 		"TXPUMP_CONFIRMATION_SLOTS",
+		"TXPUMP_STARTUP_TIMEOUT",
 		"TXPUMP_TYPES",
 		"TXPUMP_LOG_DIR",
 		"TXPUMP_FALLBACK_ADDR",

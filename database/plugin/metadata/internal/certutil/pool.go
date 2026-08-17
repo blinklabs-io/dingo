@@ -47,23 +47,42 @@ func PoolRewardAccount(
 ) (credentialTag uint8, hash []byte, err error) {
 	rawCbor := cert.Cbor()
 	if len(rawCbor) > 0 {
-		// Pool cert CBOR is a flat array:
+		// Legacy pool cert CBOR is a 10-field flat array:
 		//   [cert_type, operator, vrf_keyhash, pledge, cost, margin,
 		//    reward_account, pool_owners, relays, pool_metadata]
-		// reward_account is at index 6.
+		// Dijkstra/Leios adds leios_key after vrf_keyhash, producing an
+		// 11-field array and shifting reward_account from index 6 to 7.
 		var raw []gcbor.RawMessage
 		if _, decErr := gcbor.Decode(rawCbor, &raw); decErr != nil {
 			return 0, nil, fmt.Errorf("decode pool cert CBOR: %w", decErr)
 		}
-		if len(raw) <= 6 {
-			return 0, nil, fmt.Errorf("pool cert CBOR array too short: got %d fields, want >6", len(raw))
+		var rewardAccountIndex int
+		switch len(raw) {
+		case 10:
+			rewardAccountIndex = 6
+		case 11:
+			rewardAccountIndex = 7
+		default:
+			return 0, nil, fmt.Errorf(
+				"pool cert CBOR: got %d fields, want 10 or 11",
+				len(raw),
+			)
 		}
 		var rewardAddrBytes []byte
-		if _, decErr := gcbor.Decode(raw[6], &rewardAddrBytes); decErr != nil {
-			return 0, nil, fmt.Errorf("decode pool cert reward_account field: %w", decErr)
+		if _, decErr := gcbor.Decode(
+			raw[rewardAccountIndex],
+			&rewardAddrBytes,
+		); decErr != nil {
+			return 0, nil, fmt.Errorf(
+				"decode pool cert reward_account field: %w",
+				decErr,
+			)
 		}
 		if len(rewardAddrBytes) != 29 {
-			return 0, nil, fmt.Errorf("pool cert reward_account: got %d bytes, want 29", len(rewardAddrBytes))
+			return 0, nil, fmt.Errorf(
+				"pool cert reward_account: got %d bytes, want 29",
+				len(rewardAddrBytes),
+			)
 		}
 		// High nibble 0xE = key-hash reward address, 0xF = script-hash reward address.
 		// Any other value is invalid for a pool registration reward account.

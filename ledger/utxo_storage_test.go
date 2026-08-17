@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 // TestUtxoStorageAndRetrieval tests that UTxOs from regular blocks are stored
@@ -50,14 +51,12 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 
 	// Create database
 	dbConfig := &database.Config{
-		DataDir:        tmpDir,
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		DataDir: tmpDir,
+		Logger:  logger,
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Load blocks from immutable testdata
 	imm, err := immutable.New("../database/immutable/testdata")
@@ -352,112 +351,181 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 	)
 }
 
-// TestUtxoByRefAfterSetTransaction verifies that UtxoByRef works immediately
-// after SetTransaction within the same transaction.
-func TestUtxoByRefAfterSetTransaction(t *testing.T) {
-	// Create temp directory for database
-	tmpDir, err := os.MkdirTemp("", "utxo_byref_test")
+// newUtxoStorageTestDB creates a temp-directory database for tests that
+// load real blocks from the immutable testdata fixture.
+func newUtxoStorageTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "utxo_storage_test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
 
-	logger := slog.New(
-		slog.NewTextHandler(
-			os.Stdout,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger: slog.New(
+			slog.NewTextHandler(
+				io.Discard,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			),
 		),
-	)
-
-	// Create database
-	dbConfig := &database.Config{
-		DataDir:        tmpDir,
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-	}
-	db, err := database.New(dbConfig)
+	})
 	require.NoError(t, err)
-	defer db.Close()
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	return db
+}
 
-	// Load blocks from immutable testdata
+// newUtxoStorageTestIterator opens the shared immutable testdata fixture
+// and returns an iterator positioned at genesis.
+func newUtxoStorageTestIterator(t *testing.T) *immutable.BlockIterator {
+	t.Helper()
 	imm, err := immutable.New("../database/immutable/testdata")
 	require.NoError(t, err)
-
-	// Start from genesis
 	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: nil})
 	require.NoError(t, err)
-	defer iter.Close()
+	t.Cleanup(func() { iter.Close() })
+	return iter
+}
 
-	// Find a block with transactions
-	var block lcommon.Block
-	var blockCbor []byte
+// errNextProducingBlockValidated is returned from the scratch transaction
+// nextProducingBlock uses to check storability, forcing a rollback so the
+// caller's own (real) store starts from a clean slate regardless of
+// whether that check succeeded or failed.
+var errNextProducingBlockValidated = errors.New(
+	"nextProducingBlock: storability validated, rolling back",
+)
+
+// nextProducingBlock advances iter to the next block whose first
+// transaction produces at least one UTxO and can actually be stored with
+// this package's minimal SetTransaction call (nil pparamUpdates and
+// certDeposits) — some fixture transactions carry a deposit-bearing
+// certificate that needs certDeposits this helper doesn't supply, and
+// those are skipped too, in a scratch transaction that is always rolled
+// back. It decodes the block and returns it along with its raw CBOR. It
+// skips the test if the fixture is exhausted before finding one, so
+// callers never need to separately handle a non-producing or un-storable
+// first transaction.
+func nextProducingBlock(
+	t *testing.T,
+	db *database.Database,
+	iter *immutable.BlockIterator,
+) (lcommon.Block, []byte) {
+	t.Helper()
 	for {
 		immBlock, err := iter.Next()
 		require.NoError(t, err)
 		if immBlock == nil {
-			t.Skip("No blocks with transactions found")
+			t.Skip(
+				"no storable block with a producing first transaction found in testdata",
+			)
 		}
 
-		block, err = ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		block, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
 		require.NoError(t, err)
 
-		if len(block.Transactions()) > 0 {
-			blockCbor = immBlock.Cbor
-			break
+		if len(block.Transactions()) == 0 ||
+			len(block.Transactions()[0].Produced()) == 0 {
+			continue
 		}
-	}
 
+		txn := db.Transaction(true)
+		err = txn.Do(func(txn *database.Txn) error {
+			if _, err := tryStoreBlockFirstTx(db, txn, block, immBlock.Cbor); err != nil {
+				return err
+			}
+			return errNextProducingBlockValidated
+		})
+		if !errors.Is(err, errNextProducingBlockValidated) {
+			// A real storage error (e.g. a deposit-bearing certificate
+			// needing certDeposits this helper doesn't supply); try the
+			// next producing block instead.
+			continue
+		}
+		return block, immBlock.Cbor
+	}
+}
+
+// storeBlockFirstTx stores block (and its raw CBOR) plus its first
+// transaction into db within txn, computing the offsets SetTransaction
+// requires, and returns the stored transaction.
+func storeBlockFirstTx(
+	t *testing.T,
+	db *database.Database,
+	txn *database.Txn,
+	block lcommon.Block,
+	blockCbor []byte,
+) lcommon.Transaction {
+	t.Helper()
+	tx, err := tryStoreBlockFirstTx(db, txn, block, blockCbor)
+	require.NoError(t, err)
+	return tx
+}
+
+// tryStoreBlockFirstTx is the non-asserting form of storeBlockFirstTx, for
+// callers that want to skip a block that fails to store (e.g. one whose
+// first transaction carries a deposit-bearing certificate, which needs
+// certDeposits this minimal helper doesn't supply) rather than failing the
+// test outright.
+func tryStoreBlockFirstTx(
+	db *database.Database,
+	txn *database.Txn,
+	block lcommon.Block,
+	blockCbor []byte,
+) (lcommon.Transaction, error) {
 	point := ocommon.Point{
 		Slot: block.SlotNumber(),
 		Hash: block.Hash().Bytes(),
 	}
+	blockRecord := models.Block{
+		Slot:     point.Slot,
+		Hash:     point.Hash,
+		Number:   block.BlockNumber(),
+		Type:     uint(block.Type()),
+		PrevHash: block.PrevHash().Bytes(),
+		Cbor:     blockCbor,
+	}
+	if err := db.BlockCreate(blockRecord, txn); err != nil {
+		return nil, err
+	}
 
-	t.Logf(
-		"Using block at slot %d with %d transactions",
-		point.Slot,
-		len(block.Transactions()),
-	)
+	indexer := database.NewBlockIndexer(point.Slot, point.Hash)
+	offsets, err := indexer.ComputeOffsets(blockCbor, block)
+	if err != nil {
+		return nil, err
+	}
+
+	txs := block.Transactions()
+	if len(txs) == 0 {
+		return nil, errors.New("block has no transactions")
+	}
+	tx := txs[0]
+	if err := db.SetTransaction(
+		tx,
+		point,
+		0,
+		0,
+		nil,
+		nil,
+		&database.BlockIngestionResult{
+			TxOffsets:   offsets.TxOffsets,
+			UtxoOffsets: offsets.UtxoOffsets,
+		},
+		txn,
+	); err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+// TestUtxoByRefAfterSetTransaction verifies that UtxoByRef works immediately
+// after SetTransaction within the same transaction.
+func TestUtxoByRefAfterSetTransaction(t *testing.T) {
+	db := newUtxoStorageTestDB(t)
+	iter := newUtxoStorageTestIterator(t)
+	block, blockCbor := nextProducingBlock(t, db, iter)
 
 	// Store block and verify UTxO retrieval in same transaction
 	txn := db.Transaction(true)
-	err = txn.Do(func(txn *database.Txn) error {
-		// Store block CBOR
-		blockRecord := models.Block{
-			Slot:     point.Slot,
-			Hash:     point.Hash,
-			Number:   block.BlockNumber(),
-			Type:     uint(block.Type()),
-			PrevHash: block.PrevHash().Bytes(),
-			Cbor:     blockCbor,
-		}
-		if err := db.BlockCreate(blockRecord, txn); err != nil {
-			return err
-		}
-
-		// Compute offsets - offsets MUST be available
-		indexer := database.NewBlockIndexer(point.Slot, point.Hash)
-		offsets, err := indexer.ComputeOffsets(blockCbor, block)
-		if err != nil {
-			return fmt.Errorf("compute offsets: %w", err)
-		}
-
-		// Process first transaction - offsets MUST be available
-		tx := block.Transactions()[0]
-		err = db.SetTransaction(
-			tx,
-			point,
-			0,
-			0,
-			nil,
-			nil,
-			&database.BlockIngestionResult{
-				TxOffsets:   offsets.TxOffsets,
-				UtxoOffsets: offsets.UtxoOffsets,
-			},
-			txn,
-		)
-		if err != nil {
-			return err
-		}
+	err := txn.Do(func(txn *database.Txn) error {
+		tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
 
 		// Try to retrieve UTxOs immediately (within same transaction)
 		for _, utxo := range tx.Produced() {
@@ -483,138 +551,209 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestUtxosByRefsAfterSetTransaction verifies the batched UTxO lookup
+// returns every produced UTxO for a transaction in one call, exactly once
+// even when a ref is requested more than once, and silently omits a ref
+// that doesn't correspond to any live UTxO rather than erroring the whole
+// batch (see #392).
+func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
+	db := newUtxoStorageTestDB(t)
+	iter := newUtxoStorageTestIterator(t)
+	block, blockCbor := nextProducingBlock(t, db, iter)
+
+	txn := db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
+		produced := tx.Produced()
+
+		refs := make([]models.UtxoId, 0, len(produced)+2)
+		for _, utxo := range produced {
+			refs = append(refs, models.UtxoId{
+				Hash: utxo.Id.Id().Bytes(),
+				Idx:  utxo.Id.Index(),
+			})
+		}
+		// Requesting the first produced UTxO's ref a second time must not
+		// duplicate it in the result.
+		refs = append(refs, refs[0])
+		// A ref with no matching live UTxO should be silently omitted,
+		// not cause the whole batch to fail.
+		bogusHash := make([]byte, 32)
+		refs = append(refs, models.UtxoId{Hash: bogusHash, Idx: 9999})
+
+		results, err := db.UtxosByRefs(refs, txn)
+		if err != nil {
+			return err
+		}
+		require.Len(
+			t,
+			results,
+			len(produced),
+			"duplicate ref should not duplicate its result row",
+		)
+
+		byRef := make(map[string]models.Utxo, len(results))
+		for _, utxo := range results {
+			key := hex.EncodeToString(utxo.TxId) + ":" +
+				fmt.Sprint(utxo.OutputIdx)
+			byRef[key] = utxo
+		}
+		for _, utxo := range produced {
+			txId := utxo.Id.Id().Bytes()
+			key := hex.EncodeToString(txId) + ":" +
+				fmt.Sprint(utxo.Id.Index())
+			got, ok := byRef[key]
+			require.True(t, ok, "missing UTxO %s", key)
+			require.NotEmpty(t, got.Cbor)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 	for _, deleteTxBlob := range []bool{false, true} {
-		t.Run(fmt.Sprintf("delete_tx_blob=%t", deleteTxBlob), func(t *testing.T) {
-			tmpDir, err := os.MkdirTemp("", "utxo_byref_recover_test")
-			require.NoError(t, err)
-			defer os.RemoveAll(tmpDir)
-
-			logger := slog.New(
-				slog.NewTextHandler(
-					io.Discard,
-					&slog.HandlerOptions{Level: slog.LevelDebug},
-				),
-			)
-
-			dbConfig := &database.Config{
-				DataDir:        tmpDir,
-				Logger:         logger,
-				BlobPlugin:     "badger",
-				MetadataPlugin: "sqlite",
-			}
-			db, err := database.New(dbConfig)
-			require.NoError(t, err)
-			defer db.Close()
-
-			imm, err := immutable.New("../database/immutable/testdata")
-			require.NoError(t, err)
-
-			iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: nil})
-			require.NoError(t, err)
-			defer iter.Close()
-
-			var block lcommon.Block
-			var blockCbor []byte
-			for {
-				immBlock, err := iter.Next()
+		t.Run(
+			fmt.Sprintf("delete_tx_blob=%t", deleteTxBlob),
+			func(t *testing.T) {
+				tmpDir, err := os.MkdirTemp("", "utxo_byref_recover_test")
 				require.NoError(t, err)
-				if immBlock == nil {
-					t.Fatal("no blocks with transactions found")
-				}
-				block, err = ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-				require.NoError(t, err)
-				if len(block.Transactions()) == 0 {
-					continue
-				}
-				if len(block.Transactions()[0].Produced()) == 0 {
-					continue
-				}
-				blockCbor = immBlock.Cbor
-				break
-			}
+				defer os.RemoveAll(tmpDir)
 
-			point := ocommon.Point{
-				Slot: block.SlotNumber(),
-				Hash: block.Hash().Bytes(),
-			}
-			tx := block.Transactions()[0]
-			expectedUtxo := tx.Produced()[0]
-			txId := tx.Hash().Bytes()
-			outputIdx := expectedUtxo.Id.Index()
-
-			txn := db.Transaction(true)
-			err = txn.Do(func(txn *database.Txn) error {
-				blockRecord := models.Block{
-					Slot:     point.Slot,
-					Hash:     point.Hash,
-					Number:   block.BlockNumber(),
-					Type:     uint(block.Type()),
-					PrevHash: block.PrevHash().Bytes(),
-					Cbor:     blockCbor,
-				}
-				if err := db.BlockCreate(blockRecord, txn); err != nil {
-					return err
-				}
-				indexer := database.NewBlockIndexer(point.Slot, point.Hash)
-				offsets, err := indexer.ComputeOffsets(blockCbor, block)
-				if err != nil {
-					return fmt.Errorf("compute offsets: %w", err)
-				}
-				return db.SetTransaction(
-					tx,
-					point,
-					0,
-					0,
-					nil,
-					nil,
-					&database.BlockIngestionResult{
-						TxOffsets:   offsets.TxOffsets,
-						UtxoOffsets: offsets.UtxoOffsets,
-					},
-					txn,
+				logger := slog.New(
+					slog.NewTextHandler(
+						io.Discard,
+						&slog.HandlerOptions{Level: slog.LevelDebug},
+					),
 				)
-			})
-			require.NoError(t, err)
 
-			deleteTxn := db.Transaction(true)
-			err = deleteTxn.Do(func(txn *database.Txn) error {
-				if err := db.Blob().DeleteUtxo(txn.Blob(), txId, outputIdx); err != nil {
-					return err
+				dbConfig := &database.Config{
+					DataDir: tmpDir,
+					Logger:  logger,
 				}
-				if deleteTxBlob {
-					if err := db.Blob().DeleteTx(txn.Blob(), txId); err != nil {
+				db, err := dbtest.NewDatabase(t, dbConfig)
+				require.NoError(t, err)
+				defer dbtest.CloseDatabase(db)
+
+				imm, err := immutable.New("../database/immutable/testdata")
+				require.NoError(t, err)
+
+				iter, err := imm.BlocksFromPoint(
+					ocommon.Point{Slot: 0, Hash: nil},
+				)
+				require.NoError(t, err)
+				defer iter.Close()
+
+				var block lcommon.Block
+				var blockCbor []byte
+				for {
+					immBlock, err := iter.Next()
+					require.NoError(t, err)
+					if immBlock == nil {
+						t.Fatal("no blocks with transactions found")
+					}
+					block, err = ledger.NewBlockFromCbor(
+						immBlock.Type,
+						immBlock.Cbor,
+					)
+					require.NoError(t, err)
+					if len(block.Transactions()) == 0 {
+						continue
+					}
+					if len(block.Transactions()[0].Produced()) == 0 {
+						continue
+					}
+					blockCbor = immBlock.Cbor
+					break
+				}
+
+				point := ocommon.Point{
+					Slot: block.SlotNumber(),
+					Hash: block.Hash().Bytes(),
+				}
+				tx := block.Transactions()[0]
+				expectedUtxo := tx.Produced()[0]
+				txId := tx.Hash().Bytes()
+				outputIdx := expectedUtxo.Id.Index()
+
+				txn := db.Transaction(true)
+				err = txn.Do(func(txn *database.Txn) error {
+					blockRecord := models.Block{
+						Slot:     point.Slot,
+						Hash:     point.Hash,
+						Number:   block.BlockNumber(),
+						Type:     uint(block.Type()),
+						PrevHash: block.PrevHash().Bytes(),
+						Cbor:     blockCbor,
+					}
+					if err := db.BlockCreate(blockRecord, txn); err != nil {
 						return err
 					}
-				}
-				return nil
-			})
-			require.NoError(t, err)
-
-			metaUtxo, err := db.Metadata().GetUtxo(txId, outputIdx, nil)
-			require.NoError(t, err)
-			require.NotNil(t, metaUtxo)
-
-			lookupTxn := db.Transaction(true)
-			err = lookupTxn.Do(func(txn *database.Txn) error {
-				retrieved, err := db.UtxoByRef(txId, outputIdx, txn)
+					indexer := database.NewBlockIndexer(point.Slot, point.Hash)
+					offsets, err := indexer.ComputeOffsets(blockCbor, block)
+					if err != nil {
+						return fmt.Errorf("compute offsets: %w", err)
+					}
+					return db.SetTransaction(
+						tx,
+						point,
+						0,
+						0,
+						nil,
+						nil,
+						&database.BlockIngestionResult{
+							TxOffsets:   offsets.TxOffsets,
+							UtxoOffsets: offsets.UtxoOffsets,
+						},
+						txn,
+					)
+				})
 				require.NoError(t, err)
-				require.Equal(t, expectedUtxo.Output.Cbor(), retrieved.Cbor)
 
-				// The recovery path should heal the missing blob so future
-				// lookups do not need to re-derive it from the producer block.
-				// Verify by checking the blob key exists (the stored value is a
-				// DOFF offset reference, not raw CBOR).
-				_, err = db.Blob().GetUtxo(txn.Blob(), txId, outputIdx)
+				deleteTxn := db.Transaction(true)
+				err = deleteTxn.Do(func(txn *database.Txn) error {
+					if err := db.Blob().DeleteUtxo(txn.Blob(), txId, outputIdx); err != nil {
+						return err
+					}
+					if deleteTxBlob {
+						if err := db.Blob().DeleteTx(txn.Blob(), txId); err != nil {
+							return err
+						}
+					}
+					return nil
+				})
 				require.NoError(t, err)
 
-				// A second UtxoByRef should succeed without recovery.
-				retrieved2, err := db.UtxoByRef(txId, outputIdx, txn)
+				metaUtxo, err := db.Metadata().GetUtxo(txId, outputIdx, nil)
 				require.NoError(t, err)
-				require.Equal(t, expectedUtxo.Output.Cbor(), retrieved2.Cbor)
-				return nil
-			})
-			require.NoError(t, err)
-		})
+				require.NotNil(t, metaUtxo)
+
+				lookupTxn := db.Transaction(true)
+				err = lookupTxn.Do(func(txn *database.Txn) error {
+					retrieved, err := db.UtxoByRef(txId, outputIdx, txn)
+					require.NoError(t, err)
+					require.Equal(t, expectedUtxo.Output.Cbor(), retrieved.Cbor)
+
+					// The recovery path should heal the missing blob so future
+					// lookups do not need to re-derive it from the producer block.
+					// Verify by checking the blob key exists (the stored value is a
+					// DOFF offset reference, not raw CBOR).
+					_, err = db.Blob().GetUtxo(txn.Blob(), txId, outputIdx)
+					require.NoError(t, err)
+
+					// A second UtxoByRef should succeed without recovery.
+					retrieved2, err := db.UtxoByRef(txId, outputIdx, txn)
+					require.NoError(t, err)
+					require.Equal(
+						t,
+						expectedUtxo.Output.Cbor(),
+						retrieved2.Cbor,
+					)
+					return nil
+				})
+				require.NoError(t, err)
+			},
+		)
 	}
 }

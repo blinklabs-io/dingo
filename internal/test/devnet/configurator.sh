@@ -179,16 +179,25 @@ cp /tmp/testnet/utxos/keys/genesis.*.skey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.vkey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.addr.info /configs/utxo-keys/
 
+# Expose genesis stake verification keys and delegated address info so the
+# dingo-only harness can derive the stake credentials that genesis delegated
+# to each pool. The generator's stake key layout is discovered in the CIP-50
+# task; copy every plausible stake artifact so the loader can find them.
+mkdir -p /configs/utxo-keys/stake
+find /tmp/testnet -type f \( -name '*stake*.vkey' -o -name '*stake*.addr*' \) \
+    -exec cp {} /configs/utxo-keys/stake/ \; 2>/dev/null || true
+
 # Test-only credentials: make config + genesis files world-readable so any
 # consuming container's user can read them.
 find /configs -type d -exec chmod 0755 {} +
 find /configs -type f -exec chmod 0644 {} +
 
 # cardano-node refuses to start when vrf.skey has "other" read permissions,
-# so the per-pool keys directories must be 0700/0600. Pool 1 is consumed by
-# the dingo container (uid 100, gid 101 in the dingo image), so chown it to
-# match. Pool 2 stays root-owned for the cardano-producer container, which
-# runs as root.
+# so the per-pool keys directories must be 0700/0600. Pools listed in
+# DINGO_POOL_IDS are consumed by dingo containers, which run as a non-root
+# user, and get chowned below to match. Any pool NOT listed stays
+# root-owned for its cardano-node container, which runs as root - e.g. pool
+# 2 (and 3) in conformance mode, where DINGO_POOL_IDS defaults to "1".
 for pool_dir in /configs/[0-9]*; do
     keys_dir="$pool_dir/keys"
     if [ -d "$keys_dir" ]; then
@@ -196,6 +205,24 @@ for pool_dir in /configs/[0-9]*; do
         find "$keys_dir" -type f -exec chmod 0600 {} +
     fi
 done
-if [ -d /configs/1/keys ]; then
-    chown -R 100:101 /configs/1/keys
-fi
+# Chown the key dirs of pools consumed by dingo containers to the dingo
+# image's uid/gid. Conformance mode sets DINGO_POOL_IDS="1" (only pool 1
+# is dingo); the all-dingo configurator sets "1 2 3".
+#
+# The uid/gid come from docker-compose.yml rather than being hardcoded
+# here, because the authoritative value is the `adduser --uid` pin in the
+# repo root Dockerfile and the two must not drift. They did drift once:
+# the image moved from uid 100 to 1000 while this script still chowned to
+# 100:101, so every Dingo block producer failed startup with
+# "failed to read key file .../vrf.skey: permission denied" — the keys
+# directory is 0700 by necessity, since cardano-node refuses to start when
+# vrf.skey is group- or world-readable.
+DINGO_POOL_IDS="${DINGO_POOL_IDS:-1}"
+DINGO_UID="${DINGO_UID:-1000}"
+DINGO_GID="${DINGO_GID:-1000}"
+echo "chowning dingo pool keys to ${DINGO_UID}:${DINGO_GID} (pools: ${DINGO_POOL_IDS})"
+for id in ${DINGO_POOL_IDS}; do
+    if [ -d "/configs/${id}/keys" ]; then
+        chown -R "${DINGO_UID}:${DINGO_GID}" "/configs/${id}/keys"
+    fi
+done

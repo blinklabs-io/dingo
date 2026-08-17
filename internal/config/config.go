@@ -15,20 +15,25 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/database/plugin"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/kelseyhightower/envconfig"
@@ -80,18 +85,15 @@ func FromContext(ctx context.Context) *Config {
 const (
 	DefaultBlobPlugin                  = "badger"
 	DefaultMetadataPlugin              = "sqlite"
-	DefaultEvictionWatermark           = 0.8
+	DefaultEvictionWatermark           = 0.0
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
 	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap = 64
+	DefaultMempoolImplementation       = "fifo"
 )
-
-// ErrPluginListRequested is returned when the user requests to list
-// available plugins. This is not an error condition but a successful
-// operation that displays plugin information.
-var ErrPluginListRequested = errors.New("plugin list requested")
 
 // RunMode represents the operational mode of the dingo node
 type RunMode string
@@ -102,20 +104,23 @@ const (
 	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 
-	// RunModeSync and RunModeMithril are effective run modes used only for
-	// validation, not configurable runMode values (RunMode.Valid rejects
-	// them); cmd/dingo passes the one matching the invoked command to
-	// Config.Validate. Neither starts the relay/private serving listeners
-	// or the API listeners. They differ in their auxiliary-listener
-	// surface: RunModeSync is the Mithril snapshot sync operation (via
-	// `dingo sync --mithril` or `dingo mithril sync`), which starts a
-	// Prometheus metrics listener and an optional pprof debug listener;
-	// RunModeMithril is the read-only Mithril query subcommands (`list`,
-	// `show`, and bare `mithril`), which start no listeners at all.
-	// Keeping them distinct lets Validate check exactly the ports each
-	// invocation binds.
-	RunModeSync    RunMode = "sync"
-	RunModeMithril RunMode = "mithril"
+	// RunModeSync, RunModeMithril, and RunModeDatabase are effective run
+	// modes used only for validation, not configurable runMode values
+	// (RunMode.Valid rejects them); cmd/dingo passes the one matching the
+	// invoked command to Config.Validate. None of them starts the
+	// relay/private serving listeners or the API listeners. They differ
+	// in their auxiliary-listener surface: RunModeSync is the Mithril
+	// snapshot sync operation (via `dingo sync --mithril` or `dingo
+	// mithril sync`), which starts a Prometheus metrics listener and an
+	// optional pprof debug listener; RunModeMithril is the read-only
+	// Mithril query subcommands (`list`, `show`, and bare `mithril`),
+	// which start no listeners at all; RunModeDatabase is the offline
+	// `dingo database snapshot|restore|truncate` maintenance commands,
+	// which also start no listeners. Keeping them distinct lets Validate
+	// check exactly the ports each invocation binds.
+	RunModeSync     RunMode = "sync"
+	RunModeMithril  RunMode = "mithril"
+	RunModeDatabase RunMode = "database"
 )
 
 // StartEra controls experimental direct startup in a later ledger era.
@@ -131,7 +136,7 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeSync, RunModeMithril:
+	case RunModeSync, RunModeMithril, RunModeDatabase:
 		// Effective-only modes used for validation; never configurable runModes.
 		return false
 	default:
@@ -156,7 +161,7 @@ func (m RunMode) RequiresListeners() bool {
 	switch m {
 	case RunModeServe, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeLoad, RunModeSync, RunModeMithril:
+	case RunModeLoad, RunModeSync, RunModeMithril, RunModeDatabase:
 		return false
 	default:
 		return false
@@ -177,70 +182,10 @@ func (e StartEra) IsDijkstra() bool {
 }
 
 type tempConfig struct {
-	Config   *Config                   `yaml:"config,omitempty"`
-	Database *databaseConfig           `yaml:"database,omitempty"`
-	Blob     map[string]map[string]any `yaml:"blob,omitempty"`
-	Metadata map[string]map[string]any `yaml:"metadata,omitempty"`
-}
-
-type databaseConfig struct {
-	Blob     map[string]any `yaml:"blob,omitempty"`
-	Metadata map[string]any `yaml:"metadata,omitempty"`
+	Config *Config `yaml:"config,omitempty"`
 }
 
 var midnightYAMLFields map[string]struct{}
-
-func databasePluginConfig(
-	pluginType string,
-	data map[string]any,
-) (string, map[string]map[string]any, error) {
-	pluginConfig := make(map[string]map[string]any)
-	var pluginName string
-	if pluginVal, exists := data["plugin"]; exists {
-		var ok bool
-		pluginName, ok = pluginVal.(string)
-		if !ok {
-			return "", nil, fmt.Errorf(
-				"%s plugin name must be a string, got %T",
-				pluginType,
-				pluginVal,
-			)
-		}
-	}
-	for k, v := range data {
-		if k == "plugin" {
-			continue
-		}
-		if val, ok := v.(map[string]any); ok {
-			pluginConfig[k] = val
-			continue
-		}
-		if val, ok := v.(map[any]any); ok {
-			stringAnyMap := make(map[string]any)
-			for vk, vv := range val {
-				keyStr, ok := vk.(string)
-				if !ok {
-					return "", nil, fmt.Errorf(
-						"%s plugin config %q key must be a string, got %T",
-						pluginType,
-						k,
-						vk,
-					)
-				}
-				stringAnyMap[keyStr] = vv
-			}
-			pluginConfig[k] = stringAnyMap
-			continue
-		}
-		return "", nil, fmt.Errorf(
-			"%s plugin config %q must be a map, got %T",
-			pluginType,
-			k,
-			v,
-		)
-	}
-	return pluginName, pluginConfig, nil
-}
 
 func collectMidnightYAMLFields(buf []byte) map[string]struct{} {
 	var doc yaml.Node
@@ -302,38 +247,88 @@ type ChainsyncConfig struct {
 type GenesisBootstrapConfig struct {
 	// Enabled controls whether Genesis bootstrap mode is used when the node
 	// starts from origin.
-	Enabled bool `yaml:"enabled" envconfig:"DINGO_GENESIS_BOOTSTRAP_ENABLED"`
+	Enabled bool `yaml:"enabled"                     envconfig:"DINGO_GENESIS_BOOTSTRAP_ENABLED"`
 	// WindowSlots overrides the Genesis density comparison window in slots.
 	// A zero value derives the window from Shelley genesis parameters (3k/f).
-	WindowSlots uint64 `yaml:"windowSlots" envconfig:"DINGO_GENESIS_BOOTSTRAP_WINDOW_SLOTS"`
+	WindowSlots uint64 `yaml:"windowSlots"                 envconfig:"DINGO_GENESIS_BOOTSTRAP_WINDOW_SLOTS"`
 	// PromotionMinDiversityGroups sets the minimum number of diversity groups
 	// to prefer while promoting peers during bootstrap.
 	PromotionMinDiversityGroups int `yaml:"promotionMinDiversityGroups" envconfig:"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS"`
+	// CorroborationPeers sets the number of independent peers that must report
+	// the same recent blocks before a fast (shallow) block source may drive
+	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
+	// for biased fast-sync sources: an uncorroborated or divergent fast source
+	// is denied selection and stalls rather than steering the local chain. A
+	// zero value disables corroboration (density-only Genesis selection).
+	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
 type HistoryExpiryConfig struct {
 	// Enabled starts the background expiry worker when true.
-	Enabled bool `yaml:"enabled" envconfig:"DINGO_HISTORY_EXPIRY_ENABLED"`
+	Enabled bool `yaml:"enabled"   envconfig:"DINGO_HISTORY_EXPIRY_ENABLED"`
 	// Frequency controls how often the worker scans for expired block CBOR.
 	Frequency time.Duration `yaml:"frequency" envconfig:"DINGO_HISTORY_EXPIRY_FREQUENCY"`
+}
+
+// KoiosParityConfig controls the in-process Koios reward-parity observer
+// (dingo #3098). When enabled, Dingo subscribes an epoch-boundary observer to
+// its own EventBus (event.EpochTransitionEventType) and validates each newly
+// closed epoch's committed reward state directly against Koios reference
+// data as the node advances, instead of requiring a separate koios-parity
+// CLI process polling a second, independently synced copy of the metadata
+// database. See internal/koiosparity and ARCHITECTURE.md's "Koios Parity
+// Tracker" section. This is a one-off validation aid, not a permanent
+// subsystem — leave it disabled for normal node operation.
+type KoiosParityConfig struct {
+	// Enabled subscribes the observer to epoch.transition when true.
+	Enabled bool `yaml:"enabled"    envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
+	// Network is the Koios network to validate against: "preview" or
+	// "preprod". Empty defaults to the node's own configured Network.
+	Network string `yaml:"network"    envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
+	// CachePath is the Koios reference cache.db path. Empty defaults to
+	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
+	// default cache location.
+	CachePath string `yaml:"cachePath"  envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
+	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
+	// uses Koios's unauthenticated rate limit.
+	APIKey string `yaml:"apiKey"     envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	// Strict stops/cancels the node on the first Koios/tool error or exact
+	// parity mismatch, rather than logging it and continuing normal node
+	// operation.
+	Strict bool `yaml:"strict"     envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// GraceHours is the window after an epoch closes during which a
+	// Dingo-side row still missing is treated as reference/sync lag rather
+	// than a failure. 0 selects the default (24).
+	GraceHours int `yaml:"graceHours" envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
+}
+
+// DefaultKoiosParityConfig returns the default (disabled) Koios parity
+// observer settings. Strict defaults to true: once an operator opts into the
+// feature at all (Enabled), the safety-motivated fail-stop behavior it exists
+// for is on unless explicitly disabled with --koios-parity-strict=false /
+// DINGO_KOIOS_PARITY_STRICT=false — matching KoiosParityConfig.Strict's and
+// internal/koiosparity.Observer's own doc comments, which already describe
+// Strict as the operator default.
+func DefaultKoiosParityConfig() KoiosParityConfig {
+	return KoiosParityConfig{GraceHours: 24, Strict: true}
 }
 
 // OffchainMetadataConfig holds API-mode off-chain metadata fetcher settings.
 // Zero values fall back to the fetcher's internal defaults.
 type OffchainMetadataConfig struct {
 	// Interval controls how often the fetcher discovers and fetches due rows.
-	Interval time.Duration `yaml:"interval" envconfig:"DINGO_OFFCHAIN_METADATA_INTERVAL"`
+	Interval time.Duration `yaml:"interval"              envconfig:"DINGO_OFFCHAIN_METADATA_INTERVAL"`
 	// RequestTimeout limits each HTTP(S) metadata request.
-	RequestTimeout time.Duration `yaml:"requestTimeout" envconfig:"DINGO_OFFCHAIN_METADATA_REQUEST_TIMEOUT"`
+	RequestTimeout time.Duration `yaml:"requestTimeout"        envconfig:"DINGO_OFFCHAIN_METADATA_REQUEST_TIMEOUT"`
 	// UserAgent is sent with outbound metadata requests.
-	UserAgent string `yaml:"userAgent" envconfig:"DINGO_OFFCHAIN_METADATA_USER_AGENT"`
+	UserAgent string `yaml:"userAgent"             envconfig:"DINGO_OFFCHAIN_METADATA_USER_AGENT"`
 	// IPFSGatewayURL is the gateway prefix used for ipfs:// URLs.
-	IPFSGatewayURL string `yaml:"ipfsGatewayUrl" envconfig:"DINGO_OFFCHAIN_METADATA_IPFS_GATEWAY_URL"`
+	IPFSGatewayURL string `yaml:"ipfsGatewayUrl"        envconfig:"DINGO_OFFCHAIN_METADATA_IPFS_GATEWAY_URL"`
 	// BatchSize bounds the number of due rows claimed per fetcher pass.
-	BatchSize int `yaml:"batchSize" envconfig:"DINGO_OFFCHAIN_METADATA_BATCH_SIZE"`
+	BatchSize int `yaml:"batchSize"             envconfig:"DINGO_OFFCHAIN_METADATA_BATCH_SIZE"`
 	// MaxBytes bounds the response body bytes read from each document.
-	MaxBytes int64 `yaml:"maxBytes" envconfig:"DINGO_OFFCHAIN_METADATA_MAX_BYTES"`
+	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_OFFCHAIN_METADATA_MAX_BYTES"`
 	// AllowPrivateAddresses permits fetching private, loopback, and link-local
 	// addresses. Leave false for the default SSRF guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_OFFCHAIN_METADATA_ALLOW_PRIVATE_ADDRESSES"`
@@ -415,11 +410,17 @@ func DefaultLoggingConfig() LoggingConfig {
 }
 
 // MidnightConfig holds configuration for the Midnight indexer and its
-// optional gRPC API surface. Indexing is only active when Dingo is running
-// in API storage mode; Port 0 disables only the gRPC server.
+// optional gRPC API surface. Indexing is only active when Enabled is true
+// AND Dingo is running in API storage mode -- both are required, since the
+// indexer depends on the API-mode indexes to function; Validate rejects
+// Enabled without API storage mode. Port 0 disables only the gRPC server.
 type MidnightConfig struct {
-	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
+	// Enabled opts into running the Midnight indexer. Default false: an
+	// api-mode deployment that wants Midnight indexing must set this
+	// explicitly.
+	Enabled bool   `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	Port    uint   `yaml:"port"    envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host    string `yaml:"host"    envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -443,54 +444,79 @@ func DefaultMidnightConfig() MidnightConfig {
 }
 
 type Config struct {
-	MetadataPlugin         string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
-	TlsKeyFilePath         string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology               string   `yaml:"topology"`
-	CardanoConfig          string   `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath           string   `yaml:"databasePath"                                                     split_words:"true"`
-	SocketPath             string   `yaml:"socketPath"                                                       split_words:"true"`
-	TlsCertFilePath        string   `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr               string   `yaml:"bindAddr"                                                         split_words:"true"`
-	BlobPlugin             string   `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr        string   `yaml:"privateBindAddr"                                                  split_words:"true"`
-	ShutdownTimeout        string   `yaml:"shutdownTimeout"                                                  split_words:"true"`
-	LedgerCatchupTimeout   string   `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network                string   `yaml:"network"`
-	NetworkMagic           uint32   `yaml:"networkMagic"                                                     split_words:"true"`
-	MempoolCapacity        int64    `yaml:"mempoolCapacity"                                                  split_words:"true"`
-	EvictionWatermark      float64  `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
-	RejectionWatermark     float64  `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
-	PrivatePort            uint     `yaml:"privatePort"                                                      split_words:"true"`
-	RelayPort              uint     `yaml:"relayPort"          envconfig:"port"`
-	BarkBaseUrl            string   `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
-	BarkBlockDownloadHosts []string `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint     `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
-	UtxorpcPort            uint     `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
-	CORSAllowedOrigins     []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort            uint     `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort              uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip           bool     `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical     bool     `yaml:"validateHistorical"                                               split_words:"true"`
+	Plugins PluginsConfig `yaml:"plugins"`
+	// API holds shared TLS/auth policy defaults for every selected
+	// plugins.api.* provider. See APIConfig's own doc comment.
+	API                    APIConfig `yaml:"api"`
+	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"         envconfig:"TLS_KEY_FILE_PATH"`
+	Topology               string    `yaml:"topology"`
+	CardanoConfig          string    `yaml:"cardanoConfig"          envconfig:"config"`
+	DatabasePath           string    `yaml:"databasePath"                                                       split_words:"true"`
+	SocketPath             string    `yaml:"socketPath"                                                         split_words:"true"`
+	TlsCertFilePath        string    `yaml:"tlsCertFilePath"        envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string    `yaml:"bindAddr"                                                           split_words:"true"`
+	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                    split_words:"true"`
+	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                    split_words:"true"`
+	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"   envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string    `yaml:"network"`
+	NetworkMagic           uint32    `yaml:"networkMagic"                                                       split_words:"true"`
+	PrivatePort            uint      `yaml:"privatePort"                                                        split_words:"true"`
+	RelayPort              uint      `yaml:"relayPort"              envconfig:"port"`
+	BarkBaseUrl            string    `yaml:"barkBaseUrl"            envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint      `yaml:"barkPort"               envconfig:"DINGO_BARK_PORT"`
+	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
+	// it to loopback-only (127.0.0.1) whenever the database lifecycle
+	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
+	// see its own doc comment) is mounted, rather than bark's own
+	// all-interfaces "0.0.0.0" default; set explicitly to widen that on
+	// purpose.
+	BarkHost string `yaml:"barkHost"               envconfig:"DINGO_BARK_HOST"`
+	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
+	// certificates (mTLS) against. Required whenever the database lifecycle
+	// service is mounted (databaseLifecycle.snapshotDir set alongside
+	// barkPort): its destructive DatabaseService RPCs (CreateSnapshot,
+	// DeleteSnapshot, VerifySnapshot, Restore, Truncate, CancelOperation)
+	// refuse any caller whose connection didn't present a certificate
+	// verified against this CA — see bark.Bark.Start and bark/auth.go. Also
+	// requires TlsCertFilePath/TlsKeyFilePath to be set.
+	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath"   envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins"     envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort          uint     `yaml:"metricsPort"                                                        split_words:"true"`
+	DebugPort            uint     `yaml:"debugPort"              envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip         bool     `yaml:"intersectTip"                                                       split_words:"true"`
+	// ValidateHistorical validates the complete replay from the selected
+	// intersection. The default from-origin sync path must not trust peers to
+	// have validated historical blocks for us.
+	ValidateHistorical bool `yaml:"validateHistorical"                                                 split_words:"true"`
 	// StrictUtxoValidation errors out (instead of silently skipping) when a
 	// consumed UTxO cannot be found or recovered for a block past the
-	// recorded Mithril sync boundary. Leave disabled when bootstrapping from
-	// a non-genesis chainsync intersect point without a Mithril snapshot.
-	StrictUtxoValidation bool `yaml:"strictUtxoValidation" split_words:"true"`
+	// recorded Mithril sync boundary. A non-genesis intersect without a
+	// Mithril snapshot should explicitly opt out when pre-intersect UTxOs are
+	// intentionally unavailable.
+	StrictUtxoValidation bool `yaml:"strictUtxoValidation"                                               split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
 	// Spans are sent via OTLP HTTP; configure the destination with the
 	// standard OTEL_EXPORTER_OTLP_* env vars.
-	Tracing bool `yaml:"tracing" envconfig:"DINGO_TRACING_ENABLED"`
+	Tracing bool `yaml:"tracing"                envconfig:"DINGO_TRACING_ENABLED"`
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
-	TracingStdout   bool     `yaml:"tracingStdout" envconfig:"DINGO_TRACING_STDOUT"`
-	RunMode         RunMode  `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
-	StartEra        StartEra `yaml:"startEra"           envconfig:"DINGO_START_ERA"`
-	ImmutableDbPath string   `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	TracingStdout   bool     `yaml:"tracingStdout"          envconfig:"DINGO_TRACING_STDOUT"`
+	RunMode         RunMode  `yaml:"runMode"                envconfig:"DINGO_RUN_MODE"`
+	StartEra        StartEra `yaml:"startEra"               envconfig:"DINGO_START_ERA"`
+	ImmutableDbPath string   `yaml:"immutableDbPath"        envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
-	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
-	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
-	BackfillBatchSize int `yaml:"backfillBatchSize" envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
+	DatabaseWorkers   int `yaml:"databaseWorkers"        envconfig:"DINGO_DATABASE_WORKERS"`
+	DatabaseQueueSize int `yaml:"databaseQueueSize"      envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+	BackfillBatchSize int `yaml:"backfillBatchSize"      envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
+	// BlockPipelineEnabled turns on parallel block decode in the chainsync
+	// replay loop that reads blocks back from the primary chain and applies
+	// them to the ledger. Not consensus-affecting -- it only changes how
+	// CBOR decode work is scheduled, not validation or apply behavior -- but
+	// defaults off until throughput and stability are proven (issue #1894
+	// phase 1). See ARCHITECTURE.md ("Block Processing Pipeline").
+	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"   envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
@@ -503,18 +529,18 @@ type Config struct {
 	ActivePeersLedgerQuota   int `yaml:"activePeersLedgerQuota"   envconfig:"DINGO_ACTIVE_PEERS_LEDGER_QUOTA"`
 
 	// Peer governor tuning (0 = use default)
-	MinHotPeers              int           `yaml:"minHotPeers"         envconfig:"DINGO_MIN_HOT_PEERS"`
-	ReconcileInterval        time.Duration `yaml:"reconcileInterval"   envconfig:"DINGO_RECONCILE_INTERVAL"`
-	InactivityTimeout        time.Duration `yaml:"inactivityTimeout"   envconfig:"DINGO_INACTIVITY_TIMEOUT"`
-	InboundWarmTarget        int           `yaml:"inboundWarmTarget"   envconfig:"DINGO_INBOUND_WARM_TARGET"`
-	InboundHotQuota          int           `yaml:"inboundHotQuota"     envconfig:"DINGO_INBOUND_HOT_QUOTA"`
-	InboundMinTenure         time.Duration `yaml:"inboundMinTenure"    envconfig:"DINGO_INBOUND_MIN_TENURE"`
+	MinHotPeers              int           `yaml:"minHotPeers"              envconfig:"DINGO_MIN_HOT_PEERS"`
+	ReconcileInterval        time.Duration `yaml:"reconcileInterval"        envconfig:"DINGO_RECONCILE_INTERVAL"`
+	InactivityTimeout        time.Duration `yaml:"inactivityTimeout"        envconfig:"DINGO_INACTIVITY_TIMEOUT"`
+	InboundWarmTarget        int           `yaml:"inboundWarmTarget"        envconfig:"DINGO_INBOUND_WARM_TARGET"`
+	InboundHotQuota          int           `yaml:"inboundHotQuota"          envconfig:"DINGO_INBOUND_HOT_QUOTA"`
+	InboundMinTenure         time.Duration `yaml:"inboundMinTenure"         envconfig:"DINGO_INBOUND_MIN_TENURE"`
 	InboundHotScoreThreshold float64       `yaml:"inboundHotScoreThreshold" envconfig:"DINGO_INBOUND_HOT_SCORE_THRESHOLD"`
-	InboundPruneAfter        time.Duration `yaml:"inboundPruneAfter"   envconfig:"DINGO_INBOUND_PRUNE_AFTER"`
-	InboundDuplexOnlyForHot  bool          `yaml:"inboundDuplexOnlyForHot" envconfig:"DINGO_INBOUND_DUPLEX_ONLY_FOR_HOT"`
-	InboundCooldown          time.Duration `yaml:"inboundCooldown"     envconfig:"DINGO_INBOUND_COOLDOWN"`
-	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP" envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
-	MaxInboundConns          int           `yaml:"maxInboundConns"     envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	InboundPruneAfter        time.Duration `yaml:"inboundPruneAfter"        envconfig:"DINGO_INBOUND_PRUNE_AFTER"`
+	InboundDuplexOnlyForHot  bool          `yaml:"inboundDuplexOnlyForHot"  envconfig:"DINGO_INBOUND_DUPLEX_ONLY_FOR_HOT"`
+	InboundCooldown          time.Duration `yaml:"inboundCooldown"          envconfig:"DINGO_INBOUND_COOLDOWN"`
+	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP"      envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
+	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
@@ -527,6 +553,10 @@ type Config struct {
 
 	// History expiry configuration for local immutable block CBOR expiry.
 	HistoryExpiry HistoryExpiryConfig `yaml:"historyExpiry"`
+
+	// KoiosParity configures the optional in-process Koios reward-parity
+	// observer (dingo #3098). Disabled by default.
+	KoiosParity KoiosParityConfig `yaml:"koiosParity"`
 
 	// Off-chain metadata fetcher configuration.
 	OffchainMetadata OffchainMetadataConfig `yaml:"offchainMetadata"`
@@ -559,21 +589,46 @@ type Config struct {
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
+	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
+	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
+	// and off by default; effective only in Dijkstra and later. Enable a nonzero
+	// value only where every node also enables the same value. See
+	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
+	MinPoolMargin uint `yaml:"minPoolMargin"                          envconfig:"DINGO_MIN_POOL_MARGIN"`
+	// CIP-50 pledge-leverage staking rewards. Consensus-affecting; defaults
+	// off. PledgeLeverageEnabled turns on the L*pledge reward cap and
+	// PledgeLeverage is L in [1, 10000]. Enable only on a network where every
+	// node also enables it. See ARCHITECTURE.md ("Reward Calculation And
+	// Precomputation").
+	PledgeLeverageEnabled bool `yaml:"pledgeLeverageEnabled"                  envconfig:"DINGO_PLEDGE_LEVERAGE_ENABLED"`
+	PledgeLeverage        uint `yaml:"pledgeLeverage"                         envconfig:"DINGO_PLEDGE_LEVERAGE"`
+	// CIP-0163 full-pot reward distribution. Consensus-affecting; defaults
+	// off. When enabled the entire epoch reward pot is distributed to eligible
+	// pools and delegators instead of returning the residual to reserves.
+	// Enable only on a network where every node also enables it. See
+	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
+	FullPotRewardsEnabled bool `yaml:"fullPotRewardsEnabled"                  envconfig:"DINGO_FULL_POT_REWARDS_ENABLED"`
+	// UnsafeFullPotRewardsOnStandardNetworks is an explicit unsafe override
+	// for running CIP-0163 full-pot rewards on predefined public networks.
+	// Leave false except for controlled off-consensus experiments.
+	UnsafeFullPotRewardsOnStandardNetworks bool `yaml:"unsafeFullPotRewardsOnStandardNetworks" envconfig:"DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS"`
+	// CIP-0163 reward-account inactivity expiry. Consensus-affecting; defaults
+	// off. See ARCHITECTURE.md ("Stake Snapshots", CIP-0163 reward-account
+	// inactivity).
+	DelegatorInactivityEnabled bool   `yaml:"delegatorInactivityEnabled"             envconfig:"DINGO_DELEGATOR_INACTIVITY_ENABLED"`
+	DelegatorInactivity        uint64 `yaml:"delegatorInactivity"                    envconfig:"DINGO_DELEGATOR_INACTIVITY"`
+
 	// Leios voting configuration (experimental, leios runMode only).
-	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381
-	// vote signing key. When set on a block producer whose pool is a
-	// committee member, the node emits Leios votes for endorser blocks.
+	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope
+	// BLS12-381 vote signing key (or a legacy raw hex scalar). When set on
+	// a block producer whose pool is a committee member, the node emits
+	// Leios votes for endorser blocks.
 	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
 	// LeiosVoterPublicKeys maps hex pool key hashes to hex-encoded
 	// BLS12-381 voter public keys for vote signature verification.
 	// CIP-0164 key registration is not yet specified, so this static
 	// registry stands in for it (devnet-style).
-	LeiosVoterPublicKeys map[string]string `yaml:"leiosVoterPublicKeys" envconfig:"DINGO_LEIOS_VOTER_PUBLIC_KEYS"`
-
-	// Blockfrost REST API port (0 = disabled)
-	BlockfrostPort uint `yaml:"blockfrostPort" envconfig:"DINGO_BLOCKFROST_PORT"`
-	// Mesh (Coinbase Rosetta) API port (0 = disabled)
-	MeshPort uint `yaml:"meshPort" envconfig:"DINGO_MESH_PORT"`
+	LeiosVoterPublicKeys map[string]string `yaml:"leiosVoterPublicKeys"    envconfig:"DINGO_LEIOS_VOTER_PUBLIC_KEYS"`
 
 	// PeerSharing enables the peer sharing protocol, allowing this node
 	// to advertise known peers to other nodes on request. Pointer
@@ -593,6 +648,91 @@ type Config struct {
 
 	// Mithril snapshot bootstrap configuration
 	Mithril MithrilConfig `yaml:"mithril"`
+
+	// Database lifecycle (snapshot/restore/truncate) configuration
+	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
+
+	// provenance records, for gated fields only, whether their value came
+	// from an operator (CLI flag, environment variable, or YAML file) or
+	// is still the built-in default. Populated by ApplyFlags and
+	// RecordSourceProvenance, not by LoadConfig itself — see provenance.go
+	// and RecordSourceProvenance's own doc comment for why.
+	provenance Provenance
+}
+
+// PluginsConfig is the canonical configuration tree for compiled-in plugin
+// capabilities.
+type PluginsConfig struct {
+	Storage StoragePluginsConfig `yaml:"storage"`
+	Mempool hostplugin.Selection `yaml:"mempool"`
+	API     APIPluginsConfig     `yaml:"api"`
+}
+
+type StoragePluginsConfig struct {
+	Blob     hostplugin.Selection `yaml:"blob"`
+	Metadata hostplugin.Selection `yaml:"metadata"`
+}
+
+type APIPluginsConfig struct {
+	Blockfrost hostplugin.Selection `yaml:"blockfrost"`
+	Mesh       hostplugin.Selection `yaml:"mesh"`
+	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
+}
+
+// APIConfig holds the shared TLS and authentication policy defaults
+// applied to every selected plugins.api.* provider (Blockfrost, Mesh,
+// UTxORPC) unless that provider's own plugins.api.<name>.config.tls/auth
+// overrides a field. See ARCHITECTURE.md's "API security" section and
+// internal/apiconfig for the merge/validation rules; composition (node.go)
+// performs the actual per-provider merge, not this package.
+//
+// bindAddr and corsAllowedOrigins deliberately stay at the Config root
+// rather than moving under this section: bindAddr is not API-specific
+// (the relay/NtN and metrics/debug listeners use it too), and
+// corsAllowedOrigins already applies uniformly to all three API providers
+// today with no override need identified by dingo#2996/#2998, so
+// duplicating either here would only add a second source of truth for no
+// behavioral gain.
+type APIConfig struct {
+	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
+	Auth apiconfig.AuthPolicy `yaml:"auth"`
+}
+
+func defaultPluginsConfig() PluginsConfig {
+	return PluginsConfig{
+		Storage: StoragePluginsConfig{
+			Blob: hostplugin.Selection{
+				Provider: "badger",
+				Config:   map[string]any{},
+			},
+			Metadata: hostplugin.Selection{
+				Provider: "sqlite",
+				Config:   map[string]any{},
+			},
+		},
+		Mempool: hostplugin.Selection{
+			Provider: DefaultMempoolImplementation,
+			Config: map[string]any{
+				"evictionWatermark":    DefaultEvictionWatermark,
+				"rejectionWatermark":   DefaultRejectionWatermark,
+				"revalidationDeltaCap": DefaultMempoolRevalidationDeltaCap,
+			},
+		},
+		API: APIPluginsConfig{
+			Blockfrost: hostplugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": 3000},
+			},
+			Mesh: hostplugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": 8080},
+			},
+			Utxorpc: hostplugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": 9090},
+			},
+		},
+	}
 }
 
 // midnightNetworkDefaults holds per-network Midnight constants sourced from
@@ -706,107 +846,129 @@ func clearMidnightNetworkDefaults(cfg *Config, network string) {
 	}
 }
 
+// ReapplyMidnightNetworkDefaults re-derives the network-keyed Midnight
+// defaults after a caller has changed cfg.Network. ApplyFlags already does
+// this inline for a CLI flag that changes Network; this exported wrapper
+// gives any other caller that changes cfg.Network after LoadConfig/ApplyFlags
+// have run (e.g. internal/settingsresolve.Apply resuming Network from a
+// persisted gate) the same re-derivation, so the previous network's
+// constants do not linger under the new network. Explicitly configured
+// values are preserved: clearMidnightNetworkDefaults skips any field the
+// config file set (midnightYAMLFieldSet), and applyMidnightNetworkDefaults
+// only fills fields that are still empty.
+func ReapplyMidnightNetworkDefaults(cfg *Config, previousNetwork string) {
+	if cfg.Network != previousNetwork {
+		clearMidnightNetworkDefaults(cfg, previousNetwork)
+	}
+	applyMidnightNetworkDefaults(cfg)
+}
+
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
 type MithrilConfig struct {
 	// Enabled controls whether Mithril integration is available.
-	Enabled bool `yaml:"enabled"            envconfig:"DINGO_MITHRIL_ENABLED"`
+	Enabled bool `yaml:"enabled"                envconfig:"DINGO_MITHRIL_ENABLED"`
 	// AggregatorURL overrides the default aggregator URL for the network.
 	// If empty, the URL is auto-detected from the configured network.
-	AggregatorURL string `yaml:"aggregatorUrl"      envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
+	AggregatorURL string `yaml:"aggregatorUrl"          envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
+	// AllowInsecureHTTP permits AggregatorURL and the snapshot artifact
+	// locations the aggregator returns to use plain HTTP instead of
+	// HTTPS. Defaults to false; this is an explicit escape hatch for
+	// local development and tests against a plaintext aggregator and
+	// should not be enabled in production.
+	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"      envconfig:"DINGO_MITHRIL_ALLOW_INSECURE_HTTP"`
 	// Backend selects the Mithril artifact backend: "v2" (default) uses
 	// incremental Cardano database artifacts; "v1" uses the legacy full
 	// snapshot archives, which upstream Mithril is phasing out.
-	Backend string `yaml:"backend"            envconfig:"DINGO_MITHRIL_BACKEND"`
+	Backend string `yaml:"backend"                envconfig:"DINGO_MITHRIL_BACKEND"`
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
-	DownloadDir string `yaml:"downloadDir"        envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
+	DownloadDir string `yaml:"downloadDir"            envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
 	// DownloadIdleTimeout is the maximum idle time to wait for snapshot
 	// response headers or body bytes before retrying. Empty uses the
 	// downloader default; a negative duration disables idle detection.
-	DownloadIdleTimeout string `yaml:"downloadIdleTimeout" envconfig:"DINGO_MITHRIL_DOWNLOAD_IDLE_TIMEOUT"`
+	DownloadIdleTimeout string `yaml:"downloadIdleTimeout"    envconfig:"DINGO_MITHRIL_DOWNLOAD_IDLE_TIMEOUT"`
 	// DownloadMaxIdleRetries is the number of consecutive idle retries
 	// allowed without additional bytes. Zero uses the downloader default.
 	DownloadMaxIdleRetries int `yaml:"downloadMaxIdleRetries" envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_IDLE_RETRIES"`
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
-	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"   envconfig:"DINGO_MITHRIL_CLEANUP"`
+	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"       envconfig:"DINGO_MITHRIL_CLEANUP"`
 	// VerifyCertificates enables certificate chain verification
 	// during bootstrap. When true, the bootstrap process walks
 	// the Mithril certificate chain from the snapshot back to the
 	// genesis certificate to verify the chain is unbroken.
-	VerifyCertificates bool `yaml:"verifyCertificates" envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
+	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
-func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
-	fs := flag.NewFlagSet(programName, flag.ExitOnError)
-	fs.StringVar(
-		&c.BlobPlugin,
-		"blob",
-		DefaultBlobPlugin,
-		"blob store plugin to use, 'list' to show available",
-	)
-	fs.StringVar(
-		&c.MetadataPlugin,
-		"metadata",
-		DefaultMetadataPlugin,
-		"metadata store plugin to use, 'list' to show available",
-	)
-	// Database worker pool flags
-	fs.IntVar(
-		&c.DatabaseWorkers,
-		"db-workers",
-		5,
-		"database worker pool worker count",
-	)
-	fs.IntVar(
-		&c.DatabaseQueueSize,
-		"db-queue-size",
-		50,
-		"database worker pool task queue size",
-	)
-	// NOTE: Plugin flags are handled by Cobra in main.go
-	// if err := plugin.PopulateCmdlineOptions(fs); err != nil {
-	// 	return err
-	// }
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	// Handle plugin listing
-	if c.BlobPlugin == "list" {
-		fmt.Println("Available blob plugins:")
-		blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-		for _, p := range blobPlugins {
-			fmt.Printf("  %s: %s\n", p.Name, p.Description)
-		}
-		return ErrPluginListRequested
-	}
-	if c.MetadataPlugin == "list" {
-		fmt.Println("Available metadata plugins:")
-		metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-		for _, p := range metadataPlugins {
-			fmt.Printf("  %s: %s\n", p.Name, p.Description)
-		}
-		return ErrPluginListRequested
-	}
-
-	return nil
+// DatabaseLifecycleConfig holds configuration for automatic epoch-boundary
+// database snapshots and the `dingo database` snapshot/restore/truncate
+// CLI surface. Every snapshot is always written locally under SnapshotDir;
+// if SnapshotCloudDestination is also set, it is additionally uploaded
+// there — the cloud copy is a mirror alongside the local one, not a
+// replacement for it.
+type DatabaseLifecycleConfig struct {
+	// SnapshotEnabled controls whether automatic epoch-boundary database
+	// snapshots are captured. Manual snapshots via the CLI are always
+	// available regardless of this setting.
+	SnapshotEnabled bool `yaml:"snapshotEnabled"                envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_ENABLED"`
+	// SnapshotDir is the local filesystem directory automatic snapshots
+	// are written under (one subdirectory per snapshot). Required if
+	// SnapshotEnabled is true.
+	SnapshotDir string `yaml:"snapshotDir"                    envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_DIR"`
+	// SnapshotCloudDestination optionally mirrors every snapshot (manual
+	// or automatic) to an object-storage location in addition to
+	// SnapshotDir, as a URI: s3://<bucket>/<prefix> or
+	// gcs://<bucket>/<prefix> (matching the scheme
+	// database/plugin/blob/gcs already uses, not gs://). Requires dingo to
+	// be built with the dingo_extra_plugins tag. Empty disables cloud
+	// upload. Credentials are resolved from the ambient AWS/GCS SDK
+	// credential chain (env vars, IAM role, ADC, etc.) — there is no
+	// separate credential config here, matching how the existing s3/gcs
+	// blob store plugins work.
+	//
+	// Each snapshot is uploaded under its own sub-path — <this URI>/
+	// <snapshotID> — not flat directly under this URI, so more than one
+	// snapshot can exist at the same configured destination without
+	// overwriting each other. Restore accepts that same per-snapshot URI
+	// directly in place of a local snapshot directory: it downloads the
+	// snapshot into a local temp directory first, then proceeds exactly
+	// as a local restore. This is also how a snapshot created on one node
+	// can be restored onto another.
+	SnapshotCloudDestination string `yaml:"snapshotCloudDestination"       envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_CLOUD_DESTINATION"`
+	// SnapshotCloudDestinationPrefix is an additional path segment appended
+	// after SnapshotCloudDestination and before each snapshot's own ID
+	// (e.g. epoch-<N> for automatic snapshots), so multiple nodes can point
+	// at the very same SnapshotCloudDestination (a shared disaster-recovery
+	// bucket, say) without their automatic epoch-boundary snapshots
+	// colliding at the same remote key: every node captures its epoch-<N>
+	// snapshot under the identical deterministic name, so without a
+	// distinct prefix per node, two nodes sharing one destination would
+	// race to upload to the same path, and an interleaving could even
+	// leave one node's manifest.json paired with another node's backup
+	// files at the same remote location. Leave unset for a single node (or
+	// multiple nodes each already using distinct SnapshotCloudDestination
+	// values); operators sharing one destination across nodes must set
+	// this to a distinct value per node.
+	SnapshotCloudDestinationPrefix string `yaml:"snapshotCloudDestinationPrefix" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_CLOUD_DESTINATION_PREFIX"`
+	// SnapshotRetention is the number of most-recent automatic snapshots
+	// to keep before pruning older ones. Zero keeps all of them.
+	SnapshotRetention int `yaml:"snapshotRetention"              envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_RETENTION"`
+	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
+	// boundaries instead of every single one.
+	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
 }
+
+var configMu sync.RWMutex
 
 var globalConfig = &Config{
-	// MempoolCapacity is left as the zero sentinel; LoadConfig fills
-	// it in based on RunMode (Praos vs Leios) after CLI/env/YAML have
-	// been merged.
-	MempoolCapacity:      0,
-	EvictionWatermark:    DefaultEvictionWatermark,
-	RejectionWatermark:   DefaultRejectionWatermark,
+	Plugins:              defaultPluginsConfig(),
 	BindAddr:             "0.0.0.0",
 	CardanoConfig:        "", // Will be set dynamically based on network
 	DatabasePath:         ".dingo",
 	SocketPath:           "dingo.socket",
 	IntersectTip:         false,
-	ValidateHistorical:   false,
-	StrictUtxoValidation: false,
+	ValidateHistorical:   true,
+	StrictUtxoValidation: true,
 	Tracing:              false,
 	TracingStdout:        false,
 	Network:              "preview",
@@ -818,15 +980,12 @@ var globalConfig = &Config{
 	RelayPort:            3001,
 	BarkBaseUrl:          "",
 	BarkPort:             0,
-	UtxorpcPort:          9090,
+	BarkHost:             "",
+	BarkClientCAFilePath: "",
 	CORSAllowedOrigins:   []string{"*"},
-	BlockfrostPort:       3000,
-	MeshPort:             8080,
 	Topology:             "",
 	TlsCertFilePath:      "",
 	TlsKeyFilePath:       "",
-	BlobPlugin:           DefaultBlobPlugin,
-	MetadataPlugin:       DefaultMetadataPlugin,
 	StorageMode:          "core",
 	RunMode:              RunModeServe,
 	StartEra:             StartEraDefault,
@@ -837,6 +996,8 @@ var globalConfig = &Config{
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
 	BackfillBatchSize: 100,
+	// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
+	PledgeLeverage: 100,
 	// Cache configuration defaults
 	Cache: DefaultCacheConfig(),
 	// Chainsync configuration defaults
@@ -845,6 +1006,8 @@ var globalConfig = &Config{
 	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
 	// History expiry defaults
 	HistoryExpiry: DefaultHistoryExpiryConfig(),
+	// Koios parity observer defaults (disabled)
+	KoiosParity: DefaultKoiosParityConfig(),
 	// Logging defaults (text output at info level)
 	Logging: DefaultLoggingConfig(),
 	// Midnight defaults
@@ -859,32 +1022,160 @@ var globalConfig = &Config{
 		CleanupAfterLoad:   true,
 		VerifyCertificates: true,
 	},
+	// Database lifecycle defaults
+	DatabaseLifecycle: DatabaseLifecycleConfig{
+		SnapshotEveryNEpochs: 1,
+	},
 	// Forging defaults
 	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 }
 
-func LoadConfig(configFile string) (*Config, error) {
-	midnightYAMLFields = nil
-
-	// Load config file as YAML if provided
-	if configFile == "" {
-		// Check for config file in this path: ~/.dingo/dingo.yaml
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			userPath := filepath.Join(homeDir, ".dingo", "dingo.yaml")
-			if _, err := os.Stat(userPath); err == nil {
-				configFile = userPath
-			}
+// deepCopyPluginValue duplicates the reference-typed values a YAML plugin
+// config can hold. A nested `plugins.*.config` mapping or sequence decodes into
+// a map or slice, and GetConfig hands out snapshots, so copying only the top
+// level would leave those nested values shared between every snapshot and
+// globalConfig.
+func deepCopyPluginValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(typed))
+		for key, inner := range typed {
+			clone[key] = deepCopyPluginValue(inner)
 		}
+		return clone
+	case map[any]any:
+		clone := make(map[any]any, len(typed))
+		for key, inner := range typed {
+			clone[key] = deepCopyPluginValue(inner)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(typed))
+		for i, inner := range typed {
+			clone[i] = deepCopyPluginValue(inner)
+		}
+		return clone
+	default:
+		// Scalars are copied by assignment. A plugin config value of some
+		// other reference type would still be shared, but YAML decoding only
+		// produces scalars, maps, and sequences.
+		return value
+	}
+}
 
-		// Try to check for /etc/dingo/dingo.yaml if still not found
-		if configFile == "" {
-			systemPath := "/etc/dingo/dingo.yaml"
-			if _, err := os.Stat(systemPath); err == nil {
-				configFile = systemPath
-			}
+func clonePluginSelection(selection hostplugin.Selection) hostplugin.Selection {
+	clone := selection
+	if selection.Config == nil {
+		return clone
+	}
+	clone.Config = make(map[string]any, len(selection.Config))
+	for key, value := range selection.Config {
+		clone.Config[key] = deepCopyPluginValue(value)
+	}
+	return clone
+}
+
+func cloneStringPtr(p *string) *string {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// cloneTLSPolicy and cloneAuthPolicy deep-copy every pointer field so a
+// clone never shares a *string with the Config it was cloned from --
+// matching PeerSharing's own defensive-copy discipline just above, even
+// though every pointer in practice is replaced wholesale (never mutated
+// in place) once set.
+func cloneTLSPolicy(p apiconfig.TLSPolicy) apiconfig.TLSPolicy {
+	return apiconfig.TLSPolicy{
+		Mode:         cloneStringPtr(p.Mode),
+		CertFilePath: cloneStringPtr(p.CertFilePath),
+		KeyFilePath:  cloneStringPtr(p.KeyFilePath),
+	}
+}
+
+func cloneAuthPolicy(p apiconfig.AuthPolicy) apiconfig.AuthPolicy {
+	return apiconfig.AuthPolicy{
+		Mode:          cloneStringPtr(p.Mode),
+		Token:         cloneStringPtr(p.Token),
+		TokenFilePath: cloneStringPtr(p.TokenFilePath),
+	}
+}
+
+func cloneConfig(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	clone.BarkBlockDownloadHosts = append(
+		[]string(nil),
+		cfg.BarkBlockDownloadHosts...,
+	)
+	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	if cfg.PeerSharing != nil {
+		peerSharing := *cfg.PeerSharing
+		clone.PeerSharing = &peerSharing
+	}
+	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
+	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
+	if cfg.LeiosVoterPublicKeys != nil {
+		clone.LeiosVoterPublicKeys = make(
+			map[string]string,
+			len(cfg.LeiosVoterPublicKeys),
+		)
+		maps.Copy(clone.LeiosVoterPublicKeys, cfg.LeiosVoterPublicKeys)
+	}
+	clone.Plugins.Storage.Blob = clonePluginSelection(
+		cfg.Plugins.Storage.Blob,
+	)
+	clone.Plugins.Storage.Metadata = clonePluginSelection(
+		cfg.Plugins.Storage.Metadata,
+	)
+	clone.Plugins.Mempool = clonePluginSelection(cfg.Plugins.Mempool)
+	clone.Plugins.API.Blockfrost = clonePluginSelection(
+		cfg.Plugins.API.Blockfrost,
+	)
+	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
+	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
+	if cfg.provenance != nil {
+		clone.provenance = make(Provenance, len(cfg.provenance))
+		maps.Copy(clone.provenance, cfg.provenance)
+	}
+	return &clone
+}
+
+// resolveConfigFile applies the same default config file discovery
+// LoadConfig has always used: an explicit configFile wins outright;
+// otherwise ~/.dingo/dingo.yaml is used if it exists, else
+// /etc/dingo/dingo.yaml if that exists, else "" (no config file).
+// RecordSourceProvenance (provenance.go) calls this too, so it inspects
+// the exact same file LoadConfig actually read.
+func resolveConfigFile(configFile string) string {
+	if configFile != "" {
+		return configFile
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		userPath := filepath.Join(homeDir, ".dingo", "dingo.yaml")
+		if _, err := os.Stat(userPath); err == nil {
+			return userPath
 		}
 	}
+	systemPath := "/etc/dingo/dingo.yaml"
+	if _, err := os.Stat(systemPath); err == nil {
+		return systemPath
+	}
+	return ""
+}
+
+func LoadConfig(configFile string) (*Config, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg := cloneConfig(globalConfig)
+	midnightYAMLFields = nil
+	configFile = resolveConfigFile(configFile)
 
 	if configFile != "" {
 		buf, err := os.ReadFile(configFile)
@@ -893,103 +1184,74 @@ func LoadConfig(configFile string) (*Config, error) {
 		}
 		midnightYAMLFields = collectMidnightYAMLFields(buf)
 
-		// First unmarshal into temp config to handle plugin sections
-		var tempCfg tempConfig
-		err = yaml.Unmarshal(buf, &tempCfg)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing config file: %w", err)
+		var root map[string]yaml.Node
+		if err := yaml.Unmarshal(buf, &root); err != nil {
+			return nil, fmt.Errorf(
+				"error parsing config file %s: %w",
+				configFile,
+				err,
+			)
 		}
-
-		// If config section exists, use it for main config
-		if tempCfg.Config != nil {
-			// Overlay config values onto existing defaults
-			configBytes, err := yaml.Marshal(tempCfg.Config)
-			if err != nil {
-				return nil, fmt.Errorf("error re-marshalling config: %w", err)
+		if _, wrapped := root["config"]; wrapped {
+			tempCfg := tempConfig{Config: cfg}
+			decoder := yaml.NewDecoder(bytes.NewReader(buf))
+			decoder.KnownFields(true)
+			if err := decoder.Decode(&tempCfg); err != nil &&
+				!errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf(
+					"error parsing config section in %s: %w",
+					configFile,
+					err,
+				)
 			}
-			err = yaml.Unmarshal(configBytes, globalConfig)
-			if err != nil {
-				return nil, fmt.Errorf("error parsing config section: %w", err)
+			if tempCfg.Config == nil {
+				return nil, fmt.Errorf(
+					"config section in %s must be a mapping",
+					configFile,
+				)
 			}
 		} else {
-			// Otherwise unmarshal the whole file as main config (backward
-			// compatibility)
-			err = yaml.Unmarshal(buf, globalConfig)
-			if err != nil {
-				return nil, fmt.Errorf("error parsing config file: %w", err)
-			}
-		}
-
-		// Process plugin configurations
-		pluginConfig := make(map[string]map[string]map[string]any)
-		if tempCfg.Blob != nil {
-			pluginConfig["blob"] = tempCfg.Blob
-		}
-		if tempCfg.Metadata != nil {
-			pluginConfig["metadata"] = tempCfg.Metadata
-		}
-		// Handle database section if present
-		if tempCfg.Database != nil {
-			if tempCfg.Database.Blob != nil {
-				pluginName, blobConfig, err := databasePluginConfig(
-					"blob",
-					tempCfg.Database.Blob,
-				)
-				if err != nil {
-					return nil, err
-				}
-				if pluginName != "" {
-					globalConfig.BlobPlugin = pluginName
-				}
-				// Merge with existing blob config instead of overwriting
-				if pluginConfig["blob"] == nil {
-					pluginConfig["blob"] = blobConfig
-				} else {
-					maps.Copy(pluginConfig["blob"], blobConfig)
-				}
-			}
-			if tempCfg.Database.Metadata != nil {
-				pluginName, metadataConfig, err := databasePluginConfig(
-					"metadata",
-					tempCfg.Database.Metadata,
-				)
-				if err != nil {
-					return nil, err
-				}
-				if pluginName != "" {
-					globalConfig.MetadataPlugin = pluginName
-				}
-				// Merge with existing metadata config instead of overwriting
-				if pluginConfig["metadata"] == nil {
-					pluginConfig["metadata"] = metadataConfig
-				} else {
-					maps.Copy(pluginConfig["metadata"], metadataConfig)
-				}
-			}
-		}
-		if len(pluginConfig) > 0 {
-			err = plugin.ProcessConfig(pluginConfig)
-			if err != nil {
+			decoder := yaml.NewDecoder(bytes.NewReader(buf))
+			decoder.KnownFields(true)
+			if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 				return nil, fmt.Errorf(
-					"error processing plugin config: %w",
+					"error parsing config file %s: %w",
+					configFile,
 					err,
 				)
 			}
 		}
 	}
 	// Process environment variables
-	err := envconfig.Process("cardano", globalConfig)
+	err := envconfig.Process("cardano", cfg)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
-
-	// Process plugin environment variables
-	err = plugin.ProcessEnvVars()
-	if err != nil {
+	pluginEnviron := os.Environ()
+	if err := applyAPIPortCompatibilityEnvironment(
+		cfg,
+		pluginEnviron,
+	); err != nil {
 		return nil, fmt.Errorf(
-			"error processing plugin environment variables: %w",
+			"process API port compatibility environment: %w",
 			err,
 		)
+	}
+	pluginSelections := []struct {
+		capability hostplugin.Capability
+		selection  *hostplugin.Selection
+	}{
+		{hostplugin.CapabilityStorageBlob, &cfg.Plugins.Storage.Blob},
+		{hostplugin.CapabilityStorageMetadata, &cfg.Plugins.Storage.Metadata},
+		{hostplugin.CapabilityMempool, &cfg.Plugins.Mempool},
+		{hostplugin.CapabilityAPIBlockfrost, &cfg.Plugins.API.Blockfrost},
+		{hostplugin.CapabilityAPIMesh, &cfg.Plugins.API.Mesh},
+		{hostplugin.CapabilityAPIUtxorpc, &cfg.Plugins.API.Utxorpc},
+	}
+	for _, item := range pluginSelections {
+		if err := hostplugin.ApplyEnvironment(item.capability, item.selection, pluginEnviron); err != nil {
+			return nil, fmt.Errorf("process plugin environment: %w", err)
+		}
 	}
 
 	// LoadConfig only parses and merges configuration sources; it makes
@@ -1004,7 +1266,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	// they let a config loaded without CLI flags resolve its per-network
 	// values, and ApplyFlags compensates for a network change by
 	// clearing the previous network's defaults and reapplying.
-	applyMidnightNetworkDefaults(globalConfig)
+	applyMidnightNetworkDefaults(cfg)
 
 	// NOTE: Do not set a default CardanoConfig here. The network flag
 	// can be overridden after LoadConfig returns (see main.go
@@ -1014,7 +1276,62 @@ func LoadConfig(configFile string) (*Config, error) {
 	// which a CLI flag may still change, so cmd/dingo loads it once
 	// after the merged configuration has been defaulted and validated.
 
-	return globalConfig, nil
+	globalConfig = cloneConfig(cfg)
+	return cfg, nil
+}
+
+// applyAPIPortCompatibilityEnvironment maps the API port environment names
+// used before API providers became plugins onto their canonical plugin config.
+// The generic plugin environment is applied afterwards, so the canonical name
+// wins when an operator sets both forms during a migration.
+func applyAPIPortCompatibilityEnvironment(cfg *Config, environ []string) error {
+	type apiPortCompatibility struct {
+		legacyName    string
+		canonicalName string
+		selection     *hostplugin.Selection
+	}
+	ports := []apiPortCompatibility{
+		{
+			legacyName:    "DINGO_BLOCKFROST_PORT",
+			canonicalName: "DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT",
+			selection:     &cfg.Plugins.API.Blockfrost,
+		},
+		{
+			legacyName:    "DINGO_MESH_PORT",
+			canonicalName: "DINGO_PLUGINS_API_MESH_CONFIG_PORT",
+			selection:     &cfg.Plugins.API.Mesh,
+		},
+		{
+			legacyName:    "DINGO_UTXORPC_PORT",
+			canonicalName: "DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT",
+			selection:     &cfg.Plugins.API.Utxorpc,
+		},
+	}
+	values := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[name] = value
+		}
+	}
+	for _, port := range ports {
+		if _, ok := values[port.canonicalName]; ok {
+			continue
+		}
+		value, ok := values[port.legacyName]
+		if !ok {
+			continue
+		}
+		scalar, err := strconv.ParseUint(value, 0, 64)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", port.legacyName, err)
+		}
+		if port.selection.Config == nil {
+			port.selection.Config = make(map[string]any)
+		}
+		port.selection.Config["port"] = scalar
+	}
+	return nil
 }
 
 // ApplyDefaults fills in unset values whose defaults depend on other
@@ -1030,21 +1347,32 @@ func (c *Config) ApplyDefaults() {
 	if c.RunMode == "" {
 		c.RunMode = RunModeServe
 	}
-	// Unset MempoolCapacity defaults based on RunMode
-	if c.MempoolCapacity == 0 {
+	if c.Plugins.Mempool.Config == nil {
+		c.Plugins.Mempool.Config = make(map[string]any)
+	}
+	// Unset mempool capacity defaults based on RunMode.
+	if _, ok := c.Plugins.Mempool.Config["capacity"]; !ok {
 		if c.RunMode == RunModeLeios {
-			c.MempoolCapacity = DefaultMempoolCapacityLeios
+			c.Plugins.Mempool.Config["capacity"] = int64(
+				DefaultMempoolCapacityLeios,
+			)
 		} else {
-			c.MempoolCapacity = DefaultMempoolCapacityPraos
+			c.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 		}
 	}
-	// Unset float64 fields are 0, which is indistinguishable from an
-	// explicit 0; both select the standard watermark
-	if c.EvictionWatermark == 0 {
-		c.EvictionWatermark = DefaultEvictionWatermark
+	// The presence of evictionWatermark distinguishes an explicit zero (which
+	// disables FIFO eviction) from an unset value.
+	if _, ok := c.Plugins.Mempool.Config["evictionWatermark"]; !ok {
+		c.Plugins.Mempool.Config["evictionWatermark"] = DefaultEvictionWatermark
 	}
-	if c.RejectionWatermark == 0 {
-		c.RejectionWatermark = DefaultRejectionWatermark
+	// Zero is not a valid rejection watermark, so retain the historical
+	// zero-as-unset behavior for this field.
+	if pluginFloat64(c.Plugins.Mempool.Config["rejectionWatermark"]) == 0 {
+		c.Plugins.Mempool.Config["rejectionWatermark"] = DefaultRejectionWatermark
+	}
+	if _, ok := c.Plugins.Mempool.Config["revalidationDeltaCap"]; !ok {
+		defaultDeltaCap := DefaultMempoolRevalidationDeltaCap
+		c.Plugins.Mempool.Config["revalidationDeltaCap"] = defaultDeltaCap
 	}
 	if c.ForgeSyncToleranceSlots == 0 {
 		c.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
@@ -1058,16 +1386,84 @@ func (c *Config) ApplyDefaults() {
 	if c.HistoryExpiry.Frequency == 0 {
 		c.HistoryExpiry.Frequency = time.Hour
 	}
+	if c.KoiosParity.GraceHours == 0 {
+		c.KoiosParity.GraceHours = 24
+	}
+}
+
+func pluginInt64(value any) int64 {
+	switch value := value.(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case uint:
+		// #nosec G115 -- semantic range validation runs immediately afterwards.
+		return int64(value)
+	case uint64:
+		// #nosec G115 -- semantic range validation runs immediately afterwards.
+		return int64(value)
+	case float64:
+		return int64(value)
+	default:
+		return 0
+	}
+}
+
+func pluginUint(value any) uint {
+	// #nosec G115 -- semantic port range validation runs afterwards.
+	return uint(pluginInt64(value))
+}
+
+// MempoolSettings returns the canonical default-provider settings after
+// ApplyDefaults has run.
+func (c *Config) MempoolSettings() (int64, float64, float64) {
+	return pluginInt64(c.Plugins.Mempool.Config["capacity"]),
+		pluginFloat64(c.Plugins.Mempool.Config["evictionWatermark"]),
+		pluginFloat64(c.Plugins.Mempool.Config["rejectionWatermark"])
+}
+
+// APIPluginPort returns the configured port for a built-in API selection.
+func APIPluginPort(selection hostplugin.Selection) uint {
+	return pluginUint(selection.Config["port"])
+}
+
+func pluginFloat64(value any) float64 {
+	switch value := value.(type) {
+	case float64:
+		return value
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	default:
+		return 0
+	}
 }
 
 func GetConfig() *Config {
-	return globalConfig
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return cloneConfig(globalConfig)
+}
+
+// PublishConfig replaces the process-wide configuration snapshot returned
+// by GetConfig with a clone of cfg. LoadConfig and ApplyFlags already
+// publish their own results this way; call PublishConfig after any later
+// mutation of a *Config a caller is threading through by pointer, since
+// consumers such as LoadTopologyConfig read the package-level snapshot via
+// GetConfig, not the caller's own pointer, and would otherwise silently
+// see a stale value.
+func PublishConfig(cfg *Config) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	globalConfig = cloneConfig(cfg)
 }
 
 var globalTopologyConfig = &topology.TopologyConfig{}
 
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
-	tc, err := LoadTopologyConfigFor(globalConfig)
+	tc, err := LoadTopologyConfigFor(GetConfig())
 	if err != nil {
 		return nil, err
 	}

@@ -14,7 +14,13 @@
 
 package tlsutil
 
-import "crypto/tls"
+import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"net/http"
+	"os"
+)
 
 // ServerConfig applies the minimum TLS version policy for server connections.
 func ServerConfig(config *tls.Config) *tls.Config {
@@ -55,4 +61,53 @@ func ServerConfig(config *tls.Config) *tls.Config {
 		}
 	}
 	return config
+}
+
+// ConfigureServerTLS loads the certificate/key pair at certFilePath/
+// keyFilePath and installs it on server's TLSConfig (creating one via
+// ServerConfig if server.TLSConfig is nil), applying the shared minimum
+// TLS version floor. It is the single keypair-loading implementation
+// shared by every built-in API provider (Blockfrost, Mesh, UTxORPC),
+// replacing what was previously duplicated tls.LoadX509KeyPair-plus-floor
+// logic per provider. Callers must still call server.ServeTLS (not
+// Serve) after this returns successfully -- this only prepares the
+// config, it does not decide whether the caller wants a TLS listener at
+// all (see EffectiveTLS.Enabled in package apiconfig).
+func ConfigureServerTLS(
+	server *http.Server,
+	certFilePath, keyFilePath string,
+) error {
+	cert, err := tls.LoadX509KeyPair(certFilePath, keyFilePath)
+	if err != nil {
+		return fmt.Errorf("loading TLS keypair: %w", err)
+	}
+	server.TLSConfig = ServerConfig(server.TLSConfig)
+	// Assign a fresh single-element slice rather than appending: every
+	// caller loads exactly one keypair, and appending to whatever
+	// Certificates already held could silently accumulate a stale entry
+	// (from a reused/reinitialized *http.Server or a pre-populated
+	// TLSConfig) alongside the new one, letting Go's SNI cert selection
+	// pick the wrong certificate.
+	server.TLSConfig.Certificates = []tls.Certificate{cert}
+	return nil
+}
+
+// LoadClientCAPool reads a PEM-encoded CA bundle from path and returns an
+// x509.CertPool built from it, for use as a tls.Config's ClientCAs — the
+// trust anchor against which a server verifies client (mTLS) certificates.
+// Returns an error if the file can't be read or contains no valid PEM
+// certificates, rather than silently returning an empty (trust-nobody) pool.
+func LoadClientCAPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading client CA file %q: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf(
+			"no valid PEM certificates found in client CA file %q",
+			path,
+		)
+	}
+	return pool, nil
 }

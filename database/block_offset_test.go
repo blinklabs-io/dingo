@@ -66,12 +66,23 @@ func TestExtractTransactionOffsets(t *testing.T) {
 
 		// Extract offsets
 		offsets, err := common.ExtractTransactionOffsets(immBlock.Cbor)
-		require.NoError(t, err, "failed to extract offsets from block %d (slot %d)",
-			i, immBlock.Slot)
+		require.NoError(
+			t,
+			err,
+			"failed to extract offsets from block %d (slot %d)",
+			i,
+			immBlock.Slot,
+		)
 
 		// Verify we got offsets for all transactions
-		assert.Equal(t, len(txs), len(offsets.Transactions),
-			"transaction count mismatch for block %d (slot %d)", i, immBlock.Slot)
+		assert.Equal(
+			t,
+			len(txs),
+			len(offsets.Transactions),
+			"transaction count mismatch for block %d (slot %d)",
+			i,
+			immBlock.Slot,
+		)
 
 		// Verify each offset points to valid data
 		for txIdx, tx := range txs {
@@ -87,7 +98,8 @@ func TestExtractTransactionOffsets(t *testing.T) {
 				"body offset out of bounds for tx %d in block %d", txIdx, i)
 
 			// Extract body CBOR and verify it matches transaction body
-			if loc.Body.Offset > 0 && loc.Body.Length > 0 && bodyEnd <= uint64(len(immBlock.Cbor)) {
+			if loc.Body.Offset > 0 && loc.Body.Length > 0 &&
+				bodyEnd <= uint64(len(immBlock.Cbor)) {
 				extractedBody := immBlock.Cbor[loc.Body.Offset : loc.Body.Offset+loc.Body.Length]
 
 				// The extracted data should be valid CBOR (basic sanity check)
@@ -100,14 +112,23 @@ func TestExtractTransactionOffsets(t *testing.T) {
 					// Transaction CBOR includes both body and witnesses,
 					// so extracted body should be a prefix or we need to
 					// compare differently based on era
-					assert.LessOrEqual(t, len(extractedBody), len(txCbor)+1000,
+					assert.LessOrEqual(
+						t,
+						len(extractedBody),
+						len(txCbor)+1000,
 						"extracted body unexpectedly larger than tx cbor for tx %d in block %d",
-						txIdx, i)
+						txIdx,
+						i,
+					)
 				}
 			}
 
 			// Verify witness offset is within block bounds
-			witnessEnd := uint64(loc.Witness.Offset) + uint64(loc.Witness.Length)
+			witnessEnd := uint64(
+				loc.Witness.Offset,
+			) + uint64(
+				loc.Witness.Length,
+			)
 			assert.LessOrEqual(t, witnessEnd, uint64(len(immBlock.Cbor)),
 				"witness offset out of bounds for tx %d in block %d", txIdx, i)
 
@@ -120,10 +141,21 @@ func TestExtractTransactionOffsets(t *testing.T) {
 			}
 
 			for key, redeemerLoc := range loc.Redeemers {
-				redeemerEnd := uint64(redeemerLoc.Offset) + uint64(redeemerLoc.Length)
-				assert.LessOrEqual(t, redeemerEnd, uint64(len(immBlock.Cbor)),
+				redeemerEnd := uint64(
+					redeemerLoc.Offset,
+				) + uint64(
+					redeemerLoc.Length,
+				)
+				assert.LessOrEqual(
+					t,
+					redeemerEnd,
+					uint64(len(immBlock.Cbor)),
 					"redeemer offset out of bounds for key (%d,%d) in tx %d block %d",
-					key.Tag, key.Index, txIdx, i)
+					key.Tag,
+					key.Index,
+					txIdx,
+					i,
+				)
 			}
 
 			for hash, scriptLoc := range loc.Scripts {
@@ -140,7 +172,12 @@ func TestExtractTransactionOffsets(t *testing.T) {
 		}
 	}
 
-	assert.Greater(t, blocksWithTx, 0, "no blocks with transactions were tested")
+	assert.Greater(
+		t,
+		blocksWithTx,
+		0,
+		"no blocks with transactions were tested",
+	)
 	t.Logf("Successfully tested %d blocks with transactions", blocksWithTx)
 }
 

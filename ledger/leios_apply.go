@@ -57,6 +57,12 @@ type leiosEndorserBlockCertifier interface {
 
 var _ leiosEndorserBlockCertifier = (*dijkstra.DijkstraBlockHeader)(nil)
 
+var errCertifiedEndorserBlockUnavailable = errors.New(
+	"certified Leios endorser block unavailable",
+)
+
+const certifiedEndorserBlockRetryDelay = time.Second
+
 // applyEndorserBlock decodes a Leios endorser block's standalone transactions,
 // persists them as a standalone blob, and — on the CIP-conformant path
 // (LeiosApplyEndorserBlockTxs) — applies them to the ledger ahead of the ranking
@@ -124,7 +130,11 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 		var elems []cbor.RawMessage
 		if _, err := cbor.Decode(txCbor, &elems); err != nil {
-			return 0, 0, fmt.Errorf("decode endorser tx %d envelope: %w", i, err)
+			return 0, 0, fmt.Errorf(
+				"decode endorser tx %d envelope: %w",
+				i,
+				err,
+			)
 		}
 		if len(elems) < 2 {
 			return 0, 0, fmt.Errorf(
@@ -174,13 +184,32 @@ func (ls *LedgerState) applyEndorserBlock(
 	if err != nil {
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
-	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, txn); err != nil {
+	// Persist the endorser-block blob. Which transaction commits it depends on
+	// the apply path (see DATABASE.md, "Leios endorser-block storage", for the
+	// full rationale):
+	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
+	//     in its own blob transaction (nil txn) to avoid overflowing the shared
+	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
+	//     the blob is never read back within the chunk, so an independent commit
+	//     is safe.
+	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
+	//     the shared txn so a later block spending an endorser-produced output can
+	//     resolve it via read-your-writes.
+	blobTxn := txn
+	if !ls.config.LeiosApplyEndorserBlockTxs {
+		blobTxn = nil
+	}
+	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, blobTxn); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
 
-	delta := NewLedgerDelta(rbPoint, uint(dijkstra.EraIdDijkstra), rbBlockNumber)
+	delta := NewLedgerDelta(
+		rbPoint,
+		uint(dijkstra.EraIdDijkstra),
+		rbBlockNumber,
+	)
 	defer delta.Release()
 	delta.Offsets = offsets
 	if ls.config.LeiosApplyEndorserBlockTxs {
@@ -303,7 +332,9 @@ func buildEndorserBlockBlob(
 	writeRange := func(b []byte) (uint32, uint32, error) {
 		off := buf.Len()
 		if off > math.MaxUint32 || len(b) > math.MaxUint32 {
-			return 0, 0, errors.New("endorser block blob offset out of uint32 range")
+			return 0, 0, errors.New(
+				"endorser block blob offset out of uint32 range",
+			)
 		}
 		buf.Write(b)
 		//nolint:gosec // bounds checked above
@@ -327,7 +358,10 @@ func buildEndorserBlockBlob(
 			if len(outCbor) == 0 {
 				enc, err := cbor.Encode(utxo.Output)
 				if err != nil {
-					return nil, nil, fmt.Errorf("encode endorser output: %w", err)
+					return nil, nil, fmt.Errorf(
+						"encode endorser output: %w",
+						err,
+					)
 				}
 				outCbor = enc
 			}
@@ -376,30 +410,15 @@ func buildEndorserBlockBlob(
 //     endorser block by point on demand, so actively fetch them -- in parallel
 //     across the available relay connections -- and apply the endorser-resident
 //     outputs instead of leaving the UTxO set incomplete and trusting the
-//     chain. This is what lets a from-scratch sync build a full UTxO set.
+//     chain. On the Musashi certificate-driven path a certified closure is
+//     mandatory: an incomplete all-peer fetch returns an error before its
+//     certifying ranking block can commit. This is what lets a from-scratch
+//     sync build a complete ledger state instead of exposing a latent gap when
+//     near-tip header validation begins.
 func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
-) {
-	if ls.config.EndorserBlockProvider == nil ||
-		ls.config.EndorserBlockWaitSlots == 0 {
-		return
-	}
-	slotLen := ls.shelleySlotLength()
-	if slotLen <= 0 {
-		// Without a known slot length the slot-denominated diffusion window
-		// cannot be converted to wall-clock; skip the wait rather than guess.
-		return
-	}
-	//nolint:gosec // EndorserBlockWaitSlots is a small protocol window
-	timeout := time.Duration(ls.config.EndorserBlockWaitSlots) * slotLen
-	// Cache re-check cadence (polling granularity, not a protocol parameter):
-	// a fraction of a slot so arrival is noticed promptly, floored at 1ms so
-	// the ticker interval is always positive.
-	poll := max(slotLen/10, time.Millisecond)
-	// wallSlot is the current wall-clock slot (the live head). A block more than
-	// the wait window below it is settled backlog.
-	wallSlot, wallErr := ls.CurrentSlot()
+) error {
 	// Index each block's announced endorser block by the block's own hash so a
 	// certifying ranking block can resolve the endorser block its parent
 	// announced without a store round-trip (the parent is normally in the same
@@ -445,6 +464,62 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			}
 		}
 	}
+	required, err := requiredCertifiedEndorserBlocks(
+		infos,
+		annByHash,
+		certDrivenHistorical,
+	)
+	if err != nil {
+		return err
+	}
+	if ls.config.EndorserBlockProvider == nil {
+		if len(required) == 0 {
+			return nil
+		}
+		return fmt.Errorf(
+			"%w: no endorser block provider configured",
+			errCertifiedEndorserBlockUnavailable,
+		)
+	}
+	ensureRequiredAvailable := func() error {
+		for _, r := range required {
+			if _, _, ok := ls.config.EndorserBlockProvider(
+				r.hash.Bytes(),
+			); ok {
+				continue
+			}
+			return fmt.Errorf(
+				"%w: slot %d, EB %s",
+				errCertifiedEndorserBlockUnavailable,
+				r.slot,
+				r.hash.String(),
+			)
+		}
+		return nil
+	}
+
+	// A zero wait disables best-effort announcement waiting, but a certified
+	// Musashi closure remains mandatory: committing its CertRB without the
+	// closure would permanently omit transaction and certificate effects.
+	if ls.config.EndorserBlockWaitSlots == 0 {
+		return ensureRequiredAvailable()
+	}
+	slotLen := ls.shelleySlotLength()
+	if slotLen <= 0 {
+		// Without a known slot length the slot-denominated diffusion window
+		// cannot be converted to wall-clock. Best-effort announcements may
+		// still be skipped, but a certified closure must not be.
+		return ensureRequiredAvailable()
+	}
+	//nolint:gosec // EndorserBlockWaitSlots is a small protocol window
+	timeout := time.Duration(ls.config.EndorserBlockWaitSlots) * slotLen
+	// Cache re-check cadence (polling granularity, not a protocol parameter):
+	// a fraction of a slot so arrival is noticed promptly, floored at 1ms so
+	// the ticker interval is always positive.
+	poll := max(slotLen/10, time.Millisecond)
+	// wallSlot is the current wall-clock slot (the live head). A block more than
+	// the wait window below it is settled backlog.
+	wallSlot, wallErr := ls.CurrentSlot()
 	cached := func(ebHash lcommon.Blake2b256) bool {
 		_, _, ok := ls.config.EndorserBlockProvider(ebHash.Bytes())
 		return ok
@@ -498,6 +573,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			}
 		}
 	}
+	return ensureRequiredAvailable()
 }
 
 // leiosEbRef pairs a ranking block's slot with the hash of the endorser block
@@ -519,6 +595,44 @@ type leiosBlockInfo struct {
 	announces bool
 	ebHash    lcommon.Blake2b256
 	certifies bool
+}
+
+// requiredCertifiedEndorserBlocks returns the certified parent EBs whose
+// transactions are consensus ledger effects on the Haskell-conformant Musashi
+// path. Current announcements remain best-effort until a later block certifies
+// them. A certifying block whose parent announcement cannot be resolved is
+// rejected: proceeding would commit a ledger state known to be incomplete.
+func requiredCertifiedEndorserBlocks(
+	infos []leiosBlockInfo,
+	annByHash map[string]leiosEbRef,
+	certDrivenHistorical bool,
+) ([]leiosEbRef, error) {
+	if !certDrivenHistorical {
+		return nil, nil
+	}
+	required := make([]leiosEbRef, 0)
+	seen := make(map[string]struct{})
+	for _, info := range infos {
+		if !info.certifies {
+			continue
+		}
+		r, ok := annByHash[info.prevHash]
+		if !ok {
+			return nil, fmt.Errorf(
+				"%w: certifying ranking block at slot %d has no resolvable parent announcement (parent %x)",
+				errCertifiedEndorserBlockUnavailable,
+				info.slot,
+				[]byte(info.prevHash),
+			)
+		}
+		key := string(r.hash.Bytes())
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		required = append(required, r)
+	}
+	return required, nil
 }
 
 // leiosBlockInfoFrom extracts the fetch-policy view of a block from its header
@@ -789,9 +903,12 @@ func (ls *LedgerState) waitForEndorserBlock(
 		case <-waitCtx.Done():
 			ls.config.Logger.Info(
 				"endorser block not fetched within diffusion window; proceeding without it",
-				"component", "ledger",
-				"slot", rbSlot,
-				"eb_hash", ebHash.String(),
+				"component",
+				"ledger",
+				"slot",
+				rbSlot,
+				"eb_hash",
+				ebHash.String(),
 			)
 			return
 		case <-ticker.C:
@@ -811,16 +928,15 @@ const leiosBackfillMaxWait = 2 * time.Minute
 // referenced by r to finish (it has already been spawned). The spawned fetch
 // (FetchEndorserBlockByPoint) tries every connected peer in turn before
 // failing, so by the time it clears its in-flight marker it has tried all
-// peers. If it cached the block, the referencing ranking block can apply it; if
-// it finished without caching (every peer's response was flaky/incomplete, e.g.
-// a single connection that cannot serve a large endorser block's tail), do NOT
-// keep retrying the same peers — skip and let the interim Dijkstra validation
-// trust path cover the unresolved inputs, so catch-up advances. With multiple
-// healthy peers the all-peers attempt assembles the complete block; retrying is
-// only useful when there are other peers to try, which the all-peers loop
-// already exhausted. leiosBackfillMaxWait is a backstop against a fetch that
-// neither caches nor clears (the fetch itself is bounded by the leios-fetch
-// timeout, so this is rarely reached).
+// peers. If it cached the block, the referencing ranking block can apply it.
+// If it finished without caching (every peer's response was flaky/incomplete,
+// e.g. a single connection that cannot serve a large endorser block's tail),
+// return promptly. The caller distinguishes best-effort announcements from
+// mandatory certified Musashi closures: the former may advance, while the
+// latter abort the chunk and are retried by the ledger pipeline.
+// leiosBackfillMaxWait is a backstop against a fetch that neither caches nor
+// clears (the fetch itself is bounded by the leios-fetch timeout, so this is
+// rarely reached).
 func (b *leiosBackfiller) awaitFetch(
 	ctx context.Context,
 	r leiosEbRef,

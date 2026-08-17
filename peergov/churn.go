@@ -27,6 +27,10 @@ func (p *PeerGovernor) gossipChurn() {
 
 	p.mu.Lock()
 
+	// Churn ranks by score on its own ticker, so age stale scores here too
+	// rather than relying on the last reconcile pass.
+	p.agePeerScoresLocked(time.Now())
+
 	// Collect hot non-root peers (gossip, ledger)
 	hotNonRoot := p.filterPeers(func(peer *Peer) bool {
 		return peer.State == PeerStateHot &&
@@ -167,7 +171,8 @@ func (p *PeerGovernor) gossipChurn() {
 		if !p.lastEligibleUpstreamSkipLogged {
 			p.config.Logger.Info(
 				"gossip churn: skipping demotion of last eligible upstream peer",
-				"address", skippedUpstreamAddress,
+				"address",
+				skippedUpstreamAddress,
 			)
 			p.lastEligibleUpstreamSkipLogged = true
 		}
@@ -191,6 +196,10 @@ func (p *PeerGovernor) publicRootChurn() {
 	var events []pendingEvent
 
 	p.mu.Lock()
+
+	// Churn ranks by score on its own ticker, so age stale scores here too
+	// rather than relying on the last reconcile pass.
+	p.agePeerScoresLocked(time.Now())
 
 	// Collect warm public roots BEFORE demotion (for later promotion)
 	// This prevents promoting peers we just demoted

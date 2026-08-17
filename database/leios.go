@@ -27,7 +27,11 @@ import (
 // (received over leios-fetch MsgBlock) to the blob store. The value includes
 // the slot as a prefix so it can be recovered on load without a separate index.
 // key: "em" + hash(32) → value: slot(8 bytes big-endian) + manifest CBOR.
-func (d *Database) SetLeiosEBManifest(slot uint64, hash []byte, manifestRaw []byte) error {
+func (d *Database) SetLeiosEBManifest(
+	slot uint64,
+	hash []byte,
+	manifestRaw []byte,
+) error {
 	blob := d.Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
@@ -53,7 +57,9 @@ func (d *Database) SetLeiosEBManifest(slot uint64, hash []byte, manifestRaw []by
 // GetLeiosEBManifest retrieves the raw Leios endorser-block manifest CBOR and
 // its slot by hash. Returns ErrBlobKeyNotFound when no manifest has been stored
 // for this hash.
-func (d *Database) GetLeiosEBManifest(hash []byte) (slot uint64, manifestRaw []byte, err error) {
+func (d *Database) GetLeiosEBManifest(
+	hash []byte,
+) (slot uint64, manifestRaw []byte, err error) {
 	blob := d.Blob()
 	if blob == nil {
 		return 0, nil, types.ErrBlobStoreUnavailable

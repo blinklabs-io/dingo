@@ -68,7 +68,8 @@ func parseKeyFile(path string) ([]byte, error) {
 	if len(raw) != 34 {
 		return nil, fmt.Errorf(
 			"unexpected key encoding in %s (want 34 bytes with 5820 prefix, got %d bytes)",
-			path, len(raw),
+			path,
+			len(raw),
 		)
 	}
 	if raw[0] != 0x58 || raw[1] != 0x20 {
@@ -146,7 +147,10 @@ func loadSigningKeyPrefix(prefix string) (*UTxOKey, error) {
 	}
 	derivedVKey := ed25519.NewKeyFromSeed(skey).Public().(ed25519.PublicKey)
 	if !bytes.Equal(vkey, derivedVKey) {
-		return nil, fmt.Errorf("verification key does not match signing key for %s", prefix)
+		return nil, fmt.Errorf(
+			"verification key does not match signing key for %s",
+			prefix,
+		)
 	}
 	addr, err := parseAddrInfoFile(prefix + ".addr.info")
 	if err != nil {

@@ -107,15 +107,31 @@ func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
 			metrics.phaseActive.WithLabelValues(mithrilSyncPhaseBootstrap),
 		),
 	)
-	require.Equal(t, float64(128), promtestutil.ToFloat64(metrics.downloadBytes))
-	require.Equal(t, float64(256), promtestutil.ToFloat64(metrics.downloadTotalBytes))
-	require.Equal(t, float64(50), promtestutil.ToFloat64(metrics.downloadPercent))
+	require.Equal(
+		t,
+		float64(128),
+		promtestutil.ToFloat64(metrics.downloadBytes),
+	)
+	require.Equal(
+		t,
+		float64(256),
+		promtestutil.ToFloat64(metrics.downloadTotalBytes),
+	)
+	require.Equal(
+		t,
+		float64(50),
+		promtestutil.ToFloat64(metrics.downloadPercent),
+	)
 	require.Equal(
 		t,
 		float64(64),
 		promtestutil.ToFloat64(metrics.downloadBytesPerSecond),
 	)
-	require.Equal(t, float64(1024), promtestutil.ToFloat64(metrics.snapshotSize))
+	require.Equal(
+		t,
+		float64(1024),
+		promtestutil.ToFloat64(metrics.snapshotSize),
+	)
 	require.Equal(
 		t,
 		float64(128),
@@ -163,18 +179,42 @@ func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
 		float64(1200),
 		promtestutil.ToFloat64(metrics.immutableCurrentSlot),
 	)
-	require.Equal(t, float64(1234), promtestutil.ToFloat64(metrics.immutableTipSlot))
-	require.Equal(t, float64(97.2), promtestutil.ToFloat64(metrics.immutablePercent))
+	require.Equal(
+		t,
+		float64(1234),
+		promtestutil.ToFloat64(metrics.immutableTipSlot),
+	)
+	require.Equal(
+		t,
+		float64(97.2),
+		promtestutil.ToFloat64(metrics.immutablePercent),
+	)
 	require.Equal(
 		t,
 		float64(3.5),
 		promtestutil.ToFloat64(metrics.immutableBlocksPerSec),
 	)
 	require.Equal(t, float64(3), promtestutil.ToFloat64(metrics.gapBlocks))
-	require.Equal(t, float64(1200), promtestutil.ToFloat64(metrics.backfillCurrentSlot))
-	require.Equal(t, float64(2400), promtestutil.ToFloat64(metrics.backfillTipSlot))
-	require.Equal(t, float64(25), promtestutil.ToFloat64(metrics.backfillBlocksPerSec))
-	require.Equal(t, float64(50), promtestutil.ToFloat64(metrics.backfillPercent))
+	require.Equal(
+		t,
+		float64(1200),
+		promtestutil.ToFloat64(metrics.backfillCurrentSlot),
+	)
+	require.Equal(
+		t,
+		float64(2400),
+		promtestutil.ToFloat64(metrics.backfillTipSlot),
+	)
+	require.Equal(
+		t,
+		float64(25),
+		promtestutil.ToFloat64(metrics.backfillBlocksPerSec),
+	)
+	require.Equal(
+		t,
+		float64(50),
+		promtestutil.ToFloat64(metrics.backfillPercent),
+	)
 	require.Equal(
 		t,
 		float64(0.4),

@@ -58,7 +58,7 @@ func TestBuildVerificationMaterial(t *testing.T) {
 
 	material, err := BuildVerificationMaterial(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			LeafCertificate: &Certificate{
 				Hash:  "leaf",
@@ -88,8 +88,16 @@ func TestBuildVerificationMaterial(t *testing.T) {
 	require.NotNil(t, material)
 	require.NotNil(t, material.MithrilStakeDistribution)
 	require.NotNil(t, material.CardanoStakeDistribution)
-	require.Equal(t, "msd-cert", material.MithrilStakeDistribution.CertificateHash)
-	require.Equal(t, "csd-cert", material.CardanoStakeDistribution.CertificateHash)
+	require.Equal(
+		t,
+		"msd-cert",
+		material.MithrilStakeDistribution.CertificateHash,
+	)
+	require.Equal(
+		t,
+		"csd-cert",
+		material.CardanoStakeDistribution.CertificateHash,
+	)
 }
 
 func TestBuildVerificationMaterialRejectsMismatchedEpochFallback(t *testing.T) {
@@ -110,7 +118,7 @@ func TestBuildVerificationMaterialRejectsMismatchedEpochFallback(t *testing.T) {
 
 	_, err := BuildVerificationMaterial(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			LeafCertificate: &Certificate{
 				Hash:  "leaf",
@@ -122,7 +130,9 @@ func TestBuildVerificationMaterialRejectsMismatchedEpochFallback(t *testing.T) {
 	require.Contains(t, err.Error(), "certificate hash mismatch")
 }
 
-func TestBuildVerificationMaterialUsesSupportingCertificatesFromChain(t *testing.T) {
+func TestBuildVerificationMaterialUsesSupportingCertificatesFromChain(
+	t *testing.T,
+) {
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -148,7 +158,7 @@ func TestBuildVerificationMaterialUsesSupportingCertificatesFromChain(t *testing
 
 	material, err := BuildVerificationMaterial(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			LeafCertificate: &Certificate{
 				Hash:  "leaf",
@@ -181,6 +191,14 @@ func TestBuildVerificationMaterialUsesSupportingCertificatesFromChain(t *testing
 	require.NoError(t, err)
 	require.Equal(t, "msd-cert", material.MithrilCertificate.Hash)
 	require.Equal(t, "csd-cert", material.CardanoCertificate.Hash)
-	require.Equal(t, "msd-cert", material.MithrilStakeDistribution.CertificateHash)
-	require.Equal(t, "csd-cert", material.CardanoStakeDistribution.CertificateHash)
+	require.Equal(
+		t,
+		"msd-cert",
+		material.MithrilStakeDistribution.CertificateHash,
+	)
+	require.Equal(
+		t,
+		"csd-cert",
+		material.CardanoStakeDistribution.CertificateHash,
+	)
 }

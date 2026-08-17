@@ -17,6 +17,7 @@ package database
 import (
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -29,7 +30,10 @@ func (d *Database) RebuildRewardLiveStake(slot uint64, txn *Txn) error {
 		})
 	}
 	if txn.db != d || txn.Metadata() == nil {
-		return fmt.Errorf("rebuild reward live stake: %w", types.ErrTxnWrongType)
+		return fmt.Errorf(
+			"rebuild reward live stake: %w",
+			types.ErrTxnWrongType,
+		)
 	}
 	if !txn.IsReadWrite() {
 		return fmt.Errorf(
@@ -62,4 +66,62 @@ func (d *Database) DeleteRewardStateAfterSlot(
 		return fmt.Errorf("delete reward state after slot %d: %w", slot, err)
 	}
 	return nil
+}
+
+// GetRewardAccountOutputsByCredential returns reward account output rows for
+// a stake credential across every epoch that has not yet been pruned,
+// paginated and ordered by epoch. Used by the Blockfrost account
+// reward-history endpoint (GET /accounts/{stake_address}/rewards).
+func (d *Database) GetRewardAccountOutputsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]*models.RewardAccountOutput, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	rows, err := d.metadata.GetRewardAccountOutputsByCredential(
+		credentialTag,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get reward account outputs by credential: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountRewardAccountOutputsByCredential returns the total count of reward
+// account output rows for a stake credential.
+func (d *Database) CountRewardAccountOutputsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountRewardAccountOutputsByCredential(
+		credentialTag,
+		stakingKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count reward account outputs by credential: %w",
+			err,
+		)
+	}
+	return count, nil
 }
