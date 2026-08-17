@@ -141,6 +141,32 @@ func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 	assert.NoError(t, ValidateTxByron(redeemTx, 3313, ls, nil))
 }
 
+func TestValidateTxByron_MainnetBootstrapWitness(t *testing.T) {
+	// This is the transaction immediately after the redeem-witness regression
+	// above. Its constructor-0 witness is a tag-24-wrapped [extended public
+	// key, signature] pair, which older gouroboros releases do not expose.
+	txCbor, err := hex.DecodeString(
+		"82839f8200d81858248258206497b33b10fa2619c6efbd9f874ecd1c91badb10bf70850732aab45b90524d9e00ff9f8282d818584283581c37f1f51e41efe8713f9755e78bb61af0bb822af6fb31788dba18e27ba101581e581c010d876783fb2b59f088db6d41359ae0a3868a0e411b4dde5713f870001a570841701a000b20128282d818584283581c5d4704fc22524e98ea5b9580ab2a29396b8ad2a92764d08ce23ea1e5a101581e581cd2c9d85d9e2ce454557363216e45b9f015e9b5c2617f0294ac5bc2d0001ae8c1444d1a000186a0ffa0818200d818588582584042a2100a4bce0f08ed211f980d7a848915fd48953be80b4b4fb3a9bbf8aea206cc8a84c83896f3d716fe0fc6ae8d5ae5554109c1fff5b6ca6c53cc74741dcad25840c26a80389d8bee813ed786d4cf395bbc304f43bef1b75eb5f989e915451cbe5610f8bf7dc843392070e4a470ebb7614da37f78c8a879da8eb0fc2f7f8ffd0107",
+	)
+	bootstrapTx, err := byron.NewByronTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	inputAddress, err := lcommon.NewAddress(
+		"DdzFFzCqrhsszHTvbjTmYje5hehGbadkT6WgWbaqCy5XNxNttsPNF13eAjjBHYT7JaLJz2XVxiucam1EvwBRPSTiCrT4TNCBas4hfzic",
+	)
+	require.NoError(t, err)
+	input := byron.ByronTransactionOutput{
+		OutputAddress: inputAddress,
+		OutputAmount:  3_000_000_000,
+	}
+
+	ls := newMockLedgerState()
+	ls.networkId = lcommon.AddressNetworkMainnet
+	ls.protocolMagic = byron.MainnetProtocolMagic
+	ls.addUtxo(bootstrapTx.Inputs()[0], input)
+	assert.NoError(t, ValidateTxByron(bootstrapTx, 3336, ls, nil))
+}
+
 func TestValidateTxByron_ValidMultipleInputsOutputs(
 	t *testing.T,
 ) {
