@@ -37,7 +37,9 @@ func TestNewImmutableProgressByteBased(t *testing.T) {
 	// 4 archives of uneven size summing to 1000 bytes.
 	const totalArchives = 4
 	const totalBytes = 1000
-	onDone := newImmutableProgress(cfg, totalArchives, totalBytes)
+	onDone := newImmutableProgressWithContext(
+		cfg, totalArchives, totalBytes, "", "",
+	)
 
 	// 1 of 4 archives carrying 100 of 1000 bytes: archive-count fraction
 	// is 25%, but the byte fraction is 10%. The reported percent must be
@@ -65,7 +67,9 @@ func TestNewImmutableProgressClamp(t *testing.T) {
 		Logger:     slog.New(slog.DiscardHandler),
 		OnProgress: func(p DownloadProgress) { last = p },
 	}
-	onDone := newImmutableProgress(cfg, 2, 300) // estimated total 300
+	onDone := newImmutableProgressWithContext(
+		cfg, 2, 300, "", "",
+	) // estimated total 300
 	onDone(200)
 	onDone(200) // actual 400 > estimated 300
 	assert.LessOrEqual(t, last.Percent, 100.0)
@@ -80,7 +84,9 @@ func TestNewImmutableProgressUnknownTotalFallback(t *testing.T) {
 		Logger:     slog.New(slog.DiscardHandler),
 		OnProgress: func(p DownloadProgress) { last = p },
 	}
-	onDone := newImmutableProgress(cfg, 4, 0) // total unknown
+	onDone := newImmutableProgressWithContext(
+		cfg, 4, 0, "", "",
+	) // total unknown
 	onDone(123)
 	assert.InDelta(t, 25.0, last.Percent, 0.001,
 		"with unknown total, percent falls back to archive count")

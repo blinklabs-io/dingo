@@ -924,18 +924,6 @@ func downloadImmutables(
 	return err
 }
 
-// newImmutableProgress returns a callback that aggregates per-archive
-// completion into OnProgress updates and throttled log lines.
-func newImmutableProgress(
-	cfg BootstrapConfig,
-	totalArchives uint64,
-	totalBytes int64,
-) func(bytesAdded int64) {
-	return newImmutableProgressWithContext(
-		cfg, totalArchives, totalBytes, "", "",
-	)
-}
-
 // newImmutableProgressWithContext aggregates the concurrent immutable
 // workers into one progress stream while retaining the artifact identity.
 func newImmutableProgressWithContext(

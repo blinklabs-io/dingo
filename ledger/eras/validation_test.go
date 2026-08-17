@@ -1017,8 +1017,8 @@ func requireRuleIndexResolvesToFunc(
 	)
 	require.Equal(
 		t,
-		utxoValidationRulePtr(want),
-		utxoValidationRulePtr(rules[index]),
+		utxoValidationRuleName(want),
+		utxoValidationRuleName(rules[index]),
 		"%s hardcoded rule index no longer resolves to the expected function",
 		name,
 	)
@@ -1031,9 +1031,9 @@ func requireIndexedRulesIncludeFunc(
 	message string,
 ) {
 	t.Helper()
-	wantPtr := utxoValidationRulePtr(want)
+	wantName := utxoValidationRuleName(want)
 	for _, rule := range rules {
-		if utxoValidationRulePtr(rule.validationFunc) == wantPtr {
+		if utxoValidationRuleName(rule.validationFunc) == wantName {
 			return
 		}
 	}
@@ -1047,12 +1047,12 @@ func requireIndexedRulesExcludeFunc(
 	message string,
 ) {
 	t.Helper()
-	wantPtr := utxoValidationRulePtr(want)
+	wantName := utxoValidationRuleName(want)
 	for _, rule := range rules {
 		require.NotEqual(
 			t,
-			wantPtr,
-			utxoValidationRulePtr(rule.validationFunc),
+			wantName,
+			utxoValidationRuleName(rule.validationFunc),
 			message,
 		)
 	}

@@ -20,6 +20,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"runtime"
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -105,14 +106,14 @@ type utxoValidationRuleSkip struct {
 const (
 	noUtxoValidationRuleIndex = -1
 
-	// Positions in gouroboros v0.191.2 UtxoValidationRules. Function
+	// Positions in gouroboros v0.193.3 UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
-	// function pointers before filtering by index.
+	// their runtime function names before filtering by index.
 	alonzoUtxoValidatePlutusScriptsRuleIndex   = 27
 	babbageUtxoValidatePlutusScriptsRuleIndex  = 31
-	conwayUtxoValidateFeeTooSmallRuleIndex     = 19
-	conwayUtxoValidateExUnitsTooBigRuleIndex   = 34
-	conwayUtxoValidatePlutusScriptsRuleIndex   = 38
+	conwayUtxoValidateFeeTooSmallRuleIndex     = 24
+	conwayUtxoValidateExUnitsTooBigRuleIndex   = 39
+	conwayUtxoValidatePlutusScriptsRuleIndex   = 43
 	dijkstraUtxoValidatePlutusScriptsRuleIndex = 38
 
 	conwayRefScriptCostStride = 25_600
@@ -234,9 +235,9 @@ func validateUtxoValidationSkipIndex(
 	if skipValidationFunc == nil {
 		panic(skipRuleName + " expected validation function is nil")
 	}
-	if utxoValidationRulePtr(
+	if utxoValidationRuleName(
 		rules[skipIndex],
-	) != utxoValidationRulePtr(
+	) != utxoValidationRuleName(
 		skipValidationFunc,
 	) {
 		panic(fmt.Sprintf(
@@ -247,11 +248,15 @@ func validateUtxoValidationSkipIndex(
 	}
 }
 
-func utxoValidationRulePtr(fn lcommon.UtxoValidationRuleFunc) uintptr {
+func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 	if fn == nil {
-		return 0
+		return ""
 	}
-	return reflect.ValueOf(fn).Pointer()
+	pc := reflect.ValueOf(fn).Pointer()
+	if runtimeFn := runtime.FuncForPC(pc); runtimeFn != nil {
+		return runtimeFn.Name()
+	}
+	return fmt.Sprintf("%x", pc)
 }
 
 // SafeAddExUnits adds two ExUnits values with
