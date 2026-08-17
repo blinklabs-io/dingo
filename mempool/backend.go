@@ -125,7 +125,7 @@ func (f *FIFO) WaitForAdmissionHeadroom(
 	minBytes int64,
 	done <-chan error,
 ) bool {
-	return f.Mempool.waitForAdmissionHeadroom(minBytes, done)
+	return f.waitForAdmissionHeadroom(minBytes, done)
 }
 
 // DAG exposes the dependency-indexed mempool backend.
@@ -181,7 +181,7 @@ func (d *DAG) WaitForAdmissionHeadroom(
 	minBytes int64,
 	done <-chan error,
 ) bool {
-	return d.Mempool.waitForAdmissionHeadroom(minBytes, done)
+	return d.waitForAdmissionHeadroom(minBytes, done)
 }
 
 // New constructs the selected mempool implementation. An empty value selects

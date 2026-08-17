@@ -930,6 +930,29 @@ func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
 	)
 }
 
+func requestableTxIdsWithinHeadroom(
+	txIds []txsubmission.TxIdAndSize,
+	availableBytes int64,
+) ([]txsubmission.TxId, int64) {
+	if availableBytes <= 0 {
+		return nil, 0
+	}
+	ret := make([]txsubmission.TxId, 0, len(txIds))
+	var requestedBytes int64
+	for _, txID := range txIds {
+		txSize := int64(txID.Size)
+		if txSize > availableBytes || requestedBytes > availableBytes-txSize {
+			if len(ret) == 0 {
+				return ret, txSize
+			}
+			break
+		}
+		ret = append(ret, txID.TxId)
+		requestedBytes += txSize
+	}
+	return ret, 0
+}
+
 func TestRequestableTxIdsWithinHeadroom(t *testing.T) {
 	tx1 := txsubmission.TxId{EraId: 6, TxId: [32]byte{1}}
 	tx2 := txsubmission.TxId{EraId: 6, TxId: [32]byte{2}}
@@ -947,28 +970,28 @@ func TestRequestableTxIdsWithinHeadroom(t *testing.T) {
 			availableBytes: 300,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 150}, {TxId: tx3, Size: 75}},
 			want:           []txsubmission.TxId{tx1, tx2},
-			wantNext:       0, // >0 requestable, so nextHeadroom unused
+			wantNext:       0,
 		},
 		{
 			name:           "stops at first oversized tx to preserve offer order",
 			availableBytes: 90,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}},
 			want:           []txsubmission.TxId{},
-			wantNext:       100, // first tx size when nothing fits
+			wantNext:       100,
 		},
 		{
 			name:           "stops at first overflowing tx to preserve dependencies",
 			availableBytes: 160,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 70}, {TxId: tx3, Size: 20}},
 			want:           []txsubmission.TxId{tx1},
-			wantNext:       0, // >0 requestable, so nextHeadroom unused
+			wantNext:       0,
 		},
 		{
 			name:           "returns next headroom target when no tx fits",
 			availableBytes: 40,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}, {TxId: tx3, Size: 75}},
 			want:           []txsubmission.TxId{},
-			wantNext:       100, // first tx size when nothing fits
+			wantNext:       100,
 		},
 	}
 
@@ -978,11 +1001,7 @@ func TestRequestableTxIdsWithinHeadroom(t *testing.T) {
 				test.txIds,
 				test.availableBytes,
 			)
-			assert.Equal(
-				t,
-				test.want,
-				got,
-			)
+			assert.Equal(t, test.want, got)
 			assert.Equal(t, test.wantNext, gotNext)
 		})
 	}

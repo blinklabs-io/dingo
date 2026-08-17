@@ -485,33 +485,6 @@ func (o *Ouroboros) txsubmissionServerInit(
 	return nil
 }
 
-// requestableTxIdsWithinHeadroom returns the offered prefix that can fit in
-// the current admission budget. Keeping the prefix intact preserves the
-// dependency order advertised by the peer; the next headroom target is only
-// needed when the first offered transaction cannot fit at all.
-func requestableTxIdsWithinHeadroom(
-	txIds []txsubmission.TxIdAndSize,
-	availableBytes int64,
-) ([]txsubmission.TxId, int64) {
-	if availableBytes <= 0 {
-		return nil, 0
-	}
-	ret := make([]txsubmission.TxId, 0, len(txIds))
-	var requestedBytes int64
-	for _, txID := range txIds {
-		txSize := int64(txID.Size)
-		if txSize > availableBytes || requestedBytes > availableBytes-txSize {
-			if len(ret) == 0 {
-				return ret, txSize
-			}
-			break
-		}
-		ret = append(ret, txID.TxId)
-		requestedBytes += txSize
-	}
-	return ret, 0
-}
-
 func (o *Ouroboros) txsubmissionClientRequestTxIds(
 	ctx txsubmission.CallbackContext,
 	blocking bool,
