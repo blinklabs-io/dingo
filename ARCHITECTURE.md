@@ -3578,6 +3578,37 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
   rewards — Dingo's full AdaPots).
 
+  **Coverage contract.** A `PASS` means only that every **exact-match** and
+  **derived-match** field below matched. It does not claim parity for fields
+  classified as **intentionally-incomparable** or **unsupported**. The same
+  field-level matrix is emitted in every JSON report, and human-readable
+  status output reports the class counts. `internal/koiosparity/coverage_test.go`
+  requires every field in the consumed Koios response structs to remain
+  classified when those structs change. Account rewards are outside this
+  matrix until #3097 and #3099 are implemented.
+
+  | Koios endpoint | Classification | Fields | Dingo mapping / reason |
+  |---|---|---|---|
+  | `/tip` | derived-match | `epoch_no` | `tip - 1` bounds the safely closed epoch range. |
+  | `/pool_list` | derived-match | `pool_id_bech32` | Decode to pool key hash and compare complete pool membership. |
+  | `/pool_updates` | derived-match | `pool_id_bech32`, `active_epoch_no` | Derive each pool's earliest possible history request. These control fetching, not value parity. |
+  | `/epoch_info` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
+  | `/epoch_info` | derived-match | `active_stake` | Exact lovelace match to `epoch_summary.total_active_stake` at K-1. |
+  | `/epoch_info` | derived-match | `end_time` | Establishes closure and the reference-lag window; not a Dingo value assertion. |
+  | `/epoch_info` | unsupported | `era`, `out_sum`, `fees`, `tx_count`, `blk_count`, `start_time`, `first_block_time`, `last_block_time`, `total_rewards`, `avg_blk_reward` | Dingo has no matching persisted per-epoch aggregate. In particular, raw `fees`/`total_rewards` are not AdaPots balances. |
+  | `/epoch_info` | unsupported | `pool_cnt`, `delegator_cnt` | Documented fields are not returned by Koios preview/preprod and are omitted from the response projection. |
+  | `/totals` | exact-match | `epoch_no`, `treasury`, `reserves`, `fees` | Require the requested epoch and exact equality with K's `reward_ada_pots` boundary balances. |
+  | `/totals` | intentionally-incomparable | `reward` | Koios reports a lagged cumulative accumulator; Dingo stores a per-epoch flow. |
+  | `/totals` | unsupported | `circulation`, `supply`, `deposits_stake`, `deposits_drep`, `deposits_proposal`, `treasury_donation`, `treasury_withdrawal`, `reserves_withdrawal` | No matching persisted Dingo network aggregate. |
+  | `/pool_history` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
+  | `/pool_history` | derived-match | `pool_id_bech32` | Request identity is decoded to Dingo's pool key hash for set membership. |
+  | `/pool_history` | derived-match | `active_stake`, `delegator_cnt` | Exact values against `reward_pool_input` at stake epoch K-1. |
+  | `/pool_history` | derived-match | `block_cnt`, `fixed_cost` | Exact values against `reward_pool_input` at parameter epoch K+1. |
+  | `/pool_history` | derived-match | `margin` | K+1 values compared as equivalent rational numbers. |
+  | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with aggregated `reward_pool_output.member_reward_total` at K-1. |
+  | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
+  | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
+
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
   all use K for the same ledger period, so `checkEpoch` (`check.go`) never
