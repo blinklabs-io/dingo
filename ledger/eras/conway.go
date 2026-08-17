@@ -953,8 +953,8 @@ func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
 // intermediate slippage-batch flush failures — we run with a virtually
 // unlimited budget and compare the consumed amount against the declared budget
 // after execution. This mirrors cardano-node's restrictingEnormous semantics:
-// the machine runs unconstrained; at the end, usedBudget (which excludes the
-// final unbudgeted step batch, per SkipFinalSlippageFlush) must fit within the
+// the machine runs unconstrained; at the end, usedBudget (including the final
+// step batch, as charged by the current Plutigo evaluator) must fit within the
 // declared redeemer budget.
 //
 // math.MaxInt64/2 avoids overflow in ExBudget arithmetic (consumed = enormous - remaining).
@@ -978,9 +978,8 @@ func evaluateConwayPlutusScript(
 	// argument as a machine limit and pass an enormous budget to
 	// gouroboros/plutigo so intermediate slippage-batch flushes never exhaust
 	// the budget mid-execution. After execution we compare the consumed amount
-	// (final batch already excluded by SkipFinalSlippageFlush) against the
-	// budget argument, which callers set to the declared redeemer budget. This
-	// matches cardano-node's restrictingEnormous mode.
+	// against the budget argument, which callers set to the declared redeemer
+	// budget. This matches cardano-node's restrictingEnormous mode.
 	//
 	// In exact mode (skipFinalSlippageFlush=false) the caller-supplied budget
 	// argument is itself the machine limit, and no post-execution comparison is
@@ -1012,7 +1011,6 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			ctx.ToPlutusData(),
 			evalBudget,
@@ -1045,7 +1043,6 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			datum,
 			redeemer.Data,
@@ -1080,7 +1077,6 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			datum,
 			redeemer.Data,
