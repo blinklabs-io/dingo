@@ -42,22 +42,9 @@ var guardedMutexes = []string{
 	"chainsyncBlockfetchMutex",
 }
 
-// knownNilQueuePublishersUnderLock are lock holders that still hand nil to
-// a queue-taking helper, publishing inline while they hold a guarded
-// mutex.
-//
-// These cannot be converted in isolation. Giving one its own queue and
-// flushing on its own return does not help, because a parent frame still
-// holds a guarded mutex when it runs -- handleEventChainsyncBlockHeader is
-// called from handleEventChainsync, which holds chainsyncMutex. Fixing
-// them is the same threading described in
-// knownResyncPublishPathsUnderLock and tracked for one atomic change.
-//
-// Listed rather than silently tolerated, and checked in both directions
-// below so the list cannot rot.
-var knownNilQueuePublishersUnderLock = []string{
-	"handleEventChainsyncBlockHeader",
-}
+// knownNilQueuePublishersUnderLock is intentionally empty. A guarded caller
+// must always pass its pending queue; a nil queue would publish inline.
+var knownNilQueuePublishersUnderLock []string
 
 // TestNoEventBusPublishWhileHoldingChainsyncMutex enforces that nothing in
 // this package publishes to the EventBus while holding a mutex that an
@@ -176,7 +163,11 @@ func queueParamPositions(files []*ast.File) map[string]int {
 			idx := 0
 			for _, field := range fn.Type.Params.List {
 				isQueue := false
-				if star, ok := field.Type.(*ast.StarExpr); ok {
+				queueType := field.Type
+				if ellipsis, ok := queueType.(*ast.Ellipsis); ok {
+					queueType = ellipsis.Elt
+				}
+				if star, ok := queueType.(*ast.StarExpr); ok {
 					if id, ok := star.X.(*ast.Ident); ok &&
 						id.Name == "pendingPublishes" {
 						isQueue = true
@@ -328,31 +319,10 @@ func violations(fn *ast.FuncDecl, queueParam map[string]int) []violation {
 	return found
 }
 
-// knownResyncPublishPathsUnderLock records every helper that can publish
-// ChainsyncResyncEventType while one of guardedMutexes is held.
-//
-// That event is the dangerous one: its subscriber calls
-// RecoverAfterLocalRollback, which takes the same mutex, so a publish
-// reaching it from under the lock is the deadlock pendingPublishes
-// exists to break. handleChainSwitchEvent was converted because a review
-// demonstrated it concretely; the rest are pre-existing paths that
-// predate this change.
-//
-// Converting them means threading a queue through roughly ten functions
-// in the hottest consensus path, which belongs in its own change with its
-// own DevNet and soak validation rather than riding along here. This list
-// is the honest alternative to silence: the guard above is
-// intra-procedural, so without it the remaining exposure would look like
-// it had been handled.
-var knownResyncPublishPathsUnderLock = []string{
-	"handleBlockfetchTimeoutLocked",
-	"handleEventBlockfetchBatchDone",
-	"handleEventChainsyncRollback",
-	"handoffPipelineOnSwitchLocked",
-	"replayBufferedHeaderEvents",
-	"restartQueuedBlockfetchAfterForkLocked",
-	"startQueuedBlockfetchLocked",
-}
+// knownResyncPublishPathsUnderLock is intentionally empty. Every resync
+// publish reachable from a guarded lock holder must be queued and flushed
+// after the lock is released.
+var knownResyncPublishPathsUnderLock []string
 
 // TestChainsyncResyncPublishPathsUnderLock pins the set of helpers that
 // can publish ChainsyncResyncEventType while the mutex is held.

@@ -65,6 +65,7 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 			ConnectionId: fixture.connId,
 			Point:        fixture.ancestorTip.Point,
 		},
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -126,6 +127,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 			ConnectionId: fixture.connId,
 			Point:        fixture.ancestorTip.Point,
 		},
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -193,6 +195,7 @@ func TestHandleEventChainsyncRollbackPrunesStaleBlockNonces(
 			ConnectionId: fixture.connId,
 			Point:        fixture.ancestorTip.Point,
 		},
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -306,6 +309,7 @@ func TestHandleEventChainsyncRollbackDoesNotSkipDifferentPeerHistory(
 			ConnectionId: fixture.connId,
 			Point:        fixture.ancestorTip.Point,
 		},
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -350,6 +354,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 			ConnectionId: fixture.connId,
 			Point:        uncrossablePoint,
 		},
+		nil,
 	)
 	require.ErrorIs(t, err, ErrRollbackLoopDetected)
 
@@ -368,6 +373,7 @@ func TestHandleEventChainsyncRollbackExceedsKReconcilesDivergedLedgerTip(
 			ConnectionId: fixture.connId,
 			Point:        ocommon.Point{},
 		},
+		nil,
 	))
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
@@ -428,6 +434,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -476,6 +483,7 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 
 	require.NoError(t, err)
@@ -586,6 +594,7 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 
 	require.NoError(t, err)
@@ -732,6 +741,7 @@ func TestTryResolveForkExceedsKReconcilesDivergedLedgerTip(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -787,6 +797,7 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 
 	require.False(t, resolved)
@@ -919,6 +930,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -995,6 +1007,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1080,6 +1093,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 			},
 		},
 		notFitErr,
+		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -2106,6 +2120,7 @@ func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
 			// The peer's own tip sits below our trust boundary.
 			Tip: fixture.ancestorTip,
 		},
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -2171,6 +2186,7 @@ func TestHandleEventChainsyncRollbackRejectsDivergentPeerTipAboveMithrilBoundary
 				BlockNumber: fixture.currentTip.BlockNumber + 1,
 			},
 		},
+		nil,
 	)
 	require.NoError(t, err)
 
