@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -280,7 +281,7 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, test.path, r.URL.Path)
+				assert.Equal(t, test.path, r.URL.Path)
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`[{"epoch_no":11}]`))
 			}))
