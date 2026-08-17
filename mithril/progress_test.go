@@ -85,3 +85,20 @@ func TestNewImmutableProgressUnknownTotalFallback(t *testing.T) {
 	assert.InDelta(t, 25.0, last.Percent, 0.001,
 		"with unknown total, percent falls back to archive count")
 }
+
+func TestWithProgressContext(t *testing.T) {
+	var got DownloadProgress
+	progress := withProgressContext(
+		func(p DownloadProgress) { got = p },
+		"ancillary_ledger_state",
+		"snapshot-hash",
+	)
+	progress(DownloadProgress{
+		BytesDownloaded: 42,
+		TotalBytes:      100,
+	})
+
+	assert.Equal(t, int64(42), got.BytesDownloaded)
+	assert.Equal(t, "ancillary_ledger_state", got.Artifact)
+	assert.Equal(t, "snapshot-hash", got.SnapshotHash)
+}

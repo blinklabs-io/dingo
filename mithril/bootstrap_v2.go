@@ -114,10 +114,19 @@ func bootstrapV2(
 	cfg.Logger.Info(
 		"found latest Cardano database snapshot",
 		"component", "mithril",
+		"network", artifact.Network,
 		"hash", artifact.Hash,
+		"snapshot_hash", artifact.Hash,
 		"epoch", artifact.Beacon.Epoch,
 		"immutable_file_number", artifact.Beacon.ImmutableFileNumber,
 		"total_db_size", artifact.TotalDbSizeUncompressed,
+	)
+	cfg.Logger = cfg.Logger.With(
+		"network", artifact.Network,
+		"snapshot_hash", artifact.Hash,
+		"snapshot_epoch", artifact.Beacon.Epoch,
+		"snapshot_immutable_file_number", artifact.Beacon.ImmutableFileNumber,
+		"artifact_backend", BackendV2,
 	)
 
 	if len(artifact.Immutables.Locations) == 0 {
@@ -137,6 +146,8 @@ func bootstrapV2(
 		cfg.Logger.Info(
 			"certificate chain verified",
 			"component", "mithril",
+			"phase", "certificate_verification",
+			"artifact", "cardano_database",
 		)
 	}
 
@@ -315,6 +326,7 @@ func bootstrapV2(
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
+		"phase", "bootstrap_ready",
 		"immutable_dir", immutableDir,
 		"ancillary_dir", ancillaryDir,
 	)
@@ -366,6 +378,8 @@ func verifyArtifactCertificateV2(
 	cfg.Logger.Info(
 		"verifying certificate chain",
 		"component", "mithril",
+		"phase", "certificate_verification",
+		"artifact", "cardano_database",
 		"certificate_hash", artifact.CertificateHash,
 	)
 	verificationMode := VerificationModeStructural
@@ -540,6 +554,8 @@ func fetchVerifiedDigests(
 	cfg.Logger.Info(
 		"digest list verified against certified merkle root",
 		"component", "mithril",
+		"phase", "digest_verification",
+		"artifact", "immutable_digest_list",
 		"digests", len(digests),
 	)
 	return digests, nil
@@ -603,7 +619,12 @@ func downloadDigestsArchive(
 				"digests-%s.tar.zst",
 				truncateDigest(artifact.Hash),
 			)),
-			Logger:              cfg.Logger,
+			Logger: cfg.Logger,
+			OnProgress: withProgressContext(
+				cfg.OnProgress,
+				"immutable_digest_list",
+				artifact.Hash,
+			),
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
@@ -618,7 +639,13 @@ func downloadDigestsArchive(
 		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
 	)
 	if _, err := ExtractArchive(
-		ctx, archivePath, destDir, cfg.Logger,
+		ctx,
+		archivePath,
+		destDir,
+		cfg.Logger.With(
+			"phase", "digest_extraction",
+			"artifact", "immutable_digest_list",
+		),
 	); err != nil {
 		return nil, fmt.Errorf("extracting digests archive: %w", err)
 	}
@@ -717,8 +744,23 @@ func downloadImmutables(
 	if immutableTotalBytes <= 0 {
 		immutableTotalBytes = artifact.TotalDbSizeUncompressed
 	}
-	onArchiveDone := newImmutableProgress(
-		cfg, downloadArchives, immutableTotalBytes,
+	cfg.Logger.Info(
+		"downloading immutable archives",
+		"component", "mithril",
+		"phase", "immutable_download",
+		"artifact", "immutable_archives",
+		"immutable_file_start", startArchive,
+		"immutable_file_end", totalArchives-1,
+		"immutable_archives_total", downloadArchives,
+		"estimated_bytes", immutableTotalBytes,
+		"destination", extractDir,
+	)
+	onArchiveDone := newImmutableProgressWithContext(
+		cfg,
+		downloadArchives,
+		immutableTotalBytes,
+		"immutable_archives",
+		artifact.Hash,
 	)
 	// Per-archive extraction is too chatty for the main log at
 	// mainnet scale (tens of thousands of archives); aggregate
@@ -889,6 +931,20 @@ func newImmutableProgress(
 	totalArchives uint64,
 	totalBytes int64,
 ) func(bytesAdded int64) {
+	return newImmutableProgressWithContext(
+		cfg, totalArchives, totalBytes, "", "",
+	)
+}
+
+// newImmutableProgressWithContext aggregates the concurrent immutable
+// workers into one progress stream while retaining the artifact identity.
+func newImmutableProgressWithContext(
+	cfg BootstrapConfig,
+	totalArchives uint64,
+	totalBytes int64,
+	artifact string,
+	snapshotHash string,
+) func(bytesAdded int64) {
 	var mu sync.Mutex
 	var doneArchives uint64
 	var doneBytes int64
@@ -925,10 +981,14 @@ func newImmutableProgress(
 			// archive. Clamp so the reported percent never exceeds 100.
 			percent = min(percent, 100)
 			cfg.OnProgress(DownloadProgress{
-				BytesDownloaded: doneBytes,
-				TotalBytes:      totalBytes,
-				Percent:         percent,
-				BytesPerSecond:  speed,
+				BytesDownloaded:    doneBytes,
+				TotalBytes:         totalBytes,
+				Percent:            percent,
+				BytesPerSecond:     speed,
+				Artifact:           artifact,
+				SnapshotHash:       snapshotHash,
+				ArtifactsCompleted: doneArchives,
+				ArtifactsTotal:     totalArchives,
 			})
 		}
 		now := time.Now()
@@ -939,13 +999,13 @@ func newImmutableProgress(
 			return
 		}
 		cfg.Logger.Info(
-			fmt.Sprintf(
-				"immutable archives: %d/%d (%.1f%%)",
-				doneArchives,
-				totalArchives,
-				archivePercent,
-			),
+			"immutable archives: progress",
 			"component", "mithril",
+			"phase", "immutable_download",
+			"artifact", artifact,
+			"immutable_archives_completed", doneArchives,
+			"immutable_archives_total", totalArchives,
+			"percent", archivePercent,
 		)
 		lastLog = now
 		lastLoggedPercent = archivePercent
@@ -1086,6 +1146,9 @@ func downloadAncillaryV2(
 		"downloading ancillary data (ledger state)",
 		"component", "mithril",
 		"size", artifact.Ancillary.SizeUncompressed,
+		"phase", "ancillary_download",
+		"artifact", "ancillary_ledger_state",
+		"destination", downloadDir,
 	)
 
 	ancillaryFilename := filepath.Base(fmt.Sprintf(
@@ -1102,11 +1165,15 @@ func downloadAncillaryV2(
 		}
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:                 loc.URI,
-				DestDir:             downloadDir,
-				Filename:            ancillaryFilename,
-				Logger:              cfg.Logger,
-				OnProgress:          cfg.OnProgress,
+				URL:      loc.URI,
+				DestDir:  downloadDir,
+				Filename: ancillaryFilename,
+				Logger:   cfg.Logger,
+				OnProgress: withProgressContext(
+					cfg.OnProgress,
+					"ancillary_ledger_state",
+					artifact.Hash,
+				),
 				IdleTimeout:         cfg.DownloadIdleTimeout,
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
@@ -1139,7 +1206,13 @@ func downloadAncillaryV2(
 		filepath.Base("ancillary-"+artifact.Hash),
 	)
 	if _, extractErr := ExtractArchive(
-		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
+		ctx,
+		ancillaryPath,
+		ancillaryDir,
+		cfg.Logger.With(
+			"phase", "ancillary_extraction",
+			"artifact", "ancillary_ledger_state",
+		),
 	); extractErr != nil {
 		return "", "", fmt.Errorf(
 			"extracting ancillary archive: %w",

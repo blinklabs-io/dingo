@@ -284,10 +284,21 @@ func Bootstrap(
 	cfg.Logger.Info(
 		"found latest snapshot",
 		"component", "mithril",
+		"network", snapshot.Network,
 		"digest", snapshot.Digest,
+		"snapshot_hash", snapshot.Digest,
 		"epoch", snapshot.Beacon.Epoch,
 		"immutable_file_number", snapshot.Beacon.ImmutableFileNumber,
 		"size", snapshot.Size,
+	)
+	cfg.Logger = cfg.Logger.With(
+		"network", snapshot.Network,
+		"snapshot_hash", snapshot.Digest,
+		"snapshot_epoch", snapshot.Beacon.Epoch,
+		"snapshot_immutable_file_number", snapshot.Beacon.ImmutableFileNumber,
+	)
+	cfg.OnProgress = withProgressContext(
+		cfg.OnProgress, "snapshot_archive", snapshot.Digest,
 	)
 
 	if len(snapshot.Locations) == 0 {
@@ -559,7 +570,13 @@ func Bootstrap(
 		)
 	} else {
 		_, err = ExtractArchive(
-			ctx, archivePath, extractDir, cfg.Logger,
+			ctx,
+			archivePath,
+			extractDir,
+			cfg.Logger.With(
+				"phase", "snapshot_extraction",
+				"artifact", "snapshot_archive",
+			),
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -622,6 +639,9 @@ func downloadAncillary(
 		"downloading ancillary data (ledger state)",
 		"component", "mithril",
 		"size", snapshot.AncillarySize,
+		"phase", "ancillary_download",
+		"artifact", "ancillary_ledger_state",
+		"destination", downloadDir,
 	)
 
 	ancillaryFilename := filepath.Base(fmt.Sprintf(
@@ -634,12 +654,16 @@ func downloadAncillary(
 	for i, loc := range snapshot.AncillaryLocations {
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:                 loc,
-				DestDir:             downloadDir,
-				Filename:            ancillaryFilename,
-				ExpectedSize:        snapshot.AncillarySize,
-				Logger:              cfg.Logger,
-				OnProgress:          cfg.OnProgress,
+				URL:          loc,
+				DestDir:      downloadDir,
+				Filename:     ancillaryFilename,
+				ExpectedSize: snapshot.AncillarySize,
+				Logger:       cfg.Logger,
+				OnProgress: withProgressContext(
+					cfg.OnProgress,
+					"ancillary_ledger_state",
+					snapshot.Digest,
+				),
 				IdleTimeout:         cfg.DownloadIdleTimeout,
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
@@ -672,7 +696,13 @@ func downloadAncillary(
 		filepath.Base("ancillary-"+snapshot.Digest),
 	)
 	if _, extractErr := ExtractArchive(
-		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
+		ctx,
+		ancillaryPath,
+		ancillaryDir,
+		cfg.Logger.With(
+			"phase", "ancillary_extraction",
+			"artifact", "ancillary_ledger_state",
+		),
 	); extractErr != nil {
 		return "", "", fmt.Errorf(
 			"extracting ancillary archive: %w",
