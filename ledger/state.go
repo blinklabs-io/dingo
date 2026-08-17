@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -7534,12 +7535,15 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	if byronGenesis == nil {
 		return 0, errors.New("byron genesis is unavailable")
 	}
-	if byronGenesis.ProtocolConsts.ProtocolMagic < 0 {
+	protocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
+	if protocolMagic < 0 {
 		return 0, errors.New("byron protocol magic is negative")
 	}
-	// #nosec G115 -- the negative value is rejected above and the genesis
-	// protocol magic is defined as a non-negative uint32 value.
-	return uint32(byronGenesis.ProtocolConsts.ProtocolMagic), nil
+	if protocolMagic > math.MaxUint32 {
+		return 0, fmt.Errorf("byron protocol magic exceeds uint32: %d", protocolMagic)
+	}
+	// #nosec G115 -- the protocol magic is checked against the uint32 range above.
+	return uint32(protocolMagic), nil
 }
 
 // UtxoByRef returns a single UTxO by reference

@@ -337,8 +337,9 @@ func byronValidateWitnesses(
 			if err != nil {
 				return fmt.Errorf("get Byron protocol magic: %w", err)
 			}
-			for _, witness := range redeemWitnesses {
-				message, err := byronSignatureMessage(
+			var redeemMessage []byte
+			if len(redeemWitnesses) > 0 {
+				redeemMessage, err = byronSignatureMessage(
 					0x02,
 					protocolMagic,
 					txHash,
@@ -346,10 +347,23 @@ func byronValidateWitnesses(
 				if err != nil {
 					return err
 				}
+			}
+			var bootstrapMessage []byte
+			if len(bootstrapWitnesses) > 0 {
+				bootstrapMessage, err = byronSignatureMessage(
+					0x01,
+					protocolMagic,
+					txHash,
+				)
+				if err != nil {
+					return err
+				}
+			}
+			for _, witness := range redeemWitnesses {
 				if err := lcommon.VerifyVKeySignature(
 					witness.Vkey,
 					witness.Signature,
-					message,
+					redeemMessage,
 				); err != nil {
 					return lcommon.NewValidationError(
 						lcommon.ValidationErrorTypeTransaction,
@@ -360,18 +374,10 @@ func byronValidateWitnesses(
 				}
 			}
 			for _, witness := range bootstrapWitnesses {
-				message, err := byronSignatureMessage(
-					0x01,
-					protocolMagic,
-					txHash,
-				)
-				if err != nil {
-					return err
-				}
 				if err := lcommon.VerifyVKeySignature(
 					witness.PublicKey,
 					witness.Signature,
-					message,
+					bootstrapMessage,
 				); err != nil {
 					return lcommon.NewValidationError(
 						lcommon.ValidationErrorTypeTransaction,
@@ -418,17 +424,18 @@ type byronBootstrapWitness struct {
 	ChainCode []byte
 }
 
-func byronBootstrapWitnesses(
+func byronWitnessPayloads(
 	witnesses []cbor.Value,
-) []byronBootstrapWitness {
-	var ret []byronBootstrapWitness
+	expectedConstructor uint64,
+) [][][]byte {
+	var ret [][][]byte
 	for _, witness := range witnesses {
 		fields, ok := witness.Value().([]any)
 		if !ok || len(fields) != 2 {
 			continue
 		}
 		ctor, ok := fields[0].(uint64)
-		if !ok || ctor != lcommon.ByronAddressTypePubkey {
+		if !ok || ctor != expectedConstructor {
 			continue
 		}
 		wrapped, ok := fields[1].(cbor.WrappedCbor)
@@ -439,6 +446,19 @@ func byronBootstrapWitnesses(
 		if _, err := cbor.Decode(wrapped.Bytes(), &witnessFields); err != nil {
 			continue
 		}
+		ret = append(ret, witnessFields)
+	}
+	return ret
+}
+
+func byronBootstrapWitnesses(
+	witnesses []cbor.Value,
+) []byronBootstrapWitness {
+	var ret []byronBootstrapWitness
+	for _, witnessFields := range byronWitnessPayloads(
+		witnesses,
+		lcommon.ByronAddressTypePubkey,
+	) {
 		if len(witnessFields) != 2 || len(witnessFields[0]) != 64 ||
 			len(witnessFields[1]) != 64 {
 			continue
@@ -456,23 +476,10 @@ func byronRedeemWitnesses(
 	witnesses []cbor.Value,
 ) []lcommon.VkeyWitness {
 	var ret []lcommon.VkeyWitness
-	for _, witness := range witnesses {
-		fields, ok := witness.Value().([]any)
-		if !ok || len(fields) != 2 {
-			continue
-		}
-		ctor, ok := fields[0].(uint64)
-		if !ok || ctor != lcommon.ByronAddressTypeRedeem {
-			continue
-		}
-		wrapped, ok := fields[1].(cbor.WrappedCbor)
-		if !ok {
-			continue
-		}
-		var witnessFields [][]byte
-		if _, err := cbor.Decode(wrapped.Bytes(), &witnessFields); err != nil {
-			continue
-		}
+	for _, witnessFields := range byronWitnessPayloads(
+		witnesses,
+		lcommon.ByronAddressTypeRedeem,
+	) {
 		if len(witnessFields) != 2 {
 			continue
 		}
@@ -563,12 +570,17 @@ func validateByronInputWitnesses(
 			if matched {
 				continue
 			}
+			addressType := "bootstrap"
+			if addr.ByronType() == lcommon.ByronAddressTypeRedeem {
+				addressType = "redeem"
+			}
 			return lcommon.NewValidationError(
 				lcommon.ValidationErrorTypeTransaction,
-				"missing bootstrap witness for Byron input",
+				fmt.Sprintf("missing %s witness for Byron input", addressType),
 				map[string]any{
-					"input":   input.String(),
-					"keyhash": payload.Hash.String(),
+					"input":        input.String(),
+					"keyhash":      payload.Hash.String(),
+					"address_type": addressType,
 				},
 				nil,
 			)
@@ -612,6 +624,9 @@ func byronAddressRootForParts(
 			"invalid Byron chain code size: expected 32 bytes, got %d",
 			len(chainCode),
 		)
+	}
+	if len(attributes) == 0 {
+		attributes = []byte{0xa0}
 	}
 	// Encode the public-key address structure through its CBOR package so the
 	// Byron address-root shape stays explicit.
