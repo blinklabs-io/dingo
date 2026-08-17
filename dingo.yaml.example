@@ -30,6 +30,16 @@ plugins:
       config:
         # Optional SQLite data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
+    # PostgreSQL metadata alternative (replace the metadata block above):
+    # metadata:
+    #   provider: "postgres"
+    #   config:
+    #     host: "localhost"
+    #     port: 5432
+    #     user: "postgres"
+    #     database: "postgres"
+    #     sslMode: "require"
+    #     timeZone: "UTC"
   mempool:
     # "fifo" preserves successful-admission order. "dag" additionally indexes
     # transaction dependencies and uses deterministic topological ordering.

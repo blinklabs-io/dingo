@@ -3535,7 +3535,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     DSN is assembled from discrete host/port/user/password/database/sslMode/
     timeZone fields, defaulting any field left unset to that provider's own
     `RegisterProvider` descriptor default (e.g. postgres:
-    `host=localhost user=postgres dbname=postgres sslmode=disable`; mysql:
+    `host=localhost user=postgres dbname=postgres sslmode=require`; mysql:
     `host=localhost user=root database=dingo`) and building the connection
     string the same way `database/plugin/metadata/{postgres,mysql}`'s own
     `Start()` does (mysql via `go-sql-driver/mysql`'s own `Config`/
