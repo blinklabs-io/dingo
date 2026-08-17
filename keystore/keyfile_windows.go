@@ -36,6 +36,28 @@ var insecureSIDs = map[string]string{
 	"S-1-5-11":     "Authenticated Users",
 }
 
+// SDDL has four access-allowed ACE forms. Object and callback variants are
+// grants just like a basic A ACE and must receive the same trustee checks.
+func isAccessAllowedACEType(aceType string) bool {
+	switch aceType {
+	case "A", "OA", "XA", "ZA":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownNonGrantACEType(aceType string) bool {
+	switch aceType {
+	case "D", "OD", "XD", // access denied
+		"AU", "AL", "OU", "OL", "XU", // audit and alarm
+		"ML", "RA", "SP", "TL", "FL": // policy and label ACEs
+		return true
+	default:
+		return false
+	}
+}
+
 // checkFilePermissions verifies that a key file has appropriate
 // access controls on Windows. It converts the file's DACL to an
 // SDDL string and rejects files that grant access to Everyone,
@@ -124,6 +146,10 @@ func checkOpenSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) e
 			path, ErrInsecureFileMode,
 		)
 	}
+	return checkOpenDACL(path, owner, dacl)
+}
+
+func checkOpenDACL(path, owner, dacl string) error {
 	allowed := map[string]bool{
 		owner: true,
 		"BA":  true, // Built-in Administrators
@@ -138,11 +164,30 @@ func checkOpenSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) e
 		}
 		end := strings.IndexByte(dacl[start:], ')')
 		if end < 0 {
-			break
+			return fmt.Errorf(
+				"key file %q has unterminated DACL ACE: %w",
+				path, ErrInsecureFileMode,
+			)
 		}
-		fields := strings.Split(dacl[start+1:start+end], ";")
+		ace := dacl[start+1 : start+end]
+		fields := strings.Split(ace, ";")
 		dacl = dacl[start+end+1:]
-		if len(fields) < 6 || fields[0] != "A" || allowed[fields[5]] {
+		if len(fields) < 6 {
+			return fmt.Errorf(
+				"key file %q has malformed DACL ACE %q: %w",
+				path, ace, ErrInsecureFileMode,
+			)
+		}
+		if !isAccessAllowedACEType(fields[0]) {
+			if isKnownNonGrantACEType(fields[0]) {
+				continue
+			}
+			return fmt.Errorf(
+				"key file %q has unsupported DACL ACE type %q: %w",
+				path, fields[0], ErrInsecureFileMode,
+			)
+		}
+		if allowed[fields[5]] {
 			continue
 		}
 		return fmt.Errorf(
@@ -196,7 +241,10 @@ func checkSDDL(path, sddl string) error {
 		}
 		end := strings.IndexByte(daclStr[start:], ')')
 		if end < 0 {
-			break
+			return fmt.Errorf(
+				"key file %q has unterminated DACL ACE: %w",
+				path, ErrInsecureFileMode,
+			)
 		}
 		ace := daclStr[start+1 : start+end]
 		daclStr = daclStr[start+end+1:]
@@ -204,12 +252,22 @@ func checkSDDL(path, sddl string) error {
 		// ACE: type;flags;rights;object;inherit;trustee
 		fields := strings.Split(ace, ";")
 		if len(fields) < 6 {
-			continue
+			return fmt.Errorf(
+				"key file %q has malformed DACL ACE %q: %w",
+				path, ace, ErrInsecureFileMode,
+			)
 		}
 
-		// Only inspect ACCESS_ALLOWED ACEs (type "A").
-		if fields[0] != "A" {
-			continue
+		// Only inspect access grants; deny, audit, and policy ACEs do not
+		// make the file readable by their trustee.
+		if !isAccessAllowedACEType(fields[0]) {
+			if isKnownNonGrantACEType(fields[0]) {
+				continue
+			}
+			return fmt.Errorf(
+				"key file %q has unsupported DACL ACE type %q: %w",
+				path, fields[0], ErrInsecureFileMode,
+			)
 		}
 
 		trustee := fields[5]

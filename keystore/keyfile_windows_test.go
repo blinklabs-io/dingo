@@ -211,3 +211,29 @@ func TestNullDACLFileModeWindows(t *testing.T) {
 	defer file.Close()
 	assert.ErrorIs(t, checkOpenFilePermissions(file), ErrInsecureFileMode)
 }
+
+func TestAccessAllowedACEFormsWindows(t *testing.T) {
+	for _, aceType := range []string{"A", "OA", "XA", "ZA"} {
+		t.Run(aceType, func(t *testing.T) {
+			dacl := fmt.Sprintf("(%s;;GR;;;WD)", aceType)
+			err := checkOpenDACL("test.skey", "SY", dacl)
+			assert.ErrorIs(t, err, ErrInsecureFileMode)
+			assert.Contains(t, err.Error(), "WD")
+			assert.ErrorIs(
+				t,
+				checkSDDL("test.skey", "O:SYD:"+dacl),
+				ErrInsecureFileMode,
+			)
+		})
+	}
+}
+
+func TestUnsupportedACETypeFailsClosedWindows(t *testing.T) {
+	err := checkOpenDACL("test.skey", "SY", "(XX;;GR;;;SY)")
+	assert.ErrorIs(t, err, ErrInsecureFileMode)
+	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
+
+	err = checkSDDL("test.skey", "D:(XX;;GR;;;SY)")
+	assert.ErrorIs(t, err, ErrInsecureFileMode)
+	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
+}

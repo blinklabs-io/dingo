@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -70,6 +71,8 @@ func createTestKeys(t *testing.T) (string, string, string) {
 	require.NoError(t, os.WriteFile(vrfPath, []byte(testVRFSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(kesPath, []byte(testKESSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(opCertPath, []byte(testOpCertJSON), 0o600))
+	testutil.RestrictFileToCurrentUser(t, vrfPath)
+	testutil.RestrictFileToCurrentUser(t, kesPath)
 
 	return vrfPath, kesPath, opCertPath
 }
@@ -173,6 +176,26 @@ func TestPoolCredentialsAllowsPermissiveOpCertMode(t *testing.T) {
 
 	err := NewPoolCredentials().LoadFromFiles(vrfPath, kesPath, opCertPath)
 	require.NoError(t, err)
+}
+
+func TestLoadSecretKeyRejectsNonRegularFile(t *testing.T) {
+	_, err := loadSecretKeyFromFile(t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a regular file")
+}
+
+func TestLoadSecretKeyRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.skey")
+	require.NoError(t, os.WriteFile(
+		path,
+		make([]byte, maxSecretKeyFileSize+1),
+		0o600,
+	))
+	testutil.RestrictFileToCurrentUser(t, path)
+
+	_, err := loadSecretKeyFromFile(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum size")
 }
 
 func TestVRFProve(t *testing.T) {

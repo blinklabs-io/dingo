@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sync"
 
@@ -35,6 +34,8 @@ import (
 )
 
 var ErrVRFKeyHashMismatch = errors.New("VRF key hash mismatch")
+
+const maxSecretKeyFileSize = 1 << 20
 
 // PoolCredentials holds the cryptographic keys required for block production.
 // All keys are loaded using Bursa from standard cardano-cli format files.
@@ -74,18 +75,34 @@ func NewPoolCredentials() *PoolCredentials {
 // loadSecretKeyFromFile opens and checks a secret key before reading from the
 // same handle, avoiding a TOCTOU race between the permission check and read.
 func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
-	f, err := os.Open(path) // #nosec G304 -- operator-configured key path
+	f, err := openSecretKeyFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open key file %q: %w", path, err)
 	}
 	defer f.Close() //nolint:errcheck // read-only handle
 
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat key file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf(
+			"key file %q is not a regular file (mode %s)",
+			path, info.Mode(),
+		)
+	}
 	if err := keystore.CheckOpenFilePermissions(f); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, maxSecretKeyFileSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
+	}
+	if len(data) > maxSecretKeyFileSize {
+		return nil, fmt.Errorf(
+			"key file %q exceeds maximum size of %d bytes",
+			path, maxSecretKeyFileSize,
+		)
 	}
 	key, err := bursa.LoadKeyFromBytes(data)
 	if err != nil {
