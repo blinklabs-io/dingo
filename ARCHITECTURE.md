@@ -810,6 +810,9 @@ When `Node.Run()` is called, components are initialized in this order:
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
     verification computes an epoch nonce; only then does LedgerState subscribe
     to chainsync/blockfetch/chain-update EventBus events.
+    Fresh genesis initialization persists both genesis UTxOs and the effective
+    Shelley staking declarations, including network-specific `extraConfig`
+    pools and delegations, before snapshot capture.
 10. Snapshot manager creation, then `LedgerState.SetEpochBoundarySnapshotHook`
     wiring (authoritative epoch-boundary capture), then genesis snapshot capture
     (or reuse of an existing post-Mithril Mark snapshot window), then manager
@@ -974,18 +977,15 @@ All event types follow the `subsystem.snake_case_name` convention.
   `LedgerState.chainsyncMutex` and `chainsyncBlockfetchMutex` count:
   `RecoverAfterLocalRollback` takes the first and nests the second inside it,
   so holding either while publishing is enough to deadlock.
-- The rule is not yet fully enforced in `ledger`. Several helpers reachable
-  from a lock holder still publish `ChainsyncResyncEventType` inline; they are
-  pinned in `knownResyncPublishPathsUnderLock`
-  (`ledger/publish_under_lock_test.go`) and tracked for conversion, which has
-  to happen as one change because a helper flushing on its own return still
-  publishes while a parent frame holds the lock. Read the rule as the target
-  state plus an explicit exception list, not as an invariant already holding
-  everywhere in that package. `ledger`'s `pendingPublishes`
-  (`ledger/pending_publish.go`) is the pattern for this — queue the event under
-  the lock and flush after the unlock, registering the flush with `defer`
-  *before* taking the lock so LIFO order runs it last. The invariant is
-  enforced for `chainsyncMutex` by `TestNoEventBusPublishWhileHoldingChainsyncMutex`
+- `ledger` enforces this rule for both `chainsyncMutex` and
+  `chainsyncBlockfetchMutex`. The chainsync and blockfetch call chains thread
+  a `pendingPublishes` queue through every guarded helper and flush it after
+  the outermost lock is released; a helper must not flush its own queue while
+  a parent still holds either mutex. The invariant is checked by
+  `TestNoEventBusPublishWhileHoldingChainsyncMutex` and
+  `TestChainsyncResyncPublishPathsUnderLock` in
+  `ledger/publish_under_lock_test.go`. Register the flush with `defer`
+  *before* taking the lock so LIFO order runs it last.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into

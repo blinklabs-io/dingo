@@ -81,7 +81,7 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 	require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 		ConnectionId: shadow,
 		BatchDone:    true,
-	}))
+	}, nil))
 
 	// The shadow's BatchDone is accepted, so the batch advances and a
 	// follow-up RequestRange is dispatched for the still-queued header.
@@ -151,7 +151,7 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 	require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 		ConnectionId: primary,
 		BatchDone:    true,
-	}))
+	}, nil))
 	assert.Equal(t, 1, requestCount)
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.shadowBlockfetchConnId)
 
@@ -160,7 +160,7 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 	require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 		ConnectionId: shadow,
 		BatchDone:    true,
-	}))
+	}, nil))
 	assert.Equal(
 		t,
 		1,
@@ -223,7 +223,7 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, ls.restartQueuedBlockfetchAfterForkLocked(primary))
+	require.NoError(t, ls.restartQueuedBlockfetchAfterForkLocked(primary, nil))
 
 	// Stale per-batch shadow state must be cleared by the restart so that
 	// the new batch starts in a known state.

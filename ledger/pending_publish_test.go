@@ -100,7 +100,7 @@ func TestPendingPublishesBreaksLockCycle(t *testing.T) {
 	// ChainsyncResyncEventType's subscriber does via
 	// RecoverAfterLocalRollback.
 	bus.SubscribeFuncWithBuffer(
-		LedgerErrorEventType, 1,
+		event.ChainsyncResyncEventType, 1,
 		func(event.Event) {
 			chainsyncMutex.Lock()
 			chainsyncMutex.Unlock() //nolint:staticcheck // lock/unlock is the point
@@ -110,7 +110,8 @@ func TestPendingPublishesBreaksLockCycle(t *testing.T) {
 
 	newEvt := func(op string) event.Event {
 		return event.NewEvent(
-			LedgerErrorEventType, LedgerErrorEvent{Operation: op},
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{Reason: op},
 		)
 	}
 
@@ -124,7 +125,11 @@ func TestPendingPublishesBreaksLockCycle(t *testing.T) {
 		// Enough to overrun the subscriber's buffer while it is parked on
 		// the lock we hold. Publishing these directly is the deadlock.
 		for i := range 4 {
-			pending.add(bus, LedgerErrorEventType, newEvt(string(rune('a'+i))))
+			pending.add(
+				bus,
+				event.ChainsyncResyncEventType,
+				newEvt(string(rune('a'+i))),
+			)
 		}
 	}()
 
