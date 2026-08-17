@@ -440,10 +440,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// NaN is checked explicitly: every ordered comparison with NaN is
 	// false, so a NaN watermark would slip through the range checks
 	// alone and reach mempool threshold arithmetic.
+	// EvictionWatermark may be 0 to disable eviction, or a value in (0, 1).
 	if math.IsNaN(evictionWatermark) ||
-		evictionWatermark <= 0 || evictionWatermark >= 1.0 {
+		evictionWatermark < 0 || evictionWatermark >= 1.0 {
 		errs = append(errs, fmt.Errorf(
-			"invalid plugins.mempool.config.evictionWatermark: %f (must be in range (0, 1))",
+			"invalid plugins.mempool.config.evictionWatermark: %f (must be 0 or in range (0, 1))",
 			evictionWatermark,
 		))
 	}
@@ -454,7 +455,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			rejectionWatermark,
 		))
 	}
-	if evictionWatermark >= rejectionWatermark {
+	// Only enforce ordering if eviction is enabled (non-zero).
+	if evictionWatermark > 0 && evictionWatermark >= rejectionWatermark {
 		errs = append(errs, fmt.Errorf(
 			"plugins.mempool.config.evictionWatermark (%f) must be less than rejectionWatermark (%f)",
 			evictionWatermark,

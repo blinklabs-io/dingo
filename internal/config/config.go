@@ -83,8 +83,10 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
-	DefaultEvictionWatermark           = 0.90
-	DefaultRejectionWatermark          = 0.95
+	DefaultBlobPlugin                  = "badger"
+	DefaultMetadataPlugin              = "sqlite"
+	DefaultEvictionWatermark           = 0.0
+	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
@@ -1358,11 +1360,13 @@ func (c *Config) ApplyDefaults() {
 			c.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 		}
 	}
-	// Unset float64 fields are 0, which is indistinguishable from an
-	// explicit 0; both select the standard watermark
-	if pluginFloat64(c.Plugins.Mempool.Config["evictionWatermark"]) == 0 {
+	// The presence of evictionWatermark distinguishes an explicit zero (which
+	// disables FIFO eviction) from an unset value.
+	if _, ok := c.Plugins.Mempool.Config["evictionWatermark"]; !ok {
 		c.Plugins.Mempool.Config["evictionWatermark"] = DefaultEvictionWatermark
 	}
+	// Zero is not a valid rejection watermark, so retain the historical
+	// zero-as-unset behavior for this field.
 	if pluginFloat64(c.Plugins.Mempool.Config["rejectionWatermark"]) == 0 {
 		c.Plugins.Mempool.Config["rejectionWatermark"] = DefaultRejectionWatermark
 	}
