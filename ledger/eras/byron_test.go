@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -108,6 +109,35 @@ func TestValidateTxByron_ValidTransaction(t *testing.T) {
 	}
 	err := ValidateTxByron(tx, 0, nil, nil)
 	assert.NoError(t, err)
+}
+
+func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
+	// This is the transaction that failed at Mainnet slot 3313. Its witness
+	// is a constructor-2 redeem witness with the [vkey, signature] payload
+	// wrapped in CBOR tag 24.
+	txCbor, err := hex.DecodeString(
+		"82839f8200d8185824825820a12a839c25a01fa5d118167db5acdbd9e38172ae8f00e5ac0a4997ef792a200700ff9f8282d818584283581c6c9982e7f2b6dcc5eaa880e8014568913c8868d9f0f86eb687b2633ca101581e581c010d876783fb2b4d0d17c86df29af8d35356ed3d1827bf4744f06700001a8dc672c11a000f4240ffa0818202d81858658258208c0bdedfbbab26a1308300512ffb1b220f068ee13f7612afb076c22de3fb764158406cc41635a9794234966629ccfa2a5b089a20ae392f0e92154ff97eda30ff7a082a65fc4b362c24cf58c27f30103b1f1345e15479cf4b80cd4134c0f9dca83109",
+	)
+	redeemTx, err := byron.NewByronTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	// v0.193.3 does not expose the tag-24-wrapped constructor-2 witness
+	// through TransactionWitnessSet; the ledger must retain and validate it
+	// from the raw Byron witness values.
+	assert.Empty(t, redeemTx.Witnesses().Vkey())
+
+	producerOutputCbor, err := hex.DecodeString(
+		"82582b82d818582183581c4041adf6b03851a9c85db3f028995504fb4ba48b50703ab1b9841350a0021ad658e71f1a000f4240",
+	)
+	require.NoError(t, err)
+	producerOutput, err := byron.NewByronTransactionOutputFromCbor(
+		producerOutputCbor,
+	)
+	require.NoError(t, err)
+
+	ls := newMockLedgerState()
+	ls.networkId = lcommon.AddressNetworkMainnet
+	ls.addUtxo(redeemTx.Inputs()[0], producerOutput)
+	assert.NoError(t, ValidateTxByron(redeemTx, 3313, ls, nil))
 }
 
 func TestValidateTxByron_ValidMultipleInputsOutputs(
