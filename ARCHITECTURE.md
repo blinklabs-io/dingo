@@ -827,11 +827,14 @@ When `Node.Run()` is called, components are initialized in this order:
     transaction — and captures a point-in-time database snapshot
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
-12. Mempool setup and injection into LedgerState/Ouroboros
+12. Mempool setup and injection into LedgerState
 13. ChainsyncState (multi-client tracking, stall detection)
 14. ChainSelector (genesis/Praos comparison) start
 15. ConnectionManager creation and event wiring
-16. PeerGovernor creation/start (topology + churn + ledger peers)
+16. PeerGovernor creation, then a single `Ouroboros.Wire` call installing
+    LedgerState, Mempool, ChainsyncState, ConnManager and PeerGov together,
+    then PeerGovernor start. See Ouroboros Dependency Wiring below for why
+    these arrive here rather than in the constructor.
 17. ConnectionManager listener start
 18. Chainsync stall recycler (`internal/chainsyncrecycler.Recycler.Start`)
 19. UTxO RPC server (if API storage mode and port configured)
@@ -849,6 +852,43 @@ removals continue on the live pool. Mutations are recorded in an ordered
 journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
+
+### Ouroboros Dependency Wiring
+
+`ouroboros.Ouroboros` cannot take its dependencies as constructor arguments,
+because the wiring graph is cyclic in three places:
+
+| Component | Needs from Ouroboros |
+| --- | --- |
+| `ledger.NewLedgerState` | `EndorserBlockTxsByHash`, `FetchEndorserBlockByPoint`, `BlockfetchClientRequestRange` |
+| `connmanager.NewConnectionManager` | `ConfigureListeners`, `OutboundConnOpts` |
+| `peergov.NewPeerGovernor` | `RequestPeersFromPeer` |
+
+Ouroboros must therefore be constructed first (step 4 above), before the
+components it depends on exist. Its dependencies are unexported and installed
+by a single validated `Wire(Deps)` call that rejects any missing required
+dependency, so a mis-wired node fails at startup with a named field rather
+than at first protocol use with a nil dereference. Accessors
+(`LedgerState()`, `Mempool()`, `ChainsyncState()`, `ConnManager()`,
+`PeerGov()`, `EventBus()`) expose them read-only.
+
+`Wire` runs after the peer governor is constructed and before any listener
+opens. Nothing dereferences the dependencies earlier: `ConfigureListeners` and
+`OutboundConnOpts` read only `OuroborosConfig`, and the protocol handlers they
+install are method values invoked per connection. Event handlers the node
+subscribes before `Wire` (`HandleInboundConnEvent`, `HandleOutboundConnEvent`)
+check `Wired()` and drop an early event with a diagnostic.
+
+The optional Leios prototype handlers are wired separately via
+`SetLeiosVotes` / `SetLeiosPipeline`, because their managers are built and
+started on their own path and are rebuilt independently across live restore.
+
+`Wire` is re-callable, and the live snapshot/restore path in
+`node_lifecycle.go` depends on that: it stops and discards the ledger state,
+mempool, chainsync state, connection manager and peer governor, rebuilds them
+against the restored database, then rewires the same retained `Ouroboros`.
+Both paths install dependencies through the same `Deps` struct, so a
+dependency added for `Run()` cannot be silently forgotten in the restore path.
 
 ### Shutdown Flow
 

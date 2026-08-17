@@ -87,7 +87,7 @@ func (o *Ouroboros) localstatequeryServerQuery(
 	ctx olocalstatequery.CallbackContext,
 	query olocalstatequery.QueryWrapper,
 ) (any, error) {
-	return o.LedgerState.Query(query.Query)
+	return o.ledgerState.Query(query.Query)
 }
 
 func (o *Ouroboros) localstatequeryServerRelease(

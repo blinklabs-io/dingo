@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
@@ -36,11 +37,14 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/mempool"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
+	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -159,7 +163,30 @@ func newLiveLifecycleTestNodeWithGenesis(
 		DatabaseWorkerPoolConfig: workerPoolCfg,
 	})
 	require.NoError(t, err)
-	ouro.LedgerState = ledgerState
+	// Wire the harness the same way Run() does, through the single validated
+	// entry point, so the live-restore rewiring assertions below exercise the
+	// production path rather than a hand-assembled instance.
+	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       ledgerState,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	harnessConnManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	require.NoError(t, ouro.Wire(ouroborosPkg.Deps{
+		LedgerState:    ledgerState,
+		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
+		ChainsyncState: chainsync.NewState(eventBus, ledgerState),
+		ConnManager:    harnessConnManager,
+		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger:      logger,
+			EventBus:    eventBus,
+			ConnManager: harnessConnManager,
+		}),
+	}))
 	require.NoError(t, ledgerState.Start(context.Background()))
 
 	cfg := NewConfig(
@@ -375,11 +402,11 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 
 	// The kept-alive ouroboros object must be rewired to the NEW
 	// dependencies, not left pointing at the closed ones.
-	require.Same(t, n.ledgerState, n.ouroboros.LedgerState)
-	require.Same(t, n.mempool, n.ouroboros.Mempool)
-	require.Same(t, n.chainsyncState, n.ouroboros.ChainsyncState)
-	require.Same(t, n.connManager, n.ouroboros.ConnManager)
-	require.Same(t, n.peerGov, n.ouroboros.PeerGov)
+	require.Same(t, n.ledgerState, n.ouroboros.LedgerState())
+	require.Same(t, n.mempool, n.ouroboros.Mempool())
+	require.Same(t, n.chainsyncState, n.ouroboros.ChainsyncState())
+	require.Same(t, n.connManager, n.ouroboros.ConnManager())
+	require.Same(t, n.peerGov, n.ouroboros.PeerGov())
 
 	// The truncate itself must have taken effect: tip at the target, and
 	// blocks after it gone from the new database.
@@ -793,7 +820,7 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.NotNil(t, n.chainsyncState)
 	require.NotNil(t, n.connManager)
 	require.NotNil(t, n.peerGov)
-	require.Same(t, n.ledgerState, n.ouroboros.LedgerState)
+	require.Same(t, n.ledgerState, n.ouroboros.LedgerState())
 
 	tip, err := n.db.GetTip(nil)
 	require.NoError(t, err)

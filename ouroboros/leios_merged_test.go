@@ -80,7 +80,7 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 	require.NoError(t, err)
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	o.LedgerState = ls
+	o.ledgerState = ls
 	return o
 }
 

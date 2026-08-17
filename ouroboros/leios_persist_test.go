@@ -173,7 +173,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 	newOuroboros := newTestOuroborosWithLeiosDB(t)
 	newDB := newOuroboros.leiosDatabase()
 	require.NotNil(t, newDB)
-	o.LedgerState = newOuroboros.LedgerState
+	o.ledgerState = newOuroboros.ledgerState
 
 	// A job enqueued after the pause must actually be accepted (not
 	// silently dropped, unlike a plain post-Stop enqueue) and land in the

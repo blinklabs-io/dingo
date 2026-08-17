@@ -881,7 +881,8 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
 	n.ledgerState = state
-	n.ouroboros.LedgerState = n.ledgerState
+	// n.ouroboros is wired in one place, once every dependency exists; see
+	// the ouroboros.Wire call below.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
 		return fmt.Errorf(
 			"failed to configure chain security parameter: %w",
@@ -1189,7 +1190,6 @@ func (n *Node) Run(ctx context.Context) error {
 	)
 	// Set mempool adapter in ledger state for block forging.
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
-	n.ouroboros.Mempool = n.mempool
 	// Initialize chainsync state with multi-client configuration
 	chainsyncCfg := chainsync.DefaultConfig()
 	if n.config.chainsyncMaxClients > 0 {
@@ -1220,7 +1220,6 @@ func (n *Node) Run(ctx context.Context) error {
 		n.ledgerState,
 		chainsyncCfg,
 	)
-	n.ouroboros.ChainsyncState = n.chainsyncState
 	n.eventBus.SubscribeFunc(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
@@ -1351,7 +1350,22 @@ func (n *Node) Run(ctx context.Context) error {
 			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 		},
 	)
-	n.ouroboros.PeerGov = n.peerGov
+	// Wire ouroboros now that every dependency exists. This is deliberately
+	// the last thing before the peer governor and connection manager start
+	// below: nothing dereferences these dependencies earlier, because
+	// ConfigureListeners and OutboundConnOpts read only OuroborosConfig and
+	// the protocol handlers they install are method values that run per
+	// connection. The event subscriptions registered before this point are
+	// likewise only invoked once listeners are open.
+	if err := n.ouroboros.Wire(ouroborosPkg.Deps{
+		LedgerState:    n.ledgerState,
+		Mempool:        n.mempool,
+		ChainsyncState: n.chainsyncState,
+		ConnManager:    n.connManager,
+		PeerGov:        n.peerGov,
+	}); err != nil {
+		return fmt.Errorf("failed to wire ouroboros: %w", err)
+	}
 	n.eventBus.SubscribeFunc(
 		peergov.OutboundConnectionEventType,
 		n.ouroboros.HandleOutboundConnEvent,
@@ -1784,12 +1798,12 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
-	n.ouroboros.ConnManager = n.connManager
 	// Subscribe ouroboros to chainsync resync events from the
 	// ledger. This replaces the previous ChainsyncResyncFunc
 	// closure so all stop/restart orchestration lives in the
-	// ouroboros/chainsync component. Registered after ConnManager
-	// is wired so the handler can look up connections.
+	// ouroboros/chainsync component. This only registers a handler; the
+	// connection lookup it performs happens when an event fires, which is
+	// after ouroboros.Wire has run and the listeners are open.
 	n.ouroboros.SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 	// Subscribe to connection events BEFORE starting listeners so that
 	// inbound connections from peers that connect immediately are not lost.

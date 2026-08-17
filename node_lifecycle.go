@@ -29,14 +29,15 @@
 // Components intentionally left running throughout (verified to hold no
 // stale reference to n.db/n.ledgerState — see the Phase 2 design notes):
 // n.eventBus, n.ouroboros (its LedgerState/Mempool/ChainsyncState/PeerGov/
-// ConnManager fields are plain exported fields, reassigned below once their
-// new dependencies exist), n.chainSelector (holds only a one-time
+// ConnManager dependencies are unexported and reinstalled by the single
+// ouroboros.Wire call in reinitializeNetworkingCore once their new
+// dependencies exist), n.chainSelector (holds only a one-time
 // SecurityParam snapshot and closures over n). n.ouroboros has one
 // deliberate, narrow exception to "left running": its background Leios
 // endorser-block persistence writer is paused (not merely left alone) by
 // quiesceForLiveLifecycleOp, since — unlike everything else on
 // n.ouroboros — that writer directly calls Database.SetLeiosEB on
-// whatever n.ouroboros.LedgerState currently resolves to, on its own
+// whatever n.ouroboros's ledger state currently resolves to, on its own
 // timer, entirely independent of the request/response flow every other
 // n.ouroboros field only reacts to. Left unpaused, a write already queued
 // before quiesce began could still be draining when the database closes
@@ -49,7 +50,11 @@
 // background managers, the optional API servers, and the block-producer
 // path — is stopped, discarded, and rebuilt from scratch, mirroring (by
 // necessity duplicating, since Run() itself is intentionally left
-// unmodified) the equivalent construction in node.go's Run().
+// unmodified) the equivalent construction in node.go's Run(). The one
+// piece of that duplication the compiler now enforces is the ouroboros
+// wiring: both paths install their dependencies through the same
+// ouroboros.Wire(ouroborosPkg.Deps{...}) call, so a dependency added to
+// Deps cannot be wired in Run() and forgotten here.
 package dingo
 
 import (
@@ -86,6 +91,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	midnightserver "github.com/blinklabs-io/dingo/midnight/server"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -645,7 +651,8 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to reload state database: %w", err)
 	}
 	n.ledgerState = state
-	n.ouroboros.LedgerState = n.ledgerState
+	// n.ouroboros is rewired in one place, once every rebuilt dependency
+	// exists; see the ouroboros.Wire call in reinitializeNetworkingCore.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
 		return fmt.Errorf(
 			"failed to reconfigure chain security parameter: %w",
@@ -891,7 +898,6 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		return fmt.Errorf("failed to recreate mempool: %w", err)
 	}
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
-	n.ouroboros.Mempool = n.mempool
 
 	chainsyncCfg := chainsync.DefaultConfig()
 	if n.config.chainsyncMaxClients > 0 {
@@ -907,7 +913,6 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		n.ledgerState,
 		chainsyncCfg,
 	)
-	n.ouroboros.ChainsyncState = n.chainsyncState
 	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
 		chainsync.ClientRemoveRequestedEventType,
 		n.chainsyncState.HandleClientRemoveRequestedEvent,
@@ -930,7 +935,6 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		connmanager.ConnectionRecycleRequestedEventType,
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
-	n.ouroboros.ConnManager = n.connManager
 
 	n.poolRelayProvider, err = ledger.NewPoolRelayProvider(
 		n.ledgerState,
@@ -977,7 +981,21 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 		},
 	)
-	n.ouroboros.PeerGov = n.peerGov
+	// Rewire the retained ouroboros instance against the rebuilt
+	// dependencies, mirroring the single Wire call in Run(). Doing it in one
+	// place is what keeps this path from drifting out of sync with Run() as
+	// dependencies are added: a new required dependency now fails to compile
+	// here rather than silently leaving a half-wired instance behind a live
+	// restore.
+	if err := n.ouroboros.Wire(ouroborosPkg.Deps{
+		LedgerState:    n.ledgerState,
+		Mempool:        n.mempool,
+		ChainsyncState: n.chainsyncState,
+		ConnManager:    n.connManager,
+		PeerGov:        n.peerGov,
+	}); err != nil {
+		return fmt.Errorf("failed to rewire ouroboros: %w", err)
+	}
 
 	genesisSelectionMode := n.config.genesisBootstrap &&
 		!n.config.intersectTip &&

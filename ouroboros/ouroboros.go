@@ -75,14 +75,22 @@ func blockfetchConfig(
 }
 
 type Ouroboros struct {
-	ConnManager              *connmanager.ConnectionManager
-	PeerGov                  *peergov.PeerGovernor
-	ChainsyncState           *chainsync.State
-	EventBus                 *event.EventBus
-	Mempool                  mempool.Service
-	LedgerState              *ledger.LedgerState
-	LeiosVotes               LeiosVoteHandler
-	LeiosPipeline            LeiosPipelineHandler
+	// Dependencies are unexported and reachable only through Wire and the
+	// accessors in wiring.go. They cannot all move into NewOuroboros: the
+	// wiring graph is cyclic, since ledger construction takes
+	// EndorserBlockTxsByHash/FetchEndorserBlockByPoint/
+	// BlockfetchClientRequestRange from this type, connmanager takes
+	// ConfigureListeners/OutboundConnOpts, and peergov takes
+	// RequestPeersFromPeer. Wire is therefore the explicit setup-time gate
+	// that validates them, and it runs before any of them is dereferenced.
+	connManager              *connmanager.ConnectionManager
+	peerGov                  *peergov.PeerGovernor
+	chainsyncState           *chainsync.State
+	eventBus                 *event.EventBus
+	mempool                  mempool.Service
+	ledgerState              *ledger.LedgerState
+	leiosVotes               LeiosVoteHandler
+	leiosPipeline            LeiosPipelineHandler
 	config                   OuroborosConfig
 	blockfetchMetrics        *blockfetchMetrics
 	protocolMetrics          *protocolMetrics
@@ -284,8 +292,8 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	)
 	o := &Ouroboros{
 		config:           cfg,
-		EventBus:         cfg.EventBus,
-		ConnManager:      cfg.ConnManager,
+		eventBus:         cfg.EventBus,
+		connManager:      cfg.ConnManager,
 		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
@@ -553,19 +561,19 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 
 	// Record connection stability observation for peer scoring
 	// Connection closure indicates reduced stability
-	if o.PeerGov != nil {
+	if o.peerGov != nil {
 		// Treat connection closure as negative stability signal (0.0)
-		o.PeerGov.UpdatePeerConnectionStability(connId, 0.0)
+		o.peerGov.UpdatePeerConnectionStability(connId, 0.0)
 	}
 
 	// Remove any chainsync client state
-	if o.ChainsyncState != nil {
-		o.ChainsyncState.RemoveClient(connId)
-		o.ChainsyncState.RemoveClientConnId(connId)
+	if o.chainsyncState != nil {
+		o.chainsyncState.RemoveClient(connId)
+		o.chainsyncState.RemoveClientConnId(connId)
 	}
 	// Remove mempool consumer
-	if o.Mempool != nil {
-		o.Mempool.RemoveConsumer(connId)
+	if o.mempool != nil {
+		o.mempool.RemoveConsumer(connId)
 	}
 	// Clean up any pending block fetch start times and NoBlocks counters
 	o.blockFetchMutex.Lock()
@@ -583,8 +591,8 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
 	}
 	// Clean up Leios vote serving state
-	if o.LeiosVotes != nil {
-		o.LeiosVotes.RemoveConnection(leiosConnectionIdString(connId))
+	if o.leiosVotes != nil {
+		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
 	// Release the EB log cursor for this connection; frees any log
 	// entries that were only being held for this connection.
@@ -624,18 +632,32 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 
+	// The node subscribes this handler before Wire runs, so an event that
+	// arrives early must be dropped with a diagnostic. Without this the
+	// o.connManager dereference below panics: GetConnectionById locks a mutex
+	// on its receiver, so a nil connection manager is a nil dereference, not
+	// a nil result.
+	if !o.Wired() {
+		o.config.Logger.Error(
+			"dropping outbound connection event received before wiring completed",
+			"component", "network",
+			"connection_id", connId.String(),
+		)
+		return
+	}
+
 	// Record connection stability observation for peer scoring
 	// Successful outbound connection establishment indicates good stability
-	if o.PeerGov != nil {
+	if o.peerGov != nil {
 		// Treat successful connection as positive stability signal (1.0)
-		o.PeerGov.UpdatePeerConnectionStability(connId, 1.0)
+		o.peerGov.UpdatePeerConnectionStability(connId, 1.0)
 	}
 
 	// Log the negotiated node-to-node protocol version and diffusion mode for
 	// this connection. This is the key diagnostic for Leios mini-protocol
 	// interop: it tells us which NtN version the peer agreed to, which
 	// determines whether the peer runs responders for the Leios protocol IDs.
-	if conn := o.ConnManager.GetConnectionById(connId); conn != nil {
+	if conn := o.connManager.GetConnectionById(connId); conn != nil {
 		ver, verData := conn.ProtocolVersion()
 		fullDuplex := false
 		peerSharing := false
@@ -663,7 +685,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	// txsubmission -- the connection is unusable if chainsync fails because
 	// the Ouroboros handshake/protocol negotiation has already failed and the
 	// peer will reject further mini-protocol starts on this connection.
-	if o.ChainsyncState != nil {
+	if o.chainsyncState != nil {
 		// Registration runs before the tracked client exists, so the
 		// direction-aware fallback in shouldPublishChainsyncToLedger
 		// cannot see us yet. Outbound keeps its legacy default of
@@ -680,7 +702,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		if shouldStartChainsync {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				// Roll back the registration on failure
-				o.ChainsyncState.RemoveClientConnId(connId)
+				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
 					"failed to start chainsync client",
 					"error",
@@ -691,9 +713,9 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			o.config.Logger.Debug(
 				"started chainsync client",
 				"connection_id", connId.String(),
-				"total_clients", o.ChainsyncState.ClientConnCount(),
+				"total_clients", o.chainsyncState.ClientConnCount(),
 			)
-		} else if !o.ChainsyncState.HasClientConnId(connId) {
+		} else if !o.chainsyncState.HasClientConnId(connId) {
 			// Not already tracked and TryAdd failed means limit reached
 			o.config.Logger.Debug(
 				"chainsync client limit reached, skipping eligible admission",
@@ -758,8 +780,19 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 
+	// Subscribed before Wire runs, so drop early events rather than
+	// dereferencing a nil connection manager. See HandleOutboundConnEvent.
+	if !o.Wired() {
+		o.config.Logger.Error(
+			"dropping inbound connection event received before wiring completed",
+			"component", "network",
+			"connection_id", connId.String(),
+		)
+		return
+	}
+
 	// Look up the connection to check its negotiated diffusion mode
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		o.config.Logger.Debug(
 			"inbound connection not found, skipping client start",
@@ -798,14 +831,14 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	// peergov filters them at chainSelectionEligible. The default when no
 	// policy is wired is fail-closed for inbound: we will not feed the
 	// ledger from a peer we never decided to trust.
-	if o.ChainsyncState != nil {
+	if o.chainsyncState != nil {
 		ingressEligible := false
 		if o.config.ChainsyncIngressEligible != nil {
 			ingressEligible = o.config.ChainsyncIngressEligible(connId)
 		}
 		if o.registerTrackedChainsyncClient(connId, ingressEligible, false) {
 			if err := o.chainsyncClientStart(connId); err != nil {
-				o.ChainsyncState.RemoveClientConnId(connId)
+				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(
 					"chainsync client failed on inbound connection, closing to free per-IP slot",
 					"error",
@@ -819,7 +852,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 				o.config.Logger.Debug(
 					"started chainsync client on inbound connection",
 					"connection_id", connId.String(),
-					"total_clients", o.ChainsyncState.ClientConnCount(),
+					"total_clients", o.chainsyncState.ClientConnCount(),
 				)
 			}
 		}
@@ -835,7 +868,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	// either side starts mini-protocol messages — the remote's
 	// NewConnection() has finished and all protocol handlers are
 	// registered by the time our InboundConnectionEvent fires.
-	if o.Mempool != nil {
+	if o.mempool != nil {
 		if err := o.txsubmissionClientStart(connId); err != nil {
 			o.config.Logger.Warn(
 				"txsubmission client failed on inbound connection",

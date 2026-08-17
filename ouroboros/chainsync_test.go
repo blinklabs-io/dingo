@@ -276,7 +276,7 @@ func setTestLedgerTip(
 	tip ochainsync.Tip,
 ) {
 	t.Helper()
-	o.LedgerState.SetTipForTesting(tip)
+	o.ledgerState.SetTipForTesting(tip)
 }
 
 func snapshotChainsyncNtNTimeouts() map[string]struct {
@@ -422,7 +422,7 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 		blockType: 1,
 		cbor:      []byte{0x80},
 	}
-	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
+	require.NoError(t, o.ledgerState.Chain().AddBlock(block, nil))
 	setTestLedgerTip(t, o, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			block.SlotNumber(),
@@ -452,7 +452,7 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 	// Use a ledger that can intersect at origin, but a ChainsyncState without
 	// a chain provider so client registration must fail.
 	o := newFindIntersectTestOuroboros(t)
-	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
+	o.chainsyncState = dchainsync.NewState(o.eventBus, nil)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 
 	// Perform FindIntersect with origin so registration is the first failing
@@ -475,7 +475,7 @@ func TestChainsyncServerRequestNext_AddClientFailure(
 	// Configure RequestNext with ChainsyncState that cannot build a
 	// server-side iterator for the downstream client.
 	o := newFindIntersectTestOuroboros(t)
-	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
+	o.chainsyncState = dchainsync.NewState(o.eventBus, nil)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 
 	// Enter RequestNext before any protocol response can be sent.
@@ -708,8 +708,8 @@ func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
 			return applyEligible
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -804,8 +804,8 @@ func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -914,8 +914,8 @@ func TestChainsyncClientRollBackwardSyncObservationOrdersApplyGate(
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	// P rolls back to slot 99, below its entire corroborated frontier, trimming
 	// its observed points to empty. Its synchronous observation makes P
@@ -976,8 +976,8 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1041,8 +1041,8 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1103,8 +1103,8 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSee
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1161,8 +1161,8 @@ func TestChainsyncClientRollForwardDropsDuplicateFromSameSelectedPeer(
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1225,8 +1225,8 @@ func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1287,8 +1287,8 @@ func TestChainsyncClientRollForward_ParallelMultiPeerOrdering(t *testing.T) {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	type step struct {
 		conn   ouroboros.ConnectionId
@@ -1366,8 +1366,8 @@ func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
 			return connId == connEligible
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
 
@@ -1422,7 +1422,7 @@ func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 		StallTimeout: time.Minute,
 	})
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
+	o.chainsyncState = state
 
 	require.True(t, o.registerTrackedChainsyncClient(connObserved, false, true))
 	observabilityOnly, exists := state.ClientObservabilityOnly(connObserved)
@@ -1454,7 +1454,7 @@ func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
 		StallTimeout: time.Minute,
 	})
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
+	o.chainsyncState = state
 
 	require.True(t, o.registerTrackedChainsyncClient(connId, false, true))
 	observabilityOnly, exists := state.ClientObservabilityOnly(connId)
@@ -1496,7 +1496,7 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 	)
 
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
+	o.chainsyncState = state
 	o.HandlePeerEligibilityChangedEvent(event.NewEvent(
 		peergov.PeerEligibilityChangedEventType,
 		peergov.PeerEligibilityChangedEvent{
@@ -1528,8 +1528,8 @@ func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
 	header := newTestBlockHeader(42, 7, 0xaa)
@@ -1582,8 +1582,8 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 	)
 
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	_, recycleCh := bus.Subscribe(
 		connmanager.ConnectionRecycleRequestedEventType,
@@ -1637,9 +1637,9 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 		ochainsync.Tip{Point: rollbackPoint},
 	)
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
-	o.EventBus = bus
-	o.LedgerState = newTestLedgerState(t)
+	o.chainsyncState = state
+	o.eventBus = bus
+	o.ledgerState = newTestLedgerState(t)
 
 	_, recycleCh := bus.Subscribe(
 		connmanager.ConnectionRecycleRequestedEventType,
@@ -1734,8 +1734,8 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 				EventBus: bus,
 				Logger:   logger,
 			})
-			o.EventBus = bus
-			o.ConnManager = connManager
+			o.eventBus = bus
+			o.connManager = connManager
 
 			ctx := t.Context()
 			o.SubscribeChainsyncResync(ctx)
@@ -1796,8 +1796,8 @@ func TestSubscribeChainsyncResyncDeniesDivergentPeer(t *testing.T) {
 		EventBus: bus,
 		Logger:   logger,
 	})
-	o.EventBus = bus
-	o.PeerGov = peerGov
+	o.eventBus = bus
+	o.peerGov = peerGov
 	o.SubscribeChainsyncResync(t.Context())
 
 	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
@@ -1842,8 +1842,8 @@ func TestSubscribeChainsyncResyncDoesNotDenyRollbackLoop(t *testing.T) {
 		EventBus: bus,
 		Logger:   logger,
 	})
-	o.EventBus = bus
-	o.PeerGov = peerGov
+	o.eventBus = bus
+	o.peerGov = peerGov
 	o.SubscribeChainsyncResync(t.Context())
 
 	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
@@ -1919,8 +1919,8 @@ func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
 			return connId == connInbound
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	// Register as inbound + ingress-eligible to model a full-duplex inbound
 	// from a trusted upstream peer.
@@ -1995,8 +1995,8 @@ func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
 			return false
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	require.True(t, o.registerTrackedChainsyncClient(connInbound, false, false))
 	observabilityOnly, exists := state.ClientObservabilityOnly(connInbound)
@@ -2055,8 +2055,8 @@ func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
 	state := dchainsync.NewState(bus, nil)
 
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 	require.Nil(t, o.config.ChainsyncIngressEligible)
 
 	require.True(t, o.registerTrackedChainsyncClient(connOutbound, true, true))
@@ -2139,8 +2139,8 @@ func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	require.True(t, o.registerTrackedChainsyncClient(connInbound, true, false))
 
@@ -2203,8 +2203,8 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 		EventBus: bus,
 		Logger:   logger,
 	})
-	o.LedgerState = ledgerState
-	o.ChainsyncState = dchainsync.NewState(bus, ledgerState)
+	o.ledgerState = ledgerState
+	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 	return o
 }
 

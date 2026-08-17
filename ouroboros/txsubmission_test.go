@@ -174,8 +174,8 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Arrange a peer consumer with the test's available tx set.
 			o, connId := newTxSubmissionTestOuroboros(t)
-			o.Mempool.NewConsumer(connId)
-			addTxSubmissionTestFixtures(t, o.Mempool, fixtures[:tt.txCount]...)
+			o.mempool.NewConsumer(connId)
+			addTxSubmissionTestFixtures(t, o.mempool, fixtures[:tt.txCount]...)
 
 			// Ask the handler for at most the peer-requested number of TxIds.
 			ids, err := o.txsubmissionClientRequestTxIds(
@@ -215,8 +215,8 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	// Arrange one cached transaction for a peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
-	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// First advertise the transaction so it is stored in the consumer cache.
@@ -243,9 +243,9 @@ func TestTxSubmissionClientRequestTxs(t *testing.T) {
 	// Arrange one known tx and one unknown tx id for the peer request.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 	unknownHash := txsubmissionTestHash(99)
-	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
+	addTxSubmissionTestFixtures(t, o.mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// Advertise the known tx first so RequestTxs can find it in cache.
@@ -299,7 +299,7 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
 	// Arrange a valid consumer without advertising any txs to its cache.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 
 	// Verify an all-zero TxId request is treated as a cache miss, not a panic.
 	require.NotPanics(t, func() {
@@ -318,8 +318,8 @@ func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
 	// Arrange one available tx for the peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
-	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// A zero-count request should return nothing.
@@ -358,7 +358,7 @@ func TestTxSubmissionClientStartMissingConnectionDoesNotAddConsumer(
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "failed to lookup connection ID")
-	require.Nil(t, o.Mempool.FindConsumer(connId))
+	require.Nil(t, o.mempool.FindConsumer(connId))
 }
 
 func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
@@ -379,7 +379,7 @@ func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
 func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	// Arrange per-peer mempool and rate-limiter state.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 	o.txSubmissionRateLimiter = newTxSubmissionRateLimiter(1, 1)
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 	require.False(t, o.txSubmissionRateLimiter.Allow(connId, 1))
@@ -393,7 +393,7 @@ func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	})
 
 	// Verify both txsubmission state holders have forgotten the peer.
-	require.Nil(t, o.Mempool.FindConsumer(connId))
+	require.Nil(t, o.mempool.FindConsumer(connId))
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 }
 
@@ -428,12 +428,12 @@ func newTxSubmissionTestOuroboros(
 	})
 
 	o := NewOuroboros(OuroborosConfig{Logger: logger})
-	o.ConnManager = connmanager.NewConnectionManager(
+	o.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			Logger: logger,
 		},
 	)
-	o.Mempool = &mempool.FIFO{Mempool: m}
+	o.mempool = &mempool.FIFO{Mempool: m}
 	return o, txsubmissionTestConnId(t)
 }
 
@@ -612,9 +612,9 @@ func newTxSubmissionRelayHarnessWithOpts(
 	)
 
 	nodeA := NewOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
-	nodeA.Mempool = nodeAMempool
+	nodeA.mempool = nodeAMempool
 	nodeB := NewOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
-	nodeB.Mempool = &mempool.FIFO{Mempool: mB}
+	nodeB.mempool = &mempool.FIFO{Mempool: mB}
 
 	serverPipe, clientPipe := net.Pipe()
 
@@ -846,13 +846,13 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 			cfg.CleanupInterval = 10 * time.Millisecond
 		},
 	)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 
 	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		o.Mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes),
+		o.mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes),
 	)
 	wantTx, err := gledger.NewTransactionFromCbor(
 		txsubmissionRelayTestEraId,
@@ -866,7 +866,7 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 	require.Eventually(
 		t,
 		func() bool {
-			return len(o.Mempool.Transactions()) == 0
+			return len(o.mempool.Transactions()) == 0
 		},
 		5*time.Second,
 		10*time.Millisecond,

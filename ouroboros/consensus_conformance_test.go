@@ -193,7 +193,7 @@ func newReplayAdapter(
 			return true
 		},
 	})
-	o.EventBus = bus
+	o.eventBus = bus
 	return &replayAdapter{
 		o:        o,
 		cs:       cs,

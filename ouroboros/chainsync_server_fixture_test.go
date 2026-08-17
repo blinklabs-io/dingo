@@ -49,7 +49,7 @@ import (
 // # Asynchronous paths
 //
 // Immediately after sending AwaitReply, chainsyncServerRequestNext resolves the
-// peer with o.ConnManager.GetConnectionById(ctx.ConnectionId) so it can abandon
+// peer with o.connManager.GetConnectionById(ctx.ConnectionId) so it can abandon
 // the blocked iterator read if the peer goes away. The fixture therefore
 // registers the harness's connection (ouroboros-mock v0.16.0's
 // Harness.ServerConnection) with Dingo's ConnManager before driving anything.
@@ -101,7 +101,7 @@ func (f *chainsyncServerFixture) registerClientAtOrigin(
 	t *testing.T,
 ) *dchainsync.ChainsyncClientState {
 	t.Helper()
-	clientState, err := f.o.ChainsyncState.AddClient(
+	clientState, err := f.o.chainsyncState.AddClient(
 		f.conn.Id(),
 		ocommon.NewPointOrigin(),
 	)
@@ -163,8 +163,8 @@ func newChainsyncServerFixture(
 		EventBus:    bus,
 		Logger:      logger,
 	})
-	o.LedgerState = ledgerState
-	o.ChainsyncState = dchainsync.NewState(bus, ledgerState)
+	o.ledgerState = ledgerState
+	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 
 	f := &chainsyncServerFixture{o: o}
 
@@ -248,7 +248,7 @@ func (f *chainsyncServerFixture) appendBlock(
 		blockType:       1,
 		cbor:            []byte{0x80},
 	}
-	require.NoError(t, f.o.LedgerState.Chain().AddBlock(block, nil))
+	require.NoError(t, f.o.ledgerState.Chain().AddBlock(block, nil))
 	return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 }
 
@@ -257,7 +257,7 @@ func (f *chainsyncServerFixture) setTip(
 	block *testBlock,
 	point ocommon.Point,
 ) {
-	f.o.LedgerState.SetTipForTesting(ochainsync.Tip{
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
 		Point:       point,
 		BlockNumber: block.BlockNumber(),
 	})
@@ -275,7 +275,7 @@ func (f *chainsyncServerFixture) registeredClient(
 	if !ok {
 		return nil, false
 	}
-	return f.o.ChainsyncState.LookupClient(connId)
+	return f.o.chainsyncState.LookupClient(connId)
 }
 
 // requireConnectionClosed asserts the connection was closed through normal
@@ -547,7 +547,7 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 
 	require.NoError(
 		t,
-		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
 	)
 
 	require.NoError(t, f.h.RequestNext())
@@ -629,7 +629,7 @@ func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
 
 	require.NoError(
 		t,
-		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
 	)
 
 	msg := f.observe(t)
@@ -684,7 +684,7 @@ func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 	f.h.Server().Stop()
 	require.NoError(
 		t,
-		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
 	)
 
 	f.requireConnectionClosed(
@@ -735,7 +735,7 @@ func TestChainsyncServerRequestNextSyncIteratorErrorPropagates(t *testing.T) {
 
 	// Break the backing store so the synchronous iterator returns a real
 	// lookup error.
-	require.NoError(t, dbtest.CloseDatabase(f.o.LedgerState.Database()))
+	require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
 
 	err := f.o.chainsyncServerRequestNext(f.callbackContext())
 
@@ -766,7 +766,7 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.registerClientAtOrigin(t)
 
-	require.True(t, f.o.ConnManager.RemoveConnection(f.conn.Id(), f.conn))
+	require.True(t, f.o.connManager.RemoveConnection(f.conn.Id(), f.conn))
 
 	err := f.o.chainsyncServerRequestNext(f.callbackContext())
 

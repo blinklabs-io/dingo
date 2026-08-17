@@ -42,7 +42,7 @@ func TestLocaltxmonitorServerGetMempoolReportsConfiguredCapacity(t *testing.T) {
 					cfg.MempoolCapacity = tt.capacity
 				},
 			)
-			o.LedgerState = newTestLedgerState(t)
+			o.ledgerState = newTestLedgerState(t)
 
 			_, capacity, _, err := o.localtxmonitorServerGetMempool(
 				olocaltxmonitor.CallbackContext{},
@@ -64,7 +64,7 @@ func TestLocaltxmonitorServerGetMempoolRejectsUnrepresentableCapacity(
 	o, _ := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
 		cfg.MempoolCapacity = int64(math.MaxUint32) + 1
 	})
-	o.LedgerState = newTestLedgerState(t)
+	o.ledgerState = newTestLedgerState(t)
 
 	_, _, _, err := o.localtxmonitorServerGetMempool(
 		olocaltxmonitor.CallbackContext{},

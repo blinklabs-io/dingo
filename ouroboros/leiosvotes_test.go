@@ -153,7 +153,7 @@ func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
 			testLeiosVote(1),
 		},
 	}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	votes, err := o.leiosvotesServerRequestNext(
 		oleiosvotes.CallbackContext{},
@@ -169,7 +169,7 @@ func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
 func TestLeiosVotesClientVoteDelegates(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	vote := testLeiosVote(7)
 	require.NoError(
@@ -195,7 +195,7 @@ func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
 		ConnManager: cm,
 		EnableLeios: true,
 	})
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 	vote := lcommon.LeiosPrototypeVote{
 		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
 		VoterId:          7,
@@ -235,7 +235,7 @@ func TestLeiosFetchServerVotesRequestDelegates(t *testing.T) {
 	handler := &fakeLeiosVoteHandler{
 		rawVotes: []cbor.RawMessage{raw},
 	}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	ids := []oleiosfetch.MsgVotesRequestVoteId{
 		{SlotNo: 123, VoterId: 0},
@@ -266,7 +266,7 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 	require.Len(t, handler.ebs, 1)
@@ -282,7 +282,7 @@ func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 

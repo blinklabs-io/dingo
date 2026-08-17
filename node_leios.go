@@ -229,7 +229,9 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		return fmt.Errorf("start leios vote manager: %w", err)
 	}
 	n.leiosVoteManager = mgr
-	n.ouroboros.LeiosVotes = mgr
+	if err := n.ouroboros.SetLeiosVotes(mgr); err != nil {
+		return fmt.Errorf("wire leios vote manager: %w", err)
+	}
 	// Captured (not discarded) so quiesceForLiveLifecycleOp can unsubscribe
 	// this handler before a live database restore/truncate rebuilds
 	// leiosVoteManager and calls initLeiosVoteManager again -- the
@@ -290,7 +292,9 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 		return fmt.Errorf("start leios pipeline manager: %w", err)
 	}
 	n.leiosPipelineManager = mgr
-	n.ouroboros.LeiosPipeline = mgr
+	if err := n.ouroboros.SetLeiosPipeline(mgr); err != nil {
+		return fmt.Errorf("wire leios pipeline manager: %w", err)
+	}
 	return nil
 }
 
