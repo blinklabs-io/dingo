@@ -47,13 +47,14 @@ func envelopeParentFromTip(
 	blockNumber uint64,
 	hash []byte,
 	blockType uint,
+	blockTypeLoaded bool,
 ) envelopeParent {
 	origin := len(hash) == 0
 	return envelopeParent{
 		slot:        slot,
 		blockNumber: blockNumber,
 		origin:      origin,
-		byronEbb:    !origin && blockType == uint(gledger.BlockTypeByronEbb),
+		byronEbb:    !origin && blockTypeLoaded && blockType == uint(gledger.BlockTypeByronEbb),
 	}
 }
 

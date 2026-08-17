@@ -273,6 +273,7 @@ func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
 		5,
 		[]byte{1},
 		uint(gledger.BlockTypeByronEbb),
+		true,
 	)
 	block := &envelopeTestBlock{
 		header: &envelopeTestHeader{
@@ -284,6 +285,32 @@ func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
 
 	require.True(t, parent.byronEbb)
 	require.NoError(t, validateBlockOrder(block, parent))
+}
+
+func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
+	t *testing.T,
+) {
+	parent := envelopeParentFromTip(
+		byron.ByronSlotsPerEpoch,
+		5,
+		[]byte{1},
+		uint(gledger.BlockTypeByronEbb),
+		false,
+	)
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   byron.ByronSlotsPerEpoch,
+			number: 6,
+			era:    byron.EraByron,
+		},
+	}
+
+	require.False(t, parent.byronEbb)
+	require.ErrorContains(
+		t,
+		validateBlockOrder(block, parent),
+		"does not follow parent slot",
+	)
 }
 
 // TestValidateInboundBlockEnvelopeByronEbbOrdering covers the Byron EBB rule

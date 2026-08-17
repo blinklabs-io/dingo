@@ -4198,12 +4198,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			expectedPrevHash := snapshotTipHash
 			if !parentEnvelopeSet {
 				var parentBlockType uint
+				var parentBlockTypeLoaded bool
 				if len(snapshotTip.Point.Hash) > 0 {
 					if storedBlock, err := database.BlockByPoint(
 						ls.db,
 						snapshotTip.Point,
 					); err == nil {
 						parentBlockType = storedBlock.Type
+						parentBlockTypeLoaded = true
 					} else {
 						ls.config.Logger.Debug(
 							"could not load persisted parent block type for envelope validation",
@@ -4218,6 +4220,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					snapshotTip.BlockNumber,
 					snapshotTip.Point.Hash,
 					parentBlockType,
+					parentBlockTypeLoaded,
 				)
 				parentEnvelopeSet = true
 			}
