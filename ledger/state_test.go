@@ -4410,11 +4410,25 @@ func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
 }
 
 // TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting verifies that
-// Close releases the continuation scheduling mutex before waiting for a worker
-// that needs the same mutex to finish.
+// Close releases the continuation scheduling mutex before waiting for the
+// continuation WaitGroup. A worker may need that mutex to complete the request
+// that lets it return, so holding it across the wait deadlocks shutdown.
+//
+// The invariant is asserted directly -- the mutex must be acquirable *while*
+// Close is parked in the wait -- rather than by having a queued worker finish,
+// which passes whether or not Close ever held the mutex.
+//
+// Sequencing: the test holds the mutex before starting Close, so Close parks in
+// Lock() and is the sole waiter. By the time the test releases it, Close has
+// been queued for longer than the 1ms that puts sync.Mutex into starvation
+// mode, so the unlock hands off directly to Close and a barging TryLock from
+// this goroutine cannot jump ahead of it. Close therefore holds the mutex
+// before the polling below begins.
 func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	origTimeout := CloseBlockfetchDrainTimeout
-	CloseBlockfetchDrainTimeout = 50 * time.Millisecond
+	// Generous: the worker is released only after the assertion below, so this
+	// bounds the failure mode rather than the happy path.
+	CloseBlockfetchDrainTimeout = 30 * time.Second
 	t.Cleanup(func() { CloseBlockfetchDrainTimeout = origTimeout })
 
 	ls := &LedgerState{
@@ -4422,28 +4436,19 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	ls.blockfetchContinuationMu.Lock()
-	released := false
-	t.Cleanup(func() {
-		if !released {
-			ls.blockfetchContinuationMu.Unlock()
-		}
-	})
-	workerStarted := make(chan struct{})
-	workerDone := make(chan struct{})
-	ls.blockfetchContinuationWG.Go(func() {
-		close(workerStarted)
-		ls.blockfetchContinuationMu.Lock()
-		ls.blockfetchContinuationMu.Unlock()
-		close(workerDone)
-	})
-	testutil.RequireReceive(
-		t,
-		workerStarted,
-		time.Second,
-		"blockfetch continuation worker did not start",
-	)
 
+	// A continuation worker that stays registered until the test releases it,
+	// so Close cannot leave its wait while the assertion runs. It deliberately
+	// does not touch the mutex: the point is what Close holds, not what the
+	// worker can acquire.
+	proceed := make(chan struct{})
+	ls.blockfetchContinuationWG.Add(1)
+	go func() {
+		defer ls.blockfetchContinuationWG.Done()
+		<-proceed
+	}()
+
+	ls.blockfetchContinuationMu.Lock()
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- ls.Close() }()
 	require.Eventually(
@@ -4451,24 +4456,38 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 		ls.closed.Load,
 		time.Second,
 		time.Millisecond,
-		"Close did not begin before releasing continuation mutex",
+		"Close did not begin before releasing the continuation mutex",
 	)
 	ls.blockfetchContinuationMu.Unlock()
-	released = true
 
+	// Close is now past the scheduling synchronization point and parked waiting
+	// for the worker. The mutex must be free: if Close held it across the wait,
+	// TryLock fails for the whole window and this assertion fails, where the
+	// previous formulation of this test passed.
+	require.Eventually(
+		t,
+		func() bool {
+			if !ls.blockfetchContinuationMu.TryLock() {
+				return false
+			}
+			ls.blockfetchContinuationMu.Unlock()
+			return true
+		},
+		time.Second,
+		time.Millisecond,
+		"Close held blockfetchContinuationMu while waiting for continuations",
+	)
+
+	// Only now let the worker finish, proving Close was genuinely still waiting
+	// throughout the assertion above.
+	close(proceed)
 	err := testutil.RequireReceive(
 		t,
 		closeDone,
-		time.Second,
+		5*time.Second,
 		"Close did not finish after the continuation worker drained",
 	)
 	require.NoError(t, err)
-	testutil.RequireReceive(
-		t,
-		workerDone,
-		time.Second,
-		"blockfetch continuation worker did not drain",
-	)
 }
 
 // TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive
