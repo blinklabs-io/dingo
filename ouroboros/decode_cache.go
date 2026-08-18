@@ -69,15 +69,10 @@ func hashDecodeInput(blockType uint, raw []byte) decodeCacheKey {
 // failure is simply a correct remembered fact ("these bytes do not decode"),
 // not a permanent poison -- it is bounded and evicted by the same TTL/size
 // rules as every other entry, same as a success.
-//
-// order holds this entry's *list.Element in the cache's insertion-order
-// list, so eviction can remove it in O(1) instead of re-deriving position
-// from insertedAt every time (see decodeCache.evictLocked).
 type decodeCacheEntry[T any] struct {
 	value      T
 	err        error
 	insertedAt time.Time
-	order      *list.Element
 }
 
 // decodeCacheResult carries a decode outcome directly to a waiting caller
@@ -195,20 +190,50 @@ func (c *decodeCache[T]) getOrDecode(
 	return value, err, true
 }
 
+// decodeWithPanicSafeMetrics wraps getOrDecode so a panicking decodeFn still
+// gets its hit/miss outcome recorded. getOrDecode's own panic recovery
+// re-raises after cleaning up the cache (see its doc comment), so this call
+// never returns normally on that path -- the caller's usual
+// "record based on the returned decoded bool" pattern never runs, and a
+// genuine decode attempt (a miss) that happened to panic would silently go
+// uncounted. recordMiss is invoked from a recover here, before the panic is
+// re-raised again, so it always sees exactly the same attempts a
+// non-panicking decodeFn would have reported via decoded=true.
+func decodeWithPanicSafeMetrics[T any](
+	cache *decodeCache[T],
+	key decodeCacheKey,
+	decodeFn func() (T, error),
+	recordMiss func(),
+) (value T, err error, decoded bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			recordMiss()
+			panic(r)
+		}
+	}()
+	return cache.getOrDecode(key, decodeFn)
+}
+
 // finishDecode records key's decode outcome, releases its in-flight claim,
 // and wakes every waiter with it. Shared by getOrDecode's normal-return path
 // and its panic-recovery path so both leave the cache in the same
 // consistent state -- a waiter never observes the difference between "the
 // leader's decodeFn returned an error" and "the leader's decodeFn panicked".
 func (c *decodeCache[T]) finishDecode(key decodeCacheKey, value T, err error) {
-	now := time.Now()
 	c.mu.Lock()
-	elem := c.order.PushBack(key)
+	// now is captured under the lock, not before it: two concurrent
+	// finishDecode calls (for two different keys) acquire the lock in some
+	// order that need not match the order in which they would have called
+	// time.Now() beforehand. order (the eviction FIFO) and insertedAt must
+	// agree on which entry is older, or evictLocked's TTL loop can stop at
+	// a front entry that looks fresh while a truly-older, later-positioned
+	// entry never gets checked.
+	now := time.Now()
+	c.order.PushBack(key)
 	c.entries[key] = decodeCacheEntry[T]{
 		value:      value,
 		err:        err,
 		insertedAt: now,
-		order:      elem,
 	}
 	waiters := c.inFlight[key]
 	delete(c.inFlight, key)

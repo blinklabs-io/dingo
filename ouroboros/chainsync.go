@@ -1464,11 +1464,13 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	tip ochainsync.Tip,
 ) error {
 	key := hashDecodeInput(blockType, blockData)
-	header, err, decoded := o.headerDecodeCache.getOrDecode(
+	header, err, decoded := decodeWithPanicSafeMetrics(
+		o.headerDecodeCache,
 		key,
 		func() (gledger.BlockHeader, error) {
 			return o.decodeChainsyncHeader(blockType, blockData)
 		},
+		func() { o.recordHeaderDecodeCacheOutcome(true) },
 	)
 	o.recordHeaderDecodeCacheOutcome(decoded)
 	if err != nil {

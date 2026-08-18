@@ -150,11 +150,13 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	blockData []byte,
 ) error {
 	key := hashDecodeInput(blockType, blockData)
-	block, err, decoded := o.blockDecodeCache.getOrDecode(
+	block, err, decoded := decodeWithPanicSafeMetrics(
+		o.blockDecodeCache,
 		key,
 		func() (gledger.Block, error) {
 			return o.decodeBlockfetchBlock(blockType, blockData)
 		},
+		func() { o.recordBlockDecodeCacheOutcome(true) },
 	)
 	o.recordBlockDecodeCacheOutcome(decoded)
 	if err != nil {

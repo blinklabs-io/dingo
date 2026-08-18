@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"sync/atomic"
 	"testing"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -98,13 +99,19 @@ func BenchmarkBlockDecodeDirect(b *testing.B) {
 func BenchmarkBlockDecodeCacheAllDuplicate(b *testing.B) {
 	o := testOuroborosForDecodeCache(b)
 	blockType, raw := benchConwayBlockFixture(b)
-	key := hashDecodeInput(blockType, raw)
 	decodeFn := func() (gledger.Block, error) {
 		return o.decodeBlockfetchBlock(blockType, raw)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
+		// Hash inside the timed loop: the real entry point
+		// (blockfetchClientBlockRaw) hashes every delivery's bytes before
+		// the cache lookup, even when -- as here -- the bytes are
+		// byte-identical to the previous delivery. Precomputing the key
+		// once outside the loop would omit that per-delivery cost from the
+		// reported numbers.
+		key := hashDecodeInput(blockType, raw)
 		if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}
@@ -172,12 +179,14 @@ func BenchmarkBlockDecodeConcurrentCacheAllUnique(b *testing.B) {
 	var counter int64
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			counter++
+			// atomic: RunParallel's callback runs concurrently across
+			// goroutines, so a plain counter++ here is a data race.
+			n := atomic.AddInt64(&counter, 1)
 			key := hashDecodeInput(blockType, raw)
-			key[0] ^= byte(counter)
-			key[1] ^= byte(counter >> 8)
-			key[2] ^= byte(counter >> 16)
-			key[3] ^= byte(counter >> 24)
+			key[0] ^= byte(n)
+			key[1] ^= byte(n >> 8)
+			key[2] ^= byte(n >> 16)
+			key[3] ^= byte(n >> 24)
 			if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
 				b.Fatalf("decode: %v", err)
 			}
@@ -205,13 +214,14 @@ func BenchmarkHeaderDecodeDirect(b *testing.B) {
 func BenchmarkHeaderDecodeCacheAllDuplicate(b *testing.B) {
 	o := testOuroborosForDecodeCache(b)
 	headerType, raw := benchConwayHeaderFixture(b)
-	key := hashDecodeInput(headerType, raw)
 	decodeFn := func() (gledger.BlockHeader, error) {
 		return o.decodeChainsyncHeader(headerType, raw)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
+		// Hash inside the timed loop -- see BenchmarkBlockDecodeCacheAllDuplicate.
+		key := hashDecodeInput(headerType, raw)
 		if _, err, _ := o.headerDecodeCache.getOrDecode(key, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}
@@ -262,12 +272,13 @@ func BenchmarkHeaderDecodeConcurrentCacheAllUnique(b *testing.B) {
 	var counter int64
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			counter++
+			// atomic: see BenchmarkBlockDecodeConcurrentCacheAllUnique.
+			n := atomic.AddInt64(&counter, 1)
 			key := hashDecodeInput(headerType, raw)
-			key[0] ^= byte(counter)
-			key[1] ^= byte(counter >> 8)
-			key[2] ^= byte(counter >> 16)
-			key[3] ^= byte(counter >> 24)
+			key[0] ^= byte(n)
+			key[1] ^= byte(n >> 8)
+			key[2] ^= byte(n >> 16)
+			key[3] ^= byte(n >> 24)
 			if _, err, _ := o.headerDecodeCache.getOrDecode(key, decodeFn); err != nil {
 				b.Fatalf("decode: %v", err)
 			}
@@ -289,16 +300,25 @@ func BenchmarkBlockDecodeCacheMixedRatio(b *testing.B) {
 	decodeFn := func() (gledger.Block, error) {
 		return o.decodeBlockfetchBlock(blockType, raw)
 	}
-	const distinctKeys = 5
-	keys := make([]decodeCacheKey, distinctKeys)
-	for i := range keys {
-		keys[i] = hashDecodeInput(blockType, raw)
-		keys[i][0] ^= byte(i)
+	// Five distinct real inputs (copies of the fixture bytes, each with one
+	// byte perturbed), hashed inside the timed loop below -- not five
+	// precomputed keys derived by flipping a byte of an already-hashed
+	// digest. The real entry point always hashes the actual delivery bytes
+	// it was just handed, so this measures that per-delivery hashing cost
+	// on genuinely different byte content, matching production instead of
+	// precomputing the (cheaper) key lookup alone before ResetTimer.
+	const distinctInputs = 5
+	rawVariants := make([][]byte, distinctInputs)
+	for i := range rawVariants {
+		variant := make([]byte, len(raw))
+		copy(variant, raw)
+		variant[0] ^= byte(i)
+		rawVariants[i] = variant
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := range b.N {
-		key := keys[i%distinctKeys]
+		key := hashDecodeInput(blockType, rawVariants[i%distinctInputs])
 		if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}

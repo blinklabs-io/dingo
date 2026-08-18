@@ -72,11 +72,10 @@ func decodeCacheInsertForTest[T any](
 ) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	elem := c.order.PushBack(key)
+	c.order.PushBack(key)
 	c.entries[key] = decodeCacheEntry[T]{
 		value:      value,
 		insertedAt: insertedAt,
-		order:      elem,
 	}
 }
 
@@ -481,6 +480,61 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	require.Contains(t, err.Error(), "decode panicked")
 }
 
+// TestDecodeWithPanicSafeMetricsRecordsMissOnPanic is the regression test for
+// a real bug found in code review: getOrDecode's own panic recovery
+// re-raises after cleaning up the cache (see
+// TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey above), so it
+// never returns normally to blockfetchClientBlockRaw/
+// chainsyncClientRollForwardRaw -- their usual "record the outcome based on
+// the returned decoded bool" line never runs, and a genuine decode attempt
+// (a miss) that happened to panic went uncounted in the hit/miss metrics.
+// This confirms decodeWithPanicSafeMetrics -- the helper both wrappers now
+// call through -- invokes recordMiss exactly once before re-raising the
+// panic, and that the panic still propagates to the caller unchanged.
+func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
+	c := newDecodeCache[int]()
+	key := decodeCacheKey{0x08}
+	var missCount atomic.Int64
+
+	func() {
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "the panic must still propagate to the caller")
+			require.Equal(t, "simulated decode panic", r)
+		}()
+		_, _, _ = decodeWithPanicSafeMetrics(
+			c,
+			key,
+			func() (int, error) { panic("simulated decode panic") },
+			func() { missCount.Add(1) },
+		)
+		t.Fatal("decodeWithPanicSafeMetrics must not return normally on panic")
+	}()
+
+	require.EqualValues(
+		t,
+		1,
+		missCount.Load(),
+		"a genuine decode attempt that panicked must still be recorded as a miss",
+	)
+
+	// The panic is cached like any other failure (see
+	// TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey): a later
+	// call for the same key must not invoke decodeFn or recordMiss again.
+	_, err, decoded := decodeWithPanicSafeMetrics(
+		c,
+		key,
+		func() (int, error) {
+			t.Fatal("decodeFn must not run again for an already-cached panic")
+			return 0, nil
+		},
+		func() { missCount.Add(1) },
+	)
+	require.False(t, decoded)
+	require.Error(t, err)
+	require.EqualValues(t, 1, missCount.Load())
+}
+
 // TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes is the
 // deterministic regression test for a second real bug found by re-auditing
 // this file for a narrow/stress gap: a waiter used to be woken by a closed
@@ -518,7 +572,7 @@ func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 	c.mu.Lock()
 	elem := c.order.PushBack(key)
 	c.entries[key] = decodeCacheEntry[int]{
-		value: 999, err: nil, insertedAt: time.Now(), order: elem,
+		value: 999, err: nil, insertedAt: time.Now(),
 	}
 	delete(c.inFlight, key)
 	// Simulate a flood of unrelated churn evicting this exact entry before
