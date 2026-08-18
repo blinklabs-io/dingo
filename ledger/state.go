@@ -1559,9 +1559,9 @@ var (
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
 	// A Leios block-processing transaction can include a large endorser
 	// closure and legitimately outlive the short blockfetch waits. Keep this
-	// within Node's default 30-second shutdown budget, but long enough to avoid
-	// closing storage while that transaction is still using it.
-	CloseProcessBlocksDrainTimeout = 30 * time.Second
+	// below Node's default 30-second shutdown budget so the later ledger and
+	// database cleanup stages retain time to finish if processing is stuck.
+	CloseProcessBlocksDrainTimeout = 20 * time.Second
 	CloseBlockPipelineDrainTimeout = 10 * time.Second
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
 )

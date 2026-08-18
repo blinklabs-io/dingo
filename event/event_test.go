@@ -328,6 +328,41 @@ func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
 	require.Equal(t, int32(1), handled.Load(), "queued events were replayed during Close")
 }
 
+func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
+	const testEvtType event.EventType = "test.unsubscribe.preserves"
+	eb := event.NewEventBus(nil, nil)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int32
+	subID := eb.SubscribeFuncWithBuffer(testEvtType, 2, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-1"))
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-2"))
+
+	unsubscribed := make(chan struct{})
+	go func() {
+		eb.UnsubscribeAndWait(testEvtType, subID)
+		close(unsubscribed)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		unsubscribed,
+		50*time.Millisecond,
+		"UnsubscribeAndWait should wait for the in-flight handler",
+	)
+	close(release)
+	testutil.RequireReceive(t, unsubscribed, time.Second, "UnsubscribeAndWait did not finish")
+	require.Equal(t, int32(3), handled.Load(), "ordinary unsubscribe discarded queued events")
+}
+
 func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	var testEvtType event.EventType = "test.panic"
 	eb := event.NewEventBus(nil, nil)

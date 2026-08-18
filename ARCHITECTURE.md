@@ -866,7 +866,8 @@ Phase 1: Stop accepting new work
   Blockfrost API, Mesh API, off-chain metadata fetcher
 
 Phase 2: Drain and close connections
-  Mempool, terminal EventBus close, ConnectionManager
+  Mempool, terminal EventBus close (concurrent with ConnectionManager),
+  ConnectionManager
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -875,12 +876,15 @@ Phase 4: Cleanup resources
   Registered shutdown functions
 ```
 
-The terminal EventBus close occurs after mempool teardown but before
-`ConnectionManager.Stop`. Lossless event delivery can backpressure a network
-protocol callback on a full ledger subscriber; closing the bus at this point
-releases those publishers before connection shutdown waits for their callback
-goroutines. The node context is already cancelled, and later component
-teardown treats the already-closed bus as idempotent.
+The terminal EventBus close occurs after mempool teardown and runs concurrently
+with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
+network protocol callback on a full ledger subscriber, while a blockfetch
+continuation can wait for a batch completion event that connection shutdown
+releases; starting both operations together breaks that dependency cycle. The
+node context is already cancelled, and later component teardown treats the
+already-closed bus as idempotent. `EventBus.Close` discards queued in-memory
+events after waiting for in-flight handlers; ordinary `Unsubscribe` and
+reusable `EventBus.Stop` preserve queued events.
 
 ## Event-Driven Communication
 

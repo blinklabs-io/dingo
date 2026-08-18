@@ -4528,7 +4528,7 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 // waits for the block-processing goroutine.
 func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 	origTimeout := CloseProcessBlocksDrainTimeout
-	CloseProcessBlocksDrainTimeout = 50 * time.Millisecond
+	CloseProcessBlocksDrainTimeout = time.Second
 	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })
 
 	ls := &LedgerState{

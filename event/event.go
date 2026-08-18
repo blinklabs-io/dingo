@@ -208,10 +208,10 @@ type Subscriber interface {
 // channelSubscriber is the in-memory subscriber adapter that preserves the
 // existing channel-based API. Delivery waits for buffer capacity rather than
 // dropping: a subscriber that falls behind backpressures its publishers
-// instead of silently losing events (blinklabs-io/dingo#2932). Close discards
-// events still queued during shutdown, then closes the channel so
+// instead of silently losing events (blinklabs-io/dingo#2932). Terminal event
+// bus shutdown may discard queued events before closing the channel so
 // SubscribeFunc goroutines exit without replaying a potentially large backlog
-// into components that are closing.
+// into components that are closing; ordinary unsubscribe preserves them.
 type channelSubscriber struct {
 	ch     chan Event
 	logger *slog.Logger
@@ -389,6 +389,10 @@ func (c *channelSubscriber) DeliverBlocking(evt Event) error {
 }
 
 func (c *channelSubscriber) Close() {
+	c.close(false)
+}
+
+func (c *channelSubscriber) close(discardQueued bool) {
 	// Release waiting sends before asking for the write lock; they hold the
 	// read lock, so the write lock would otherwise wait on a wait that only
 	// Close can end.
@@ -401,18 +405,17 @@ func (c *channelSubscriber) Close() {
 		return
 	}
 	c.closed = true
-	// Once shutdown begins, queued events have no useful consumer: replaying
-	// them can keep EventBus.Close waiting behind a bulk-sync backlog while
-	// the component that owns the handler is already being torn down. Normal
-	// delivery remains lossless; this discard is limited to Close/Stop.
-	for {
-		select {
-		case <-c.ch:
-		default:
-			close(c.ch)
-			return
+	if discardQueued {
+		for {
+			select {
+			case <-c.ch:
+			default:
+				close(c.ch)
+				return
+			}
 		}
 	}
+	close(c.ch)
 }
 
 // subscribeInternal does the actual subscription work without checking stopped.
@@ -691,7 +694,7 @@ func (e *EventBus) unsubscribe(
 	if chSub != nil {
 		// Close is idempotent, so this is safe even if a concurrent
 		// caller already closed the same subscriber via subToClose above.
-		chSub.Close()
+		chSub.close(false)
 		if wait {
 			chSub.waitDone()
 		}
@@ -1040,9 +1043,14 @@ func (e *EventBus) shutdown(restart bool) {
 	e.mu.Unlock()
 
 	// Close subscribers outside of lock
+	discardQueued := !restart
 	for _, evtTypeSubs := range subsCopy {
 		for _, sub := range evtTypeSubs {
-			sub.Close()
+			if chSub, ok := sub.(*channelSubscriber); ok {
+				chSub.close(discardQueued)
+			} else {
+				sub.Close()
+			}
 		}
 	}
 
