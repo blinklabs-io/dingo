@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	oprotocol "github.com/blinklabs-io/gouroboros/protocol"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -98,10 +99,17 @@ type Ouroboros struct {
 	registerer *trackingRegisterer
 	// subscriptions records the EventBus registrations this instance made on
 	// its own behalf, so Close can remove them from a bus that outlives it.
-	subscriptionsMu          sync.Mutex
-	subscriptions            []subscription
-	blockfetchMetrics        *blockfetchMetrics
-	protocolMetrics          *protocolMetrics
+	subscriptionsMu   sync.Mutex
+	subscriptions     []subscription
+	blockfetchMetrics *blockfetchMetrics
+	protocolMetrics   *protocolMetrics
+	// Shared cache of decoded blocks/headers keyed by content hash, so
+	// multiple connections delivering byte-identical data (the common case
+	// when several peers relay the same block) decode once instead of once
+	// per connection. See #489 and decode_cache.go.
+	blockDecodeCache         *decodeCache[gledger.Block]
+	headerDecodeCache        *decodeCache[gledger.BlockHeader]
+	decodeCacheMetrics       *decodeCacheMetrics
 	blockFetchStarts         map[ouroboros.ConnectionId]time.Time
 	blockFetchMutex          sync.Mutex
 	blockfetchNoBlocksCounts map[ouroboros.ConnectionId]blockfetchNoBlocksState
@@ -367,6 +375,8 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
+		blockDecodeCache:           newDecodeCache[gledger.Block](),
+		headerDecodeCache:          newDecodeCache[gledger.BlockHeader](),
 		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
 		leiosClosureWaiters:        make(map[string][]chan struct{}),
 		leiosEBLog:                 newLeiosForgedEBLog(),
@@ -389,6 +399,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
 		o.initLeiosMetrics()
+		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
 	return o

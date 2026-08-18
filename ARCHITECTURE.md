@@ -931,7 +931,8 @@ Phase 1: Stop accepting new work
   Blockfrost API, Mesh API, off-chain metadata fetcher
 
 Phase 2: Drain and close connections
-  Mempool, terminal EventBus close, ConnectionManager
+  Mempool, terminal EventBus close (concurrent with ConnectionManager),
+  ConnectionManager
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -940,12 +941,15 @@ Phase 4: Cleanup resources
   Registered shutdown functions
 ```
 
-The terminal EventBus close occurs after mempool teardown but before
-`ConnectionManager.Stop`. Lossless event delivery can backpressure a network
-protocol callback on a full ledger subscriber; closing the bus at this point
-releases those publishers before connection shutdown waits for their callback
-goroutines. The node context is already cancelled, and later component
-teardown treats the already-closed bus as idempotent.
+The terminal EventBus close occurs after mempool teardown and runs concurrently
+with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
+network protocol callback on a full ledger subscriber, while a blockfetch
+continuation can wait for a batch completion event that connection shutdown
+releases; starting both operations together breaks that dependency cycle. The
+node context is already cancelled, and later component teardown treats the
+already-closed bus as idempotent. `EventBus.Close` discards queued in-memory
+events after waiting for in-flight handlers; ordinary `Unsubscribe` and
+reusable `EventBus.Stop` preserve queued events.
 
 ## Event-Driven Communication
 
@@ -1051,6 +1055,15 @@ All event types follow the `subsystem.snake_case_name` convention.
   `TestChainsyncResyncPublishPathsUnderLock` in
   `ledger/publish_under_lock_test.go`. Register the flush with `defer`
   *before* taking the lock so LIFO order runs it last.
+- `ledger` also must not invoke an external `BlockfetchRequestRangeFunc` while
+  holding `chainsyncBlockfetchMutex`. The blockfetch client can wait in
+  `acquireBusy` for the previous request's receive callback to return, while
+  that callback is publishing `ledger.blockfetch` and its subscriber is
+  waiting for the ledger mutex. `startQueuedBlockfetchLocked` reserves the
+  batch and arms its timer under the mutex, releases the mutex for the primary
+  and shadow requests, then reacquires it before inspecting state. If a
+  callback completed or replaced the batch while the request was outside the
+  lock, the stale request result is ignored.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into
@@ -2384,6 +2397,51 @@ The `Ouroboros` struct (`ouroboros/ouroboros.go`) manages all protocol handlers:
     -------------------------------------------
 ```
 
+### Shared Block/Header Decode Cache
+
+Several peer connections routinely deliver byte-identical block or header
+bytes within a short window of each other (multiple peers relaying the same
+freshly-produced block), so `Ouroboros` holds two shared, content-hash-keyed
+caches (`blockDecodeCache`, `headerDecodeCache`, `ouroboros/decode_cache.go`)
+that `blockfetchClientBlockRaw` and `chainsyncClientRollForwardRaw` check
+before calling `decodeBlockfetchBlock`/`decodeChainsyncHeader`. The key is a
+hash of `(blockType, raw bytes)`, not the chain point: two connections
+delivering identical bytes always share one decode and one cache entry, while
+two connections delivering *different* bytes for what is nominally "the same
+block" (corruption, tampering, a buggy peer) hash to different keys and are
+decoded, cached, and reported on completely independently, so a bad delivery
+from one peer can never contaminate the answer another peer's good delivery
+produces.
+
+Concurrent callers submitting the same key at nearly the same instant share
+one decode rather than each doing the work: the first caller claims the
+key and runs the decode with the cache lock released (so concurrent decodes
+for different keys never serialize against each other); every other caller
+registers a wait channel and is woken with the identical result once the
+decode finishes, whether it succeeded or failed. A failed decode is cached
+the same as a successful one, bounded by the same TTL/size eviction — since
+decoding is a pure function of its input bytes, a cached failure is simply a
+correct remembered fact ("these bytes do not decode"), not a permanent
+poison. This mirrors the existing `leiosEndorserBlocks` cache's bounded,
+waiter-channel design (see Leios CertRB Serving below), applied to ordinary
+block/header decoding rather than Leios EB closures.
+
+A decode function that panics (adversarial/malformed peer bytes could in
+principle trigger this) does not strand the key: `getOrDecode` recovers the
+panic just long enough to record it as an ordinary cached failure and wake
+every waiter, then re-raises it, so the decoding goroutine's own
+crash-or-recover behavior is unchanged but no other connection is left
+permanently blocked on that key, and a later identical delivery fails fast
+from cache instead of panicking again.
+
+A waiting caller's decode outcome is delivered directly through its wait
+channel rather than by re-reading the shared entry map after waking: the
+entry it is waiting on can be evicted by unrelated churn (many other keys
+being inserted, past `decodeCacheMaxEntries`) in the window between "the
+decode finishes" and "a descheduled waiter resumes," so re-reading the map
+at that point could silently hand back a zero-value/nil "success" instead of
+the real outcome.
+
 ### Connection Management
 
 The `ConnectionManager` (`connmanager/connection_manager.go`) handles connection lifecycle:
@@ -2922,6 +2980,11 @@ When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
 VRF signing keys, KES signing keys, and operational certificates are loaded from files at startup. The `keystore` package handles platform-specific file permission checks (Unix file modes, Windows ACLs) and KES key evolution.
+
+VRF and KES secret-key loads check permissions on the open file handle and
+reject group/other access on Unix or insecure DACL grants on Windows before
+reading the key. Operational certificates contain public data and remain
+exempt from the secret-key permission check.
 
 ### Leios Voting (`ledger/leios/`)
 
@@ -3642,6 +3705,37 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   its output row is computed), `epoch_summary` (total active stake, pool
   count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
   rewards — Dingo's full AdaPots).
+
+  **Coverage contract.** A `PASS` means only that every **exact-match** and
+  **derived-match** field below matched. It does not claim parity for fields
+  classified as **intentionally-incomparable** or **unsupported**. The same
+  field-level matrix is emitted in every JSON report, and human-readable
+  status output reports the class counts. `internal/koiosparity/coverage_test.go`
+  requires every field in the consumed Koios response structs to remain
+  classified when those structs change. Account rewards are outside this
+  matrix until #3097 and #3099 are implemented.
+
+  | Koios endpoint | Classification | Fields | Dingo mapping / reason |
+  |---|---|---|---|
+  | `/tip` | derived-match | `epoch_no` | `tip - 1` bounds the safely closed epoch range. |
+  | `/pool_list` | derived-match | `pool_id_bech32` | Decode to pool key hash and compare complete pool membership. |
+  | `/pool_updates` | derived-match | `pool_id_bech32`, `active_epoch_no` | Derive each pool's earliest possible history request. These control fetching, not value parity. |
+  | `/epoch_info` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
+  | `/epoch_info` | derived-match | `active_stake` | Exact lovelace match to `epoch_summary.total_active_stake` at K-1. |
+  | `/epoch_info` | derived-match | `end_time` | Establishes closure and the reference-lag window; not a Dingo value assertion. |
+  | `/epoch_info` | unsupported | `era`, `out_sum`, `fees`, `tx_count`, `blk_count`, `start_time`, `first_block_time`, `last_block_time`, `total_rewards`, `avg_blk_reward` | Dingo has no matching persisted per-epoch aggregate. In particular, raw `fees`/`total_rewards` are not AdaPots balances. |
+  | `/epoch_info` | unsupported | `pool_cnt`, `delegator_cnt` | Documented fields are not returned by Koios preview/preprod and are omitted from the response projection. |
+  | `/totals` | exact-match | `epoch_no`, `treasury`, `reserves`, `fees` | Require the requested epoch and exact equality with K's `reward_ada_pots` boundary balances. |
+  | `/totals` | intentionally-incomparable | `reward` | Koios reports a lagged cumulative accumulator; Dingo stores a per-epoch flow. |
+  | `/totals` | unsupported | `circulation`, `supply`, `deposits_stake`, `deposits_drep`, `deposits_proposal`, `treasury_donation`, `treasury_withdrawal`, `reserves_withdrawal` | No matching persisted Dingo network aggregate. |
+  | `/pool_history` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
+  | `/pool_history` | derived-match | `pool_id_bech32` | Request identity is decoded to Dingo's pool key hash for set membership. |
+  | `/pool_history` | derived-match | `active_stake`, `delegator_cnt` | Exact values against `reward_pool_input` at stake epoch K-1. |
+  | `/pool_history` | derived-match | `block_cnt`, `fixed_cost` | Exact values against `reward_pool_input` at parameter epoch K+1. |
+  | `/pool_history` | derived-match | `margin` | K+1 values compared as equivalent rational numbers. |
+  | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with aggregated `reward_pool_output.member_reward_total` at K-1. |
+  | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
+  | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
 
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
@@ -4467,6 +4561,22 @@ The `EventBus` implements publisher/subscriber communication, decoupling compone
 ### Worker Pool Pattern
 
 Database operations and event delivery use worker pools for controlled concurrency and backpressure.
+
+During shutdown, EventBus closes release backpressured publishers and discard
+events still queued in in-memory subscribers. It still waits for a handler
+that is already executing, but does not replay bulk-sync blockfetch backlog
+into ledger or storage components that are being closed.
+
+The ledger blockfetch subscriber must not synchronously start the next
+`GetBlockRange` from its `ledger.blockfetch` handler: the request completes
+only after the peer's `BatchDone` is delivered through that same EventBus
+subscription. Batch continuation requests therefore run on tracked workers;
+the blockfetch state mutex protects the handoff and shutdown drains those
+workers before unsubscribing the ledger. A connection must not be reused for a
+new batch while an older request on that connection is still draining, because
+blockfetch callbacks carry only the connection ID; reuse waits for the older
+request to return and fails boundedly if it remains wedged. Close also bounds
+the continuation drain without holding the scheduling mutex while waiting.
 
 ## Threading and Concurrency
 

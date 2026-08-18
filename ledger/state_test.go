@@ -53,6 +53,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/pipeline"
 )
 
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
@@ -2342,7 +2343,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 
 	// Start the epoch rollover goroutine
 	wg.Go(func() {
-
 		// Capture snapshot
 		ls.RLock()
 		snapshotEra := ls.currentEra
@@ -2388,7 +2388,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	// Start multiple reader goroutines that try to read during the transaction
 	for range 5 {
 		wg.Go(func() {
-
 			// Wait for transaction to start
 			<-txnStarted
 
@@ -4411,6 +4410,81 @@ func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
 	assert.Contains(t, err.Error(), "block-processing pipeline")
 }
 
+// TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting verifies that
+// Close releases the continuation scheduling mutex before waiting for the
+// continuation WaitGroup. A worker may need that mutex to complete the request
+// that lets it return, so holding it across the wait deadlocks shutdown.
+//
+// The invariant is asserted directly -- the mutex must be acquirable *while*
+// Close is parked in the wait -- rather than by having a queued worker finish,
+// which passes whether or not Close ever held the mutex.
+func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
+	origTimeout := CloseBlockfetchDrainTimeout
+	// Generous: the worker is released only after the assertion below, so this
+	// bounds the failure mode rather than the happy path.
+	CloseBlockfetchDrainTimeout = 30 * time.Second
+	t.Cleanup(func() { CloseBlockfetchDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	schedulingDone := make(chan struct{})
+	ls.blockfetchContinuationSchedulingHook = func() {
+		close(schedulingDone)
+	}
+
+	// A continuation worker that stays registered until the test releases it,
+	// so Close cannot leave its wait while the assertion runs. It deliberately
+	// does not touch the mutex: the point is what Close holds, not what the
+	// worker can acquire.
+	proceed := make(chan struct{})
+	ls.blockfetchContinuationWG.Add(1)
+	go func() {
+		defer ls.blockfetchContinuationWG.Done()
+		<-proceed
+	}()
+
+	ls.blockfetchContinuationMu.Lock()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ls.Close() }()
+	require.Eventually(
+		t,
+		ls.closed.Load,
+		time.Second,
+		time.Millisecond,
+		"Close did not begin before releasing the continuation mutex",
+	)
+	ls.blockfetchContinuationMu.Unlock()
+
+	// The hook fires only after Close has completed the scheduling lock/unlock
+	// pair. The worker remains registered, so Close must still be in its wait.
+	testutil.RequireReceive(
+		t,
+		schedulingDone,
+		time.Second,
+		"Close did not release blockfetchContinuationMu before waiting",
+	)
+	require.True(
+		t,
+		ls.blockfetchContinuationMu.TryLock(),
+		"Close held blockfetchContinuationMu while waiting for continuations",
+	)
+	ls.blockfetchContinuationMu.Unlock()
+
+	// Only now let the worker finish, proving Close was genuinely still waiting
+	// throughout the assertion above.
+	close(proceed)
+	err := testutil.RequireReceive(
+		t,
+		closeDone,
+		5*time.Second,
+		"Close did not finish after the continuation worker drained",
+	)
+	require.NoError(t, err)
+}
+
 // TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive
 // counterpart: a real Start/Close cycle (ledgerProcessBlocks genuinely
 // running, not simulated) must not report a timeout, and Close must
@@ -4445,4 +4519,34 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 	default:
 		t.Fatal("Close returned without processCtx actually being cancelled")
 	}
+}
+
+// TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the
+// shutdown ordering required when block processing is draining the decode
+// pipeline's Results channel. That drain has no context select after a batch
+// is submitted, so stopping the pipeline must close Results before Close
+// waits for the block-processing goroutine.
+func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
+	origTimeout := CloseProcessBlocksDrainTimeout
+	CloseProcessBlocksDrainTimeout = time.Second
+	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		blockPipeline: pipeline.NewBlockPipeline(
+			pipeline.WithDecodeWorkers(1),
+		),
+	}
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	ls.processBlocksCancel = func() {}
+	ls.processBlocksWG.Add(1)
+	go func() {
+		defer ls.processBlocksWG.Done()
+		for range ls.blockPipeline.Results() {
+		}
+	}()
+
+	require.NoError(t, ls.Close())
 }

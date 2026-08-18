@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -669,7 +670,25 @@ type LedgerState struct {
 	chainsyncBlockfetchReadyChan  chan struct{}
 	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
 	shadowBlockfetchConnId        ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
-	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// blockfetchPrimaryRequestGeneration identifies the currently running
+	// primary request. A timeout may fire while the request is blocked in the
+	// protocol client; keeping its generation lets the timeout wait instead of
+	// issuing a duplicate request on the same batch.
+	blockfetchRequestGeneration         uint64
+	blockfetchPrimaryRequestGeneration  uint64
+	blockfetchRequestsInFlight          map[string]chan struct{}
+	blockfetchShadowRequestsInFlight    map[string]struct{}
+	blockfetchInFlightTimeoutGeneration uint64
+	blockfetchInFlightTimeoutCount      uint8
+	selectedBlockfetchConnId            ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// blockfetchContinuationPending prevents a chainsync handler from starting
+	// a competing batch in the short interval after the blockfetch subscriber
+	// schedules its next request on a worker. The worker must run outside the
+	// subscriber goroutine because GetBlockRange waits for BatchDone, which is
+	// delivered back through that same subscriber.
+	blockfetchContinuationPending bool
+	blockfetchContinuationMu      sync.Mutex
+	blockfetchContinuationWG      sync.WaitGroup
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
@@ -821,6 +840,9 @@ type LedgerState struct {
 	peerHeaderHistory    map[string]*peerHeaderChain
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
+	// Test hook called after Close releases the blockfetch continuation mutex
+	// and before it waits for continuation workers.
+	blockfetchContinuationSchedulingHook func()
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -1527,17 +1549,22 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
-// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout, and
-// CloseProcessBlocksDrainTimeout bound the corresponding waits in Close()
-// below. Exported (not local consts) so tests — including cross-package
+// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout,
+// CloseProcessBlocksDrainTimeout, and CloseBlockfetchDrainTimeout bound the
+// corresponding waits in Close() below. Exported (not local consts) so tests — including cross-package
 // node-level tests exercising how a caller reacts to Close failing to
 // confirm drain — can shrink them instead of running real multi-second
 // timeouts.
 var (
 	CloseRollbackDrainTimeout        = 10 * time.Second
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
-	CloseProcessBlocksDrainTimeout   = 10 * time.Second
-	CloseBlockPipelineDrainTimeout   = 10 * time.Second
+	// A Leios block-processing transaction can include a large endorser
+	// closure and legitimately outlive the short blockfetch waits. Keep this
+	// below Node's default 30-second shutdown budget so the later ledger and
+	// database cleanup stages retain time to finish if processing is stuck.
+	CloseProcessBlocksDrainTimeout = 20 * time.Second
+	CloseBlockPipelineDrainTimeout = 10 * time.Second
+	CloseBlockfetchDrainTimeout    = 10 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
@@ -1578,6 +1605,21 @@ func (ls *LedgerState) Close() error {
 		ls.Scheduler.Stop()
 	}
 
+	// Stop the decode pipeline at the same time as the block-processing
+	// goroutine. decodeReadChainBatch drains the pipeline's Results channel
+	// without a context select once a batch has been submitted; waiting for
+	// ledgerProcessBlocks before stopping the pipeline can therefore deadlock
+	// shutdown until CloseProcessBlocksDrainTimeout expires. Stop cancels
+	// Submit calls and closes Results, which releases that drain so the
+	// block-processing goroutine can exit normally.
+	var blockPipelineStopDone chan error
+	if ls.blockPipeline != nil {
+		blockPipelineStopDone = make(chan error, 1)
+		go func() {
+			blockPipelineStopDone <- ls.blockPipeline.Stop()
+		}()
+	}
+
 	// Stop the normal chainsync-driven block-processing pipeline next, for
 	// the identical reason as Scheduler.Stop above: ledgerProcessBlocks
 	// writes blocks to ls.chain/the database (via dbWorkerPool below), and
@@ -1615,20 +1657,16 @@ func (ls *LedgerState) Close() error {
 		}
 	}
 
-	// Stop the block-decode pipeline (if configured), now that its only
-	// submitter -- the goroutine just drained above -- has exited. Bounded
-	// for the same reason as the wait above: a stuck pipeline must not hang
-	// Close forever, but a timeout here is not silently treated as success,
-	// since it means pipeline worker goroutines may still be running when
-	// Close returns.
-	if ls.blockPipeline != nil {
-		pipelineStopDone := make(chan struct{})
-		go func() {
-			_ = ls.blockPipeline.Stop()
-			close(pipelineStopDone)
-		}()
+	// Wait for the decode pipeline after its block-processing consumer has
+	// drained. Stop was started above so it could release a consumer blocked
+	// waiting for Results; this wait still bounds pipeline teardown and
+	// surfaces a failure to the caller.
+	if blockPipelineStopDone != nil {
 		select {
-		case <-pipelineStopDone:
+		case stopErr := <-blockPipelineStopDone:
+			if stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("block-decode pipeline shutdown: %w", stopErr))
+			}
 		case <-time.After(CloseBlockPipelineDrainTimeout):
 			err = errors.Join(
 				err,
@@ -1638,6 +1676,37 @@ func (ls *LedgerState) Close() error {
 				),
 			)
 		}
+	}
+
+	// Synchronize with continuation scheduling before waiting. Close() marks
+	// the ledger closed above; startQueuedBlockfetchFromEventLocked checks that
+	// flag both before and after taking this mutex, so no worker can be added
+	// after this synchronization point. Do not hold the mutex across Wait: the
+	// blockfetch subscriber may need it while completing the request that lets a
+	// worker return.
+	continuationSchedulingDone := make(chan struct{})
+	ls.blockfetchContinuationMu.Lock()
+	close(continuationSchedulingDone)
+	ls.blockfetchContinuationMu.Unlock()
+	if ls.blockfetchContinuationSchedulingHook != nil {
+		ls.blockfetchContinuationSchedulingHook()
+	}
+	<-continuationSchedulingDone
+	blockfetchContinuationsDone := make(chan struct{})
+	go func() {
+		ls.blockfetchContinuationWG.Wait()
+		close(blockfetchContinuationsDone)
+	}()
+	select {
+	case <-blockfetchContinuationsDone:
+	case <-time.After(CloseBlockfetchDrainTimeout):
+		err = errors.Join(
+			err,
+			fmt.Errorf(
+				"timed out after %s waiting for blockfetch continuations to stop",
+				CloseBlockfetchDrainTimeout,
+			),
+		)
 	}
 
 	// Unsubscribe from event bus to stop receiving new events. Use
@@ -7523,6 +7592,26 @@ func (ls *LedgerState) BlockByHash(hash []byte) (models.Block, error) {
 // CardanoNodeConfig returns the Cardano node configuration used for this ledger state.
 func (ls *LedgerState) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return ls.config.CardanoNodeConfig
+}
+
+// ByronProtocolMagic returns the protocol magic configured in Byron genesis.
+func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
+	if ls == nil || ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("cardano node config is unavailable")
+	}
+	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if byronGenesis == nil {
+		return 0, errors.New("byron genesis is unavailable")
+	}
+	protocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
+	if protocolMagic < 0 {
+		return 0, errors.New("byron protocol magic is negative")
+	}
+	if protocolMagic > math.MaxUint32 {
+		return 0, fmt.Errorf("byron protocol magic exceeds uint32: %d", protocolMagic)
+	}
+	// #nosec G115 -- the protocol magic is checked against the uint32 range above.
+	return uint32(protocolMagic), nil
 }
 
 // UtxoByRef returns a single UTxO by reference
