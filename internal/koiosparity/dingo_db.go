@@ -495,6 +495,52 @@ func (d *DingoDB) GetRewardAccountOutputs(
 	return out, nil
 }
 
+// StakeAddressFromCredential converts a reward-account credential — as
+// stored on models.RewardAccountOutput/RewardStakeInput (StakingKey +
+// CredentialTag) — to its bech32 stake address ("stake1…"/"stake_test1…").
+// credentialTag must be one of models.CredentialTagFromUint64's two values:
+// 0 (key hash) or 1 (script hash); see that function's doc comment for the
+// 0/1 meaning.
+//
+// koios-parity only ever targets preview/preprod, both testnet networks, so
+// the address network ID is always lcommon.AddressNetworkTestnet — this
+// never needs a network parameter. This mirrors
+// api/blockfrost/adapter.go's stakeAddressFromCredential exactly (same
+// lcommon.NewAddressFromParts call with paymentAddr=nil), reimplemented here
+// rather than imported: the api package is a much larger dependency edge
+// (importing it would pull the whole Blockfrost adapter surface into
+// koiosparity) for one 12-line helper, and koios-parity must not gain an HTTP
+// client for the Dingo side of any comparison regardless of the underlying
+// address logic being identical — see this file's/ARCHITECTURE.md's "never
+// add an HTTP client for the Dingo side" invariant.
+func StakeAddressFromCredential(
+	stakingKey []byte,
+	credentialTag uint8,
+) (string, error) {
+	addrType := uint8(lcommon.AddressTypeNoneKey)
+	switch credentialTag {
+	case 0:
+		// key hash; addrType already set above.
+	case 1:
+		addrType = lcommon.AddressTypeNoneScript
+	default:
+		return "", fmt.Errorf(
+			"unsupported stake credential tag: %d",
+			credentialTag,
+		)
+	}
+	addr, err := lcommon.NewAddressFromParts(
+		addrType,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakingKey,
+	)
+	if err != nil {
+		return "", fmt.Errorf("build stake address: %w", err)
+	}
+	return addr.String(), nil
+}
+
 // PoolKeyHashHex converts a pool bech32 ID ("pool1…") to its lower-hex
 // 28-byte key hash. The hex string matches the keys in GetPoolEpochDataMap.
 func PoolKeyHashHex(bech32 string) (string, error) {

@@ -106,6 +106,11 @@ type KoiosParityConfig struct {
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
 	GraceHours int
+	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// phase for every epoch the observer processes, alongside the existing
+	// epoch-aggregate/pool phases. Defaults to true — see
+	// internalconfig.DefaultKoiosParityConfig.
+	Accounts bool
 }
 
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
@@ -695,6 +700,7 @@ func (c *Config) syncCompatFields() {
 		APIKey:     c.cfg.KoiosParity.APIKey,
 		Strict:     c.cfg.KoiosParity.Strict,
 		GraceHours: c.cfg.KoiosParity.GraceHours,
+		Accounts:   c.cfg.KoiosParity.Accounts,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
@@ -1455,6 +1461,7 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			APIKey:     cfg.APIKey,
 			Strict:     cfg.Strict,
 			GraceHours: cfg.GraceHours,
+			Accounts:   cfg.Accounts,
 		}
 	}
 }

@@ -401,6 +401,30 @@ func koiosAPIKey(cmd *cobra.Command) string {
 	return os.Getenv("KOIOS_API_KEY")
 }
 
+// addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,
+// shared by fetch/check/run/watch. Per-account fetching/checking issues far
+// more Koios requests than pool-level work (a chunked request set covering
+// the full address universe per epoch, versus one request per pool), so this
+// stays opt-in for the standalone CLI even though the in-process observer
+// (ObserverConfig.AccountsEnabled, wired from
+// dingo.KoiosParityConfig/DefaultKoiosParityConfig) defaults it on.
+func addAccountsFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("accounts", false,
+		"also fetch/check #3097 per-account exact reward parity (opt-in: substantially more Koios requests; or KOIOS_PARITY_ACCOUNTS=true)")
+}
+
+// accountsEnabled resolves the --accounts flag, falling back to the
+// koios-parity-only KOIOS_PARITY_ACCOUNTS env var (no existing repo-standard
+// name applies to this tool-specific opt-in switch — see CLAUDE.md's env-var
+// naming guidance in this tool's own conventions).
+func accountsEnabled(cmd *cobra.Command) bool {
+	if v, _ := cmd.Flags().GetBool("accounts"); v {
+		return true
+	}
+	v := strings.TrimSpace(os.Getenv("KOIOS_PARITY_ACCOUNTS"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // addDingoDB registers --metadata-plugin and --metadata-dsn on cmd and
 // should be called for every subcommand that reads from Dingo's database.
 func addDingoDBFlags(cmd *cobra.Command) {

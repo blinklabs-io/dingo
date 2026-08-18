@@ -40,6 +40,7 @@ func addRunFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("skip-check", false, "skip compare phase")
 	cmd.Flags().
 		Bool("all", false, "re-check all cached epochs (not just unchecked/stale)")
+	addAccountsFlag(cmd)
 }
 
 func runCommand(cmd *cobra.Command, _ []string) error {
@@ -60,13 +61,32 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	logger := slog.Default()
 	ctx := cmd.Context()
 
+	accounts := accountsEnabled(cmd)
+	var accountsSource koiosparity.RewardParitySource
+	if accounts {
+		// See fetchRun's identical comment: only opened when --accounts is
+		// set, and only ever a direct read-only query, never an HTTP call to
+		// Dingo's own API.
+		dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
+		if dingoErr != nil {
+			return fmt.Errorf(
+				"open dingo db (required for --accounts): %w",
+				dingoErr,
+			)
+		}
+		defer dingo.Close() //nolint:errcheck
+		accountsSource = dingo
+	}
+
 	if !skipFetch {
 		slog.Info("koios-parity: fetch phase starting", "network", network)
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-			Network:     network,
-			APIKey:      koiosAPIKey(cmd),
-			CachePath:   cachePath,
-			Concurrency: concurrency,
+			Network:         network,
+			APIKey:          koiosAPIKey(cmd),
+			CachePath:       cachePath,
+			Concurrency:     concurrency,
+			AccountsEnabled: accounts,
+			AccountsSource:  accountsSource,
 		}, logger)
 		if fetchErr != nil {
 			return fmt.Errorf("fetch: %w", fetchErr)
@@ -88,12 +108,13 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	if !skipCheck {
 		slog.Info("koios-parity: check phase starting", "network", network)
 		if _, err := koiosparity.Check(ctx, koiosparity.CheckConfig{
-			Network:    network,
-			DingoDB:    resolveDingoDB(cmd),
-			CachePath:  cachePath,
-			Workers:    workers,
-			All:        all,
-			GraceHours: graceHours,
+			Network:         network,
+			DingoDB:         resolveDingoDB(cmd),
+			CachePath:       cachePath,
+			Workers:         workers,
+			All:             all,
+			GraceHours:      graceHours,
+			AccountsEnabled: accounts,
 		}, logger); err != nil {
 			return fmt.Errorf("check: %w", err)
 		}

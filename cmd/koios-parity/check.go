@@ -40,6 +40,7 @@ No Koios HTTP calls; no Dingo API endpoint contacted.`,
 	cmd.Flags().Uint64("from-epoch", 0, "lower bound (inclusive)")
 	cmd.Flags().Uint64("through-epoch", 0, "upper bound (inclusive)")
 	addDingoDBFlags(cmd)
+	addAccountsFlag(cmd)
 
 	return cmd
 }
@@ -57,14 +58,15 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 	graceHours, _ := cmd.Flags().GetInt("grace-hours")
 
 	result, err := koiosparity.Check(cmd.Context(), koiosparity.CheckConfig{
-		Network:      network,
-		DingoDB:      resolveDingoDB(cmd),
-		CachePath:    resolveCachePath(),
-		Workers:      workers,
-		All:          all,
-		FromEpoch:    fromEpoch,
-		ThroughEpoch: throughEpoch,
-		GraceHours:   graceHours,
+		Network:         network,
+		DingoDB:         resolveDingoDB(cmd),
+		CachePath:       resolveCachePath(),
+		Workers:         workers,
+		All:             all,
+		FromEpoch:       fromEpoch,
+		ThroughEpoch:    throughEpoch,
+		GraceHours:      graceHours,
+		AccountsEnabled: accountsEnabled(cmd),
 	}, slog.Default())
 	if err != nil {
 		return err

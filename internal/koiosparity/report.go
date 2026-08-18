@@ -192,11 +192,15 @@ type JSONEpochEntry struct {
 
 // JSONMismatch is a single field-level mismatch in the JSON report.
 type JSONMismatch struct {
-	Pool       string `json:"pool,omitempty"`
-	Field      string `json:"field"`
-	DingoValue string `json:"dingo_value"`
-	KoiosValue string `json:"koios_value"`
-	Category   string `json:"category"`
+	Pool  string `json:"pool,omitempty"`
+	Field string `json:"field"`
+	// StakeAddress is set for #3097's per-account mismatches (acct_only_dingo/
+	// acct_only_koios/acct_duplicate/account_reward_amount); empty for
+	// pool/epoch-level mismatches, which have no single associated address.
+	StakeAddress string `json:"stake_address,omitempty"`
+	DingoValue   string `json:"dingo_value"`
+	KoiosValue   string `json:"koios_value"`
+	Category     string `json:"category"`
 }
 
 // BuildJSONReport constructs a JSONReport from status and mismatch data.
@@ -246,11 +250,12 @@ func BuildJSONReport(
 			}
 			for _, m := range mismatches {
 				entry.Mismatches = append(entry.Mismatches, JSONMismatch{
-					Pool:       m.PoolBech32,
-					Field:      m.Field,
-					DingoValue: m.DingoValue,
-					KoiosValue: m.KoiosValue,
-					Category:   m.Category,
+					Pool:         m.PoolBech32,
+					Field:        m.Field,
+					StakeAddress: m.StakeAddress,
+					DingoValue:   m.DingoValue,
+					KoiosValue:   m.KoiosValue,
+					Category:     m.Category,
 				})
 			}
 		}
@@ -302,12 +307,39 @@ func PrintExplain(
 		items := byCat[cat]
 		fmt.Fprintf(w, "  [%s] %d\n", cat, len(items))
 		for _, m := range items {
-			pool := m.PoolBech32
-			if pool == "" {
-				pool = "(epoch)"
+			// #3097's per-account mismatches carry StakeAddress instead of
+			// PoolBech32 — label the row accordingly so an account-level FAIL
+			// is identifiable (which stake address) rather than printing the
+			// same "(epoch)" placeholder a pool/epoch-level mismatch does.
+			switch {
+			case m.PoolBech32 != "":
+				fmt.Fprintf(
+					w,
+					"    pool=%-55s field=%-22s dingo=%-20s koios=%s\n",
+					m.PoolBech32,
+					m.Field,
+					m.DingoValue,
+					m.KoiosValue,
+				)
+			case m.StakeAddress != "":
+				fmt.Fprintf(
+					w,
+					"    account=%-55s field=%-22s dingo=%-20s koios=%s\n",
+					m.StakeAddress,
+					m.Field,
+					m.DingoValue,
+					m.KoiosValue,
+				)
+			default:
+				fmt.Fprintf(
+					w,
+					"    pool=%-55s field=%-22s dingo=%-20s koios=%s\n",
+					"(epoch)",
+					m.Field,
+					m.DingoValue,
+					m.KoiosValue,
+				)
 			}
-			fmt.Fprintf(w, "    pool=%-55s field=%-22s dingo=%-20s koios=%s\n",
-				pool, m.Field, m.DingoValue, m.KoiosValue)
 		}
 	}
 }

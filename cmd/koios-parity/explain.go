@@ -106,11 +106,12 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 		out := make([]koiosparity.JSONMismatch, len(mismatches))
 		for i, m := range mismatches {
 			out[i] = koiosparity.JSONMismatch{
-				Pool:       m.PoolBech32,
-				Field:      m.Field,
-				DingoValue: m.DingoValue,
-				KoiosValue: m.KoiosValue,
-				Category:   m.Category,
+				Pool:         m.PoolBech32,
+				Field:        m.Field,
+				StakeAddress: m.StakeAddress,
+				DingoValue:   m.DingoValue,
+				KoiosValue:   m.KoiosValue,
+				Category:     m.Category,
 			}
 		}
 		enc := json.NewEncoder(os.Stdout)

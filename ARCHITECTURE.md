@@ -3526,7 +3526,8 @@ internal/koiosparity/      # shared library
   dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
-  check.go                 # parity check orchestration (pool-level comparison)
+  fetch_accounts.go        # #3097 per-account Koios fetch (chunked, address-universe union)
+  check.go                 # parity check orchestration (pool-level + #3097 per-account comparison)
   report.go                # human-readable status + JSON report generation
 
 cmd/koios-parity/          # thin Cobra CLI wrapper
@@ -3540,7 +3541,17 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koios_pool_epoch`, and `koios_totals` rows per closed epoch, storing the
   full documented `/epoch_info`, `/pool_history`, and `/totals` field sets
   (not just the subset compared against Dingo) so the cache is a complete
-  Koios reference even as new comparisons are added later.
+  Koios reference even as new comparisons are added later. `cache.db` is this
+  tool's own private cache, not part of Dingo's own metadata schema —
+  `DATABASE.md` does not (and need not) document it. #3097 adds
+  `koios_account_rewards` (one row per `(network, epoch, stake_address,
+  reward_type)` from `/account_reward_history` — widened to include
+  `reward_type` in the key because a pool owner delegating to their own pool
+  legitimately has both a `member` and a `leader` row in the same epoch) and
+  `koios_account_coverage` (one row per `(network, epoch)` recording
+  `requested_count`/`fetched_count`/`complete` — see "Per-account exact
+  parity (#3097)" below for why `complete` gates every per-account
+  comparison).
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
@@ -3593,7 +3604,15 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     are being measured, i.e. K itself). `reward_pool_output` (`member_reward_
     total`) is written from that same `epochs.snapshot` value in the same
     reward-application call, so it is read at the identical epoch as
-    `reward_pool_input`'s stake fields, never at K.
+    `reward_pool_input`'s stake fields, never at K. `reward_account_output`
+    (#3097) shares this exact offset too: `ledger/reward_calculation.go`'s
+    `saveStakeRewardOutputs` calls `meta.SaveRewardAccountOutputs` in the same
+    transaction and at the same `app.epochs.snapshot` value as
+    `SaveRewardPoolOutputs`, and `rewardAccountOutputs`'s own `Epoch` field is
+    stamped from that identical `rewardSnapshotEpoch` parameter — so
+    `compareEpochAccounts` (`check.go`) reads Dingo's `reward_account_output`
+    at `stakeEpoch`, reusing `koiosStakeEpoch` rather than deriving a second,
+    possibly-diverging offset.
   - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced`, `Margin`,
     and `Cost` (fixed cost) describe the epoch *before* the row's own Epoch —
     `ledger/snapshot/rotation.go`'s `buildRewardStateInputs` stamps them from
@@ -3724,7 +3743,12 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
-may be transient). Results are stored in `check_mismatches` and summarised in
+may be transient), plus #3097's per-account categories: `acct_only_dingo`,
+`acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
+reward_type) row within one side — a data-integrity problem, not a value
+disagreement), and `acct_coverage_incomplete` (the per-account Koios fetch for
+this epoch never completed across every chunk — see "Per-account exact parity
+(#3097)" below). Results are stored in `check_mismatches` and summarised in
 `check_epoch_status`.
 
 Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
@@ -3815,9 +3839,9 @@ second sync:
   `GetRewardPoolOutputs`, `GetRewardAccountOutputs`) inside a fresh read-only
   transaction per call — the same tables `ledger/snapshot/rotation.go`
   already populates at every epoch boundary, with no new table and no
-  metadata export. `GetRewardAccountOutputs` is exposed on the interface now
-  (unused by any comparison yet) so #3097's per-account exact-parity check
-  can be wired in later without revisiting this abstraction.
+  metadata export. `GetRewardAccountOutputs` is what #3097's per-account
+  exact-parity comparison (`compareEpochAccounts`, "Per-account exact parity
+  (#3097)" below) reads Dingo's committed reward state through.
   - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
     `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
     for only a rolling 4-epoch window in core storage mode (API mode retains
@@ -3945,16 +3969,155 @@ second sync:
     against the fresh `n.db` and resubscribe it, before restarting
     `n.ledgerState` — mirroring `Run()`'s own hooks-then-observer-then-ledger
     ordering above so a live rebuild cannot reintroduce the same race.
-- **Out of scope for #3098** (left for #3097/#3099, and explicitly not
-  blocked by this design): per-account exact parity (`RewardParitySource`
-  already exposes `GetRewardAccountOutputs` for this) and chunked/paginated/
-  resumable large-account Koios fetches. `Observer.fetchIfNeeded` avoids
-  repeating the pool-universe scan across its own bounded retry loop (see
-  above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve or
-  reuse that universe only within a single `fetchIfNeeded` call, not across
-  distinct epochs or fetch runs — a deliberate simplicity trade-off for this
-  one-off validation use case, not a resumability guarantee; #3099 owns
-  making that path chunked/paginated/resumable across epochs.
+- **Out of scope for #3098, now addressed by #3097/#3099 below**:
+  per-account exact parity (`RewardParitySource` already exposed
+  `GetRewardAccountOutputs` for this at #3098 landing time) is wired up by
+  #3097, described in its own subsection immediately below. Fully
+  chunked/paginated/resumable large-account Koios fetches remain #3099's
+  scope — see that subsection's own boundary note. `Observer.fetchIfNeeded`
+  avoids repeating the pool-universe scan across its own bounded retry loop
+  (see above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve
+  or reuse that universe only within a single `fetchIfNeeded` call, not
+  across distinct epochs or fetch runs — a deliberate simplicity trade-off
+  for this one-off validation use case, not a resumability guarantee; #3099
+  owns making that path chunked/paginated/resumable across epochs.
+
+#### Per-account exact parity (dingo #3097)
+
+Extends the pool-level comparison above to a complete, exact, per-reward-
+account check: every relevant stake address, every closed epoch, compared as
+exact integer lovelace with no rounding/sampling/tolerance/aggregate-only
+shortcut. This is opt-in for both the standalone CLI and the in-process
+observer's underlying library calls, but **defaults to enabled for the
+in-process observer** (`ObserverConfig.AccountsEnabled`, wired from
+`KoiosParityConfig.Accounts` / `DefaultKoiosParityConfig`, mirroring
+`Strict`'s own "on once you opt into the feature at all" default) — the
+continuously-driven in-process path is the operationally-real one #3098
+exists to make possible, so it gets the complete check by default; the
+standalone CLI's `--accounts` flag (`cmd/koios-parity`) stays opt-in-only
+since per-account fetching issues substantially more Koios requests than
+pool-level fetching (one chunked request set covering the full address
+universe per epoch, versus one request per pool).
+
+- **Account universe.** `BuildAccountAddressUniverse`
+  (`fetch_accounts.go`) unions two sources for a given Koios reporting epoch:
+  Koios's own full historical account list (`GetAllAccountAddresses`,
+  `/account_list`, Range-paginated exactly like `GetAllHistoricalPoolIDs`,
+  hoisted once per `Fetch` run / observer fetch cycle via
+  `ResolveKoiosAccountUniverse`) and Dingo's own committed
+  `reward_account_output` addresses at `stakeEpoch` (converted from
+  `StakingKey`+`CredentialTag` to bech32 via `StakeAddressFromCredential`,
+  `dingo_db.go`). The union — not either side alone — is what lets a
+  Koios-only-known account Dingo never recorded a reward for surface as a
+  real `acct_only_dingo`-or-`acct_only_koios` mismatch (whichever side is
+  missing) rather than silently never being checked, mirroring why per-pool
+  comparison already unions Koios's and Dingo's pool sets. `source` may be
+  `nil` (the standalone CLI's `fetch` invoked without `--metadata-*`
+  configured for accounts) — the universe then falls back to Koios's list
+  alone.
+- **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
+  history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
+  the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`
+  client helper (mirrors `get()`'s retry/burst-limit/permanent-vs-transient
+  classification exactly, rebuilding the request body fresh on every retry
+  attempt since a drained `io.Reader` can't be replayed the way a bodyless
+  GET can via `req.Clone`). The response's `type` enum (`member`/`leader`/
+  `treasury`/`reserves`/`refund`) maps directly onto
+  `models.RewardAccountOutput.RewardType`'s `"member"`/`"leader"` string
+  constants for the two types Dingo currently produces;
+  `CompareAccountEpoch` filters `treasury`/`reserves`/`refund` rows out of
+  the comparison entirely (documented via
+  `koiosAccountRewardTypesOutOfScope`, not silently dropped) since Dingo's
+  reward accounting does not currently track those MIR/refund mechanisms —
+  wire them in if/when it does.
+- **Chunking.** `FetchAccountRewardsForEpoch` (`fetch_accounts.go`) splits
+  the address universe into `koiosAccountChunkSize` (100)-sized groups,
+  fetched with bounded concurrency mirroring `fetchEpoch`'s per-pool worker
+  pool, accumulates every returned row in memory, and commits to the cache
+  only once every chunk has succeeded
+  (`Cache.CommitAccountRewardsForEpoch`, one transaction: replace
+  `koios_account_rewards` for the epoch and upsert `koios_account_coverage`
+  together) — a single failed chunk commits nothing at all for that epoch,
+  never a partial "complete" result. This is deliberately the *minimal*
+  viable chunking (bounded blast radius and payload size per request,
+  nothing more) — full byte-size-aware request shaping, adaptive rate
+  limiting, and mid-fetch resumable checkpointing across a process restart
+  are #3099's scope (see below); a restart simply redoes the whole epoch's
+  account fetch from scratch, which is safe (idempotent, same final state)
+  even if not maximally efficient.
+- **Coverage gate.** `koios_account_coverage.complete` must be `true` before
+  `compareEpochAccounts` (`check.go`) ever treats `koios_account_rewards` as
+  a valid reference set for an epoch; an absent or incomplete coverage row
+  produces an explicit `acct_coverage_incomplete` / `ERROR` mismatch and
+  skips the per-account comparison for that epoch entirely — mirroring how a
+  missing `koios_totals` row already gates `CompareEpochTotals`. This is the
+  invariant #3099's chunking work must never violate: no code path may ever
+  set `complete = true` after a partial fetch.
+- **Epoch selection is account-coverage-aware, not just pool/aggregate-aware.**
+  `Cache.GetUncachedEpochs` (keyed on `koios_epoch_info` presence) and
+  `Cache.GetEpochsNeedingCheck`/`check_epoch_status.last_checked_at` staleness
+  alone can never re-select an epoch whose pool-level data was fetched before
+  per-account fetching existed, or before accounts were turned on for a given
+  run — it looks "already fetched"/"already checked" forever, so a Dingo
+  deployment upgrading from a pre-#3097 koios-parity attach would otherwise
+  keep reporting a stale pool-only `PASS` with zero per-account validation
+  ever attempted. Three additions close this gap, all gated on
+  `AccountsEnabled`/`cfg.Accounts` so pool-only mode (the standalone CLI's
+  default) is unaffected:
+  - `Cache.GetEpochsMissingAccountCoverage(network, from, through)` returns
+    epochs that already have a `koios_epoch_info` row but whose
+    `koios_account_coverage` is absent or `complete = 0`. `Fetch` (`fetch.go`)
+    unions this into its epoch list only when `cfg.AccountsEnabled`, and the
+    per-epoch worker skips the redundant pool/`epoch_info`/`totals` re-fetch
+    entirely for any epoch this returns that `GetUncachedEpochs` did not also
+    return (`accountOnlyEpochs`) — going straight to the account backfill
+    instead of re-fetching thousands of already-fresh pool-history rows.
+  - `Cache.GetEpochsNeedingCheck` takes an `accountsEnabled bool` parameter:
+    when true, its `LEFT JOIN` against `check_epoch_status` gains a second
+    `LEFT JOIN` against `koios_account_coverage`, and an epoch also qualifies
+    for recheck when that coverage row is absent, incomplete, or was
+    refreshed (`fetched_at`) after the last check — mirroring the existing
+    `koios_epoch_info.fetched_at > last_checked_at` pool-side staleness
+    check, so a `Fetch` run that backfills accounts for an already-checked
+    epoch automatically triggers a recheck the same way a pool refetch
+    already does. `Check` and `Observer.Start` both pass
+    `cfg.AccountsEnabled`/`o.cfg.AccountsEnabled` through.
+  - `Observer.Start`'s backlog seeding additionally calls
+    `GetEpochsMissingAccountCoverage(network, 0, throughEpoch)` when
+    `AccountsEnabled` and adds every epoch it returns to `o.pending`,
+    independent of whatever `GetEpochsNeedingCheck`/`GetUncachedEpochs`
+    already decided about that epoch for other reasons — the same
+    independent-gating shape `fetchAccountsIfNeeded` already used relative to
+    `fetchPoolsIfNeeded` for the per-epoch on-demand path.
+- **Comparison.** `CompareAccountEpoch` (`compare.go`) keys both sides by
+  `(stake_address, reward_type)` — not `stake_address` alone — since a pool
+  owner delegating to their own pool legitimately has both a `member` and a
+  `leader` row in the same epoch, checked independently (never merged or
+  summed). Internal duplicates within either side (the same key appearing
+  twice) are reported once per duplicate occurrence as `acct_duplicate`
+  before the union walk runs, so a duplicate is never mistaken for or masked
+  by a value disagreement. Amounts are compared via `lovelaceEqual`
+  (`big.Int`, never a float/rational) so #3097's "no rounding, sampling, or
+  tolerance" requirement holds exactly, including a 1-lovelace difference.
+  `graceHours`/`epochEndTime` apply the identical `reference_lag` treatment
+  `ComparePoolEpoch` already uses for a genuinely-too-recent epoch.
+- **Strict-mode propagation.** An account-level `FAIL` flows through
+  `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
+  forces `FAIL`, exactly like the pool-level categories) into
+  `EpochCompareResult.Status`, then into `Observer.processEpoch`'s
+  `result.Status != StatusPass` check the same way a pool-level mismatch
+  already does — no separate code path, so strict mode stops the node on an
+  account-level mismatch exactly as it does on a pool/aggregate one.
+- **Out of scope for #3097, left for #3099**: fully paginated/resumable/
+  rate-shaped account fetching at arbitrary scale, mid-epoch chunk-level
+  resume-from-checkpoint after a process restart, and duplicate-page
+  detection from Koios's own pagination (not applicable to
+  `/account_reward_history`, which isn't Range-paginated). #3097's chunking
+  is correct and never silently marks a partially-fetched epoch complete
+  (the coverage-gate + atomic-commit invariants above already guarantee
+  that), but does not need to survive a restart mid-epoch-fetch with a
+  resumed cursor — redoing the whole epoch's account fetch from scratch is
+  an acceptable (if not maximally efficient) fallback.
 
 ### Bark (`bark/`)
 

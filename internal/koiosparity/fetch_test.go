@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -245,5 +247,156 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 		poolHistoryAttempts.Load(),
 		int32(poolTotal),
 		"scheduling must stop well short of every pool once one hits a permanent error",
+	)
+}
+
+// TestFetchBackfillsAccountsForPreExistingCache is the fetch-side regression
+// test for the account-coverage-blind epoch-selection bug found in review of
+// #3097: a Dingo deployment that already ran koios-parity before #3097
+// landed has epochs with fresh koios_epoch_info/koios_totals rows but no
+// koios_account_coverage row at all. Turning on cfg.AccountsEnabled must
+// still get that epoch's accounts backfilled — GetUncachedEpochs alone
+// (keyed only on koios_epoch_info presence) would otherwise never re-select
+// it, since its pool-level data already looks "fetched" forever.
+//
+// This also exercises the chosen fix shape: the pool-level fetchEpoch call
+// (epoch_info/totals/pool_history) is skipped entirely for an epoch whose
+// pool data is already fresh — only the account backfill runs — so
+// /epoch_info and /totals must never be re-requested for this epoch.
+func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
+	const network = "preview"
+	const epoch = uint64(50)
+	const koiosAddr = "stake1uzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+
+	var epochInfoCalls, totalsCalls atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
+			case r.URL.Path == "/pool_list" || r.URL.Path == "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case r.URL.Path == "/epoch_info":
+				epochInfoCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
+			case r.URL.Path == "/totals":
+				totalsCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, epoch)
+			case r.URL.Path == "/account_list":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, `[{"stake_address":%q}]`, koiosAddr)
+			case r.URL.Path == "/account_reward_history":
+				var body struct {
+					StakeAddresses []string `json:"_stake_addresses"`
+					EpochNo        uint64   `json:"_epoch_no"`
+				}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				var sb strings.Builder
+				sb.WriteByte('[')
+				for i, addr := range body.StakeAddresses {
+					if i > 0 {
+						sb.WriteByte(',')
+					}
+					fmt.Fprintf(
+						&sb,
+						`{"stake_address":%q,"earned_epoch":%d,"amount":"1000000","type":"member"}`,
+						addr,
+						body.EpochNo,
+					)
+				}
+				sb.WriteByte(']')
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(sb.String()))
+			default:
+				t.Errorf("unexpected request path %s", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}),
+	)
+	defer srv.Close()
+	withTestKoiosBaseURL(t, srv.URL)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "12345",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Treasury:  "1",
+		Reserves:  "1",
+		Fees:      "1",
+		Reward:    "1",
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:       network,
+		Epoch:         epoch,
+		LastCheckedAt: fetchedAt.Add(time.Minute),
+		Status:        StatusPass,
+	}))
+	require.NoError(t, cache.Close())
+
+	result, err := Fetch(context.Background(), FetchConfig{
+		Network:         network,
+		CachePath:       cachePath,
+		Concurrency:     1,
+		FromEpoch:       epoch,
+		ThroughEpoch:    epoch,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Empty(t, result.FailedEpochs)
+	require.Equal(
+		t,
+		1,
+		result.EpochsFetched,
+		"the pre-existing epoch must be (re)fetched to backfill accounts",
+	)
+	require.Equal(
+		t,
+		int32(0),
+		epochInfoCalls.Load(),
+		"pool-level data was already fresh; /epoch_info must not be re-fetched just to backfill accounts",
+	)
+	require.Equal(
+		t,
+		int32(0),
+		totalsCalls.Load(),
+		"pool-level data was already fresh; /totals must not be re-fetched just to backfill accounts",
+	)
+
+	cache2, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache2.Close() //nolint:errcheck
+
+	cov, err := cache2.GetAccountCoverage(network, epoch)
+	require.NoError(t, err)
+	require.True(t, cov.Complete)
+	require.Equal(t, 1, cov.RequestedCount)
+
+	rows, err := cache2.GetAccountRewardsForEpoch(network, epoch)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, koiosAddr, rows[0].StakeAddress)
+
+	info, err := cache2.GetEpochInfo(network, epoch)
+	require.NoError(t, err)
+	require.WithinDuration(
+		t,
+		fetchedAt,
+		info.FetchedAt,
+		time.Second,
+		"pool-level fetched_at must not be clobbered by an accounts-only backfill",
 	)
 }

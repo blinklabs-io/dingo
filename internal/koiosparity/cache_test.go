@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -75,4 +76,150 @@ func TestCommitEpochDataWithTotals(t *testing.T) {
 	require.Equal(t, totals.DepositsDRep, got.DepositsDRep)
 	require.Equal(t, totals.DepositsStake, got.DepositsStake)
 	require.Equal(t, totals.DepositsProposal, got.DepositsProposal)
+}
+
+// TestCommitAccountRewardsForEpoch exercises the real SQL for the
+// koios_account_rewards/koios_account_coverage atomic commit, including the
+// widened (network, epoch, stake_address, reward_type) key that lets one
+// account carry both a member and a leader row in the same epoch.
+func TestCommitAccountRewardsForEpoch(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []KoiosAccountRewards{
+		{
+			StakeAddress:   "stake_test1uqevw2xnsc0pvn9t9r9c7qryan77xqk6etza9dprr8f80qq0e8ptn",
+			RewardType:     "member",
+			Earned:         "1000000",
+			SpendableEpoch: 101,
+			FetchedAt:      now,
+		},
+		{
+			// Same address, different reward type — pool owner delegating to
+			// their own pool. Must NOT collide with the row above.
+			StakeAddress:   "stake_test1uqevw2xnsc0pvn9t9r9c7qryan77xqk6etza9dprr8f80qq0e8ptn",
+			RewardType:     "leader",
+			Earned:         "5000000",
+			SpendableEpoch: 101,
+			PoolIDBech32:   "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+			FetchedAt:      now,
+		},
+	}
+
+	require.NoError(
+		t,
+		cache.CommitAccountRewardsForEpoch("preview", 100, rows, 5, true, now),
+	)
+
+	got, err := cache.GetAccountRewardsForEpoch("preview", 100)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	types := map[string]string{
+		got[0].RewardType: got[0].Earned,
+		got[1].RewardType: got[1].Earned,
+	}
+	require.Equal(t, "1000000", types["member"])
+	require.Equal(t, "5000000", types["leader"])
+	require.Equal(
+		t,
+		"pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+		got[1].PoolIDBech32,
+	)
+
+	cov, err := cache.GetAccountCoverage("preview", 100)
+	require.NoError(t, err)
+	require.Equal(t, 5, cov.RequestedCount)
+	require.Equal(t, 2, cov.FetchedCount)
+	require.True(t, cov.Complete)
+
+	// Re-commit with fewer rows and complete=false (simulating a subsequent
+	// partial/failed fetch) must fully replace the prior set — no leftover
+	// rows from the first commit, and coverage must reflect the new,
+	// incomplete state rather than the stale "complete" one.
+	require.NoError(
+		t,
+		cache.CommitAccountRewardsForEpoch(
+			"preview",
+			100,
+			rows[:1],
+			5,
+			false,
+			now,
+		),
+	)
+	got, err = cache.GetAccountRewardsForEpoch("preview", 100)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	cov, err = cache.GetAccountCoverage("preview", 100)
+	require.NoError(t, err)
+	require.False(t, cov.Complete)
+}
+
+// TestAccountRewardsAdditiveColumnMigration proves OpenCache migrates an
+// older koios_account_rewards table (missing reward_type/spendable_epoch/
+// pool_id_bech32 — the #1875 schema-only shape) forward without errors or
+// data loss, and that the widened unique index is in place afterward.
+func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+
+	// Build the pre-#3097 shape directly, bypassing createCacheSchema.
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE koios_account_rewards (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+		stake_address TEXT NOT NULL, earned TEXT NOT NULL, fetched_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(
+		`CREATE UNIQUE INDEX idx_kar_net_epoch_addr ON koios_account_rewards(network, epoch, stake_address)`,
+	)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err = db.Exec(
+		`INSERT INTO koios_account_rewards (network, epoch, stake_address, earned, fetched_at) VALUES (?, ?, ?, ?, ?)`,
+		"preview",
+		50,
+		"stake_test1existingrow",
+		"42",
+		now,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Opening through the real path must migrate forward without error.
+	cache, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	got, err := cache.GetAccountRewardsForEpoch("preview", 50)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "stake_test1existingrow", got[0].StakeAddress)
+	require.Equal(t, "42", got[0].Earned)
+	require.Equal(t, "", got[0].RewardType) // pre-existing row defaults to ""
+
+	// The widened unique key must now allow a second (member/leader) row for
+	// the same address+epoch, which the old (network, epoch, stake_address)
+	// unique index would have rejected.
+	require.NoError(
+		t,
+		cache.CommitAccountRewardsForEpoch("preview", 50, []KoiosAccountRewards{
+			{
+				StakeAddress: "stake_test1existingrow",
+				RewardType:   "member",
+				Earned:       "1",
+				FetchedAt:    now,
+			},
+			{
+				StakeAddress: "stake_test1existingrow",
+				RewardType:   "leader",
+				Earned:       "2",
+				FetchedAt:    now,
+			},
+		}, 1, true, now),
+	)
+	got, err = cache.GetAccountRewardsForEpoch("preview", 50)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
 }

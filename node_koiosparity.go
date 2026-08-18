@@ -78,13 +78,14 @@ func (n *Node) startKoiosParityObserver() error {
 	}
 
 	observer, err := koiosparity.NewObserver(koiosparity.ObserverConfig{
-		Network:    network,
-		CachePath:  cachePath,
-		APIKey:     cfg.APIKey,
-		Source:     source,
-		Strict:     cfg.Strict,
-		GraceHours: cfg.GraceHours,
-		Logger:     n.config.logger,
+		Network:         network,
+		CachePath:       cachePath,
+		APIKey:          cfg.APIKey,
+		Source:          source,
+		Strict:          cfg.Strict,
+		AccountsEnabled: cfg.Accounts,
+		GraceHours:      cfg.GraceHours,
+		Logger:          n.config.logger,
 		FatalFunc: func(err error) {
 			n.config.logger.Error(
 				"fatal koios parity validation failure, initiating shutdown",
@@ -123,6 +124,7 @@ func (n *Node) startKoiosParityObserver() error {
 		"koios parity observer enabled",
 		"network", network,
 		"strict", cfg.Strict,
+		"accounts", cfg.Accounts,
 		"cache", cachePath,
 	)
 	return nil

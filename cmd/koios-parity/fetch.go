@@ -40,6 +40,10 @@ Does not contact Dingo. Safe to interrupt and resume.`,
 		Uint64("through-epoch", 0, "stop at this epoch (default: tip-1)")
 	cmd.Flags().
 		Bool("force-refresh", false, "re-fetch and overwrite all epochs in [from-epoch, through-epoch], not just missing ones")
+	addAccountsFlag(cmd)
+	// Only used when --accounts is set (see fetchRun): the standalone fetch
+	// command otherwise never contacts Dingo's database at all.
+	addDingoDBFlags(cmd)
 
 	return cmd
 }
@@ -61,14 +65,36 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		)
 	}
 
+	accounts := accountsEnabled(cmd)
+	var accountsSource koiosparity.RewardParitySource
+	if accounts {
+		// #3097's address universe unions Koios's own list with Dingo's known
+		// addresses (see koiosparity.BuildAccountAddressUniverse) — open a
+		// read-only connection to Dingo's metadata DB for that purpose only;
+		// this is still the same direct, read-only GORM-backed query this
+		// tool has always used for the Dingo side, never an HTTP call to
+		// Dingo's own API.
+		dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
+		if dingoErr != nil {
+			return fmt.Errorf(
+				"open dingo db (required for --accounts): %w",
+				dingoErr,
+			)
+		}
+		defer dingo.Close() //nolint:errcheck
+		accountsSource = dingo
+	}
+
 	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
-		Network:      network,
-		APIKey:       koiosAPIKey(cmd),
-		CachePath:    resolveCachePath(),
-		Concurrency:  concurrency,
-		FromEpoch:    fromEpoch,
-		ThroughEpoch: throughEpoch,
-		ForceRefresh: forceRefresh,
+		Network:         network,
+		APIKey:          koiosAPIKey(cmd),
+		CachePath:       resolveCachePath(),
+		Concurrency:     concurrency,
+		FromEpoch:       fromEpoch,
+		ThroughEpoch:    throughEpoch,
+		ForceRefresh:    forceRefresh,
+		AccountsEnabled: accounts,
+		AccountsSource:  accountsSource,
 	}, slog.Default())
 	if err != nil {
 		return err

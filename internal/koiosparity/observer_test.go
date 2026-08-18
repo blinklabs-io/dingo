@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -51,15 +52,34 @@ type fakeEpochRef struct {
 	attempts        atomic.Int32
 }
 
+// fakeKoiosAccountFixtures optionally extends newFakeKoiosServer with
+// #3097's /account_list and /account_reward_history endpoints. Zero value
+// (the default for every existing caller passing no options) serves an empty
+// address list and empty reward history for every epoch — indistinguishable
+// from the pre-#3097 fake server for every test that never enables
+// ObserverConfig.AccountsEnabled, since those tests never issue a request to
+// either endpoint at all.
+type fakeKoiosAccountFixtures struct {
+	addresses      []string
+	rewardsByEpoch map[uint64][]KoiosAccountRewardHistoryItem
+}
+
 // newFakeKoiosServer serves a minimal, epoch-keyed Koios API: /pool_list and
 // /pool_updates always report zero pools; /epoch_info and /totals serve
 // exactly the epochs present in epochs (any other epoch number 404s, which
 // the real client classifies as a permanent, non-retryable error).
+// accounts is optional (pass nothing for the pre-#3097 behavior every
+// existing caller relies on).
 func newFakeKoiosServer(
 	t *testing.T,
 	epochs map[uint64]*fakeEpochRef,
+	accounts ...fakeKoiosAccountFixtures,
 ) *httptest.Server {
 	t.Helper()
+	var acct fakeKoiosAccountFixtures
+	if len(accounts) > 0 {
+		acct = accounts[0]
+	}
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -69,6 +89,27 @@ func newFakeKoiosServer(
 			case "/pool_list", "/pool_updates":
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`[]`))
+			case "/account_list":
+				w.WriteHeader(http.StatusOK)
+				type listItem struct {
+					StakeAddress string `json:"stake_address"`
+				}
+				items := make([]listItem, len(acct.addresses))
+				for i, a := range acct.addresses {
+					items[i] = listItem{StakeAddress: a}
+				}
+				b, _ := json.Marshal(items)
+				_, _ = w.Write(b)
+			case "/account_reward_history":
+				var body struct {
+					StakeAddresses []string `json:"_stake_addresses"`
+					EpochNo        uint64   `json:"_epoch_no"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				items := acct.rewardsByEpoch[body.EpochNo]
+				b, _ := json.Marshal(items)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(b)
 			case "/epoch_info":
 				epoch, ref, ok := lookupFakeEpoch(r, epochs)
 				if !ok {
@@ -606,6 +647,85 @@ func TestObserverStrictModeCancelsOnFirstMismatch(t *testing.T) {
 	)
 }
 
+// TestObserverStrictModeCancelsOnAccountMismatch is #3097's observer-level
+// proof: with ObserverConfig.AccountsEnabled, a per-account exact-parity
+// mismatch (not merely a pool/aggregate one, as
+// TestObserverStrictModeCancelsOnFirstMismatch already covers) fires
+// FatalFunc in strict mode exactly the same way. Epoch-level aggregates
+// match cleanly here, isolating the failure to the account phase alone.
+func TestObserverStrictModeCancelsOnAccountMismatch(t *testing.T) {
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	const koiosEpoch = uint64(5)
+	const stakeEpoch = koiosEpoch - 1
+
+	stakingKey := testPoolKeyHash(t, 0x55)
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		koiosEpoch: {
+			activeStake: "1000000",
+			treasury:    "10",
+			reserves:    "20",
+			fees:        "30",
+		},
+	}, fakeKoiosAccountFixtures{
+		addresses: []string{addr},
+		rewardsByEpoch: map[uint64][]KoiosAccountRewardHistoryItem{
+			koiosEpoch: {{
+				StakeAddress: addr,
+				EarnedEpoch:  koiosEpoch,
+				Amount:       "9999999", // deliberately wrong
+				Type:         "member",
+			}},
+		},
+	})
+	withTestKoiosBaseURL(t, srv.URL)
+
+	var fatalCount atomic.Int32
+	o, err := NewObserver(ObserverConfig{
+		Network:         "preview",
+		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
+		Source:          source,
+		Strict:          true,
+		AccountsEnabled: true,
+		Logger:          slog.New(slog.DiscardHandler),
+		FatalFunc:       func(error) { fatalCount.Add(1) },
+	})
+	require.NoError(t, err)
+	defer func() { _ = o.Stop(context.Background()) }()
+
+	require.NoError(t, o.Start(context.Background()))
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+
+	seedDingoEpochAggregate(t, source, koiosEpoch, 1_000_000, 10, 20, 30)
+	gormDB := sourceGormDB(t, source.db)
+	require.NoError(t, gormDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  stakingKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x66),
+		RewardType:  "member",
+		Amount: types.Uint64(
+			1_000_000,
+		), // matches epoch aggregate above, differs from koios's 9999999
+		Spendable: true,
+	}).Error)
+
+	publishEpochTransition(eb, koiosEpoch)
+
+	testutil.WaitForCondition(t, func() bool {
+		return fatalCount.Load() == 1
+	}, 5*time.Second, "strict mode must call FatalFunc on an account-level mismatch")
+}
+
 // TestObserverNonStrictModeContinuesAfterFailure confirms non-strict mode
 // records a failure but keeps validating subsequent epochs, and never calls
 // FatalFunc.
@@ -771,6 +891,184 @@ func TestObserverConcurrentStopCallsDoNotPanic(t *testing.T) {
 	wg.Wait()
 	require.NoError(t, errs[0])
 	require.NoError(t, errs[1])
+}
+
+// TestObserverStartSeedsBacklogForMissingAccountCoverage is the
+// observer-backlog-seeding regression test for the account-coverage-blind
+// epoch-selection bug found in review of #3097: an epoch whose pool data and
+// check status are already fine (fresh koios_epoch_info, a fresh persisted
+// PASS) but whose koios_account_coverage row is entirely absent — the
+// realistic state a Dingo deployment upgrading from a pre-#3097 koios-parity
+// attach would be in — must still be added to Start's seeded backlog purely
+// because its account coverage is missing, independent of whatever
+// GetEpochsNeedingCheck/GetUncachedEpochs already decided about it.
+//
+// Before the fix, Start's backlog seeding only consulted
+// GetEpochsNeedingCheck (pool/aggregate staleness) and GetUncachedEpochs
+// (pool presence); neither would ever select this epoch, so
+// o.pending would stay empty for it and it would never be (re)checked —
+// the stale pool-only PASS would persist forever with zero per-account
+// validation ever attempted, even with ObserverConfig.AccountsEnabled true.
+func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	const koiosEpoch = uint64(5)
+	const stakeEpoch = koiosEpoch - 1
+
+	stakingKey := testPoolKeyHash(t, 0x77)
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+
+	// Zero pools/epoch reference data served -- the pool side is never
+	// requested at all (see the epochInfoCalls/totalsCalls-equivalent
+	// reasoning in TestFetchBackfillsAccountsForPreExistingCache): the epoch
+	// is already cached, so fetchPoolsIfNeeded's own GetUncachedEpochs check
+	// skips it, and only the account-fetch endpoints below are ever hit.
+	srv := newFakeKoiosServer(
+		t,
+		map[uint64]*fakeEpochRef{},
+		fakeKoiosAccountFixtures{
+			addresses: []string{addr},
+			rewardsByEpoch: map[uint64][]KoiosAccountRewardHistoryItem{
+				koiosEpoch: {{
+					StakeAddress: addr,
+					EarnedEpoch:  koiosEpoch,
+					Amount:       "1000000",
+					Type:         "member",
+				}},
+			},
+		},
+	)
+	withTestKoiosBaseURL(t, srv.URL)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        koiosEpoch,
+		ActiveStake:  "1000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Treasury:  "10",
+		Reserves:  "20",
+		Fees:      "30",
+		Reward:    "1",
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:       "preview",
+		Epoch:         koiosEpoch,
+		LastCheckedAt: fetchedAt.Add(time.Minute),
+		Status:        StatusPass,
+	}))
+	// Epochs 0..koiosEpoch-1 must look fully settled (fetched, checked PASS,
+	// AND complete account coverage) so Start's OTHER backlog sources
+	// (GetUncachedEpochs' full-range scan, GetEpochsNeedingCheck's ordinary
+	// staleness check) don't also enqueue them — this test isolates the one
+	// new seeding path under test (missing account coverage alone) from the
+	// pre-existing "epoch never fetched at all" backlog case, which every
+	// other Observer test already covers.
+	for e := range koiosEpoch {
+		require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+			Network:      "preview",
+			Epoch:        e,
+			ActiveStake:  "1",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		}, nil, &KoiosTotals{
+			Treasury:  "1",
+			Reserves:  "1",
+			Fees:      "1",
+			Reward:    "1",
+			FetchedAt: fetchedAt,
+		}))
+		require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+			Network:       "preview",
+			Epoch:         e,
+			LastCheckedAt: fetchedAt.Add(time.Minute),
+			Status:        StatusPass,
+		}))
+		require.NoError(
+			t,
+			cache.CommitAccountRewardsForEpoch(
+				"preview",
+				e,
+				nil,
+				0,
+				true,
+				fetchedAt,
+			),
+		)
+	}
+	require.NoError(t, cache.Close())
+
+	// Dingo-side committed state matching the fake Koios fixtures above, so
+	// a genuine re-check (not just an acct_coverage_incomplete error) can
+	// pass -- proof this is a real re-validation, not merely detecting the
+	// absence of coverage.
+	seedDingoEpochAggregate(t, source, koiosEpoch, 1_000_000, 10, 20, 30)
+	gormDB := sourceGormDB(t, source.db)
+	require.NoError(t, gormDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  stakingKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x88),
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   true,
+	}).Error)
+	// Push Dingo's own "current epoch" past koiosEpoch so Start's
+	// GetLatestEpoch-derived throughEpoch bound (latest-1) includes it.
+	require.NoError(
+		t,
+		gormDB.Create(
+			&models.EpochSummary{Epoch: koiosEpoch + 1, SnapshotReady: true},
+		).Error,
+	)
+
+	results := make(chan *EpochCompareResult, 4)
+	o, err := NewObserver(ObserverConfig{
+		Network:            "preview",
+		CachePath:          cachePath,
+		Source:             source,
+		Strict:             false,
+		AccountsEnabled:    true,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 3,
+		FetchRetryDelay:    5 * time.Millisecond,
+		OnResult:           func(r *EpochCompareResult) { results <- r },
+	})
+	require.NoError(t, err)
+	defer func() { _ = o.Stop(context.Background()) }()
+
+	require.NoError(t, o.Start(context.Background()))
+
+	result := testutil.RequireReceive(
+		t,
+		results,
+		5*time.Second,
+		"epoch 5 should be picked up from Start's backlog purely due to missing account coverage",
+	)
+	require.Equal(t, koiosEpoch, result.Epoch)
+	require.Equal(
+		t,
+		StatusPass,
+		result.Status,
+		"a genuine re-validation (not the stale pool-only PASS) should now include a real per-account comparison and pass",
+	)
+
+	cov, err := o.cache.GetAccountCoverage("preview", koiosEpoch)
+	require.NoError(t, err)
+	require.True(
+		t,
+		cov.Complete,
+		"the account backfill triggered by Start's backlog seeding must have completed",
+	)
 }
 
 // TestObserverFetchIfNeededRetriesTransientThenSucceeds is a focused unit

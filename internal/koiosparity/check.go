@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -35,6 +36,15 @@ type CheckConfig struct {
 	FromEpoch    uint64 // 0 = all unchecked/stale
 	ThroughEpoch uint64 // 0 = no upper bound
 	GraceHours   int    // pools/epochs missing from Dingo within this window → reference_lag, not FAIL
+	// AccountsEnabled runs #3097's per-account exact-parity comparison phase
+	// (CompareAccountEpoch) alongside the existing epoch-aggregate/pool
+	// phases, consulting koios_account_rewards/koios_account_coverage —
+	// which only ever get populated when the corresponding fetch phase was
+	// also run with accounts enabled (see FetchConfig.AccountsEnabled). False
+	// by default for the standalone CLI (opt-in: per-account checking issues
+	// far more Koios requests than pool-level checking); see
+	// ObserverConfig.AccountsEnabled for the in-process default.
+	AccountsEnabled bool
 }
 
 // CheckResult summarises a completed check run.
@@ -112,7 +122,7 @@ func Check(
 	if cfg.All {
 		epochs, err = cache.GetAllFetchedEpochs(cfg.Network)
 	} else {
-		epochs, err = cache.GetEpochsNeedingCheck(cfg.Network)
+		epochs, err = cache.GetEpochsNeedingCheck(cfg.Network, cfg.AccountsEnabled)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get epochs to check: %w", err)
@@ -160,7 +170,7 @@ func Check(
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				res, checkErr := checkEpoch(ctx, cache, dingo, cfg.Network, epoch, cfg.GraceHours, logger)
+				res, checkErr := checkEpoch(ctx, cache, dingo, cfg.Network, epoch, cfg.GraceHours, cfg.AccountsEnabled, logger)
 				if checkErr != nil {
 					select {
 					case errCh <- fmt.Errorf("epoch %d: %w", epoch, checkErr):
@@ -236,12 +246,22 @@ func CheckEpoch(
 	network string,
 	epoch uint64,
 	graceHours int,
+	accountsEnabled bool,
 	logger *slog.Logger,
 ) (*EpochCompareResult, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return checkEpoch(ctx, cache, source, network, epoch, graceHours, logger)
+	return checkEpoch(
+		ctx,
+		cache,
+		source,
+		network,
+		epoch,
+		graceHours,
+		accountsEnabled,
+		logger,
+	)
 }
 
 // koiosStakeEpoch returns the Dingo epoch whose reward_pool_input/
@@ -311,6 +331,7 @@ func checkEpoch(
 	network string,
 	epoch uint64,
 	graceHours int,
+	accountsEnabled bool,
 	logger *slog.Logger,
 ) (*EpochCompareResult, error) {
 	now := time.Now()
@@ -531,6 +552,31 @@ func checkEpoch(
 		}
 	}
 
+	// 5. Per-account exact parity (#3097) — opt-in (accountsEnabled), and
+	// only for epochs with a valid stake epoch (mirrors the pool-comparison
+	// phases above; PreStaking epochs never reach here at all, so
+	// hasStakeEpoch is always true in practice — see koiosStakeEpoch's doc
+	// comment). Gated behind the account-coverage completeness check so an
+	// interrupted or not-yet-run account fetch can never be silently treated
+	// as "nothing to compare" — see KoiosAccountCoverage's doc comment.
+	if accountsEnabled && hasStakeEpoch {
+		allMismatches = append(
+			allMismatches,
+			compareEpochAccounts(
+				ctx,
+				cache,
+				dingo,
+				network,
+				epoch,
+				stakeEpoch,
+				now,
+				graceHours,
+				epochEndTime,
+				logger,
+			)...,
+		)
+	}
+
 	status := DetermineStatus(allMismatches)
 
 	if err := cache.InsertMismatches(allMismatches); err != nil {
@@ -571,4 +617,123 @@ func checkEpoch(
 		OnlyDingo:      onlyDingo,
 		OnlyKoios:      onlyKoios,
 	}, nil
+}
+
+// compareEpochAccounts runs #3097's per-account exact-parity comparison for
+// one epoch: it first consults KoiosAccountCoverage to make sure a complete
+// Koios account-reward fetch actually exists for this epoch (never treating
+// an absent/incomplete coverage row as "nothing to compare" — see
+// CategoryAcctCoverageIncomplete's doc comment), then loads both sides and
+// delegates the actual comparison to CompareAccountEpoch.
+//
+// stakeEpoch is the Dingo epoch reward_account_output rows for Koios
+// reporting epoch `epoch` actually live under — the same koiosStakeEpoch
+// (K-1) offset reward_pool_output already uses, since both are written from
+// app.epochs.snapshot in the same ledger/reward_calculation.go call (see
+// koiosStakeEpoch's doc comment and ARCHITECTURE.md's Epoch alignment
+// section).
+func compareEpochAccounts(
+	ctx context.Context,
+	cache *Cache,
+	dingo RewardParitySource,
+	network string,
+	epoch, stakeEpoch uint64,
+	now time.Time,
+	graceHours int,
+	epochEndTime time.Time,
+	logger *slog.Logger,
+) []CheckMismatch {
+	coverage, covErr := cache.GetAccountCoverage(network, epoch)
+	if covErr != nil || coverage == nil || !coverage.Complete {
+		detail := "no account fetch has been attempted for this epoch"
+		if covErr == nil && coverage != nil {
+			detail = fmt.Sprintf(
+				"account fetch incomplete: requested=%d fetched=%d",
+				coverage.RequestedCount,
+				coverage.FetchedCount,
+			)
+		}
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "koios_account_coverage",
+			DingoValue: "",
+			KoiosValue: detail,
+			Category:   CategoryAcctCoverageIncomplete,
+			CheckedAt:  now,
+		}}
+	}
+
+	koiosRows, err := cache.GetAccountRewardsForEpoch(network, epoch)
+	if err != nil {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "koios_account_rewards",
+			DingoValue: "",
+			KoiosValue: fmt.Sprintf("error: %v", err),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}
+	}
+
+	dingoOutputs, err := dingo.GetRewardAccountOutputs(ctx, stakeEpoch)
+	if err != nil {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "reward_account_output",
+			DingoValue: fmt.Sprintf("error: %v", err),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}
+	}
+
+	var out []CheckMismatch
+	dingoRows := make([]DingoAccountReward, 0, len(dingoOutputs))
+	for _, row := range dingoOutputs {
+		addr, addrErr := StakeAddressFromCredential(
+			row.StakingKey,
+			row.CredentialTag,
+		)
+		if addrErr != nil {
+			logger.Warn(
+				"koiosparity: failed to decode reward_account_output credential",
+				"epoch",
+				stakeEpoch,
+				"error",
+				addrErr,
+			)
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "account_reward_address_decode",
+				DingoValue: fmt.Sprintf("error: %v", addrErr),
+				KoiosValue: "",
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+			continue
+		}
+		dingoRows = append(dingoRows, DingoAccountReward{
+			StakeAddress: addr,
+			RewardType:   row.RewardType,
+			Amount:       strconv.FormatUint(uint64(row.Amount), 10),
+		})
+	}
+
+	out = append(
+		out,
+		CompareAccountEpoch(
+			network,
+			epoch,
+			koiosRows,
+			dingoRows,
+			now,
+			graceHours,
+			epochEndTime,
+		)...,
+	)
+	return out
 }
