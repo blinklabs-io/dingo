@@ -156,8 +156,13 @@ func BenchmarkBlockDecodeConcurrentDirect(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
+			// testing.TB's FailNow/Fatal family must only be called from the
+			// goroutine running the benchmark, not from a RunParallel worker
+			// goroutine (it would only runtime.Goexit that one goroutine,
+			// not reliably fail the benchmark). Error/Errorf are safe from
+			// any goroutine.
 			if _, err := o.decodeBlockfetchBlock(blockType, raw); err != nil {
-				b.Fatalf("decode: %v", err)
+				b.Errorf("decode: %v", err)
 			}
 		}
 	})
@@ -188,7 +193,7 @@ func BenchmarkBlockDecodeConcurrentCacheAllUnique(b *testing.B) {
 			key[2] ^= byte(n >> 16)
 			key[3] ^= byte(n >> 24)
 			if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
-				b.Fatalf("decode: %v", err)
+				b.Errorf("decode: %v", err)
 			}
 		}
 	})
@@ -254,8 +259,10 @@ func BenchmarkHeaderDecodeConcurrentDirect(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
+			// See BenchmarkBlockDecodeConcurrentDirect on why Errorf, not
+			// Fatalf, is required inside a RunParallel worker goroutine.
 			if _, err := o.decodeChainsyncHeader(headerType, raw); err != nil {
-				b.Fatalf("decode: %v", err)
+				b.Errorf("decode: %v", err)
 			}
 		}
 	})
@@ -280,7 +287,7 @@ func BenchmarkHeaderDecodeConcurrentCacheAllUnique(b *testing.B) {
 			key[2] ^= byte(n >> 16)
 			key[3] ^= byte(n >> 24)
 			if _, err, _ := o.headerDecodeCache.getOrDecode(key, decodeFn); err != nil {
-				b.Fatalf("decode: %v", err)
+				b.Errorf("decode: %v", err)
 			}
 		}
 	})

@@ -192,6 +192,47 @@ func TestDecodeCachePrunesExpiredEntries(t *testing.T) {
 	require.Zero(t, decodeCacheLen(c), "expired entry must be pruned")
 }
 
+// TestDecodeCacheExpiredEntryIsNotServedOnLookup is the regression test for
+// a real gap found in code review: eviction was entirely insertion-
+// triggered (evictLocked only ever ran from finishDecode, i.e. on a genuine
+// miss completing), so a key that keeps getting hit -- with no other key
+// ever decoded again in the meantime -- would never have its own age
+// re-checked and could be served from cache long past decodeCacheTTL. This
+// inserts an already-expired entry directly (bypassing getOrDecode, the
+// same way TestDecodeCachePrunesExpiredEntries does) and confirms a lookup
+// for that exact key detects the expiry itself, discards the stale entry,
+// and falls through to a genuine fresh decode instead of returning the
+// past-TTL cached value.
+func TestDecodeCacheExpiredEntryIsNotServedOnLookup(t *testing.T) {
+	c := newDecodeCache[int]()
+	key := decodeCacheKey{0x09}
+	decodeCacheInsertForTest(
+		c, key, 111, time.Now().Add(-decodeCacheTTL-time.Second),
+	)
+	require.Equal(t, 1, decodeCacheLen(c))
+
+	decodeFn, calls := countingDecoder(222, nil, 0)
+	value, err, decoded := c.getOrDecode(key, decodeFn)
+	require.NoError(t, err)
+	require.True(
+		t, decoded,
+		"a lookup past the entry's TTL must be a genuine decode, not a hit",
+	)
+	require.Equal(
+		t, 222, value,
+		"the stale cached value must not be returned once past its TTL",
+	)
+	require.EqualValues(t, 1, calls.Load())
+
+	// The fresh decode is now the current cached entry: a second lookup
+	// immediately afterward must be a normal hit again.
+	value, err, decoded = c.getOrDecode(key, decodeFn)
+	require.NoError(t, err)
+	require.False(t, decoded)
+	require.Equal(t, 222, value)
+	require.EqualValues(t, 1, calls.Load())
+}
+
 // TestDecodeCachePrunesBySizeWhenOverCapacity checks the other cleanup
 // rule: if the cache gets too full, it removes the oldest entries to make
 // room, instead of growing without limit.

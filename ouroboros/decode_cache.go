@@ -143,8 +143,18 @@ func (c *decodeCache[T]) getOrDecode(
 ) (value T, err error, decoded bool) {
 	c.mu.Lock()
 	if entry, ok := c.entries[key]; ok {
-		c.mu.Unlock()
-		return entry.value, entry.err, false
+		if time.Since(entry.insertedAt) < decodeCacheTTL {
+			c.mu.Unlock()
+			return entry.value, entry.err, false
+		}
+		// Past its TTL: eviction is otherwise insertion-triggered (only
+		// evictLocked, called from finishDecode, ever prunes), so a hot key
+		// that keeps getting hit with no other key ever decoded again would
+		// otherwise never re-evaluate its own age and could be served
+		// indefinitely. Remove it here and fall through as a genuine miss,
+		// so the documented TTL holds on the read path too, not only when
+		// some unrelated key's insert happens to trigger a sweep.
+		c.removeLocked(key)
 	}
 	if waiters, claimed := c.inFlight[key]; claimed {
 		// Buffered so finishDecode's send never blocks on a waiter that
@@ -249,6 +259,28 @@ func (c *decodeCache[T]) finishDecode(key decodeCacheKey, value T, err error) {
 	result := decodeCacheResult[T]{value: value, err: err}
 	for _, ch := range waiters {
 		ch <- result
+	}
+}
+
+// removeLocked deletes key from both entries and order together, keeping
+// them in lockstep -- evictLocked assumes every order node has a matching
+// entries row and stops pruning entirely the first time that is not true
+// (see its "!ok" check), so any removal outside evictLocked's own
+// pop-from-front loop must remove from both sides, never just one.
+//
+// This is only ever reached from getOrDecode's TTL-on-lookup check, an
+// intentionally rare path (an expired hit resets that one key, not a
+// sweep), so the O(n) scan for key's position -- there is no per-entry
+// element pointer to remove in O(1), unlike evictLocked's own front-only
+// access -- is an acceptable cost bounded by decodeCacheMaxEntries. The
+// caller must hold mu.
+func (c *decodeCache[T]) removeLocked(key decodeCacheKey) {
+	delete(c.entries, key)
+	for e := c.order.Front(); e != nil; e = e.Next() {
+		if e.Value.(decodeCacheKey) == key { //nolint:forcetypeassert
+			c.order.Remove(e)
+			return
+		}
 	}
 }
 
