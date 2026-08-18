@@ -1399,6 +1399,13 @@ func (n *Node) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to construct ouroboros: %w", err)
 	}
+	// The Leios managers were started earlier in Run, before this instance
+	// existed, so their handlers are attached here rather than at their own
+	// construction. reinitializeNetworkingCore does the same after its
+	// rebuild.
+	if err := n.attachLeiosHandlers(ouro); err != nil {
+		return err
+	}
 	n.ouroborosRef.Store(ouro)
 	// The asynchronous Leios endorser-block persistence writer, the EventBus
 	// subscriptions ouroboros makes on its own behalf, and its Prometheus

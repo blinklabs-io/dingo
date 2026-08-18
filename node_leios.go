@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -229,9 +230,11 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		return fmt.Errorf("start leios vote manager: %w", err)
 	}
 	n.leiosVoteManager = mgr
-	if err := n.ouroboros().SetLeiosVotes(mgr); err != nil {
-		return fmt.Errorf("wire leios vote manager: %w", err)
-	}
+	// Deliberately not wired into ouroboros here. Run initializes the Leios
+	// managers before it constructs Ouroboros, so reaching for the instance
+	// at this point dereferences a nil pointer. attachLeiosHandlers installs
+	// them once an instance exists, on both the startup and live-restore
+	// paths.
 	// Captured (not discarded) so quiesceForLiveLifecycleOp can unsubscribe
 	// this handler before a live database restore/truncate rebuilds
 	// leiosVoteManager and calls initLeiosVoteManager again -- the
@@ -292,9 +295,8 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 		return fmt.Errorf("start leios pipeline manager: %w", err)
 	}
 	n.leiosPipelineManager = mgr
-	if err := n.ouroboros().SetLeiosPipeline(mgr); err != nil {
-		return fmt.Errorf("wire leios pipeline manager: %w", err)
-	}
+	// See initLeiosVoteManager: attachLeiosHandlers does the wiring, once an
+	// Ouroboros instance exists.
 	return nil
 }
 
@@ -345,5 +347,33 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 		"component", "node",
 		"pool_id", poolID.String(),
 	)
+	return nil
+}
+
+// attachLeiosHandlers installs the optional Leios prototype handlers onto an
+// Ouroboros instance.
+//
+// They are not OuroborosConfig fields because their managers start on their
+// own path, which runs before Ouroboros is constructed during startup and
+// again before Ouroboros is replaced during a live restore. Both paths call
+// this immediately after they have an instance, which is the only safe point:
+// earlier there is nothing to wire, and later protocol traffic could already
+// be arriving unhandled.
+//
+// A nil manager means Leios is disabled, and is skipped rather than an error.
+func (n *Node) attachLeiosHandlers(o *ouroborosPkg.Ouroboros) error {
+	if o == nil {
+		return errors.New("cannot attach leios handlers: ouroboros is nil")
+	}
+	if n.leiosVoteManager != nil {
+		if err := o.SetLeiosVotes(n.leiosVoteManager); err != nil {
+			return fmt.Errorf("wire leios vote manager: %w", err)
+		}
+	}
+	if n.leiosPipelineManager != nil {
+		if err := o.SetLeiosPipeline(n.leiosPipelineManager); err != nil {
+			return fmt.Errorf("wire leios pipeline manager: %w", err)
+		}
+	}
 	return nil
 }

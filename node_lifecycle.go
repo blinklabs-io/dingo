@@ -1042,25 +1042,12 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to reconstruct ouroboros: %w", err)
 	}
-	// Carry the optional Leios prototype handlers across. They are not part
-	// of OuroborosConfig because their managers start on their own path, and
-	// that path (reinitializeBackgroundManagers) already ran earlier in this
-	// restore -- so it set them on the instance being replaced here. Without
-	// this, a live restore on a Dijkstra node silently loses Leios vote and
-	// pipeline handling.
-	if n.leiosVoteManager != nil {
-		if err := rebuiltOuroboros.SetLeiosVotes(
-			n.leiosVoteManager,
-		); err != nil {
-			return fmt.Errorf("failed to rewire leios votes: %w", err)
-		}
-	}
-	if n.leiosPipelineManager != nil {
-		if err := rebuiltOuroboros.SetLeiosPipeline(
-			n.leiosPipelineManager,
-		); err != nil {
-			return fmt.Errorf("failed to rewire leios pipeline: %w", err)
-		}
+	// Carry the optional Leios prototype handlers across. Their managers were
+	// rebuilt earlier in this restore, by reinitializeBackgroundManagers, so
+	// without this the replacement instance would silently lose Leios vote
+	// and pipeline handling. Same call Run makes after its construction.
+	if err := n.attachLeiosHandlers(rebuiltOuroboros); err != nil {
+		return err
 	}
 	n.ouroborosRef.Store(rebuiltOuroboros)
 	// Re-register the chainsync resync handler: Close took the previous

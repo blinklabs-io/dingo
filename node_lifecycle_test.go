@@ -364,6 +364,25 @@ func lifecycleSnapshot(
 // points at the new db/ledgerState rather than the closed ones, and (c)
 // leave n.ctx alone, so the node's normal shutdown signalling is
 // unaffected by having gone through a live truncate.
+// TestInitLeiosManagersDoNotRequireOuroboros pins the startup ordering. Run
+// initializes the Leios managers well before it constructs Ouroboros, so the
+// init path must not reach for the instance: doing so dereferences a nil
+// pointer and panics before the node ever finishes starting. The handlers are
+// attached separately, once the instance exists, by attachLeiosHandlers.
+func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 2)
+	// Exactly the state Run is in when it reaches the Leios init calls.
+	n.ouroborosRef.Store(nil)
+	require.Nil(t, n.ouroboros())
+
+	require.NotPanics(t, func() {
+		require.NoError(t, n.initLeiosVoteManager(t.Context()))
+		require.NoError(t, n.initLeiosPipelineManager(t.Context()))
+	})
+	require.NotNil(t, n.leiosVoteManager)
+	require.NotNil(t, n.leiosPipelineManager)
+}
+
 // TestLiveLifecycleRebuildPreservesLeiosHandlers pins a regression that the
 // storage-rebuild assertions cannot see. The Leios vote and pipeline handlers
 // are not part of OuroborosConfig -- their managers start on a separate path
