@@ -129,10 +129,14 @@ type EventBus struct {
 	asyncWg    sync.WaitGroup
 	stopCh     chan struct{}
 	closed     bool
-	stopped    bool
-	stopSeq    uint64
-	stopMu     sync.RWMutex
-	stopOpMu   sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
+	// terminalClosing is set before Close begins quiescing the bus. Callback
+	// dispatchers use it to discard events already buffered in their channels;
+	// Stop remains reusable and does not discard buffered callback events.
+	terminalClosing atomic.Bool
+	stopped         bool
+	stopSeq         uint64
+	stopMu          sync.RWMutex
+	stopOpMu        sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
 }
 
 // NewEventBus creates a new EventBus with async worker pool
@@ -566,6 +570,9 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 		for {
 			evt, ok := <-evtCh
 			if !ok {
+				return
+			}
+			if e.terminalClosing.Load() {
 				return
 			}
 			e.safeHandlerCall(handlerFunc, evt)
@@ -1004,6 +1011,9 @@ func (e *EventBus) shutdown(restart bool) {
 	// duplicate worker pools when called concurrently
 	e.stopOpMu.Lock()
 	defer e.stopOpMu.Unlock()
+	if !restart {
+		e.terminalClosing.Store(true)
+	}
 
 	// Signal quiesce before taking stopMu for write. Publishers park on a
 	// full subscriber buffer or a full async queue while holding stopMu for
