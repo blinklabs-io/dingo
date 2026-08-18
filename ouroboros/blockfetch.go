@@ -135,19 +135,42 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 }
 
 // blockfetchClientBlockRaw decodes the raw fetched block (via
-// decodeBlockfetchBlock) and forwards the decoded block to the shared block
-// handler.
+// decodeBlockfetchBlock, through the shared decode cache) and forwards the
+// decoded block to the shared block handler.
+//
+// Multiple connections routinely deliver byte-identical block bytes around
+// the same time (several peers relaying the same freshly-produced block), so
+// the decode is keyed by content hash and shared across connections: the
+// first connection to submit a given block's bytes decodes it, and every
+// other connection submitting the identical bytes -- concurrently or
+// afterward -- reuses that result instead of redoing the parse. See #489.
 func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	blockData []byte,
 ) error {
-	block, err := o.decodeBlockfetchBlock(blockType, blockData)
+	key := hashDecodeInput(blockType, blockData)
+	block, err, decoded := o.blockDecodeCache.getOrDecode(
+		key,
+		func() (gledger.Block, error) {
+			return o.decodeBlockfetchBlock(blockType, blockData)
+		},
+	)
+	o.recordBlockDecodeCacheOutcome(decoded)
 	if err != nil {
 		return fmt.Errorf(
 			"decode block-fetch block (block type %d): %w",
 			blockType,
 			err,
+		)
+	}
+	if block == nil {
+		// decodeCache's contract is (nil value, non-nil err) on failure, but
+		// that is a convention on decodeFn, not something the generic cache
+		// itself enforces -- guard explicitly rather than trust it silently.
+		return fmt.Errorf(
+			"decode block-fetch block (block type %d): decoded nil block with no error",
+			blockType,
 		)
 	}
 	return o.blockfetchClientBlock(ctx, blockType, block)

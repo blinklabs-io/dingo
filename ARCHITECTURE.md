@@ -2284,6 +2284,51 @@ The `Ouroboros` struct (`ouroboros/ouroboros.go`) manages all protocol handlers:
     -------------------------------------------
 ```
 
+### Shared Block/Header Decode Cache
+
+Several peer connections routinely deliver byte-identical block or header
+bytes within a short window of each other (multiple peers relaying the same
+freshly-produced block), so `Ouroboros` holds two shared, content-hash-keyed
+caches (`blockDecodeCache`, `headerDecodeCache`, `ouroboros/decode_cache.go`)
+that `blockfetchClientBlockRaw` and `chainsyncClientRollForwardRaw` check
+before calling `decodeBlockfetchBlock`/`decodeChainsyncHeader`. The key is a
+hash of `(blockType, raw bytes)`, not the chain point: two connections
+delivering identical bytes always share one decode and one cache entry, while
+two connections delivering *different* bytes for what is nominally "the same
+block" (corruption, tampering, a buggy peer) hash to different keys and are
+decoded, cached, and reported on completely independently, so a bad delivery
+from one peer can never contaminate the answer another peer's good delivery
+produces.
+
+Concurrent callers submitting the same key at nearly the same instant share
+one decode rather than each doing the work: the first caller claims the
+key and runs the decode with the cache lock released (so concurrent decodes
+for different keys never serialize against each other); every other caller
+registers a wait channel and is woken with the identical result once the
+decode finishes, whether it succeeded or failed. A failed decode is cached
+the same as a successful one, bounded by the same TTL/size eviction — since
+decoding is a pure function of its input bytes, a cached failure is simply a
+correct remembered fact ("these bytes do not decode"), not a permanent
+poison. This mirrors the existing `leiosEndorserBlocks` cache's bounded,
+waiter-channel design (see Leios CertRB Serving below), applied to ordinary
+block/header decoding rather than Leios EB closures.
+
+A decode function that panics (adversarial/malformed peer bytes could in
+principle trigger this) does not strand the key: `getOrDecode` recovers the
+panic just long enough to record it as an ordinary cached failure and wake
+every waiter, then re-raises it, so the decoding goroutine's own
+crash-or-recover behavior is unchanged but no other connection is left
+permanently blocked on that key, and a later identical delivery fails fast
+from cache instead of panicking again.
+
+A waiting caller's decode outcome is delivered directly through its wait
+channel rather than by re-reading the shared entry map after waking: the
+entry it is waiting on can be evicted by unrelated churn (many other keys
+being inserted, past `decodeCacheMaxEntries`) in the window between "the
+decode finishes" and "a descheduled waiter resumes," so re-reading the map
+at that point could silently hand back a zero-value/nil "success" instead of
+the real outcome.
+
 ### Connection Management
 
 The `ConnectionManager` (`connmanager/connection_manager.go`) handles connection lifecycle:

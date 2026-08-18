@@ -1447,22 +1447,44 @@ func (o *Ouroboros) decodeChainsyncHeader(
 }
 
 // chainsyncClientRollForwardRaw decodes the raw header itself (via
-// decodeChainsyncHeader) and forwards the decoded header to the shared
-// RollForward handler. dingo takes the raw callback so it can apply the
-// Musashi-scoped Conway-with-Leios-header decode; using the decoded callback
-// would let gouroboros' strict decode fail before dingo can intervene.
+// decodeChainsyncHeader, through the shared decode cache) and forwards the
+// decoded header to the shared RollForward handler. dingo takes the raw
+// callback so it can apply the Musashi-scoped Conway-with-Leios-header
+// decode; using the decoded callback would let gouroboros' strict decode fail
+// before dingo can intervene.
+//
+// Every chainsync-connected peer delivers a header for each new point at
+// roughly the same time, so -- like blockfetchClientBlockRaw -- the decode is
+// keyed by content hash and shared across connections instead of repeated
+// once per connection. See #489.
 func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
 	blockData []byte,
 	tip ochainsync.Tip,
 ) error {
-	header, err := o.decodeChainsyncHeader(blockType, blockData)
+	key := hashDecodeInput(blockType, blockData)
+	header, err, decoded := o.headerDecodeCache.getOrDecode(
+		key,
+		func() (gledger.BlockHeader, error) {
+			return o.decodeChainsyncHeader(blockType, blockData)
+		},
+	)
+	o.recordHeaderDecodeCacheOutcome(decoded)
 	if err != nil {
 		return fmt.Errorf(
 			"decode chain-sync header (block type %d): %w",
 			blockType,
 			err,
+		)
+	}
+	if header == nil {
+		// decodeCache's contract is (nil value, non-nil err) on failure, but
+		// that is a convention on decodeFn, not something the generic cache
+		// itself enforces -- guard explicitly rather than trust it silently.
+		return fmt.Errorf(
+			"decode chain-sync header (block type %d): decoded nil header with no error",
+			blockType,
 		)
 	}
 	return o.chainsyncClientRollForward(ctx, blockType, header, tip)
