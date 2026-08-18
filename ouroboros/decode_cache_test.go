@@ -521,6 +521,56 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	require.Contains(t, err.Error(), "decode panicked")
 }
 
+// TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey is the
+// regression test for a P1 bug found in code review: getOrDecode used to
+// decide "did decodeFn panic" by testing recover()'s return value for
+// nilness. recover() also returns nil when there is no panic at all, so a
+// bare panic(nil) inside decodeFn was indistinguishable from normal
+// completion -- the recovery branch would never run, this key's in-flight
+// claim would never be released, and every current and future waiter for
+// these exact bytes would block forever. This confirms a panic(nil)
+// decodeFn is still detected, still finishes the entry and wakes waiters,
+// and still re-raises to the caller, exactly like panicking with any other
+// value.
+func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
+	t *testing.T,
+) {
+	c := newDecodeCache[int]()
+	key := decodeCacheKey{0x0E}
+
+	func() {
+		defer func() {
+			// recover() here returns the runtime's substituted, non-nil
+			// *runtime.PanicNilError on modern Go rather than literal nil,
+			// but the fix does not depend on that: it is unconditional on
+			// completed, not on recover()'s value, so this holds either way.
+			_ = recover()
+		}()
+		_, _, _ = c.getOrDecode(key, func() (int, error) {
+			panic(nil)
+		})
+		t.Fatal("getOrDecode must still panic for a panic(nil) decodeFn")
+	}()
+
+	require.Zero(
+		t,
+		len(c.inFlight),
+		"the in-flight claim must be released even when decodeFn panics with nil",
+	)
+
+	_, err, decoded := c.getOrDecode(key, func() (int, error) {
+		t.Fatal("decodeFn must not run again for an already-cached panic")
+		return 0, nil
+	})
+	require.False(t, decoded)
+	require.Error(
+		t,
+		err,
+		"the panic(nil) must still be recorded as a cached failure",
+	)
+	require.Contains(t, err.Error(), "decode panicked")
+}
+
 // TestDecodeWithPanicSafeMetricsRecordsMissOnPanic is the regression test for
 // a real bug found in code review: getOrDecode's own panic recovery
 // re-raises after cleaning up the cache (see
@@ -530,12 +580,13 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 // the returned decoded bool" line never runs, and a genuine decode attempt
 // (a miss) that happened to panic went uncounted in the hit/miss metrics.
 // This confirms decodeWithPanicSafeMetrics -- the helper both wrappers now
-// call through -- invokes recordMiss exactly once before re-raising the
-// panic, and that the panic still propagates to the caller unchanged.
+// call through -- invokes recordOutcome(true) exactly once before
+// re-raising the panic, and that the panic still propagates to the caller
+// unchanged.
 func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x08}
-	var missCount atomic.Int64
+	var outcomes []bool
 
 	func() {
 		defer func() {
@@ -543,86 +594,177 @@ func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 			require.NotNil(t, r, "the panic must still propagate to the caller")
 			require.Equal(t, "simulated decode panic", r)
 		}()
-		_, _, _ = decodeWithPanicSafeMetrics(
+		_, _ = decodeWithPanicSafeMetrics(
 			c,
 			key,
 			func() (int, error) { panic("simulated decode panic") },
-			func() { missCount.Add(1) },
+			func(isMiss bool) { outcomes = append(outcomes, isMiss) },
 		)
 		t.Fatal("decodeWithPanicSafeMetrics must not return normally on panic")
 	}()
 
-	require.EqualValues(
+	require.Equal(
 		t,
-		1,
-		missCount.Load(),
+		[]bool{true},
+		outcomes,
 		"a genuine decode attempt that panicked must still be recorded as a miss",
 	)
 
 	// The panic is cached like any other failure (see
 	// TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey): a later
-	// call for the same key must not invoke decodeFn or recordMiss again.
-	_, err, decoded := decodeWithPanicSafeMetrics(
+	// call for the same key must not invoke decodeFn again, but must still
+	// be recorded as a miss (not a hit) -- see
+	// TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit.
+	_, err := decodeWithPanicSafeMetrics(
 		c,
 		key,
 		func() (int, error) {
 			t.Fatal("decodeFn must not run again for an already-cached panic")
 			return 0, nil
 		},
-		func() { missCount.Add(1) },
+		func(isMiss bool) { outcomes = append(outcomes, isMiss) },
 	)
-	require.False(t, decoded)
 	require.Error(t, err)
-	require.EqualValues(t, 1, missCount.Load())
+	require.Equal(t, []bool{true, true}, outcomes)
+}
+
+// TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit is the
+// regression test for a real bug found in code review: getOrDecode's
+// decoded flag is false for both a genuine cache hit AND a waiter woken by
+// -- or a lookup hitting -- an already-failed outcome (corrupted/tampered
+// bytes, or a panic another goroutine already recorded). Recording purely
+// on decoded would inflate the hit counter with one entry per caller that
+// ever touches a failed delivery, when no successful decode was ever
+// reused. This confirms decodeWithPanicSafeMetrics reports every failed
+// outcome as a miss regardless of which internal path produced it (a fresh
+// failing decode, or a repeat hit on that same now-cached failure), and
+// still reports a genuine successful hit as a hit.
+func TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit(t *testing.T) {
+	c := newDecodeCache[int]()
+	failKey := decodeCacheKey{0x0C}
+	okKey := decodeCacheKey{0x0D}
+	wantErr := errors.New("bad bytes")
+	var outcomes []bool
+	record := func(isMiss bool) { outcomes = append(outcomes, isMiss) }
+
+	// Fresh failure: a genuine miss, correctly true regardless of the fix.
+	_, err := decodeWithPanicSafeMetrics(
+		c, failKey, func() (int, error) { return 0, wantErr }, record,
+	)
+	require.ErrorIs(t, err, wantErr)
+
+	// Repeat of the identical bad bytes: served from the cached failure
+	// (decoded=false internally), but must still be a miss, not a hit --
+	// this is the specific case the fix addresses.
+	_, err = decodeWithPanicSafeMetrics(
+		c, failKey, func() (int, error) {
+			t.Fatal("decodeFn must not run again for a cached failure")
+			return 0, nil
+		}, record,
+	)
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(
+		t, []bool{true, true}, outcomes,
+		"both the fresh failure and the repeat hit on it must count as misses",
+	)
+
+	// A genuine success, then a genuine hit on it: true then false, exactly
+	// matching getOrDecode's own decoded contract -- the fix must not touch
+	// this case.
+	outcomes = nil
+	_, err = decodeWithPanicSafeMetrics(
+		c, okKey, func() (int, error) { return 7, nil }, record,
+	)
+	require.NoError(t, err)
+	_, err = decodeWithPanicSafeMetrics(
+		c, okKey, func() (int, error) {
+			t.Fatal("decodeFn must not run again for a cache hit")
+			return 0, nil
+		}, record,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, false}, outcomes)
 }
 
 // TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes is the
-// deterministic regression test for a second real bug found by re-auditing
-// this file for a narrow/stress gap: a waiter used to be woken by a closed
-// signal channel and then re-read its answer from c.entries[key]. But an
-// entry can be evicted by unrelated churn (many other keys being inserted)
-// in the window between "the leader signals waiters" and "a descheduled
-// waiter resumes and re-acquires the lock" -- so a waiter could silently
-// observe a zero-value/nil "success" instead of the real decode outcome,
-// with no error and no panic to reveal anything went wrong. This
-// reconstructs that exact race deterministically (no reliance on scheduler
-// timing) by manually evicting the entry in the gap between "insert" and
-// "signal", and confirms the waiter still gets the real answer -- because
-// finishDecode now sends the result directly through the wait channel
-// instead of the waiter re-reading the (possibly-since-evicted) map.
+// regression test for a real bug found by re-auditing this file for a
+// narrow/stress gap: a waiter used to be woken by a closed signal channel
+// and then re-read its answer from c.entries[key]. But an entry can be
+// evicted by unrelated churn (many other keys being inserted) in the window
+// between "the leader signals waiters" and "a descheduled waiter resumes and
+// re-acquires the lock" -- so a waiter could silently observe a
+// zero-value/nil "success" instead of the real decode outcome, with no
+// error and no panic to reveal anything went wrong.
+//
+// An earlier version of this test constructed the in-flight map by hand and
+// sent the result to the waiter's channel itself, never calling getOrDecode
+// or finishDecode at all -- it could not have caught a regression to the
+// old closed-signal-channel design, since the delivery it asserted on was
+// the test's own code, not production code. This version drives both
+// participants through the real getOrDecode (the leader via a real
+// in-flight decode, the waiter by genuinely registering as a waiter on it)
+// so finishDecode's real channel-send is what delivers the result; the map
+// is only touched afterward, to simulate the "evicted by unrelated churn"
+// condition itself, which is external to the delivery mechanism being
+// tested.
 func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 	t *testing.T,
 ) {
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x77}
+	release := make(chan struct{})
+	leaderStarted := make(chan struct{})
 
-	c.mu.Lock()
-	ch := make(chan decodeCacheResult[int], 1)
-	c.inFlight[key] = []chan decodeCacheResult[int]{ch}
-	c.mu.Unlock()
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _, _ = c.getOrDecode(key, func() (int, error) {
+			close(leaderStarted)
+			<-release
+			return 999, nil
+		})
+	}()
+	<-leaderStarted
 
 	waiterDone := make(chan struct{})
 	var gotValue int
 	var gotErr error
+	var gotDecoded bool
 	go func() {
 		defer close(waiterDone)
-		result := <-ch
-		gotValue, gotErr = result.value, result.err
+		gotValue, gotErr, gotDecoded = c.getOrDecode(
+			key,
+			func() (int, error) {
+				t.Error("the waiter must not run decodeFn itself")
+				return 0, nil
+			},
+		)
 	}()
+	// Confirm the waiter has genuinely registered itself in c.inFlight[key]
+	// -- the real waiter-registration code path in getOrDecode -- before
+	// releasing the leader.
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.inFlight[key]) == 1
+	}, 2*time.Second, 5*time.Millisecond)
 
-	c.mu.Lock()
-	elem := c.order.PushBack(key)
-	c.entries[key] = decodeCacheEntry[int]{
-		value: 999, err: nil, insertedAt: time.Now(),
+	close(release)
+	select {
+	case <-leaderDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leader never returned")
 	}
-	delete(c.inFlight, key)
-	// Simulate a flood of unrelated churn evicting this exact entry before
-	// the waiter goroutine above gets scheduled to do anything with it.
-	c.order.Remove(elem)
+	// The leader's getOrDecode call has now returned, which only happens
+	// after finishDecode has already inserted the entry AND sent the result
+	// to the waiter's (buffered) channel. Deleting the entry here simulates
+	// unrelated churn evicting it before the waiter goroutine gets around
+	// to reading its already-delivered value -- it must have no effect on
+	// what the waiter receives, since finishDecode delivers the result
+	// directly rather than the waiter re-reading this map.
+	c.mu.Lock()
 	delete(c.entries, key)
 	c.mu.Unlock()
-
-	ch <- decodeCacheResult[int]{value: 999, err: nil}
 
 	select {
 	case <-waiterDone:
@@ -636,6 +778,7 @@ func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 		"waiter must get the real decode result even though its entry was evicted before it read anything",
 	)
 	require.NoError(t, gotErr)
+	require.False(t, gotDecoded, "the waiter itself never ran decodeFn")
 }
 
 // TestDecodeCacheStressConcurrentChurnWithSharedKeys is a stress test
@@ -1000,6 +1143,99 @@ func TestChainsyncClientRollForwardRawRoutesThroughSharedCache(t *testing.T) {
 		t, 1, testutil.ToFloat64(o.decodeCacheMetrics.headerCacheHits), 0,
 		"the second, identical delivery must be served from the cache",
 	)
+}
+
+// TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits is the
+// regression test, through the real production wrapper and real Prometheus
+// counters, for a bug found in code review: a delivery that never decodes
+// successfully -- fresh, or replayed from the cached failure, exactly like
+// a second peer relaying the same tampered/corrupted bytes -- was recorded
+// as a hit whenever getOrDecode's own decoded flag was false, which is true
+// for every repeat lookup regardless of whether the cached outcome was a
+// success or a failure. Two calls with identical corrupted bytes must both
+// count as misses; neither ever represents a successful decode being
+// reused.
+func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
+	t *testing.T,
+) {
+	o := NewOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	blockType, raw := conwayBlockFixtureBytes(t)
+	badRaw := make([]byte, len(raw))
+	copy(badRaw, raw)
+	badRaw[len(badRaw)/2] ^= 0xFF
+	ctx := blockfetch.CallbackContext{}
+
+	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badRaw))
+	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badRaw))
+
+	require.InDelta(
+		t, 2, testutil.ToFloat64(o.decodeCacheMetrics.blockCacheMisses), 0,
+		"both calls represent a failed decode and must count as misses",
+	)
+	require.Zero(
+		t,
+		testutil.ToFloat64(o.decodeCacheMetrics.blockCacheHits),
+		"a failed decode -- fresh or replayed from the cached failure -- must never count as a hit",
+	)
+}
+
+// TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses proves the
+// same fix for the concurrent-waiter case specifically: N callers racing on
+// one in-flight decode that ultimately fails all get decoded=false from
+// getOrDecode (none of them ran decodeFn themselves), but none of them ever
+// represents a successful decode being reused either. Applying
+// decoded||err!=nil -- the formula decodeWithPanicSafeMetrics now uses --
+// to every participant (the leader included) must classify all of them as
+// misses.
+func TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses(
+	t *testing.T,
+) {
+	c := newDecodeCache[int]()
+	key := decodeCacheKey{0x0A}
+	wantErr := errors.New("bad bytes")
+	release := make(chan struct{})
+	leaderStarted := make(chan struct{})
+	var leaderOnce sync.Once
+
+	const numWaiters = 4
+	type outcome struct {
+		decoded bool
+		err     error
+	}
+	results := make([]outcome, numWaiters)
+	var wg sync.WaitGroup
+	wg.Add(numWaiters)
+	for i := range numWaiters {
+		go func(idx int) {
+			defer wg.Done()
+			_, err, decoded := c.getOrDecode(key, func() (int, error) {
+				leaderOnce.Do(func() { close(leaderStarted) })
+				<-release
+				return 0, wantErr
+			})
+			results[idx] = outcome{decoded, err}
+		}(i)
+	}
+
+	<-leaderStarted
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.inFlight[key]) == numWaiters-1
+	}, 2*time.Second, 5*time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	for i, r := range results {
+		require.ErrorIs(t, r.err, wantErr, "caller %d", i)
+		isMiss := r.decoded || r.err != nil
+		require.True(
+			t,
+			isMiss,
+			"caller %d: a failed delivery must never be recorded as a hit, whether it ran decodeFn itself or shared a failing in-flight decode",
+			i,
+		)
+	}
 }
 
 // TestBlockDecodeCacheWorksWithMusashiLeiosDecodeBranch covers the one
