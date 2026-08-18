@@ -374,6 +374,21 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 	if depth == 0 {
 		depth = kes.CardanoKesDepth
 	}
+	// Shelley fixes the KES tree depth, so any other value is either a
+	// misconfigured agent or a hostile one. Rejecting it here bounds the work
+	// the agent can make this node do: the vkey derivation below walks the
+	// whole tree, so an arbitrarily deep key would be arbitrarily expensive to
+	// reject, and a key at any other depth could not produce Shelley-valid
+	// signatures even if it were installed.
+	if depth != kes.CardanoKesDepth {
+		c.logger.Error(
+			"ignoring KES key push: unsupported key depth",
+			"depth", depth,
+			"want", kes.CardanoKesDepth,
+		)
+		wipe(kp.KESSignKey)
+		return
+	}
 	// Validate the key's layout before it can reach kes.Sign. A short or
 	// malformed buffer indexes out of range while deriving the public key, so
 	// the size check has to come first.

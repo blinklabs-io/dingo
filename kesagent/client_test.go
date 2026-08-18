@@ -20,8 +20,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -744,4 +746,92 @@ func TestServeKeyRejectsExpiredPush(t *testing.T) {
 	if client.HasKey() {
 		t.Fatal("expired KES key push was installed")
 	}
+}
+
+// TestServeKeyRejectsUnsupportedDepth covers a push claiming a KES tree depth
+// other than Shelley's. Such a key cannot produce Shelley-valid signatures, and
+// without the depth rule the push is only refused after kes.PublicKey has
+// walked an agent-controlled tree depth to derive the key — unbounded work
+// driven by the peer.
+//
+// The assertion is on the rejection *reason*, not just that the key was
+// refused: the vkey cross-check further down would reject this push either way,
+// so anything weaker passes with or without the depth rule.
+func TestServeKeyRejectsUnsupportedDepth(t *testing.T) {
+	const start = uint64(0)
+	vkey, master, opcert := newTestKES(t, start)
+
+	var logBuf bytes.Buffer
+	var logMu sync.Mutex
+	logger := slog.New(slog.NewTextHandler(&syncWriter{mu: &logMu, w: &logBuf}, nil))
+
+	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
+		// A deeper tree, with a buffer sized consistently for it so the layout
+		// check passes and only the depth rule can reject it.
+		deep := uint64(kes.CardanoKesDepth) + 4
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     3,
+			Depth:      deep,
+			KESSignKey: make([]byte, secretKeySize(deep)),
+			KESVKey:    vkey,
+		})
+		good, err := evolveClone(master, 1)
+		if err != nil {
+			return
+		}
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: good.Data,
+			KESVKey:    vkey,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	})
+
+	client, err := New(Config{
+		SocketPath: agent.socket(),
+		Mode:       ModeServeKey,
+		OpCert:     opcert,
+		Logger:     logger,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	// The rejected push claims the later period, so had it been installed the
+	// legitimate push below would have been refused as moving backward.
+	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+
+	logMu.Lock()
+	logged := logBuf.String()
+	logMu.Unlock()
+	if !strings.Contains(logged, "unsupported key depth") {
+		t.Fatalf("depth was not rejected on the depth rule; log was:\n%s", logged)
+	}
+
+	msg := []byte("after unsupported-depth push")
+	sig, err := client.KESSign(1, msg)
+	if err != nil {
+		t.Fatalf("sign with the accepted key: %v", err)
+	}
+	if !kes.VerifySignedKES(vkey, 1, msg, sig) {
+		t.Fatal("a key at an unsupported depth was installed")
+	}
+}
+
+// syncWriter serializes writes from the client's background goroutine against
+// the test goroutine's read of the buffer.
+type syncWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
