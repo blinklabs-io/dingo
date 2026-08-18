@@ -56,6 +56,21 @@ func startQueuedBlockfetchForTest(
 	return ls.startQueuedBlockfetchLocked(connId, pending)
 }
 
+func startQueuedBlockfetchWithWaitSignalForTest(
+	ls *LedgerState,
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+	waitStarted chan<- struct{},
+) error {
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	return ls.startQueuedBlockfetchLockedWithWaitSignal(
+		connId,
+		pending,
+		waitStarted,
+	)
+}
+
 func restartQueuedBlockfetchAfterForkForTest(
 	ls *LedgerState,
 	connId ouroboros.ConnectionId,
@@ -145,6 +160,7 @@ func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
 	}))
 	connId := testChainsyncConnId(6113, 3001)
 	requestStarted := make(chan struct{})
+	waitStarted := make(chan struct{})
 	requestDone := make(chan struct{})
 	ls := &LedgerState{
 		chain: testChain,
@@ -166,13 +182,24 @@ func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
 
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- startQueuedBlockfetchForTest(ls, connId, nil)
+		startDone <- startQueuedBlockfetchWithWaitSignalForTest(
+			ls,
+			connId,
+			nil,
+			waitStarted,
+		)
 	}()
 	select {
 	case <-requestStarted:
 		t.Fatal("reused connection before prior blockfetch request drained")
-	case <-time.After(50 * time.Millisecond):
+	case <-waitStarted:
 	}
+	testutil.RequireNoReceive(
+		t,
+		requestStarted,
+		50*time.Millisecond,
+		"blockfetch request started before prior request drained",
+	)
 
 	ls.chainsyncBlockfetchMutex.Lock()
 	delete(ls.blockfetchRequestsInFlight, connIdKey(connId))

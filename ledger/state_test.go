@@ -4409,12 +4409,12 @@ func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
 	assert.Contains(t, err.Error(), "block-processing pipeline")
 }
 
-// TestCloseReturnsErrorWhenBlockfetchContinuationsDoNotDrainInTime verifies
-// that Close does not hold the continuation scheduling mutex while waiting
-// for a worker that may need the blockfetch subscriber to finish its request.
-func TestCloseReturnsErrorWhenBlockfetchContinuationsDoNotDrainInTime(t *testing.T) {
+// TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting verifies that
+// Close releases the continuation scheduling mutex before waiting for a worker
+// that needs the same mutex to finish.
+func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	origTimeout := CloseBlockfetchDrainTimeout
-	CloseBlockfetchDrainTimeout = 10 * time.Millisecond
+	CloseBlockfetchDrainTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { CloseBlockfetchDrainTimeout = origTimeout })
 
 	ls := &LedgerState{
@@ -4422,12 +4422,53 @@ func TestCloseReturnsErrorWhenBlockfetchContinuationsDoNotDrainInTime(t *testing
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	ls.blockfetchContinuationWG.Add(1)
-	t.Cleanup(ls.blockfetchContinuationWG.Done)
+	ls.blockfetchContinuationMu.Lock()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			ls.blockfetchContinuationMu.Unlock()
+		}
+	})
+	workerStarted := make(chan struct{})
+	workerDone := make(chan struct{})
+	ls.blockfetchContinuationWG.Go(func() {
+		close(workerStarted)
+		ls.blockfetchContinuationMu.Lock()
+		ls.blockfetchContinuationMu.Unlock()
+		close(workerDone)
+	})
+	testutil.RequireReceive(
+		t,
+		workerStarted,
+		time.Second,
+		"blockfetch continuation worker did not start",
+	)
 
-	err := ls.Close()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "blockfetch continuations")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ls.Close() }()
+	require.Eventually(
+		t,
+		ls.closed.Load,
+		time.Second,
+		time.Millisecond,
+		"Close did not begin before releasing continuation mutex",
+	)
+	ls.blockfetchContinuationMu.Unlock()
+	released = true
+
+	err := testutil.RequireReceive(
+		t,
+		closeDone,
+		time.Second,
+		"Close did not finish after the continuation worker drained",
+	)
+	require.NoError(t, err)
+	testutil.RequireReceive(
+		t,
+		workerDone,
+		time.Second,
+		"blockfetch continuation worker did not drain",
+	)
 }
 
 // TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive

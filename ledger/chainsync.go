@@ -3206,6 +3206,16 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	connId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) error {
+	return ls.startQueuedBlockfetchLockedWithWaitSignal(connId, pending, nil)
+}
+
+// startQueuedBlockfetchLockedWithWaitSignal is the same scheduling path with
+// an optional test synchronization signal for the prior-request drain.
+func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+	waitStarted chan<- struct{},
+) error {
 	// The caller owns chainsyncBlockfetchMutex. Keep the reservation and
 	// timeout state under that lock, but never hold it across the network
 	// request below. BlockFetch delivers blocks from its protocol receive
@@ -3220,7 +3230,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	// The lock is temporarily released around each external request and is
 	// reacquired before any state is inspected or changed. Callers still own
 	// the lock when this function returns.
-	if err := ls.waitForBlockfetchRequestLocked(connId); err != nil {
+	if err := ls.waitForBlockfetchRequestLockedWithSignal(connId, waitStarted); err != nil {
 		return err
 	}
 	if ls.chain.HeaderCount() == 0 {
@@ -5114,8 +5124,9 @@ func (ls *LedgerState) armBlockfetchTimeoutLocked(
 //
 // The caller owns chainsyncBlockfetchMutex. This function returns with it
 // locked, including after the bounded wait expires.
-func (ls *LedgerState) waitForBlockfetchRequestLocked(
+func (ls *LedgerState) waitForBlockfetchRequestLockedWithSignal(
 	connId ouroboros.ConnectionId,
+	waitStarted chan<- struct{},
 ) error {
 	key := connIdKey(connId)
 	if key == "" {
@@ -5127,6 +5138,10 @@ func (ls *LedgerState) waitForBlockfetchRequestLocked(
 			return nil
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
+		if waitStarted != nil {
+			close(waitStarted)
+			waitStarted = nil
+		}
 		timer := time.NewTimer(blockfetchBusyTimeout)
 		select {
 		case <-requestDone:

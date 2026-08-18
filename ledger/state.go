@@ -1665,15 +1665,11 @@ func (ls *LedgerState) Close() error {
 	// after this synchronization point. Do not hold the mutex across Wait: the
 	// blockfetch subscriber may need it while completing the request that lets a
 	// worker return.
+	continuationSchedulingDone := make(chan struct{})
 	ls.blockfetchContinuationMu.Lock()
-	continuationSchedulingClosed := ls.closed.Load()
+	close(continuationSchedulingDone)
 	ls.blockfetchContinuationMu.Unlock()
-	if !continuationSchedulingClosed {
-		err = errors.Join(
-			err,
-			errors.New("ledger closed state was cleared during continuation drain"),
-		)
-	}
+	<-continuationSchedulingDone
 	blockfetchContinuationsDone := make(chan struct{})
 	go func() {
 		ls.blockfetchContinuationWG.Wait()
