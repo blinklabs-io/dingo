@@ -3232,6 +3232,9 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	ls.blockfetchRequestGeneration++
+	primaryRequestGeneration := ls.blockfetchRequestGeneration
+	ls.blockfetchPrimaryRequestGeneration = primaryRequestGeneration
 	ls.armBlockfetchTimeoutLocked(connId)
 	batchReadyChan := ls.chainsyncBlockfetchReadyChan
 	ls.chainsyncBlockfetchMutex.Unlock()
@@ -3241,6 +3244,9 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		headerEnd,
 	); err != nil {
 		ls.chainsyncBlockfetchMutex.Lock()
+		if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
+			ls.blockfetchPrimaryRequestGeneration = 0
+		}
 		// A blockfetch callback may have completed this batch, or a
 		// callback may have started its continuation, while the request
 		// was outside the lock. In either case the request error is stale
@@ -3269,6 +3275,9 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		return err
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
+	if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
+		ls.blockfetchPrimaryRequestGeneration = 0
+	}
 	// The request can synchronously release a completed batch before it
 	// returns (for example when a peer answers with an immediate empty
 	// response). Do not dispatch shadow work for a batch that no longer
@@ -3334,10 +3343,20 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 					sameConnectionId(shadowConn, connId) {
 					continue
 				}
+				if ls.blockfetchShadowRequestsInFlight != nil {
+					if _, inFlight := ls.blockfetchShadowRequestsInFlight[connIdKey(shadowConn)]; inFlight {
+						continue
+					}
+				}
 				// Publish the shadow owner before releasing the mutex so an
 				// immediately returned block is accepted by the blockfetch
 				// handler. Restore it if the request itself fails.
 				ls.shadowBlockfetchConnId = shadowConn
+				if ls.blockfetchShadowRequestsInFlight == nil {
+					ls.blockfetchShadowRequestsInFlight = make(map[string]struct{})
+				}
+				shadowConnKey := connIdKey(shadowConn)
+				ls.blockfetchShadowRequestsInFlight[shadowConnKey] = struct{}{}
 				ls.chainsyncBlockfetchMutex.Unlock()
 				err := ls.config.BlockfetchRequestRangeFunc(
 					shadowConn,
@@ -3345,6 +3364,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 					headerEnd,
 				)
 				ls.chainsyncBlockfetchMutex.Lock()
+				delete(ls.blockfetchShadowRequestsInFlight, shadowConnKey)
 				if ls.chainsyncBlockfetchReadyChan != batchReadyChan {
 					return nil
 				}
@@ -5120,6 +5140,19 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 	currentConnId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) {
+	if ls.blockfetchPrimaryRequestGeneration != 0 {
+		// The protocol request is still blocked outside the ledger mutex. Do
+		// not issue a duplicate range request while it is in flight; the
+		// original request may still deliver a valid response. Keep the
+		// watchdog alive so a later timeout can reassess the same request.
+		ls.config.Logger.Debug(
+			"blockfetch request still in flight at timeout; waiting for it to return",
+			"component", "ledger",
+			"connection_id", currentConnId.String(),
+		)
+		ls.armBlockfetchTimeoutLocked(currentConnId)
+		return
+	}
 	headerCount := ls.chain.HeaderCount()
 	if headerCount == 0 {
 		ls.blockfetchRequestRangeCleanup()

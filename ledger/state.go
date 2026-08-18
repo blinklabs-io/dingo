@@ -669,7 +669,14 @@ type LedgerState struct {
 	chainsyncBlockfetchReadyChan  chan struct{}
 	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
 	shadowBlockfetchConnId        ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
-	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// blockfetchPrimaryRequestGeneration identifies the currently running
+	// primary request. A timeout may fire while the request is blocked in the
+	// protocol client; keeping its generation lets the timeout wait instead of
+	// issuing a duplicate request on the same batch.
+	blockfetchRequestGeneration        uint64
+	blockfetchPrimaryRequestGeneration uint64
+	blockfetchShadowRequestsInFlight   map[string]struct{}
+	selectedBlockfetchConnId           ouroboros.ConnectionId // latest selected chainsync connection for the next batch
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
