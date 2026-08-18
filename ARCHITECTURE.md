@@ -866,7 +866,8 @@ Phase 1: Stop accepting new work
   Blockfrost API, Mesh API, off-chain metadata fetcher
 
 Phase 2: Drain and close connections
-  Mempool, terminal EventBus close, ConnectionManager
+  Mempool, terminal EventBus close (concurrent with ConnectionManager),
+  ConnectionManager
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -875,12 +876,15 @@ Phase 4: Cleanup resources
   Registered shutdown functions
 ```
 
-The terminal EventBus close occurs after mempool teardown but before
-`ConnectionManager.Stop`. Lossless event delivery can backpressure a network
-protocol callback on a full ledger subscriber; closing the bus at this point
-releases those publishers before connection shutdown waits for their callback
-goroutines. The node context is already cancelled, and later component
-teardown treats the already-closed bus as idempotent.
+The terminal EventBus close occurs after mempool teardown and runs concurrently
+with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
+network protocol callback on a full ledger subscriber, while a blockfetch
+continuation can wait for a batch completion event that connection shutdown
+releases; starting both operations together breaks that dependency cycle. The
+node context is already cancelled, and later component teardown treats the
+already-closed bus as idempotent. `EventBus.Close` discards queued in-memory
+events after waiting for in-flight handlers; ordinary `Unsubscribe` and
+reusable `EventBus.Stop` preserve queued events.
 
 ## Event-Driven Communication
 
@@ -986,6 +990,15 @@ All event types follow the `subsystem.snake_case_name` convention.
   `TestChainsyncResyncPublishPathsUnderLock` in
   `ledger/publish_under_lock_test.go`. Register the flush with `defer`
   *before* taking the lock so LIFO order runs it last.
+- `ledger` also must not invoke an external `BlockfetchRequestRangeFunc` while
+  holding `chainsyncBlockfetchMutex`. The blockfetch client can wait in
+  `acquireBusy` for the previous request's receive callback to return, while
+  that callback is publishing `ledger.blockfetch` and its subscriber is
+  waiting for the ledger mutex. `startQueuedBlockfetchLocked` reserves the
+  batch and arms its timer under the mutex, releases the mutex for the primary
+  and shadow requests, then reacquires it before inspecting state. If a
+  callback completed or replaced the batch while the request was outside the
+  lock, the stale request result is ignored.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into
@@ -4483,6 +4496,22 @@ The `EventBus` implements publisher/subscriber communication, decoupling compone
 ### Worker Pool Pattern
 
 Database operations and event delivery use worker pools for controlled concurrency and backpressure.
+
+During shutdown, EventBus closes release backpressured publishers and discard
+events still queued in in-memory subscribers. It still waits for a handler
+that is already executing, but does not replay bulk-sync blockfetch backlog
+into ledger or storage components that are being closed.
+
+The ledger blockfetch subscriber must not synchronously start the next
+`GetBlockRange` from its `ledger.blockfetch` handler: the request completes
+only after the peer's `BatchDone` is delivered through that same EventBus
+subscription. Batch continuation requests therefore run on tracked workers;
+the blockfetch state mutex protects the handoff and shutdown drains those
+workers before unsubscribing the ledger. A connection must not be reused for a
+new batch while an older request on that connection is still draining, because
+blockfetch callbacks carry only the connection ID; reuse waits for the older
+request to return and fails boundedly if it remains wedged. Close also bounds
+the continuation drain without holding the scheduling mutex while waiting.
 
 ## Threading and Concurrency
 
