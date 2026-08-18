@@ -357,13 +357,6 @@ func lifecycleSnapshot(
 	)
 }
 
-// TestLiveTruncateRebuildsStorageAndKeepsNodeUsable is the core Phase 2
-// verification: truncating a real, multi-block chain on an already-running
-// node's live objects must (a) actually remove the truncated blocks and
-// fix up the tip, (b) rebuild every storage-dependent subsystem so it
-// points at the new db/ledgerState rather than the closed ones, and (c)
-// leave n.ctx alone, so the node's normal shutdown signalling is
-// unaffected by having gone through a live truncate.
 // TestInitLeiosManagersDoNotRequireOuroboros pins the startup ordering. Run
 // initializes the Leios managers well before it constructs Ouroboros, so the
 // init path must not reach for the instance: doing so dereferences a nil
@@ -419,6 +412,13 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 	require.Same(t, pipeline, n.ouroboros().LeiosPipeline())
 }
 
+// TestLiveTruncateRebuildsStorageAndKeepsNodeUsable is the core Phase 2
+// verification: truncating a real, multi-block chain on an already-running
+// node's live objects must (a) actually remove the truncated blocks and
+// fix up the tip, (b) rebuild every storage-dependent subsystem so it
+// points at the new db/ledgerState rather than the closed ones, and (c)
+// leave n.ctx alone, so the node's normal shutdown signalling is
+// unaffected by having gone through a live truncate.
 func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
