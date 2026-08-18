@@ -2858,6 +2858,11 @@ When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState
 
 VRF signing keys, KES signing keys, and operational certificates are loaded from files at startup. The `keystore` package handles platform-specific file permission checks (Unix file modes, Windows ACLs) and KES key evolution.
 
+VRF and KES secret-key loads check permissions on the open file handle and
+reject group/other access on Unix or insecure DACL grants on Windows before
+reading the key. Operational certificates contain public data and remain
+exempt from the secret-key permission check.
+
 ### Leios Voting (`ledger/leios/`)
 
 Experimental CIP-0164 stake-truncated committee voting, active only under the Dijkstra/Leios gate. `VoteManager` collects, validates, serves, and emits Leios votes:

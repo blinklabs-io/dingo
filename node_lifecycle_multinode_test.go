@@ -202,7 +202,7 @@ func newDevnetForgerNode(
 	ln net.Listener,
 ) *Node {
 	t.Helper()
-	vrfPath, kesPath, opcertPath := devnetCredPaths()
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
 	cfg := NewConfig(
 		WithDatabasePath(t.TempDir()),
 		WithLogger(logger),
