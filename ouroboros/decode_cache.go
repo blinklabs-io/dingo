@@ -180,11 +180,19 @@ func (c *decodeCache[T]) getOrDecode(
 	// submission of the identical bytes fails fast instead of panicking
 	// again -- then re-panic so this goroutine's own crash-or-recover
 	// behavior is unchanged from before this cache existed.
+	//
+	// completed (not recover()'s return value) is what decides whether
+	// decodeFn panicked: recover() returns nil both when there is no panic
+	// in flight AND when the panic value itself is literally nil (e.g. a
+	// bare panic(nil)), so testing "r == nil" alone would mistake that
+	// panic for normal completion and leave this key's claim stuck forever,
+	// stranding every current and future waiter for these bytes.
+	completed := false
 	defer func() {
-		r := recover()
-		if r == nil {
+		if completed {
 			return
 		}
+		r := recover()
 		var panicErr error
 		if asErr, ok := r.(error); ok {
 			panicErr = fmt.Errorf("decode panicked: %w", asErr)
@@ -196,32 +204,53 @@ func (c *decodeCache[T]) getOrDecode(
 	}()
 
 	value, err = decodeFn()
+	completed = true
 	c.finishDecode(key, value, err)
 	return value, err, true
 }
 
-// decodeWithPanicSafeMetrics wraps getOrDecode so a panicking decodeFn still
-// gets its hit/miss outcome recorded. getOrDecode's own panic recovery
-// re-raises after cleaning up the cache (see its doc comment), so this call
-// never returns normally on that path -- the caller's usual
-// "record based on the returned decoded bool" pattern never runs, and a
-// genuine decode attempt (a miss) that happened to panic would silently go
-// uncounted. recordMiss is invoked from a recover here, before the panic is
-// re-raised again, so it always sees exactly the same attempts a
-// non-panicking decodeFn would have reported via decoded=true.
+// decodeWithPanicSafeMetrics wraps getOrDecode and owns recording its
+// hit/miss outcome entirely, covering three cases in one place so a future
+// change to one can't drift out of sync with the others:
+//
+//   - decodeFn panics: getOrDecode's own panic recovery re-raises after
+//     cleaning up the cache (see its doc comment), so this call never
+//     returns normally -- recordOutcome(true) runs from a recover here,
+//     before the panic is re-raised again.
+//   - decodeFn returns an error, or a waiter/cached-hit shares an
+//     already-failed outcome: recordOutcome(true). A failed delivery never
+//     represents an actual decode being successfully reused, whether this
+//     call ran decodeFn itself or reused another caller's failure, so it
+//     must never be counted as a hit -- getOrDecode's own decoded flag
+//     alone would undercount this, since it is false for every hit
+//     (including a hit on a cached failure) and every waiter (including one
+//     woken by a failing in-flight decode).
+//   - a genuine successful decode or hit: recordOutcome(decoded), matching
+//     getOrDecode's own contract exactly.
+//
+// completed, not recover()'s return value, decides whether getOrDecode
+// panicked -- see getOrDecode's own doc comment on why testing "r == nil"
+// alone would mistake a bare panic(nil) for normal completion.
 func decodeWithPanicSafeMetrics[T any](
 	cache *decodeCache[T],
 	key decodeCacheKey,
 	decodeFn func() (T, error),
-	recordMiss func(),
-) (value T, err error, decoded bool) {
+	recordOutcome func(isMiss bool),
+) (value T, err error) {
+	completed := false
 	defer func() {
-		if r := recover(); r != nil {
-			recordMiss()
-			panic(r)
+		if completed {
+			return
 		}
+		r := recover()
+		recordOutcome(true)
+		panic(r)
 	}()
-	return cache.getOrDecode(key, decodeFn)
+	var decoded bool
+	value, err, decoded = cache.getOrDecode(key, decodeFn)
+	completed = true
+	recordOutcome(decoded || err != nil)
+	return value, err
 }
 
 // finishDecode records key's decode outcome, releases its in-flight claim,
