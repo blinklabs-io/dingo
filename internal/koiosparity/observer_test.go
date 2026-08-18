@@ -106,7 +106,20 @@ func newFakeKoiosServer(
 					EpochNo        uint64   `json:"_epoch_no"`
 				}
 				_ = json.NewDecoder(r.Body).Decode(&body)
-				items := acct.rewardsByEpoch[body.EpochNo]
+				requested := make(map[string]bool, len(body.StakeAddresses))
+				for _, a := range body.StakeAddresses {
+					requested[a] = true
+				}
+				// Filter to exactly the requested addresses rather than
+				// always returning every configured address's rewards —
+				// otherwise this fixture could never catch a client bug
+				// that posts the wrong stake-address subset.
+				var items []KoiosAccountRewardHistoryItem
+				for _, item := range acct.rewardsByEpoch[body.EpochNo] {
+					if requested[item.StakeAddress] {
+						items = append(items, item)
+					}
+				}
 				b, _ := json.Marshal(items)
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(b)
@@ -1108,6 +1121,49 @@ func TestObserverFetchIfNeededRetriesTransientThenSucceeds(t *testing.T) {
 		uncached,
 		"epoch 5 should be cached after the retry loop succeeds",
 	)
+}
+
+// TestObserverFetchAccountsIfNeededPropagatesCoverageDBError guards against
+// fetchAccountsIfNeeded conflating a genuine koios_account_coverage query
+// failure with "no fetch attempted yet" (sql.ErrNoRows), which used to fall
+// through silently into the fetch retry loop. Replacing the coverage table
+// with one missing the "complete" column produces a real, non-ErrNoRows
+// error from the SELECT; fetchAccountsIfNeeded must propagate it directly
+// rather than treating it as "needs fetching".
+func TestObserverFetchAccountsIfNeededPropagatesCoverageDBError(t *testing.T) {
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	// No epochs configured — if this ever fell through to the fetch retry
+	// loop instead of propagating the coverage error, every request would
+	// permanently fail Koios-side and produce a different error message.
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{})
+	withTestKoiosBaseURL(t, srv.URL)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:            "preview",
+		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
+		Source:             source,
+		AccountsEnabled:    true,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 5,
+		FetchRetryDelay:    5 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer func() { _ = o.Stop(context.Background()) }()
+
+	_, err = o.cache.db.Exec("DROP TABLE koios_account_coverage")
+	require.NoError(t, err)
+	_, err = o.cache.db.Exec(`CREATE TABLE koios_account_coverage (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+		requested_count INTEGER NOT NULL DEFAULT 0, fetched_count INTEGER NOT NULL DEFAULT 0,
+		fetched_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+
+	err = o.fetchAccountsIfNeeded(context.Background(), 5)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "get account coverage")
 }
 
 // TestObserverFetchIfNeededSurfacesPermanentErrorImmediately confirms a

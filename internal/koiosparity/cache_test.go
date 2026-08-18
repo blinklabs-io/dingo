@@ -157,6 +157,63 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 	require.False(t, cov.Complete)
 }
 
+// TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey proves
+// idx_kar_net_epoch_addr_type's widening from unique to non-unique actually
+// lets CommitAccountRewardsForEpoch insert two rows sharing the exact same
+// (network, epoch, stake_address, reward_type) key without erroring — the
+// real-world case is Koios itself legitimately returning a duplicate
+// /account_reward_history row (see CategoryAcctDuplicate's doc comment), not
+// just two rows with different reward_type values for the same address
+// (already covered by TestCommitAccountRewardsForEpoch). Before the index was
+// widened to non-unique, this insert would have failed with a UNIQUE
+// constraint violation before CompareAccountEpoch ever got a chance to flag
+// the duplicate as acct_duplicate.
+func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []KoiosAccountRewards{
+		{
+			StakeAddress: "stake_test1uqevw2xnsc0pvn9t9r9c7qryan77xqk6etza9dprr8f80qq0e8ptn",
+			RewardType:   "member",
+			Earned:       "1000000",
+			FetchedAt:    now,
+		},
+		{
+			// Literal duplicate: identical (network, epoch, stake_address,
+			// reward_type) key as the row above.
+			StakeAddress: "stake_test1uqevw2xnsc0pvn9t9r9c7qryan77xqk6etza9dprr8f80qq0e8ptn",
+			RewardType:   "member",
+			Earned:       "1000000",
+			FetchedAt:    now,
+		},
+	}
+
+	require.NoError(
+		t,
+		cache.CommitAccountRewardsForEpoch("preview", 100, rows, 1, true, now),
+		"a literal duplicate (network, epoch, stake_address, reward_type) key must not error",
+	)
+
+	got, err := cache.GetAccountRewardsForEpoch("preview", 100)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		got,
+		2,
+		"both duplicate rows must land so CompareAccountEpoch can later flag acct_duplicate",
+	)
+	require.Equal(t, "member", got[0].RewardType)
+	require.Equal(t, "member", got[1].RewardType)
+
+	cov, err := cache.GetAccountCoverage("preview", 100)
+	require.NoError(t, err)
+	require.Equal(t, 2, cov.FetchedCount)
+	require.True(t, cov.Complete)
+}
+
 // TestAccountRewardsAdditiveColumnMigration proves OpenCache migrates an
 // older koios_account_rewards table (missing reward_type/spendable_epoch/
 // pool_id_bech32 — the #1875 schema-only shape) forward without errors or

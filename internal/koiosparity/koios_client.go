@@ -189,15 +189,32 @@ type KoiosClient struct {
 	limiter *burstLimiter
 }
 
-// NewKoiosClient creates a client for the given network.
-func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
-	base, ok := koiosBaseURLs[network]
-	if !ok {
-		return nil, fmt.Errorf(
+// validateKoiosNetwork rejects any network this tool doesn't support
+// (currently "preview"/"preprod" only, via koiosBaseURLs). Called both by
+// NewKoiosClient (the live-fetch path) and by Check/CheckEpoch (the
+// cache-only path, which never constructs a KoiosClient and so would
+// otherwise let an unsupported network — e.g. "mainnet" — reach
+// compareEpochAccounts/StakeAddressFromCredential unvalidated;
+// StakeAddressFromCredential hardcodes the testnet address network ID since
+// preview/preprod are the only networks this tool ever validates against,
+// so an unvalidated "mainnet" would silently generate wrong-network stake
+// addresses instead of erroring).
+func validateKoiosNetwork(network string) error {
+	if _, ok := koiosBaseURLs[network]; !ok {
+		return fmt.Errorf(
 			"unsupported network %q; supported: preview, preprod",
 			network,
 		)
 	}
+	return nil
+}
+
+// NewKoiosClient creates a client for the given network.
+func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
+	if err := validateKoiosNetwork(network); err != nil {
+		return nil, err
+	}
+	base := koiosBaseURLs[network]
 	return &KoiosClient{
 		baseURL: base,
 		apiKey:  apiKey,

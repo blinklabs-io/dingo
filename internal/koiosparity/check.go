@@ -101,6 +101,14 @@ func Check(
 	cfg CheckConfig,
 	logger *slog.Logger,
 ) (*CheckResult, error) {
+	// Check works entirely from the cache and never constructs a
+	// KoiosClient (unlike Fetch), so nothing else validates cfg.Network —
+	// without this, an unsupported network (e.g. "mainnet") would reach
+	// compareEpochAccounts/StakeAddressFromCredential unrejected. See
+	// validateKoiosNetwork's doc comment.
+	if err := validateKoiosNetwork(cfg.Network); err != nil {
+		return nil, err
+	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.NumCPU()
 	}
@@ -252,6 +260,13 @@ func CheckEpoch(
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	// See Check's identical guard: CheckEpoch is a separate public entry
+	// point (used directly by Observer) that likewise never constructs a
+	// KoiosClient, so it needs its own validateKoiosNetwork call rather than
+	// relying on a caller upstream to have already checked network.
+	if err := validateKoiosNetwork(network); err != nil {
+		return nil, err
+	}
 	return checkEpoch(
 		ctx,
 		cache,
@@ -263,6 +278,17 @@ func CheckEpoch(
 		logger,
 	)
 }
+
+// preStakingThroughEpoch is the last Koios reporting epoch that predates a
+// valid "go" stake snapshot (see koiosStakeEpoch's doc comment for the
+// mark/set/go derivation). fetchEpoch commits a PreStaking marker instead of
+// erroring/retrying forever for epoch <= preStakingThroughEpoch;
+// checkEpoch/koiosStakeEpoch/the #3097 account-fetch path
+// (FetchEpochAccountsWithAddrs) all key off this same constant so the
+// pre-staking exclusion stays consistent across every phase — a null
+// active_stake on any epoch above this value is a real, retryable error
+// instead.
+const preStakingThroughEpoch = 1
 
 // koiosStakeEpoch returns the Dingo epoch whose reward_pool_input/
 // reward_pool_output rows and epoch_summary/mark stake distribution actually
@@ -285,12 +311,15 @@ func CheckEpoch(
 // koiosParamEpoch below for the distinct offset reward_pool_input's
 // BlocksProduced/Margin/FixedCost fields need instead.
 //
-// ok is false only for koiosEpoch == 0, which has no valid stake epoch at
-// all (checkEpoch never reaches this for epoch 0 in practice — it's already
-// filtered out by the PreStaking marker fetch commits for epochs 0-1 — but
-// the guard avoids a uint64 underflow if that invariant is ever violated).
+// ok is false for koiosEpoch <= preStakingThroughEpoch (0 and 1), neither of
+// which has a valid stake epoch (checkEpoch never reaches this for those
+// epochs in practice — it's already filtered out by the PreStaking marker
+// fetch commits for epochs 0-1 — but the guard both avoids a uint64
+// underflow for epoch 0 and keeps epoch 1 from being treated as having a
+// real stakeEpoch of 0, which previously let #3097's account-fetch path
+// wastefully run Koios requests for a pre-staking epoch).
 func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
-	if koiosEpoch == 0 {
+	if koiosEpoch <= preStakingThroughEpoch {
 		return 0, false
 	}
 	return koiosEpoch - 1, true
@@ -644,6 +673,20 @@ func compareEpochAccounts(
 	logger *slog.Logger,
 ) []CheckMismatch {
 	coverage, covErr := cache.GetAccountCoverage(network, epoch)
+	// sql.ErrNoRows ("no fetch has been attempted for this epoch yet") is a
+	// legitimate incomplete-coverage state; any other error is a genuine
+	// cache/DB failure and must not be mistaken for "nothing to compare".
+	if covErr != nil && !errors.Is(covErr, sql.ErrNoRows) {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "koios_account_coverage",
+			DingoValue: "",
+			KoiosValue: fmt.Sprintf("error: %v", covErr),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}
+	}
 	if covErr != nil || coverage == nil || !coverage.Complete {
 		detail := "no account fetch has been attempted for this epoch"
 		if covErr == nil && coverage != nil {

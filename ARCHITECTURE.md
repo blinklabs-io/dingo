@@ -3997,7 +3997,17 @@ exists to make possible, so it gets the complete check by default; the
 standalone CLI's `--accounts` flag (`cmd/koios-parity`) stays opt-in-only
 since per-account fetching issues substantially more Koios requests than
 pool-level fetching (one chunked request set covering the full address
-universe per epoch, versus one request per pool).
+universe per epoch, versus one request per pool). The public
+`dingo.KoiosParityConfig.Accounts` field is `*bool`, not `bool` — a plain
+bool's zero value (`false`) would be indistinguishable from an explicit
+opt-out, silently defeating the documented "defaults to true" behavior for
+any caller (including `internal/node`'s own composition) that builds a
+`KoiosParityConfig` without setting it explicitly; `nil` means "apply the
+default," matching `internal/config.DefaultKoiosParityConfig`.
+`cmd/koios-parity`'s own `--accounts`/`KOIOS_PARITY_ACCOUNTS` precedence
+follows CLAUDE.md's CLI > env rule via `cmd.Flags().Changed("accounts")`: an
+explicitly-set `--accounts=false` always wins over the environment variable,
+never the reverse.
 
 - **Account universe.** `BuildAccountAddressUniverse`
   (`fetch_accounts.go`) unions two sources for a given Koios reporting epoch:
@@ -4044,7 +4054,16 @@ universe per epoch, versus one request per pool).
   limiting, and mid-fetch resumable checkpointing across a process restart
   are #3099's scope (see below); a restart simply redoes the whole epoch's
   account fetch from scratch, which is safe (idempotent, same final state)
-  even if not maximally efficient.
+  even if not maximally efficient. A chunk failure — transient or
+  permanent — cancels `FetchAccountRewardsForEpoch`'s own per-epoch
+  `fetchCtx` immediately rather than waiting for/scheduling every remaining
+  chunk: since nothing is ever committed once any chunk has failed, letting
+  the rest of the epoch's chunks run to completion would only waste Koios
+  request budget on results that get discarded. This only cancels the local,
+  per-epoch `fetchCtx`, never the caller's shared multi-epoch context, so an
+  isolated transient chunk failure still just drops that one epoch into
+  `FailedEpochs` for a later retry, the same as an isolated pool-level
+  failure.
 - **Coverage gate.** `koios_account_coverage.complete` must be `true` before
   `compareEpochAccounts` (`check.go`) ever treats `koios_account_rewards` as
   a valid reference set for an epoch; an absent or incomplete coverage row
@@ -4052,7 +4071,23 @@ universe per epoch, versus one request per pool).
   skips the per-account comparison for that epoch entirely — mirroring how a
   missing `koios_totals` row already gates `CompareEpochTotals`. This is the
   invariant #3099's chunking work must never violate: no code path may ever
-  set `complete = true` after a partial fetch.
+  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage`
+  propagates `sql.ErrNoRows` unwrapped for "no fetch attempted yet" — every
+  caller (`compareEpochAccounts`, `Observer.fetchAccountsIfNeeded`) treats
+  that specific error as incomplete coverage, but any other error from the
+  query is a genuine cache/DB failure and is surfaced as `dingo_db_error`
+  (or a propagated error, for the observer) rather than being conflated with
+  "nothing fetched yet."
+- **Pre-staking epochs are excluded from account fetching too.**
+  `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject epoch <= 1,
+  not just epoch == 0, so `FetchEpochAccountsWithAddrs` skips both
+  pre-staking epochs entirely instead of running a real (and meaningless)
+  Koios `/account_reward_history` sweep for epoch 1 against a nonexistent
+  stake epoch. Neither epoch ever gets a `koios_account_coverage` row as a
+  result, so `Cache.GetEpochsMissingAccountCoverage`'s query explicitly
+  filters `k.pre_staking = 0` — without it, epochs 0-1 (which do get a
+  `koios_epoch_info` row via the `pre_staking` marker) would be
+  re-proposed for account backfill on every future `fetch` run forever.
 - **Epoch selection is account-coverage-aware, not just pool/aggregate-aware.**
   `Cache.GetUncachedEpochs` (keyed on `koios_epoch_info` presence) and
   `Cache.GetEpochsNeedingCheck`/`check_epoch_status.last_checked_at` staleness
@@ -4096,11 +4131,27 @@ universe per epoch, versus one request per pool).
   summed). Internal duplicates within either side (the same key appearing
   twice) are reported once per duplicate occurrence as `acct_duplicate`
   before the union walk runs, so a duplicate is never mistaken for or masked
-  by a value disagreement. Amounts are compared via `lovelaceEqual`
-  (`big.Int`, never a float/rational) so #3097's "no rounding, sampling, or
-  tolerance" requirement holds exactly, including a 1-lovelace difference.
-  `graceHours`/`epochEndTime` apply the identical `reference_lag` treatment
-  `ComparePoolEpoch` already uses for a genuinely-too-recent epoch.
+  by a value disagreement. `koios_account_rewards`'s
+  `(network, epoch, stake_address, reward_type)` index
+  (`idx_kar_net_epoch_addr_type`) is deliberately non-unique: Koios can
+  itself return duplicate rows for the same key, and a unique constraint
+  would abort `CommitAccountRewardsForEpoch`'s insert with a constraint
+  error before `CompareAccountEpoch` ever gets the chance to detect and
+  report that duplication as `acct_duplicate`. Amounts are compared via
+  `lovelaceEqual`. Both sides of every amount comparison are parsed and
+  validated as non-negative `big.Int` values before any equality check —
+  including the identical-string case, so two identical malformed or
+  negative amounts never compare equal-by-accident — never a float/rational,
+  so #3097's "no rounding, sampling, or tolerance" requirement holds exactly,
+  including a 1-lovelace difference. `graceHours`/`epochEndTime` apply the
+  identical `reference_lag` treatment `ComparePoolEpoch` already uses for a
+  genuinely-too-recent epoch, symmetrically for both presence-mismatch
+  directions: `acct_only_koios` (Koios has a row Dingo doesn't yet) and
+  `acct_only_dingo` (Dingo has a row Koios hasn't published yet — Koios can
+  lag in publishing `/account_reward_history` for a just-closed epoch the
+  same way it can lag on any other endpoint) both fall back to
+  `reference_lag` within the grace window rather than only the
+  Koios-side direction.
 - **Strict-mode propagation.** An account-level `FAIL` flows through
   `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
   forces `FAIL`, exactly like the pool-level categories) into
@@ -4117,7 +4168,24 @@ universe per epoch, versus one request per pool).
   (the coverage-gate + atomic-commit invariants above already guarantee
   that), but does not need to survive a restart mid-epoch-fetch with a
   resumed cursor — redoing the whole epoch's account fetch from scratch is
-  an acceptable (if not maximally efficient) fallback.
+  an acceptable (if not maximally efficient) fallback. Known limitation:
+  a *fully successful* fetch that happens to run before Koios has actually
+  published `/account_reward_history` for a just-closed epoch (as opposed to
+  a partial/failed fetch) can legitimately return zero rows and still be
+  recorded `complete = true` — the grace-window `reference_lag` treatment
+  above absorbs this for the duration of `--grace-hours`, but nothing
+  currently re-triggers a refetch of that epoch's account coverage once
+  Koios's real data appears after the window closes; #3099's chunking work
+  should address this alongside its other coverage-staleness invariants.
+- **Network validation.** `Check`/`CheckEpoch` never construct a
+  `KoiosClient` (they work entirely from the cache), so unlike `Fetch` they
+  don't get `NewKoiosClient`'s network-allow-list check for free — both call
+  `validateKoiosNetwork` (`koios_client.go`) explicitly. This matters
+  specifically for `StakeAddressFromCredential` (`dingo_db.go`), which
+  hardcodes the Cardano testnet address network ID since preview/preprod are
+  the only networks this tool ever validates against: an unvalidated
+  `network` value reaching `compareEpochAccounts` could otherwise silently
+  generate wrong-network-tagged stake addresses instead of erroring.
 
 ### Bark (`bark/`)
 

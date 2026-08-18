@@ -294,7 +294,17 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 					StakeAddresses []string `json:"_stake_addresses"`
 					EpochNo        uint64   `json:"_epoch_no"`
 				}
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				// require.* must never run inside an HTTP handler
+				// goroutine — a failure calls t.FailNow, valid only on the
+				// goroutine running the test function, which would abort
+				// the handler without writing a response and hang the
+				// client until timeout. Use t.Errorf plus an explicit error
+				// response instead.
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request body: %v", err)
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				var sb strings.Builder
 				sb.WriteByte('[')
 				for i, addr := range body.StakeAddresses {

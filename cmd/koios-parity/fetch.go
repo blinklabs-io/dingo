@@ -28,7 +28,9 @@ func fetchCommand() *cobra.Command {
 		Use:   "fetch",
 		Short: "Pull Koios reference data into the local cache",
 		Long: `Incremental Koios fetch into cache.db. Resumes from last cached epoch + 1.
-Does not contact Dingo. Safe to interrupt and resume.`,
+Does not contact Dingo, unless --accounts is set: #3097's per-account fetch
+phase then opens Dingo's metadata database read-only (see --metadata-plugin/
+--metadata-dsn) to resolve the account universe. Safe to interrupt and resume.`,
 		RunE: fetchRun,
 	}
 

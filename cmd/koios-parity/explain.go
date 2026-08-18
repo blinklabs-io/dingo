@@ -39,6 +39,7 @@ Use --live to re-run the comparison against Dingo's database (requires access to
 	cmd.Flags().
 		Bool("live", false, "re-compare against Dingo DB instead of cached results")
 	cmd.Flags().Bool("json", false, "emit JSON output")
+	addAccountsFlag(cmd)
 	addDingoDBFlags(cmd)
 
 	return cmd
@@ -70,12 +71,13 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 		checkResult, checkErr := koiosparity.Check(
 			cmd.Context(),
 			koiosparity.CheckConfig{
-				Network:      network,
-				DingoDB:      resolveDingoDB(cmd),
-				CachePath:    cachePath,
-				All:          true,
-				FromEpoch:    epoch,
-				ThroughEpoch: epoch,
+				Network:         network,
+				DingoDB:         resolveDingoDB(cmd),
+				CachePath:       cachePath,
+				All:             true,
+				FromEpoch:       epoch,
+				ThroughEpoch:    epoch,
+				AccountsEnabled: accountsEnabled(cmd),
 			},
 			slog.Default(),
 		)

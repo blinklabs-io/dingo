@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -644,6 +645,13 @@ func (o *Observer) fetchAccountsIfNeeded(
 	epoch uint64,
 ) error {
 	cov, covErr := o.cache.GetAccountCoverage(o.cfg.Network, epoch)
+	// sql.ErrNoRows ("no fetch attempted yet") is legitimately incomplete
+	// coverage and falls through to the fetch loop below; any other error is
+	// a genuine cache/DB failure and must propagate rather than being
+	// silently treated as "needs fetching".
+	if covErr != nil && !errors.Is(covErr, sql.ErrNoRows) {
+		return fmt.Errorf("get account coverage: %w", covErr)
+	}
 	if covErr == nil && cov != nil && cov.Complete {
 		return nil
 	}

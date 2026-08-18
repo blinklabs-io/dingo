@@ -62,23 +62,26 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 
 	accounts := accountsEnabled(cmd)
-	var accountsSource koiosparity.RewardParitySource
-	if accounts {
-		// See fetchRun's identical comment: only opened when --accounts is
-		// set, and only ever a direct read-only query, never an HTTP call to
-		// Dingo's own API.
-		dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
-		if dingoErr != nil {
-			return fmt.Errorf(
-				"open dingo db (required for --accounts): %w",
-				dingoErr,
-			)
-		}
-		defer dingo.Close() //nolint:errcheck
-		accountsSource = dingo
-	}
 
 	if !skipFetch {
+		var accountsSource koiosparity.RewardParitySource
+		if accounts {
+			// See fetchRun's identical comment: only opened when --accounts
+			// is set, and only ever a direct read-only query, never an HTTP
+			// call to Dingo's own API. Scoped to the fetch phase itself (not
+			// opened at all for a report-only run with both phases skipped)
+			// — the check phase below opens its own DingoDB when it runs.
+			dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
+			if dingoErr != nil {
+				return fmt.Errorf(
+					"open dingo db (required for --accounts): %w",
+					dingoErr,
+				)
+			}
+			defer dingo.Close() //nolint:errcheck
+			accountsSource = dingo
+		}
+
 		slog.Info("koios-parity: fetch phase starting", "network", network)
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 			Network:         network,

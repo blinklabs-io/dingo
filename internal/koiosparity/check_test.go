@@ -632,6 +632,94 @@ func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
 	require.True(t, found, "expected a CategoryAcctCoverageIncomplete mismatch")
 }
 
+// TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage guards
+// against compareEpochAccounts treating a genuine koios_account_coverage
+// query failure (e.g. a corrupted cache) the same as "no account fetch has
+// been attempted yet" (sql.ErrNoRows). Replacing the table with one missing
+// the "requested_count" column produces a real, non-ErrNoRows error from
+// GetAccountCoverage's own SELECT — unlike a dropped table (which Check's own
+// OpenCache call would silently recreate via "CREATE TABLE IF NOT EXISTS",
+// a no-op once a table of that name already exists — the same reason
+// TestAccountRewardsAdditiveColumnMigration builds its pre-migration table
+// directly rather than relying on OpenCache) — while leaving
+// GetEpochsNeedingCheck's own join (which never selects requested_count)
+// unaffected, so this epoch is still selected for checking in the first
+// place. This must surface as an explicit CategoryDBError
+// ("koios_account_coverage" / dingo_db_error), not the
+// CategoryAcctCoverageIncomplete this same field can also report for the
+// legitimate "not fetched yet" case (see
+// TestCheckAccountsCoverageIncompleteIsError).
+func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
+	t *testing.T,
+) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{Network: network, Epoch: koiosEpoch, FetchedAt: fetchedAt}))
+
+	// Simulate a genuine cache/DB failure distinct from "no fetch attempted
+	// yet": replace koios_account_coverage with a table missing the
+	// "requested_count" column GetAccountCoverage's SELECT requires, so that
+	// specific query errors instead of returning sql.ErrNoRows.
+	// GetEpochsNeedingCheck's own join never selects requested_count, so this
+	// epoch is still correctly selected for (re)checking.
+	_, err = cache.db.Exec("DROP TABLE koios_account_coverage")
+	require.NoError(t, err)
+	_, err = cache.db.Exec(`CREATE TABLE koios_account_coverage (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+		fetched_count INTEGER NOT NULL DEFAULT 0,
+		complete INTEGER NOT NULL DEFAULT 0, fetched_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs)
+	require.Empty(t, result.FailEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var found *CheckMismatch
+	for i := range mismatches {
+		if mismatches[i].Field == "koios_account_coverage" {
+			found = &mismatches[i]
+		}
+	}
+	require.NotNil(t, found, "expected a koios_account_coverage mismatch")
+	require.Equal(
+		t,
+		CategoryDBError,
+		found.Category,
+		"a genuine DB error querying coverage must be dingo_db_error, not acct_coverage_incomplete",
+	)
+}
+
 // TestCheckAccountsEndToEndExactMatchAndMismatch is an end-to-end #3097 test:
 // with account coverage marked complete, an exact-match account produces no
 // mismatch and a 1-lovelace-off account produces a value_mismatch — proving

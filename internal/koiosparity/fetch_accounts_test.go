@@ -43,8 +43,22 @@ func TestFetchAccountRewardsForEpochChunksAndCommits(t *testing.T) {
 				StakeAddresses []string `json:"_stake_addresses"`
 				EpochNo        uint64   `json:"_epoch_no"`
 			}
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			require.EqualValues(t, 100, body.EpochNo)
+			// require.* must never run inside an HTTP handler goroutine: a
+			// failure calls t.FailNow, which is only valid on the goroutine
+			// running the test function itself — here it would abort the
+			// handler without writing a response, hanging the client until
+			// timeout instead of failing cleanly. Use t.Errorf plus an
+			// explicit error response instead.
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode request body: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if body.EpochNo != 100 {
+				t.Errorf("unexpected epoch_no: got %d, want 100", body.EpochNo)
+				http.Error(w, "unexpected epoch_no", http.StatusBadRequest)
+				return
+			}
 			var sb strings.Builder
 			sb.WriteByte('[')
 			for i, addr := range body.StakeAddresses {

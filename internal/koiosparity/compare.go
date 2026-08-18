@@ -702,6 +702,17 @@ func CompareAccountEpoch(
 				CheckedAt: now,
 			})
 		case dingoOK && !koiosOK:
+			// Symmetric with the koiosOK && !dingoOK case above: Koios can
+			// lag in publishing /account_reward_history for a just-closed
+			// epoch the same way it can lag on any other endpoint, so an
+			// account Dingo has already committed a reward for but Koios
+			// hasn't published yet within graceHours is reference lag, not
+			// a real acct_only_dingo discrepancy.
+			cat := CategoryAcctOnlyDingo
+			if graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+				cat = CategoryReferenceLag
+			}
 			out = append(out, CheckMismatch{
 				Network:      network,
 				Epoch:        epoch,
@@ -713,7 +724,7 @@ func CompareAccountEpoch(
 					dr.RewardType,
 				),
 				KoiosValue: "",
-				Category:   CategoryAcctOnlyDingo,
+				Category:   cat,
 				CheckedAt:  now,
 			})
 		default:
@@ -743,14 +754,17 @@ func CompareAccountEpoch(
 // so a corrupt/malformed amount always surfaces as a mismatch rather than a
 // false pass.
 func lovelaceEqual(a, b string) bool {
-	if a == b {
-		return true
-	}
+	// Both values are parsed and validated (well-formed base-10 integer,
+	// non-negative — lovelace amounts are never negative) before any
+	// equality check, including the a == b case: a naive fast-path
+	// string-equality short-circuit would report two identical malformed or
+	// negative strings as "equal" without ever validating them, letting
+	// CompareAccountEpoch pass on invalid account data.
 	var x, y big.Int
-	if _, ok := x.SetString(a, 10); !ok {
+	if _, ok := x.SetString(a, 10); !ok || x.Sign() < 0 {
 		return false
 	}
-	if _, ok := y.SetString(b, 10); !ok {
+	if _, ok := y.SetString(b, 10); !ok || y.Sign() < 0 {
 		return false
 	}
 	return x.Cmp(&y) == 0

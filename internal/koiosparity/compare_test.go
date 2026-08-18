@@ -515,6 +515,28 @@ func TestCompareAccountEpochMissingFromDingoWithinGraceIsReferenceLag(
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
 
+// TestCompareAccountEpochMissingFromKoiosWithinGraceIsReferenceLag mirrors
+// TestCompareAccountEpochMissingFromDingoWithinGraceIsReferenceLag for the
+// symmetric direction: an account Dingo has already committed a reward for,
+// but that Koios hasn't published /account_reward_history for yet, within
+// graceHours of epochEndTime, must be reported as CategoryReferenceLag
+// (StatusError) rather than CategoryAcctOnlyDingo (StatusFail) — Koios can
+// lag in publishing account rewards for a just-closed epoch the same way it
+// can lag on any other endpoint.
+func TestCompareAccountEpochMissingFromKoiosWithinGraceIsReferenceLag(
+	t *testing.T,
+) {
+	now := time.Now()
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
+	}
+	recentClose := now.Add(-time.Hour)
+	ms := CompareAccountEpoch("preview", 100, nil, dingo, now, 24, recentClose)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryReferenceLag, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
 func TestCompareAccountEpochDuplicateInKoios(t *testing.T) {
 	now := time.Now()
 	koios := []KoiosAccountRewards{
@@ -603,4 +625,19 @@ func TestLovelaceEqual(t *testing.T) {
 	require.False(t, lovelaceEqual("1000000", "1000001"))
 	require.False(t, lovelaceEqual("not-a-number", "1000000"))
 	require.False(t, lovelaceEqual("1000000", "not-a-number"))
+
+	// Numerically equal but textually different (leading zeros) must go
+	// through the big.Int Cmp() path, not a string-equality short-circuit —
+	// exercises the branch every other "equal" case above skips since they
+	// use byte-identical strings.
+	require.True(t, lovelaceEqual("01000000", "1000000"))
+	require.True(t, lovelaceEqual("0", "00"))
+
+	// A malformed or negative value must never compare equal to itself:
+	// lovelace amounts are never negative, and an identical-string fast
+	// path would otherwise report two invalid values as "equal" without
+	// ever validating them.
+	require.False(t, lovelaceEqual("not-a-number", "not-a-number"))
+	require.False(t, lovelaceEqual("-5", "-5"))
+	require.False(t, lovelaceEqual("-5", "5"))
 }

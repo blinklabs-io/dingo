@@ -581,7 +581,6 @@ func fetchEpoch(
 	// Treating that as permanent pre-staking would silently and permanently
 	// stop comparing a real epoch, so it is rejected as a retryable error
 	// instead of being cached.
-	const preStakingThroughEpoch = 1
 	if info.ActiveStake == nil && epoch <= preStakingThroughEpoch {
 		if err := cache.CommitEpochData(KoiosEpochInfo{
 			Network:        network,

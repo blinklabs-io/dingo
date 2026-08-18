@@ -203,9 +203,11 @@ func FetchAccountRewardsForEpoch(
 	var errMu sync.Mutex
 	var firstErr error
 
-	// fetchCtx is cancelled the moment a permanent error is seen, so this
-	// call stops scheduling further doomed chunk requests — mirrors
-	// fetchEpoch's poolCtx.
+	// fetchCtx is cancelled the moment any chunk error is seen — transient
+	// or permanent — so this call stops scheduling further doomed chunk
+	// requests once the epoch's reference set can no longer be complete;
+	// see the per-goroutine comment below for why transient failures are
+	// included, not just permanent ones. Mirrors fetchEpoch's poolCtx.
 	fetchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -235,9 +237,17 @@ outer:
 					firstErr = wrapped
 				}
 				errMu.Unlock()
-				if isPermanent {
-					cancel()
-				}
+				// A missing chunk means this epoch's account reference set can
+				// never be complete — nothing is committed below once err !=
+				// nil, so there is no point spending the rest of the epoch's
+				// Koios request budget on chunks whose results will only be
+				// discarded. Cancel on the first error, transient or
+				// permanent, not just permanent ones. This only cancels
+				// fetchCtx (this call's own per-epoch context derived from
+				// ctx above), never the caller's shared multi-epoch context,
+				// so an isolated transient failure still just drops this one
+				// epoch for a later retry.
+				cancel()
 				return
 			}
 
@@ -303,9 +313,13 @@ func FetchEpochAccountsWithAddrs(
 ) (int, error) {
 	stakeEpoch, ok := koiosStakeEpoch(epoch)
 	if !ok {
-		// Pre-staking epoch (0) — no valid stake epoch, and fetchEpoch's own
-		// PreStaking-marker path never reaches this for epochs 0-1 in
-		// practice. Nothing to fetch.
+		// Pre-staking epoch (0 or 1, see preStakingThroughEpoch) — no valid
+		// stake epoch, and fetchEpoch's own PreStaking-marker path never
+		// reaches this for epochs 0-1 in practice. Nothing to fetch — and no
+		// koios_account_coverage row is written, matching how these epochs
+		// never get a real account fetch attempt; GetEpochsMissingAccountCoverage
+		// explicitly excludes pre_staking epochs so this never causes a
+		// perpetual backfill re-selection.
 		return 0, nil
 	}
 	universe, err := BuildAccountAddressUniverse(

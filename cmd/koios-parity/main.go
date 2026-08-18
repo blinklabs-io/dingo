@@ -417,9 +417,14 @@ func addAccountsFlag(cmd *cobra.Command) {
 // koios-parity-only KOIOS_PARITY_ACCOUNTS env var (no existing repo-standard
 // name applies to this tool-specific opt-in switch — see CLAUDE.md's env-var
 // naming guidance in this tool's own conventions).
+//
+// Per CLAUDE.md's config precedence (CLI > env > YAML > defaults), an
+// explicitly-set --accounts flag always wins, even --accounts=false — it
+// must not be overridden by KOIOS_PARITY_ACCOUNTS=true in the environment.
 func accountsEnabled(cmd *cobra.Command) bool {
-	if v, _ := cmd.Flags().GetBool("accounts"); v {
-		return true
+	if cmd.Flags().Changed("accounts") {
+		v, _ := cmd.Flags().GetBool("accounts")
+		return v
 	}
 	v := strings.TrimSpace(os.Getenv("KOIOS_PARITY_ACCOUNTS"))
 	return v == "1" || strings.EqualFold(v, "true")

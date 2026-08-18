@@ -507,14 +507,22 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 	if _, err = tx.Exec("DELETE FROM koios_account_rewards WHERE network = ? AND epoch = ?", network, epoch); err != nil {
 		return err
 	}
-	for i := range rows {
-		rows[i].Network, rows[i].Epoch = network, epoch
-		if _, err = tx.Exec(`INSERT INTO koios_account_rewards
+	if len(rows) > 0 {
+		var stmt *sql.Stmt
+		stmt, err = tx.Prepare(`INSERT INTO koios_account_rewards
 			(network, epoch, stake_address, reward_type, earned, spendable_epoch, pool_id_bech32, fetched_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			rows[i].Network, rows[i].Epoch, rows[i].StakeAddress, rows[i].RewardType, rows[i].Earned,
-			rows[i].SpendableEpoch, rows[i].PoolIDBech32, rows[i].FetchedAt); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		if err != nil {
 			return err
+		}
+		defer stmt.Close() //nolint:errcheck
+		for i := range rows {
+			rows[i].Network, rows[i].Epoch = network, epoch
+			if _, err = stmt.Exec(
+				rows[i].Network, rows[i].Epoch, rows[i].StakeAddress, rows[i].RewardType, rows[i].Earned,
+				rows[i].SpendableEpoch, rows[i].PoolIDBech32, rows[i].FetchedAt); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err = tx.Exec("DELETE FROM koios_account_coverage WHERE network = ? AND epoch = ?", network, epoch); err != nil {
@@ -695,6 +703,12 @@ func (c *Cache) GetEpochsMissingAccountCoverage(
 	network string,
 	from, through uint64,
 ) ([]uint64, error) {
+	// pre_staking = 0 excludes epochs <= preStakingThroughEpoch: those get a
+	// koios_epoch_info row (the PreStaking marker) but never a
+	// koios_account_coverage row — FetchEpochAccountsWithAddrs skips them
+	// entirely, matching fetchEpoch/checkEpoch's own exclusion of the same
+	// epochs — so without this filter they would be selected for account
+	// backfill on every fetch run forever.
 	rows, err := c.db.Query(`
 		SELECT k.epoch
 		FROM koios_epoch_info k
@@ -702,6 +716,7 @@ func (c *Cache) GetEpochsMissingAccountCoverage(
 		       ON k.network = a.network AND k.epoch = a.epoch
 		WHERE k.network = ?
 		  AND k.epoch >= ? AND k.epoch <= ?
+		  AND k.pre_staking = 0
 		  AND (a.epoch IS NULL OR a.complete = 0)
 		ORDER BY k.epoch ASC
 	`, network, from, through)
@@ -1005,8 +1020,23 @@ func createCacheSchema(db *sql.DB) error {
 			err,
 		)
 	}
+	// idx_kar_net_epoch_addr_type must be non-unique: Koios can legitimately
+	// return duplicate (network, epoch, stake_address, reward_type) rows
+	// (see CategoryAcctDuplicate's doc comment), and a unique constraint
+	// would abort CommitAccountRewardsForEpoch's insert with a constraint
+	// error before CompareAccountEpoch ever gets a chance to detect and
+	// report the duplicate as an acct_duplicate FAIL. Explicitly drop any
+	// unique version of this index a previous run of this migration may
+	// already have created before this fix, since "CREATE INDEX IF NOT
+	// EXISTS" would otherwise leave an existing unique index in place.
+	if _, err := db.Exec("DROP INDEX IF EXISTS idx_kar_net_epoch_addr_type"); err != nil {
+		return fmt.Errorf(
+			"migrate koios_account_rewards: drop unique widened index: %w",
+			err,
+		)
+	}
 	if _, err := db.Exec(
-		"CREATE UNIQUE INDEX IF NOT EXISTS idx_kar_net_epoch_addr_type ON koios_account_rewards(network, epoch, stake_address, reward_type)",
+		"CREATE INDEX IF NOT EXISTS idx_kar_net_epoch_addr_type ON koios_account_rewards(network, epoch, stake_address, reward_type)",
 	); err != nil {
 		return fmt.Errorf(
 			"migrate koios_account_rewards: create widened index: %w",
@@ -1016,8 +1046,9 @@ func createCacheSchema(db *sql.DB) error {
 	return nil
 }
 
-// addColumnIfMissing adds column columnDDL ("TEXT NOT NULL DEFAULT ”", etc.)
-// to table if it is not already present, so re-running createCacheSchema
+// addColumnIfMissing adds column columnDDL (e.g. TEXT NOT NULL DEFAULT with an
+// empty-string default) to table if it is not already present, so
+// re-running createCacheSchema
 // against an older cache.db is idempotent and never errors on a column that
 // already exists.
 func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
