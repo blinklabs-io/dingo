@@ -839,6 +839,9 @@ type LedgerState struct {
 	peerHeaderHistory    map[string]*peerHeaderChain
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
+	// Test hook called after Close releases the blockfetch continuation mutex
+	// and before it waits for continuation workers.
+	blockfetchContinuationSchedulingHook func()
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -1669,6 +1672,9 @@ func (ls *LedgerState) Close() error {
 	ls.blockfetchContinuationMu.Lock()
 	close(continuationSchedulingDone)
 	ls.blockfetchContinuationMu.Unlock()
+	if ls.blockfetchContinuationSchedulingHook != nil {
+		ls.blockfetchContinuationSchedulingHook()
+	}
 	<-continuationSchedulingDone
 	blockfetchContinuationsDone := make(chan struct{})
 	go func() {

@@ -4417,13 +4417,6 @@ func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
 // The invariant is asserted directly -- the mutex must be acquirable *while*
 // Close is parked in the wait -- rather than by having a queued worker finish,
 // which passes whether or not Close ever held the mutex.
-//
-// Sequencing: the test holds the mutex before starting Close, so Close parks in
-// Lock() and is the sole waiter. By the time the test releases it, Close has
-// been queued for longer than the 1ms that puts sync.Mutex into starvation
-// mode, so the unlock hands off directly to Close and a barging TryLock from
-// this goroutine cannot jump ahead of it. Close therefore holds the mutex
-// before the polling below begins.
 func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	origTimeout := CloseBlockfetchDrainTimeout
 	// Generous: the worker is released only after the assertion below, so this
@@ -4435,6 +4428,10 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
+	}
+	schedulingDone := make(chan struct{})
+	ls.blockfetchContinuationSchedulingHook = func() {
+		close(schedulingDone)
 	}
 
 	// A continuation worker that stays registered until the test releases it,
@@ -4460,23 +4457,20 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	)
 	ls.blockfetchContinuationMu.Unlock()
 
-	// Close is now past the scheduling synchronization point and parked waiting
-	// for the worker. The mutex must be free: if Close held it across the wait,
-	// TryLock fails for the whole window and this assertion fails, where the
-	// previous formulation of this test passed.
-	require.Eventually(
+	// The hook fires only after Close has completed the scheduling lock/unlock
+	// pair. The worker remains registered, so Close must still be in its wait.
+	testutil.RequireReceive(
 		t,
-		func() bool {
-			if !ls.blockfetchContinuationMu.TryLock() {
-				return false
-			}
-			ls.blockfetchContinuationMu.Unlock()
-			return true
-		},
+		schedulingDone,
 		time.Second,
-		time.Millisecond,
+		"Close did not release blockfetchContinuationMu before waiting",
+	)
+	require.True(
+		t,
+		ls.blockfetchContinuationMu.TryLock(),
 		"Close held blockfetchContinuationMu while waiting for continuations",
 	)
+	ls.blockfetchContinuationMu.Unlock()
 
 	// Only now let the worker finish, proving Close was genuinely still waiting
 	// throughout the assertion above.
