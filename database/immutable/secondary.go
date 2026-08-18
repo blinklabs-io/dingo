@@ -17,7 +17,6 @@ package immutable
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 )
 
 const (
@@ -25,7 +24,7 @@ const (
 )
 
 type secondaryIndex struct {
-	file     *os.File
+	file     entryReader
 	primary  *primaryIndex
 	fileSize int64
 }
@@ -49,14 +48,14 @@ func newSecondaryIndex() *secondaryIndex {
 }
 
 // Open takes an already-open index file; see chunk.Open for why.
-func (s *secondaryIndex) Open(f *os.File, primary *primaryIndex) error {
+func (s *secondaryIndex) Open(f entryReader, primary *primaryIndex) error {
 	s.file = f
 	s.primary = primary
-	if stat, err := f.Stat(); err != nil {
+	size, err := f.Size()
+	if err != nil {
 		return err
-	} else {
-		s.fileSize = stat.Size()
 	}
+	s.fileSize = size
 	return nil
 }
 

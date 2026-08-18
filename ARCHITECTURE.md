@@ -3221,6 +3221,12 @@ After that, an in-place write needs write permission on a `0640` file owned by
 the node's user — which is the node's own user, and no filesystem check defends
 a boundary that has already been crossed.
 
+That is a statement about who can attempt the write, not about whether it would
+be read, and the two are worth keeping apart: the layers above do not rely on
+it. A file read once and parsed from the buffer is not reachable by an in-place
+write at all, whoever makes it, because there is no second read for it to land
+in front of.
+
 That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
 downloaded trio as its archive lands and closes it; the tip read, the catch-up
 check and the blob copy open those files again. `verifyAncillaryManifest` hashes
@@ -3233,7 +3239,7 @@ reader keeps:
 
 | tree | what travels | where it is re-checked |
 |---|---|---|
-| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` hashes each chunk, primary and secondary file as it opens it, and the read goes through that same descriptor |
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads each chunk, primary and secondary file once, hashes that buffer, and the chunk and index parsers walk the same buffer |
 | immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
@@ -3245,20 +3251,38 @@ the point of use. For the same reason an ancillary tree flagged `AncillaryVerifi
 without a digest map is refused outright — the flag would otherwise rest on a
 check nothing downstream can repeat.
 
-Note what the last two rows do *not* do: hash a descriptor and hand the parser
-that same descriptor. It looks equivalent and is not, because the parser then
-reads the file a second time. Where the payload fits in memory the fix is to
-read once and give both the buffer; where it does not, it is to map once and
-hash the mapping. Either way there is no second read to catch out.
+Note what none of these rows do: hash a descriptor and hand the parser that same
+descriptor. It looks equivalent and is not, because the parser then reads the
+file a second time. Rewinding does not detach a descriptor from its inode, so a
+writer who can modify the file in place changes what the second pass reads
+without changing anything the first pass could have seen — the check and the
+parse become two readings of one mutable thing, and only the first is the one
+compared against the digest. Where the payload fits in memory the fix is to read
+once and give both the buffer; where it does not, it is to map once and hash the
+mapping. Either way there is no second read to catch out.
+
+For the ImmutableDB that means the reader takes bytes rather than a file:
+`entryReader` (`database/immutable/entry.go`) is what the chunk and index
+parsers read through, and a verified open supplies a `bytesEntry` over the
+buffer it hashed while an ordinary local open supplies a `fileEntry` over the
+descriptor, exactly as before. Only the verified path buffers, so a node reading
+its own ImmutableDB still streams chunks from disk and holds none of one in
+memory.
+
+The cost is one entry in memory at a time — bounded by the largest certified
+file, which is a chunk. It is not an extra read: verifying already meant reading
+the whole file, so the buffer replaces the parser's second pass rather than
+adding to it, and a verified open now reads each file once where it previously
+read it twice.
 
 Re-hashing is the cost the alternative was not worth. Binding by retained
 descriptor would mean holding one for every file in the snapshot from
 verification until load, which for a mainnet ImmutableDB is tens of thousands;
 binding by file identity (`os.SameFile`, size, mtime) is defeatable by an
 attacker who creates the replacement, since inode numbers are reused and
-timestamps are settable. Hashing at the open costs one extra pass over data the
-reader is about to read anyway, so it is served from page cache and bounded by
-SHA-256 throughput rather than by I/O.
+timestamps are settable. Hashing what is read costs a pass over data the reader
+is about to read anyway, so it is bounded by SHA-256 throughput rather than by
+I/O.
 
 A digest map that is present but empty is refused rather than treated as
 absent. Absence is v1, which certifies an archive and not the files in it;

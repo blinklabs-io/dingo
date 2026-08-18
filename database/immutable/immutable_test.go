@@ -434,6 +434,162 @@ func TestNewFromRootVerifiedRefusesAFileSubstitutedAfterTheDigestCheck(
 	}
 }
 
+// readAllSlots drains an iterator, returning the slot of every block it
+// yielded. The sequence is the comparison the mutation tests below need: a
+// count alone would pass for a reader that returned the wrong blocks, and an
+// error alone would pass for a reader that failed for an unrelated reason.
+func readAllSlots(t *testing.T, iter *immutable.BlockIterator) []uint64 {
+	t.Helper()
+	var slots []uint64
+	for {
+		block, err := iter.Next()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if block == nil {
+			return slots
+		}
+		slots = append(slots, block.Slot)
+	}
+}
+
+// overwriteInPlace writes over part of an existing file without replacing it,
+// and fails the test if the inode changed — which is the whole point. Every
+// other substitution in this file swaps what the name refers to; this one
+// leaves the name, the inode and the size alone and changes only the contents,
+// so it is the case a check bound to a descriptor cannot see.
+func overwriteInPlace(t *testing.T, path string, offset int64) {
+	t.Helper()
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	junk := make([]byte, before.Size()-offset)
+	for i := range junk {
+		junk[i] = 0xFF
+	}
+	if _, err := f.WriteAt(junk, offset); err != nil {
+		_ = f.Close()
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("the overwrite replaced the file; it must mutate it in place")
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf(
+			"the overwrite changed the size from %d to %d; it must not",
+			before.Size(), after.Size(),
+		)
+	}
+}
+
+// TestNewFromRootVerifiedIsUnaffectedByAnInPlaceWrite is the second half of the
+// finding, and the half a directory handle and a descriptor both leave open.
+//
+// The other substitution tests replace what a name refers to, which a
+// descriptor opened beforehand does not follow. An in-place write is not a
+// substitution: the inode stays the one that was opened and hashed, so a
+// digest taken through the descriptor and a parse taken through the same
+// descriptor read the file at two different moments and can disagree. Only the
+// first of those is the reading the digest was compared against.
+//
+// So the guarantee cannot be "the descriptor is still open"; it has to be that
+// there is no second reading at all. The bytes are read once, hashed, and
+// parsed from memory. This asserts that by mutating the file after the reader
+// has it — every block still read is the certified one, and the writer reaches
+// nothing.
+//
+// Staged mid-iteration on purpose. The iterator holds a chunk open across
+// Next calls, so a reader that went back to the file for each block would pick
+// the mutation up here and nowhere earlier.
+func TestNewFromRootVerifiedIsUnaffectedByAnInPlaceWrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "immutable")
+	copyChunkTrio(t, "00000", dir)
+	digests := trioDigests(t, dir)
+	chunkPath := filepath.Join(dir, "00000.chunk")
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	// What the certified tree holds, read before anything touches it.
+	clean, err := immutable.NewFromRootVerified(root, digests, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	cleanIter, err := clean.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	want := readAllSlots(t, cleanIter)
+	if err := cleanIter.Close(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if len(want) < 2 {
+		t.Fatalf(
+			"fixture must hold at least two blocks to stage a write between "+
+				"them, got %d", len(want),
+		)
+	}
+
+	imm, err := immutable.NewFromRootVerified(root, digests, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	first, err := iter.Next()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if first == nil {
+		t.Fatal("expected to read a block from a tree that verifies")
+	}
+
+	// Over the second half, so the blocks the iterator has not reached yet are
+	// the ones the writer is reaching for.
+	info, err := os.Stat(chunkPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	overwriteInPlace(t, chunkPath, info.Size()/2)
+
+	got := append([]uint64{first.Slot}, readAllSlots(t, iter)...)
+	if len(got) != len(want) {
+		t.Fatalf(
+			"an in-place write must not change what the reader yields: "+
+				"read %d blocks, certified tree holds %d",
+			len(got), len(want),
+		)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf(
+				"block %d came back as slot %d, certified tree has slot %d; "+
+					"the reader went back to the mutated file",
+				i, got[i], want[i],
+			)
+		}
+	}
+}
+
 // TestNewFromRootVerifiedRefusesAFileTheDigestsDoNotCover keeps "no digest" an
 // error rather than an open. A file nothing certified is exactly what an
 // attacker adds, and reading it because the map is silent about it would make

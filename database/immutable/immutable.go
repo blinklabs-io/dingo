@@ -51,8 +51,9 @@ type ImmutableDb struct {
 	// about which bytes the files in it hold. Those are two separate
 	// substitutions, and only the first is closed by holding the directory
 	// open: a writer who cannot escape the directory can still rename a file
-	// of their own over `00000.chunk` inside it. So each file is verified from
-	// the descriptor the read then goes through — see openEntry.
+	// of their own over `00000.chunk` inside it, or write through the one
+	// already there. So each file is read once and parsed from the bytes that
+	// were hashed — see openEntry.
 	digests map[string]string
 	// maxChunk, when non-empty, is the highest chunk name this database will
 	// expose. See NewFromRootVerified.
@@ -159,8 +160,8 @@ func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
 }
 
 // NewFromRootVerified is NewFromRoot for a tree whose files are individually
-// certified: every file is checked against digests as it is opened, and the
-// read then goes through that same open descriptor.
+// certified: every file is read once, checked against digests, and parsed from
+// the bytes that were checked.
 //
 // NewFromRoot binds the reads to a directory. This binds them to the bytes.
 // The two are not the same guarantee, and the difference is the whole point
@@ -168,9 +169,20 @@ func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
 // whatever consumes it opens it again later. Between those, a writer who
 // shares the download directory can rename a file of their own over the
 // verified one without ever leaving the directory the handle refers to, and
-// the second open reads what they wrote. Verifying at the open the reader
-// keeps closes that, because a rename afterwards does not reach a descriptor
-// that is already open.
+// the second open reads what they wrote.
+//
+// Holding the descriptor open across both would answer the rename and nothing
+// else. A descriptor names an inode, so writes made through the file it still
+// refers to are visible to a reader that has merely rewound it — the check and
+// the parse would be two readings of one mutable thing, and only the first
+// would be the one that was compared against the digest. So there is only one
+// reading: the entry is read into memory, the digest is computed over that
+// buffer, and the parser walks the same buffer. Nothing that happens to the
+// file afterwards is reachable from it.
+//
+// This holds one entry in memory at a time, which is what the guarantee costs.
+// It costs no extra read — verifying already meant reading the whole file, and
+// the buffer replaces the parser's second pass rather than adding to it.
 //
 // digests maps a name directly beneath the data directory ("00000.chunk") to
 // its lowercase hex SHA-256. An empty or nil map is refused: it would verify
@@ -212,11 +224,18 @@ func (i *ImmutableDb) entryPath(name string) string {
 
 // openEntry opens a file directly beneath the data directory.
 //
-// When the database was opened with digests, the returned descriptor is one
-// whose contents have been confirmed to be the certified contents. Everything
-// downstream reads through it, so no name is resolved a second time between
-// the check and the read.
-func (i *ImmutableDb) openEntry(name string) (*os.File, error) {
+// Without digests the reads go to the descriptor, as an ordinary local
+// ImmutableDB's always have.
+//
+// With digests the entry is read once, checked, and served from the bytes that
+// were checked — the descriptor is closed before the parser runs and is never
+// read a second time. Hashing a descriptor and then parsing through it does not
+// establish that the parser saw certified bytes: rewinding does not detach the
+// descriptor from its inode, and a writer who can modify that inode in place
+// changes what the second pass reads without changing anything the first pass
+// could have noticed. Reading once removes the second pass rather than trying
+// to make it safe.
+func (i *ImmutableDb) openEntry(name string) (entryReader, error) {
 	var f *os.File
 	var err error
 	if i.root != nil {
@@ -228,36 +247,42 @@ func (i *ImmutableDb) openEntry(name string) (*os.File, error) {
 		return nil, err
 	}
 	if i.digests == nil {
-		return f, nil
+		return fileEntry{file: f}, nil
 	}
-	if err := i.verifyEntry(f, name); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return f, nil
+	// Closed here rather than carried: once the bytes are in hand the
+	// descriptor can only be a way to read them again, which is the thing
+	// being removed.
+	defer func() { _ = f.Close() }()
+	return i.readVerifiedEntry(f, name)
 }
 
-// verifyEntry hashes an open entry and compares it with the certified digest
-// for its name, leaving the descriptor rewound for the caller to read.
-func (i *ImmutableDb) verifyEntry(f *os.File, name string) error {
+// readVerifiedEntry reads an entry and returns the bytes, but only if they are
+// the certified ones.
+//
+// The digest is computed over the buffer that is returned, not over a separate
+// pass across the file, so there is no interval in which the two could differ.
+func (i *ImmutableDb) readVerifiedEntry(
+	f *os.File,
+	name string,
+) (entryReader, error) {
 	expected, ok := i.digests[name]
 	if !ok {
-		return fmt.Errorf("%w: %s is not certified", ErrDigestMismatch, name)
-	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, f); err != nil {
-		return fmt.Errorf("hashing %s: %w", i.entryPath(name), err)
-	}
-	if sum := hex.EncodeToString(hasher.Sum(nil)); sum != expected {
-		return fmt.Errorf(
-			"%w: %s computed %s, certified %s",
-			ErrDigestMismatch, name, sum, expected,
+		return nil, fmt.Errorf(
+			"%w: %s is not certified", ErrDigestMismatch, name,
 		)
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewinding %s: %w", i.entryPath(name), err)
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", i.entryPath(name), err)
 	}
-	return nil
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != expected {
+		return nil, fmt.Errorf(
+			"%w: %s computed %s, certified %s",
+			ErrDigestMismatch, name, got, expected,
+		)
+	}
+	return newBytesEntry(data), nil
 }
 
 // removeEntry removes a file directly beneath the data directory.
