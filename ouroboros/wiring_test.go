@@ -44,7 +44,7 @@ func wiringTestConnId(t *testing.T) ouroboros.ConnectionId {
 }
 
 func newUnwiredOuroboros() *Ouroboros {
-	return NewOuroboros(OuroborosConfig{
+	return newOuroboros(OuroborosConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 }
@@ -82,7 +82,7 @@ func TestUnwiredHandleInboundConnEventDoesNotPanic(t *testing.T) {
 }
 
 // newWiringTestDeps builds a config carrying a complete, valid dependency set.
-// Each dependency only has to be non-nil and distinguishable; wiring
+// Each dependency only has to be non-nil and distinguishable; constructor
 // validation never calls into them.
 func newWiringTestDeps(t *testing.T) OuroborosConfig {
 	t.Helper()
@@ -100,6 +100,8 @@ func newWiringTestDeps(t *testing.T) OuroborosConfig {
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
 	return OuroborosConfig{
+		Logger:         logger,
+		EventBus:       bus,
 		LedgerState:    ls,
 		Mempool:        &mempool.FIFO{Mempool: m},
 		ChainsyncState: chainsync.NewState(bus, ls),
@@ -115,108 +117,72 @@ func newWiringTestDeps(t *testing.T) OuroborosConfig {
 func newWiringTestOuroboros(t *testing.T) *Ouroboros {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	return NewOuroboros(OuroborosConfig{
+	return newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
 }
 
-// TestWireRejectsMissingRequiredDependency is the fail-fast contract: wiring
-// with any required dependency absent must return an error naming the field
-// rather than leaving the instance in a partially-wired state that only fails
-// later, at first protocol use, with a nil dereference.
-func TestWireRejectsMissingRequiredDependency(t *testing.T) {
+// TestNewOuroborosRejectsMissingRequiredDependency is the fail-fast contract:
+// constructing without a required dependency must fail, naming the field,
+// rather than returning an instance whose only symptom is a nil dereference at
+// first protocol use.
+func TestNewOuroborosRejectsMissingRequiredDependency(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		clear func(*OuroborosConfig)
 	}{
-		{"LedgerState", func(d *OuroborosConfig) { d.LedgerState = nil }},
-		{"Mempool", func(d *OuroborosConfig) { d.Mempool = nil }},
-		{"ChainsyncState", func(d *OuroborosConfig) { d.ChainsyncState = nil }},
-		{"ConnManager", func(d *OuroborosConfig) { d.ConnManager = nil }},
-		{"PeerGov", func(d *OuroborosConfig) { d.PeerGov = nil }},
+		{"EventBus", func(c *OuroborosConfig) { c.EventBus = nil }},
+		{"LedgerState", func(c *OuroborosConfig) { c.LedgerState = nil }},
+		{"Mempool", func(c *OuroborosConfig) { c.Mempool = nil }},
+		{"ChainsyncState", func(c *OuroborosConfig) { c.ChainsyncState = nil }},
+		{"ConnManager", func(c *OuroborosConfig) { c.ConnManager = nil }},
+		{"PeerGov", func(c *OuroborosConfig) { c.PeerGov = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			o := newWiringTestOuroboros(t)
-			deps := newWiringTestDeps(t)
-			tc.clear(&deps)
-			err := o.Wire(deps)
-			require.Error(t, err)
+			cfg := newWiringTestDeps(t)
+			tc.clear(&cfg)
+			o, err := NewOuroboros(cfg)
+			require.Nil(t, o)
+			require.ErrorIs(t, err, ErrMissingDependency)
 			require.Contains(t, err.Error(), tc.name)
 		})
 	}
 }
 
-// TestWireRejectsMissingEventBus covers the one required dependency that
-// NewOuroboros cannot report itself (it has no error return and 100+ call
-// sites), so Wire is the explicit setup-time gate that catches it. Neither
-// the constructor config nor the wiring config supplies one here.
-func TestWireRejectsMissingEventBus(t *testing.T) {
-	o := newUnwiredOuroboros() // built without an EventBus
-	err := o.Wire(newWiringTestDeps(t))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "EventBus")
-}
-
-// TestWireAcceptsEventBusFromEitherConfig pins the two ways the shared
-// OuroborosConfig can carry the EventBus, now that NewOuroboros and Wire read
-// the same struct: supplied at construction and omitted at wiring, or omitted
-// at construction and supplied at wiring.
-func TestWireAcceptsEventBusFromEitherConfig(t *testing.T) {
-	t.Run("from constructor", func(t *testing.T) {
-		o := newWiringTestOuroboros(t) // EventBus set at construction
-		deps := newWiringTestDeps(t)   // carries no EventBus
-		require.NoError(t, o.Wire(deps))
-		require.NotNil(t, o.EventBus())
-	})
-	t.Run("from wire", func(t *testing.T) {
-		o := newUnwiredOuroboros() // no EventBus at construction
-		deps := newWiringTestDeps(t)
-		deps.EventBus = event.NewEventBus(
-			nil,
-			slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		)
-		require.NoError(t, o.Wire(deps))
-		require.Same(t, deps.EventBus, o.EventBus())
-	})
-}
-
-// TestWireSucceedsWithRequiredDeps checks the happy path, and that the
-// optional Leios handlers may be left unset.
-func TestWireSucceedsWithRequiredDeps(t *testing.T) {
-	o := newWiringTestOuroboros(t)
-	deps := newWiringTestDeps(t)
-	require.NoError(t, o.Wire(deps))
-	require.Same(t, deps.LedgerState, o.LedgerState())
-	require.Same(t, deps.ChainsyncState, o.ChainsyncState())
-	require.Same(t, deps.ConnManager, o.ConnManager())
-	require.Same(t, deps.PeerGov, o.PeerGov())
-	require.Equal(t, deps.Mempool, o.Mempool())
+// TestNewOuroborosExposesDependencies checks the happy path, and that the
+// optional Leios handlers start unset.
+func TestNewOuroborosExposesDependencies(t *testing.T) {
+	cfg := newWiringTestDeps(t)
+	o, err := NewOuroboros(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	require.Same(t, cfg.LedgerState, o.LedgerState())
+	require.Same(t, cfg.ChainsyncState, o.ChainsyncState())
+	require.Same(t, cfg.ConnManager, o.ConnManager())
+	require.Same(t, cfg.PeerGov, o.PeerGov())
+	require.Same(t, cfg.EventBus, o.EventBus())
+	require.Equal(t, cfg.Mempool, o.Mempool())
 	require.Nil(t, o.LeiosVotes())
 	require.Nil(t, o.LeiosPipeline())
 }
 
-// TestWireIsRepeatable models the live snapshot/restore path in
-// node_lifecycle.go, which tears down and rebuilds the ledger state, mempool,
-// chainsync state, connection manager and peer governor while the node is
-// running, then rewires the same Ouroboros instance with the replacements.
-func TestWireIsRepeatable(t *testing.T) {
-	o := newWiringTestOuroboros(t)
-	require.NoError(t, o.Wire(newWiringTestDeps(t)))
-	rebuilt := newWiringTestDeps(t)
-	require.NoError(t, o.Wire(rebuilt))
-	require.Same(t, rebuilt.LedgerState, o.LedgerState())
-	require.Same(t, rebuilt.ChainsyncState, o.ChainsyncState())
-	require.Same(t, rebuilt.ConnManager, o.ConnManager())
-	require.Same(t, rebuilt.PeerGov, o.PeerGov())
-	require.Equal(t, rebuilt.Mempool, o.Mempool())
+// TestNewOuroborosIsFullyWired pins the property the refactor exists to
+// provide: any instance the exported constructor hands back already satisfies
+// the dependency invariant, so no protocol handler can observe a half-built
+// one.
+func TestNewOuroborosIsFullyWired(t *testing.T) {
+	o, err := NewOuroboros(newWiringTestDeps(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	require.True(t, o.hasDependencies())
 }
 
-// TestWireRejectsNilLeiosHandlers guards the optional handlers against being
+// TestSetLeiosHandlersRejectNil guards the optional handlers against being
 // silently cleared: node_leios.go wires them from a separate path that reruns
 // across live restore cycles, so a nil there is a wiring bug, not a request
 // to disable Leios.
-func TestWireRejectsNilLeiosHandlers(t *testing.T) {
+func TestSetLeiosHandlersRejectNil(t *testing.T) {
 	o := newWiringTestOuroboros(t)
 	require.Error(t, o.SetLeiosVotes(nil))
 	require.Error(t, o.SetLeiosPipeline(nil))

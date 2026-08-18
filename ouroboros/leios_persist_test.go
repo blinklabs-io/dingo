@@ -76,7 +76,7 @@ func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
 // returns after the drain timeout instead of blocking graceful shutdown
 // forever, and still closes the stop channel so the writer can exit later.
 func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	// Simulate a started writer whose drain never completes.
 	o.leiosPersistStarted.Store(true)
 	o.leiosPersistStop = make(chan struct{})

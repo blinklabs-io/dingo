@@ -28,10 +28,7 @@
 //
 // Components intentionally left running throughout (verified to hold no
 // stale reference to n.db/n.ledgerState — see the Phase 2 design notes):
-// n.eventBus, n.ouroboros (its LedgerState/Mempool/ChainsyncState/PeerGov/
-// ConnManager dependencies are unexported and reinstalled by the single
-// ouroboros.Wire call in reinitializeNetworkingCore once their new
-// dependencies exist), n.chainSelector (holds only a one-time
+// n.eventBus, n.chainSelector (holds only a one-time
 // SecurityParam snapshot and closures over n). n.ouroboros has one
 // deliberate, narrow exception to "left running": its background Leios
 // endorser-block persistence writer is paused (not merely left alone) by
@@ -39,7 +36,7 @@
 // n.ouroboros — that writer directly calls Database.SetLeiosEB on
 // whatever n.ouroboros's ledger state currently resolves to, on its own
 // timer, entirely independent of the request/response flow every other
-// n.ouroboros field only reacts to. Left unpaused, a write already queued
+// part of n.ouroboros only reacts to. Left unpaused, a write already queued
 // before quiesce began could still be draining when the database closes
 // out from under it, or could still be sitting queued when LedgerState is
 // reassigned post-reinit, silently writing pre-operation data into the
@@ -50,11 +47,14 @@
 // background managers, the optional API servers, and the block-producer
 // path — is stopped, discarded, and rebuilt from scratch, mirroring (by
 // necessity duplicating, since Run() itself is intentionally left
-// unmodified) the equivalent construction in node.go's Run(). The one
-// piece of that duplication the compiler now enforces is the ouroboros
-// wiring: both paths install their dependencies through the same
-// ouroboros.Wire(ouroborosPkg.OuroborosConfig{...}) call, so a dependency added to
-// OuroborosConfig cannot be wired in Run() and forgotten here.
+// unmodified) the equivalent construction in node.go's Run(). n.ouroboros
+// is rebuilt along with them: it takes its dependencies at construction and
+// never reassigns them, so reinitializeNetworkingCore closes the outgoing
+// instance (releasing its Prometheus collectors and EventBus subscriptions,
+// both of which sit on registries that outlive it) and constructs a
+// replacement from the retained n.ouroborosConfig. Callbacks the node handed
+// to other components resolve n.ouroboros when they fire rather than binding
+// an instance, so they follow the replacement automatically.
 package dingo
 
 import (
@@ -95,6 +95,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -520,18 +521,34 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			ChainManager:                  n.chainManager,
-			Database:                      n.db,
-			EventBus:                      n.eventBus,
-			Logger:                        n.config.logger,
-			CardanoNodeConfig:             n.config.cardanoNodeConfig,
-			PromRegistry:                  n.config.promRegistry,
-			ForgeBlocks:                   n.config.isDevMode(),
-			ValidateHistorical:            n.config.validateHistorical,
-			EnableDijkstra:                enableDijkstra,
-			StartInDijkstra:               n.config.startEra.IsDijkstra(),
-			EndorserBlockProvider:         n.ouroboros.EndorserBlockTxsByHash,
-			EndorserBlockFetcher:          n.ouroboros.FetchEndorserBlockByPoint,
+			ChainManager:       n.chainManager,
+			Database:           n.db,
+			EventBus:           n.eventBus,
+			Logger:             n.config.logger,
+			CardanoNodeConfig:  n.config.cardanoNodeConfig,
+			PromRegistry:       n.config.promRegistry,
+			ForgeBlocks:        n.config.isDevMode(),
+			ValidateHistorical: n.config.validateHistorical,
+			EnableDijkstra:     enableDijkstra,
+			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			// Closures, not method values: n.ouroboros is replaced further
+			// down this restore, and a method value would pin the rebuilt
+			// ledger to the outgoing instance. Same for
+			// BlockfetchRequestRangeFunc and PeerRequestFunc below.
+			EndorserBlockProvider: func(
+				ebHash []byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return n.ouroboros.EndorserBlockTxsByHash(ebHash)
+			},
+			// The fetch is driven by the ledger's own call, exactly as the
+			// method value this replaced was; the closure only defers
+			// resolving n.ouroboros.
+			EndorserBlockFetcher: func( //nolint:contextcheck
+				ebSlot uint64,
+				ebHash []byte,
+			) error {
+				return n.ouroboros.FetchEndorserBlockByPoint(ebSlot, ebHash)
+			},
 			EndorserBlockWaitSlots:        n.leiosPipelineTiming().CertifyByDeadlineSlots,
 			LeiosApplyEndorserBlockTxs:    !n.config.isMusashiNetwork(),
 			SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
@@ -558,8 +575,14 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 			// not network-derived, and must mirror Run()'s construction so a
 			// live restore/truncate doesn't silently drop back to serial
 			// decode after being explicitly enabled.
-			BlockPipelineEnabled:       n.config.blockPipelineEnabled,
-			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
+			BlockPipelineEnabled: n.config.blockPipelineEnabled,
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				return n.ouroboros.BlockfetchClientRequestRange(connId, start, end)
+			},
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
 				point ocommon.Point,
@@ -652,7 +675,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	}
 	n.ledgerState = state
 	// n.ouroboros is rewired in one place, once every rebuilt dependency
-	// exists; see the ouroboros.Wire call in reinitializeNetworkingCore.
+	// exists; see the NewOuroboros call in reinitializeNetworkingCore.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
 		return fmt.Errorf(
 			"failed to reconfigure chain security parameter: %w",
@@ -918,14 +941,22 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		n.chainsyncState.HandleClientRemoveRequestedEvent,
 	)
 
-	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
+	// Providers, not eagerly-computed values, matching Run. Resolving these
+	// here would capture the outgoing ouroboros instance that is replaced
+	// below, so every listener and outbound dial would install protocol
+	// handlers bound to a closed Ouroboros and the node would never resume
+	// syncing after the restore.
 	n.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
-			Logger:              n.config.logger,
-			EventBus:            n.eventBus,
-			Listeners:           tmpListeners,
-			OutboundSourcePort:  n.config.outboundSourcePort,
-			OutboundConnOpts:    n.ouroboros.OutboundConnOpts(),
+			Logger:   n.config.logger,
+			EventBus: n.eventBus,
+			ListenersProvider: func() []connmanager.ListenerConfig {
+				return n.ouroboros.ConfigureListeners(n.config.listeners)
+			},
+			OutboundSourcePort: n.config.outboundSourcePort,
+			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
+				return n.ouroboros.OutboundConnOpts()
+			},
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
@@ -952,12 +983,14 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	n.peerGov = peergov.NewPeerGovernor(
 		peergov.PeerGovernorConfig{
-			Logger:                               n.config.logger,
-			EventBus:                             n.eventBus,
-			ConnManager:                          n.connManager,
-			DisableOutbound:                      n.config.isDevMode(),
-			PromRegistry:                         n.config.promRegistry,
-			PeerRequestFunc:                      n.ouroboros.RequestPeersFromPeer,
+			Logger:          n.config.logger,
+			EventBus:        n.eventBus,
+			ConnManager:     n.connManager,
+			DisableOutbound: n.config.isDevMode(),
+			PromRegistry:    n.config.promRegistry,
+			PeerRequestFunc: func(peer *peergov.Peer) []string {
+				return n.ouroboros.RequestPeersFromPeer(peer)
+			},
 			LedgerPeerProvider:                   ledgerPeerProvider,
 			UseLedgerAfterSlot:                   useLedgerAfterSlot,
 			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
@@ -981,21 +1014,37 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 		},
 	)
-	// Rewire the retained ouroboros instance against the rebuilt
-	// dependencies, mirroring the single Wire call in Run(). Doing it in one
-	// place is what keeps this path from drifting out of sync with Run() as
-	// dependencies are added: a new required dependency now fails to compile
-	// here rather than silently leaving a half-wired instance behind a live
-	// restore.
-	if err := n.ouroboros.Wire(ouroborosPkg.OuroborosConfig{
-		LedgerState:    n.ledgerState,
-		Mempool:        n.mempool,
-		ChainsyncState: n.chainsyncState,
-		ConnManager:    n.connManager,
-		PeerGov:        n.peerGov,
-	}); err != nil {
-		return fmt.Errorf("failed to rewire ouroboros: %w", err)
+	// Replace ouroboros. It takes its dependencies at construction and never
+	// reassigns them, so rebuilding those dependencies means rebuilding it
+	// too. Closing the old instance first is required, not merely tidy: it
+	// owns Prometheus collectors on the retained registry (a duplicate
+	// registration panics) and EventBus subscriptions on the retained bus (a
+	// leaked one would be handled once per restore cycle, forever).
+	//
+	// The settings half of the config is reused verbatim from Run, so the two
+	// paths cannot drift, and a dependency added to OuroborosConfig fails to
+	// compile here rather than silently leaving a half-wired instance behind
+	// a live restore.
+	//
+	// The connection-event subscriptions registered during Run do not need
+	// re-registering: they are closures over n, so they resolve whichever
+	// instance n.ouroboros currently holds.
+	if err := n.ouroboros.Close(); err != nil {
+		return fmt.Errorf("failed to close previous ouroboros: %w", err)
 	}
+	ouroborosCfg := n.ouroborosConfig
+	ouroborosCfg.LedgerState = n.ledgerState
+	ouroborosCfg.Mempool = n.mempool
+	ouroborosCfg.ChainsyncState = n.chainsyncState
+	ouroborosCfg.ConnManager = n.connManager
+	ouroborosCfg.PeerGov = n.peerGov
+	n.ouroboros, err = ouroborosPkg.NewOuroboros(ouroborosCfg)
+	if err != nil {
+		return fmt.Errorf("failed to reconstruct ouroboros: %w", err)
+	}
+	// Re-register the chainsync resync handler: Close took the previous
+	// instance's subscription off the retained bus.
+	n.ouroboros.SubscribeChainsyncResync(ctx)
 
 	genesisSelectionMode := n.config.genesisBootstrap &&
 		!n.config.intersectTip &&

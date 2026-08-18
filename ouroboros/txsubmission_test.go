@@ -427,7 +427,7 @@ func newTxSubmissionTestOuroboros(
 		require.NoError(t, m.Stop(context.Background()))
 	})
 
-	o := NewOuroboros(OuroborosConfig{Logger: logger})
+	o := newOuroboros(OuroborosConfig{Logger: logger})
 	o.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			Logger: logger,
@@ -611,9 +611,9 @@ func newTxSubmissionRelayHarnessWithOpts(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
 
-	nodeA := NewOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
+	nodeA := newOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
 	nodeA.mempool = nodeAMempool
-	nodeB := NewOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
+	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
 	nodeB.mempool = &mempool.FIFO{Mempool: mB}
 
 	serverPipe, clientPipe := net.Pipe()

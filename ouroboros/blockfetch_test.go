@@ -151,7 +151,7 @@ func TestBlockfetchServerRequestRange_StartAfterEnd(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -184,7 +184,7 @@ func TestBlockfetchServerRequestRange_EqualPoints(t *testing.T) {
 	// When start == end (same slot), this is a valid single-block range
 	// and should NOT trigger the "start after end" check.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -215,7 +215,7 @@ func TestBlockfetchServerRequestRange_OversizedRange(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -257,7 +257,7 @@ func TestBlockfetchServerRequestRange_RangeWithinLimit(t *testing.T) {
 	// this will panic at that call, proving the range check did not
 	// reject it.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -281,7 +281,7 @@ func TestBlockfetchServerRequestRange_ExactlyAtLimit(t *testing.T) {
 	// (the check is > not >=). Since LedgerState is nil, this will
 	// panic at GetChainFromPoint, proving the range check passed.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -304,7 +304,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -338,7 +338,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 
 func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -370,7 +370,7 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -419,7 +419,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -461,7 +461,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -503,7 +503,7 @@ func TestReportBlockfetchServerAsyncError_ClosesConnection(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -525,7 +525,7 @@ func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -553,7 +553,7 @@ func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
 	// Returns false for each of the first four identical NoBlocks requests.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -574,7 +574,7 @@ func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
 func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
 	// Returns true on the fifth consecutive NoBlocks for the same start point.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -596,7 +596,7 @@ func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
 func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 	// Valid blockfetch progress clears prior NoBlocks counts for the connection.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -628,7 +628,7 @@ func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
 	// Only consecutive NoBlocks for the same start point should accumulate.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -656,7 +656,7 @@ func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
 func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
 	// Tracks counters independently per connection for the same start point.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -686,7 +686,7 @@ func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
 func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 	// Resets the counter after connection close so the peer gets a fresh count on reconnect.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -721,7 +721,7 @@ func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	eventBus := event.NewEventBus(nil, logger)
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:       logger,
 		EventBus:     eventBus,
 		PromRegistry: prometheus.NewRegistry(),

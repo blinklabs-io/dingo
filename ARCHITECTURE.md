@@ -770,7 +770,8 @@ When `Node.Run()` is called, components are initialized in this order:
  1. EventBus creation in `New`, plus tracing/runtime metrics setup in `Run`
  2. Resolve blob and metadata providers, then inject both stores into Database
  3. ChainManager initialization and block-proposed event subscription
- 4. Ouroboros protocol handler creation
+ 4. (Ouroboros is NOT built here — see step 16. Components that consume its
+    callbacks are given closures that resolve it when they fire.)
  5. LedgerState creation, followed by mempool provider resolution
  6. Bark remote archive adapter, then database recovery if startup detects a
     recoverable timestamp conflict
@@ -831,10 +832,10 @@ When `Node.Run()` is called, components are initialized in this order:
 13. ChainsyncState (multi-client tracking, stall detection)
 14. ChainSelector (genesis/Praos comparison) start
 15. ConnectionManager creation and event wiring
-16. PeerGovernor creation, then a single `Ouroboros.Wire` call installing
-    LedgerState, Mempool, ChainsyncState, ConnManager and PeerGov together,
-    then PeerGovernor start. See Ouroboros Dependency Wiring below for why
-    these arrive here rather than in the constructor.
+16. PeerGovernor creation, then `NewOuroboros` with every dependency
+    (LedgerState, Mempool, ChainsyncState, ConnManager, PeerGov) supplied and
+    validated up front, then PeerGovernor start. See Ouroboros Dependency
+    Wiring below for how the apparent cycle is resolved.
 17. ConnectionManager listener start
 18. Chainsync stall recycler (`internal/chainsyncrecycler.Recycler.Start`)
 19. UTxO RPC server (if API storage mode and port configured)
@@ -855,8 +856,9 @@ after a later chain update; it is not a failed admission or a partial swap.
 
 ### Ouroboros Dependency Wiring
 
-`ouroboros.Ouroboros` cannot take its dependencies as constructor arguments,
-because the wiring graph is cyclic in three places:
+Three components consume callbacks from `ouroboros.Ouroboros`, which makes it
+look like Ouroboros must exist before them and therefore cannot receive them as
+constructor arguments:
 
 | Component | Needs from Ouroboros |
 | --- | --- |
@@ -864,44 +866,48 @@ because the wiring graph is cyclic in three places:
 | `connmanager.NewConnectionManager` | `ConfigureListeners`, `OutboundConnOpts` |
 | `peergov.NewPeerGovernor` | `RequestPeersFromPeer` |
 
-Ouroboros must therefore be constructed first (step 4 above), before the
-components it depends on exist. Its dependencies are unexported and installed
-by a single validated `Wire(OuroborosConfig)` call that rejects any missing required
-dependency, so a mis-wired node fails at startup with a named field rather
-than at first protocol use with a nil dereference. Accessors
-(`LedgerState()`, `Mempool()`, `ChainsyncState()`, `ConnManager()`,
-`PeerGov()`, `EventBus()`) expose them read-only.
+The cycle is only apparent, because none of those callbacks runs at
+construction time. The node breaks it two ways:
 
-`NewOuroboros` and `Wire` share the `OuroborosConfig` struct but read disjoint
-parts of it, so one type describes everything Ouroboros is given:
+- **Closures, not method values.** Every callback the node hands to ledger and
+  peergov is a closure that reads `n.ouroboros` when it fires. A method value
+  would bind whatever `n.ouroboros` held at wiring time.
+- **Lazy providers.** `ConnectionManagerConfig.ListenersProvider` and
+  `OutboundConnOptsProvider` are invoked on first use (at `Start`, or the first
+  outbound dial) rather than at construction.
 
-| Field group | `NewOuroboros` | `Wire` |
-| --- | --- | --- |
-| `Logger`, `NetworkMagic`, `PeerSharing`, `PromRegistry`, timeouts, Leios tuning | reads | ignores |
-| `EventBus`, `ConnManager` | reads | reads |
-| `LedgerState`, `Mempool`, `ChainsyncState`, `PeerGov` | ignores | reads |
+So Ouroboros is constructed **last** (step 16), takes every dependency up
+front, and validates them, returning an error naming the first missing one. Its
+dependency fields are unexported and never reassigned, so an instance cannot be
+observed partially wired. Accessors (`LedgerState()`, `Mempool()`,
+`ChainsyncState()`, `ConnManager()`, `PeerGov()`, `EventBus()`) expose them
+read-only. The optional Leios prototype handlers are set separately via
+`SetLeiosVotes`/`SetLeiosPipeline`, since their managers start on their own
+path.
 
-`PromRegistry` drives one-time metric registration in `NewOuroboros` only, so
-reusing one config across both calls cannot double-register collectors. An
-`EventBus` supplied at construction stands if the wiring config omits one.
+**This makes Ouroboros immutable, so a live restore must replace it.** The
+snapshot/restore path discards and rebuilds the ledger state, mempool,
+chainsync state, connection manager and peer governor, so it discards and
+rebuilds Ouroboros too, from the retained `n.ouroborosConfig`. The outgoing
+instance must be `Close`d first, because it owns two things on registries that
+outlive it:
 
-`Wire` runs after the peer governor is constructed and before any listener
-opens. Nothing dereferences the dependencies earlier: `ConfigureListeners` and
-`OutboundConnOpts` read only construction-time settings, and the protocol
-handlers they install are method values invoked per connection. Event handlers the node
-subscribes before `Wire` (`HandleInboundConnEvent`, `HandleOutboundConnEvent`)
-check `Wired()` and drop an early event with a diagnostic.
+- **Prometheus collectors.** Metrics go through `promauto`, which panics on
+  duplicate registration. `Close` unregisters them. Collectors are tracked
+  automatically as they are registered rather than by a hand-maintained list,
+  so adding a metric cannot silently reintroduce the panic.
+- **EventBus subscriptions.** `Close` removes the subscriptions Ouroboros makes
+  on its own behalf. A leaked one would be handled once per restore cycle,
+  forever.
 
-The optional Leios prototype handlers are wired separately via
-`SetLeiosVotes` / `SetLeiosPipeline`, because their managers are built and
-started on their own path and are rebuilt independently across live restore.
+`Close` is idempotent, so `Run`'s deferred shutdown and an explicit restore
+teardown can both call it.
 
-`Wire` is re-callable, and the live snapshot/restore path in
-`node_lifecycle.go` depends on that: it stops and discards the ledger state,
-mempool, chainsync state, connection manager and peer governor, rebuilds them
-against the restored database, then rewires the same retained `Ouroboros`.
-Both paths install dependencies through the same `OuroborosConfig` struct, so a
-dependency added for `Run()` cannot be silently forgotten in the restore path.
+Because the node's callbacks and the connection manager's providers all resolve
+`n.ouroboros` at call time, they follow the replacement automatically and are
+not re-registered. That property is what the closure rule above protects: a
+method value anywhere in either path would pin a component to the pre-restore
+instance, and the node would keep running while silently failing to sync.
 
 ### Shutdown Flow
 

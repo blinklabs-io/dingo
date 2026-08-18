@@ -75,23 +75,31 @@ func blockfetchConfig(
 }
 
 type Ouroboros struct {
-	// Dependencies are unexported and reachable only through Wire and the
-	// accessors in wiring.go. They cannot all move into NewOuroboros: the
-	// wiring graph is cyclic, since ledger construction takes
-	// EndorserBlockTxsByHash/FetchEndorserBlockByPoint/
-	// BlockfetchClientRequestRange from this type, connmanager takes
-	// ConfigureListeners/OutboundConnOpts, and peergov takes
-	// RequestPeersFromPeer. Wire is therefore the explicit setup-time gate
-	// that validates them, and it runs before any of them is dereferenced.
-	connManager              *connmanager.ConnectionManager
-	peerGov                  *peergov.PeerGovernor
-	chainsyncState           *chainsync.State
-	eventBus                 *event.EventBus
-	mempool                  mempool.Service
-	ledgerState              *ledger.LedgerState
-	leiosVotes               LeiosVoteHandler
-	leiosPipeline            LeiosPipelineHandler
-	config                   OuroborosConfig
+	// Dependencies are supplied to NewOuroboros, validated there, and never
+	// reassigned. They are unexported and exposed read-only by the accessors
+	// in wiring.go, so an Ouroboros cannot be observed partially wired.
+	//
+	// ledger, connmanager and peergov each consume callbacks from this type,
+	// which looks like it forces post-construction assignment. It does not:
+	// the node passes closures that resolve n.ouroboros when the callback
+	// fires, and gives connmanager lazy listener providers, so all three can
+	// be built before the Ouroboros they refer to.
+	connManager    *connmanager.ConnectionManager
+	peerGov        *peergov.PeerGovernor
+	chainsyncState *chainsync.State
+	eventBus       *event.EventBus
+	mempool        mempool.Service
+	ledgerState    *ledger.LedgerState
+	leiosVotes     LeiosVoteHandler
+	leiosPipeline  LeiosPipelineHandler
+	config         OuroborosConfig
+	// registerer wraps config.PromRegistry and tracks every collector this
+	// instance registers, so Close can hand them all back. See lifecycle.go.
+	registerer *trackingRegisterer
+	// subscriptions records the EventBus registrations this instance made on
+	// its own behalf, so Close can remove them from a bus that outlives it.
+	subscriptionsMu          sync.Mutex
+	subscriptions            []subscription
 	blockfetchMetrics        *blockfetchMetrics
 	protocolMetrics          *protocolMetrics
 	blockFetchStarts         map[ouroboros.ConnectionId]time.Time
@@ -310,7 +318,32 @@ type blockfetchMetrics struct {
 	blocksUnder5s      atomic.Int64
 }
 
-func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
+// NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
+// front and validated here, so the returned instance can never be observed in
+// a partially-wired state.
+//
+// The node satisfies the apparent cycle — ledger, connmanager and peergov each
+// consume callbacks from Ouroboros — by passing closures that resolve
+// n.ouroboros at call time rather than method values bound at construction,
+// and by giving connmanager lazy listener providers. See the composition
+// order in Node.Run.
+//
+// The returned instance owns EventBus subscriptions and Prometheus collectors
+// on registries that outlive it, so callers must Close it. The live
+// snapshot/restore path depends on that: it discards this instance along with
+// the dependencies it was built from and constructs a replacement.
+func NewOuroboros(cfg OuroborosConfig) (*Ouroboros, error) {
+	if err := cfg.validateDependencies(); err != nil {
+		return nil, err
+	}
+	return newOuroboros(cfg), nil
+}
+
+// newOuroboros constructs without validating dependencies. Production code
+// goes through NewOuroboros; this exists for in-package tests that exercise a
+// single protocol handler and would otherwise have to stand up a database,
+// mempool, connection manager and peer governor to do it.
+func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -320,8 +353,13 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	)
 	o := &Ouroboros{
 		config:           cfg,
+		registerer:       newTrackingRegisterer(cfg.PromRegistry),
 		eventBus:         cfg.EventBus,
 		connManager:      cfg.ConnManager,
+		ledgerState:      cfg.LedgerState,
+		mempool:          cfg.Mempool,
+		chainsyncState:   cfg.ChainsyncState,
+		peerGov:          cfg.PeerGov,
 		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
@@ -357,7 +395,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 }
 
 func (o *Ouroboros) initBlockfetchMetrics() {
-	promautoFactory := promauto.With(o.config.PromRegistry)
+	promautoFactory := promauto.With(o.registerer)
 	o.blockfetchMetrics = &blockfetchMetrics{}
 	o.blockfetchMetrics.servedBlockCount = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
@@ -665,7 +703,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	// o.connManager dereference below panics: GetConnectionById locks a mutex
 	// on its receiver, so a nil connection manager is a nil dereference, not
 	// a nil result.
-	if !o.Wired() {
+	if !o.hasDependencies() {
 		o.config.Logger.Error(
 			"dropping outbound connection event received before wiring completed",
 			"component", "network",
@@ -810,7 +848,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 
 	// Subscribed before Wire runs, so drop early events rather than
 	// dereferencing a nil connection manager. See HandleOutboundConnEvent.
-	if !o.Wired() {
+	if !o.hasDependencies() {
 		o.config.Logger.Error(
 			"dropping inbound connection event received before wiring completed",
 			"component", "network",

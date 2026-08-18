@@ -158,7 +158,7 @@ func newChainsyncServerFixture(
 		_ = connManager.Stop(stopCtx)
 	})
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		ConnManager: connManager,
 		EventBus:    bus,
 		Logger:      logger,

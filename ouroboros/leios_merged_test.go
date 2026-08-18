@@ -79,7 +79,7 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 	})
 	require.NoError(t, err)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.ledgerState = ls
 	return o
 }
@@ -165,7 +165,7 @@ func testLeiosEndorserBlockRawWithRefs(
 func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	got, ok, err := o.mergedLeiosRankingBlockCbor(blockRaw)
 	require.NoError(t, err)
 	require.False(t, ok)
@@ -188,7 +188,7 @@ func TestLeiosTxsFromBitmapPreservesRequestedOrder(t *testing.T) {
 func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
@@ -211,7 +211,7 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
@@ -242,7 +242,7 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 		conn.ErrorChan() <- errors.New("test connection closed")
 	}()
 
-	o := NewOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockTxsOffer(
@@ -287,7 +287,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	headerRaw, err := cbor.Encode(headerTop)
 	require.NoError(t, err)
 
-	o := NewOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
 	o.leiosEBLog.registerConn("test")
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
@@ -363,7 +363,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 }
 
 func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.leiosDeferredAnnouncements["pending"] = leiosDeferredAnnouncement{
 		raw: []byte("deferred"), source: "peer",
 	}
@@ -406,7 +406,7 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	txRaw := mustCbor(t, "tx0")
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
@@ -432,7 +432,7 @@ func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	require.NoError(t, err)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
@@ -515,7 +515,7 @@ func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	point.Hash[0] ^= 0xff
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	err := o.storeLeiosEndorserBlock(point, blockRaw, nil)
 	require.ErrorContains(
 		t,
@@ -528,7 +528,7 @@ func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
 }
 
 func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	point, raw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
@@ -548,7 +548,7 @@ func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 }
 
 func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	oldPoint, oldRaw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(t, o.storeLeiosEndorserBlock(oldPoint, oldRaw, nil))
 	oldData, ok := o.lookupLeiosEndorserBlock(oldPoint.Hash)
@@ -569,7 +569,7 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 }
 
 func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	var lastPoint ocommon.Point
 	for idx := range leiosEndorserBlockCacheMaxEntries + 1 {
 		point, raw := testLeiosEndorserBlockRaw(t, idx)
@@ -789,7 +789,7 @@ func TestLeiosAnnouncementFromBlockCbor(t *testing.T) {
 func TestResolveCertifiedEndorserTxsGuards(t *testing.T) {
 	// A non-certifying Dijkstra block is never merged.
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	_, ok := o.resolveCertifiedEndorserTxs(blockRaw)
 	require.False(t, ok)
 
@@ -803,7 +803,7 @@ func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(
 	t *testing.T,
 ) {
 	certRB := testDijkstraCertRBRaw(t, 3, make([]byte, lcommon.Blake2b256Size))
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	got, ok, err := o.mergedLeiosRankingBlockCbor(certRB)
 	require.NoError(t, err)
 	require.False(t, ok)
@@ -811,7 +811,7 @@ func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(
 }
 
 func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
 	// A non-certifying Dijkstra block is not a CertRB: certified=false.
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
@@ -835,7 +835,7 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 	t *testing.T,
 ) {
 	// No ledger state, so a CertRB's parent announcement cannot be resolved.
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
 	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
 
@@ -849,7 +849,7 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 
 func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 	// A non-certifying Dijkstra block is served unchanged.
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	_, blockRaw := testDijkstraBlockRaw(t, 6)
 	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
 
@@ -861,7 +861,7 @@ func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
@@ -879,7 +879,7 @@ func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
 func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	result := make(chan bool, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(
@@ -924,7 +924,7 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 }
 
 func TestWaitForLeiosEndorserClosureTimesOutAndCleansUp(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	ebHash := make([]byte, lcommon.Blake2b256Size)
 	ebHash[0] = 0xbb
 
@@ -943,7 +943,7 @@ func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 	var ebHash lcommon.Blake2b256
 	ebHash[0] = 0xcc
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		20*time.Millisecond,
@@ -956,7 +956,7 @@ func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 
 func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true, PromRegistry: reg})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true, PromRegistry: reg})
 	require.NotNil(t, o.leiosMetrics)
 
 	o.recordLeiosCertRbOutcome("merged")
@@ -984,7 +984,7 @@ func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
 	// Without a PromRegistry, metrics are not initialized; recording must be
 	// a no-op rather than panicking.
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.Nil(t, o.leiosMetrics)
 	require.NotPanics(t, func() {
 		o.recordLeiosCertRbOutcome("merged")
@@ -994,7 +994,7 @@ func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
 
 func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
 	// Explicit config override wins.
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EnableLeios:             true,
 		LeiosClosureWaitTimeout: 5 * time.Second,
 	})
@@ -1002,7 +1002,7 @@ func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
 
 	// With no override and no ledger timing, the conservative default applies
 	// (not a short constant).
-	o = NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o = newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.Equal(
 		t,
 		defaultLeiosClosureWaitTimeout,
@@ -1019,7 +1019,7 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 	var ebHash lcommon.Blake2b256
 	ebHash[0] = 0xdd
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EnableLeios:             true,
 		LeiosClosureWaitTimeout: 20 * time.Millisecond,
 	})
@@ -1047,7 +1047,7 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 		mustCbor(t, "tx1"),
 	}
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
 	// One connection delivers the manifest, another completes the txs.
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
@@ -1097,7 +1097,7 @@ func TestStoreLeiosEndorserBlockKeepsLargerTxSet(t *testing.T) {
 		mustCbor(t, "tx2"),
 	}
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full))
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full[:1]))
 

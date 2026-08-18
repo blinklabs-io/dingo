@@ -147,12 +147,6 @@ func newLiveLifecycleTestNodeWithGenesis(
 		cardanoNodeCfg = newNodeTestCardanoNodeCfg(t)
 	}
 
-	ouro := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
-		Logger:       logger,
-		EventBus:     eventBus,
-		NetworkMagic: 2, // preview
-	})
-
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:                 db,
 		ChainManager:             cm,
@@ -163,9 +157,10 @@ func newLiveLifecycleTestNodeWithGenesis(
 		DatabaseWorkerPoolConfig: workerPoolCfg,
 	})
 	require.NoError(t, err)
-	// Wire the harness the same way Run() does, through the single validated
-	// entry point, so the live-restore rewiring assertions below exercise the
-	// production path rather than a hand-assembled instance.
+	// Build the harness ouroboros the way Run() does: every dependency up
+	// front, through the validating constructor, so the live-restore
+	// reconstruction assertions below exercise the production path rather
+	// than a hand-assembled instance.
 	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
 		PromRegistry:    prometheus.NewRegistry(),
@@ -176,7 +171,10 @@ func newLiveLifecycleTestNodeWithGenesis(
 	harnessConnManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
-	require.NoError(t, ouro.Wire(ouroborosPkg.OuroborosConfig{
+	ouroborosCfg := ouroborosPkg.OuroborosConfig{
+		Logger:         logger,
+		EventBus:       eventBus,
+		NetworkMagic:   2, // preview
 		LedgerState:    ledgerState,
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(eventBus, ledgerState),
@@ -186,7 +184,9 @@ func newLiveLifecycleTestNodeWithGenesis(
 			EventBus:    eventBus,
 			ConnManager: harnessConnManager,
 		}),
-	}))
+	}
+	ouro, err := ouroborosPkg.NewOuroboros(ouroborosCfg)
+	require.NoError(t, err)
 	require.NoError(t, ledgerState.Start(context.Background()))
 
 	cfg := NewConfig(
@@ -214,8 +214,11 @@ func newLiveLifecycleTestNodeWithGenesis(
 		chainManager: cm,
 		ledgerState:  ledgerState,
 		ouroboros:    ouro,
-		ctx:          ctx,
-		cancel:       cancel,
+		// Retained so reinitializeNetworkingCore can rebuild ouroboros the
+		// way Run() does.
+		ouroborosConfig: ouroborosCfg,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 	t.Cleanup(func() {
 		cancel()
@@ -368,6 +371,7 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	oldLedgerState := n.ledgerState
 	oldChainManager := n.chainManager
 	oldCtx := n.ctx
+	ouroBeforeRestore := n.ouroboros
 
 	targetIndex := numBlocks / 2
 	targetSlot := points[targetIndex].Slot
@@ -400,13 +404,24 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.NotNil(t, n.snapshotMgr)
 	require.NotNil(t, n.dbLifecycleMgr)
 
-	// The kept-alive ouroboros object must be rewired to the NEW
-	// dependencies, not left pointing at the closed ones.
+	// Ouroboros takes its dependencies at construction and never reassigns
+	// them, so rebuilding those dependencies must have produced a REPLACEMENT
+	// instance holding the new ones -- not the original still pointing at the
+	// closed ledger, mempool and connection manager.
+	require.NotSame(t, ouroBeforeRestore, n.ouroboros)
 	require.Same(t, n.ledgerState, n.ouroboros.LedgerState())
 	require.Same(t, n.mempool, n.ouroboros.Mempool())
 	require.Same(t, n.chainsyncState, n.ouroboros.ChainsyncState())
 	require.Same(t, n.connManager, n.ouroboros.ConnManager())
 	require.Same(t, n.peerGov, n.ouroboros.PeerGov())
+
+	// Everything the node handed to other components as a callback must
+	// resolve the replacement, not the instance it was built alongside. This
+	// is the failure mode that silently stops a restored node from syncing:
+	// the callbacks still run, but against a closed Ouroboros. Asserting on
+	// the connection manager's providers covers the listener and outbound
+	// paths, which are resolved lazily for exactly this reason.
+	require.NotNil(t, n.connManager.ResolvedListeners())
 
 	// The truncate itself must have taken effect: tip at the target, and
 	// blocks after it gone from the new database.

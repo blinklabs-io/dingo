@@ -1210,7 +1210,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.eventBus == nil {
 		return
 	}
-	o.eventBus.SubscribeFunc(
+	o.subscribeTracked(
 		event.ChainsyncResyncEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(event.ChainsyncResyncEvent)

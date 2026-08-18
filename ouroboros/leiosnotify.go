@@ -1320,8 +1320,8 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 		return
 	}
 	retry := func(event.Event) { o.retryDeferredLeiosAnnouncements() }
-	o.eventBus.SubscribeFunc(chain.ChainUpdateEventType, retry)
-	o.eventBus.SubscribeFunc(event.EpochTransitionEventType, retry)
+	o.subscribeTracked(chain.ChainUpdateEventType, retry)
+	o.subscribeTracked(event.EpochTransitionEventType, retry)
 }
 
 // pruneLeiosAnnouncements bounds announcement deduplication state to the
