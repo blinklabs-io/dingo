@@ -4448,7 +4448,11 @@ The ledger blockfetch subscriber must not synchronously start the next
 only after the peer's `BatchDone` is delivered through that same EventBus
 subscription. Batch continuation requests therefore run on tracked workers;
 the blockfetch state mutex protects the handoff and shutdown drains those
-workers before unsubscribing the ledger.
+workers before unsubscribing the ledger. A connection must not be reused for a
+new batch while an older request on that connection is still draining, because
+blockfetch callbacks carry only the connection ID; reuse waits for the older
+request to return and fails boundedly if it remains wedged. Close also bounds
+the continuation drain without holding the scheduling mutex while waiting.
 
 ## Threading and Concurrency
 

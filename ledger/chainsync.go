@@ -88,6 +88,12 @@ const (
 	// discards its record entirely.
 	blockfetchMaxSameRangeFailures = 3
 
+	// Warn after this many consecutive watchdog expirations while the same
+	// protocol request is still blocked outside the ledger mutex. The request
+	// remains protected from duplicate retries, but a permanently wedged peer
+	// must become visible at normal log level.
+	blockfetchInFlightTimeoutWarnThreshold = 3
+
 	// Number of received blockfetch blocks to buffer before committing them.
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
@@ -3214,6 +3220,9 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	// The lock is temporarily released around each external request and is
 	// reacquired before any state is inspected or changed. Callers still own
 	// the lock when this function returns.
+	if err := ls.waitForBlockfetchRequestLocked(connId); err != nil {
+		return err
+	}
 	if ls.chain.HeaderCount() == 0 {
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return nil
@@ -3235,6 +3244,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	ls.blockfetchRequestGeneration++
 	primaryRequestGeneration := ls.blockfetchRequestGeneration
 	ls.blockfetchPrimaryRequestGeneration = primaryRequestGeneration
+	primaryRequestDone := ls.beginBlockfetchRequestLocked(connId)
 	ls.armBlockfetchTimeoutLocked(connId)
 	batchReadyChan := ls.chainsyncBlockfetchReadyChan
 	ls.chainsyncBlockfetchMutex.Unlock()
@@ -3244,8 +3254,10 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		headerEnd,
 	); err != nil {
 		ls.chainsyncBlockfetchMutex.Lock()
+		ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
 		if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
 			ls.blockfetchPrimaryRequestGeneration = 0
+			ls.resetBlockfetchInFlightTimeoutsLocked()
 		}
 		// A blockfetch callback may have completed this batch, or a
 		// callback may have started its continuation, while the request
@@ -3275,8 +3287,10 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		return err
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
+	ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
 	if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
 		ls.blockfetchPrimaryRequestGeneration = 0
+		ls.resetBlockfetchInFlightTimeoutsLocked()
 	}
 	// The request can synchronously release a completed batch before it
 	// returns (for example when a peer answers with an immediate empty
@@ -3357,6 +3371,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 				}
 				shadowConnKey := connIdKey(shadowConn)
 				ls.blockfetchShadowRequestsInFlight[shadowConnKey] = struct{}{}
+				shadowRequestDone := ls.beginBlockfetchRequestLocked(shadowConn)
 				ls.chainsyncBlockfetchMutex.Unlock()
 				err := ls.config.BlockfetchRequestRangeFunc(
 					shadowConn,
@@ -3364,6 +3379,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 					headerEnd,
 				)
 				ls.chainsyncBlockfetchMutex.Lock()
+				ls.endBlockfetchRequestLocked(shadowConn, shadowRequestDone)
 				delete(ls.blockfetchShadowRequestsInFlight, shadowConnKey)
 				if ls.chainsyncBlockfetchReadyChan != batchReadyChan {
 					return nil
@@ -3424,7 +3440,7 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	resyncConnId ouroboros.ConnectionId,
 	reason string,
 ) {
-	if ls.blockfetchContinuationPending {
+	if ls.closed.Load() || ls.blockfetchContinuationPending {
 		return
 	}
 	ls.blockfetchContinuationPending = true
@@ -5091,6 +5107,78 @@ func (ls *LedgerState) armBlockfetchTimeoutLocked(
 	)
 }
 
+// waitForBlockfetchRequestLocked drains a previous request before allowing
+// the connection to be reused. Blockfetch callbacks identify only their
+// connection, so accepting a late block or BatchDone after the same peer has
+// been assigned to a new batch would apply the old response to new state.
+//
+// The caller owns chainsyncBlockfetchMutex. This function returns with it
+// locked, including after the bounded wait expires.
+func (ls *LedgerState) waitForBlockfetchRequestLocked(
+	connId ouroboros.ConnectionId,
+) error {
+	key := connIdKey(connId)
+	if key == "" {
+		return nil
+	}
+	for {
+		requestDone, ok := ls.blockfetchRequestsInFlight[key]
+		if !ok {
+			return nil
+		}
+		ls.chainsyncBlockfetchMutex.Unlock()
+		timer := time.NewTimer(blockfetchBusyTimeout)
+		select {
+		case <-requestDone:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+			ls.chainsyncBlockfetchMutex.Lock()
+			return fmt.Errorf(
+				"blockfetch connection %s remains busy after %s",
+				connId.String(),
+				blockfetchBusyTimeout,
+			)
+		}
+		ls.chainsyncBlockfetchMutex.Lock()
+	}
+}
+
+// beginBlockfetchRequestLocked records a request whose callbacks are still
+// allowed to arrive. The caller owns chainsyncBlockfetchMutex.
+func (ls *LedgerState) beginBlockfetchRequestLocked(
+	connId ouroboros.ConnectionId,
+) chan struct{} {
+	if ls.blockfetchRequestsInFlight == nil {
+		ls.blockfetchRequestsInFlight = make(map[string]chan struct{})
+	}
+	done := make(chan struct{})
+	ls.blockfetchRequestsInFlight[connIdKey(connId)] = done
+	return done
+}
+
+// endBlockfetchRequestLocked releases a request's connection for reuse. The
+// caller owns chainsyncBlockfetchMutex.
+func (ls *LedgerState) endBlockfetchRequestLocked(
+	connId ouroboros.ConnectionId,
+	done chan struct{},
+) {
+	key := connIdKey(connId)
+	if current, ok := ls.blockfetchRequestsInFlight[key]; ok && current == done {
+		delete(ls.blockfetchRequestsInFlight, key)
+		close(done)
+	}
+}
+
+func (ls *LedgerState) resetBlockfetchInFlightTimeoutsLocked() {
+	ls.blockfetchInFlightTimeoutGeneration = 0
+	ls.blockfetchInFlightTimeoutCount = 0
+}
+
 // blockfetchRequestRangeStart starts the external request. It must be called
 // without chainsyncBlockfetchMutex held; the blockfetch protocol may wait for
 // a previous request whose receive callback needs that mutex to publish its
@@ -5145,10 +5233,27 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		// not issue a duplicate range request while it is in flight; the
 		// original request may still deliver a valid response. Keep the
 		// watchdog alive so a later timeout can reassess the same request.
-		ls.config.Logger.Debug(
+		if ls.blockfetchInFlightTimeoutGeneration !=
+			ls.blockfetchPrimaryRequestGeneration {
+			ls.blockfetchInFlightTimeoutGeneration = ls.blockfetchPrimaryRequestGeneration
+			ls.blockfetchInFlightTimeoutCount = 0
+		}
+		if ls.blockfetchInFlightTimeoutCount <
+			blockfetchInFlightTimeoutWarnThreshold {
+			ls.blockfetchInFlightTimeoutCount++
+		}
+		logFn := ls.config.Logger.Debug
+		if ls.blockfetchInFlightTimeoutCount >=
+			blockfetchInFlightTimeoutWarnThreshold {
+			logFn = ls.config.Logger.Warn
+		}
+		logFn(
 			"blockfetch request still in flight at timeout; waiting for it to return",
 			"component", "ledger",
 			"connection_id", currentConnId.String(),
+			"request_generation", ls.blockfetchPrimaryRequestGeneration,
+			"in_flight_timeout_count", ls.blockfetchInFlightTimeoutCount,
+			"in_flight_elapsed", time.Since(ls.activeBlockfetchStart),
 		)
 		ls.armBlockfetchTimeoutLocked(currentConnId)
 		return

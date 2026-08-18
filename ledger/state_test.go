@@ -2342,7 +2342,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 
 	// Start the epoch rollover goroutine
 	wg.Go(func() {
-
 		// Capture snapshot
 		ls.RLock()
 		snapshotEra := ls.currentEra
@@ -2388,7 +2387,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	// Start multiple reader goroutines that try to read during the transaction
 	for range 5 {
 		wg.Go(func() {
-
 			// Wait for transaction to start
 			<-txnStarted
 
@@ -4409,6 +4407,27 @@ func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
 	err := ls.Close()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "block-processing pipeline")
+}
+
+// TestCloseReturnsErrorWhenBlockfetchContinuationsDoNotDrainInTime verifies
+// that Close does not hold the continuation scheduling mutex while waiting
+// for a worker that may need the blockfetch subscriber to finish its request.
+func TestCloseReturnsErrorWhenBlockfetchContinuationsDoNotDrainInTime(t *testing.T) {
+	origTimeout := CloseBlockfetchDrainTimeout
+	CloseBlockfetchDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseBlockfetchDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.blockfetchContinuationWG.Add(1)
+	t.Cleanup(ls.blockfetchContinuationWG.Done)
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blockfetch continuations")
 }
 
 // TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive

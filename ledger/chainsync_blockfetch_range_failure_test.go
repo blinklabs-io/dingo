@@ -129,6 +129,70 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 	ls.chainsyncBlockfetchMutex.Unlock()
 }
 
+// TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse verifies
+// that a late shadow request cannot share its connection with a later batch.
+// Blockfetch events carry only a connection ID, so reusing the connection
+// before the prior callback returns would make the old BatchDone ambiguous.
+func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
+	t *testing.T,
+) {
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("reuse-header")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+	connId := testChainsyncConnId(6113, 3001)
+	requestStarted := make(chan struct{})
+	requestDone := make(chan struct{})
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) error {
+				close(requestStarted)
+				return nil
+			},
+		},
+		blockfetchRequestsInFlight: map[string]chan struct{}{
+			connIdKey(connId): requestDone,
+		},
+	}
+
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- startQueuedBlockfetchForTest(ls, connId, nil)
+	}()
+	select {
+	case <-requestStarted:
+		t.Fatal("reused connection before prior blockfetch request drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	delete(ls.blockfetchRequestsInFlight, connIdKey(connId))
+	close(requestDone)
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	testutil.RequireReceive(
+		t,
+		requestStarted,
+		time.Second,
+		"blockfetch request did not start after prior request drained",
+	)
+	require.NoError(t, <-startDone)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
 // TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation verifies that
 // the blockfetch EventBus subscriber does not synchronously enter the next
 // GetBlockRange call. GetBlockRange waits for the next BatchDone, so doing so

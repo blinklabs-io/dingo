@@ -673,10 +673,13 @@ type LedgerState struct {
 	// primary request. A timeout may fire while the request is blocked in the
 	// protocol client; keeping its generation lets the timeout wait instead of
 	// issuing a duplicate request on the same batch.
-	blockfetchRequestGeneration        uint64
-	blockfetchPrimaryRequestGeneration uint64
-	blockfetchShadowRequestsInFlight   map[string]struct{}
-	selectedBlockfetchConnId           ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	blockfetchRequestGeneration         uint64
+	blockfetchPrimaryRequestGeneration  uint64
+	blockfetchRequestsInFlight          map[string]chan struct{}
+	blockfetchShadowRequestsInFlight    map[string]struct{}
+	blockfetchInFlightTimeoutGeneration uint64
+	blockfetchInFlightTimeoutCount      uint8
+	selectedBlockfetchConnId            ouroboros.ConnectionId // latest selected chainsync connection for the next batch
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
@@ -1542,9 +1545,9 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
-// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout, and
-// CloseProcessBlocksDrainTimeout bound the corresponding waits in Close()
-// below. Exported (not local consts) so tests — including cross-package
+// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout,
+// CloseProcessBlocksDrainTimeout, and CloseBlockfetchDrainTimeout bound the
+// corresponding waits in Close() below. Exported (not local consts) so tests — including cross-package
 // node-level tests exercising how a caller reacts to Close failing to
 // confirm drain — can shrink them instead of running real multi-second
 // timeouts.
@@ -1553,6 +1556,7 @@ var (
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
 	CloseProcessBlocksDrainTimeout   = 10 * time.Second
 	CloseBlockPipelineDrainTimeout   = 10 * time.Second
+	CloseBlockfetchDrainTimeout      = 10 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
@@ -1655,12 +1659,37 @@ func (ls *LedgerState) Close() error {
 		}
 	}
 
-	// Drain blockfetch continuation workers before unsubscribing from the
-	// EventBus. A worker may be waiting for BatchDone from the request it
-	// issued; keeping the subscriber alive lets that request finish cleanly.
+	// Synchronize with continuation scheduling before waiting. Close() marks
+	// the ledger closed above; startQueuedBlockfetchFromEventLocked checks that
+	// flag both before and after taking this mutex, so no worker can be added
+	// after this synchronization point. Do not hold the mutex across Wait: the
+	// blockfetch subscriber may need it while completing the request that lets a
+	// worker return.
 	ls.blockfetchContinuationMu.Lock()
-	ls.blockfetchContinuationWG.Wait()
+	continuationSchedulingClosed := ls.closed.Load()
 	ls.blockfetchContinuationMu.Unlock()
+	if !continuationSchedulingClosed {
+		err = errors.Join(
+			err,
+			errors.New("ledger closed state was cleared during continuation drain"),
+		)
+	}
+	blockfetchContinuationsDone := make(chan struct{})
+	go func() {
+		ls.blockfetchContinuationWG.Wait()
+		close(blockfetchContinuationsDone)
+	}()
+	select {
+	case <-blockfetchContinuationsDone:
+	case <-time.After(CloseBlockfetchDrainTimeout):
+		err = errors.Join(
+			err,
+			fmt.Errorf(
+				"timed out after %s waiting for blockfetch continuations to stop",
+				CloseBlockfetchDrainTimeout,
+			),
+		)
+	}
 
 	// Unsubscribe from event bus to stop receiving new events. Use
 	// UnsubscribeAndWait, not Unsubscribe: several of these handlers read
