@@ -65,9 +65,9 @@ func (f fileEntry) Size() (int64, error) {
 // bytesEntry serves an entry that was read and verified in one go, so the
 // bytes the digest covered are the bytes the parser walks.
 //
-// This holds one entry in memory at a time. It costs no extra read: verifying
-// a file already meant reading all of it, and this replaces the parser's
-// second pass rather than adding one.
+// This holds one entry in memory at a time, bounded by the certified size of
+// the file rather than by its actual size — see readVerifiedEntry, which
+// establishes the one before allocating for the other.
 type bytesEntry struct {
 	reader *bytes.Reader
 }

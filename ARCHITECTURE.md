@@ -3239,7 +3239,7 @@ reader keeps:
 
 | tree | what travels | where it is re-checked |
 |---|---|---|
-| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads each chunk, primary and secondary file once, hashes that buffer, and the chunk and index parsers walk the same buffer |
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` streams each chunk, primary and secondary file past a hash to establish its certified size, reads that many bytes, confirms the digest over the buffer, and the chunk and index parsers walk that buffer |
 | immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
@@ -3269,11 +3269,26 @@ descriptor, exactly as before. Only the verified path buffers, so a node reading
 its own ImmutableDB still streams chunks from disk and holds none of one in
 memory.
 
-The cost is one entry in memory at a time — bounded by the largest certified
-file, which is a chunk. It is not an extra read: verifying already meant reading
-the whole file, so the buffer replaces the parser's second pass rather than
-adding to it, and a verified open now reads each file once where it previously
-read it twice.
+The cost is one entry in memory at a time, bounded by the largest certified
+file, which is a chunk. The file is still read twice, as verifying it always
+meant: what the buffer removes is the parser's read, not one of those.
+
+The first pass is why the second is safe to allocate for. How large a file is,
+is whoever wrote it's choice; how large the *certified* file is, is not, because
+SHA-256 preimage resistance stands between the two. So the streaming pass holds
+nothing and returns a size only for an entry whose digest already matched, and
+the buffered pass reads that many bytes. Reading straight into memory instead
+would size an allocation from an untrusted file, and a planted entry large
+enough would be materialised in full before its digest could be found wrong —
+turning a refusal into an out-of-memory kill. A refusal that cannot be reached
+is not a refusal.
+
+The second pass hashes again, and not out of caution: the parser reads the
+buffer, so the buffer is the thing that has to be compared. That is also what
+makes a write landing between the two passes a refusal rather than a hole — it
+changes the bytes, so it changes the digest. An entry that grew is read only to
+its certified length and the remainder is never looked at; one that shrank fails
+to fill the buffer, which is a mismatch like any other.
 
 Re-hashing is the cost the alternative was not worth. Binding by retained
 descriptor would mean holding one for every file in the snapshot from

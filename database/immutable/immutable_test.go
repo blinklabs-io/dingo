@@ -590,6 +590,87 @@ func TestNewFromRootVerifiedIsUnaffectedByAnInPlaceWrite(t *testing.T) {
 	}
 }
 
+// TestNewFromRootVerifiedDoesNotAllocateForAPlantedFile covers the cost of
+// reading an entry into memory before knowing it is the certified one.
+//
+// The digest decides whether bytes are trusted, but the allocation happens
+// first, and its size is whoever wrote the file's choice — so a planted entry
+// large enough would be materialised in full and the process killed before the
+// refusal it was heading for could be returned. A refusal that cannot be
+// reached is not a refusal.
+//
+// So the size is established from a streaming pass that holds nothing, and only
+// a file whose digest already matched is read into memory. The assertion is on
+// bytes allocated rather than on the error, because the error was always
+// correct: it is arriving without a half-gigabyte allocation behind it that is
+// new.
+//
+// Sparse, so the fixture costs a size rather than the disk to back it.
+func TestNewFromRootVerifiedDoesNotAllocateForAPlantedFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "immutable")
+	copyChunkTrio(t, "00000", dir)
+	digests := trioDigests(t, dir)
+
+	const plantedSize = 512 << 20
+	chunkPath := filepath.Join(dir, "00000.chunk")
+	planted, err := os.OpenFile(chunkPath, os.O_RDWR|os.O_TRUNC, 0o640)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := planted.Truncate(plantedSize); err != nil {
+		_ = planted.Close()
+		t.Skipf("filesystem will not hold a sparse fixture: %s", err)
+	}
+	if err := planted.Close(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	info, err := os.Stat(chunkPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if info.Size() != plantedSize {
+		t.Fatalf("expected a %d byte fixture, got %d", plantedSize, info.Size())
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = root.Close() }()
+	imm, err := immutable.NewFromRootVerified(root, digests, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, readErr := iter.Next()
+	runtime.ReadMemStats(&after)
+
+	if !errors.Is(readErr, immutable.ErrDigestMismatch) {
+		t.Fatalf(
+			"a planted chunk must fail as a digest mismatch, got %v", readErr,
+		)
+	}
+	// Generous by three orders of magnitude against the streaming pass, which
+	// holds a copy buffer, and still nowhere near the fixture: reading it in
+	// would allocate more than the file itself as the slice grew.
+	const allocBudget = 32 << 20
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > allocBudget {
+		t.Fatalf(
+			"refusing a %d byte planted chunk allocated %d bytes; it must be "+
+				"refused without reading it into memory",
+			plantedSize, grew,
+		)
+	}
+}
+
 // TestNewFromRootVerifiedRefusesAFileTheDigestsDoNotCover keeps "no digest" an
 // error rather than an open. A file nothing certified is exactly what an
 // attacker adds, and reading it because the map is silent about it would make

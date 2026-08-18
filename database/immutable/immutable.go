@@ -180,9 +180,10 @@ func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
 // buffer, and the parser walks the same buffer. Nothing that happens to the
 // file afterwards is reachable from it.
 //
-// This holds one entry in memory at a time, which is what the guarantee costs.
-// It costs no extra read — verifying already meant reading the whole file, and
-// the buffer replaces the parser's second pass rather than adding to it.
+// This holds one entry in memory at a time, bounded by the certified size of
+// the largest file, which is what the guarantee costs. The file is read twice —
+// once streaming, to learn that size without trusting it, and once into the
+// buffer — so it is the parser's read that is removed, not one of the two.
 //
 // digests maps a name directly beneath the data directory ("00000.chunk") to
 // its lowercase hex SHA-256. An empty or nil map is refused: it would verify
@@ -227,14 +228,16 @@ func (i *ImmutableDb) entryPath(name string) string {
 // Without digests the reads go to the descriptor, as an ordinary local
 // ImmutableDB's always have.
 //
-// With digests the entry is read once, checked, and served from the bytes that
-// were checked — the descriptor is closed before the parser runs and is never
-// read a second time. Hashing a descriptor and then parsing through it does not
-// establish that the parser saw certified bytes: rewinding does not detach the
-// descriptor from its inode, and a writer who can modify that inode in place
-// changes what the second pass reads without changing anything the first pass
-// could have noticed. Reading once removes the second pass rather than trying
-// to make it safe.
+// With digests the entry is checked, read, and then served from the bytes that
+// were checked — the descriptor is closed before the parser runs and the parser
+// never touches the file. Hashing a descriptor and then parsing through it does
+// not establish that the parser saw certified bytes: rewinding does not detach
+// the descriptor from its inode, and a writer who can modify that inode in
+// place changes what the parser reads without changing anything the hash could
+// have noticed. What closes that is not checking harder but giving the parser
+// something nobody else can reach, which is a buffer whose own digest was
+// compared. See readVerifiedEntry for why it takes two passes over the file to
+// produce one safely.
 func (i *ImmutableDb) openEntry(name string) (entryReader, error) {
 	var f *os.File
 	var err error
@@ -256,11 +259,27 @@ func (i *ImmutableDb) openEntry(name string) (entryReader, error) {
 	return i.readVerifiedEntry(f, name)
 }
 
-// readVerifiedEntry reads an entry and returns the bytes, but only if they are
-// the certified ones.
+// readVerifiedEntry returns an entry's bytes, but only if they are the
+// certified ones, and only after establishing how many of them there may be.
 //
-// The digest is computed over the buffer that is returned, not over a separate
-// pass across the file, so there is no interval in which the two could differ.
+// Two passes, and the first one is what makes the second safe to allocate for.
+// How large a file is, is whoever wrote it's choice; how large the *certified*
+// file is, is not. So the streaming pass measures and checks the entry without
+// holding it, and the buffered pass then reads that many bytes and confirms the
+// digest over the buffer it is about to hand the parser. Reading straight into
+// memory instead would size an allocation from an untrusted file — a planted
+// entry of any size at all would be materialised in full before its digest
+// could be found wrong, which turns a refusal into an out-of-memory kill.
+//
+// The point of the second pass is not to check again but to check *the buffer*.
+// A digest taken during the first pass describes what the descriptor held then;
+// the parser reads the buffer, so the buffer is what has to be compared. That
+// is also what makes an in-place write between the passes harmless rather than
+// undetected: it changes the bytes, so it changes the digest, so it is refused.
+//
+// A file that grew between the passes is read only to its certified length, and
+// what follows is never looked at. One that shrank fails to fill the buffer,
+// which is a mismatch like any other.
 func (i *ImmutableDb) readVerifiedEntry(
 	f *os.File,
 	name string,
@@ -271,9 +290,20 @@ func (i *ImmutableDb) readVerifiedEntry(
 			"%w: %s is not certified", ErrDigestMismatch, name,
 		)
 	}
-	data, err := io.ReadAll(f)
+	certifiedSize, err := i.measureVerifiedEntry(f, name, expected)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", i.entryPath(name), err)
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding %s: %w", i.entryPath(name), err)
+	}
+	data := make([]byte, certifiedSize)
+	if _, err := io.ReadFull(f, data); err != nil {
+		// Including ErrUnexpectedEOF: an entry that no longer holds as much as
+		// the certified one is not the certified one.
+		return nil, fmt.Errorf(
+			"%w: re-reading %s: %w", ErrDigestMismatch, name, err,
+		)
 	}
 	sum := sha256.Sum256(data)
 	if got := hex.EncodeToString(sum[:]); got != expected {
@@ -283,6 +313,41 @@ func (i *ImmutableDb) readVerifiedEntry(
 		)
 	}
 	return newBytesEntry(data), nil
+}
+
+// measureVerifiedEntry streams an entry past a hash, in constant memory,
+// returning its length if it is the certified entry and an error if it is not.
+//
+// The length is worth having only because the digest matched: SHA-256 preimage
+// resistance is what stops a planted file from reporting a size the caller then
+// allocates. So the two answers come from one pass and neither is usable
+// without the other.
+func (i *ImmutableDb) measureVerifiedEntry(
+	f *os.File,
+	name string,
+	expected string,
+) (int64, error) {
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, f)
+	if err != nil {
+		return 0, fmt.Errorf("hashing %s: %w", i.entryPath(name), err)
+	}
+	if sum := hex.EncodeToString(hasher.Sum(nil)); sum != expected {
+		return 0, fmt.Errorf(
+			"%w: %s computed %s, certified %s",
+			ErrDigestMismatch, name, sum, expected,
+		)
+	}
+	// Guaranteed by the digest on 64-bit, where a certified entry this large
+	// cannot exist; stated rather than assumed for the platforms where int is
+	// narrower than the size io.Copy counts in.
+	if certifiedSize := int64(int(size)); certifiedSize != size {
+		return 0, fmt.Errorf(
+			"%w: %s is %d bytes, too large to read on this platform",
+			ErrDigestMismatch, name, size,
+		)
+	}
+	return size, nil
 }
 
 // removeEntry removes a file directly beneath the data directory.
