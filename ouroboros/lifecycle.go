@@ -141,7 +141,12 @@ func (o *Ouroboros) Close() error {
 	o.subscriptionsMu.Unlock()
 	if o.eventBus != nil {
 		for _, sub := range subs {
-			o.eventBus.Unsubscribe(sub.eventType, sub.id)
+			// UnsubscribeAndWait, not Unsubscribe: Close is called on the
+			// live restore path immediately before the ledger state,
+			// mempool and chainsync state this instance holds are closed
+			// and replaced. Returning while a handler is still mid-flight
+			// would let it touch a closed dependency.
+			o.eventBus.UnsubscribeAndWait(sub.eventType, sub.id)
 		}
 	}
 	o.StopLeiosPersistWriter()

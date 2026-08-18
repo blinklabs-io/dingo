@@ -590,9 +590,12 @@ func (c *ConnectionManager) stopListeners() {
 // success -- silently leaving that listener deaf to new inbound
 // connections until the whole process restarted.
 func (c *ConnectionManager) ResolvedListeners() []ListenerConfig {
+	// Resolve before taking the lock. The provider is caller-supplied and may
+	// reach back into components that touch this ConnectionManager, so running
+	// it under listenersMutex would risk a re-entrant deadlock.
+	listenerCfgs := c.listenerConfigList()
 	c.listenersMutex.Lock()
 	defer c.listenersMutex.Unlock()
-	listenerCfgs := c.listenerConfigList()
 	resolved := make([]ListenerConfig, len(listenerCfgs))
 	for i, cfg := range listenerCfgs {
 		// Only rewrite an entry that came in with a caller-supplied

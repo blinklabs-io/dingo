@@ -363,8 +363,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// against the about-to-close database, exactly the same danger
 	// errStorageDrainUnconfirmed already makes Restore/Truncate fail
 	// closed on rather than attempt reinitializeAndResume.
-	if n.ouroboros != nil {
-		if pauseErr := n.ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
+	if n.ouroboros() != nil {
+		if pauseErr := n.ouroboros().PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
 			err = errors.Join(
 				err,
 				errStorageDrainUnconfirmed,
@@ -538,16 +538,16 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 			EndorserBlockProvider: func(
 				ebHash []byte,
 			) (uint64, []cbor.RawMessage, bool) {
-				return n.ouroboros.EndorserBlockTxsByHash(ebHash)
+				return n.ouroboros().EndorserBlockTxsByHash(ebHash)
 			},
 			// The fetch is driven by the ledger's own call, exactly as the
 			// method value this replaced was; the closure only defers
-			// resolving n.ouroboros.
+			// resolving n.ouroboros().
 			EndorserBlockFetcher: func( //nolint:contextcheck
 				ebSlot uint64,
 				ebHash []byte,
 			) error {
-				return n.ouroboros.FetchEndorserBlockByPoint(ebSlot, ebHash)
+				return n.ouroboros().FetchEndorserBlockByPoint(ebSlot, ebHash)
 			},
 			EndorserBlockWaitSlots:        n.leiosPipelineTiming().CertifyByDeadlineSlots,
 			LeiosApplyEndorserBlockTxs:    !n.config.isMusashiNetwork(),
@@ -581,7 +581,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 				start ocommon.Point,
 				end ocommon.Point,
 			) error {
-				return n.ouroboros.BlockfetchClientRequestRange(connId, start, end)
+				return n.ouroboros().BlockfetchClientRequestRange(connId, start, end)
 			},
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
@@ -951,11 +951,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros.ConfigureListeners(n.config.listeners)
+				return n.ouroboros().ConfigureListeners(n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
-				return n.ouroboros.OutboundConnOpts()
+				return n.ouroboros().OutboundConnOpts()
 			},
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
@@ -989,7 +989,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			DisableOutbound: n.config.isDevMode(),
 			PromRegistry:    n.config.promRegistry,
 			PeerRequestFunc: func(peer *peergov.Peer) []string {
-				return n.ouroboros.RequestPeersFromPeer(peer)
+				return n.ouroboros().RequestPeersFromPeer(peer)
 			},
 			LedgerPeerProvider:                   ledgerPeerProvider,
 			UseLedgerAfterSlot:                   useLedgerAfterSlot,
@@ -1029,7 +1029,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// The connection-event subscriptions registered during Run do not need
 	// re-registering: they are closures over n, so they resolve whichever
 	// instance n.ouroboros currently holds.
-	if err := n.ouroboros.Close(); err != nil {
+	if err := n.ouroboros().Close(); err != nil {
 		return fmt.Errorf("failed to close previous ouroboros: %w", err)
 	}
 	ouroborosCfg := n.ouroborosConfig
@@ -1038,13 +1038,39 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	ouroborosCfg.ChainsyncState = n.chainsyncState
 	ouroborosCfg.ConnManager = n.connManager
 	ouroborosCfg.PeerGov = n.peerGov
-	n.ouroboros, err = ouroborosPkg.NewOuroboros(ouroborosCfg)
+	rebuiltOuroboros, err := ouroborosPkg.NewOuroboros(ouroborosCfg)
 	if err != nil {
 		return fmt.Errorf("failed to reconstruct ouroboros: %w", err)
 	}
+	// Carry the optional Leios prototype handlers across. They are not part
+	// of OuroborosConfig because their managers start on their own path, and
+	// that path (reinitializeBackgroundManagers) already ran earlier in this
+	// restore -- so it set them on the instance being replaced here. Without
+	// this, a live restore on a Dijkstra node silently loses Leios vote and
+	// pipeline handling.
+	if n.leiosVoteManager != nil {
+		if err := rebuiltOuroboros.SetLeiosVotes(
+			n.leiosVoteManager,
+		); err != nil {
+			return fmt.Errorf("failed to rewire leios votes: %w", err)
+		}
+	}
+	if n.leiosPipelineManager != nil {
+		if err := rebuiltOuroboros.SetLeiosPipeline(
+			n.leiosPipelineManager,
+		); err != nil {
+			return fmt.Errorf("failed to rewire leios pipeline: %w", err)
+		}
+	}
+	n.ouroborosRef.Store(rebuiltOuroboros)
 	// Re-register the chainsync resync handler: Close took the previous
 	// instance's subscription off the retained bus.
-	n.ouroboros.SubscribeChainsyncResync(ctx)
+	//
+	// n.ctx, not the restore operation's ctx: this subscription outlives the
+	// restore, so binding it to a context cancelled at the end of the
+	// operation would leave the node running with resync handling silently
+	// disabled. This matches Run's own long-lived subscription.
+	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 
 	genesisSelectionMode := n.config.genesisBootstrap &&
 		!n.config.intersectTip &&

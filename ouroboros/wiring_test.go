@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -87,7 +88,7 @@ func TestUnwiredHandleInboundConnEventDoesNotPanic(t *testing.T) {
 func newWiringTestDeps(t *testing.T) OuroborosConfig {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	bus := event.NewEventBus(nil, logger)
+	bus := newWiringTestEventBus(t)
 	ls := newTestLedgerState(t)
 	m, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
@@ -116,11 +117,19 @@ func newWiringTestDeps(t *testing.T) OuroborosConfig {
 
 func newWiringTestOuroboros(t *testing.T) *Ouroboros {
 	t.Helper()
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return newOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus: newWiringTestEventBus(t),
 	})
+}
+
+// newWiringTestEventBus builds an EventBus that is closed when the test ends,
+// so its dispatch goroutines do not outlive the test.
+func newWiringTestEventBus(t *testing.T) *event.EventBus {
+	t.Helper()
+	bus := event.NewEventBus(nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	t.Cleanup(bus.Close)
+	return bus
 }
 
 // TestNewOuroborosRejectsMissingRequiredDependency is the fail-fast contract:
@@ -186,4 +195,41 @@ func TestSetLeiosHandlersRejectNil(t *testing.T) {
 	o := newWiringTestOuroboros(t)
 	require.Error(t, o.SetLeiosVotes(nil))
 	require.Error(t, o.SetLeiosPipeline(nil))
+}
+
+// leiosPipelineHandlerStub exists only so a typed-nil pointer to it can be
+// passed to SetLeiosPipeline. fakeLeiosVoteHandler (leiosvotes_test.go) plays
+// the same role for votes.
+type leiosPipelineHandlerStub struct{}
+
+func (*leiosPipelineHandlerStub) ObserveEndorserBlock(
+	uint64,
+	lcommon.Blake2b256,
+) {
+}
+
+// TestRejectsTypedNilDependencies covers the interface-typed dependencies,
+// where a nil pointer stored in a non-nil interface compares != nil and then
+// panics on the first method call -- far from the wiring mistake that caused
+// it. The plain-nil cases are covered above; these are the typed ones.
+func TestRejectsTypedNilDependencies(t *testing.T) {
+	t.Run("Mempool", func(t *testing.T) {
+		cfg := newWiringTestDeps(t)
+		var typedNil *mempool.FIFO
+		cfg.Mempool = typedNil
+		o, err := NewOuroboros(cfg)
+		require.Nil(t, o)
+		require.ErrorIs(t, err, ErrMissingDependency)
+		require.Contains(t, err.Error(), "Mempool")
+	})
+	t.Run("LeiosVotes", func(t *testing.T) {
+		o := newWiringTestOuroboros(t)
+		var typedNil *fakeLeiosVoteHandler
+		require.ErrorIs(t, o.SetLeiosVotes(typedNil), ErrMissingDependency)
+	})
+	t.Run("LeiosPipeline", func(t *testing.T) {
+		o := newWiringTestOuroboros(t)
+		var typedNil *leiosPipelineHandlerStub
+		require.ErrorIs(t, o.SetLeiosPipeline(typedNil), ErrMissingDependency)
+	})
 }

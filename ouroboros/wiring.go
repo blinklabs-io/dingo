@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -30,6 +31,34 @@ import (
 // construction.
 var ErrMissingDependency = errors.New("ouroboros: missing dependency")
 
+// isNilInterface reports whether an interface value is unusable: either a plain
+// nil, or an interface holding a nil pointer.
+//
+// The second case is the one worth guarding. A caller that declares a typed
+// variable, fails to assign it, and passes it in produces an interface that
+// compares != nil but panics on the first method call. For Mempool that
+// surfaces as a crash on the first transaction, and for the Leios handlers on
+// the first vote — both far from the wiring mistake that caused them.
+func isNilInterface(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	//nolint:exhaustive // Only the nilable kinds matter; everything else
+	// cannot be a typed nil and falls through to false.
+	switch rv.Kind() {
+	case reflect.Pointer,
+		reflect.Interface,
+		reflect.Map,
+		reflect.Slice,
+		reflect.Func,
+		reflect.Chan,
+		reflect.UnsafePointer:
+		return rv.IsNil()
+	}
+	return false
+}
+
 // validateDependencies rejects a config that cannot produce a usable
 // Ouroboros, naming the first missing field. This is what makes a
 // partially-wired instance unrepresentable in production: the constructor is
@@ -41,7 +70,7 @@ func (cfg OuroborosConfig) validateDependencies() error {
 	}{
 		{"EventBus", cfg.EventBus == nil},
 		{"LedgerState", cfg.LedgerState == nil},
-		{"Mempool", cfg.Mempool == nil},
+		{"Mempool", isNilInterface(cfg.Mempool)},
 		{"ChainsyncState", cfg.ChainsyncState == nil},
 		{"ConnManager", cfg.ConnManager == nil},
 		{"PeerGov", cfg.PeerGov == nil},
@@ -74,7 +103,7 @@ func (o *Ouroboros) hasDependencies() bool {
 // disabling Leios is a config decision, so a nil here is a wiring bug that
 // would otherwise silently stop vote diffusion.
 func (o *Ouroboros) SetLeiosVotes(h LeiosVoteHandler) error {
-	if h == nil {
+	if isNilInterface(h) {
 		return fmt.Errorf("%w: LeiosVotes", ErrMissingDependency)
 	}
 	o.leiosVotes = h
@@ -84,7 +113,7 @@ func (o *Ouroboros) SetLeiosVotes(h LeiosVoteHandler) error {
 // SetLeiosPipeline wires the Leios pipeline handler. See SetLeiosVotes for why
 // this is not a constructor argument and why nil is rejected.
 func (o *Ouroboros) SetLeiosPipeline(h LeiosPipelineHandler) error {
-	if h == nil {
+	if isNilInterface(h) {
 		return fmt.Errorf("%w: LeiosPipeline", ErrMissingDependency)
 	}
 	o.leiosPipeline = h

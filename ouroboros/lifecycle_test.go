@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +37,7 @@ func TestCloseAllowsReconstructionWithSameRegistry(t *testing.T) {
 	newInstance := func() *Ouroboros {
 		return newOuroboros(OuroborosConfig{
 			Logger:       logger,
-			EventBus:     event.NewEventBus(nil, logger),
+			EventBus:     newWiringTestEventBus(t),
 			PromRegistry: registry,
 			EnableLeios:  true,
 		})
@@ -60,7 +59,7 @@ func TestCloseAllowsReconstructionWithSameRegistry(t *testing.T) {
 // same leak node_leios.go captures subscription IDs to avoid.
 func TestCloseUnsubscribesFromEventBus(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	bus := event.NewEventBus(nil, logger)
+	bus := newWiringTestEventBus(t)
 	o := newOuroboros(OuroborosConfig{
 		Logger:      logger,
 		EventBus:    bus,
@@ -82,7 +81,7 @@ func TestCloseIsIdempotent(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:       logger,
-		EventBus:     event.NewEventBus(nil, logger),
+		EventBus:     newWiringTestEventBus(t),
 		PromRegistry: prometheus.NewRegistry(),
 		EnableLeios:  true,
 	})

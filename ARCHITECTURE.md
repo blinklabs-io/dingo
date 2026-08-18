@@ -904,10 +904,16 @@ outlive it:
 teardown can both call it.
 
 Because the node's callbacks and the connection manager's providers all resolve
-`n.ouroboros` at call time, they follow the replacement automatically and are
-not re-registered. That property is what the closure rule above protects: a
-method value anywhere in either path would pin a component to the pre-restore
-instance, and the node would keep running while silently failing to sync.
+the instance at call time, they follow the replacement automatically and are not
+re-registered. That property is what the closure rule above protects: a method
+value anywhere in either path would pin a component to the pre-restore instance,
+and the node would keep running while silently failing to sync.
+
+The instance is held in an `atomic.Pointer` and read through `Node.ouroboros()`,
+because those callbacks run on other goroutines while a restore replaces it. The
+optional Leios handlers are carried across explicitly: their managers restart on
+a path that runs *before* the replacement, so they would otherwise be set on the
+outgoing instance and silently lost.
 
 ### Shutdown Flow
 
