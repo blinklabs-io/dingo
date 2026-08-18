@@ -26,27 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 )
 
-// Deps is the complete set of components Ouroboros needs before it can serve
-// or initiate any mini-protocol.
-//
-// These cannot be constructor arguments because the wiring graph is cyclic:
-// ledger.NewLedgerState takes EndorserBlockTxsByHash, FetchEndorserBlockByPoint
-// and BlockfetchClientRequestRange from an existing *Ouroboros;
-// connmanager.NewConnectionManager takes ConfigureListeners and
-// OutboundConnOpts; and peergov.NewPeerGovernor takes RequestPeersFromPeer.
-// Ouroboros must therefore exist before any of them, and Wire is the explicit
-// setup-time gate that closes the cycle with validation.
-//
-// Wire is safe to call before the dependencies are used but must complete
-// before listeners open or outbound connections start.
-type Deps struct {
-	LedgerState    *ledger.LedgerState
-	Mempool        mempool.Service
-	ChainsyncState *chainsync.State
-	ConnManager    *connmanager.ConnectionManager
-	PeerGov        *peergov.PeerGovernor
-}
-
 // ErrNotWired reports that a dependency was needed before Wire supplied it.
 var ErrNotWired = errors.New("ouroboros: dependencies not wired")
 
@@ -57,6 +36,21 @@ var ErrNotWired = errors.New("ouroboros: dependencies not wired")
 // only symptom was a nil dereference at first protocol use, and which had to
 // be kept in sync across both the Run() startup path and the live
 // snapshot/restore rebuild path independently.
+//
+// Wire and NewOuroboros share OuroborosConfig but read disjoint parts of it.
+// Passing the constructor's config back to Wire does not re-apply any setting,
+// and passing settings to Wire has no effect:
+//
+//	Field group                              NewOuroboros  Wire
+//	Logger, NetworkMagic, PeerSharing,
+//	  PromRegistry, timeouts, Leios tuning    reads         ignores
+//	EventBus, ConnManager                     reads         reads
+//	LedgerState, Mempool, ChainsyncState,
+//	  PeerGov                                 ignores       reads
+//
+// In particular PromRegistry drives one-time metric registration in
+// NewOuroboros only; Wire never touches it, so a config reused across both
+// calls cannot double-register collectors.
 //
 // Wire is idempotent in the sense that it may be called again with a fresh set
 // of dependencies. The live restore path in node_lifecycle.go relies on that:
@@ -69,32 +63,38 @@ var ErrNotWired = errors.New("ouroboros: dependencies not wired")
 // dependencies are read unsynchronized on the protocol hot paths, so a rewire
 // racing live traffic would be a data race. This is the same constraint the
 // previous exported-field assignments carried, made explicit.
-func (o *Ouroboros) Wire(d Deps) error {
-	// The EventBus arrives through OuroborosConfig rather than Deps, but it is
-	// no less required. NewOuroboros has no error return, so this is the only
-	// place it can be reported.
-	if o.eventBus == nil {
+func (o *Ouroboros) Wire(cfg OuroborosConfig) error {
+	// An EventBus supplied at construction stands if this config omits one,
+	// so a caller can pass either the same config twice or a dependencies-only
+	// config. NewOuroboros has no error return, so a missing EventBus can only
+	// be reported here.
+	eventBus := cfg.EventBus
+	if eventBus == nil {
+		eventBus = o.eventBus
+	}
+	if eventBus == nil {
 		return fmt.Errorf("%w: EventBus", ErrNotWired)
 	}
 	for _, missing := range []struct {
 		name  string
 		isNil bool
 	}{
-		{"LedgerState", d.LedgerState == nil},
-		{"Mempool", d.Mempool == nil},
-		{"ChainsyncState", d.ChainsyncState == nil},
-		{"ConnManager", d.ConnManager == nil},
-		{"PeerGov", d.PeerGov == nil},
+		{"LedgerState", cfg.LedgerState == nil},
+		{"Mempool", cfg.Mempool == nil},
+		{"ChainsyncState", cfg.ChainsyncState == nil},
+		{"ConnManager", cfg.ConnManager == nil},
+		{"PeerGov", cfg.PeerGov == nil},
 	} {
 		if missing.isNil {
 			return fmt.Errorf("%w: %s", ErrNotWired, missing.name)
 		}
 	}
-	o.ledgerState = d.LedgerState
-	o.mempool = d.Mempool
-	o.chainsyncState = d.ChainsyncState
-	o.connManager = d.ConnManager
-	o.peerGov = d.PeerGov
+	o.eventBus = eventBus
+	o.ledgerState = cfg.LedgerState
+	o.mempool = cfg.Mempool
+	o.chainsyncState = cfg.ChainsyncState
+	o.connManager = cfg.ConnManager
+	o.peerGov = cfg.PeerGov
 	return nil
 }
 

@@ -171,8 +171,16 @@ type chainsyncPeerStats struct {
 	headerCount         int64
 }
 
+// OuroborosConfig carries both the settings NewOuroboros applies at
+// construction and the node dependencies Wire installs afterwards. The two
+// groups are read at different points in the lifecycle and are not
+// interchangeable — see the dependency block at the bottom of the struct and
+// the field-ownership table on Wire.
 type OuroborosConfig struct {
-	Logger          *slog.Logger
+	Logger *slog.Logger
+	// EventBus and ConnManager are read by both NewOuroboros and Wire.
+	// Supplying them at construction is optional; Wire requires ConnManager
+	// and requires that an EventBus was supplied by one of the two.
 	EventBus        *event.EventBus
 	ConnManager     *connmanager.ConnectionManager
 	IntersectPoints []ocommon.Point
@@ -267,6 +275,26 @@ type OuroborosConfig struct {
 	// that bound are clamped there. Unset (0) on other networks, so dead peers
 	// are still evicted quickly.
 	KeepAliveTimeout time.Duration
+
+	// Node dependencies, installed and validated by Wire rather than by
+	// NewOuroboros. They live here rather than in a separate type so there is
+	// one struct describing everything Ouroboros is given, but they are read
+	// at a different point in the lifecycle than the settings above: see
+	// Wire, and the field-ownership table in its doc comment. NewOuroboros
+	// ignores every field in this group, with the documented exception of
+	// EventBus and ConnManager above, which it also accepts so a caller that
+	// already holds them (chiefly tests) can supply them up front.
+	//
+	// These cannot be constructor arguments because the wiring graph is
+	// cyclic: ledger construction takes EndorserBlockTxsByHash,
+	// FetchEndorserBlockByPoint and BlockfetchClientRequestRange from
+	// Ouroboros, connmanager takes ConfigureListeners and OutboundConnOpts,
+	// and peergov takes RequestPeersFromPeer. Ouroboros must therefore be
+	// built before any of them exists.
+	LedgerState    *ledger.LedgerState
+	Mempool        mempool.Service
+	ChainsyncState *chainsync.State
+	PeerGov        *peergov.PeerGovernor
 }
 
 type blockfetchMetrics struct {

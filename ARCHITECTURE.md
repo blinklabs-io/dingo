@@ -866,16 +866,29 @@ because the wiring graph is cyclic in three places:
 
 Ouroboros must therefore be constructed first (step 4 above), before the
 components it depends on exist. Its dependencies are unexported and installed
-by a single validated `Wire(Deps)` call that rejects any missing required
+by a single validated `Wire(OuroborosConfig)` call that rejects any missing required
 dependency, so a mis-wired node fails at startup with a named field rather
 than at first protocol use with a nil dereference. Accessors
 (`LedgerState()`, `Mempool()`, `ChainsyncState()`, `ConnManager()`,
 `PeerGov()`, `EventBus()`) expose them read-only.
 
+`NewOuroboros` and `Wire` share the `OuroborosConfig` struct but read disjoint
+parts of it, so one type describes everything Ouroboros is given:
+
+| Field group | `NewOuroboros` | `Wire` |
+| --- | --- | --- |
+| `Logger`, `NetworkMagic`, `PeerSharing`, `PromRegistry`, timeouts, Leios tuning | reads | ignores |
+| `EventBus`, `ConnManager` | reads | reads |
+| `LedgerState`, `Mempool`, `ChainsyncState`, `PeerGov` | ignores | reads |
+
+`PromRegistry` drives one-time metric registration in `NewOuroboros` only, so
+reusing one config across both calls cannot double-register collectors. An
+`EventBus` supplied at construction stands if the wiring config omits one.
+
 `Wire` runs after the peer governor is constructed and before any listener
 opens. Nothing dereferences the dependencies earlier: `ConfigureListeners` and
-`OutboundConnOpts` read only `OuroborosConfig`, and the protocol handlers they
-install are method values invoked per connection. Event handlers the node
+`OutboundConnOpts` read only construction-time settings, and the protocol
+handlers they install are method values invoked per connection. Event handlers the node
 subscribes before `Wire` (`HandleInboundConnEvent`, `HandleOutboundConnEvent`)
 check `Wired()` and drop an early event with a diagnostic.
 
@@ -887,7 +900,7 @@ started on their own path and are rebuilt independently across live restore.
 `node_lifecycle.go` depends on that: it stops and discards the ledger state,
 mempool, chainsync state, connection manager and peer governor, rebuilds them
 against the restored database, then rewires the same retained `Ouroboros`.
-Both paths install dependencies through the same `Deps` struct, so a
+Both paths install dependencies through the same `OuroborosConfig` struct, so a
 dependency added for `Run()` cannot be silently forgotten in the restore path.
 
 ### Shutdown Flow

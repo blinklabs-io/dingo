@@ -176,7 +176,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 	harnessConnManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
-	require.NoError(t, ouro.Wire(ouroborosPkg.Deps{
+	require.NoError(t, ouro.Wire(ouroborosPkg.OuroborosConfig{
 		LedgerState:    ledgerState,
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(eventBus, ledgerState),

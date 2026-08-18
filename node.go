@@ -1357,7 +1357,7 @@ func (n *Node) Run(ctx context.Context) error {
 	// the protocol handlers they install are method values that run per
 	// connection. The event subscriptions registered before this point are
 	// likewise only invoked once listeners are open.
-	if err := n.ouroboros.Wire(ouroborosPkg.Deps{
+	if err := n.ouroboros.Wire(ouroborosPkg.OuroborosConfig{
 		LedgerState:    n.ledgerState,
 		Mempool:        n.mempool,
 		ChainsyncState: n.chainsyncState,

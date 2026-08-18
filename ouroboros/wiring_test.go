@@ -81,10 +81,10 @@ func TestUnwiredHandleInboundConnEventDoesNotPanic(t *testing.T) {
 	require.NotPanics(t, func() { o.HandleInboundConnEvent(evt) })
 }
 
-// newWiringTestDeps builds a complete, valid dependency set. Each dependency
-// only has to be non-nil and distinguishable; wiring validation never calls
-// into them.
-func newWiringTestDeps(t *testing.T) Deps {
+// newWiringTestDeps builds a config carrying a complete, valid dependency set.
+// Each dependency only has to be non-nil and distinguishable; wiring
+// validation never calls into them.
+func newWiringTestDeps(t *testing.T) OuroborosConfig {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
@@ -99,7 +99,7 @@ func newWiringTestDeps(t *testing.T) Deps {
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
-	return Deps{
+	return OuroborosConfig{
 		LedgerState:    ls,
 		Mempool:        &mempool.FIFO{Mempool: m},
 		ChainsyncState: chainsync.NewState(bus, ls),
@@ -128,13 +128,13 @@ func newWiringTestOuroboros(t *testing.T) *Ouroboros {
 func TestWireRejectsMissingRequiredDependency(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		clear func(*Deps)
+		clear func(*OuroborosConfig)
 	}{
-		{"LedgerState", func(d *Deps) { d.LedgerState = nil }},
-		{"Mempool", func(d *Deps) { d.Mempool = nil }},
-		{"ChainsyncState", func(d *Deps) { d.ChainsyncState = nil }},
-		{"ConnManager", func(d *Deps) { d.ConnManager = nil }},
-		{"PeerGov", func(d *Deps) { d.PeerGov = nil }},
+		{"LedgerState", func(d *OuroborosConfig) { d.LedgerState = nil }},
+		{"Mempool", func(d *OuroborosConfig) { d.Mempool = nil }},
+		{"ChainsyncState", func(d *OuroborosConfig) { d.ChainsyncState = nil }},
+		{"ConnManager", func(d *OuroborosConfig) { d.ConnManager = nil }},
+		{"PeerGov", func(d *OuroborosConfig) { d.PeerGov = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := newWiringTestOuroboros(t)
@@ -148,14 +148,37 @@ func TestWireRejectsMissingRequiredDependency(t *testing.T) {
 }
 
 // TestWireRejectsMissingEventBus covers the one required dependency that
-// arrives through OuroborosConfig rather than Deps. NewOuroboros cannot
-// report it (it has no error return and 100+ call sites), so Wire is the
-// explicit setup-time gate that catches it.
+// NewOuroboros cannot report itself (it has no error return and 100+ call
+// sites), so Wire is the explicit setup-time gate that catches it. Neither
+// the constructor config nor the wiring config supplies one here.
 func TestWireRejectsMissingEventBus(t *testing.T) {
 	o := newUnwiredOuroboros() // built without an EventBus
 	err := o.Wire(newWiringTestDeps(t))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "EventBus")
+}
+
+// TestWireAcceptsEventBusFromEitherConfig pins the two ways the shared
+// OuroborosConfig can carry the EventBus, now that NewOuroboros and Wire read
+// the same struct: supplied at construction and omitted at wiring, or omitted
+// at construction and supplied at wiring.
+func TestWireAcceptsEventBusFromEitherConfig(t *testing.T) {
+	t.Run("from constructor", func(t *testing.T) {
+		o := newWiringTestOuroboros(t) // EventBus set at construction
+		deps := newWiringTestDeps(t)   // carries no EventBus
+		require.NoError(t, o.Wire(deps))
+		require.NotNil(t, o.EventBus())
+	})
+	t.Run("from wire", func(t *testing.T) {
+		o := newUnwiredOuroboros() // no EventBus at construction
+		deps := newWiringTestDeps(t)
+		deps.EventBus = event.NewEventBus(
+			nil,
+			slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		)
+		require.NoError(t, o.Wire(deps))
+		require.Same(t, deps.EventBus, o.EventBus())
+	})
 }
 
 // TestWireSucceedsWithRequiredDeps checks the happy path, and that the

@@ -53,8 +53,8 @@
 // unmodified) the equivalent construction in node.go's Run(). The one
 // piece of that duplication the compiler now enforces is the ouroboros
 // wiring: both paths install their dependencies through the same
-// ouroboros.Wire(ouroborosPkg.Deps{...}) call, so a dependency added to
-// Deps cannot be wired in Run() and forgotten here.
+// ouroboros.Wire(ouroborosPkg.OuroborosConfig{...}) call, so a dependency added to
+// OuroborosConfig cannot be wired in Run() and forgotten here.
 package dingo
 
 import (
@@ -987,7 +987,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// dependencies are added: a new required dependency now fails to compile
 	// here rather than silently leaving a half-wired instance behind a live
 	// restore.
-	if err := n.ouroboros.Wire(ouroborosPkg.Deps{
+	if err := n.ouroboros.Wire(ouroborosPkg.OuroborosConfig{
 		LedgerState:    n.ledgerState,
 		Mempool:        n.mempool,
 		ChainsyncState: n.chainsyncState,
