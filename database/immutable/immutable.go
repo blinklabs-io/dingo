@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -338,10 +339,12 @@ func (i *ImmutableDb) measureVerifiedEntry(
 			ErrDigestMismatch, name, sum, expected,
 		)
 	}
-	// Guaranteed by the digest on 64-bit, where a certified entry this large
-	// cannot exist; stated rather than assumed for the platforms where int is
-	// narrower than the size io.Copy counts in.
-	if certifiedSize := int64(int(size)); certifiedSize != size {
+	// Sizes are counted in int64 and indexed in int, which are the same width
+	// on the platforms this runs on and are not everywhere. Stated rather than
+	// assumed, so the buffer below cannot be asked for a length that does not
+	// fit — and widening rather than round-tripping through int, so the
+	// comparison says what it means on the platform where it can be false.
+	if size > int64(math.MaxInt) {
 		return 0, fmt.Errorf(
 			"%w: %s is %d bytes, too large to read on this platform",
 			ErrDigestMismatch, name, size,
