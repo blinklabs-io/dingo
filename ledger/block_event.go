@@ -34,27 +34,33 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 		for _, blk := range data.RolledBackBlocks {
 			ls.publishBlockEvent(BlockActionUndo, blk)
 		}
-		// Emit per-transaction rollback events.
-		// Hold rollbackMu so Close cannot start Wait between our
-		// closed check and Add(1).
-		ls.rollbackMu.Lock()
 		if ls.closed.Load() {
-			ls.rollbackMu.Unlock()
 			return
 		}
-		ls.rollbackWG.Add(1)
-		ls.rollbackMu.Unlock()
-		go ls.emitTransactionRollbackEvents(data)
+		// Emit per-transaction rollback events on this goroutine, not a
+		// detached one. handleEventChainUpdate is a SubscribeFunc
+		// dispatch, so its invocations are already serialized in
+		// chain-update order; emitting inline is what puts the undo
+		// events ahead of whatever the ledger publishes for the next
+		// chain update. See the ordering contract on
+		// emitTransactionRollbackEvents (blinklabs-io/dingo#2287).
+		ls.emitTransactionRollbackEvents(data)
 	}
 }
 
 // emitTransactionRollbackEvents emits TransactionEvent for each transaction
 // in the rolled-back blocks, allowing subscribers to undo any state changes.
+//
+// Ordering contract: the events for one rollback are emitted newest block
+// first and, within a block, in reverse transaction order -- the reverse of
+// how they were applied -- and all of them are handed to the bus before this
+// returns, so every one of them precedes any transaction event the ledger
+// emits for a later chain update. publishTransactionEvent carries that order
+// through to subscribers. A subscriber maintaining derived state can therefore
+// apply the undos and the next block's redos in the order they happened.
 func (ls *LedgerState) emitTransactionRollbackEvents(
 	rollbackEvt chain.ChainRollbackEvent,
 ) {
-	defer ls.rollbackWG.Done()
-
 	if ls.config.EventBus == nil {
 		return
 	}
@@ -102,21 +108,36 @@ func (ls *LedgerState) emitTransactionRollbackEvents(
 			continue
 		}
 		for i, tx := range slices.Backward(txs) {
-			ls.config.EventBus.PublishAsync(
-				TransactionEventType,
-				event.NewEvent(
-					TransactionEventType,
-					TransactionEvent{
-						Transaction: tx,
-						Point:       blockPoint,
-						BlockNumber: block.Number,
-						TxIndex:     uint32(i), //nolint:gosec
-						Rollback:    true,
-					},
-				),
-			)
+			ls.publishTransactionEvent(TransactionEvent{
+				Transaction: tx,
+				Point:       blockPoint,
+				BlockNumber: block.Number,
+				TxIndex:     uint32(i), //nolint:gosec
+				Rollback:    true,
+			})
 		}
 	}
+}
+
+// publishTransactionEvent publishes a TransactionEvent on the ledger.tx
+// ordered lane. Ordering is the point: subscribers derive state from these
+// events, and applying a block's transactions out of order -- or applying a
+// rollback's undo after the redo that followed it -- leaves that state wrong
+// in ways no later event corrects. PublishAsync cannot be used here because
+// the shared worker pool reorders (blinklabs-io/dingo#2287).
+//
+// This stays asynchronous rather than becoming a PublishBlocking like
+// publishBlockEvent: the forward-path caller runs inside the block-apply
+// database transaction, so parking it on subscriber backpressure would hold
+// that transaction open.
+func (ls *LedgerState) publishTransactionEvent(evt TransactionEvent) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.PublishOrdered(
+		TransactionEventType,
+		event.NewEvent(TransactionEventType, evt),
+	)
 }
 
 func (ls *LedgerState) publishBlockEvent(

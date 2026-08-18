@@ -372,6 +372,27 @@ sequenceDiagram
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
 
+`ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
+subscriber deriving state from it sees a block's transactions in index order
+and sees a rollback's undo events (`Rollback: true`) before any transaction
+event the ledger emits afterwards. Both halves of that contract are required:
+`handleEventChainUpdate` (`ledger/block_event.go`) emits the per-transaction
+undo events on its own goroutine rather than a detached one — it is a
+`SubscribeFunc` dispatch, so its invocations are already serialized in
+chain-update order — and the ordered lane carries that order through to
+subscribers. Until #2287 the undo events were emitted from a `go` statement
+onto the reordering shared pool, so a subscriber could apply an undo after the
+redo that followed it and stay inconsistent with no later event to correct it.
+`LedgerState.Close` therefore no longer drains in-flight rollback goroutines;
+the `UnsubscribeAndWait` on `chain.ChainUpdateEventType` is what guarantees no
+emission is in flight.
+
+The forward path keeps async semantics deliberately: `LedgerDelta.apply`
+(`ledger/delta.go`) publishes from inside the block-apply database
+transaction, so a synchronous publish would hold that transaction open under
+subscriber backpressure. `ledger.block` remains `PublishBlocking` on the
+handler's own goroutine.
+
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
 when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
 opens a chain iterator at the requested start point, sends `StartBatch`, then
@@ -930,7 +951,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
 | `ledger.block` | LedgerState | Block applied or rolled back |
-| `ledger.tx` | LedgerState | Transaction processed |
+| `ledger.tx` | LedgerState | Transaction processed (ordered lane — see below) |
 | `ledger.error` | LedgerState | Ledger error occurred |
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
 | `ledger.chainsync` | Ouroboros | Chainsync event received |
@@ -954,6 +975,17 @@ All event types follow the `subsystem.snake_case_name` convention.
 ### EventBus Features
 
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
+- **Ordering.** `Publish` and `PublishBlocking` deliver on the caller's
+  goroutine, so one publisher's events reach a subscriber in call order.
+  `PublishAsync` does **not** preserve order: the shared queue is drained by
+  4 workers that race each other into `Publish`, so events enqueued in order
+  can be delivered in either order. `PublishOrdered` (`event/ordered.go`) is
+  the order-preserving async path — one FIFO per event type
+  (`OrderedQueueSize`, 10000 entries) drained by exactly one worker, created
+  lazily on first publish and torn down by `Stop`/`Close`. Its guarantee is
+  per event type and covers only publishes that are themselves sequenced;
+  concurrent publishers still race to enqueue. Per-type lanes also isolate a
+  slow subscriber to its own event type, unlike the shared pool
 - Default subscriber buffers of 1024 events, with opt-in 100000-entry burst
   buffers for high-volume ledger chainsync and chain-update paths. The
   payload-heavy ledger blockfetch path uses an eight-entry buffer and relies
@@ -970,8 +1002,8 @@ All event types follow the `subsystem.snake_case_name` convention.
   per subscriber, not per delivery, and reports how many publishers are parked
   on it — every parked publisher observes the same stall, so a per-delivery
   limit made the log volume scale with publisher count rather than with time
-- **Never `Publish`, `PublishAsync`, or `PublishBlocking` while holding a lock
-  that a subscriber of that event acquires.** Because all three wait for
+- **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
+  while holding a lock that a subscriber of that event acquires.** Because all three wait for
   capacity rather than dropping, this is a deadlock, not merely a slow path:
   once the subscriber's buffer fills, the subscriber waits for the lock the
   publisher holds while the publisher waits for the capacity the subscriber

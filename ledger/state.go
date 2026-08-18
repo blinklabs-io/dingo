@@ -754,7 +754,7 @@ type LedgerState struct {
 	// node_lifecycle.go's package doc). Without a way to signal this
 	// goroutine specifically, it keeps applying incoming blocks with no
 	// awareness that Close is about to run — Close waited for every other
-	// background goroutine (rollbackWG, replayWG, rewardPrecomputeWG below)
+	// background goroutine (replayWG, rewardPrecomputeWG below)
 	// but not this one, the actual pipeline that writes blocks to the
 	// database. A block landing mid-write exactly as Close proceeds to
 	// shut down dbWorkerPool leaves the persisted block-ID index
@@ -764,7 +764,7 @@ type LedgerState struct {
 	// transient condition a retry can recover from.
 	processBlocksCancel context.CancelFunc
 	// processBlocksWG tracks that same goroutine so Close can wait for it
-	// to actually exit before proceeding, the same way rollbackWG/replayWG/
+	// to actually exit before proceeding, the same way replayWG/
 	// rewardPrecomputeWG already do for the others.
 	processBlocksWG sync.WaitGroup
 
@@ -784,12 +784,6 @@ type LedgerState struct {
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
 
-	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
-	// to prevent Add-after-Wait panics from the TOCTOU race between
-	// closed.Load() and Add(1) in handleEventChainUpdate.
-	rollbackMu sync.Mutex
-	// rollbackWG tracks in-flight rollback event emission goroutines
-	rollbackWG sync.WaitGroup
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
 	// closed.Load() and Add(1) in replayBufferedHeadersAsync (#2107).
@@ -1549,14 +1543,13 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
-// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout,
-// CloseProcessBlocksDrainTimeout, and CloseBlockfetchDrainTimeout bound the
-// corresponding waits in Close() below. Exported (not local consts) so tests — including cross-package
+// CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
+// CloseBlockfetchDrainTimeout bound the corresponding waits in Close()
+// below. Exported (not local consts) so tests — including cross-package
 // node-level tests exercising how a caller reacts to Close failing to
 // confirm drain — can shrink them instead of running real multi-second
 // timeouts.
 var (
-	CloseRollbackDrainTimeout        = 10 * time.Second
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
 	// A Leios block-processing transaction can include a large endorser
 	// closure and legitimately outlive the short blockfetch waits. Keep this
@@ -1748,37 +1741,10 @@ func (ls *LedgerState) Close() error {
 		)
 	}
 
-	// Wait for in-flight rollback event emission goroutines.
-	// Hold rollbackMu so no new goroutine can Add(1) between our
-	// closed flag and this Wait.
-	ls.config.Logger.Info("waiting for in-flight rollback goroutines")
-	rollbackStart := time.Now()
-	ls.rollbackMu.Lock()
-	rollbackDone := make(chan struct{})
-	go func() {
-		ls.rollbackWG.Wait()
-		close(rollbackDone)
-	}()
-	select {
-	case <-rollbackDone:
-		ls.config.Logger.Info(
-			"rollback goroutines finished",
-			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
-		)
-	case <-time.After(CloseRollbackDrainTimeout):
-		ls.config.Logger.Warn(
-			"timed out waiting for rollback goroutines",
-			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
-		)
-		err = errors.Join(
-			err,
-			fmt.Errorf(
-				"timed out after %s waiting for in-flight rollback goroutines",
-				time.Since(rollbackStart).Round(time.Millisecond),
-			),
-		)
-	}
-	ls.rollbackMu.Unlock()
+	// Rollback transaction events no longer need a drain wait here.
+	// They are emitted inline by handleEventChainUpdate (see
+	// block_event.go), so the UnsubscribeAndWait on ChainUpdateEventType
+	// above already guarantees none is in flight by this point.
 
 	// Drain in-flight replayBufferedHeadersAsync goroutines so they
 	// finish issuing DB reads before the owner closes the database

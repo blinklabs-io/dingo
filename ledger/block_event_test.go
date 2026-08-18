@@ -50,8 +50,6 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 			Logger:   logger,
 		},
 	}
-	ls.rollbackWG.Add(1)
-
 	rollbackEvt := chain.ChainRollbackEvent{
 		RolledBackBlocks: []models.Block{
 			{
