@@ -208,8 +208,10 @@ type Subscriber interface {
 // channelSubscriber is the in-memory subscriber adapter that preserves the
 // existing channel-based API. Delivery waits for buffer capacity rather than
 // dropping: a subscriber that falls behind backpressures its publishers
-// instead of silently losing events (blinklabs-io/dingo#2932). Close closes
-// the channel so SubscribeFunc goroutines exit.
+// instead of silently losing events (blinklabs-io/dingo#2932). Close discards
+// events still queued during shutdown, then closes the channel so
+// SubscribeFunc goroutines exit without replaying a potentially large backlog
+// into components that are closing.
 type channelSubscriber struct {
 	ch     chan Event
 	logger *slog.Logger
@@ -399,7 +401,18 @@ func (c *channelSubscriber) Close() {
 		return
 	}
 	c.closed = true
-	close(c.ch)
+	// Once shutdown begins, queued events have no useful consumer: replaying
+	// them can keep EventBus.Close waiting behind a bulk-sync backlog while
+	// the component that owns the handler is already being torn down. Normal
+	// delivery remains lossless; this discard is limited to Close/Stop.
+	for {
+		select {
+		case <-c.ch:
+		default:
+			close(c.ch)
+			return
+		}
+	}
 }
 
 // subscribeInternal does the actual subscription work without checking stopped.

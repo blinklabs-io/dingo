@@ -53,6 +53,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/pipeline"
 )
 
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
@@ -4518,4 +4519,34 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 	default:
 		t.Fatal("Close returned without processCtx actually being cancelled")
 	}
+}
+
+// TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the
+// shutdown ordering required when block processing is draining the decode
+// pipeline's Results channel. That drain has no context select after a batch
+// is submitted, so stopping the pipeline must close Results before Close
+// waits for the block-processing goroutine.
+func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
+	origTimeout := CloseProcessBlocksDrainTimeout
+	CloseProcessBlocksDrainTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		blockPipeline: pipeline.NewBlockPipeline(
+			pipeline.WithDecodeWorkers(1),
+		),
+	}
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	ls.processBlocksCancel = func() {}
+	ls.processBlocksWG.Add(1)
+	go func() {
+		defer ls.processBlocksWG.Done()
+		for range ls.blockPipeline.Results() {
+		}
+	}()
+
+	require.NoError(t, ls.Close())
 }

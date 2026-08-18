@@ -4443,6 +4443,11 @@ The `EventBus` implements publisher/subscriber communication, decoupling compone
 
 Database operations and event delivery use worker pools for controlled concurrency and backpressure.
 
+During shutdown, EventBus closes release backpressured publishers and discard
+events still queued in in-memory subscribers. It still waits for a handler
+that is already executing, but does not replay bulk-sync blockfetch backlog
+into ledger or storage components that are being closed.
+
 The ledger blockfetch subscriber must not synchronously start the next
 `GetBlockRange` from its `ledger.blockfetch` handler: the request completes
 only after the peer's `BatchDone` is delivered through that same EventBus

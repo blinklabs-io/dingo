@@ -1557,9 +1557,13 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 var (
 	CloseRollbackDrainTimeout        = 10 * time.Second
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
-	CloseProcessBlocksDrainTimeout   = 10 * time.Second
-	CloseBlockPipelineDrainTimeout   = 10 * time.Second
-	CloseBlockfetchDrainTimeout      = 10 * time.Second
+	// A Leios block-processing transaction can include a large endorser
+	// closure and legitimately outlive the short blockfetch waits. Keep this
+	// within Node's default 30-second shutdown budget, but long enough to avoid
+	// closing storage while that transaction is still using it.
+	CloseProcessBlocksDrainTimeout = 30 * time.Second
+	CloseBlockPipelineDrainTimeout = 10 * time.Second
+	CloseBlockfetchDrainTimeout    = 10 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
@@ -1600,6 +1604,21 @@ func (ls *LedgerState) Close() error {
 		ls.Scheduler.Stop()
 	}
 
+	// Stop the decode pipeline at the same time as the block-processing
+	// goroutine. decodeReadChainBatch drains the pipeline's Results channel
+	// without a context select once a batch has been submitted; waiting for
+	// ledgerProcessBlocks before stopping the pipeline can therefore deadlock
+	// shutdown until CloseProcessBlocksDrainTimeout expires. Stop cancels
+	// Submit calls and closes Results, which releases that drain so the
+	// block-processing goroutine can exit normally.
+	var blockPipelineStopDone chan error
+	if ls.blockPipeline != nil {
+		blockPipelineStopDone = make(chan error, 1)
+		go func() {
+			blockPipelineStopDone <- ls.blockPipeline.Stop()
+		}()
+	}
+
 	// Stop the normal chainsync-driven block-processing pipeline next, for
 	// the identical reason as Scheduler.Stop above: ledgerProcessBlocks
 	// writes blocks to ls.chain/the database (via dbWorkerPool below), and
@@ -1637,20 +1656,16 @@ func (ls *LedgerState) Close() error {
 		}
 	}
 
-	// Stop the block-decode pipeline (if configured), now that its only
-	// submitter -- the goroutine just drained above -- has exited. Bounded
-	// for the same reason as the wait above: a stuck pipeline must not hang
-	// Close forever, but a timeout here is not silently treated as success,
-	// since it means pipeline worker goroutines may still be running when
-	// Close returns.
-	if ls.blockPipeline != nil {
-		pipelineStopDone := make(chan struct{})
-		go func() {
-			_ = ls.blockPipeline.Stop()
-			close(pipelineStopDone)
-		}()
+	// Wait for the decode pipeline after its block-processing consumer has
+	// drained. Stop was started above so it could release a consumer blocked
+	// waiting for Results; this wait still bounds pipeline teardown and
+	// surfaces a failure to the caller.
+	if blockPipelineStopDone != nil {
 		select {
-		case <-pipelineStopDone:
+		case stopErr := <-blockPipelineStopDone:
+			if stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("block-decode pipeline shutdown: %w", stopErr))
+			}
 		case <-time.After(CloseBlockPipelineDrainTimeout):
 			err = errors.Join(
 				err,

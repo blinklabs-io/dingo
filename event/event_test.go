@@ -293,6 +293,41 @@ func TestEventBusClose(t *testing.T) {
 	eb.Close()
 }
 
+func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
+	const testEvtType event.EventType = "test.close.discard"
+	eb := event.NewEventBus(nil, nil)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int32
+	eb.SubscribeFuncWithBuffer(testEvtType, 2, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-1"))
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-2"))
+
+	closeDone := make(chan struct{})
+	go func() {
+		eb.Close()
+		close(closeDone)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		closeDone,
+		50*time.Millisecond,
+		"Close should still wait for the in-flight handler",
+	)
+	close(release)
+	testutil.RequireReceive(t, closeDone, time.Second, "Close did not finish")
+	require.Equal(t, int32(1), handled.Load(), "queued events were replayed during Close")
+}
+
 func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	var testEvtType event.EventType = "test.panic"
 	eb := event.NewEventBus(nil, nil)
