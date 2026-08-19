@@ -303,6 +303,47 @@ func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
 // TestServerShutdownOnContextCancel asserts cancelling the context
 // passed to Start shuts the listener down, which is how the node stops
 // the API during its own shutdown.
+// TestStartServerReleasesListenerWhenServerAlreadyDetached covers the
+// window between Start publishing s.httpServer and startServer recording
+// the listener. A Stop landing inside it detaches the server, so takeServer
+// later hands back a nil server and shutdownServer never runs -- meaning
+// startServer must not leave its own socket bound, and must not overwrite
+// the listener of whichever server is current now.
+func TestStartServerReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
+	srv := newTestServer(t, newTestDeps())
+	addr := testutil.FreePort(t)
+
+	// Stands in for the server a concurrent restart already published;
+	// it must survive this call untouched.
+	currentListener, err := net.Listen("tcp", testutil.FreePort(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = currentListener.Close() })
+	current := &http.Server{Addr: currentListener.Addr().String()}
+	srv.mu.Lock()
+	srv.httpServer = current
+	srv.listener = currentListener
+	srv.mu.Unlock()
+
+	// The detached server this startServer call is bringing up.
+	detached := &http.Server{Addr: addr}
+	require.NoError(t, srv.startServer(detached))
+
+	require.False(
+		t, portAccepts(addr),
+		"startServer must not leave a stopped server's port bound",
+	)
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	require.Same(
+		t, current, srv.httpServer,
+		"startServer must not disturb the current server",
+	)
+	require.Same(
+		t, currentListener, srv.listener,
+		"startServer must not overwrite the current server's listener",
+	)
+}
+
 func TestServerShutdownOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	_, addr := startOnFreePort(t, ctx, newTestDeps())

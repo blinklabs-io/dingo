@@ -250,7 +250,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	if err := s.startServer(server); err != nil {
 		s.mu.Lock()
-		s.httpServer = nil
+		// Guarded: an overlapping Stop or restart may already have
+		// detached or replaced this server, and clearing the field
+		// unconditionally would discard the newer one.
+		if s.httpServer == server {
+			s.httpServer = nil
+		}
 		s.mu.Unlock()
 		return err
 	}
@@ -345,10 +350,34 @@ func (s *Server) startServer(
 		)
 	}
 	// Recorded so Stop can close the socket itself rather than relying on
-	// the Serve goroutine below having registered it (see shutdownServer).
+	// the Serve goroutine below having registered it (see shutdownServer),
+	// but only while this call's server is still the current one. Stop can
+	// detach it between Start publishing the server and this point; a bare
+	// assignment would then strand a bound socket no later Stop can reach,
+	// because takeServer hands back a nil server and shutdownServer never
+	// runs. The same guard stops an overlapping restart from overwriting the
+	// newer server's listener with this one.
 	s.mu.Lock()
-	s.listener = ln
+	current := s.httpServer == server
+	if current {
+		s.listener = ln
+	}
 	s.mu.Unlock()
+	if !current {
+		// Already stopped or replaced: close our own socket instead of
+		// leaving it bound, and never hand it to Serve. Reported by log
+		// rather than returned, because Start's error path nils
+		// s.httpServer and would clobber the newer server here.
+		if closeErr := ln.Close(); closeErr != nil &&
+			!errors.Is(closeErr, net.ErrClosed) {
+			s.logger.Error(
+				"failed to close the listener of a "+
+					"stopped Mesh API server",
+				"error", closeErr,
+			)
+		}
+		return nil
+	}
 	go func() {
 		var serveErr error
 		if useTLS {
