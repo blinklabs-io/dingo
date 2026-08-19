@@ -140,7 +140,9 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		}
 	}
 	if n.peerGov != nil {
-		n.peerGov.Stop()
+		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("peer governor shutdown: %w", stopErr))
+		}
 	}
 	// reinitializeNetworkingCore constructs a fresh PoolRelayProvider on
 	// every cycle (it has no long-lived identity of its own, unlike
@@ -1073,6 +1075,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		n.peerGov.LoadTopologyConfig(topologyConfig)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
+				ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added == 0 {

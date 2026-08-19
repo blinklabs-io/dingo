@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -46,7 +47,7 @@ func TestLoadPeerSnapshotSeedsLedgerPeers(t *testing.T) {
 		LedgerPeerTarget: 2,
 	})
 
-	added := pg.LoadPeerSnapshot(snapshot)
+	added := pg.LoadPeerSnapshot(context.Background(), snapshot)
 
 	require.Equal(t, 2, added)
 	require.Len(t, pg.peers, 2)

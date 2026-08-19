@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"context"
 	"time"
 )
 
@@ -27,7 +28,13 @@ import (
 // unusable peers must not block fresh relay candidates while the node is short
 // of connected upstreams. Candidates are shuffled uniformly so no single pool
 // dominates across refreshes.
+//
+//nolint:unused // Kept as a context-free test helper for existing discovery tests.
 func (p *PeerGovernor) discoverLedgerPeers() {
+	p.discoverLedgerPeersContext(context.Background())
+}
+
+func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	// Check if ledger peer provider is configured
 	if p.config.LedgerPeerProvider == nil {
 		p.config.Logger.Debug(
@@ -95,6 +102,9 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 	}
 
 	// Get pool relays from ledger
+	if err := ctx.Err(); err != nil {
+		return
+	}
 	relays, err := p.config.LedgerPeerProvider.GetPoolRelays()
 	if err != nil {
 		p.config.Logger.Error(
@@ -113,7 +123,7 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 	if urgent && needed <= 0 {
 		extraAdds = p.config.LedgerPeerTarget
 	}
-	addedCount := p.addLedgerRelays(relays, extraAdds)
+	addedCount := p.addLedgerRelaysContext(ctx, relays, extraAdds)
 
 	if addedCount > 0 {
 		p.config.Logger.Info(
@@ -219,13 +229,25 @@ func dedupeRelayCandidates(candidates []string) []string {
 
 // addLedgerPeer adds a peer from ledger discovery with deduplication.
 // Returns true if the peer was added, false if it already exists or is denied.
+//
+//nolint:unused // Kept as a context-free test helper for existing peer tests.
 func (p *PeerGovernor) addLedgerPeer(address string) bool {
+	return p.addLedgerPeerContext(context.Background(), address)
+}
+
+func (p *PeerGovernor) addLedgerPeerContext(
+	ctx context.Context,
+	address string,
+) bool {
+	if err := ctx.Err(); err != nil {
+		return false
+	}
 	// Resolve address (with DNS lookup) before acquiring lock to avoid
 	// blocking while holding the mutex. Ledger relay hostnames are
 	// attacker-supplied, and resolveLedgerDialTarget's fast path dials
 	// whatever ends up here unchanged for the peer's whole lifetime, so this
 	// (unlike resolveAddress) filters to a locally-dialable address family.
-	normalized := p.resolveLedgerDiscoveryAddress(address)
+	normalized := p.resolveLedgerDiscoveryAddress(ctx, address)
 
 	// Reject non-routable IPs (private, loopback, link-local, etc.)
 	if !isRoutableAddr(normalized) {

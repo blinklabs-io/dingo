@@ -961,6 +961,13 @@ Phase 4: Cleanup resources
   Registered shutdown functions
 ```
 
+The node creates one shutdown context from the configured `shutdownTimeout`
+and passes it through every phase. PeerGovernor shutdown cancels its internal
+run context, which interrupts ledger-peer DNS discovery and outbound work,
+then waits for its tracked workers until that deadline. A deadline expiry is
+returned as a shutdown error while the remaining teardown continues, so a
+slow peer-governor operation cannot hold phase 1 indefinitely.
+
 The terminal EventBus close occurs after mempool teardown and runs concurrently
 with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
 network protocol callback on a full ledger subscriber, while a blockfetch

@@ -197,7 +197,7 @@ func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(
 	pg.ctx = t.Context()
 	pg.stopCh = make(chan struct{})
 	pg.mu.Unlock()
-	t.Cleanup(pg.Stop)
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 
 	target := &Peer{
 		Address:           "relay.example.com:1",
@@ -313,7 +313,7 @@ func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityChecked
 	pg.ctx = ctx
 	pg.stopCh = make(chan struct{})
 	pg.mu.Unlock()
-	t.Cleanup(pg.Stop)
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 
 	target := &Peer{
 		Address:           "relay5.example.com:3001",
@@ -451,14 +451,14 @@ func TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer(
 func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
 	setLocalAddrFamilies(t, true, false) // v4-only host
 
-	oldLookupIP := lookupIP
-	lookupIP = func(string) ([]net.IP, error) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
 		return []net.IP{
 			net.ParseIP("2001:db8::1"), // AAAA returned first
 			net.ParseIP("198.51.100.9"),
 		}, nil
 	}
-	t.Cleanup(func() { lookupIP = oldLookupIP })
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
 	pg := newDialSpreadGovernor()
 	require.True(t, pg.addLedgerPeer("relay.example.com:3001"))
@@ -473,4 +473,39 @@ func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
 	got, err := pg.resolveLedgerDialTarget(t.Context(), pg.peers[0])
 	require.NoError(t, err)
 	assert.Equal(t, "198.51.100.9:3001", got)
+}
+
+func TestResolveLedgerDiscoveryAddressHonorsCancellation(t *testing.T) {
+	oldLookupIPAddr := lookupIPAddr
+	started := make(chan struct{})
+	lookupIPAddr = func(ctx context.Context, _ string) ([]net.IP, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan string, 1)
+	go func() {
+		result <- pg.resolveLedgerDiscoveryAddress(ctx, "RELAY.EXAMPLE.COM:3001")
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ledger DNS lookup did not start")
+	}
+	cancel()
+
+	select {
+	case got := <-result:
+		require.Equal(t, "relay.example.com:3001", got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ledger DNS lookup did not honor cancellation")
+	}
 }

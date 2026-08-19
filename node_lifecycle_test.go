@@ -233,7 +233,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 			_ = n.connManager.Stop(context.Background())
 		}
 		if n.peerGov != nil {
-			n.peerGov.Stop()
+			_ = n.peerGov.Stop(context.Background())
 		}
 		if n.snapshotMgr != nil {
 			_ = n.snapshotMgr.Stop()

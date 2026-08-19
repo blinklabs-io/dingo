@@ -16,6 +16,7 @@ package peergov
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -141,6 +142,7 @@ type PeerGovernor struct {
 	publicRootChurnTicker *time.Ticker
 	stopCh                chan struct{}
 	ctx                   context.Context      // Context for cancellation
+	cancel                context.CancelFunc   // Cancels the context owned by Start
 	denyList              map[string]time.Time // address -> expiry time
 	peers                 []*Peer
 	config                PeerGovernorConfig
@@ -424,6 +426,8 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 }
 
 func (p *PeerGovernor) Start(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+
 	// Setup connmanager event listeners
 	if p.config.EventBus != nil {
 		inboundConnSubId := p.config.EventBus.SubscribeFunc(
@@ -448,7 +452,8 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	publicRootChurnTicker := time.NewTicker(p.config.PublicRootChurnInterval)
 
 	p.mu.Lock()
-	p.ctx = ctx
+	p.ctx = runCtx
+	p.cancel = cancel
 	p.reconcileTicker = ticker
 	p.gossipChurnTicker = gossipChurnTicker
 	p.publicRootChurnTicker = publicRootChurnTicker
@@ -463,10 +468,10 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 		for {
 			select {
 			case <-t.C:
-				p.reconcile(ctx)
+				p.reconcile(runCtx)
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -483,7 +488,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 				p.gossipChurn()
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -500,7 +505,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 				p.publicRootChurn()
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -522,11 +527,11 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 			select {
 			case <-t.C:
 				if p.ledgerPeersUrgent() {
-					p.discoverLedgerPeers()
+					p.discoverLedgerPeersContext(runCtx)
 				}
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -543,10 +548,10 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 		defer p.wg.Done()
 		select {
 		case <-time.After(initialReconnectDelay):
-			p.reconcile(ctx)
+			p.reconcile(runCtx)
 		case <-stop:
 			return
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			return
 		}
 	}(stopCh)
@@ -554,8 +559,9 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down the peer governor
-func (p *PeerGovernor) Stop() {
+// Stop gracefully shuts down the peer governor, waiting for its background
+// workers until ctx is canceled or reaches its deadline.
+func (p *PeerGovernor) Stop(ctx context.Context) error {
 	p.mu.Lock()
 
 	// Stop all tickers
@@ -578,9 +584,14 @@ func (p *PeerGovernor) Stop() {
 	}
 	inboundConnSubId := p.inboundConnSubId
 	connClosedSubId := p.connClosedSubId
+	cancel := p.cancel
+	p.cancel = nil
 	p.inboundConnSubId = 0
 	p.connClosedSubId = 0
 	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 
 	// PeerGovernor instances are replaced during a live database
 	// restore/truncate while the EventBus remains running. Remove the
@@ -606,5 +617,15 @@ func (p *PeerGovernor) Stop() {
 	// take p.mu themselves, so waiting while still holding it would
 	// deadlock. See the wg field's doc comment for why this wait matters
 	// beyond a clean process shutdown.
-	p.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("peer governor shutdown: %w", ctx.Err())
+	}
 }

@@ -566,7 +566,7 @@ func TestSpawnOutboundConnectionLockedReservesBeforeScheduling(t *testing.T) {
 //
 // This matters beyond a clean shutdown: the live database restore/truncate
 // quiesce path (node_lifecycle.go's quiesceForLiveLifecycleOp) calls
-// PeerGovernor.Stop() expecting every background goroutine -- including
+// PeerGovernor.Stop(context.Background()) expecting every background goroutine -- including
 // in-flight outbound dials -- to have exited before it tears down and
 // replaces the node's ConnectionManager. A dial goroutine not tracked by
 // p.wg could finish its handshake after Stop returns and attach to (or
@@ -636,7 +636,7 @@ func TestStop_WaitsForInFlightOutboundDial(t *testing.T) {
 
 	stopped := make(chan struct{})
 	go func() {
-		pg.Stop()
+		_ = pg.Stop(context.Background())
 		close(stopped)
 	}()
 

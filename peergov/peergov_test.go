@@ -247,7 +247,7 @@ func TestPeerGovernorStopWaitsForInFlightGoroutines(t *testing.T) {
 
 	stopDone := make(chan struct{})
 	go func() {
-		pg.Stop()
+		_ = pg.Stop(context.Background())
 		close(stopDone)
 	}()
 
@@ -264,6 +264,37 @@ func TestPeerGovernorStopWaitsForInFlightGoroutines(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not return after the in-flight goroutine finished")
 	}
+}
+
+func TestPeerGovernorStopHonorsContextDeadline(t *testing.T) {
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
+
+	blocking := &blockingLedgerPeerProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           eventBus,
+		DisableOutbound:    true,
+		LedgerPeerProvider: blocking,
+	})
+	require.NoError(t, pg.Start(context.Background()))
+
+	select {
+	case <-blocking.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := pg.Stop(stopCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	close(blocking.release)
+	require.NoError(t, pg.Stop(context.Background()))
 }
 
 func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
@@ -286,7 +317,7 @@ func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
 		eventBus.HasSubscribers(connmanager.ConnectionClosedEventType),
 	)
 
-	pg.Stop()
+	_ = pg.Stop(context.Background())
 
 	require.False(
 		t,

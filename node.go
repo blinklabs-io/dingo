@@ -1440,6 +1440,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.peerGov.LoadTopologyConfig(topologyConfig)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
+				n.ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added > 0 {
@@ -1465,7 +1466,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("peer governor start failed: %w", err)
 	}
-	started = append(started, func() { n.peerGov.Stop() })
+	started = append(started, func() { _ = n.peerGov.Stop(context.Background()) })
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
