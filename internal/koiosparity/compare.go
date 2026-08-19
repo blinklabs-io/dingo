@@ -51,6 +51,26 @@ const (
 	// epoch read as PASS just because every row that *was* fetched happened
 	// to match.
 	CategoryAcctCoverageIncomplete = "acct_coverage_incomplete"
+
+	// CategoryAcctZeroReward/CategoryAcctNewlyRegistered/CategoryAcctDeregistered
+	// (dingo #3099) report the three account dimensions #3097's merged
+	// comparison structurally cannot: CompareAccountEpoch only ever compares
+	// keys present in at least one side's row map, so an address absent from
+	// both (a confirmed-zero-reward account, since Koios never emits a row
+	// for zero reward) never enters that comparison at all, and #3097's
+	// address universe is a single flat list reused across every epoch in one
+	// run, with no per-epoch persisted snapshot to diff for lifecycle
+	// changes. All three are purely informational — descriptive state, not a
+	// Dingo-vs-Koios discrepancy — and must never affect Status (see
+	// DetermineStatus's dedicated no-op case for these three).
+	CategoryAcctZeroReward = "acct_zero_reward"
+	// CategoryAcctNewlyRegistered marks a stake address present in this
+	// epoch's persisted koios_account_checked universe but absent from the
+	// previous epoch's — see Cache.GetAccountUniverseForEpoch.
+	CategoryAcctNewlyRegistered = "acct_newly_registered"
+	// CategoryAcctDeregistered marks a stake address present in the previous
+	// epoch's persisted universe but absent from this epoch's.
+	CategoryAcctDeregistered = "acct_deregistered"
 )
 
 // Epoch check status values.
@@ -807,6 +827,13 @@ func DetermineStatus(mismatches []CheckMismatch) string {
 			CategoryReferenceLag,
 			CategoryAcctCoverageIncomplete:
 			hasError = true
+		case CategoryAcctZeroReward,
+			CategoryAcctNewlyRegistered,
+			CategoryAcctDeregistered:
+			// Purely informational — see these categories' doc comments.
+			// Deliberately not counted toward hasError or default's FAIL: a
+			// zero-reward or lifecycle-change mismatch must never turn an
+			// otherwise-clean epoch into ERROR or FAIL.
 		default:
 			return StatusFail
 		}

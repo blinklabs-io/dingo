@@ -778,5 +778,97 @@ func compareEpochAccounts(
 			epochEndTime,
 		)...,
 	)
+	out = append(out, accountLifecycleMismatches(cache, network, epoch, now)...)
+	return out
+}
+
+// accountLifecycleMismatches (dingo #3099) reports the two account
+// dimensions #3097's CompareAccountEpoch structurally cannot: confirmed
+// zero-reward accounts and newly-registered/deregistered accounts between
+// adjacent Koios epochs. Both rely on koios_account_checked, the per-address
+// "Koios actually answered for this address" ledger
+// fetchAccountRewardsForEpoch populates as chunks commit — data #3097's
+// original implementation never persisted. Purely informational: every
+// mismatch returned here uses one of CategoryAcctZeroReward/
+// CategoryAcctNewlyRegistered/CategoryAcctDeregistered, which
+// DetermineStatus treats as a no-op, never FAIL or ERROR.
+func accountLifecycleMismatches(
+	cache *Cache,
+	network string,
+	epoch uint64,
+	now time.Time,
+) []CheckMismatch {
+	var out []CheckMismatch
+
+	zeroReward, err := cache.GetZeroRewardAccountsForEpoch(network, epoch)
+	if err == nil {
+		for _, addr := range zeroReward {
+			out = append(out, CheckMismatch{
+				Network:      network,
+				Epoch:        epoch,
+				StakeAddress: addr,
+				Field:        "account_zero_reward",
+				DingoValue:   "",
+				KoiosValue:   "0",
+				Category:     CategoryAcctZeroReward,
+				CheckedAt:    now,
+			})
+		}
+	}
+
+	if epoch == 0 {
+		return out
+	}
+	// Only trust the previous epoch's persisted universe once its own
+	// account fetch reached coverage.Complete — an incomplete or
+	// never-attempted previous fetch must disable the lifecycle report
+	// rather than let every current address look newly registered.
+	prevCoverage, prevCovErr := cache.GetAccountCoverage(network, epoch-1)
+	if prevCovErr != nil || prevCoverage == nil || !prevCoverage.Complete {
+		return out
+	}
+	previousUniverse, err := cache.GetAccountUniverseForEpoch(network, epoch-1)
+	if err != nil {
+		return out
+	}
+	currentUniverse, err := cache.GetAccountUniverseForEpoch(network, epoch)
+	if err != nil {
+		return out
+	}
+
+	prevSet := make(map[string]bool, len(previousUniverse))
+	for _, a := range previousUniverse {
+		prevSet[a] = true
+	}
+	currSet := make(map[string]bool, len(currentUniverse))
+	for _, a := range currentUniverse {
+		currSet[a] = true
+		if !prevSet[a] {
+			out = append(out, CheckMismatch{
+				Network:      network,
+				Epoch:        epoch,
+				StakeAddress: a,
+				Field:        "account_lifecycle",
+				DingoValue:   "",
+				KoiosValue:   "newly_registered",
+				Category:     CategoryAcctNewlyRegistered,
+				CheckedAt:    now,
+			})
+		}
+	}
+	for _, a := range previousUniverse {
+		if !currSet[a] {
+			out = append(out, CheckMismatch{
+				Network:      network,
+				Epoch:        epoch,
+				StakeAddress: a,
+				Field:        "account_lifecycle",
+				DingoValue:   "deregistered",
+				KoiosValue:   "",
+				Category:     CategoryAcctDeregistered,
+				CheckedAt:    now,
+			})
+		}
+	}
 	return out
 }

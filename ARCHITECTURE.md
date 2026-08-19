@@ -4168,8 +4168,9 @@ internal/koiosparity/      # shared library
   dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
-  fetch_accounts.go        # #3097 per-account Koios fetch (chunked, address-universe union)
-  check.go                 # parity check orchestration (pool-level + #3097 per-account comparison)
+  fetch_accounts.go        # #3097 per-account Koios fetch (address-universe union), #3099 checkpointed resume
+  account_chunk.go         # #3099 count+size bounded, content-addressed address chunking
+  check.go                 # parity check orchestration (pool-level + #3097 per-account comparison + #3099 zero-reward/lifecycle)
   report.go                # human-readable status + JSON report generation
 
 cmd/koios-parity/          # thin Cobra CLI wrapper
@@ -4876,24 +4877,22 @@ never the reverse.
   `result.Status != StatusPass` check the same way a pool-level mismatch
   already does — no separate code path, so strict mode stops the node on an
   account-level mismatch exactly as it does on a pool/aggregate one.
-- **Out of scope for #3097, left for #3099**: fully paginated/resumable/
-  rate-shaped account fetching at arbitrary scale, mid-epoch chunk-level
-  resume-from-checkpoint after a process restart, and duplicate-page
-  detection from Koios's own pagination (not applicable to
-  `/account_reward_history`, which isn't Range-paginated). #3097's chunking
-  is correct and never silently marks a partially-fetched epoch complete
-  (the coverage-gate + atomic-commit invariants above already guarantee
-  that), but does not need to survive a restart mid-epoch-fetch with a
-  resumed cursor — redoing the whole epoch's account fetch from scratch is
-  an acceptable (if not maximally efficient) fallback. Known limitation:
-  a *fully successful* fetch that happens to run before Koios has actually
-  published `/account_reward_history` for a just-closed epoch (as opposed to
-  a partial/failed fetch) can legitimately return zero rows and still be
-  recorded `complete = true` — the grace-window `reference_lag` treatment
-  above absorbs this for the duration of `--grace-hours`, but nothing
-  currently re-triggers a refetch of that epoch's account coverage once
-  Koios's real data appears after the window closes; #3099's chunking work
-  should address this alongside its other coverage-staleness invariants.
+- **Delivered by #3099** (was: "out of scope for #3097, left for #3099"):
+  byte-size-aware chunking, mid-epoch chunk-level resume-from-checkpoint
+  across a process restart, and page-safety hardening for
+  `/account_reward_history` — see the "Chunked, checkpointed account-reward
+  fetch (dingo #3099)" subsection immediately below for the design.
+  **Correction to this section's earlier assumption:** `/account_reward_history`
+  is *not* usably Range-paginated — confirmed by live testing against
+  preview: repeated requests with different `Range` values return the same
+  first row window rather than paging further, so a response landing at that
+  ceiling is indistinguishable from a silently truncated one (see #3099's
+  page-safety guard in `GetAccountRewardHistory`, which hard-errors instead
+  of accepting such a response as complete). The known zero-row/grace-window
+  limitation described above (nothing re-triggers a refetch once Koios's
+  real data appears after `--grace-hours` closes) remains open; #3099's
+  scope was fetch reliability, not coverage staleness beyond what the grace
+  window already covers.
 - **Network validation.** `Check`/`CheckEpoch` never construct a
   `KoiosClient` (they work entirely from the cache), so unlike `Fetch` they
   don't get `NewKoiosClient`'s network-allow-list check for free — both call
@@ -4903,6 +4902,94 @@ never the reverse.
   the only networks this tool ever validates against: an unvalidated
   `network` value reaching `compareEpochAccounts` could otherwise silently
   generate wrong-network-tagged stake addresses instead of erroring.
+
+#### Chunked, checkpointed account-reward fetch (dingo #3099)
+
+Extends #3097's account-fetch layer (`fetch_accounts.go`) with the
+reliability-at-scale properties its own doc comments explicitly deferred:
+byte-size-aware chunking, durable mid-epoch resume across a process restart,
+and page-safety hardening for `/account_reward_history`'s real (not
+Range-paginated) behavior. Wired directly into #3097's existing functions
+and schema rather than as a parallel implementation — `FetchEpochAccountsWithAddrs`,
+`Cache.CommitAccountRewardsForEpoch`, `koios_account_coverage`, and
+`compareEpochAccounts`'s coverage gate are all unchanged in contract and
+every one of #3097's own tests passes unmodified.
+
+- **Byte+count-bounded chunking.** `chunkAddressesByCountAndSize`
+  (`account_chunk.go`) replaces `chunkAddresses`' count-only chunking inside
+  `fetchAccountRewardsForEpoch` (the unexported implementation
+  `FetchAccountRewardsForEpoch`/`FetchEpochAccountsWithAddrs` both now call),
+  bounding each `/account_reward_history` request by both address count
+  (`--account-chunk-size`, default `koiosAccountChunkSize` = 100) and encoded
+  body size (`--account-chunk-max-bytes`, default `koiosAccountChunkMaxBytesDefault`
+  = 32 KiB). The address universe is sorted before chunking — required so the
+  same underlying address set always produces the same chunk boundaries
+  (and therefore the same content-addressed chunk hash) regardless of
+  `addressUniverse`'s incoming order, which `BuildAccountAddressUniverse`
+  does not itself guarantee is stable across calls.
+- **Durable per-chunk checkpoint, resumable across a restart.** Two new
+  tables, purely additive alongside #3097's `koios_account_rewards`/
+  `koios_account_coverage`: `koios_account_fetch_staged_rows` (a chunk's
+  fetched rows, staged — not yet the authoritative reference set) and
+  `koios_account_checked` (per-address "Koios answered for this address"
+  markers, keyed by `chunk_hash`, doubling as the done-chunk signal via
+  `Cache.GetDoneAccountChunkHashes`). Each chunk that succeeds calls
+  `Cache.SaveAccountFetchChunkProgress` immediately rather than only
+  accumulating rows in memory the way #3097's original implementation did.
+  On any chunk error, `fetchAccountRewardsForEpoch` returns early exactly as
+  #3097's version did (nothing committed to `koios_account_rewards`/
+  `koios_account_coverage`) — but the checkpointed chunks' progress survives,
+  so a subsequent call (after a process restart or a retried `fetch`) skips
+  them and only re-fetches whatever never completed, instead of redoing the
+  whole epoch from scratch. Once every chunk in the current plan is
+  checkpointed, `Cache.GetStagedAccountRows` reads them all back and calls
+  the existing, unmodified `Cache.CommitAccountRewardsForEpoch` exactly
+  once — the same atomic replace-and-gate #3097 always used, now fed from
+  durable staging instead of an in-memory slice.
+- **Selective invalidation on universe/chunk-plan change.**
+  `Cache.InvalidateStaleAccountChunks` prunes staged rows/checked markers for
+  any chunk hash no longer present in the current plan before dispatch —
+  because chunk hashes are content-addressed, only chunks whose address
+  grouping actually changed (a changed address universe, or an operator
+  tuning `--account-chunk-size`/`--account-chunk-max-bytes` between runs) are
+  invalidated; an unaffected chunk keeps its checkpointed progress and still
+  counts as done.
+- **Page-safety hardening.** `/account_reward_history` is not usably
+  Range-paginated — confirmed live against preview: repeated requests with
+  different `Range` values return the same first row window rather than
+  paging further. `GetAccountRewardHistory` therefore hard-errors
+  (`ErrKoiosPermanent`) whenever a response reaches `koiosPageSize` (1000)
+  rows rather than accepting a response that size as a complete, trustworthy
+  answer — there is no reliable way to fetch "the rest," so the only safe
+  response is to refuse and require a smaller `--account-chunk-size`, never
+  silently truncate. `get()`/`post()` also now bound every response body
+  read at `koiosMaxResponseBytes` (32 MiB), a defensive ceiling neither had
+  before.
+- **Zero-reward and lifecycle reporting.** `koios_account_checked` also
+  answers two dimensions #3097's `CompareAccountEpoch` structurally cannot:
+  it only ever compares keys present in at least one side's row map, so a
+  confirmed-zero-reward address (Koios answered, no reward, so no row is
+  ever emitted for it) never enters that comparison at all, and #3097's
+  address universe is a single flat list reused across every epoch in one
+  run, with no per-epoch persisted snapshot to diff for newly-registered/
+  deregistered accounts. `accountLifecycleMismatches` (`check.go`), appended
+  to `compareEpochAccounts`'s result, reports both via three new categories —
+  `CategoryAcctZeroReward`, `CategoryAcctNewlyRegistered`,
+  `CategoryAcctDeregistered` — all purely informational: `DetermineStatus`
+  has a dedicated no-op case for them, so none can ever turn an otherwise
+  clean epoch into `FAIL` or `ERROR`. The lifecycle diff only trusts the
+  previous epoch's persisted universe once that epoch's own
+  `koios_account_coverage.complete` is true; an absent or incomplete
+  previous fetch disables the report entirely rather than flagging every
+  current address as newly registered.
+- **Configuration.** `--account-chunk-size`/`--account-chunk-max-bytes`
+  (standalone CLI: `fetch`/`run`/`watch`) thread through `FetchConfig`/
+  `ObserverConfig` the same way `GraceHours` already does, down to
+  `dingo.KoiosParityConfig.AccountChunkSize`/`AccountChunkMaxBytes` and
+  `internal/config.KoiosParityConfig`'s matching YAML/env fields
+  (`DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_SIZE`/`_MAX_BYTES`) for the in-process
+  observer. 0 for either (the default) selects the package default —
+  existing `--accounts` behavior is unchanged unless explicitly tuned.
 
 ### Bark (`bark/`)
 

@@ -272,7 +272,11 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 			name: "pool_history",
 			path: "/pool_history",
 			call: func(k *KoiosClient) error {
-				_, err := k.GetPoolEpochHistory(context.Background(), "pool1test", 10)
+				_, err := k.GetPoolEpochHistory(
+					context.Background(),
+					"pool1test",
+					10,
+				)
 				return err
 			},
 		},
@@ -280,11 +284,13 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, test.path, r.URL.Path)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`[{"epoch_no":11}]`))
-			}))
+			srv := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, test.path, r.URL.Path)
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`[{"epoch_no":11}]`))
+				}),
+			)
 			defer srv.Close()
 
 			err := test.call(newTestKoiosClient(srv.URL))
@@ -294,10 +300,12 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 }
 
 func TestFilteredKoiosResponsesRejectMultipleRows(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[{"epoch_no":10},{"epoch_no":10}]`))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":10},{"epoch_no":10}]`))
+		}),
+	)
 	defer srv.Close()
 
 	_, err := newTestKoiosClient(srv.URL).GetEpochInfo(context.Background(), 10)

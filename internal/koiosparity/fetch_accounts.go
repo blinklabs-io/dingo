@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -130,22 +132,6 @@ func BuildAccountAddressUniverse(
 	return out, nil
 }
 
-// chunkAddresses splits addrs into groups of at most size, preserving order.
-func chunkAddresses(addrs []string, size int) [][]string {
-	if size <= 0 {
-		size = koiosAccountChunkSize
-	}
-	if len(addrs) == 0 {
-		return nil
-	}
-	chunks := make([][]string, 0, (len(addrs)+size-1)/size)
-	for i := 0; i < len(addrs); i += size {
-		end := min(i+size, len(addrs))
-		chunks = append(chunks, addrs[i:end])
-	}
-	return chunks
-}
-
 // FetchAccountRewardsForEpoch fetches Koios /account_reward_history
 // reference data for every address in addressUniverse for Koios reporting
 // epoch epoch, and commits it to the cache only once every chunk has
@@ -208,6 +194,56 @@ func FetchAccountRewardsForEpoch(
 	graceHours int,
 	logger *slog.Logger,
 ) (fetched int, err error) {
+	return fetchAccountRewardsForEpoch(
+		ctx, koios, cache, network, epoch, addressUniverse,
+		epochEndTime, graceHours, 0, 0, logger,
+	)
+}
+
+// fetchAccountRewardsForEpoch is FetchAccountRewardsForEpoch's real
+// implementation, additionally parameterized by chunkSize/chunkMaxBytes (<=0
+// meaning "use the package defaults", koiosAccountChunkSize and
+// koiosAccountChunkMaxBytesDefault respectively) so FetchEpochAccountsWithAddrs
+// can thread operator-configured --account-chunk-size/--account-chunk-max-bytes
+// through without changing FetchAccountRewardsForEpoch's own public
+// signature — every existing direct caller/test of that function keeps
+// working unchanged.
+//
+// dingo #3099 adds durable, resumable checkpointing on top of #3097's
+// original single-shot implementation: each chunk's fetched rows and
+// per-address "checked" markers are saved to
+// koios_account_fetch_staged_rows/koios_account_checked
+// (Cache.SaveAccountFetchChunkProgress) as soon as that chunk succeeds,
+// rather than only accumulated in memory. A killed/restarted process
+// therefore resumes from whichever chunks already checkpointed
+// (Cache.GetDoneAccountChunkHashes) instead of redoing the whole epoch's
+// fetch from scratch. The final commit step — reading back every staged row
+// (Cache.GetStagedAccountRows) and calling the existing, unmodified
+// Cache.CommitAccountRewardsForEpoch exactly once — is otherwise identical to
+// #3097's original single-shot commit: still one atomic, all-or-nothing
+// write, still gated by graceHours/epochEndTime the same way, still never
+// setting complete=true except when every chunk in the current plan has
+// succeeded.
+//
+// Address universe changes across resumed attempts are handled by content-
+// addressed chunk hashing (hashAddressChunk, sha256 of a sorted chunk's own
+// addresses): Cache.InvalidateStaleAccountChunks prunes checkpoint state for
+// any chunk whose exact address grouping is no longer part of the current
+// plan before dispatch, so a changed universe or a --account-chunk-size/
+// --account-chunk-max-bytes tuning change only re-fetches the affected
+// chunks, never silently reuses stale progress from a different plan.
+func fetchAccountRewardsForEpoch(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	addressUniverse []string,
+	epochEndTime time.Time,
+	graceHours int,
+	chunkSize, chunkMaxBytes int,
+	logger *slog.Logger,
+) (fetched int, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -220,16 +256,68 @@ func FetchAccountRewardsForEpoch(
 		if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, nil, 0, true, now); commitErr != nil {
 			return 0, fmt.Errorf("commit empty account coverage: %w", commitErr)
 		}
+		if clearErr := cache.ClearAccountFetchStaging(network, epoch); clearErr != nil {
+			logger.Warn(
+				"koiosparity: failed to clear account fetch staging for empty universe",
+				"network",
+				network,
+				"epoch",
+				epoch,
+				"error",
+				clearErr,
+			)
+		}
 		return 0, nil
 	}
 
-	chunks := chunkAddresses(addressUniverse, koiosAccountChunkSize)
+	// Sorted so the same address set always produces the same chunk
+	// boundaries (and therefore the same content-addressed chunk hashes)
+	// regardless of addressUniverse's incoming order, which is not itself
+	// guaranteed stable across calls (BuildAccountAddressUniverse's Dingo-side
+	// half comes from a plain SQL query with no ORDER BY) — required for
+	// resumability and selective invalidation to mean anything.
+	sorted := make([]string, len(addressUniverse))
+	copy(sorted, addressUniverse)
+	sort.Strings(sorted)
 
-	var mu sync.Mutex
-	var rows []KoiosAccountRewards
+	if chunkSize <= 0 {
+		chunkSize = koiosAccountChunkSize
+	}
+	if chunkMaxBytes <= 0 {
+		chunkMaxBytes = koiosAccountChunkMaxBytesDefault
+	}
+	groups := chunkAddressesByCountAndSize(sorted, chunkSize, chunkMaxBytes)
+
+	type chunkPlan struct {
+		hash  string
+		addrs []string
+	}
+	plans := make([]chunkPlan, len(groups))
+	hashes := make([]string, len(groups))
+	for i, g := range groups {
+		h := hashAddressChunk(g)
+		plans[i] = chunkPlan{hash: h, addrs: g}
+		hashes[i] = h
+	}
+
+	if err := cache.InvalidateStaleAccountChunks(network, epoch, hashes); err != nil {
+		return 0, fmt.Errorf("invalidate stale account chunks: %w", err)
+	}
+	doneHashes, err := cache.GetDoneAccountChunkHashes(network, epoch)
+	if err != nil {
+		return 0, fmt.Errorf("get done account chunks: %w", err)
+	}
+
+	var pending []chunkPlan
+	for _, p := range plans {
+		if !doneHashes[p.hash] {
+			pending = append(pending, p)
+		}
+	}
 
 	var errMu sync.Mutex
 	var firstErr error
+	var newlyFetched atomic.Int64
 
 	// fetchCtx is cancelled the moment any chunk error is seen — transient
 	// or permanent — so this call stops scheduling further doomed chunk
@@ -243,7 +331,7 @@ func FetchAccountRewardsForEpoch(
 	var wg sync.WaitGroup
 
 outer:
-	for _, chunk := range chunks {
+	for _, plan := range pending {
 		// Check first so a cancellation from a prior iteration's chunk error
 		// is never missed simply because the semaphore also happened to have
 		// room this iteration (see the post-acquire recheck below for why a
@@ -269,13 +357,13 @@ outer:
 		}
 
 		wg.Add(1)
-		go func(addrs []string) {
+		go func(plan chunkPlan) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			items, hErr := koios.GetAccountRewardHistory(fetchCtx, addrs, epoch)
+			items, hErr := koios.GetAccountRewardHistory(fetchCtx, plan.addrs, epoch)
 			if hErr != nil {
-				wrapped := fmt.Errorf("account reward history chunk (%d addresses): %w", len(addrs), hErr)
+				wrapped := fmt.Errorf("account reward history chunk (%d addresses): %w", len(plan.addrs), hErr)
 				isPermanent := errors.Is(hErr, ErrKoiosPermanent)
 				errMu.Lock()
 				if firstErr == nil ||
@@ -292,7 +380,10 @@ outer:
 				// fetchCtx (this call's own per-epoch context derived from
 				// ctx above), never the caller's shared multi-epoch context,
 				// so an isolated transient failure still just drops this one
-				// epoch for a later retry.
+				// epoch for a later retry — and, unlike #3097's original
+				// implementation, whichever chunks already checkpointed
+				// before this error fired survive for that later retry to
+				// resume from.
 				cancel()
 				// afterChunkCancelForTest, when non-nil, lets a test observe
 				// deterministically that cancel() has actually fired for this
@@ -307,19 +398,28 @@ outer:
 				return
 			}
 
-			mu.Lock()
-			for _, item := range items {
-				rows = append(rows, KoiosAccountRewards{
+			rows := make([]KoiosAccountRewards, len(items))
+			for i, item := range items {
+				rows[i] = KoiosAccountRewards{
 					StakeAddress:   item.StakeAddress,
 					RewardType:     item.Type,
 					Earned:         item.Amount,
 					SpendableEpoch: item.SpendableEpoch,
 					PoolIDBech32:   strOrEmpty(item.PoolIDBech32),
 					FetchedAt:      now,
-				})
+				}
 			}
-			mu.Unlock()
-		}(chunk)
+			if saveErr := cache.SaveAccountFetchChunkProgress(network, epoch, plan.hash, rows, plan.addrs, now); saveErr != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("save account fetch chunk progress: %w", saveErr)
+				}
+				errMu.Unlock()
+				cancel()
+				return
+			}
+			newlyFetched.Add(int64(len(rows)))
+		}(plan)
 	}
 
 	wg.Wait()
@@ -335,28 +435,48 @@ outer:
 		return 0, classifyFetchErr(err)
 	}
 
+	stagedRows, err := cache.GetStagedAccountRows(network, epoch)
+	if err != nil {
+		return 0, fmt.Errorf("get staged account rows: %w", err)
+	}
+
 	// A zero-row result across the whole address universe, for an epoch that
 	// closed within the grace window, is far more likely to be Koios's own
 	// account_reward_history publishing lag than genuine "nobody earned a
 	// reward this epoch" — see this function's doc comment. Leave coverage
 	// incomplete so a later attempt retries it, rather than baking in an
 	// empty snapshot as permanent fact the moment complete=1 is committed.
-	complete := len(rows) != 0 || graceHours <= 0 || epochEndTime.IsZero() ||
+	complete := len(stagedRows) != 0 || graceHours <= 0 ||
+		epochEndTime.IsZero() ||
 		now.Sub(epochEndTime) >= time.Duration(graceHours)*time.Hour
 
-	if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, rows, len(addressUniverse), complete, now); commitErr != nil {
+	if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, stagedRows, len(addressUniverse), complete, now); commitErr != nil {
 		return 0, fmt.Errorf("commit account rewards: %w", commitErr)
+	}
+	if complete {
+		if clearErr := cache.ClearAccountFetchStaging(network, epoch); clearErr != nil {
+			logger.Warn(
+				"koiosparity: failed to clear account fetch staging after commit",
+				"network",
+				network,
+				"epoch",
+				epoch,
+				"error",
+				clearErr,
+			)
+		}
 	}
 
 	logger.Info("koiosparity: epoch account rewards fetched",
 		"network", network,
 		"epoch", epoch,
 		"addresses", len(addressUniverse),
-		"chunks", len(chunks),
-		"rows", len(rows),
+		"chunks", len(plans),
+		"pending_chunks", len(pending),
+		"rows", len(stagedRows),
 		"complete", complete,
 	)
-	return len(rows), nil
+	return int(newlyFetched.Load()), nil
 }
 
 // FetchEpochAccountsWithAddrs fetches and caches Koios account-reward
@@ -380,6 +500,11 @@ outer:
 // this function instead: silently treating it the same as "unknown end
 // time" would let an empty account fetch bypass the grace gate and commit
 // as complete, suppressing retries and risking a false PASS.
+//
+// chunkSize/chunkMaxBytes (dingo #3099) thread operator-configured
+// --account-chunk-size/--account-chunk-max-bytes through to
+// fetchAccountRewardsForEpoch's dual-bounded chunking; 0 for either means
+// "use the package default" (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault).
 func FetchEpochAccountsWithAddrs(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -389,6 +514,7 @@ func FetchEpochAccountsWithAddrs(
 	source RewardParitySource,
 	koiosAddrs []string,
 	graceHours int,
+	chunkSize, chunkMaxBytes int,
 	logger *slog.Logger,
 ) (int, error) {
 	stakeEpoch, ok := koiosStakeEpoch(epoch)
@@ -428,7 +554,7 @@ func FetchEpochAccountsWithAddrs(
 			fmt.Errorf("get epoch info for grace-hours gate: %w", infoErr),
 		)
 	}
-	return FetchAccountRewardsForEpoch(
+	return fetchAccountRewardsForEpoch(
 		ctx,
 		koios,
 		cache,
@@ -437,6 +563,8 @@ func FetchEpochAccountsWithAddrs(
 		universe,
 		epochEndTime,
 		graceHours,
+		chunkSize,
+		chunkMaxBytes,
 		logger,
 	)
 }

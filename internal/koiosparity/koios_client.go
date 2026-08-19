@@ -66,11 +66,23 @@ const (
 	// request body and the worst-case response bounded regardless of how
 	// large the full requested address universe is, and limits the "blast
 	// radius" of a single failed/timed-out request to a small slice of the
-	// epoch's account universe rather than the whole thing. This is the
+	// epoch's account universe rather than the whole thing. This was the
 	// minimal viable chunking for #3097; shaping requests further by actual
-	// encoded byte size, adaptive sizing, and mid-fetch resumable
-	// checkpointing is #3099's scope (see FetchAccountRewardsForEpoch).
+	// encoded byte size and mid-fetch resumable checkpointing is #3099's
+	// scope, delivered in fetchAccountRewardsForEpoch (see its doc comment)
+	// via chunkAddressesByCountAndSize — koiosAccountChunkSize remains the
+	// default address-count bound when an operator hasn't tuned
+	// --account-chunk-size.
 	koiosAccountChunkSize = 100
+
+	// koiosMaxResponseBytes caps every Koios response body read (GET and
+	// POST) — dingo #3099's "bound response/body memory" requirement.
+	// Existing GET responses are already page-bounded to koiosPageSize rows
+	// and never approach this; it exists specifically as a defensive
+	// ceiling for /account_reward_history's POST responses, whose size
+	// isn't otherwise bounded by anything but Koios's own internal paging
+	// (see GetAccountRewardHistory's koiosPageSize truncation-detection).
+	koiosMaxResponseBytes = 32 * 1024 * 1024
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -330,6 +342,36 @@ type koiosResponse struct {
 	Header     http.Header
 }
 
+// errKoiosResponseTooLarge marks a response body that reached
+// koiosMaxResponseBytes without terminating — a response that big means
+// something is wrong upstream (or the request itself was shaped too large),
+// not a transient blip, so readBodyLimited's caller must never retry it the
+// way a plain read error is retried.
+var errKoiosResponseTooLarge = errors.New(
+	"koios: response body exceeded the maximum allowed size",
+)
+
+// readBodyLimited reads r fully, capped at koiosMaxResponseBytes — dingo
+// #3099's "bound response/body memory" requirement, applied uniformly to
+// every Koios call (GET and POST). Reading koiosMaxResponseBytes+1 bytes
+// means the true body is at or past the cap, so it fails hard with
+// errKoiosResponseTooLarge rather than silently returning a truncated
+// prefix as if it were the complete response.
+func readBodyLimited(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, koiosMaxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > koiosMaxResponseBytes {
+		return nil, fmt.Errorf(
+			"%w: exceeded %d bytes",
+			errKoiosResponseTooLarge,
+			koiosMaxResponseBytes,
+		)
+	}
+	return body, nil
+}
+
 // get executes a GET request against the Koios API with optional Range header,
 // retrying transport errors, 5xx responses, burst 429s, and body-read failures.
 // rangeStart/rangeEnd < 0 means no Range header.
@@ -389,11 +431,17 @@ func (k *KoiosClient) get(
 			)
 		}
 
-		body, readErr := io.ReadAll(resp.Body)
+		body, readErr := readBodyLimited(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			// Treat a body-read failure (e.g. connection reset mid-transfer)
-			// exactly like a transport error: it's transient and safe to retry.
+			if errors.Is(readErr, errKoiosResponseTooLarge) {
+				// A response this large means something is wrong upstream, not
+				// a transient blip — never retry it (see readBodyLimited).
+				return nil, fmt.Errorf("koios GET %s: %w", path, readErr)
+			}
+			// Treat any other body-read failure (e.g. connection reset
+			// mid-transfer) exactly like a transport error: it's transient
+			// and safe to retry.
 			if err := retryOrFail(attempt,
 				koiosRetryBackoff5xx*time.Duration(attempt+1),
 				"koios GET %s: read body: %w", path, readErr,
@@ -541,9 +589,14 @@ func (k *KoiosClient) post(
 			)
 		}
 
-		body, readErr := io.ReadAll(resp.Body)
+		body, readErr := readBodyLimited(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
+			if errors.Is(readErr, errKoiosResponseTooLarge) {
+				// A response this large means something is wrong upstream, not
+				// a transient blip — never retry it (see readBodyLimited).
+				return nil, fmt.Errorf("koios POST %s: %w", path, readErr)
+			}
 			if err := retryOrFail(attempt,
 				koiosRetryBackoff5xx*time.Duration(attempt+1),
 				"koios POST %s: read body: %w", path, readErr,
@@ -998,6 +1051,27 @@ func (k *KoiosClient) GetAccountRewardHistory(
 	var items []KoiosAccountRewardHistoryItem
 	if err := json.Unmarshal(resp.Body, &items); err != nil {
 		return nil, fmt.Errorf("koios /account_reward_history decode: %w", err)
+	}
+	// dingo #3099: /account_reward_history does not honor the Range header
+	// the way GET table-view endpoints (/pool_list, /account_list) do —
+	// verified live against preview: repeated requests with different Range
+	// values return the same first koiosPageSize-row window rather than
+	// paging further, so there is no working way to fetch a "next page" for
+	// this endpoint. A response landing at that same row-count ceiling is
+	// therefore indistinguishable from a silently truncated one; rather than
+	// accept it as a complete, trustworthy answer, this fails hard and
+	// permanently so the caller (fetchAccountRewardsForEpoch) aborts instead
+	// of committing a reference set that might be missing rows. The
+	// resolution is a smaller --account-chunk-size, not a retry — retrying
+	// the same chunk would hit the exact same ceiling again.
+	if len(items) >= koiosPageSize {
+		return nil, fmt.Errorf(
+			"%w: koios /account_reward_history returned %d rows (>= the %d-row page ceiling) for a %d-address chunk — this endpoint is not Range-paginated, so the response may be silently truncated; reduce --account-chunk-size and retry",
+			ErrKoiosPermanent,
+			len(items),
+			koiosPageSize,
+			len(stakeAddresses),
+		)
 	}
 	return items, nil
 }

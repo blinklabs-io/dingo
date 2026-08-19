@@ -84,6 +84,13 @@ type ObserverConfig struct {
 	// reference/sync lag, not a failure. 0 selects the check package's own
 	// default handling (no grace window).
 	GraceHours int
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request by both address count and encoded
+	// body size. <=0 means "use the package default"
+	// (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault). Unused when
+	// AccountsEnabled is false.
+	AccountChunkSize     int
+	AccountChunkMaxBytes int
 	// FatalFunc is invoked at most once, with a non-nil error, the first
 	// time Strict validation fails. Wired by the caller (typically
 	// node.go's n.cancel) to stop/cancel the driving Dingo instance. May be
@@ -689,6 +696,8 @@ func (o *Observer) fetchAccountsIfNeeded(
 			o.cfg.Source,
 			koiosAddrs,
 			o.cfg.GraceHours,
+			o.cfg.AccountChunkSize,
+			o.cfg.AccountChunkMaxBytes,
 			o.cfg.Logger,
 		)
 		if err == nil {
