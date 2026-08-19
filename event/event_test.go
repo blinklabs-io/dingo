@@ -331,6 +331,10 @@ func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
 func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
 	const testEvtType event.EventType = "test.unsubscribe.preserves"
 	eb := event.NewEventBus(nil, nil)
+	// Close, not Stop: NewEventBus starts an async worker unconditionally, and
+	// Stop reinitializes it (restart=true) rather than leaving it stopped, so
+	// only Close lets the worker goroutine exit when the test ends.
+	defer eb.Close()
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
