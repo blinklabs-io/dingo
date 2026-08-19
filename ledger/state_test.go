@@ -4193,6 +4193,97 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
 }
 
+// TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure exercises
+// the full standard-profile apply path. The transaction is invalid only
+// because its fee is below the protocol minimum, so trusting the validation
+// error would record it in metadata; the rejection must return a
+// txValidationError and leave no transaction committed.
+func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	txCbor, err := cbor.Encode([]any{
+		map[uint]any{2: uint64(0)},
+		map[uint]any{},
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := dijkstra.NewDijkstraTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	pparams := dijkstraTestProtocolParameters()
+	pparams.MaxBlockBodySize = 100_000
+	pparams.MaxBlockHeaderSize = 100_000
+	pparams.MinFeeB = 1
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  10,
+				ByteLength: uint32(len(txCbor)),
+			},
+		},
+	}
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 1,
+					Slot:        10,
+					ProtoVersion: babbage.BabbageProtoVersion{
+						Major: 12,
+					},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*tx},
+		},
+	}
+	bodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: nodeConfig,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err = db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: 10, Hash: []byte("dijkstra-validation")},
+			block,
+			true,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			offsets,
+			eras.DijkstraEraDesc,
+			pparams,
+			nil,
+		)
+		return err
+	})
+	require.Error(t, err)
+	var validationErr *txValidationError
+	require.ErrorAs(t, err, &validationErr)
+	require.Contains(t, err.Error(), "fee")
+
+	stored, err := db.Metadata().GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "rejected Dijkstra transaction must not be committed")
+}
+
 // TestStrictConsumedInputsEnabled pins the #3005 guard condition, including the
 // P1 transition-batch case: the first batch whose blocks cross the tip cutoff is
 // processed while reachedTip is still false (it is stored true only after that

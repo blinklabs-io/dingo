@@ -4987,31 +4987,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 				delta.Release()
 				return nil, err
 			}
-			// Dijkstra/Leios: per-tx UTxO validation is run only when the
-			// ranking block's endorser block was applied above, so the
-			// endorser-resident inputs these txs spend are now present in the
-			// UTxO set and the rules can resolve them. When the endorser block
-			// was not applied — e.g. it has not been fetched, or the prototype
-			// does not diffuse it (historical endorser blocks) — validation is
-			// skipped: the rules could only fail (BadInputsUtxo /
-			// ValueNotConserved), the network already admitted the block via
-			// its Leios certificate, and running the full rule set per tx on
-			// dense near-tip blocks otherwise holds throughput down to the
-			// block-production rate and prevents convergence. A validation
-			// disagreement on an endorser-applied block is trusted (logged)
-			// below rather than rewinding, since the prototype's
-			// endorser-block availability and certificate surface are still
-			// evolving.
-			// Skip Dijkstra per-tx validation only on the Haskell-conformant
-			// prototype path (Musashi, SkipDijkstraTxValidation): there endorser
-			// txs are stored but never applied, so ranking-block txs that spend
-			// endorser-resident outputs are unresolvable and disagree on
-			// essentially every tx and are then trusted anyway (the prototype
-			// does not validate endorser txs either). Running that always-failing
-			// rule set per tx on dense Leios blocks pegs a core and holds
-			// throughput below the block-production rate, so skip it. The normal
-			// CIP-conformant / Dijkstra path applies endorser txs (complete UTxO)
-			// and validates normally — it is never skipped here.
+			// Standard Dijkstra/CIP profiles validate ranking-block transactions
+			// even when the referenced endorser block is unavailable; missing
+			// endorser-resident inputs then produce a validation error. Skip
+			// Dijkstra validation only on the Haskell-conformant prototype path
+			// (Musashi, SkipDijkstraTxValidation), where endorser transactions
+			// are stored but not applied and the Leios certificate is trusted.
 			skipDijkstraValidation := ls.skipDijkstraTxValidation(
 				validationEra.Id,
 			)
@@ -5065,15 +5046,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 					)
 					err = nil
 				}
-				// Dijkstra/Leios: the block was admitted to the chain via its
-				// Leios certificate. An endorser block may be only partially
-				// resolvable (e.g. an endorser-resident input from an endorser
-				// block the prototype did not diffuse), and the prototype's
-				// certificate/validation surface is still evolving, so a
-				// remaining validation disagreement is logged and trusted
-				// rather than rewinding the certified chain. Tracked by #2587:
-				// tighten to enforce once endorser-block availability and
-				// Leios certificate validation are complete.
+				// The Musashi prototype trusts remaining Dijkstra validation
+				// disagreements because its certificate-driven closure is still
+				// evolving. Standard profiles leave the error intact and reject
+				// the block below.
 				if err != nil &&
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
 					ls.config.Logger.Warn(
