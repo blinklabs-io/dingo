@@ -109,6 +109,15 @@ func PrintStatus(
 	statuses []CheckEpochStatus,
 ) {
 	fmt.Fprintf(w, "%s parity status\n", s.Network)
+	exact, derived, incomparable, unsupported := coverageCounts()
+	fmt.Fprintf(
+		w,
+		"  scope:    epoch/pool fields (exact %d / derived %d / intentionally incomparable %d / unsupported %d)\n",
+		exact,
+		derived,
+		incomparable,
+		unsupported,
+	)
 	if s.TotalFetched > 0 {
 		fmt.Fprintf(w, "  cache:    epochs %d–%d fetched (%d total)\n",
 			s.MinFetched, s.MaxFetched, s.TotalFetched)
@@ -166,11 +175,12 @@ func PrintStatus(
 
 // JSONReport is the machine-readable report format written by `run`.
 type JSONReport struct {
-	Network     string            `json:"network"`
-	GeneratedAt string            `json:"generated_at"`
-	Summary     JSONReportSummary `json:"summary"`
-	FailEpochs  []JSONEpochEntry  `json:"fail_epochs,omitempty"`
-	ErrorEpochs []JSONEpochEntry  `json:"error_epochs,omitempty"`
+	Network     string               `json:"network"`
+	GeneratedAt string               `json:"generated_at"`
+	Coverage    []KoiosFieldCoverage `json:"coverage"`
+	Summary     JSONReportSummary    `json:"summary"`
+	FailEpochs  []JSONEpochEntry     `json:"fail_epochs,omitempty"`
+	ErrorEpochs []JSONEpochEntry     `json:"error_epochs,omitempty"`
 }
 
 // JSONReportSummary holds aggregate counts.
@@ -214,6 +224,7 @@ func BuildJSONReport(
 	report := &JSONReport{
 		Network:     network,
 		GeneratedAt: generatedAt,
+		Coverage:    KoiosCoverageMatrix(),
 		Summary: JSONReportSummary{
 			TotalFetched: len(fetchedEpochs),
 		},
@@ -268,6 +279,22 @@ func BuildJSONReport(
 	}
 
 	return report, nil
+}
+
+func coverageCounts() (exact, derived, incomparable, unsupported int) {
+	for _, field := range koiosCoverageMatrix {
+		switch field.Class {
+		case CoverageExactMatch:
+			exact++
+		case CoverageDerivedMatch:
+			derived++
+		case CoverageIntentionallyIncomparable:
+			incomparable++
+		case CoverageUnsupported:
+			unsupported++
+		}
+	}
+	return
 }
 
 // WriteJSONReport serialises the report and writes it to w.

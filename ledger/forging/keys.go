@@ -21,9 +21,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
 	"sync"
 
 	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -31,6 +34,8 @@ import (
 )
 
 var ErrVRFKeyHashMismatch = errors.New("VRF key hash mismatch")
+
+const maxSecretKeyFileSize = 1 << 20
 
 // PoolCredentials holds the cryptographic keys required for block production.
 // All keys are loaded using Bursa from standard cardano-cli format files.
@@ -67,6 +72,46 @@ func NewPoolCredentials() *PoolCredentials {
 	return &PoolCredentials{}
 }
 
+// loadSecretKeyFromFile opens and checks a secret key before reading from the
+// same handle, avoiding a TOCTOU race between the permission check and read.
+func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
+	f, err := openSecretKeyFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open key file %q: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat key file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf(
+			"key file %q is not a regular file (mode %s)",
+			path, info.Mode(),
+		)
+	}
+	if err := keystore.CheckOpenFilePermissions(f); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxSecretKeyFileSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
+	}
+	if len(data) > maxSecretKeyFileSize {
+		return nil, fmt.Errorf(
+			"key file %q exceeds maximum size of %d bytes",
+			path, maxSecretKeyFileSize,
+		)
+	}
+	key, err := bursa.LoadKeyFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse key file %q: %w", path, err)
+	}
+	key.File = filepath.Base(path)
+	return key, nil
+}
+
 // LoadFromFiles loads all pool credentials from the specified file paths.
 // Uses Bursa to parse cardano-cli format key files.
 func (pc *PoolCredentials) LoadFromFiles(
@@ -78,7 +123,7 @@ func (pc *PoolCredentials) LoadFromFiles(
 	defer pc.mu.Unlock()
 
 	// Load VRF signing key
-	vrfKey, err := bursa.LoadKeyFromFile(vrfSKeyPath)
+	vrfKey, err := loadSecretKeyFromFile(vrfSKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load VRF signing key: %w", err)
 	}
@@ -93,7 +138,7 @@ func (pc *PoolCredentials) LoadFromFiles(
 	pc.vrfVKey = vrfKey.VKey
 
 	// Load KES signing key
-	kesKey, err := bursa.LoadKeyFromFile(kesSKeyPath)
+	kesKey, err := loadSecretKeyFromFile(kesSKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load KES signing key: %w", err)
 	}

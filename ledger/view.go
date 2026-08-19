@@ -85,6 +85,10 @@ func (lv *LedgerView) NetworkId() uint {
 	return 0
 }
 
+func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
+	return lv.ls.ByronProtocolMagic()
+}
+
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {

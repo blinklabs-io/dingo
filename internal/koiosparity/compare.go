@@ -77,9 +77,9 @@ type EpochCompareResult struct {
 // Only total_active_stake is compared here — koios.Fees and koios.TotalRewards
 // (/epoch_info.fees and /epoch_info.total_rewards) are raw block/tx accounting
 // quantities that have no corresponding Dingo aggregate; see the comment below
-// and KoiosTotalsResp's doc comment. The AdaPots pot values Dingo does track
-// (reward_ada_pots.Fees/Rewards) are compared against their correct Koios
-// counterpart, /totals, in CompareEpochTotals instead.
+// and KoiosTotalsResp's doc comment. Dingo's reward_ada_pots.Fees is compared
+// against its correct /totals.fees counterpart in CompareEpochTotals;
+// reward_ada_pots.Rewards has no matching Koios per-epoch field.
 // dingoEpoch may be nil when the epoch_summary row is absent (not yet computed).
 // fetchErr is set when the DB query itself failed.
 // graceHours: if the Koios row was fetched within this many hours and Dingo's
@@ -144,11 +144,10 @@ func CompareEpochAggregates(
 	// are deliberately NOT compared here. Both are raw block/tx accounting
 	// quantities (the sum of transaction fees for txs included in that epoch's
 	// blocks, and total rewards earned in the epoch) — Dingo has no matching
-	// aggregate; reward_ada_pots.Fees/Rewards are AdaPots *pot* values (balances
-	// at the epoch boundary), a different quantity entirely (see
-	// KoiosTotalsResp's doc comment). reward_ada_pots is compared against its
-	// correct Koios counterpart, /totals.fees and /totals.reward, in
-	// CompareEpochTotals instead.
+	// aggregate; reward_ada_pots.Fees/Rewards are different quantities (see
+	// KoiosTotalsResp's doc comment). reward_ada_pots.Fees is compared against
+	// /totals.fees in CompareEpochTotals; Rewards remains explicitly
+	// unsupported.
 
 	return out
 }

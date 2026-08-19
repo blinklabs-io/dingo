@@ -129,10 +129,14 @@ type EventBus struct {
 	asyncWg    sync.WaitGroup
 	stopCh     chan struct{}
 	closed     bool
-	stopped    bool
-	stopSeq    uint64
-	stopMu     sync.RWMutex
-	stopOpMu   sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
+	// terminalClosing is set before Close begins quiescing the bus. Callback
+	// dispatchers use it to discard events already buffered in their channels;
+	// Stop remains reusable and does not discard buffered callback events.
+	terminalClosing atomic.Bool
+	stopped         bool
+	stopSeq         uint64
+	stopMu          sync.RWMutex
+	stopOpMu        sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
 }
 
 // NewEventBus creates a new EventBus with async worker pool
@@ -208,8 +212,10 @@ type Subscriber interface {
 // channelSubscriber is the in-memory subscriber adapter that preserves the
 // existing channel-based API. Delivery waits for buffer capacity rather than
 // dropping: a subscriber that falls behind backpressures its publishers
-// instead of silently losing events (blinklabs-io/dingo#2932). Close closes
-// the channel so SubscribeFunc goroutines exit.
+// instead of silently losing events (blinklabs-io/dingo#2932). Terminal event
+// bus shutdown may discard queued events before closing the channel so
+// SubscribeFunc goroutines exit without replaying a potentially large backlog
+// into components that are closing; ordinary unsubscribe preserves them.
 type channelSubscriber struct {
 	ch     chan Event
 	logger *slog.Logger
@@ -387,6 +393,10 @@ func (c *channelSubscriber) DeliverBlocking(evt Event) error {
 }
 
 func (c *channelSubscriber) Close() {
+	c.close(false)
+}
+
+func (c *channelSubscriber) close(discardQueued bool) {
 	// Release waiting sends before asking for the write lock; they hold the
 	// read lock, so the write lock would otherwise wait on a wait that only
 	// Close can end.
@@ -399,6 +409,16 @@ func (c *channelSubscriber) Close() {
 		return
 	}
 	c.closed = true
+	if discardQueued {
+		for {
+			select {
+			case <-c.ch:
+			default:
+				close(c.ch)
+				return
+			}
+		}
+	}
 	close(c.ch)
 }
 
@@ -552,6 +572,9 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 			if !ok {
 				return
 			}
+			if e.terminalClosing.Load() {
+				return
+			}
 			e.safeHandlerCall(handlerFunc, evt)
 		}
 	}(
@@ -678,7 +701,7 @@ func (e *EventBus) unsubscribe(
 	if chSub != nil {
 		// Close is idempotent, so this is safe even if a concurrent
 		// caller already closed the same subscriber via subToClose above.
-		chSub.Close()
+		chSub.close(false)
 		if wait {
 			chSub.waitDone()
 		}
@@ -988,6 +1011,9 @@ func (e *EventBus) shutdown(restart bool) {
 	// duplicate worker pools when called concurrently
 	e.stopOpMu.Lock()
 	defer e.stopOpMu.Unlock()
+	if !restart {
+		e.terminalClosing.Store(true)
+	}
 
 	// Signal quiesce before taking stopMu for write. Publishers park on a
 	// full subscriber buffer or a full async queue while holding stopMu for
@@ -1027,9 +1053,14 @@ func (e *EventBus) shutdown(restart bool) {
 	e.mu.Unlock()
 
 	// Close subscribers outside of lock
+	discardQueued := !restart
 	for _, evtTypeSubs := range subsCopy {
 		for _, sub := range evtTypeSubs {
-			sub.Close()
+			if chSub, ok := sub.(*channelSubscriber); ok {
+				chSub.close(discardQueued)
+			} else {
+				sub.Close()
+			}
 		}
 	}
 

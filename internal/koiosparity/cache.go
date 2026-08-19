@@ -37,8 +37,8 @@ type KoiosEpochInfo struct {
 	// raw block/tx accounting quantities — stored for reference only. Dingo has
 	// no matching aggregate, so CompareEpochAggregates does not compare them;
 	// see that function's doc comment and KoiosTotalsResp for why /totals.fees
-	// and /totals.reward (compared in CompareEpochTotals) are the correct
-	// counterpart to reward_ada_pots.Fees/Rewards instead.
+	// is the correct counterpart to reward_ada_pots.Fees. /totals.reward has no
+	// matching Dingo aggregate and is intentionally not compared.
 	Fees         string
 	TotalRewards string
 	EpochEndTime time.Time // when the epoch actually closed (from Koios end_time); zero for old cache rows
