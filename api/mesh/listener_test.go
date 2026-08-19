@@ -300,9 +300,6 @@ func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
 	}
 }
 
-// TestServerShutdownOnContextCancel asserts cancelling the context
-// passed to Start shuts the listener down, which is how the node stops
-// the API during its own shutdown.
 // TestStartServerReleasesListenerWhenServerAlreadyDetached covers the
 // window between Start publishing s.httpServer and startServer recording
 // the listener. A Stop landing inside it detaches the server, so takeServer
@@ -326,7 +323,12 @@ func TestStartServerReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
 
 	// The detached server this startServer call is bringing up.
 	detached := &http.Server{Addr: addr}
-	require.NoError(t, srv.startServer(detached))
+	bindDone := make(chan struct{})
+	require.NoError(t, srv.startServer(detached, bindDone))
+	testutil.RequireReceive(
+		t, bindDone, time.Second,
+		"startServer must signal that the bind settled",
+	)
 
 	require.False(
 		t, portAccepts(addr),
@@ -344,6 +346,38 @@ func TestStartServerReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
 	)
 }
 
+// TestStopWaitsForAnInFlightBind asserts Stop does not report the server
+// down while a startServer call is still between net.Listen and releasing
+// its socket. Detaching the server is what makes that bind close its own
+// listener, so without waiting here Stop could return -- and a caller could
+// rebind the same port -- while the old socket was still open.
+func TestStopWaitsForAnInFlightBind(t *testing.T) {
+	srv := newTestServer(t, newTestDeps())
+
+	// Stands in for Start having published a server and a bind that has
+	// not finished yet.
+	bindDone := make(chan struct{})
+	srv.mu.Lock()
+	srv.httpServer = &http.Server{Addr: testutil.FreePort(t)}
+	srv.bindDone = bindDone
+	srv.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err := srv.Stop(ctx)
+	require.ErrorIs(
+		t, err, context.DeadlineExceeded,
+		"Stop must wait for the in-flight bind rather than returning",
+	)
+
+	// Once the bind settles, Stop completes.
+	close(bindDone)
+	require.NoError(t, srv.Stop(t.Context()))
+}
+
+// TestServerShutdownOnContextCancel asserts cancelling the context
+// passed to Start shuts the listener down, which is how the node stops
+// the API during its own shutdown.
 func TestServerShutdownOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	_, addr := startOnFreePort(t, ctx, newTestDeps())

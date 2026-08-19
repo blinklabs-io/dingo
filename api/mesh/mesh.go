@@ -87,8 +87,12 @@ type Server struct {
 	addrNetworkID       uint8
 	httpServer          *http.Server
 	listener            net.Listener
-	verifier            *apiauth.Verifier
-	mu                  sync.Mutex
+	// bindDone is closed by startServer once the listening socket has been
+	// either published on s.listener or closed again. Stop waits on it so a
+	// bind still in flight cannot outlive the Stop that raced it.
+	bindDone chan struct{}
+	verifier *apiauth.Verifier
+	mu       sync.Mutex
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -213,13 +217,15 @@ func (s *Server) Start(ctx context.Context) error {
 		IdleTimeout:       120 * time.Second,
 	}
 	s.httpServer = server
+	bindDone := make(chan struct{})
+	s.bindDone = bindDone
 
 	// Launch context monitor before unlocking so there
 	// is no window where Stop() could race with the
 	// goroutine not yet existing.
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
-		srv, ln := s.takeServer()
+		srv, ln, bindDone := s.takeServer()
 
 		if srv != nil {
 			s.logger.Debug(
@@ -232,6 +238,14 @@ func (s *Server) Start(ctx context.Context) error {
 				30*time.Second,
 			)
 			defer cancel()
+			//nolint:contextcheck
+			if err := awaitBind(shutdownCtx, bindDone); err != nil {
+				s.logger.Error(
+					"failed to settle the Mesh API listener bind "+
+						"during shutdown",
+					"error", err,
+				)
+			}
 			//nolint:contextcheck
 			if err := shutdownServer(
 				shutdownCtx, srv, ln,
@@ -248,7 +262,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.mu.Unlock()
 
-	if err := s.startServer(server); err != nil {
+	if err := s.startServer(server, bindDone); err != nil {
 		s.mu.Lock()
 		// Guarded: an overlapping Stop or restart may already have
 		// detached or replaced this server, and clearing the field
@@ -270,10 +284,13 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the HTTP server.
 func (s *Server) Stop(ctx context.Context) error {
-	srv, ln := s.takeServer()
+	srv, ln, bindDone := s.takeServer()
 
 	if srv != nil {
 		s.logger.Debug("shutting down Mesh API server")
+		if err := awaitBind(ctx, bindDone); err != nil {
+			return err
+		}
 		return shutdownServer(ctx, srv, ln)
 	}
 	return nil
@@ -282,12 +299,31 @@ func (s *Server) Stop(ctx context.Context) error {
 // takeServer detaches the running HTTP server and its listener so
 // exactly one caller shuts them down: Stop and the context monitor
 // started by Start both race for them.
-func (s *Server) takeServer() (*http.Server, net.Listener) {
+func (s *Server) takeServer() (*http.Server, net.Listener, chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	srv, ln := s.httpServer, s.listener
-	s.httpServer, s.listener = nil, nil
-	return srv, ln
+	srv, ln, bindDone := s.httpServer, s.listener, s.bindDone
+	s.httpServer, s.listener, s.bindDone = nil, nil, nil
+	return srv, ln, bindDone
+}
+
+// awaitBind waits for an in-flight startServer to finish releasing or
+// publishing its socket. Detaching the server first (takeServer) is what makes
+// that bind close its own listener, so waiting here is what lets Stop promise
+// the port is free by the time it returns rather than merely started closing.
+func awaitBind(ctx context.Context, bindDone chan struct{}) error {
+	if bindDone == nil {
+		return nil
+	}
+	select {
+	case <-bindDone:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf(
+			"timed out waiting for the Mesh API listener bind to settle: %w",
+			ctx.Err(),
+		)
+	}
 }
 
 // shutdownServer drains in-flight requests, then closes the listening
@@ -328,7 +364,12 @@ func shutdownServer(
 // error detection.
 func (s *Server) startServer(
 	server *http.Server,
+	bindDone chan struct{},
 ) error {
+	// Closed on every exit path -- bind failure, publication, or closing our
+	// own socket after losing the race to Stop -- so a waiting Stop is never
+	// left hanging on a bind that already finished.
+	defer close(bindDone)
 	useTLS := s.config.TLS.Enabled
 	if useTLS {
 		if err := tlsutil.ConfigureServerTLS(
