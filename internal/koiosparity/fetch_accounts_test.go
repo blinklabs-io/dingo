@@ -19,12 +19,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -96,6 +98,8 @@ func TestFetchAccountRewardsForEpochChunksAndCommits(t *testing.T) {
 		"preview",
 		100,
 		addrs,
+		time.Time{},
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -129,6 +133,8 @@ func TestFetchAccountRewardsForEpochEmptyUniverseCommitsComplete(t *testing.T) {
 		"preview",
 		100,
 		nil,
+		time.Time{},
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -166,6 +172,8 @@ func TestFetchAccountRewardsForEpochTransientChunkFailureCommitsNothing(
 		"preview",
 		100,
 		[]string{"stake1a"},
+		time.Time{},
+		0,
 		nil,
 	)
 	require.Error(t, err)
@@ -201,10 +209,191 @@ func TestFetchAccountRewardsForEpochPermanentErrorAbortsImmediately(
 		"preview",
 		100,
 		[]string{"stake1a"},
+		time.Time{},
+		0,
 		nil,
 	)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrKoiosPermanent))
+}
+
+// TestFetchAccountRewardsForEpochZeroRowsWithinGraceLeavesIncomplete proves a
+// just-closed epoch (EpochEndTime within graceHours of now) whose #3097
+// account fetch returns zero rows across the whole address universe is left
+// with coverage incomplete rather than permanently accepted as "zero
+// accounts earned rewards" — Koios's own /account_reward_history publishing
+// lag is far more likely, and GetEpochsMissingAccountCoverage never
+// re-selects an epoch whose coverage row already reports complete=1 (see
+// FetchAccountRewardsForEpoch's doc comment).
+func TestFetchAccountRewardsForEpochZeroRowsWithinGraceLeavesIncomplete(
+	t *testing.T,
+) {
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetched, err := FetchAccountRewardsForEpoch(
+		context.Background(),
+		k,
+		cache,
+		"preview",
+		100,
+		[]string{"stake1a"},
+		time.Now().Add(-time.Hour), // closed 1h ago
+		24,                         // graceHours
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 0, fetched)
+
+	cov, err := cache.GetAccountCoverage("preview", 100)
+	require.NoError(t, err)
+	require.False(
+		t,
+		cov.Complete,
+		"a zero-row result within the grace window must not be accepted as final",
+	)
+	require.Equal(t, 0, cov.FetchedCount)
+}
+
+// TestFetchAccountRewardsForEpochZeroRowsPastGraceMarksComplete proves a
+// zero-row result is accepted as final (complete=true) once the grace window
+// has elapsed, so a genuinely empty epoch is not retried forever.
+func TestFetchAccountRewardsForEpochZeroRowsPastGraceMarksComplete(
+	t *testing.T,
+) {
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetched, err := FetchAccountRewardsForEpoch(
+		context.Background(),
+		k,
+		cache,
+		"preview",
+		100,
+		[]string{"stake1a"},
+		time.Now().Add(-100*time.Hour), // closed long ago
+		24,                             // graceHours
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 0, fetched)
+
+	cov, err := cache.GetAccountCoverage("preview", 100)
+	require.NoError(t, err)
+	require.True(
+		t,
+		cov.Complete,
+		"a zero-row result past the grace window must be accepted as final",
+	)
+}
+
+// TestFetchAccountRewardsForEpochZeroRowsGraceDisabledMarksComplete proves
+// graceHours=0 disables the lag gate entirely (immediate complete=true on a
+// zero-row result, matching this function's pre-grace-gate behavior), for
+// any caller that explicitly passes 0.
+func TestFetchAccountRewardsForEpochZeroRowsGraceDisabledMarksComplete(
+	t *testing.T,
+) {
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	_, err = FetchAccountRewardsForEpoch(
+		context.Background(),
+		k,
+		cache,
+		"preview",
+		100,
+		[]string{"stake1a"},
+		time.Now().Add(-time.Hour),
+		0, // graceHours disabled
+		nil,
+	)
+	require.NoError(t, err)
+
+	cov, err := cache.GetAccountCoverage("preview", 100)
+	require.NoError(t, err)
+	require.True(t, cov.Complete)
+}
+
+// TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache proves
+// FetchEpochAccountsWithAddrs resolves epochEndTime from the epoch's
+// already-committed koios_epoch_info row (rather than requiring the caller
+// to pass it explicitly), so the grace-window gate above actually applies
+// end-to-end through the caller every real Fetch/Observer path uses.
+func TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache(t *testing.T) {
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	const network = "preview"
+	const epoch = uint64(100)
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "1",
+		EpochEndTime: time.Now().Add(-time.Hour), // just closed
+		FetchedAt:    time.Now(),
+	}, nil, nil))
+
+	_, err = FetchEpochAccountsWithAddrs(
+		context.Background(),
+		k,
+		cache,
+		network,
+		epoch,
+		nil,
+		[]string{"stake1a"},
+		24, // graceHours
+		nil,
+	)
+	require.NoError(t, err)
+
+	cov, err := cache.GetAccountCoverage(network, epoch)
+	require.NoError(t, err)
+	require.False(
+		t,
+		cov.Complete,
+		"the epoch's cached EpochEndTime must be looked up and used to gate the zero-row result",
+	)
 }
 
 // TestBuildAccountAddressUniverseUnionsKoiosAndDingo proves the address
@@ -265,4 +454,165 @@ func TestChunkAddresses(t *testing.T) {
 	require.Equal(t, []string{"c", "d"}, chunks[1])
 	require.Equal(t, []string{"e"}, chunks[2])
 	require.Nil(t, chunkAddresses(nil, 2))
+}
+
+// TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError guards
+// against the dispatcher race flagged in review: `select { case
+// <-fetchCtx.Done(): ...; case sem <- struct{}{}: }` can nondeterministically
+// choose the semaphore branch even after a concurrently-running chunk's
+// error has already called cancel(), because Done() and a buffered
+// sem<-struct{} can both be simultaneously ready — Go's select does not
+// prioritize between ready cases. Without a recheck after acquiring the
+// semaphore, the dispatch loop could launch one or more further chunk
+// workers after the epoch's reference set is already known to be doomed.
+//
+// This exercises the real dispatch loop under genuine concurrent execution
+// (a real *KoiosClient against a real httptest.Server, real goroutines,
+// real channel operations) rather than a hand-rolled reimplementation of the
+// same select/semaphore shape, so it validates the actual production code
+// path, not a model of it:
+//
+//   - The erroring chunk is identified by *content* (poisonAddr, placed in
+//     the very first koiosAccountChunkSize addresses so it is always part of
+//     chunk 0, always dispatched in the initial accountFetchConcurrency-sized
+//     batch) rather than "whichever request happens to reach the server
+//     first" — with arrival-order identification, *any* of the 30 chunks
+//     could win the race to fail, so the count measured could include any
+//     number of otherwise-successful chunks that legitimately cascaded
+//     through before the unlucky one happened to run, with or without the
+//     fix — not a useful signal either way.
+//   - Every other chunk's response is held behind a test-controlled gate
+//     that only this test ever closes, and only after waiting a generous
+//     fixed margin past the poison chunk's response — long enough that
+//     cancel() is guaranteed to have already been called by the time the
+//     gate opens. This bounds every possible source of a freed semaphore
+//     slot (the poison chunk's own release, and every other chunk's release
+//     once the gate opens) to strictly after cancellation, so requestCount
+//     — checked only once FetchAccountRewardsForEpoch has fully returned —
+//     can never legitimately exceed accountFetchConcurrency; anything more
+//     means a chunk was dispatched using a slot that only became available
+//     post-cancellation. It can legitimately be *less*, since an
+//     already-dispatched chunk still waiting on the rate limiter or
+//     http.Client.Do for one of the gated chunks aborts immediately once
+//     fetchCtx is cancelled, without ever completing its request.
+//
+// The exact nanosecond-scale race between a `close(fetchCtx.Done())` and an
+// immediately-following semaphore release in the same goroutine did not
+// reproduce empirically against this Go runtime even under sustained -race
+// stress testing during this test's development (a mutex-guarded
+// context.Context's Err() appears, in practice, to make the specific
+// same-goroutine sequencing safe well before the release notification can
+// reach a parked select) — but the recheck is correct, necessary per Go's
+// documented select semantics for the general case, and costs nothing; this
+// test's job is to confirm the dispatcher never violates the invariant under
+// real adversarial concurrent execution, not to force that one specific
+// interleaving to occur.
+func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
+	t *testing.T,
+) {
+	const totalChunks = 30
+	const poisonAddr = "stake1poison"
+	// cancelMargin only needs to comfortably exceed how long it takes the
+	// dispatcher goroutine to receive the poison response, classify it as
+	// ErrKoiosPermanent, and call cancel() — all in-process, no further
+	// network I/O — not to influence the race itself (that race, if
+	// present, has already resolved one way or the other by the time this
+	// margin elapses).
+	const cancelMargin = 100 * time.Millisecond
+
+	var requestCount atomic.Int32
+	poisonSeen := make(chan struct{})
+	gate := make(chan struct{})
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount.Add(1)
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), poisonAddr) {
+				// 401 is a permanent, non-retried failure (see
+				// koios_client.go's get()/post(): only 429 bursts and 5xx
+				// are retried internally) — a retryable status here (e.g.
+				// 503) would make the client itself resend this very same
+				// chunk's request rather than surfacing an error once.
+				close(poisonSeen)
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("invalid API key"))
+				return
+			}
+			// Every other request — including any chunk that should never
+			// have been dispatched — blocks here until the test explicitly
+			// opens the gate, well after cancel() is guaranteed to have
+			// already fired. Nothing about reaching this point depends on
+			// dispatch order or timing beyond "this request is not the
+			// poison one."
+			<-gate
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addrs := make([]string, totalChunks*koiosAccountChunkSize)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("stake1addr%d", i)
+	}
+	addrs[0] = poisonAddr // guarantees poisonAddr is part of chunk 0
+
+	fetchDone := make(chan error, 1)
+	go func() {
+		_, fetchErr := FetchAccountRewardsForEpoch(
+			context.Background(),
+			k,
+			cache,
+			"preview",
+			100,
+			addrs,
+			time.Time{},
+			0,
+			nil,
+		)
+		fetchDone <- fetchErr
+	}()
+
+	select {
+	case <-poisonSeen:
+	case <-time.After(10 * time.Second):
+		t.Fatal("poison chunk was never dispatched")
+	}
+	time.Sleep(cancelMargin)
+	close(gate)
+
+	var fetchErr error
+	select {
+	case fetchErr = <-fetchDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal(
+			"FetchAccountRewardsForEpoch never returned after the gate opened",
+		)
+	}
+	require.Error(t, fetchErr)
+	require.ErrorIs(t, fetchErr, ErrKoiosPermanent)
+
+	// requestCount can legitimately be *less* than accountFetchConcurrency:
+	// once fetchCtx is cancelled, an already-dispatched chunk still waiting
+	// on koios.limiter.wait/http.Client.Do for one of the other, gated
+	// chunks aborts immediately without ever completing its request, so not
+	// every one of the initial batch is guaranteed to reach the server. It
+	// must never be *more*: every request beyond the poison chunk's own
+	// initial batch would have to have used a slot that only ever became
+	// available after fetchCtx was already cancelled — see the doc comment
+	// for why this holds for requests arriving both before and after the
+	// gate opens.
+	require.LessOrEqual(
+		t,
+		requestCount.Load(),
+		int32(accountFetchConcurrency),
+		"no chunk may ever be dispatched using a semaphore slot freed after "+
+			"fetchCtx was already cancelled",
+	)
 }

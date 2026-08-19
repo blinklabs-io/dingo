@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,4 +147,50 @@ func TestDsnFromMetadataConfigUnsupportedPlugin(t *testing.T) {
 			map[string]any{"host": "db.example.com"},
 		),
 	)
+}
+
+// TestAccountsEnabledExplicitFlagWinsOverEnv guards against the precedence
+// bug flagged in review: an explicit --accounts=false on the command line
+// must win over KOIOS_PARITY_ACCOUNTS=true in the environment — a naive
+// "flag value OR env value" resolution would let a true env var override an
+// explicit opt-out. accountsEnabled must consult cmd.Flags().Changed
+// ("accounts") to distinguish "explicitly set to false" from "left at its
+// zero-value default."
+func TestAccountsEnabledExplicitFlagWinsOverEnv(t *testing.T) {
+	t.Setenv("KOIOS_PARITY_ACCOUNTS", "true")
+
+	cmd := &cobra.Command{}
+	addAccountsFlag(cmd)
+	require.NoError(t, cmd.Flags().Set("accounts", "false"))
+	require.True(t, cmd.Flags().Changed("accounts"))
+
+	require.False(
+		t,
+		accountsEnabled(cmd),
+		"an explicit --accounts=false must win over KOIOS_PARITY_ACCOUNTS=true",
+	)
+}
+
+// TestAccountsEnabledFallsBackToEnvWhenFlagUnset proves the env var is
+// consulted only when the flag was never explicitly set.
+func TestAccountsEnabledFallsBackToEnvWhenFlagUnset(t *testing.T) {
+	cmd := &cobra.Command{}
+	addAccountsFlag(cmd)
+
+	t.Setenv("KOIOS_PARITY_ACCOUNTS", "true")
+	require.True(t, accountsEnabled(cmd))
+
+	t.Setenv("KOIOS_PARITY_ACCOUNTS", "")
+	require.False(t, accountsEnabled(cmd))
+}
+
+// TestAccountsEnabledExplicitTrueFlagWinsOverEnvFalse is the mirror case:
+// an explicit --accounts=true must win even when the environment says
+// otherwise (or is simply unset).
+func TestAccountsEnabledExplicitTrueFlagWinsOverEnvFalse(t *testing.T) {
+	cmd := &cobra.Command{}
+	addAccountsFlag(cmd)
+	require.NoError(t, cmd.Flags().Set("accounts", "true"))
+
+	require.True(t, accountsEnabled(cmd))
 }

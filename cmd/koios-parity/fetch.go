@@ -42,6 +42,8 @@ phase then opens Dingo's metadata database read-only (see --metadata-plugin/
 		Uint64("through-epoch", 0, "stop at this epoch (default: tip-1)")
 	cmd.Flags().
 		Bool("force-refresh", false, "re-fetch and overwrite all epochs in [from-epoch, through-epoch], not just missing ones")
+	cmd.Flags().Int("grace-hours", defaultGraceHours,
+		"a just-closed epoch's zero-row --accounts fetch within this window is retried, not accepted as final (see check/run/watch's identical flag)")
 	addAccountsFlag(cmd)
 	// Only used when --accounts is set (see fetchRun): the standalone fetch
 	// command otherwise never contacts Dingo's database at all.
@@ -60,6 +62,7 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	fromEpoch, _ := cmd.Flags().GetUint64("from-epoch")
 	throughEpoch, _ := cmd.Flags().GetUint64("through-epoch")
 	forceRefresh, _ := cmd.Flags().GetBool("force-refresh")
+	graceHours, _ := cmd.Flags().GetInt("grace-hours")
 
 	if forceRefresh && !cmd.Flags().Changed("from-epoch") {
 		return errors.New(
@@ -97,6 +100,7 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		ForceRefresh:    forceRefresh,
 		AccountsEnabled: accounts,
 		AccountsSource:  accountsSource,
+		GraceHours:      graceHours,
 	}, slog.Default())
 	if err != nil {
 		return err

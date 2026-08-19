@@ -125,6 +125,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 					FromEpoch:       fromClosed,
 					ThroughEpoch:    toClosed,
 					AccountsEnabled: accounts,
+					GraceHours:      graceHours,
 					// Reuse the already-open, long-lived Dingo connection
 					// above (unused when accounts is false) rather than
 					// opening a second one — watch already keeps dingo open

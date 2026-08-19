@@ -51,6 +51,16 @@ type FetchConfig struct {
 	// alone, which still checks every Koios-known account, just cannot also
 	// surface a Dingo-only account Koios has never indexed.
 	AccountsSource RewardParitySource
+	// GraceHours is forwarded to FetchAccountRewardsForEpoch's zero-row/lag
+	// gate (see its doc comment): a just-closed epoch (within this many
+	// hours of EpochEndTime) whose #3097 account fetch returns zero rows
+	// across the whole address universe is left with koios_account_coverage
+	// incomplete rather than permanently accepted as "zero accounts earned
+	// rewards", since Koios's own /account_reward_history publishing lag is
+	// a far more likely explanation. 0 disables the gate (every zero-row
+	// result is accepted as final immediately). Unused when AccountsEnabled
+	// is false.
+	GraceHours int
 }
 
 // FetchResult summarises a completed fetch run.
@@ -388,7 +398,7 @@ loop:
 			if cfg.AccountsEnabled {
 				if _, acctErr := FetchEpochAccountsWithAddrs(
 					fetchCtx, koios, cache, cfg.Network, epoch,
-					cfg.AccountsSource, koiosAccountAddrs, logger,
+					cfg.AccountsSource, koiosAccountAddrs, cfg.GraceHours, logger,
 				); acctErr != nil {
 					handleEpochFetchErr("accounts", acctErr)
 					return

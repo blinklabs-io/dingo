@@ -171,6 +171,22 @@ func chunkAddresses(addrs []string, size int) [][]string {
 // is complete". The caller (Fetch's per-epoch worker, or the Observer's
 // fetchIfNeeded retry loop) is expected to retry the whole epoch, the same
 // way it already retries a fetchEpoch pool-history failure.
+//
+// epochEndTime/graceHours gate a distinct hazard: every chunk can succeed yet
+// still return zero reward rows across the entire address universe, because
+// Koios has simply not finished publishing /account_reward_history for a
+// just-closed epoch yet (the same publishing lag CompareEpochAggregates/
+// ComparePoolEpoch already treat as reference_lag, not a real discrepancy —
+// see compare.go). Committing that empty result as complete=true would be
+// permanent: GetEpochsMissingAccountCoverage never re-selects an epoch whose
+// coverage row already reports complete=1, so a real, later-published
+// non-empty answer would never be fetched. When len(rows) == 0 and epoch
+// closed less than graceHours ago (epochEndTime non-zero), the coverage row
+// is committed with complete=false instead — recording the attempt without
+// ever letting a lag-induced empty snapshot look like an authoritative "zero
+// accounts earned rewards this epoch" — so a later Fetch/Observer attempt
+// retries it. Once the grace window elapses, a persistently empty result is
+// accepted as final (complete=true) so the epoch is not retried forever.
 func FetchAccountRewardsForEpoch(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -178,6 +194,8 @@ func FetchAccountRewardsForEpoch(
 	network string,
 	epoch uint64,
 	addressUniverse []string,
+	epochEndTime time.Time,
+	graceHours int,
 	logger *slog.Logger,
 ) (fetched int, err error) {
 	if logger == nil {
@@ -216,10 +234,28 @@ func FetchAccountRewardsForEpoch(
 
 outer:
 	for _, chunk := range chunks {
+		// Check first so a cancellation from a prior iteration's chunk error
+		// is never missed simply because the semaphore also happened to have
+		// room this iteration (see the post-acquire recheck below for why a
+		// single check here is not by itself sufficient).
+		if fetchCtx.Err() != nil {
+			break outer
+		}
 		select {
 		case <-fetchCtx.Done():
 			break outer
 		case sem <- struct{}{}:
+		}
+		// Recheck immediately after acquiring the semaphore slot: Done() and
+		// sem <- struct{}{} being simultaneously ready makes Go's select
+		// choose between them nondeterministically, so cancellation fired by
+		// a concurrently-running chunk's error between this iteration's top
+		// check and the select above could otherwise still let this
+		// iteration dispatch one more doomed worker. Release the slot and
+		// stop rather than launch it.
+		if fetchCtx.Err() != nil {
+			<-sem
+			break outer
 		}
 
 		wg.Add(1)
@@ -279,7 +315,16 @@ outer:
 		return 0, classifyFetchErr(err)
 	}
 
-	if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, rows, len(addressUniverse), true, now); commitErr != nil {
+	// A zero-row result across the whole address universe, for an epoch that
+	// closed within the grace window, is far more likely to be Koios's own
+	// account_reward_history publishing lag than genuine "nobody earned a
+	// reward this epoch" — see this function's doc comment. Leave coverage
+	// incomplete so a later attempt retries it, rather than baking in an
+	// empty snapshot as permanent fact the moment complete=1 is committed.
+	complete := len(rows) != 0 || graceHours <= 0 || epochEndTime.IsZero() ||
+		now.Sub(epochEndTime) >= time.Duration(graceHours)*time.Hour
+
+	if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, rows, len(addressUniverse), complete, now); commitErr != nil {
 		return 0, fmt.Errorf("commit account rewards: %w", commitErr)
 	}
 
@@ -289,6 +334,7 @@ outer:
 		"addresses", len(addressUniverse),
 		"chunks", len(chunks),
 		"rows", len(rows),
+		"complete", complete,
 	)
 	return len(rows), nil
 }
@@ -301,6 +347,15 @@ outer:
 // Callers that fetch many epochs in one run (Fetch, Observer) should resolve
 // koiosAddrs once and reuse it across every call, exactly like
 // FetchEpochWithPools does for the pool universe.
+//
+// graceHours is forwarded to FetchAccountRewardsForEpoch's zero-row/lag gate
+// (see its doc comment); the epoch's EpochEndTime is looked up from the
+// already-committed koios_epoch_info row (fetchEpoch/fetchPoolsIfNeeded
+// always commit it before this is ever called — see
+// GetEpochsMissingAccountCoverage's join). A lookup failure (e.g. no
+// koios_epoch_info row exists yet, which should not happen in practice)
+// leaves epochEndTime at its zero value, which simply disables the grace
+// check rather than failing the fetch outright.
 func FetchEpochAccountsWithAddrs(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -309,6 +364,7 @@ func FetchEpochAccountsWithAddrs(
 	epoch uint64,
 	source RewardParitySource,
 	koiosAddrs []string,
+	graceHours int,
 	logger *slog.Logger,
 ) (int, error) {
 	stakeEpoch, ok := koiosStakeEpoch(epoch)
@@ -333,6 +389,10 @@ func FetchEpochAccountsWithAddrs(
 			fmt.Errorf("build account address universe: %w", err),
 		)
 	}
+	var epochEndTime time.Time
+	if info, infoErr := cache.GetEpochInfo(network, epoch); infoErr == nil {
+		epochEndTime = info.EpochEndTime
+	}
 	return FetchAccountRewardsForEpoch(
 		ctx,
 		koios,
@@ -340,6 +400,8 @@ func FetchEpochAccountsWithAddrs(
 		network,
 		epoch,
 		universe,
+		epochEndTime,
+		graceHours,
 		logger,
 	)
 }

@@ -688,6 +688,7 @@ func (o *Observer) fetchAccountsIfNeeded(
 			epoch,
 			o.cfg.Source,
 			koiosAddrs,
+			o.cfg.GraceHours,
 			o.cfg.Logger,
 		)
 		if err == nil {

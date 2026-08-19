@@ -4063,7 +4063,13 @@ never the reverse.
   per-epoch `fetchCtx`, never the caller's shared multi-epoch context, so an
   isolated transient chunk failure still just drops that one epoch into
   `FailedEpochs` for a later retry, the same as an isolated pool-level
-  failure.
+  failure. The dispatch loop rechecks `fetchCtx.Err()` both before and
+  immediately after acquiring a semaphore slot, not relying on
+  `select { case <-fetchCtx.Done(): ...; case sem <- struct{}{}: }` alone —
+  Go's `select` does not prioritize between simultaneously-ready cases, so a
+  concurrently-running chunk's error firing `cancel()` right as another slot
+  frees up could otherwise still let the loop launch one more doomed worker
+  before observing the cancellation.
 - **Coverage gate.** `koios_account_coverage.complete` must be `true` before
   `compareEpochAccounts` (`check.go`) ever treats `koios_account_rewards` as
   a valid reference set for an epoch; an absent or incomplete coverage row
@@ -4078,6 +4084,27 @@ never the reverse.
   query is a genuine cache/DB failure and is surfaced as `dingo_db_error`
   (or a propagated error, for the observer) rather than being conflated with
   "nothing fetched yet."
+- **A zero-row fetch result is not automatically "complete" for a
+  just-closed epoch.** Every chunk succeeding does not by itself mean the
+  epoch's reference set is trustworthy: Koios's own `/account_reward_history`
+  publishing can lag behind `/pool_history`/`/epoch_info` by a similar window
+  to the `--grace-hours` lag already tolerated elsewhere in this tool (see
+  the mismatch-categories subsection's `reference_lag`), so a fetch that
+  lands entirely within that window and returns zero reward rows across the
+  whole address universe is far more likely to mean "Koios hasn't finished
+  publishing yet" than "zero accounts earned a reward this epoch."
+  `FetchAccountRewardsForEpoch` (`fetch_accounts.go`) therefore commits
+  `complete = false` (recording the attempt, not the answer) when
+  `len(rows) == 0` and the epoch's `EpochEndTime` (looked up from the
+  already-committed `koios_epoch_info` row by `FetchEpochAccountsWithAddrs`)
+  is within `graceHours` of now — `Cache.GetEpochsMissingAccountCoverage`
+  then re-selects it on the next `Fetch`/`Observer` attempt instead of the
+  coverage row locking in a stale empty snapshot forever. Once the grace
+  window elapses, a persistently empty result is accepted as final
+  (`complete = true`) so a genuinely reward-less epoch is not retried
+  indefinitely. `graceHours = 0` (the historical default before this gate
+  existed) disables it, preserving the original immediate-`complete=true`
+  behavior for any caller that does not configure grace hours.
 - **Pre-staking epochs are excluded from account fetching too.**
   `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject epoch <= 1,
   not just epoch == 0, so `FetchEpochAccountsWithAddrs` skips both

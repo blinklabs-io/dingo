@@ -90,6 +90,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 			Concurrency:     concurrency,
 			AccountsEnabled: accounts,
 			AccountsSource:  accountsSource,
+			GraceHours:      graceHours,
 		}, logger)
 		if fetchErr != nil {
 			return fmt.Errorf("fetch: %w", fetchErr)
