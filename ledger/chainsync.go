@@ -2273,6 +2273,14 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 		}
 		return LocalRollbackRecoveryResult{Recovered: true}
 	}
+	// Every preferred connection failed. Clear the selection rather than
+	// leaving it on a connection known not to serve this range, matching what
+	// handleEventChainsync does when its own fallbacks are exhausted. Each
+	// successful replay reassigns this field before its blockfetch attempt, so
+	// nothing downstream currently reads a stale value -- but that makes the
+	// invariant depend on every future writer reassigning first, which is not a
+	// property worth relying on.
+	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	return LocalRollbackRecoveryResult{}
 }
 

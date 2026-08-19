@@ -1432,6 +1432,77 @@ func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
 	)
 }
 
+// TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails asserts
+// the blockfetch selection is not left pointing at a connection that just failed
+// to serve the replayed range. handleEventChainsync clears it when its own
+// fallbacks are exhausted; this path now does the same, so nothing downstream
+// has to depend on being the next writer of the field.
+func TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6002},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3003},
+	}
+	fixture.ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &activeConnId
+	}
+	// Nothing can serve the range: neither the recovery connection nor the
+	// active best peer the fallback reaches for.
+	fixture.ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) error {
+		return errBlockfetchNoBlocks
+	}
+
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("rollback-clear-selection"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+		BlockHeader: header,
+	})
+
+	result := fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+	require.False(t, result.Recovered)
+
+	assert.Empty(
+		t, connIdKey(fixture.ls.selectedBlockfetchConnId),
+		"an exhausted recovery must not leave the selection on a "+
+			"connection that failed to serve the range",
+	)
+}
+
 func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 	t *testing.T,
 ) {
