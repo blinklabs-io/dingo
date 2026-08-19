@@ -82,11 +82,12 @@ type BlockForger struct {
 	slotTracker *SlotTracker
 
 	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
-	leiosChecker  LeiosProduceChecker
-	leiosEBCaster EndorserBlockBroadcaster
-	leiosMempool  MempoolProvider
-	leiosCerts    LeiosCertificateProvider
-	leiosParent   LeiosParentAnnouncementProvider
+	leiosChecker   LeiosProduceChecker
+	leiosEBCaster  EndorserBlockBroadcaster
+	leiosMempool   MempoolProvider
+	leiosValidator TxValidator
+	leiosCerts     LeiosCertificateProvider
+	leiosParent    LeiosParentAnnouncementProvider
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -215,8 +216,9 @@ type EndorserBlockBroadcaster interface {
 // LeiosEndorserBlockAnnouncement is the header extension payload for an
 // endorser block announced by a Dijkstra ranking block.
 type LeiosEndorserBlockAnnouncement struct {
-	Hash lcommon.Blake2b256
-	Size uint64
+	Hash              lcommon.Blake2b256
+	Size              uint64
+	TransactionHashes []string
 }
 
 // LeiosBlockData carries the Leios prototype data a Dijkstra ranking block
@@ -269,6 +271,10 @@ type ForgerConfig struct {
 	// LeiosMempool provides transactions for EB building. May reuse the
 	// same MempoolProvider as the RB builder.
 	LeiosMempool MempoolProvider
+	// LeiosTxValidator re-validates endorser-block transactions against one
+	// coherent ledger snapshot before the EB is broadcast. Production wiring
+	// supplies LedgerState; nil preserves compatibility for test embedders.
+	LeiosTxValidator TxValidator
 	// LeiosCertificateProvider supplies certified EBs for Dijkstra CertRBs.
 	LeiosCertificateProvider LeiosCertificateProvider
 	// LeiosParentAnnouncementProvider supplies the EB hash announced by the
@@ -317,6 +323,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosChecker:     cfg.LeiosProduceChecker,
 		leiosEBCaster:    cfg.LeiosEBBroadcaster,
 		leiosMempool:     cfg.LeiosMempool,
+		leiosValidator:   cfg.LeiosTxValidator,
 		leiosCerts:       cfg.LeiosCertificateProvider,
 		leiosParent:      cfg.LeiosParentAnnouncementProvider,
 		blockValidator:   cfg.BlockValidator,
@@ -1028,8 +1035,20 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		}
 		return nil, nil
 	}
+	validatedTxs, err := selectValidLeiosTransactions(txs, f.leiosValidator)
+	if err != nil {
+		return nil, fmt.Errorf("validate leios EB transactions: %w", err)
+	}
+	txs = validatedTxs
+	if len(txs) == 0 {
+		f.logger.Debug("leios EB skipped: no valid transactions", "slot", slot)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("no_valid_transactions").Inc()
+		}
+		return nil, nil
+	}
 
-	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
+	ebCbor, ebHash, bodies, txHashes, err := buildLeiosEB(txs)
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
@@ -1064,9 +1083,57 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		f.metrics.leiosEbForged.Inc()
 	}
 	return &LeiosEndorserBlockAnnouncement{
-		Hash: lcommon.NewBlake2b256(ebHash),
-		Size: uint64(len(ebCbor)),
+		Hash:              lcommon.NewBlake2b256(ebHash),
+		Size:              uint64(len(ebCbor)),
+		TransactionHashes: txHashes,
 	}, nil
+}
+
+// selectValidLeiosTransactions re-validates an ordered mempool snapshot with
+// the same UTxO overlay semantics used at admission. Parent outputs are exposed
+// only after the parent passes, so rejecting a parent also rejects descendants
+// that depend on it. LedgerState pins the whole pass to one publication through
+// TxValidationSessionProvider.
+func selectValidLeiosTransactions(
+	txs []MempoolTransaction,
+	validator TxValidator,
+) ([]MempoolTransaction, error) {
+	if validator == nil {
+		return txs, nil
+	}
+	selected := make([]MempoolTransaction, 0, len(txs))
+	err := withTxValidationSession(
+		validator,
+		func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+		) error {
+			consumed := make(map[string]struct{})
+			created := make(map[string]lcommon.Utxo)
+			for _, mempoolTx := range txs {
+				tx, err := decodeMempoolTx(mempoolTx)
+				if err != nil || validate(tx, consumed, created) != nil {
+					continue
+				}
+				selected = append(selected, mempoolTx)
+				for _, input := range tx.Consumed() {
+					key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+					consumed[key] = struct{}{}
+				}
+				for _, utxo := range tx.Produced() {
+					key := fmt.Sprintf(
+						"%s:%d", utxo.Id.Id().String(), utxo.Id.Index(),
+					)
+					created[key] = utxo
+				}
+			}
+			if !stillCurrent() {
+				return errTxValidationSnapshotChanged
+			}
+			return nil
+		},
+	)
+	return selected, err
 }
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
@@ -1075,13 +1142,20 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 // when no valid references remain after filtering.
 func buildLeiosEB(
 	txs []MempoolTransaction,
-) (cbor []byte, hash []byte, bodies [][]byte, err error) {
+) (
+	cbor []byte,
+	hash []byte,
+	bodies [][]byte,
+	txHashes []string,
+	err error,
+) {
 	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
 	// bodies holds each referenced transaction's raw CBOR, in the same order
 	// as refs, so the endorser block can serve them over leios-fetch. A
 	// transaction dropped from refs (bad hash or size) is dropped here too,
 	// keeping body i aligned with reference i.
 	bodies = make([][]byte, 0, len(txs))
+	txHashes = make([]string, 0, len(txs))
 	for _, tx := range txs {
 		raw, hexErr := hex.DecodeString(tx.Hash)
 		if hexErr != nil || len(raw) != 32 {
@@ -1096,17 +1170,18 @@ func buildLeiosEB(
 			TransactionSize: uint16(sz), // #nosec G115 -- bounded above
 		})
 		bodies = append(bodies, tx.Cbor)
+		txHashes = append(txHashes, tx.Hash)
 	}
 	if len(refs) == 0 {
-		return nil, nil, nil, errNoValidTxRefs
+		return nil, nil, nil, nil, errNoValidTxRefs
 	}
 	eb := lcommon.LeiosEndorserBlock{TransactionReferences: refs}
 	ebCbor, marshalErr := eb.MarshalCBOR()
 	if marshalErr != nil {
-		return nil, nil, nil, fmt.Errorf("marshal leios EB: %w", marshalErr)
+		return nil, nil, nil, nil, fmt.Errorf("marshal leios EB: %w", marshalErr)
 	}
 	h := lcommon.Blake2b256Hash(ebCbor)
-	return ebCbor, h.Bytes(), bodies, nil
+	return ebCbor, h.Bytes(), bodies, txHashes, nil
 }
 
 // modeString returns a string representation of the forging mode.

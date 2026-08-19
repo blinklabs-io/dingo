@@ -449,12 +449,10 @@ type LedgerStateConfig struct {
 	// reached from a preview/preprod/mainnet configuration.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
-	// validation rule set entirely. dingo already trusts (logs, does not reject)
-	// every Dijkstra tx-validation disagreement, because the block was admitted
-	// to the chain by its Leios certificate and the prototype does not itself
-	// validate endorser-block transactions. On the Haskell-conformant path
-	// (Musashi) certified closure and ranking-block transactions are trusted in
-	// the same way. Running dingo's rule set only to discard any disagreement is
+	// validation rule set entirely. On the Haskell-conformant Musashi path,
+	// certified closure and ranking-block transactions are trusted because the
+	// prototype does not validate endorser-block transactions. Running dingo's
+	// rule set only to discard any disagreement is
 	// wasted work that prevents the node from reaching tip under load. Set true
 	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
 	// requires an unambiguous Musashi identity so this can never be reached
@@ -4703,11 +4701,8 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
 //
-// Note what this flag does *not* decide: whether a Dijkstra validation failure
-// rejects the block. That is trustDijkstraTxValidationError, which is
-// profile-independent — so on the Dijkstra path the accept/reject outcome is
-// the same either way, and this flag only governs whether the rules are run at
-// all (CPU cost and disagreement logging).
+// The same prototype flag also scopes trustDijkstraTxValidationError. Standard
+// Dijkstra/Leios profiles run the rules and reject any disagreement.
 func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -4716,23 +4711,12 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //
-// This is deliberately *not* gated on the network profile or on
-// SkipDijkstraTxValidation: a Dijkstra block reaches here only because it was
-// admitted to the chain by its Leios certificate, an endorser block may be only
-// partially resolvable, and the certificate/validation surface is still
-// evolving — so rewinding a certified chain on a disagreement is not yet the
-// right response on any profile. Dijkstra is only in the active era table when
-// EnableDijkstra is set (Musashi, runMode "leios", or startEra "dijkstra"), so
-// a default preview/preprod/mainnet node never reaches this path.
-//
-// The consequence for the trust boundary is worth stating plainly:
-// SkipDijkstraTxValidation changes whether the rules run, not whether a bad
-// Dijkstra transaction is rejected. Tightening this to enforce was item 5 of
-// #2587, which was closed without that item being done; it needs its own
-// change, with DevNet/Leios validation, rather than riding along with a
-// configuration-boundary fix.
+// Trust is limited to the explicit Musashi prototype bypass. Standard
+// Dijkstra/Leios profiles have complete endorser-block fetch/apply support and
+// must reject invalid ranking-block transactions just like every other era.
 func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
-	return eraId == dijkstra.EraIdDijkstra
+	return eraId == dijkstra.EraIdDijkstra &&
+		ls.config.SkipDijkstraTxValidation
 }
 
 func (ls *LedgerState) ledgerProcessBlock(

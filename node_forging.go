@@ -351,6 +351,7 @@ func (n *Node) initBlockForger(
 		LeiosProduceChecker:             leiosChecker,
 		LeiosEBBroadcaster:              leiosEBCaster,
 		LeiosMempool:                    leiosMempool,
+		LeiosTxValidator:                n.ledgerState,
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
 	})
