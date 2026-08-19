@@ -1186,6 +1186,13 @@ Dingo supports two storage modes, configured via `storageMode`:
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
 
+In core mode, the ledger's background consumed-UTxO pruner is advisory: it
+defers while the local tip is materially behind the known upstream tip, so its
+potentially large SQLite write transaction cannot compete with blockfetch
+state persistence during historical catch-up. The timer and epoch-boundary
+triggers are single-flight; once the node is near the upstream tip, one run
+drains eligible rows using the era's stability window.
+
 ### Midnight gRPC Server
 
 In `storageMode: api` with `midnight.port > 0`, `node.go` starts

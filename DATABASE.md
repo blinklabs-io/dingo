@@ -263,6 +263,18 @@ flowchart LR
 - Certificate history ordering must use `added_slot DESC`, the producing transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets per transaction.
 - Storage mode is persisted in `node_settings_gate` (the `storage_mode` gate; `node_settings.storage_mode` is a read-only compatibility fallback, see below). `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, metadata-label indexes, and the best-effort `offchain_metadata` cache. API-only tables are still migrated in `core` mode but may be empty.
 
+In core mode, consumed UTxO rows are hard-deleted only by the background
+ledger cleanup after they are outside the current era's stability window.
+That cleanup is deferred while the local tip is materially behind a known
+upstream tip and is single-flight across its timer and epoch-boundary
+triggers. The deferral needs a known upstream tip: a node with no connected
+peer has no catch-up distance to measure, so cleanup falls back to running
+off the local tip alone rather than deferring for as long as the node stays
+peerless. This keeps the potentially large `utxo`/stake-reference scan from
+holding SQLite's single write connection during historical catch-up; the
+rows remain eligible and are reclaimed once the node is near the upstream tip.
+API mode retains spent UTxO metadata for historical transaction queries.
+
 ## ER Diagrams
 
 ### Transactions and UTxO
