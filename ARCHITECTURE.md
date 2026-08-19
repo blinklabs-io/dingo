@@ -520,8 +520,7 @@ sequenceDiagram
     participant BB as BlockBuilder
     participant MP as Mempool
     participant LS as LedgerState
-    participant ChM as ChainManager
-    participant PC as Chain (primary)
+    participant PC as PrimaryChain
     participant EB as EventBus
 
     Note over SC,EB: Epoch Preparation
@@ -546,7 +545,7 @@ sequenceDiagram
         BB->>BB: sign with KES key, attach VRF proof
         BB-->>BF: block + CBOR
         BF->>PC: AddLocalBlock(forgedBlock) via BlockBroadcaster
-        PC->>EB: publish ChainUpdateEvent (before AddLocalBlock returns)
+        PC->>EB: publish ChainUpdateEvent, before AddLocalBlock returns
         BF->>EB: publish BlockForgedEvent
         BF->>MP: remove confirmed transactions (RemoveTxsByHash)
     end
