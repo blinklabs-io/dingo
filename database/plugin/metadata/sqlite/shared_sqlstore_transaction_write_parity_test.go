@@ -31,6 +31,7 @@ type transactionWriteStore interface {
 		ocommon.Point,
 		uint32,
 		map[int]uint64,
+		bool,
 		types.Txn,
 	) error
 	GetTransactionByHash([]byte, types.Txn) (*models.Transaction, error)
@@ -73,7 +74,45 @@ func TestSharedSQLStoreTransactionWriteParity(t *testing.T) {
 		).Scan(&witnesses))
 		return deltas, witnesses
 	}
-	_ = exerciseTransactionWriteStore(t, store, counts)
+	_ = exerciseTransactionWriteStore(t, store, false, counts)
+}
+
+// TestSharedSQLStoreWithdrawalWitnessGate covers issue #2919: the
+// account_withdrawal_witness insert must be elided when the caller reports
+// the delegator-inactivity gate off (skipWithdrawalWitness=true), and written
+// when the gate is on -- in both cases the unrelated reward-delta bookkeeping
+// (account_reward_delta) must be unaffected.
+func TestSharedSQLStoreWithdrawalWitnessGate(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                  string
+		skipWithdrawalWitness bool
+		wantWitnesses         int
+	}{
+		{name: "gate off elides witness row", skipWithdrawalWitness: true, wantWitnesses: 0},
+		{name: "gate on writes witness row", skipWithdrawalWitness: false, wantWitnesses: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, raw := newSharedSQLStore(t)
+			counts := func() (int, int) {
+				var deltas int
+				var witnesses int
+				require.NoError(t, raw.QueryRow(
+					"SELECT COUNT(*) FROM account_reward_delta",
+				).Scan(&deltas))
+				require.NoError(t, raw.QueryRow(
+					"SELECT COUNT(*) FROM account_withdrawal_witness",
+				).Scan(&witnesses))
+				return deltas, witnesses
+			}
+			state := exerciseTransactionWriteStore(
+				t, store, tc.skipWithdrawalWitness, counts,
+			)
+			require.Equal(t, tc.wantWitnesses, state.WithdrawalProofs)
+			require.Equal(t, 1, state.WithdrawalDeltas)
+		})
+	}
 }
 
 type certificateWriteState struct {
@@ -128,6 +167,7 @@ func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
 					},
 					0,
 					nil,
+					false,
 					nil,
 				))
 				ret := map[string]int{}
@@ -261,6 +301,7 @@ func exerciseCertificateWriteStore(
 		point,
 		7,
 		deposits,
+		false,
 		nil,
 	))
 	require.NoError(t, store.SetTransaction(
@@ -268,6 +309,7 @@ func exerciseCertificateWriteStore(
 		point,
 		7,
 		deposits,
+		false,
 		nil,
 	))
 	state := certificateWriteState{TableCounts: map[string]int{}}
@@ -319,6 +361,7 @@ WHERE credential_tag = 0 AND credential = ?`,
 func exerciseTransactionWriteStore(
 	t *testing.T,
 	store transactionWriteStore,
+	skipWithdrawalWitness bool,
 	counts func() (int, int),
 ) transactionWriteState {
 	t.Helper()
@@ -359,8 +402,12 @@ func exerciseTransactionWriteStore(
 		Slot: 10,
 		Hash: bytes.Repeat([]byte{0xc1}, 32),
 	}
-	require.NoError(t, store.SetTransaction(transaction, point, 3, nil, nil))
-	require.NoError(t, store.SetTransaction(transaction, point, 3, nil, nil))
+	require.NoError(t, store.SetTransaction(
+		transaction, point, 3, nil, skipWithdrawalWitness, nil,
+	))
+	require.NoError(t, store.SetTransaction(
+		transaction, point, 3, nil, skipWithdrawalWitness, nil,
+	))
 	stored, err := store.GetTransactionByHash(transactionHash.Bytes(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, stored)

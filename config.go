@@ -106,6 +106,13 @@ type KoiosParityConfig struct {
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
 	GraceHours int
+	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// phase for every epoch the observer processes, alongside the existing
+	// epoch-aggregate/pool phases. A nil pointer defaults to true — see
+	// internalconfig.DefaultKoiosParityConfig — since a plain bool's zero
+	// value (false) can't be distinguished from an explicit opt-out. Pass a
+	// pointer to false to disable account-level checking explicitly.
+	Accounts *bool
 }
 
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
@@ -122,11 +129,14 @@ type OffchainMetadataConfig struct {
 }
 
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
-// Indexing is only active in API storage mode. Port 0 disables the gRPC
-// listener while leaving indexing eligible to run.
+// Indexing is only active when Enabled is true AND Dingo is running in API
+// storage mode -- both are required, since the indexer depends on the
+// api-mode indexes to function. Port 0 disables the gRPC listener while
+// leaving indexing eligible to run.
 type MidnightConfig struct {
-	Port uint
-	Host string
+	Enabled bool
+	Port    uint
+	Host    string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -165,11 +175,16 @@ type Config struct {
 	chainsyncStallTimeout time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
-	dataDir                                                                             string
-	bindAddr                                                                            string
-	pluginSelections                                                                    map[hostplugin.Capability]hostplugin.Selection
-	network                                                                             string
-	tlsCertFilePath, tlsKeyFilePath                                                     string
+	dataDir                         string
+	bindAddr                        string
+	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
+	network                         string
+	tlsCertFilePath, tlsKeyFilePath string
+	// apiConfig mirrors cfg.API -- the shared api.tls/api.auth policy
+	// defaults merged into every selected plugins.api.* provider's own
+	// config by node.go before that provider resolves. See
+	// ARCHITECTURE.md's "API security" section.
+	apiConfig                                                                           internalconfig.APIConfig
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
@@ -204,6 +219,7 @@ type Config struct {
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
+	blockPipelineEnabled                                                                bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -397,6 +413,32 @@ func (c *Config) isMusashiNetwork() bool {
 		c.cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
+// prototypeTrustBypassesEnabled reports whether this node may run with the
+// Musashi prototype's consensus/ledger trust bypasses —
+// LedgerStateConfig.SkipLeaderStakeThresholdCheck and
+// SkipDijkstraTxValidation. Those two make the node accept blocks and Dijkstra
+// transactions a validating ledger would reject, so they are prototype-only
+// behaviour and must never be reachable from a preview, preprod, or mainnet
+// configuration.
+//
+// This is deliberately stricter than isMusashiNetwork, which treats either
+// half of the identity (name or magic) as Musashi and is used for era and
+// mini-protocol selection where a half-match is merely wrong, not unsafe. Here
+// a half-match that also names or addresses a standard network yields false.
+// configValidate rejects such a configuration outright, so in the normal
+// startup path this can only be reached with an unambiguous identity; the
+// extra check keeps the bypasses off for an embedder that builds a Config
+// directly and never validates it.
+func (c *Config) prototypeTrustBypassesEnabled() bool {
+	if c.cfg == nil {
+		return false
+	}
+	return internalconfig.MusashiPrototypeNetwork(
+		c.cfg.Network,
+		c.cfg.NetworkMagic,
+	)
+}
+
 // experimentalLeiosNetworkingEnabled reports whether the Leios node-to-node
 // mini-protocols (leios-fetch / leios-notify) should be offered on outbound
 // and inbound connections.
@@ -459,6 +501,53 @@ func (n *Node) configValidate() error {
 		return fmt.Errorf(
 			"pledge leverage (%d) must be in [1, 10000] when enabled",
 			n.config.cfg.PledgeLeverage,
+		)
+	}
+	// The Musashi prototype network disables consensus and ledger validation
+	// (see Config.prototypeTrustBypassesEnabled). Its identity is matched on
+	// either the network name or the network magic, so refuse any configuration
+	// that pairs one half of it with a different standard network — otherwise a
+	// node an operator configured as preview/preprod/mainnet would silently run
+	// with those bypasses, or (with `--network musashi --network-magic 2`)
+	// actually join preview while trusting the prototype's rules, since the
+	// handshake uses the magic. There is deliberately no opt-in override.
+	if network, ok := internalconfig.MusashiNetworkIdentityConflict(
+		n.config.cfg.Network,
+		n.config.cfg.NetworkMagic,
+	); ok {
+		return fmt.Errorf(
+			"network identity conflict: network %q with networkMagic %d "+
+				"identifies both the %q network and the Musashi prototype "+
+				"network (name %q, magic %d); the Musashi prototype disables "+
+				"consensus and ledger validation and must not be reachable "+
+				"from a standard network configuration",
+			n.config.cfg.Network,
+			n.config.cfg.NetworkMagic,
+			network,
+			ouroboros.NetworkCardanoMusashi.Name,
+			ouroboros.NetworkCardanoMusashi.NetworkMagic,
+		)
+	}
+	// The block-decode pipeline's vendored decode stage
+	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
+	// directly and has no hook for dingo's Leios-extended-header Conway
+	// fallback (database/models.DecodeConwayBlock), which the Musashi
+	// prototype network's blocks require. Enabling the pipeline there would
+	// not error loudly: a Leios-extended block would fail strict decode,
+	// decodeReadChainBatch would log and return ok=false,
+	// ledgerReadChainIterator would return (closing resultCh), and
+	// ledgerProcessBlocksFromSource treats a closed result channel as a
+	// clean, non-error exit -- so chain replay would silently and
+	// permanently stall until a full process restart, with no diagnostic.
+	// Refuse the combination outright rather than let an operator hit that.
+	if n.config.cfg.BlockPipelineEnabled && n.config.isMusashiNetwork() {
+		return errors.New(
+			"block pipeline is not supported on the Musashi prototype " +
+				"network: its decode stage does not apply dingo's " +
+				"Leios-extended Conway header fallback, so a Leios-extended " +
+				"block would fail to decode and silently stall chain replay; " +
+				"disable --block-pipeline-enabled (blockPipelineEnabled) to " +
+				"sync Musashi",
 		)
 	}
 	if n.config.cfg.FullPotRewardsEnabled &&
@@ -582,6 +671,7 @@ func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
+	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
@@ -606,6 +696,10 @@ func (c *Config) syncCompatFields() {
 		Enabled:   c.cfg.HistoryExpiry.Enabled,
 		Frequency: c.cfg.HistoryExpiry.Frequency,
 	}
+	// c.cfg.KoiosParity.Accounts is already a fully-resolved bool by this
+	// point (defaulted by WithKoiosParity or internal/config's LoadConfig),
+	// so the mirror always carries a non-nil pointer.
+	koiosParityAccounts := c.cfg.KoiosParity.Accounts
 	c.koiosParity = KoiosParityConfig{
 		Enabled:    c.cfg.KoiosParity.Enabled,
 		Network:    c.cfg.KoiosParity.Network,
@@ -613,8 +707,10 @@ func (c *Config) syncCompatFields() {
 		APIKey:     c.cfg.KoiosParity.APIKey,
 		Strict:     c.cfg.KoiosParity.Strict,
 		GraceHours: c.cfg.KoiosParity.GraceHours,
+		Accounts:   &koiosParityAccounts,
 	}
 	c.midnight = MidnightConfig{
+		Enabled:                     c.cfg.Midnight.Enabled,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -651,6 +747,7 @@ func (c *Config) syncCompatFields() {
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -917,6 +1014,16 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	}
 }
 
+// WithAPIConfig sets the shared api.tls/api.auth policy applied to every
+// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
+// provider's own plugins.api.<name>.config.tls/auth overrides a field.
+// See internal/apiconfig and ARCHITECTURE.md's "API security" section.
+func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.API = cfg
+	}
+}
+
 // WithPeerSharing specifies whether to enable peer sharing. This is disabled by default
 func WithPeerSharing(peerSharing bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -972,9 +1079,9 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 }
 
 // WithEvictionWatermark sets the mempool eviction watermark
-// as a fraction of capacity (0.0-1.0). When a new TX would
+// as a fraction of capacity [0.0-1.0). When a new TX would
 // push the mempool past this fraction, oldest TXs are evicted
-// to make room. Default is 0.90 (90%).
+// to make room. A value of 0 disables eviction. Default is 0.
 func WithEvictionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
@@ -984,9 +1091,8 @@ func WithEvictionWatermark(
 }
 
 // WithRejectionWatermark sets the mempool rejection watermark
-// as a fraction of capacity (0.0-1.0). New TXs are rejected
-// when the mempool would exceed this fraction even after
-// eviction. Default is 0.95 (95%).
+// as a fraction of capacity (0.0-1.0]. New TXs are rejected
+// when the mempool would exceed this fraction. Default is 1.0.
 func WithRejectionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
@@ -1382,6 +1488,15 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 // synced Dingo instance.
 func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 	return func(c *Config) {
+		// Accounts defaults to true (matching
+		// internalconfig.DefaultKoiosParityConfig) unless the caller
+		// explicitly opts out via a non-nil pointer to false — a plain bool
+		// field here would make an unset value indistinguishable from an
+		// explicit false, silently disabling #3097's per-account checking.
+		accounts := true
+		if cfg.Accounts != nil {
+			accounts = *cfg.Accounts
+		}
 		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
 			Enabled:    cfg.Enabled,
 			Network:    cfg.Network,
@@ -1389,6 +1504,7 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			APIKey:     cfg.APIKey,
 			Strict:     cfg.Strict,
 			GraceHours: cfg.GraceHours,
+			Accounts:   accounts,
 		}
 	}
 }
@@ -1427,6 +1543,7 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			*c = NewConfig()
 		}
 		c.cfg.Midnight = internalconfig.MidnightConfig{
+			Enabled:                     cfg.Enabled,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,
@@ -1628,6 +1745,13 @@ func (c *Config) TlsCertFilePath() string {
 // TlsKeyFilePath returns the path to the TLS key for gRPC APIs.
 func (c *Config) TlsKeyFilePath() string {
 	return c.cfg.TlsKeyFilePath
+}
+
+// APIConfig returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider unless overridden. See
+// WithAPIConfig and ARCHITECTURE.md's "API security" section.
+func (c *Config) APIConfig() internalconfig.APIConfig {
+	return c.cfg.API
 }
 
 // IntersectTip returns whether to start chainsync at the current chain tip.
@@ -1920,6 +2044,12 @@ func (c *Config) Midnight() internalconfig.MidnightConfig {
 // CORSAllowedOrigins returns the CORS allowed origins list.
 func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
+}
+
+// API returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider. See WithAPIConfig.
+func (c *Config) API() internalconfig.APIConfig {
+	return c.cfg.API
 }
 
 // SlotsPerKESPeriod returns the number of slots per KES period.

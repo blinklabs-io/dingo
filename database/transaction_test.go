@@ -50,6 +50,11 @@ type mockBlobStore struct {
 	syncErr               error
 	syncCount             int
 	syncAtBlobCommitCount int
+	// getErr, when set, is returned by Get instead of the default
+	// types.ErrBlobKeyNotFound, so a test can simulate a genuine read
+	// failure (e.g. a corrupted or unreadable store) distinct from the
+	// ordinary "key was never written" case.
+	getErr error
 }
 
 func (m *mockBlobStore) Sync() error {
@@ -85,6 +90,9 @@ func (m *mockBlobStore) NewTransaction(bool) types.Txn {
 }
 
 func (m *mockBlobStore) Get(types.Txn, []byte) ([]byte, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	return nil, types.ErrBlobKeyNotFound
 }
 

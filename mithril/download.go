@@ -45,11 +45,40 @@ type DownloadProgress struct {
 	TotalBytes      int64
 	Percent         float64
 	BytesPerSecond  float64
+	// Artifact identifies the artifact whose progress is being reported.
+	// It is populated by the bootstrap orchestration layer so concurrent
+	// downloads can be distinguished by callers consuming one callback.
+	Artifact string
+	// SnapshotHash identifies the Mithril snapshot or Cardano database
+	// artifact that owns the download.
+	SnapshotHash string
+	// ArtifactsCompleted and ArtifactsTotal are populated for aggregate
+	// progress, such as the v2 immutable archive worker pool.
+	ArtifactsCompleted uint64
+	ArtifactsTotal     uint64
 }
 
 // ProgressFunc is a callback invoked periodically during download
 // to report progress.
 type ProgressFunc func(DownloadProgress)
+
+// withProgressContext labels progress emitted by a nested download. A
+// single BootstrapConfig.OnProgress callback is shared by the v2 ancillary
+// and immutable download paths, which may run concurrently.
+func withProgressContext(
+	onProgress ProgressFunc,
+	artifact string,
+	snapshotHash string,
+) ProgressFunc {
+	if onProgress == nil {
+		return nil
+	}
+	return func(p DownloadProgress) {
+		p.Artifact = artifact
+		p.SnapshotHash = snapshotHash
+		onProgress(p)
+	}
+}
 
 const (
 	defaultDownloadIdleTimeout = 2 * time.Minute
@@ -117,6 +146,11 @@ type DownloadConfig struct {
 	// connections are pooled across files. When nil, a per-call client
 	// with keep-alives disabled is used (single-archive downloads).
 	HTTPClient *http.Client
+	// AllowInsecureHTTP permits URL to use plain HTTP instead of HTTPS.
+	// By default, Validate rejects a non-HTTPS URL; this is an explicit
+	// escape hatch for local development and tests (e.g. against an
+	// httptest server) and should not be set in production.
+	AllowInsecureHTTP bool
 }
 
 // Validate checks DownloadConfig values before use.
@@ -126,6 +160,11 @@ func (cfg DownloadConfig) Validate() error {
 			"download config MaxIdleRetries must be >= 0, got %d",
 			cfg.MaxIdleRetries,
 		)
+	}
+	if cfg.URL != "" {
+		if err := requireSecureURL(cfg.URL, "download URL", cfg.AllowInsecureHTTP); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -792,7 +831,7 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			cfg.Logger.Info(
+			cfg.Logger.Debug(
 				"resuming download",
 				"component", "mithril",
 				"existing_bytes", existingSize,
@@ -836,7 +875,7 @@ func downloadSnapshotOnce(
 				destPath,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download already complete",
 			"component", "mithril",
 			"path", destPath,
@@ -867,7 +906,7 @@ func downloadSnapshotOnce(
 		}
 	}() // safety net for panics/early returns
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
 		"url", cfg.URL,
@@ -924,7 +963,7 @@ func downloadSnapshotOnce(
 		})
 	}
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"download complete",
 		"component", "mithril",
 		"bytes", pw.written,
@@ -950,7 +989,7 @@ func downloadSnapshotOnce(
 				fi.Size(), cfg.ExpectedSize,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download size verified",
 			"component", "mithril",
 			"bytes", fi.Size(),
@@ -976,23 +1015,33 @@ const (
 // specified destination directory. It returns the path to the
 // directory where files were extracted. The context is checked
 // between files so that long-running extractions can be cancelled.
+//
+// By default the destination is exclusive: it must be empty, extraction is
+// staged in a private directory, and the result is renamed into place only
+// once complete. See WithReplaceDestination and WithMergeIntoDestination for
+// the destinations that need other policies.
 func ExtractArchive(
 	ctx context.Context,
 	archivePath string,
 	destDir string,
 	logger *slog.Logger,
+	opts ...ExtractOption,
 ) (string, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	logger = logger.With(
+		"archive", archivePath,
+		"destination", destDir,
+	)
 
-	// Create destination directory
-	if err := os.MkdirAll(destDir, 0o750); err != nil {
-		return "", fmt.Errorf(
-			"creating extraction directory: %w",
-			err,
-		)
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, newExtractConfig(opts),
+	)
+	if err != nil {
+		return "", err
 	}
+	defer cleanup()
 
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -1061,26 +1110,16 @@ func ExtractArchive(
 			)
 		}
 
-		// Zip Slip prevention: join the cleaned name to destDir,
-		// then verify the result stays within destDir using
-		// both HasPrefix and Rel checks.
-		cleanDest := filepath.Clean(destDir)
-		target := filepath.Join(
-			cleanDest, filepath.FromSlash(name),
-		)
-		if !strings.HasPrefix(
-			target,
-			cleanDest+string(filepath.Separator),
-		) {
-			return "", fmt.Errorf(
-				"path escapes destination: %s",
-				header.Name,
-			)
-		}
+		// Entry paths stay relative and are resolved through the
+		// extraction root handle, which refuses anything landing outside
+		// it. validRelPath above already rejected absolute paths and ".."
+		// components, so this is belt and braces rather than the only
+		// containment check.
+		target := filepath.FromSlash(name)
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil { //nolint:gosec // target validated by validRelPath + HasPrefix above
+			if err := mkdirExtracted(workDir, target); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
 					target,
@@ -1101,7 +1140,7 @@ func ExtractArchive(
 
 			// Ensure parent directory exists
 			parent := filepath.Dir(target)
-			if err := os.MkdirAll(parent, 0o750); err != nil { //nolint:gosec // parent derived from validated target path
+			if err := mkdirExtracted(workDir, parent); err != nil {
 				return "", fmt.Errorf(
 					"creating parent directory %s: %w",
 					parent,
@@ -1109,11 +1148,7 @@ func ExtractArchive(
 				)
 			}
 
-			outFile, err := os.OpenFile( //nolint:gosec // target validated by validRelPath + HasPrefix above
-				target,
-				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-				0o640,
-			)
+			outFile, err := createExtractedFile(workDir, target)
 			if err != nil {
 				return "", fmt.Errorf(
 					"creating file %s: %w",
@@ -1130,7 +1165,7 @@ func ExtractArchive(
 			)
 			closeErr := outFile.Close()
 			if err != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"extracting file %s: %w",
 					target,
@@ -1138,7 +1173,7 @@ func ExtractArchive(
 				)
 			}
 			if closeErr != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"closing file %s: %w",
 					target,
@@ -1146,7 +1181,7 @@ func ExtractArchive(
 				)
 			}
 			if written > maxExtractFileSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"file %s decompressed beyond maximum size (%d > %d)",
 					header.Name, written, maxExtractFileSize,
@@ -1156,7 +1191,7 @@ func ExtractArchive(
 			// header.Size) for cumulative extraction limit.
 			totalExtracted += written
 			if totalExtracted > maxTotalExtractSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"archive extraction exceeds maximum total size (%d)",
 					maxTotalExtractSize,
@@ -1190,6 +1225,10 @@ func ExtractArchive(
 			// Skip symlinks and other types for security
 			continue
 		}
+	}
+
+	if err := publish(); err != nil {
+		return "", err
 	}
 
 	logger.Info(

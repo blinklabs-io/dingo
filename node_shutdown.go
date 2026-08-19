@@ -231,8 +231,27 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	// Close the EventBus while draining connections. Since v0.68, event
+	// delivery applies backpressure instead of dropping events. A chainsync
+	// callback can therefore be blocked waiting for a full ledger subscriber,
+	// while a blockfetch continuation can wait for a BatchDone event that only
+	// connection shutdown releases. Run both operations together so neither
+	// side waits indefinitely for the other.
+	var connManagerDone chan error
 	if n.connManager != nil {
-		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
+		connManagerDone = make(chan error, 1)
+		go func() {
+			connManagerDone <- n.connManager.Stop(ctx)
+		}()
+	}
+
+	if n.eventBus != nil {
+		n.config.logger.Info("closing event bus while draining connections")
+		n.eventBus.Close()
+	}
+
+	if connManagerDone != nil {
+		if stopErr := <-connManagerDone; stopErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("connection manager shutdown: %w", stopErr),
@@ -325,12 +344,6 @@ func (n *Node) shutdown() error {
 		}
 	}
 	n.shutdownFuncs = nil
-
-	if n.eventBus != nil {
-		// Close (not Stop): this is a terminal shutdown, and Stop restarts the
-		// async-worker pool, leaking those goroutines past node teardown.
-		n.eventBus.Close()
-	}
 
 	n.config.logger.Info(
 		"graceful shutdown complete",

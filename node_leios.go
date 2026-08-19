@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -24,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -47,6 +49,55 @@ func (a *leiosStakeDistributionAdapter) GetStakeDistribution(
 		return nil, 0, nil
 	}
 	return dist.PoolStakes, dist.TotalStake, nil
+}
+
+// leiosKeyProviderAdapter adapts ledger.LedgerState to leios.LeiosKeyProvider,
+// resolving registered Leios keys for exactly the pools the caller names
+// (the same set VoteManager already fetched a stake distribution for). It
+// returns raw (unverified) keys -- VoteManager itself checks proof of
+// possession before trusting one. This is a current-state lookup (see
+// leios.LeiosKeyProvider's doc comment), not frozen to a snapshot epoch.
+type leiosKeyProviderAdapter struct {
+	ledgerState *ledger.LedgerState
+}
+
+func (a *leiosKeyProviderAdapter) GetLeiosKeys(
+	poolKeyHashesHex []string,
+) (_ map[string]*lcommon.LeiosKey, err error) {
+	if a.ledgerState == nil {
+		return nil, errors.New("ledger state unavailable")
+	}
+	if len(poolKeyHashesHex) == 0 {
+		return map[string]*lcommon.LeiosKey{}, nil
+	}
+	poolKeyHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashesHex))
+	for _, poolHashHex := range poolKeyHashesHex {
+		raw, decodeErr := hex.DecodeString(poolHashHex)
+		if decodeErr != nil || len(raw) != len(lcommon.PoolKeyHash{}) {
+			continue
+		}
+		poolKeyHashes = append(poolKeyHashes, lcommon.PoolKeyHash(raw))
+	}
+	db := a.ledgerState.Database()
+	if db == nil {
+		return nil, errors.New("database unavailable")
+	}
+	txn := db.MetadataTxn(false)
+	if txn == nil {
+		return nil, errors.New("metadata transaction unavailable")
+	}
+	defer func() {
+		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"release leios key transaction: %w",
+					rollbackErr,
+				),
+			)
+		}
+	}()
+	return a.ledgerState.NewView(txn).GetLeiosKeys(poolKeyHashes)
 }
 
 // leiosCommitteeParamsAdapter adapts ledger.LedgerState to
@@ -142,13 +193,17 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("invalid leios voter public keys: %w", err)
 	}
+	stakeAdapter := &leiosStakeDistributionAdapter{
+		inner: stakeDistributionAdapter{
+			ledgerState: n.ledgerState,
+		},
+	}
 	mgr, err := leios.NewVoteManager(leios.VoteManagerConfig{
-		Logger:   n.config.logger,
-		EventBus: n.eventBus,
-		StakeProvider: &leiosStakeDistributionAdapter{
-			inner: stakeDistributionAdapter{
-				ledgerState: n.ledgerState,
-			},
+		Logger:        n.config.logger,
+		EventBus:      n.eventBus,
+		StakeProvider: stakeAdapter,
+		KeyProvider: &leiosKeyProviderAdapter{
+			ledgerState: n.ledgerState,
 		},
 		EpochProvider: &epochInfoAdapter{
 			ledgerState: n.ledgerState,
@@ -156,7 +211,6 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		ParamsProvider: &leiosCommitteeParamsAdapter{
 			ledgerState: n.ledgerState,
 		},
-		PrototypeMode: true,
 		// LedgerState satisfies leios.SlotProvider directly; the slot
 		// window keeps fabricated far-past/future votes away from
 		// committee computation and the stake snapshot queries behind
@@ -176,7 +230,11 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		return fmt.Errorf("start leios vote manager: %w", err)
 	}
 	n.leiosVoteManager = mgr
-	n.ouroboros.LeiosVotes = mgr
+	// Deliberately not wired into ouroboros here. Run initializes the Leios
+	// managers before it constructs Ouroboros, so reaching for the instance
+	// at this point dereferences a nil pointer. attachLeiosHandlers installs
+	// them once an instance exists, on both the startup and live-restore
+	// paths.
 	// Captured (not discarded) so quiesceForLiveLifecycleOp can unsubscribe
 	// this handler before a live database restore/truncate rebuilds
 	// leiosVoteManager and calls initLeiosVoteManager again -- the
@@ -191,7 +249,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 			if !ok {
 				return
 			}
-			n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
+			n.ouroboros().EnqueueLeiosPrototypeVote(data.Vote)
 		},
 	)
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
@@ -237,13 +295,16 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 		return fmt.Errorf("start leios pipeline manager: %w", err)
 	}
 	n.leiosPipelineManager = mgr
-	n.ouroboros.LeiosPipeline = mgr
+	// See initLeiosVoteManager: attachLeiosHandlers does the wiring, once an
+	// Ouroboros instance exists.
 	return nil
 }
 
-// enableLeiosVoting enables vote emission for the block producer's pool. A
-// configured BLS signing key is preferred; the pool-derived key remains as a
-// temporary prototype fallback when no key file is configured.
+// enableLeiosVoting enables vote emission for the block producer's pool,
+// using the operator-configured BLS signing key. A pool started without one
+// runs as a non-voting relay: upstream removed the insecure pool-derived
+// key shortcut, so there is no fallback that lets a pool vote without a
+// real registered key.
 func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if n.leiosVoteManager == nil {
 		return nil
@@ -251,29 +312,32 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
+	if n.config.leiosVoteSigningKeyFile == "" {
+		n.config.logger.Warn(
+			"no leios vote signing key configured; running as a non-voting relay",
+			"component",
+			"node",
+		)
+		return nil
+	}
 	poolID := creds.GetPoolID()
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolID[:])
-	var key *leios.VoteSigningKey
-	var err error
-	if n.config.leiosVoteSigningKeyFile != "" {
-		key, err = leios.LoadVoteSigningKeyFile(
-			n.config.leiosVoteSigningKeyFile,
-		)
-		if err != nil {
-			return fmt.Errorf("load leios vote signing key: %w", err)
-		}
-		if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-			return fmt.Errorf(
-				"validate configured leios vote signing key: %w; register the matching public key in leios-voter-public-keys on every peer",
-				err,
-			)
-		}
-	} else {
-		key, err = leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
-		if err != nil {
-			return fmt.Errorf("derive prototype leios vote signing key: %w", err)
-		}
+	key, err := leios.LoadVoteSigningKeyFile(
+		n.config.leiosVoteSigningKeyFile,
+	)
+	if err != nil {
+		return fmt.Errorf("load leios vote signing key: %w", err)
+	}
+	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
+		// ValidateVotingKey's own error already names which sources it
+		// checked (the on-chain registration and leiosVoterPublicKeys) and
+		// whether the problem was "not found" or "found but mismatched," so
+		// no remedy is added here: the on-chain key takes precedence over
+		// leiosVoterPublicKeys, so directing every failure at the static
+		// registry would be wrong advice whenever the real problem is a key
+		// that no longer matches the pool's on-chain registration.
+		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
 	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
 		return fmt.Errorf("enable leios voting: %w", err)
@@ -283,5 +347,33 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 		"component", "node",
 		"pool_id", poolID.String(),
 	)
+	return nil
+}
+
+// attachLeiosHandlers installs the optional Leios prototype handlers onto an
+// Ouroboros instance.
+//
+// They are not OuroborosConfig fields because their managers start on their
+// own path, which runs before Ouroboros is constructed during startup and
+// again before Ouroboros is replaced during a live restore. Both paths call
+// this immediately after they have an instance, which is the only safe point:
+// earlier there is nothing to wire, and later protocol traffic could already
+// be arriving unhandled.
+//
+// A nil manager means Leios is disabled, and is skipped rather than an error.
+func (n *Node) attachLeiosHandlers(o *ouroborosPkg.Ouroboros) error {
+	if o == nil {
+		return errors.New("cannot attach leios handlers: ouroboros is nil")
+	}
+	if n.leiosVoteManager != nil {
+		if err := o.SetLeiosVotes(n.leiosVoteManager); err != nil {
+			return fmt.Errorf("wire leios vote manager: %w", err)
+		}
+	}
+	if n.leiosPipelineManager != nil {
+		if err := o.SetLeiosPipeline(n.leiosPipelineManager); err != nil {
+			return fmt.Errorf("wire leios pipeline manager: %w", err)
+		}
+	}
 	return nil
 }

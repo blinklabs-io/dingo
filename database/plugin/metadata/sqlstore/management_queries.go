@@ -34,6 +34,21 @@ type managementQueries interface {
 		string,
 		string,
 	) (int64, error)
+	getNodeSettingsGates(context.Context) (map[string]string, error)
+	upsertNodeSettingsGate(
+		context.Context,
+		string,
+		string,
+		int64,
+		int64,
+	) error
+	insertNodeSettingsGateIfAbsent(
+		context.Context,
+		string,
+		string,
+		int64,
+		int64,
+	) (int64, error)
 }
 
 func newManagementQueries(
@@ -107,6 +122,56 @@ func (q sqliteManagementQueries) backfillNodeSettingsNetwork(
 	)
 }
 
+func (q sqliteManagementQueries) getNodeSettingsGates(
+	ctx context.Context,
+) (map[string]string, error) {
+	rows, err := q.queries.GetNodeSettingsGates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gates := make(map[string]string, len(rows))
+	for _, row := range rows {
+		gates[row.Name] = row.Value
+	}
+	return gates, nil
+}
+
+func (q sqliteManagementQueries) upsertNodeSettingsGate(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) error {
+	return q.queries.UpsertNodeSettingsGate(
+		ctx,
+		sqlitequery.UpsertNodeSettingsGateParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
+func (q sqliteManagementQueries) insertNodeSettingsGateIfAbsent(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) (int64, error) {
+	return q.queries.InsertNodeSettingsGateIfAbsent(
+		ctx,
+		sqlitequery.InsertNodeSettingsGateIfAbsentParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
 type postgresManagementQueries struct {
 	queries *postgresquery.Queries
 }
@@ -159,6 +224,56 @@ func (q postgresManagementQueries) backfillNodeSettingsNetwork(
 	)
 }
 
+func (q postgresManagementQueries) getNodeSettingsGates(
+	ctx context.Context,
+) (map[string]string, error) {
+	rows, err := q.queries.GetNodeSettingsGates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gates := make(map[string]string, len(rows))
+	for _, row := range rows {
+		gates[row.Name] = row.Value
+	}
+	return gates, nil
+}
+
+func (q postgresManagementQueries) upsertNodeSettingsGate(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) error {
+	return q.queries.UpsertNodeSettingsGate(
+		ctx,
+		postgresquery.UpsertNodeSettingsGateParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
+func (q postgresManagementQueries) insertNodeSettingsGateIfAbsent(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) (int64, error) {
+	return q.queries.InsertNodeSettingsGateIfAbsent(
+		ctx,
+		postgresquery.InsertNodeSettingsGateIfAbsentParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
 type mysqlManagementQueries struct {
 	queries *mysqlquery.Queries
 }
@@ -207,6 +322,56 @@ func (q mysqlManagementQueries) backfillNodeSettingsNetwork(
 		mysqlquery.BackfillNodeSettingsNetworkParams{
 			Network:     network,
 			StorageMode: storageMode,
+		},
+	)
+}
+
+func (q mysqlManagementQueries) getNodeSettingsGates(
+	ctx context.Context,
+) (map[string]string, error) {
+	rows, err := q.queries.GetNodeSettingsGates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gates := make(map[string]string, len(rows))
+	for _, row := range rows {
+		gates[row.Name] = row.Value
+	}
+	return gates, nil
+}
+
+func (q mysqlManagementQueries) upsertNodeSettingsGate(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) error {
+	return q.queries.UpsertNodeSettingsGate(
+		ctx,
+		mysqlquery.UpsertNodeSettingsGateParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
+func (q mysqlManagementQueries) insertNodeSettingsGateIfAbsent(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) (int64, error) {
+	return q.queries.InsertNodeSettingsGateIfAbsent(
+		ctx,
+		mysqlquery.InsertNodeSettingsGateIfAbsentParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
 		},
 	)
 }

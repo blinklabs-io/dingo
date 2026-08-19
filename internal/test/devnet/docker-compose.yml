@@ -34,6 +34,10 @@
 #   docker compose up -d       # Start all services in the selected profile
 #   docker compose down -v     # Stop and remove volumes
 #
+# Network spec overrides (set by the scripts' --accelerated flag):
+#   DEVNET_DINGO_SPEC       - dingo profile spec      (default: ./testnet-dingo.yaml)
+#   DEVNET_CONFORMANCE_SPEC - conformance profile spec (default: ./testnet.yaml)
+#
 # Host port overrides (set in environment or .env file, conformance profile):
 #   DEVNET_DINGO_PORT     - Dingo producer host port    (default: 3010)
 #   DEVNET_CARDANO_PORT   - Cardano producer host port  (default: 3011)
@@ -49,8 +53,15 @@ services:
       dockerfile: Dockerfile.configurator
     container_name: devnet-configurator
     profiles: ["conformance"]
+    environment:
+      # Must match the dingo user pinned in the repo root Dockerfile;
+      # configurator.sh chowns the pool key directories to it.
+      DINGO_UID: "${DEVNET_DINGO_UID:-1000}"
+      DINGO_GID: "${DEVNET_DINGO_GID:-1000}"
     volumes:
-      - ./testnet.yaml:/testnet.yaml
+      # Network spec: canonical by default, accelerated when the scripts'
+      # --accelerated flag exports DEVNET_CONFORMANCE_SPEC.
+      - ${DEVNET_CONFORMANCE_SPEC:-./testnet.yaml}:/testnet.yaml
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - utxo-keys:/configs/utxo-keys
@@ -63,8 +74,14 @@ services:
     profiles: ["dingo"]
     environment:
       DINGO_POOL_IDS: "1 2 3"
+      # Must match the dingo user pinned in the repo root Dockerfile;
+      # configurator.sh chowns the pool key directories to it.
+      DINGO_UID: "${DEVNET_DINGO_UID:-1000}"
+      DINGO_GID: "${DEVNET_DINGO_GID:-1000}"
     volumes:
-      - ./testnet-dingo.yaml:/testnet.yaml
+      # Network spec: canonical by default, accelerated when the scripts'
+      # --accelerated flag exports DEVNET_DINGO_SPEC.
+      - ${DEVNET_DINGO_SPEC:-./testnet-dingo.yaml}:/testnet.yaml
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - p3-configs:/configs/3
@@ -95,7 +112,7 @@ services:
       DINGO_PLUGINS_MEMPOOL_PROVIDER: "${DEVNET_MEMPOOL_PROVIDER:-fifo}"
       # Expose node-to-client over TCP (private port 3002) so the host test
       # harness can run LocalStateQuery. Avoids a cross-uid host socket mount:
-      # the dingo image runs as uid 100 and cannot bind a socket in a
+      # the dingo image runs as uid 1000 and cannot bind a socket in a
       # host-owned bind mount. The in-container unix socket lives on a named
       # volume (like conformance mode) for txpump and the healthcheck.
       DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
@@ -260,7 +277,7 @@ services:
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
       # Expose node-to-client over TCP (private port 3002) on all interfaces
       # so the in-network txpump can submit transactions without a cross-uid
-      # unix-socket mount (the socket is owned by uid 100; txpump is uid 1000).
+      # unix-socket mount (the socket is owned by the dingo uid).
       DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
       CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
     volumes:

@@ -397,25 +397,25 @@ func (n *Node) initBlockForger(
 	var leiosParent forging.LeiosParentAnnouncementProvider
 	var leiosEBCaster forging.EndorserBlockBroadcaster
 	var leiosMempool forging.MempoolProvider
-	if n.leiosPipelineManager != nil && n.ouroboros != nil {
+	if n.leiosPipelineManager != nil && n.ouroboros() != nil {
 		adapter := &leiosPipelineAdapter{
 			mgr:                   n.leiosPipelineManager,
 			chain:                 n.chainManager.PrimaryChain(),
-			endorserBlockTxHashes: n.ouroboros.EndorserBlockTxHashesByHash,
+			endorserBlockTxHashes: n.ouroboros().EndorserBlockTxHashesByHash,
 		}
 		leiosChecker = adapter
 		leiosCerts = adapter
 		leiosParent = adapter
-		leiosEBCaster = n.ouroboros
+		leiosEBCaster = n.ouroboros()
 		leiosMempool = mempoolAdapter
 	}
 	blockForged := n.ledgerState.RecordForgedBlock
-	if n.ouroboros != nil {
+	if n.ouroboros() != nil {
 		blockForged = func(block gledger.Block, blockCbor []byte, latency time.Duration) {
 			n.ledgerState.RecordForgedBlock(block, blockCbor, latency)
 			if header, ok := block.Header().(*gdijkstra.DijkstraBlockHeader); ok {
 				if _, _, announces := header.LeiosAnnouncement(); announces {
-					n.ouroboros.EnqueueLeiosBlockAnnouncement(header.Cbor())
+					n.ouroboros().EnqueueLeiosBlockAnnouncement(header.Cbor())
 				}
 			}
 		}

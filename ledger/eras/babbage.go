@@ -331,7 +331,6 @@ func ValidateTxBabbage(
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
-			evalContext.SkipFinalSlippageFlush = true
 			usedBudgetV1, err := s.Evaluate(
 				datum,
 				redeemer.Data,
@@ -383,7 +382,6 @@ func ValidateTxBabbage(
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
-			evalContext.SkipFinalSlippageFlush = true
 			usedBudgetV2, err := s.Evaluate(
 				datum,
 				redeemer.Data,

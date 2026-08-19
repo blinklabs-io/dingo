@@ -52,6 +52,15 @@ const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 func (n *Node) startKoiosParityObserver() error {
 	cfg := n.config.koiosParity
 
+	// Accounts defaults to true when unset (see KoiosParityConfig's doc
+	// comment); the mirror populated by syncCompatFields always carries a
+	// resolved, non-nil pointer, but this stays defensive against a nil
+	// value regardless.
+	accountsEnabled := true
+	if cfg.Accounts != nil {
+		accountsEnabled = *cfg.Accounts
+	}
+
 	network := cfg.Network
 	if network == "" {
 		network = n.config.network
@@ -78,13 +87,14 @@ func (n *Node) startKoiosParityObserver() error {
 	}
 
 	observer, err := koiosparity.NewObserver(koiosparity.ObserverConfig{
-		Network:    network,
-		CachePath:  cachePath,
-		APIKey:     cfg.APIKey,
-		Source:     source,
-		Strict:     cfg.Strict,
-		GraceHours: cfg.GraceHours,
-		Logger:     n.config.logger,
+		Network:         network,
+		CachePath:       cachePath,
+		APIKey:          cfg.APIKey,
+		Source:          source,
+		Strict:          cfg.Strict,
+		AccountsEnabled: accountsEnabled,
+		GraceHours:      cfg.GraceHours,
+		Logger:          n.config.logger,
 		FatalFunc: func(err error) {
 			n.config.logger.Error(
 				"fatal koios parity validation failure, initiating shutdown",
@@ -123,6 +133,7 @@ func (n *Node) startKoiosParityObserver() error {
 		"koios parity observer enabled",
 		"network", network,
 		"strict", cfg.Strict,
+		"accounts", accountsEnabled,
 		"cache", cachePath,
 	)
 	return nil

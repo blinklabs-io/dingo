@@ -92,6 +92,7 @@ func TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback(
 			ConnectionId: fixture.connId,
 			Point:        fixture.currentTip.Point,
 		},
+		nil,
 	))
 
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)

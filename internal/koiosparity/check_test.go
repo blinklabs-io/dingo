@@ -137,6 +137,131 @@ func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
 	require.Empty(t, result.FailEpochs)
 }
 
+// TestCheckReselectsPoolOnlyEpochMissingAccountCoverage is the regression
+// test for the account-coverage-blind epoch-selection bug found in review of
+// #3097: an epoch fetched/checked before #3097 existed (pool-level Koios
+// data cached, a fresh persisted PASS, and no koios_account_coverage row at
+// all — the realistic pre-#3097-to-post-#3097 upgrade path for a Dingo
+// deployment that already ran koios-parity) must be reselected by
+// GetEpochsNeedingCheck/Check once AccountsEnabled is turned on, purely
+// because its account coverage is missing — not left at its stale pool-only
+// PASS forever just because nothing about its pool/aggregate data changed.
+//
+// Before the fix, GetEpochsNeedingCheck ignored koios_account_coverage
+// entirely: this epoch's koios_epoch_info.fetched_at never changes and its
+// check_epoch_status.last_checked_at is already newer, so it would never be
+// reselected and compareEpochAccounts would never run for it — the persisted
+// PASS would be reported forever with zero account-level validation ever
+// attempted.
+func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	const network = "preview"
+	const epoch = uint64(50)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+
+	// Seed a complete pool-level cache (epoch_info + totals, matching a real
+	// pre-#3097 fetchEpoch commit) and a fresh persisted PASS — deliberately
+	// with NO koios_account_coverage row, simulating an epoch that was
+	// fetched/checked before #3097's per-account fetch/check phases existed.
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "100",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Treasury:  "1",
+		Reserves:  "1",
+		Fees:      "1",
+		Reward:    "1",
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network: network,
+		Epoch:   epoch,
+		LastCheckedAt: fetchedAt.Add(
+			time.Minute,
+		), // fresh relative to fetched_at
+		Status: StatusPass,
+	}))
+
+	// Sanity check: pool-only mode (AccountsEnabled=false, the standalone
+	// CLI's default) must NOT change behavior — this is the existing,
+	// already-correct case the fix must not regress.
+	needingPoolOnly, err := cache.GetEpochsNeedingCheck(network, false)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		needingPoolOnly,
+		"pool-only mode must not reselect a fresh persisted PASS",
+	)
+
+	// This is the actual bug: with accounts enabled, the epoch must be
+	// reselected purely because koios_account_coverage is absent, even though
+	// nothing about its pool data or check status changed.
+	needingWithAccounts, err := cache.GetEpochsNeedingCheck(network, true)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		[]uint64{epoch},
+		needingWithAccounts,
+		"an epoch with no account coverage row must be reselected when accounts are enabled",
+	)
+
+	// Running Check end-to-end must actually invoke compareEpochAccounts for
+	// this epoch (via GetEpochsNeedingCheck's selection above) rather than
+	// silently leaving the stale PASS untouched. It has no account coverage
+	// fetched yet, so it must surface a real acct_coverage_incomplete ERROR —
+	// proof the account comparison phase actually ran — rather than reporting
+	// the old PASS forever.
+	result, err := Check(context.Background(), CheckConfig{
+		Network: network,
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		1,
+		result.EpochsChecked,
+		"the epoch must actually be (re)checked, not silently skipped",
+	)
+	require.Equal(t, []uint64{epoch}, result.ErrorEpochs)
+	require.Empty(t, result.FailEpochs)
+
+	mismatches, err := cache.GetMismatches(network, epoch, "")
+	require.NoError(t, err)
+	var sawAcctCoverageIncomplete bool
+	for _, m := range mismatches {
+		if m.Category == CategoryAcctCoverageIncomplete {
+			sawAcctCoverageIncomplete = true
+		}
+	}
+	require.True(
+		t,
+		sawAcctCoverageIncomplete,
+		"a real acct_coverage_incomplete mismatch must be recorded — proof the account phase actually ran, not a silently-preserved stale PASS",
+	)
+
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(
+		t,
+		StatusError,
+		statuses[0].Status,
+		"the stale pool-only PASS must be overwritten by a real account-aware result",
+	)
+}
+
 // TestCheckScopesPersistedOutcomeToFromThroughEpoch covers the 'check'
 // subcommand's --from-epoch/--through-epoch scoping: a persisted FAIL outside
 // the requested range must not fail the run, but one inside it must — the
@@ -450,6 +575,259 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, statuses, 1)
 	require.Equal(t, StatusError, statuses[0].Status)
+}
+
+// TestCheckAccountsCoverageIncompleteIsError proves that enabling
+// CheckConfig.AccountsEnabled without ever having run a successful account
+// fetch (no koios_account_coverage row for the epoch) surfaces as ERROR
+// (CategoryAcctCoverageIncomplete), never a silent PASS — the coverage gate
+// compareEpochAccounts must consult before treating koios_account_rewards as
+// a complete reference set.
+func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{Network: network, Epoch: koiosEpoch, FetchedAt: fetchedAt}))
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs)
+	require.Empty(t, result.FailEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	found := false
+	for _, m := range mismatches {
+		if m.Category == CategoryAcctCoverageIncomplete {
+			found = true
+		}
+	}
+	require.True(t, found, "expected a CategoryAcctCoverageIncomplete mismatch")
+}
+
+// TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage guards
+// against compareEpochAccounts treating a genuine koios_account_coverage
+// query failure (e.g. a corrupted cache) the same as "no account fetch has
+// been attempted yet" (sql.ErrNoRows). Replacing the table with one missing
+// the "requested_count" column produces a real, non-ErrNoRows error from
+// GetAccountCoverage's own SELECT — unlike a dropped table (which Check's own
+// OpenCache call would silently recreate via "CREATE TABLE IF NOT EXISTS",
+// a no-op once a table of that name already exists — the same reason
+// TestAccountRewardsAdditiveColumnMigration builds its pre-migration table
+// directly rather than relying on OpenCache) — while leaving
+// GetEpochsNeedingCheck's own join (which never selects requested_count)
+// unaffected, so this epoch is still selected for checking in the first
+// place. This must surface as an explicit CategoryDBError
+// ("koios_account_coverage" / dingo_db_error), not the
+// CategoryAcctCoverageIncomplete this same field can also report for the
+// legitimate "not fetched yet" case (see
+// TestCheckAccountsCoverageIncompleteIsError).
+func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
+	t *testing.T,
+) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{Network: network, Epoch: koiosEpoch, FetchedAt: fetchedAt}))
+
+	// Simulate a genuine cache/DB failure distinct from "no fetch attempted
+	// yet": replace koios_account_coverage with a table missing the
+	// "requested_count" column GetAccountCoverage's SELECT requires, so that
+	// specific query errors instead of returning sql.ErrNoRows.
+	// GetEpochsNeedingCheck's own join never selects requested_count, so this
+	// epoch is still correctly selected for (re)checking.
+	_, err = cache.db.Exec("DROP TABLE koios_account_coverage")
+	require.NoError(t, err)
+	_, err = cache.db.Exec(`CREATE TABLE koios_account_coverage (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+		fetched_count INTEGER NOT NULL DEFAULT 0,
+		complete INTEGER NOT NULL DEFAULT 0, fetched_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs)
+	require.Empty(t, result.FailEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var found *CheckMismatch
+	for i := range mismatches {
+		if mismatches[i].Field == "koios_account_coverage" {
+			found = &mismatches[i]
+		}
+	}
+	require.NotNil(t, found, "expected a koios_account_coverage mismatch")
+	require.Equal(
+		t,
+		CategoryDBError,
+		found.Category,
+		"a genuine DB error querying coverage must be dingo_db_error, not acct_coverage_incomplete",
+	)
+}
+
+// TestCheckAccountsEndToEndExactMatchAndMismatch is an end-to-end #3097 test:
+// with account coverage marked complete, an exact-match account produces no
+// mismatch and a 1-lovelace-off account produces a value_mismatch — proving
+// the full path from CheckConfig.AccountsEnabled through checkEpoch's
+// coverage gate, StakeAddressFromCredential resolution, and
+// CompareAccountEpoch.
+func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	okKey := testPoolKeyHash(t, 0x41)
+	badKey := testPoolKeyHash(t, 0x42)
+	poolKeyHash := testPoolKeyHash(t, 0x22)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  okKey,
+		PoolKeyHash: poolKeyHash,
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  badKey,
+		PoolKeyHash: poolKeyHash,
+		RewardType:  "member",
+		Amount:      types.Uint64(2_000_000), // will differ from koios below
+		Spendable:   true,
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	okAddr, err := StakeAddressFromCredential(okKey, 0)
+	require.NoError(t, err)
+	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	require.NoError(t, err)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{Network: network, Epoch: koiosEpoch, FetchedAt: fetchedAt}))
+
+	require.NoError(
+		t,
+		cache.CommitAccountRewardsForEpoch(
+			network,
+			koiosEpoch,
+			[]KoiosAccountRewards{
+				{
+					StakeAddress: okAddr,
+					RewardType:   "member",
+					Earned:       "1000000",
+					FetchedAt:    fetchedAt,
+				},
+				{
+					StakeAddress: badAddr,
+					RewardType:   "member",
+					Earned:       "2000001",
+					FetchedAt:    fetchedAt,
+				},
+			},
+			2,
+			true,
+			fetchedAt,
+		),
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.FailEpochs)
+	require.Empty(t, result.ErrorEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var acctMismatches []CheckMismatch
+	for _, m := range mismatches {
+		if m.Field == "account_reward_amount" {
+			acctMismatches = append(acctMismatches, m)
+		}
+	}
+	require.Len(t, acctMismatches, 1)
+	require.Equal(t, badAddr, acctMismatches[0].StakeAddress)
+	require.Equal(t, "2000000", acctMismatches[0].DingoValue)
+	require.Equal(t, "2000001", acctMismatches[0].KoiosValue)
 }
 
 func TestEffectiveCheckOutcome(t *testing.T) {

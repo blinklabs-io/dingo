@@ -142,7 +142,7 @@ bench-mempool-degenerate: ## Compare FIFO and DAG under degenerate workloads
 
 test-load: build ## Run build, then load test data into a fresh database
 	rm -rf .dingo
-	./dingo load database/immutable/testdata
+	./internal/test/load/run-tests.sh
 
 test-load-log: build ## Run build, then load test data and capture log output
 	rm -rf .dingo dingo.log

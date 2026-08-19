@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -245,9 +246,223 @@ func TestGetPoolFirstActiveEpochsTakesMinAcrossUpdates(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		call func(*KoiosClient) error
+	}{
+		{
+			name: "epoch_info",
+			path: "/epoch_info",
+			call: func(k *KoiosClient) error {
+				_, err := k.GetEpochInfo(context.Background(), 10)
+				return err
+			},
+		},
+		{
+			name: "totals",
+			path: "/totals",
+			call: func(k *KoiosClient) error {
+				_, err := k.GetTotals(context.Background(), 10)
+				return err
+			},
+		},
+		{
+			name: "pool_history",
+			path: "/pool_history",
+			call: func(k *KoiosClient) error {
+				_, err := k.GetPoolEpochHistory(context.Background(), "pool1test", 10)
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, test.path, r.URL.Path)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":11}]`))
+			}))
+			defer srv.Close()
+
+			err := test.call(newTestKoiosClient(srv.URL))
+			require.ErrorContains(t, err, "requested epoch 10")
+		})
+	}
+}
+
+func TestFilteredKoiosResponsesRejectMultipleRows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"epoch_no":10},{"epoch_no":10}]`))
+	}))
+	defer srv.Close()
+
+	_, err := newTestKoiosClient(srv.URL).GetEpochInfo(context.Background(), 10)
+	require.ErrorContains(t, err, "got 2 row(s)")
+}
+
 func TestRationalsEqual(t *testing.T) {
 	require.True(t, rationalsEqual("0.1", "1/10"))
 	require.True(t, rationalsEqual("1/20", "0.05"))
 	require.False(t, rationalsEqual("0.1", "0.2"))
 	require.False(t, rationalsEqual("not-a-number", "1/10"))
+}
+
+// TestPostRetriesOn503ThenSucceeds mirrors TestGetRetriesOn503ThenSucceeds
+// for post(), proving the POST path shares the same transient-retry
+// classification as get() despite needing to rebuild its body each attempt.
+func TestPostRetriesOn503ThenSucceeds(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodPost, r.Method)
+			if attempts.Add(1) == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("no server available"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"stake_address":"stake1x"}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	resp, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{
+			"_stake_addresses": []string{"stake1x"},
+			"_epoch_no":        100,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 2, attempts.Load())
+}
+
+func TestPostDoesNotRetryOnAuthFailure(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("unauthorized"))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{},
+	)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 1, attempts.Load())
+}
+
+func TestPostDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("Exceeded Tier Limit"))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{},
+	)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 1, attempts.Load())
+}
+
+func TestGetAllAccountAddressesPaginates(t *testing.T) {
+	var reqs []string
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reqs = append(reqs, r.Header.Get("Range"))
+			if len(reqs) == 1 {
+				w.Header().Set("Content-Range", "0-999/1001")
+				w.WriteHeader(http.StatusPartialContent)
+				items := make([]string, koiosPageSize)
+				for i := range items {
+					items[i] = `{"stake_address":"stake1addr` + strings.Repeat(
+						"a",
+						1,
+					) + `"}`
+				}
+				_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+				return
+			}
+			w.Header().Set("Content-Range", "1000-1000/1001")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"stake_address":"stake1addrlast"}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	addrs, err := k.GetAllAccountAddresses(context.Background())
+	require.NoError(t, err)
+	require.Len(t, reqs, 2)
+	require.Contains(t, addrs, "stake1addrlast")
+}
+
+func TestGetAccountRewardHistoryDecodesResponse(t *testing.T) {
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodPost, r.Method)
+			require.Equal(t, "/account_reward_history", r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"stake_address":"stake1x","earned_epoch":100,"spendable_epoch":102,"amount":"1000000","type":"member","pool_id_bech32":null},
+				{"stake_address":"stake1y","earned_epoch":100,"spendable_epoch":102,"amount":"5000000","type":"leader","pool_id_bech32":"pool1abc"}
+			]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	items, err := k.GetAccountRewardHistory(
+		context.Background(),
+		[]string{"stake1x", "stake1y"},
+		100,
+	)
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	require.Equal(t, "member", items[0].Type)
+	require.Nil(t, items[0].PoolIDBech32)
+	require.Equal(t, "leader", items[1].Type)
+	require.NotNil(t, items[1].PoolIDBech32)
+	require.Equal(t, "pool1abc", *items[1].PoolIDBech32)
+}
+
+func TestGetAccountRewardHistoryEmptyAddressesNoRequest(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	items, err := k.GetAccountRewardHistory(context.Background(), nil, 100)
+	require.NoError(t, err)
+	require.Nil(t, items)
+	require.False(t, called)
 }

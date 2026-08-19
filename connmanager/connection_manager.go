@@ -61,18 +61,25 @@ type ConnectionManager struct {
 	metrics          *connectionManagerMetrics
 	listeners        []net.Listener
 	config           ConnectionManagerConfig
-	connectionsMutex sync.Mutex
-	listenersMutex   sync.Mutex
-	closing          bool
-	goroutineWg      sync.WaitGroup // tracks spawned goroutines for clean shutdown
-	ipConns          map[string]int // IP key -> active connection count
-	ipConnsMutex     sync.Mutex
-	outboundCount    int
-	fullDuplexCount  int
-	unidirectional   int
-	duplexPeers      int
-	prunableConns    int
-	trackedConnCount int
+	// resolveDeferredOnce guards the one-time evaluation of
+	// ListenersProvider/OutboundConnOptsProvider. Using sync.Once also
+	// supplies the happens-before edge that lets the resolved slices be read
+	// from the listener and outbound-dial paths without further locking.
+	resolveDeferredOnce  sync.Once
+	listenerConfigs      []ListenerConfig
+	outboundConnOptsCfgs []ouroboros.ConnectionOptionFunc
+	connectionsMutex     sync.Mutex
+	listenersMutex       sync.Mutex
+	closing              bool
+	goroutineWg          sync.WaitGroup // tracks spawned goroutines for clean shutdown
+	ipConns              map[string]int // IP key -> active connection count
+	ipConnsMutex         sync.Mutex
+	outboundCount        int
+	fullDuplexCount      int
+	unidirectional       int
+	duplexPeers          int
+	prunableConns        int
+	trackedConnCount     int
 }
 
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
@@ -80,14 +87,27 @@ type ConnectionManager struct {
 const DefaultMaxConnectionsPerIP = 5
 
 type ConnectionManagerConfig struct {
-	PromRegistry       prometheus.Registerer
-	Logger             *slog.Logger
-	EventBus           *event.EventBus
-	ConnClosedFunc     ConnectionManagerConnClosedFunc
-	Listeners          []ListenerConfig
-	OutboundConnOpts   []ouroboros.ConnectionOptionFunc
-	OutboundSourcePort uint
-	MaxInboundConns    int // 0 means use DefaultMaxInboundConnections
+	PromRegistry     prometheus.Registerer
+	Logger           *slog.Logger
+	EventBus         *event.EventBus
+	ConnClosedFunc   ConnectionManagerConnClosedFunc
+	Listeners        []ListenerConfig
+	OutboundConnOpts []ouroboros.ConnectionOptionFunc
+	// ListenersProvider and OutboundConnOptsProvider supply the two fields
+	// above lazily, on first use rather than at construction. They take
+	// precedence over the plain fields and are each invoked exactly once.
+	//
+	// They exist so a component that needs a ConnectionManager in order to
+	// produce its listener configs can still be constructed after it. The
+	// node uses this for ouroboros.Ouroboros, whose ConfigureListeners and
+	// OutboundConnOpts install protocol handlers bound to a fully-built
+	// instance: with these providers the ConnectionManager can be built
+	// first and the handlers resolved at Start, which is what lets Ouroboros
+	// take every dependency in its constructor.
+	ListenersProvider        func() []ListenerConfig
+	OutboundConnOptsProvider func() []ouroboros.ConnectionOptionFunc
+	OutboundSourcePort       uint
+	MaxInboundConns          int // 0 means use DefaultMaxInboundConnections
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
@@ -419,6 +439,35 @@ func (c *ConnectionManager) rebuildConnectionMetricsLocked() {
 	c.trackedConnCount = len(c.connections)
 }
 
+// resolveDeferredConfig evaluates the lazy listener/outbound providers once.
+// Every read of the resolved values goes through the accessors below, so a
+// provider is invoked on first use whether that is Start, an outbound dial, or
+// ResolvedListeners.
+func (c *ConnectionManager) resolveDeferredConfig() {
+	c.resolveDeferredOnce.Do(func() {
+		c.listenerConfigs = c.config.Listeners
+		if c.config.ListenersProvider != nil {
+			c.listenerConfigs = c.config.ListenersProvider()
+		}
+		c.outboundConnOptsCfgs = c.config.OutboundConnOpts
+		if c.config.OutboundConnOptsProvider != nil {
+			c.outboundConnOptsCfgs = c.config.OutboundConnOptsProvider()
+		}
+	})
+}
+
+// listenerConfigList returns the resolved listener configs.
+func (c *ConnectionManager) listenerConfigList() []ListenerConfig {
+	c.resolveDeferredConfig()
+	return c.listenerConfigs
+}
+
+// outboundConnOptList returns the resolved outbound connection options.
+func (c *ConnectionManager) outboundConnOptList() []ouroboros.ConnectionOptionFunc {
+	c.resolveDeferredConfig()
+	return c.outboundConnOptsCfgs
+}
+
 func (c *ConnectionManager) Start(ctx context.Context) error {
 	if err := c.startListeners(ctx); err != nil {
 		return err
@@ -541,10 +590,14 @@ func (c *ConnectionManager) stopListeners() {
 // success -- silently leaving that listener deaf to new inbound
 // connections until the whole process restarted.
 func (c *ConnectionManager) ResolvedListeners() []ListenerConfig {
+	// Resolve before taking the lock. The provider is caller-supplied and may
+	// reach back into components that touch this ConnectionManager, so running
+	// it under listenersMutex would risk a re-entrant deadlock.
+	listenerCfgs := c.listenerConfigList()
 	c.listenersMutex.Lock()
 	defer c.listenersMutex.Unlock()
-	resolved := make([]ListenerConfig, len(c.config.Listeners))
-	for i, cfg := range c.config.Listeners {
+	resolved := make([]ListenerConfig, len(listenerCfgs))
+	for i, cfg := range listenerCfgs {
 		// Only rewrite an entry that came in with a caller-supplied
 		// Listener -- an already address-configured entry (Listener nil)
 		// already rebinds correctly on its own via ListenNetwork/
@@ -744,8 +797,19 @@ func (c *ConnectionManager) addConnectionImpl(
 		if !c.RemoveConnection(connId, conn) {
 			return
 		}
-		// Generate event
-		if c.config.EventBus != nil {
+		// Generate event, but only for node-to-node connections. Every
+		// subscriber to this event does node-to-node peer management --
+		// chain selection, peer governance, chainsync client state, the
+		// mempool consumer set -- and the payload gives them no way to
+		// recognise a node-to-client connection and ignore it.
+		//
+		// It is not just wasted work. A local client that reconnects in a
+		// tight loop publishes at that rate, which fills the delivery
+		// buffer and wedges the subscriber for good ("event delivery
+		// stalled: subscriber not draining"). The NtN chainsync recovery
+		// these events drive then never runs again, and the node silently
+		// stops following the chain while continuing to forge.
+		if c.config.EventBus != nil && !isNtC {
 			c.config.EventBus.Publish(
 				ConnectionClosedEventType,
 				event.NewEvent(

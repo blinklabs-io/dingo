@@ -239,7 +239,7 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 	case "postgres":
 		// Defaults match postgres.RegisterProvider's descriptor default
 		// (Config{Host: "localhost", Port: 5432, User: "postgres", Database:
-		// "postgres", SSLMode: "disable", TimeZone: "UTC"}), which is what a
+		// "postgres", SSLMode: "require", TimeZone: "UTC"}), which is what a
 		// bare `provider: postgres` config section resolves to before
 		// Start() builds its connection string the same way below.
 		if host == "" {
@@ -252,7 +252,7 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 			database = "postgres"
 		}
 		if sslMode == "" {
-			sslMode = "disable"
+			sslMode = "require"
 		}
 		if timeZone == "" {
 			timeZone = "UTC"
@@ -393,12 +393,63 @@ func checkResultErr(result *koiosparity.CheckResult) error {
 	}
 }
 
+// resolveGraceHours reads the --grace-hours flag and rejects a negative
+// value, mirroring internal/config/validate.go's identical check on
+// koiosParity.graceHours ("must not be negative; 0 selects the default of
+// 24"). This matters beyond input hygiene: FetchAccountRewardsForEpoch's and
+// compare.go's zero-row/reference-lag gates only disable the grace check
+// when graceHours <= 0 — a negative value reaches that same "disabled" branch
+// as 0, but arrives silently instead of through the explicit, documented
+// opt-out. Left unvalidated, a just-closed epoch's empty --accounts response
+// could be committed complete and later read back as a valid, authoritative
+// empty reference set. Every subcommand exposing --grace-hours (fetch, check,
+// run, watch) must call this instead of a bare GetInt.
+func resolveGraceHours(cmd *cobra.Command) (int, error) {
+	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	if graceHours < 0 {
+		return 0, fmt.Errorf(
+			"--grace-hours must not be negative, got %d (0 disables the grace/reference-lag window)",
+			graceHours,
+		)
+	}
+	return graceHours, nil
+}
+
 // koiosAPIKey returns the Koios Bearer token from flag or environment.
 func koiosAPIKey(cmd *cobra.Command) string {
 	if key, _ := cmd.Flags().GetString("api-key"); key != "" {
 		return key
 	}
 	return os.Getenv("KOIOS_API_KEY")
+}
+
+// addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,
+// shared by fetch/check/run/watch. Per-account fetching/checking issues far
+// more Koios requests than pool-level work (a chunked request set covering
+// the full address universe per epoch, versus one request per pool), so this
+// stays opt-in for the standalone CLI even though the in-process observer
+// (ObserverConfig.AccountsEnabled, wired from
+// dingo.KoiosParityConfig/DefaultKoiosParityConfig) defaults it on.
+func addAccountsFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("accounts", false,
+		"also fetch/check #3097 per-account exact reward parity (opt-in: substantially more Koios requests; or KOIOS_PARITY_ACCOUNTS=true)")
+}
+
+// accountsEnabled resolves the --accounts flag, falling back to the
+// koios-parity-only KOIOS_PARITY_ACCOUNTS env var (no existing repo-standard
+// name applies to this tool-specific opt-in switch — see CLAUDE.md's env-var
+// naming guidance in this tool's own conventions).
+//
+// Per CLAUDE.md's config precedence (CLI > env > YAML > defaults), an
+// explicitly-set --accounts flag always wins, even --accounts=false — it
+// must not be overridden by KOIOS_PARITY_ACCOUNTS=true in the environment.
+func accountsEnabled(cmd *cobra.Command) bool {
+	if cmd.Flags().Changed("accounts") {
+		v, _ := cmd.Flags().GetBool("accounts")
+		return v
+	}
+	v := strings.TrimSpace(os.Getenv("KOIOS_PARITY_ACCOUNTS"))
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 // addDingoDB registers --metadata-plugin and --metadata-dsn on cmd and

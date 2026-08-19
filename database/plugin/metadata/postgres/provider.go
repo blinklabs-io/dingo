@@ -45,6 +45,17 @@ type Config struct {
 	PoolConnMaxLifetime time.Duration `yaml:"poolConnMaxLifetime"`
 }
 
+func defaultConfig() Config {
+	return Config{
+		Host:     "localhost",
+		Port:     5432,
+		User:     "postgres",
+		Database: "postgres",
+		SSLMode:  "require",
+		TimeZone: "UTC",
+	}
+}
+
 func RegisterProvider(host *plugin.Host) error {
 	return plugin.Register(
 		host,
@@ -53,16 +64,7 @@ func RegisterProvider(host *plugin.Host) error {
 			Name:        "postgres",
 			Description: "PostgreSQL relational database",
 		},
-		func() Config {
-			return Config{
-				Host:     "localhost",
-				Port:     5432,
-				User:     "postgres",
-				Database: "postgres",
-				SSLMode:  "disable",
-				TimeZone: "UTC",
-			}
-		},
+		defaultConfig,
 		func(
 			_ context.Context,
 			cfg Config,
@@ -91,27 +93,7 @@ func openStore(
 		cfg.PoolConnMaxLifetime < 0 {
 		return nil, errors.New("PostgreSQL pool limits must not be negative")
 	}
-	dsn := cfg.DSN
-	if dsn == "" {
-		connectionURL := &url.URL{
-			Scheme: "postgres",
-			User:   url.UserPassword(cfg.User, cfg.Password),
-			Host: net.JoinHostPort(
-				cfg.Host,
-				strconv.FormatUint(uint64(cfg.Port), 10),
-			),
-			Path: cfg.Database,
-		}
-		query := connectionURL.Query()
-		if cfg.SSLMode != "" {
-			query.Set("sslmode", cfg.SSLMode)
-		}
-		if cfg.TimeZone != "" {
-			query.Set("timezone", cfg.TimeZone)
-		}
-		connectionURL.RawQuery = query.Encode()
-		dsn = connectionURL.String()
-	}
+	dsn := assembleDSN(cfg)
 	db, err := sqlstore.OpenDB("pgx", dsn, "postgresql")
 	if err != nil {
 		return nil, err
@@ -151,10 +133,44 @@ func openStore(
 			0x64696e676f6d6574,
 			30*time.Second,
 		),
+		BackupTo: func(ctx context.Context, dstPath string) error {
+			return backupPostgres(ctx, dsn, dstPath)
+		},
+		RestoreFrom: func(ctx context.Context, srcPath string) error {
+			return restorePostgres(ctx, dsn, srcPath)
+		},
+		Reset: func(ctx context.Context) error {
+			return resetDatabase(ctx, db)
+		},
+		ValidateBackup: validatePostgresBackup,
 	})
 	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return store, nil
+}
+
+func assembleDSN(cfg Config) string {
+	if cfg.DSN != "" {
+		return cfg.DSN
+	}
+	connectionURL := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(cfg.User, cfg.Password),
+		Host: net.JoinHostPort(
+			cfg.Host,
+			strconv.FormatUint(uint64(cfg.Port), 10),
+		),
+		Path: cfg.Database,
+	}
+	query := connectionURL.Query()
+	if cfg.SSLMode != "" {
+		query.Set("sslmode", cfg.SSLMode)
+	}
+	if cfg.TimeZone != "" {
+		query.Set("timezone", cfg.TimeZone)
+	}
+	connectionURL.RawQuery = query.Encode()
+	return connectionURL.String()
 }

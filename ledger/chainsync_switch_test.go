@@ -130,7 +130,7 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 		},
 	}
 
-	activeConnId, configured := ls.detectConnectionSwitch()
+	activeConnId, configured := ls.detectConnectionSwitch(nil)
 	require.True(t, configured)
 	require.NotNil(t, activeConnId)
 	assert.Equal(t, connId2, *activeConnId)
@@ -251,7 +251,7 @@ func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
 		},
 	}
 
-	replayConnId, err := ls.handoffPipelineOnSwitchLocked(connId2)
+	replayConnId, err := ls.handoffPipelineOnSwitchLocked(connId2, nil)
 	require.NoError(t, err)
 	assert.Equal(t, connId2, replayConnId)
 	assert.Equal(t, 0, testChain.HeaderCount())
@@ -474,10 +474,10 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 		},
 	))
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
-	})
+	}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, requestCount)
 	assert.Equal(t, connId2, requestedConnId)
@@ -525,10 +525,10 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
-	})
+	}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, requestCount)
 	assert.Equal(t, connId, requestedConnId)
@@ -1325,10 +1325,10 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		},
 	}
 
-	err := ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		ls.chainsyncMutex.Lock()
@@ -1555,7 +1555,7 @@ func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 	err := ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: bufferedConn,
 		Point:        ocommon.NewPoint(0, nil),
-	})
+	}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, ls.bufferedHeaderEvents[connIdKey(bufferedConn)])
 }
@@ -1785,10 +1785,10 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, []ouroboros.ConnectionId{connId2}, requestedConnIds)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
@@ -1833,10 +1833,10 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
-	})
+	}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, requestCount)
 	assert.Equal(t, 1, testChain.HeaderCount())
@@ -1889,7 +1889,7 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	assert.Equal(t, connId2, requestedConn)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
@@ -1913,7 +1913,7 @@ func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId)
+	handleBlockfetchTimeoutForTest(ls, connId, nil)
 
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
 	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
@@ -1972,7 +1972,7 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	require.Equal(
 		t,

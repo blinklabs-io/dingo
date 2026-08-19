@@ -41,8 +41,8 @@ const (
 	AddTransactionEventType    event.EventType = "mempool.add_tx"
 	RemoveTransactionEventType event.EventType = "mempool.remove_tx"
 
-	DefaultEvictionWatermark    = 0.90
-	DefaultRejectionWatermark   = 0.95
+	DefaultEvictionWatermark    = 0.0
+	DefaultRejectionWatermark   = 1.0
 	DefaultTransactionTTL       = 5 * time.Minute
 	DefaultCleanupInterval      = 1 * time.Minute
 	DefaultRevalidationDeltaCap = 64
@@ -539,12 +539,31 @@ func newMempool(
 		)
 	}
 	evictionWatermark := config.EvictionWatermark
+	if evictionWatermark < 0 {
+		return nil, fmt.Errorf(
+			"invalid eviction watermark: %f (must be in range [0, 1))",
+			evictionWatermark,
+		)
+	}
 	if evictionWatermark == 0 {
 		evictionWatermark = DefaultEvictionWatermark
 	}
 	rejectionWatermark := config.RejectionWatermark
 	if rejectionWatermark == 0 {
 		rejectionWatermark = DefaultRejectionWatermark
+	}
+	if rejectionWatermark <= 0 || rejectionWatermark > 1 {
+		return nil, fmt.Errorf(
+			"invalid rejection watermark: %f (must be in range (0, 1])",
+			rejectionWatermark,
+		)
+	}
+	if evictionWatermark > 0 && evictionWatermark >= rejectionWatermark {
+		return nil, fmt.Errorf(
+			"eviction watermark (%f) must be less than rejection watermark (%f)",
+			evictionWatermark,
+			rejectionWatermark,
+		)
 	}
 	transactionTTL := config.TransactionTTL
 	if transactionTTL == 0 {
@@ -578,8 +597,8 @@ func newMempool(
 	}
 	if implementation == ImplementationDAG {
 		m.dag = newTransactionDAG()
-		m.headroomChanged = make(chan struct{})
 	}
+	m.headroomChanged = make(chan struct{})
 	if config.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
@@ -1476,7 +1495,8 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		evictionThreshold := int64(
 			float64(m.config.MempoolCapacity) * m.evictionWatermark,
 		)
-		if m.dag == nil && newSize > evictionThreshold {
+		if m.dag == nil && m.evictionWatermark > 0 &&
+			newSize > evictionThreshold {
 			needsEviction = true
 			targetBytes = max(int64(0), evictionThreshold-txSize)
 			// Compute which TXs would be evicted from the front
@@ -1625,6 +1645,68 @@ func (m *Mempool) Transactions() []MempoolTransaction {
 	return ret
 }
 
+func (m *Mempool) AdmissionHeadroomBytes() int64 {
+	m.RLock()
+	defer m.RUnlock()
+	return m.admissionHeadroomBytesLocked()
+}
+
+func (m *Mempool) MaxAdmissionHeadroomBytes() int64 {
+	m.RLock()
+	defer m.RUnlock()
+	return m.maxAdmissionHeadroomBytesLocked()
+}
+
+func (m *Mempool) admissionHeadroomBytesLocked() int64 {
+	headroom := m.maxAdmissionHeadroomBytesLocked() - m.currentSizeBytes
+	if headroom < 0 {
+		return 0
+	}
+	return headroom
+}
+
+func (m *Mempool) maxAdmissionHeadroomBytesLocked() int64 {
+	return m.admissionLimitBytes()
+}
+
+// waitForAdmissionHeadroom blocks until the requested admission budget is
+// available or the pool/connection stops. The state check and channel capture
+// happen under the same read lock, so a concurrent removal cannot be missed.
+func (m *Mempool) waitForAdmissionHeadroom(
+	minBytes int64,
+	done <-chan error,
+) bool {
+	if minBytes < 0 || minBytes > m.MaxAdmissionHeadroomBytes() {
+		return false
+	}
+	if minBytes == 0 {
+		return true
+	}
+	for {
+		m.RLock()
+		if m.stopped {
+			m.RUnlock()
+			return false
+		}
+		if m.admissionHeadroomBytesLocked() >= minBytes {
+			m.RUnlock()
+			return true
+		}
+		changed := m.headroomChanged
+		m.RUnlock()
+		if changed == nil {
+			return false
+		}
+		select {
+		case <-changed:
+		case <-m.done:
+			return false
+		case <-done:
+			return false
+		}
+	}
+}
+
 // cloneMempoolTransaction returns a deep copy that does not share mutable CBOR
 // storage with the source transaction.
 func cloneMempoolTransaction(tx *MempoolTransaction) *MempoolTransaction {
@@ -1645,12 +1727,6 @@ func (m *Mempool) admissionLimitBytes() int64 {
 	return int64(
 		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
 	)
-}
-
-// admissionHeadroomBytesLocked returns available admission capacity. The
-// caller must hold at least the mempool read lock.
-func (m *Mempool) admissionHeadroomBytesLocked() int64 {
-	return max(int64(0), m.admissionLimitBytes()-m.currentSizeBytes)
 }
 
 // notifyHeadroomChangedLocked wakes admission waiters after a size or lifecycle

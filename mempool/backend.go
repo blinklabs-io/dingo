@@ -113,6 +113,21 @@ func (f *FIFO) Consumer(connId ouroboros.ConnectionId) RelayConsumer {
 	return consumer
 }
 
+func (f *FIFO) AdmissionHeadroomBytes() int64 {
+	return f.Mempool.AdmissionHeadroomBytes()
+}
+
+func (f *FIFO) MaxAdmissionHeadroomBytes() int64 {
+	return f.Mempool.MaxAdmissionHeadroomBytes()
+}
+
+func (f *FIFO) WaitForAdmissionHeadroom(
+	minBytes int64,
+	done <-chan error,
+) bool {
+	return f.waitForAdmissionHeadroom(minBytes, done)
+}
+
 // DAG exposes the dependency-indexed mempool backend.
 type DAG struct {
 	*Mempool
@@ -166,30 +181,7 @@ func (d *DAG) WaitForAdmissionHeadroom(
 	minBytes int64,
 	done <-chan error,
 ) bool {
-	if minBytes < 0 || minBytes > d.MaxAdmissionHeadroomBytes() {
-		return false
-	}
-	for {
-		d.RLock()
-		if d.stopped {
-			d.RUnlock()
-			return false
-		}
-		if d.admissionHeadroomBytesLocked() >= minBytes {
-			d.RUnlock()
-			return true
-		}
-		changed := d.headroomChanged
-		d.RUnlock()
-
-		select {
-		case <-changed:
-		case <-done:
-			return false
-		case <-d.done:
-			return false
-		}
-	}
+	return d.waitForAdmissionHeadroom(minBytes, done)
 }
 
 // New constructs the selected mempool implementation. An empty value selects
@@ -216,6 +208,7 @@ var (
 	_ Pool              = (*DAG)(nil)
 	_ Service           = (*FIFO)(nil)
 	_ Service           = (*DAG)(nil)
+	_ AdmissionHeadroom = (*FIFO)(nil)
 	_ AdmissionHeadroom = (*DAG)(nil)
 	_ RelayConsumer     = (*MempoolConsumer)(nil)
 )

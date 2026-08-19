@@ -139,6 +139,7 @@ func decideCatchUp(
 	backend string,
 	storageMode string,
 	aggregatorURL string,
+	allowInsecureHTTP bool,
 	logger *slog.Logger,
 ) (catchUpDecision, error) {
 	if backend != BackendV2 {
@@ -207,7 +208,7 @@ func decideCatchUp(
 			)
 			return catchUpDecision{engage: true}, nil
 		}
-		target, targetErr := NewClient(aggregatorURL).
+		target, targetErr := newMithrilClient(aggregatorURL, allowInsecureHTTP).
 			GetLatestCardanoDatabaseSnapshot(ctx)
 		if targetErr != nil {
 			return catchUpDecision{}, fmt.Errorf(
@@ -280,6 +281,7 @@ type SyncConfig struct {
 	CardanoConfigPath      string                     // optional explicit config.json path (else "<network>/config.json")
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
 	AggregatorURL          string                     // optional; defaults per-network
+	AllowInsecureHTTP      bool                       // permit plain-HTTP aggregator/artifact URLs; local dev/test only
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
@@ -465,7 +467,8 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
 	dec, decErr := decideCatchUp(
-		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL, logger,
+		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL,
+		cfg.AllowInsecureHTTP, logger,
 	)
 	if decErr != nil {
 		return SyncResult{}, decErr
@@ -496,28 +499,48 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if copyChain == nil {
 		return SyncResult{}, errors.New("primary chain not available")
 	}
-	var pipeImm *immutable.ImmutableDb
 	var pipeLastChunk uint64
 	pipeCopied := false
 	const pipelineCopyChunkStride = 64
-	onChunkContiguous := func(immutableDir string, num uint64) error {
-		if pipeImm == nil {
-			var nerr error
-			if pipeImm, nerr = immutable.New(immutableDir); nerr != nil {
-				return fmt.Errorf(
-					"opening immutable DB for pipelined copy: %w", nerr,
-				)
-			}
-		}
+	onChunkContiguous := func(chunk ContiguousChunk) error {
 		// Throttle: copy every N contiguous chunks rather than on each one;
 		// the post-bootstrap copy finishes whatever remainder is left.
-		if pipeCopied && num < pipeLastChunk+pipelineCopyChunkStride {
+		if pipeCopied && chunk.Num < pipeLastChunk+pipelineCopyChunkStride {
 			return nil
 		}
-		maxSlot, ok, serr := pipeImm.LastSlotInChunk(num)
+		// Opened per call, and only usable from inside this callback: it is
+		// bound to the handle downloadImmutables holds open, which is closed
+		// when the download returns, and the sequencer drains before it does.
+		// Nothing after Bootstrap may read it — the post-bootstrap copy opens
+		// its own.
+		//
+		// Through the handle extraction is writing through, not through its
+		// name: the copy has to be reading the chunks this process just wrote,
+		// and only the handle says so. Verified against the same digests the
+		// pool checked, because the handle settles the directory and not the
+		// files in it.
+		//
+		// Bounded to the contiguous prefix, which is why it is rebuilt each
+		// call rather than kept. The pool writes chunks above the prefix out
+		// of order, so one of those may be present and half written; the bound
+		// keeps the reader from opening it at all, rather than opening it and
+		// refusing a file that is merely unfinished.
+		//
+		// The bound is the chunk's name rather than a count of chunks, and the
+		// lookup below is by number rather than by position, because the two
+		// coincide only for a range starting at chunk 0.
+		pipeImm, nerr := immutable.NewFromRootVerified(
+			chunk.Root, chunk.Digests, immutable.ChunkName(chunk.Num),
+		)
+		if nerr != nil {
+			return fmt.Errorf(
+				"opening immutable DB for pipelined copy: %w", nerr,
+			)
+		}
+		maxSlot, ok, serr := pipeImm.LastSlotInChunk(chunk.Num)
 		if serr != nil {
 			return fmt.Errorf(
-				"pipelined copy bound for chunk %d: %w", num, serr,
+				"pipelined copy bound for chunk %d: %w", chunk.Num, serr,
 			)
 		}
 		if !ok {
@@ -538,7 +561,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"pipelined copy to slot %d: %w", maxSlot, cerr,
 			)
 		}
-		pipeLastChunk = num
+		pipeLastChunk = chunk.Num
 		pipeCopied = true
 		return nil
 	}
@@ -561,6 +584,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			Network:                network,
 			Backend:                cfg.Backend,
 			AggregatorURL:          aggregatorURL,
+			AllowInsecureHTTP:      cfg.AllowInsecureHTTP,
 			DownloadDir:            downloadDir,
 			CleanupAfterLoad:       cfg.CleanupAfterLoad,
 			VerifyCertificateChain: cfg.VerifyCertChain,
@@ -596,15 +620,23 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 						(p.Percent-lastLoggedPercent) < progressLogPercentStep {
 						return
 					}
+					artifact := p.Artifact
+					if artifact == "" {
+						artifact = "unknown"
+					}
 					logger.Info(
-						fmt.Sprintf(
-							"download progress: %.1f%% (%s / %s) at %s/s",
-							p.Percent,
-							HumanBytes(p.BytesDownloaded),
-							HumanBytes(p.TotalBytes),
-							HumanBytes(int64(p.BytesPerSecond)),
-						),
+						"download progress",
 						"component", "mithril",
+						"network", network,
+						"phase", "download",
+						"artifact", artifact,
+						"snapshot_hash", p.SnapshotHash,
+						"bytes_downloaded", p.BytesDownloaded,
+						"total_bytes", p.TotalBytes,
+						"percent", p.Percent,
+						"bytes_per_second", p.BytesPerSecond,
+						"artifacts_completed", p.ArtifactsCompleted,
+						"artifacts_total", p.ArtifactsTotal,
 					)
 					lastLogTime = now
 					lastLoggedPercent = p.Percent
@@ -615,6 +647,21 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	cfg.emit(SyncProgress{Phase: PhaseBootstrap, Active: false})
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("mithril bootstrap failed: %w", err)
+	}
+
+	// Every read of the bootstrapped ImmutableDB below goes through this one
+	// handle-bound open. Bootstrap vetted the directory and held the handle
+	// open; opening by pathname here would drop that, and read whatever holds
+	// the name by now.
+	//
+	// Released on the way out whether or not the extracted tree is cleaned up:
+	// a run that keeps the tree for a later sync still must not leak the
+	// descriptors. This runs after the import errgroup is joined, which is what
+	// makes clearing the fields safe against the goroutines that read them.
+	defer result.CloseHandles()
+	certifiedImmutable, err := openBootstrappedImmutable(result)
+	if err != nil {
+		return SyncResult{}, err
 	}
 
 	// Catch-up: confirm the local chain is an ancestor of the target artifact
@@ -634,7 +681,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		// early here would leave the node wedged (serve refuses to start on
 		// sync_status="in_progress" and every re-run would no-op).
 		upToDate, interErr := verifyCatchupBeforeImport(
-			db, result.ImmutableDir, targetImmutable,
+			db, certifiedImmutable, targetImmutable,
 			mode == syncModeResume, logger,
 		)
 		if interErr != nil {
@@ -694,14 +741,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// source node's volatile database. Select only a ledger state at or below
 	// the certified immutable tip; later blocks must go through normal ledger
 	// validation when the node starts.
-	immutableDB, err := immutable.New(result.ImmutableDir)
-	if err != nil {
-		return SyncResult{}, fmt.Errorf(
-			"opening certified ImmutableDB for trust-boundary selection: %w",
-			err,
-		)
-	}
-	certifiedTip, err := immutableDB.GetTip()
+	certifiedTip, err := certifiedImmutable.GetTip()
 	if err != nil {
 		return SyncResult{}, fmt.Errorf(
 			"reading certified ImmutableDB tip: %w",
@@ -767,6 +807,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
 			gctx, nil, logger, result.ImmutableDir, db,
+			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
 					Phase:          PhaseImmutableCopy,
@@ -1085,6 +1126,14 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
+		// point with the delegator-inactivity gate enabled
+		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
+		// always elided here. SyncConfig has no gate field to thread through
+		// (Mithril bootstrap and the gate are mutually exclusive by
+		// construction), so this is explicit rather than the zero-value
+		// default.
+		bf.SetDelegatorInactivityEnabled(false)
 		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(

@@ -1055,6 +1055,189 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 	)
 }
 
+// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
+// review finding on ledgerstate/utxo.go: the indefinite-length UTxO map's
+// running entry-count check can only reject entry `limit`+1 after earlier
+// batches have already been streamed to the UTxO callback and committed to
+// the database (there is no header count to check up front, unlike the
+// definite-length path). This is safe rather than a partial-import bug
+// because every UTxO write is an idempotent "insert if absent" upsert: a
+// later re-run over the same data (e.g. after the cap is raised or
+// corrupted data is replaced) reapplies the same rows without duplicating
+// them, converging to exactly one row per UTxO.
+func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	const (
+		// One more entry than the cap below, so the running check
+		// rejects the map — but only after two full utxoBatchSize
+		// (10,000-entry) batches were already committed.
+		totalEntries = 20001
+		limit        = 20000
+		slot         = uint64(500)
+	)
+	data := buildIndefiniteUTxOMapCbor(t, totalEntries)
+	store := db.Metadata()
+
+	importBatch := func(batch []ParsedUTxO) error {
+		utxos := make([]models.Utxo, 0, len(batch))
+		for i := range batch {
+			utxos = append(utxos, UTxOToModel(&batch[i], slot))
+		}
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		if err := store.ImportUtxos(utxos, txn.Metadata()); err != nil {
+			return err
+		}
+		return txn.Commit()
+	}
+
+	_, err = parseIndefiniteUTxOMapWithProgressLimit(
+		data, importBatch, nil, limit,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeded max entries")
+	require.Contains(t, err.Error(), "duplicate-safe")
+
+	committed, err := store.GetUtxosAddedAfterSlot(slot-1, nil)
+	require.NoError(t, err)
+	require.Len(
+		t, committed, limit,
+		"the two full batches before the rejected entry "+
+			"should already be committed",
+	)
+
+	// Simulate a retry (checkpoint-resumed or from scratch) once the
+	// underlying issue is resolved: re-running over a limit that now
+	// covers every entry must converge without duplicating the rows
+	// the first pass already committed.
+	total, err := parseIndefiniteUTxOMapWithProgressLimit(
+		data, importBatch, nil, totalEntries,
+	)
+	require.NoError(t, err)
+	require.Equal(t, totalEntries, total)
+
+	final, err := store.GetUtxosAddedAfterSlot(slot-1, nil)
+	require.NoError(t, err)
+	require.Len(
+		t, final, totalEntries,
+		"retry must converge to exactly one row per UTxO, no duplicates",
+	)
+}
+
+// TestSynthesizeRetiredScheduledPoolsResolvesVrfKey verifies that a pool
+// present only in the imported active pool distribution (absent from the live
+// pool table) becomes resolvable via GetPool(includeInactive=true) carrying the
+// VRF key hash from the distribution, and is tombstoned with a retirement at
+// the snapshot epoch. This mirrors a pool that retired at the epoch boundary
+// but still leads the current epoch's fixed schedule, whose header VRF-key
+// binding check would otherwise fail on a Mithril-imported node.
+func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	// A currently-registered pool that the import already wrote.
+	livePoolKeyHash := bytes.Repeat([]byte{0x11}, 28)
+	liveVrfKeyHash := bytes.Repeat([]byte{0x12}, 32)
+	importTestPool(t, db, &models.Pool{
+		PoolKeyHash: livePoolKeyHash,
+		VrfKeyHash:  liveVrfKeyHash,
+	})
+
+	// A retired-but-scheduled pool present only in the active pool distr.
+	retiredPoolKeyHash := bytes.Repeat([]byte{0x21}, 28)
+	retiredVrfKeyHash := bytes.Repeat([]byte{0x22}, 32)
+
+	const epoch = uint64(305)
+	const slot = uint64(130267768)
+
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	require.NoError(t, synthesizeRetiredScheduledPools(
+		context.Background(),
+		cfg,
+		[]ParsedActivePoolStake{
+			{
+				PoolKeyHash:      livePoolKeyHash,
+				StakeNumerator:   1,
+				StakeDenominator: 10,
+				VrfKeyHash:       liveVrfKeyHash,
+			},
+			{
+				PoolKeyHash:      retiredPoolKeyHash,
+				StakeNumerator:   2,
+				StakeDenominator: 10,
+				VrfKeyHash:       retiredVrfKeyHash,
+			},
+		},
+		epoch,
+		slot,
+	))
+	require.NoError(t, db.Metadata().SetEpoch(
+		slot-100,
+		epoch,
+		nil,
+		nil,
+		nil,
+		nil,
+		0,
+		1,
+		200,
+		nil,
+	))
+	active, err := db.Metadata().GetActivePoolKeyHashesAtSlot(slot, nil)
+	require.NoError(t, err)
+	require.Contains(t, active, livePoolKeyHash)
+	require.NotContains(t, active, retiredPoolKeyHash)
+
+	// The retired-but-scheduled pool now resolves with its VRF key hash on
+	// both the denormalized pool row and its registration, the two fields the
+	// header VRF-key binding check reads.
+	retired, err := db.Metadata().GetPool(
+		testPoolKeyHash(retiredPoolKeyHash),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, retired)
+	require.Equal(t, retiredVrfKeyHash, []byte(retired.VrfKeyHash))
+	require.NotEmpty(t, retired.Registration)
+	require.Equal(
+		t,
+		retiredVrfKeyHash,
+		retired.Registration[0].VrfKeyHash,
+	)
+	require.Equal(t, slot, retired.Registration[0].AddedSlot)
+
+	// It carries a retirement tombstone at the snapshot epoch (synthetic
+	// certificate_id 0), keeping it out of active-pool/stake/reward queries.
+	require.NotEmpty(t, retired.Retirement)
+	require.Equal(t, epoch, retired.Retirement[0].Epoch)
+	require.Equal(t, uint(0), retired.Retirement[0].CertificateID)
+
+	// The already-registered pool is left untouched: no duplicate registration
+	// and no retirement tombstone.
+	live, err := db.Metadata().GetPool(
+		testPoolKeyHash(livePoolKeyHash),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, live)
+	require.Len(t, live.Registration, 1)
+	require.Empty(t, live.Retirement)
+}
+
 func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)

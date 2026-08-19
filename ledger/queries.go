@@ -984,8 +984,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
-	// TODO: support multiple addresses (#391)
-	utxos, err := ls.db.UtxosByAddress(addrs[0], nil)
+	utxos, err := ls.db.UtxosByAddress(addrs, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1278,23 +1277,27 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	if len(txIns) == 0 {
 		return []any{ret}, nil
 	}
-	// TODO: support multiple TxIns (#392)
-	utxo, err := ls.db.UtxoByRef(
-		txIns[0].Id().Bytes(),
-		txIns[0].Index(),
-		nil,
-	)
+	refs := make([]models.UtxoId, len(txIns))
+	for i, txIn := range txIns {
+		refs[i] = models.UtxoId{
+			Hash: txIn.Id().Bytes(),
+			Idx:  txIn.Index(),
+		}
+	}
+	utxos, err := ls.db.UtxosByRefs(refs, nil)
 	if err != nil {
 		return nil, err
 	}
-	txOut, err := utxo.Decode()
-	if err != nil {
-		return nil, err
+	for _, utxo := range utxos {
+		txOut, err := utxo.Decode()
+		if err != nil {
+			return nil, err
+		}
+		utxoId := olocalstatequery.UtxoId{
+			Hash: ledger.NewBlake2b256(utxo.TxId),
+			Idx:  int(utxo.OutputIdx),
+		}
+		ret[utxoId] = txOut
 	}
-	utxoId := olocalstatequery.UtxoId{
-		Hash: ledger.NewBlake2b256(utxo.TxId),
-		Idx:  int(utxo.OutputIdx),
-	}
-	ret[utxoId] = txOut
 	return []any{ret}, nil
 }

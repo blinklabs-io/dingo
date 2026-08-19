@@ -173,13 +173,13 @@ func (o *Ouroboros) denyDivergentChainsyncPeer(
 	connId ouroboros.ConnectionId,
 	reason string,
 ) {
-	if o.PeerGov == nil ||
+	if o.peerGov == nil ||
 		connId.RemoteAddr == nil ||
 		!chainsyncResyncDeniesPeer(reason) {
 		return
 	}
 	address := connId.RemoteAddr.String()
-	o.PeerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
+	o.peerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
 	o.config.Logger.Warn(
 		"temporarily denying chainsync peer whose chain we cannot follow",
 		"connection_id", connId.String(),
@@ -192,10 +192,10 @@ func (o *Ouroboros) denyDivergentChainsyncPeer(
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 	connId ouroboros.ConnectionId,
 ) ([]ocommon.Point, error) {
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return nil, errors.New("ledger state not available")
 	}
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return nil, fmt.Errorf(
 			"failed to lookup connection ID: %s",
@@ -208,7 +208,7 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 			connId.String(),
 		)
 	}
-	intersectPoints, err := o.LedgerState.IntersectPoints(
+	intersectPoints, err := o.ledgerState.IntersectPoints(
 		chainsyncIntersectPointCount,
 	)
 	if err != nil {
@@ -253,7 +253,7 @@ func (o *Ouroboros) syncChainsyncClient(
 	connId ouroboros.ConnectionId,
 	intersectPoints []ocommon.Point,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
@@ -267,8 +267,8 @@ func (o *Ouroboros) syncChainsyncClient(
 	if len(intersectPoints) == 0 {
 		intersectPoints = []ocommon.Point{ocommon.NewPointOrigin()}
 	}
-	if o.PeerGov != nil {
-		o.PeerGov.SetPeerHotByConnId(connId)
+	if o.peerGov != nil {
+		o.peerGov.SetPeerHotByConnId(connId)
 	}
 	return conn.ChainSync().Client.Sync(intersectPoints)
 }
@@ -302,7 +302,7 @@ func (o *Ouroboros) RestartChainsyncClientWithPoints(
 	connId ouroboros.ConnectionId,
 	intersectPoints []ocommon.Point,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connId.String())
 	}
@@ -329,7 +329,7 @@ func (o *Ouroboros) resyncChainsyncClientWithPoints(
 	connId ouroboros.ConnectionId,
 	intersectPoints []ocommon.Point,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connId.String())
 	}
@@ -375,7 +375,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		"connection_id", ctx.ConnectionId.String(),
 		"num_points", len(points),
 	)
-	tip := o.LedgerState.Tip()
+	tip := o.ledgerState.Tip()
 	o.config.Logger.Debug(
 		"chainsync server: got tip",
 		"component", "ouroboros",
@@ -397,7 +397,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		)
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
-	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
+	intersectPoint, err := o.ledgerState.GetIntersectPoint(points)
 	if err != nil {
 		o.config.Logger.Error(
 			"chainsync server: GetIntersectPoint error",
@@ -415,7 +415,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
 	// Add our client to the chainsync state
-	_, err = o.ChainsyncState.AddClient(
+	_, err = o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		*intersectPoint,
 	)
@@ -435,7 +435,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 // ledger processes them, so the tip can be stale. A tip slot behind the
 // block slot is a protocol violation that causes peers to disconnect.
 func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
-	tip := o.LedgerState.Tip()
+	tip := o.ledgerState.Tip()
 	if !next.Rollback && next.Point.Slot > tip.Point.Slot {
 		tip = ochainsync.Tip{
 			Point:       next.Point,
@@ -449,8 +449,8 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 ) error {
 	// Create/retrieve chainsync state for connection
-	tip := o.LedgerState.Tip()
-	clientState, err := o.ChainsyncState.AddClient(
+	tip := o.ledgerState.Tip()
+	clientState, err := o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		tip.Point,
 	)
@@ -517,7 +517,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		return err
 	}
 	// Wait for next block and send
-	conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+	conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 	if conn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
@@ -684,7 +684,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 		observedSync = o.config.ChainsyncObservePeerRollback(rollbackEvent)
 	}
 	if !observedSync {
-		o.EventBus.Publish(
+		o.eventBus.Publish(
 			chainselection.PeerRollbackEventType,
 			event.NewEvent(
 				chainselection.PeerRollbackEventType,
@@ -707,7 +707,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	// Generate event. This stream is ordering-critical: dropping a
 	// rollback/header event can strand the ledger pipeline, so use blocking
 	// delivery to apply backpressure instead of lossy buffer overflow.
-	if err := o.EventBus.PublishBlocking(
+	if err := o.eventBus.PublishBlocking(
 		ledger.ChainsyncEventType,
 		event.NewEvent(
 			ledger.ChainsyncEventType,
@@ -784,7 +784,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				observedSync = o.config.ChainsyncObservePeerTip(peerTipUpdate)
 			}
 			if !observedSync {
-				o.EventBus.Publish(
+				o.eventBus.Publish(
 					chainselection.PeerTipUpdateEventType,
 					event.NewEvent(
 						chainselection.PeerTipUpdateEventType,
@@ -805,23 +805,23 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// deduplicated — a later corroborated, apply-eligible peer can still
 		// publish the point into the ledger.
 		isNew := true
-		if o.ChainsyncState != nil {
+		if o.chainsyncState != nil {
 			if applyEligible {
-				isNew = o.ChainsyncState.UpdateClientTip(
+				isNew = o.chainsyncState.UpdateClientTip(
 					ctx.ConnectionId,
 					point,
 					tip,
 				)
 			} else {
-				o.ChainsyncState.UpdateClientTipWithoutDedup(
+				o.chainsyncState.UpdateClientTipWithoutDedup(
 					ctx.ConnectionId,
 					point,
 					tip,
 				)
 			}
 		}
-		if ingressEligible && o.ChainsyncState != nil {
-			o.ChainsyncState.RecordObservedHeader(
+		if ingressEligible && o.chainsyncState != nil {
+			o.chainsyncState.RecordObservedHeader(
 				chainsync.ObservedHeader{
 					ConnectionId: ctx.ConnectionId,
 					Point:        point,
@@ -848,8 +848,8 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// seen elsewhere (prior behavior); parallel lets every eligible peer
 		// publish new headers but never replays duplicates; round-robin admits
 		// only the current rotation driver.
-		if o.ChainsyncState != nil &&
-			!o.ChainsyncState.ShouldPublishHeader(
+		if o.chainsyncState != nil &&
+			!o.chainsyncState.ShouldPublishHeader(
 				ctx.ConnectionId,
 				point,
 				isNew,
@@ -862,7 +862,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				"chainsync: header dropped",
 				"component", "ouroboros",
 				"reason", dropReason,
-				"strategy", o.ChainsyncState.HeaderSyncStrategy().String(),
+				"strategy", o.chainsyncState.HeaderSyncStrategy().String(),
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
@@ -886,7 +886,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
-		if err := o.EventBus.PublishBlocking(
+		if err := o.eventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
 				ledger.ChainsyncEventType,
@@ -903,11 +903,11 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		}
 		if point.Slot == tip.Point.Slot &&
 			bytes.Equal(point.Hash, tip.Point.Hash) {
-			if o.ChainsyncState != nil {
-				o.ChainsyncState.MarkClientSynced(ctx.ConnectionId)
+			if o.chainsyncState != nil {
+				o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
 			}
-			if ingressEligible && o.EventBus != nil {
-				o.EventBus.Publish(
+			if ingressEligible && o.eventBus != nil {
+				o.eventBus.Publish(
 					ledger.ChainsyncAwaitReplyEventType,
 					event.NewEvent(
 						ledger.ChainsyncAwaitReplyEventType,
@@ -940,10 +940,10 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	if o.config.ChainsyncIngressEligible != nil {
 		return o.config.ChainsyncIngressEligible(connId)
 	}
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return false
 	}
-	outbound, exists := o.ChainsyncState.ClientStartedAsOutbound(connId)
+	outbound, exists := o.chainsyncState.ClientStartedAsOutbound(connId)
 	return exists && outbound
 }
 
@@ -972,10 +972,10 @@ func (o *Ouroboros) shouldApplyChainsyncToLedger(
 func (o *Ouroboros) isInboundChainsyncClient(
 	connId ouroboros.ConnectionId,
 ) bool {
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return false
 	}
-	outbound, exists := o.ChainsyncState.ClientStartedAsOutbound(connId)
+	outbound, exists := o.chainsyncState.ClientStartedAsOutbound(connId)
 	if !exists {
 		// Unknown client — treat as inbound (conservative: don't
 		// feed untracked connections into the ledger).
@@ -986,8 +986,8 @@ func (o *Ouroboros) isInboundChainsyncClient(
 
 func (o *Ouroboros) maxTrackedChainsyncClients() int {
 	maxClients := defaultMaxChainsyncClients
-	if o.ChainsyncState != nil && o.ChainsyncState.MaxClients() > 0 {
-		maxClients = o.ChainsyncState.MaxClients()
+	if o.chainsyncState != nil && o.chainsyncState.MaxClients() > 0 {
+		maxClients = o.chainsyncState.MaxClients()
 	}
 	return maxClients
 }
@@ -997,23 +997,23 @@ func (o *Ouroboros) registerTrackedChainsyncClient(
 	ingressEligible bool,
 	startedAsOutbound bool,
 ) bool {
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return false
 	}
 	if ingressEligible {
-		if o.ChainsyncState.TryAddClientConnIdWithDirection(
+		if o.chainsyncState.TryAddClientConnIdWithDirection(
 			connId,
 			o.maxTrackedChainsyncClients(),
 			startedAsOutbound,
 		) {
 			return true
 		}
-		if o.ChainsyncState.HasClientConnId(connId) {
-			o.ChainsyncState.SetClientStartedAsOutbound(
+		if o.chainsyncState.HasClientConnId(connId) {
+			o.chainsyncState.SetClientStartedAsOutbound(
 				connId,
 				startedAsOutbound,
 			)
-			observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+			observabilityOnly, exists := o.chainsyncState.ClientObservabilityOnly(
 				connId,
 			)
 			if !exists {
@@ -1026,7 +1026,7 @@ func (o *Ouroboros) registerTrackedChainsyncClient(
 		}
 		return false
 	}
-	if o.ChainsyncState.TryAddObservedClientConnIdWithDirection(
+	if o.chainsyncState.TryAddObservedClientConnIdWithDirection(
 		connId,
 		startedAsOutbound,
 	) {
@@ -1039,10 +1039,10 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 	connId ouroboros.ConnectionId,
 	desiredEligible bool,
 ) bool {
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return desiredEligible
 	}
-	observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+	observabilityOnly, exists := o.chainsyncState.ClientObservabilityOnly(
 		connId,
 	)
 	if !exists {
@@ -1052,16 +1052,16 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 		if !observabilityOnly {
 			return true
 		}
-		if !o.ChainsyncState.SetClientObservabilityOnly(connId, false) {
+		if !o.chainsyncState.SetClientObservabilityOnly(connId, false) {
 			return false
 		}
-		observabilityOnly, exists = o.ChainsyncState.ClientObservabilityOnly(
+		observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(
 			connId,
 		)
 		return exists && !observabilityOnly
 	}
 	if !observabilityOnly {
-		_ = o.ChainsyncState.SetClientObservabilityOnly(connId, true)
+		_ = o.chainsyncState.SetClientObservabilityOnly(connId, true)
 	}
 	return false
 }
@@ -1072,7 +1072,7 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	connId ouroboros.ConnectionId,
 	peerTip ochainsync.Tip,
 ) {
-	if o.PeerGov == nil || o.LedgerState == nil {
+	if o.peerGov == nil || o.ledgerState == nil {
 		return
 	}
 
@@ -1111,7 +1111,7 @@ func (o *Ouroboros) updateChainsyncMetrics(
 
 	// Calculate tip delta (our tip slot - peer's tip slot)
 	// Positive means peer is behind us, negative means peer is ahead
-	ourTip := o.LedgerState.Tip()
+	ourTip := o.ledgerState.Tip()
 	// Use signed subtraction to handle the delta correctly
 	// Slots are uint64, but the difference fits in int64 for reasonable cases
 	// Cap at math.MaxInt64 to avoid overflow
@@ -1133,7 +1133,7 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	}
 
 	// Update peer scoring
-	o.PeerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
+	o.peerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
 }
 
 func (o *Ouroboros) restartChainsyncClientAsync(
@@ -1142,7 +1142,7 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 	reason string,
 	restartFn func() error,
 ) {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return
 	}
@@ -1207,10 +1207,10 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 // rewind tracked client cursors and attempt ledger-side recovery
 // before recycling affected connections as a fallback.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
-	if o.EventBus == nil {
+	if o.eventBus == nil {
 		return
 	}
-	o.EventBus.SubscribeFunc(
+	o.subscribeTracked(
 		event.ChainsyncResyncEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(event.ChainsyncResyncEvent)
@@ -1225,25 +1225,25 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			var connIds []ouroboros.ConnectionId
 			if e.ConnectionId != (ouroboros.ConnectionId{}) {
 				connIds = append(connIds, e.ConnectionId)
-			} else if o.ChainsyncState != nil {
-				connIds = o.ChainsyncState.RewindTrackedClientsTo(e.Point)
+			} else if o.chainsyncState != nil {
+				connIds = o.chainsyncState.RewindTrackedClientsTo(e.Point)
 				if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback &&
 					len(connIds) == 0 {
-					connIds = o.ChainsyncState.GetClientConnIds()
+					connIds = o.chainsyncState.GetClientConnIds()
 				}
 			}
-			if o.ChainsyncState != nil {
+			if o.chainsyncState != nil {
 				if e.Point.Slot > 0 || len(e.Point.Hash) > 0 {
-					o.ChainsyncState.ClearSeenHeadersFrom(e.Point.Slot)
+					o.chainsyncState.ClearSeenHeadersFrom(e.Point.Slot)
 				} else {
-					o.ChainsyncState.ClearSeenHeaders()
+					o.chainsyncState.ClearSeenHeaders()
 				}
 			}
 			if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback {
-				if o.LedgerState == nil {
+				if o.ledgerState == nil {
 					return
 				}
-				recovery := o.LedgerState.RecoverAfterLocalRollback(
+				recovery := o.ledgerState.RecoverAfterLocalRollback(
 					connIds,
 					e.Point,
 				)
@@ -1283,13 +1283,13 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					len(connIds),
 				)
 				for _, connId := range connIds {
-					if o.ChainsyncState != nil {
-						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					if o.chainsyncState != nil {
+						o.chainsyncState.ClearObservedHeaderHistory(connId)
 					}
-					if o.ConnManager == nil {
+					if o.connManager == nil {
 						continue
 					}
-					conn := o.ConnManager.GetConnectionById(connId)
+					conn := o.connManager.GetConnectionById(connId)
 					if conn == nil {
 						continue
 					}
@@ -1317,13 +1317,13 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if chainsyncResyncRequiresFreshConnection(e.Reason) {
 				for _, connId := range connIds {
 					o.denyDivergentChainsyncPeer(connId, e.Reason)
-					if o.ChainsyncState != nil {
-						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					if o.chainsyncState != nil {
+						o.chainsyncState.ClearObservedHeaderHistory(connId)
 					}
-					if o.ConnManager == nil {
+					if o.connManager == nil {
 						continue
 					}
-					conn := o.ConnManager.GetConnectionById(connId)
+					conn := o.connManager.GetConnectionById(connId)
 					if conn == nil {
 						continue
 					}
@@ -1337,10 +1337,10 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			}
 			for _, connId := range connIds {
-				if o.ChainsyncState != nil {
-					o.ChainsyncState.ClearObservedHeaderHistory(connId)
+				if o.chainsyncState != nil {
+					o.chainsyncState.ClearObservedHeaderHistory(connId)
 				}
-				if o.ConnManager == nil {
+				if o.connManager == nil {
 					continue
 				}
 				o.restartChainsyncClientAsync(
@@ -1447,22 +1447,45 @@ func (o *Ouroboros) decodeChainsyncHeader(
 }
 
 // chainsyncClientRollForwardRaw decodes the raw header itself (via
-// decodeChainsyncHeader) and forwards the decoded header to the shared
-// RollForward handler. dingo takes the raw callback so it can apply the
-// Musashi-scoped Conway-with-Leios-header decode; using the decoded callback
-// would let gouroboros' strict decode fail before dingo can intervene.
+// decodeChainsyncHeader, through the shared decode cache) and forwards the
+// decoded header to the shared RollForward handler. dingo takes the raw
+// callback so it can apply the Musashi-scoped Conway-with-Leios-header
+// decode; using the decoded callback would let gouroboros' strict decode fail
+// before dingo can intervene.
+//
+// Every chainsync-connected peer delivers a header for each new point at
+// roughly the same time, so -- like blockfetchClientBlockRaw -- the decode is
+// keyed by content hash and shared across connections instead of repeated
+// once per connection. See #489.
 func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
 	blockData []byte,
 	tip ochainsync.Tip,
 ) error {
-	header, err := o.decodeChainsyncHeader(blockType, blockData)
+	key := hashDecodeInput(blockType, blockData)
+	header, err := decodeWithPanicSafeMetrics(
+		o.headerDecodeCache,
+		key,
+		func() (gledger.BlockHeader, error) {
+			return o.decodeChainsyncHeader(blockType, blockData)
+		},
+		o.recordHeaderDecodeCacheOutcome,
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"decode chain-sync header (block type %d): %w",
 			blockType,
 			err,
+		)
+	}
+	if header == nil {
+		// decodeCache's contract is (nil value, non-nil err) on failure, but
+		// that is a convention on decodeFn, not something the generic cache
+		// itself enforces -- guard explicitly rather than trust it silently.
+		return fmt.Errorf(
+			"decode chain-sync header (block type %d): decoded nil header with no error",
+			blockType,
 		)
 	}
 	return o.chainsyncClientRollForward(ctx, blockType, header, tip)

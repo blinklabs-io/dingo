@@ -401,7 +401,7 @@ func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOption
 func (o *Ouroboros) leiosnotifyClientStart(
 	connId ouroboros.ConnectionId,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf(
 			"failed to lookup connection ID: %s",
@@ -469,17 +469,17 @@ const leiosTipPrefetchMaxLagSlots = 600
 // will be applied before it expires from the cache). It is false during a deep
 // catch-up so all fetch capacity serves the historical backfill.
 func (o *Ouroboros) leiosTipPrefetchEnabled() bool {
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return true
 	}
-	return o.LedgerState.SlotsBehindHead() <= leiosTipPrefetchMaxLagSlots
+	return o.ledgerState.SlotsBehindHead() <= leiosTipPrefetchMaxLagSlots
 }
 
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
 ) error {
-	conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+	conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 	connId := leiosConnectionIdString(ctx.ConnectionId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId)
@@ -662,6 +662,14 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			}
 			txs, err := o.fetchLeiosEbTxsBatched(client, point, data.txCount)
 			if err != nil {
+				// The transactions gathered by this attempt are retained
+				// against the cached endorser block, so a later offer of the
+				// same block completes it instead of starting over. Log what
+				// survived to make that progress visible across attempts.
+				retained := 0
+				if cached, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
+					retained = cached.partialTxCount()
+				}
 				o.config.Logger.Debug(
 					"leios EB transaction fetch failed",
 					"error", err,
@@ -669,6 +677,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 					"slot", point.Slot,
 					"hash", hex.EncodeToString(point.Hash),
 					"fetched", len(txs),
+					"retained", retained,
 					"tx_count", data.txCount,
 				)
 				return
@@ -711,11 +720,11 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// membership, dedup, BLS) and builds an endorser-block certificate on
 		// quorum. (m.Votes carries vote IDs offered by non-prototype peers and
 		// is fetched separately; only pushed FullVotes are handled here.)
-		if o.LeiosVotes == nil {
+		if o.leiosVotes == nil {
 			return nil
 		}
 		for _, vote := range m.FullVotes {
-			if err := o.LeiosVotes.HandleVote(connId, vote); err != nil {
+			if err := o.leiosVotes.HandleVote(connId, vote); err != nil {
 				o.config.Logger.Debug(
 					"failed to handle pushed leios vote",
 					"component", "network",
@@ -728,7 +737,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			}
 		}
 		for _, vote := range m.PrototypeVotes {
-			if err := o.LeiosVotes.HandlePrototypeVote(connId, vote); err != nil {
+			if err := o.leiosVotes.HandlePrototypeVote(connId, vote); err != nil {
 				o.config.Logger.Debug(
 					"failed to handle pushed prototype leios vote",
 					"component", "network",
@@ -969,6 +978,20 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 		)
 	}
 	result := make([]cbor.RawMessage, txCount)
+	// Resume from whatever this endorser block already holds. The relay
+	// diffuses transactions over several seconds, so a fetch near the live tip
+	// often ends before the block is whole; the prefix it gathered is retained
+	// against the cached block (below) and seeded back here, so a re-offer
+	// requests only the still-missing tail instead of re-fetching transactions
+	// dingo already has (issue #2629).
+	o.seedLeiosPartialTxs(point.Hash, result)
+	// Retain whatever this attempt ends up holding, so an attempt that stops
+	// short (tail budget, per-attempt deadline, protocol error) leaves the
+	// connection free while its progress survives for the next offer. A
+	// completing attempt's caller stores the whole set, which clears this.
+	defer func() {
+		o.retainLeiosPartialTxs(point.Hash, result)
+	}()
 	// The no-progress guard below guarantees termination (each non-final round
 	// places at least one new transaction, and there are txCount of them); this
 	// is an absolute backstop against a relay that dribbles already-held txs.
@@ -1172,7 +1195,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	source string,
 	deferVerification bool,
 ) error {
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return errors.New(
 			"cannot accept leios announcement without ledger state",
 		)
@@ -1187,7 +1210,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"ranking-block header has no valid endorser-block announcement",
 		)
 	}
-	currentSlot, slotErr := o.LedgerState.CurrentSlot()
+	currentSlot, slotErr := o.ledgerState.CurrentSlot()
 	if slotErr != nil {
 		return fmt.Errorf(
 			"read current slot for announcement validation: %w",
@@ -1201,7 +1224,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			currentSlot,
 		)
 	}
-	announcementStart, timeErr := o.LedgerState.SlotToTime(header.SlotNumber())
+	announcementStart, timeErr := o.ledgerState.SlotToTime(header.SlotNumber())
 	if timeErr != nil {
 		return fmt.Errorf("read announcement slot time: %w", timeErr)
 	}
@@ -1215,7 +1238,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if age > leiosNotifyMaxAnnouncementAge {
 		return fmt.Errorf("announcement is stale by %s", age)
 	}
-	if err := o.LedgerState.ValidateBlockHeaderCrypto(header); err != nil {
+	if err := o.ledgerState.ValidateBlockHeaderCrypto(header); err != nil {
 		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
 			o.deferLeiosAnnouncement(header, raw, source)
 		}
@@ -1293,12 +1316,12 @@ func (o *Ouroboros) retryDeferredLeiosAnnouncements() {
 }
 
 func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
-	if !o.config.EnableLeios || o.EventBus == nil {
+	if !o.config.EnableLeios || o.eventBus == nil {
 		return
 	}
 	retry := func(event.Event) { o.retryDeferredLeiosAnnouncements() }
-	o.EventBus.SubscribeFunc(chain.ChainUpdateEventType, retry)
-	o.EventBus.SubscribeFunc(event.EpochTransitionEventType, retry)
+	o.subscribeTracked(chain.ChainUpdateEventType, retry)
+	o.subscribeTracked(event.EpochTransitionEventType, retry)
 }
 
 // pruneLeiosAnnouncements bounds announcement deduplication state to the
@@ -1306,14 +1329,14 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 // rebuilt from the retained announcements so an old EB cannot keep its size
 // invariant alive after its announcements expire.
 func (o *Ouroboros) pruneLeiosAnnouncements() {
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return
 	}
 	now := time.Now()
 	o.leiosAnnouncementsMu.Lock()
 	defer o.leiosAnnouncementsMu.Unlock()
 	for key, announcement := range o.leiosAnnouncements {
-		start, err := o.LedgerState.SlotToTime(announcement.slot)
+		start, err := o.ledgerState.SlotToTime(announcement.slot)
 		if err != nil || now.Sub(start) > leiosNotifyMaxAnnouncementAge {
 			delete(o.leiosAnnouncements, key)
 		}

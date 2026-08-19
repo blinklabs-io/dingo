@@ -37,6 +37,17 @@ type Pool struct {
 	// RewardAccount (AddrKeyHash), discarding the header. We decode the raw
 	// cert CBOR to preserve the credential type here.
 	RewardAccountCredentialTag uint8
+	// LeiosKeyPublic and LeiosKeyPossessionProof are the pool's registered
+	// Dijkstra/Leios BLS voting key (96-byte compressed G2 public key) and
+	// its proof of possession (48-byte compressed G1 signature), as decoded
+	// from the on-chain leios_key pool-cert field. Both are nil only when
+	// the pool has no leios_key. This is raw registration data -- the proof
+	// is not checked here or anywhere in this package; a key with an
+	// invalid proof is still stored as-is, and only excluded when read back
+	// out for committee construction in ledger/leios, matching upstream's
+	// "invalid proofs are treated as absent" rule.
+	LeiosKeyPublic          []byte
+	LeiosKeyPossessionProof []byte
 	// Owners and Relays are query-only associations (no CASCADE).
 	// The actual parent-child relationship is PoolRegistration -> Owners/Relays.
 	// When Pool is deleted, PoolRegistrations cascade, which then cascade to Owners/Relays.
@@ -67,7 +78,7 @@ type Pool struct {
 // scan. Worth the write cost for a one-shot query behind
 // `leadership-schedule`; it would not be for something on a hot path.
 //
-// Migration v2 declares it; the schema lives in SQL rather than in tags on this
+// Migration v1 declares it; the schema lives in SQL rather than in tags on this
 // struct.
 type PoolOpCertSequence struct {
 	PoolKeyHash []byte
@@ -85,6 +96,8 @@ type PoolRegistration struct {
 	RewardAccount              []byte
 	RewardAccountCredentialTag uint8
 	MetadataHash               []byte
+	LeiosKeyPublic             []byte
+	LeiosKeyPossessionProof    []byte
 	Owners                     []PoolRegistrationOwner
 	Relays                     []PoolRegistrationRelay
 	Pledge                     types.Uint64

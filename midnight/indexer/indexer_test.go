@@ -37,6 +37,8 @@ import (
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	_ "github.com/glebarez/go-sqlite"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2140,6 +2142,65 @@ func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
 		t,
 		idx.cNightUTxOs,
 		"the first tx's in-memory UTxO must be undone along with its rolled-back DB row",
+	)
+}
+
+// TestProcessBlock_PartialFailureDoesNotRecordMetrics verifies that
+// blocksIndexed and eventsTotal stay at zero when a block fails and rolls
+// back, even though one of its transactions wrote a row (tx1's create)
+// before the second transaction's write failed and aborted the whole block.
+// recordBlockEvents is called only after txn.Commit succeeds, specifically
+// so a rolled-back block's counts never partially land in either metric.
+func TestProcessBlock_PartialFailureDoesNotRecordMetrics(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	wrapped := &failingAfterNCreatesStore{testStore: store, remaining: 1}
+	reg := prometheus.NewRegistry()
+	idx, err := New(Config{
+		Metadata:        wrapped,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CNightPolicyID:  testPolicyID,
+		CNightAssetName: testAssetNameHex,
+		PromRegistry:    reg,
+	})
+	require.NoError(t, err)
+
+	tx1 := buildTx(
+		t,
+		pad32("aa000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 100),
+		},
+	)
+	tx2 := buildTx(
+		t,
+		pad32("bb000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 200),
+		},
+	)
+
+	block := testBlock(1, 100, 0xAA)
+	err = idx.processBlock(block, []lcommon.Transaction{tx1, tx2}, 1_000_000)
+	require.Error(
+		t,
+		err,
+		"the second tx's create must fail and abort the whole block",
+	)
+
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(idx.metrics.blocksIndexed),
+		"a rolled-back block must not increment blocksIndexed",
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(idx.metrics.eventsTotal.WithLabelValues("create")),
+		"tx1's successful-then-rolled-back create must not be counted",
 	)
 }
 

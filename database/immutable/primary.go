@@ -18,7 +18,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"os"
 )
 
 const (
@@ -26,7 +25,7 @@ const (
 )
 
 type primaryIndex struct {
-	file            *os.File
+	file            entryReader
 	slot            int
 	lastOffset      uint32
 	version         uint8
@@ -47,11 +46,8 @@ func (e primaryIndexEntry) Empty() bool {
 	return e.empty
 }
 
-func (p *primaryIndex) Open(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
+// Open takes an already-open index file; see chunk.Open for why.
+func (p *primaryIndex) Open(f entryReader) error {
 	p.file = f
 	// Read version
 	if err := binary.Read(f, binary.BigEndian, &p.version); err != nil {

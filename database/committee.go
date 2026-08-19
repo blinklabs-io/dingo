@@ -32,7 +32,7 @@ func (d *Database) GetCommitteeMember(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	ret, err := d.metadata.GetCommitteeMember(coldKey, txn.Metadata())
+	ret, err := d.governanceStore().GetCommitteeMember(coldKey, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func (d *Database) GetActiveCommitteeMembers(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetActiveCommitteeMembers(txn.Metadata())
+	return d.governanceStore().GetActiveCommitteeMembers(txn.Metadata())
 }
 
 // IsCommitteeMemberResigned checks if a committee member has resigned
@@ -62,7 +62,7 @@ func (d *Database) IsCommitteeMemberResigned(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.IsCommitteeMemberResigned(coldKey, txn.Metadata())
+	return d.governanceStore().IsCommitteeMemberResigned(coldKey, txn.Metadata())
 }
 
 // GetResignedCommitteeMembers returns cold credentials whose latest
@@ -75,7 +75,7 @@ func (d *Database) GetResignedCommitteeMembers(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetResignedCommitteeMembers(
+	return d.governanceStore().GetResignedCommitteeMembers(
 		coldKeys,
 		txn.Metadata(),
 	)
@@ -90,7 +90,7 @@ func (d *Database) GetCommitteeActiveCount(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetCommitteeActiveCount(txn.Metadata())
+	return d.governanceStore().GetCommitteeActiveCount(txn.Metadata())
 }
 
 // SetCommitteeMembers upserts governance-enacted committee members. Used
@@ -109,7 +109,7 @@ func (d *Database) SetCommitteeMembers(
 			}
 		}()
 	}
-	if err := d.metadata.SetCommitteeMembers(
+	if err := d.governanceStore().SetCommitteeMembers(
 		members, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf("failed to set committee members: %w", err)
@@ -148,7 +148,7 @@ func (d *Database) SetCommitteeQuorum(
 		}()
 	}
 	stored := &types.Rat{Rat: new(big.Rat).Set(quorum)}
-	if err := d.metadata.SetCommitteeQuorum(
+	if err := d.governanceStore().SetCommitteeQuorum(
 		stored, slot, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf("failed to set committee quorum: %w", err)
@@ -182,7 +182,7 @@ func (d *Database) ClearCommitteeQuorum(
 			}
 		}()
 	}
-	if err := d.metadata.ClearCommitteeQuorum(
+	if err := d.governanceStore().ClearCommitteeQuorum(
 		slot, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf("failed to clear committee quorum: %w", err)
@@ -206,7 +206,7 @@ func (d *Database) GetCommitteeQuorum(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	quorum, err := d.metadata.GetCommitteeQuorum(txn.Metadata())
+	quorum, err := d.governanceStore().GetCommitteeQuorum(txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get committee quorum: %w", err)
 	}
@@ -225,7 +225,7 @@ func (d *Database) GetCommitteeMembers(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	members, err := d.metadata.GetCommitteeMembers(txn.Metadata())
+	members, err := d.governanceStore().GetCommitteeMembers(txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get committee members: %w", err)
 	}
@@ -243,7 +243,7 @@ func (d *Database) GetCommitteeMembersIncludeDeleted(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	members, err := d.metadata.GetCommitteeMembersIncludeDeleted(
+	members, err := d.governanceStore().GetCommitteeMembersIncludeDeleted(
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -271,7 +271,7 @@ func (d *Database) DeleteCommitteeMembersAfterSlot(
 			}
 		}()
 	}
-	if err := d.metadata.DeleteCommitteeMembersAfterSlot(
+	if err := d.governanceStore().DeleteCommitteeMembersAfterSlot(
 		slot, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
@@ -306,7 +306,7 @@ func (d *Database) SoftDeleteCommitteeMembers(
 			}
 		}()
 	}
-	if err := d.metadata.SoftDeleteCommitteeMembers(
+	if err := d.governanceStore().SoftDeleteCommitteeMembers(
 		coldCredHashes, slot, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
@@ -340,7 +340,7 @@ func (d *Database) SoftDeleteAllCommitteeMembers(
 			}
 		}()
 	}
-	if err := d.metadata.SoftDeleteAllCommitteeMembers(
+	if err := d.governanceStore().SoftDeleteAllCommitteeMembers(
 		slot, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(

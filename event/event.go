@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -128,10 +129,14 @@ type EventBus struct {
 	asyncWg    sync.WaitGroup
 	stopCh     chan struct{}
 	closed     bool
-	stopped    bool
-	stopSeq    uint64
-	stopMu     sync.RWMutex
-	stopOpMu   sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
+	// terminalClosing is set before Close begins quiescing the bus. Callback
+	// dispatchers use it to discard events already buffered in their channels;
+	// Stop remains reusable and does not discard buffered callback events.
+	terminalClosing atomic.Bool
+	stopped         bool
+	stopSeq         uint64
+	stopMu          sync.RWMutex
+	stopOpMu        sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
 }
 
 // NewEventBus creates a new EventBus with async worker pool
@@ -207,8 +212,10 @@ type Subscriber interface {
 // channelSubscriber is the in-memory subscriber adapter that preserves the
 // existing channel-based API. Delivery waits for buffer capacity rather than
 // dropping: a subscriber that falls behind backpressures its publishers
-// instead of silently losing events (blinklabs-io/dingo#2932). Close closes
-// the channel so SubscribeFunc goroutines exit.
+// instead of silently losing events (blinklabs-io/dingo#2932). Terminal event
+// bus shutdown may discard queued events before closing the channel so
+// SubscribeFunc goroutines exit without replaying a potentially large backlog
+// into components that are closing; ordinary unsubscribe preserves them.
 type channelSubscriber struct {
 	ch     chan Event
 	logger *slog.Logger
@@ -246,6 +253,50 @@ type channelSubscriber struct {
 	// bus-owned goroutine to wait for; the caller there owns its own read
 	// loop. See waitDone.
 	done chan struct{}
+
+	// stallWaiters counts publishers currently parked waiting for capacity.
+	// Reported with the stall warning: the count is what separates ordinary
+	// backpressure from a subscriber that has stopped draining entirely.
+	stallWaiters atomic.Int64
+	// stallMu guards the stall-warning rate limiter below.
+	stallMu sync.Mutex
+	// stallNextWarn is the earliest time the next stall warning may be
+	// emitted, and stallSuppressed counts the warnings withheld since the
+	// last one was. The limit is per subscriber rather than per delivery:
+	// every parked publisher observes the same stall, so a per-delivery
+	// limit lets the log volume scale with the number of publishers instead
+	// of with time. See TestDeliverStallWarningIsRateLimitedPerSubscriber.
+	stallNextWarn   time.Time
+	stallSuppressed int
+}
+
+// warnStalled reports a subscriber that is not draining, at most once per
+// deliveryStallWarnInterval for the whole subscriber no matter how many
+// publishers are parked on it.
+func (c *channelSubscriber) warnStalled(evtType EventType) {
+	now := time.Now()
+	c.stallMu.Lock()
+	if now.Before(c.stallNextWarn) {
+		c.stallSuppressed++
+		c.stallMu.Unlock()
+		return
+	}
+	suppressed := c.stallSuppressed
+	c.stallSuppressed = 0
+	c.stallNextWarn = now.Add(deliveryStallWarnInterval)
+	c.stallMu.Unlock()
+
+	if c.logger == nil {
+		return
+	}
+	c.logger.Warn(
+		"event delivery stalled: subscriber not draining",
+		"type", evtType,
+		"buffer", cap(c.ch),
+		"stalled_for", deliveryStallWarnInterval,
+		"blocked_publishers", c.stallWaiters.Load(),
+		"suppressed_warnings", suppressed,
+	)
 }
 
 func newChannelSubscriber(
@@ -305,6 +356,8 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 	if c.onBlocked != nil {
 		c.onBlocked()
 	}
+	c.stallWaiters.Add(1)
+	defer c.stallWaiters.Add(-1)
 	stall := time.NewTimer(deliveryStallWarnInterval)
 	defer stall.Stop()
 	for {
@@ -316,14 +369,7 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 		case <-c.busStop:
 			return errChannelSubscriberClosed
 		case <-stall.C:
-			if c.logger != nil {
-				c.logger.Warn(
-					"event delivery stalled: subscriber not draining",
-					"type", evt.Type,
-					"buffer", cap(c.ch),
-					"stalled_for", deliveryStallWarnInterval,
-				)
-			}
+			c.warnStalled(evt.Type)
 			stall.Reset(deliveryStallWarnInterval)
 		}
 	}
@@ -347,6 +393,10 @@ func (c *channelSubscriber) DeliverBlocking(evt Event) error {
 }
 
 func (c *channelSubscriber) Close() {
+	c.close(false)
+}
+
+func (c *channelSubscriber) close(discardQueued bool) {
 	// Release waiting sends before asking for the write lock; they hold the
 	// read lock, so the write lock would otherwise wait on a wait that only
 	// Close can end.
@@ -359,6 +409,16 @@ func (c *channelSubscriber) Close() {
 		return
 	}
 	c.closed = true
+	if discardQueued {
+		for {
+			select {
+			case <-c.ch:
+			default:
+				close(c.ch)
+				return
+			}
+		}
+	}
 	close(c.ch)
 }
 
@@ -512,6 +572,9 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 			if !ok {
 				return
 			}
+			if e.terminalClosing.Load() {
+				return
+			}
 			e.safeHandlerCall(handlerFunc, evt)
 		}
 	}(
@@ -638,7 +701,7 @@ func (e *EventBus) unsubscribe(
 	if chSub != nil {
 		// Close is idempotent, so this is safe even if a concurrent
 		// caller already closed the same subscriber via subToClose above.
-		chSub.Close()
+		chSub.close(false)
 		if wait {
 			chSub.waitDone()
 		}
@@ -948,6 +1011,9 @@ func (e *EventBus) shutdown(restart bool) {
 	// duplicate worker pools when called concurrently
 	e.stopOpMu.Lock()
 	defer e.stopOpMu.Unlock()
+	if !restart {
+		e.terminalClosing.Store(true)
+	}
 
 	// Signal quiesce before taking stopMu for write. Publishers park on a
 	// full subscriber buffer or a full async queue while holding stopMu for
@@ -987,9 +1053,14 @@ func (e *EventBus) shutdown(restart bool) {
 	e.mu.Unlock()
 
 	// Close subscribers outside of lock
+	discardQueued := !restart
 	for _, evtTypeSubs := range subsCopy {
 		for _, sub := range evtTypeSubs {
-			sub.Close()
+			if chSub, ok := sub.(*channelSubscriber); ok {
+				chSub.close(discardQueued)
+			} else {
+				sub.Close()
+			}
 		}
 	}
 
