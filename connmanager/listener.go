@@ -216,6 +216,10 @@ func (c *ConnectionManager) startListener(
 						c.config.Logger.Error(
 							fmt.Sprintf("listener: accept failed: %s", err),
 						)
+						// Close errors on this reject path are intentionally
+						// discarded throughout this loop: the connection is
+						// already being torn down, and the reason is the
+						// logged error above, not whatever Close() reports.
 						_ = conn.Close()
 						continue
 					}
@@ -239,7 +243,7 @@ func (c *ConnectionManager) startListener(
 							err,
 						),
 					)
-					conn.Close()
+					_ = conn.Close()
 					continue
 				}
 				peerAddr := "unknown"
@@ -298,7 +302,7 @@ func (c *ConnectionManager) startListener(
 						conn.RemoteAddr(),
 					),
 				)
-				conn.Close()
+				_ = conn.Close()
 				continue
 			}
 			// From here on, we hold a reserved inbound slot.
@@ -328,7 +332,7 @@ func (c *ConnectionManager) startListener(
 						c.config.MaxConnectionsPerIP,
 					),
 				)
-				conn.Close()
+				_ = conn.Close()
 				c.releaseInboundSlot()
 				continue
 			}
@@ -348,7 +352,7 @@ func (c *ConnectionManager) startListener(
 				)
 				// Release the IP slot since the connection failed
 				c.releaseIPSlot(ipKey)
-				conn.Close()
+				_ = conn.Close()
 				c.releaseInboundSlot()
 				continue
 			}

@@ -105,7 +105,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 							peer.Connection.Id,
 						)
 						if conn != nil {
-							conn.Close()
+							closeConnAndLog(
+								p.config.Logger,
+								conn,
+								"error closing connection for bootstrap peer after exit",
+								"address",
+								peer.Address,
+							)
 						}
 					}
 					peer.Connection = nil
@@ -626,7 +632,13 @@ func (p *PeerGovernor) enforceStateLimit(
 		if peer.Connection != nil && p.config.ConnManager != nil {
 			conn := p.config.ConnManager.GetConnectionById(peer.Connection.Id)
 			if conn != nil {
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing connection for peer removed due to limit exceeded",
+					"address",
+					peer.Address,
+				)
 			}
 		}
 		events = append(events, pendingEvent{

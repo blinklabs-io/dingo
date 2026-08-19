@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"slices"
@@ -1799,7 +1800,11 @@ func (n *Node) Run(ctx context.Context) error {
 				n.blockForger.Stop()
 			}
 			if n.leaderElection != nil {
-				_ = n.leaderElection.Stop()
+				logErrIfNotNil(
+					n.config.logger,
+					"failed to stop leader election during cleanup",
+					n.leaderElection.Stop(),
+				)
 			}
 		})
 	}
@@ -1817,6 +1822,14 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wait for shutdown signal
 	<-n.ctx.Done()
 	return nil
+}
+
+// logErrIfNotNil logs err at Error level if non-nil, so a cleanup step run
+// from the startup failure/shutdown unwind stack doesn't fail silently.
+func logErrIfNotNil(logger *slog.Logger, msg string, err error) {
+	if err != nil {
+		logger.Error(msg, "error", err)
+	}
 }
 
 // taintValue encodes a taint bit for EnforceNodeSettings. A taint records
