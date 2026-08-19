@@ -147,6 +147,366 @@ type SlotRangeStore interface {
 	) (SlotRangeStats, error)
 }
 
+// GovernanceStore owns the Conway governance surface: proposals and the
+// votes cast on them, the constitutional committee, DReps, and the
+// constitution. These are the tables a governance component needs and the
+// only ones it should be able to reach.
+//
+// Treasury and reserves (SetNetworkState, the network-donation methods)
+// stay on MetadataStore despite sitting among the governance sections
+// there: they are ledger economics read by reward calculation, not
+// governance state. ImportDrep likewise stays with the snapshot bulk-import
+// cluster, and ClearDanglingDRepDelegations mutates the account table
+// rather than the drep table.
+type GovernanceStore interface {
+	// Proposal and vote methods
+
+	// GetGovernanceProposal retrieves a governance proposal by transaction hash and action index.
+	GetGovernanceProposal(
+		[]byte, // txHash
+		uint32, // actionIndex
+		types.Txn,
+	) (*models.GovernanceProposal, error)
+
+	// GetActiveGovernanceProposals retrieves all governance proposals that
+	// are still in the active pool (not expired, not enacted, not marked
+	// expired, not soft-deleted).
+	GetActiveGovernanceProposals(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetRatifiedGovernanceProposals returns proposals that have been
+	// ratified but not yet enacted. Used at epoch start by enactment.
+	GetRatifiedGovernanceProposals(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetEnactedGovernanceProposalsAt returns proposals that were enacted at
+	// the given epoch-boundary slot. Used to replay enactment side effects when
+	// stake reward pot reset is reapplied after a boundary commit crash.
+	GetEnactedGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiringGovernanceProposals returns proposals whose
+	// `expires_epoch` is strictly less than the given epoch and that
+	// have not yet been enacted, expired, or soft-deleted. Used at
+	// epoch boundaries to mark expired proposals and return deposits.
+	GetExpiringGovernanceProposals(
+		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
+	// the given epoch-boundary slot. Used to replay deposit-return side effects
+	// when stake reward pot reset is reapplied after a boundary commit crash.
+	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetLastEnactedGovernanceProposal returns the most recently enacted
+	// proposal whose action_type is in the given set, or nil if none
+	// exist. Callers pass the set of action types that share a chain
+	// root per CIP-1694 (e.g., NoConfidence + UpdateCommittee together).
+	// Used to resolve governance action chain roots at ratification
+	// time.
+	GetLastEnactedGovernanceProposal(
+		actionTypes []uint8,
+		txn types.Txn,
+	) (*models.GovernanceProposal, error)
+
+	// SetGovernanceProposal creates or updates a governance proposal.
+	SetGovernanceProposal(
+		*models.GovernanceProposal,
+		types.Txn,
+	) error
+
+	// GetChildGovernanceProposals returns all active proposals whose parent
+	// is the given proposal (matched by txHash + actionIndex). Only returns
+	// proposals not yet enacted, expired, or soft-deleted. Used during
+	// epoch boundary orphan sweeps to find dependents of enacted/expired
+	// proposals and remove them transitively.
+	GetChildGovernanceProposals(
+		parentTxHash []byte,
+		parentActionIdx uint32,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetGovernanceVotes retrieves all votes for a governance proposal.
+	GetGovernanceVotes(
+		uint, // proposalID
+		types.Txn,
+	) ([]*models.GovernanceVote, error)
+
+	// SetGovernanceVote records a vote on a governance proposal.
+	SetGovernanceVote(
+		*models.GovernanceVote,
+		types.Txn,
+	) error
+
+	// Committee methods
+
+	// GetCommitteeMember retrieves a committee member by cold key.
+	GetCommitteeMember(
+		[]byte, // coldKey
+		types.Txn,
+	) (*models.AuthCommitteeHot, error)
+
+	// GetActiveCommitteeMembers retrieves all active committee members.
+	GetActiveCommitteeMembers(types.Txn) ([]*models.AuthCommitteeHot, error)
+
+	// IsCommitteeMemberResigned checks if a committee member has resigned.
+	IsCommitteeMemberResigned(
+		[]byte, // coldKey
+		types.Txn,
+	) (bool, error)
+
+	// GetResignedCommitteeMembers returns the cold credentials whose
+	// latest resignation is after their latest authorization.
+	GetResignedCommitteeMembers(
+		[][]byte, // coldKeys
+		types.Txn,
+	) (map[string]bool, error)
+
+	// GetCommitteeActiveCount returns the number of active (non-resigned)
+	// committee members.
+	GetCommitteeActiveCount(types.Txn) (int, error)
+
+	// Snapshot-imported committee member methods
+
+	// SetCommitteeMembers upserts committee members imported from a
+	// Mithril snapshot. On conflict (same cold_cred_hash), the
+	// expires_epoch and added_slot are updated.
+	SetCommitteeMembers(
+		[]*models.CommitteeMember,
+		types.Txn,
+	) error
+
+	// SetCommitteeQuorum stores the quorum threshold enacted with a
+	// committee update.
+	SetCommitteeQuorum(*types.Rat, uint64, types.Txn) error
+
+	// ClearCommitteeQuorum records that the committee has no
+	// enacted quorum as of the given slot. Used by NoConfidence
+	// enactment so GetCommitteeQuorum falls back to Conway
+	// genesis until a subsequent UpdateCommittee sets a new
+	// quorum.
+	ClearCommitteeQuorum(uint64, types.Txn) error
+
+	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
+	// Returns (nil, nil) when no quorum has been enacted or when the
+	// most recent record is a ClearCommitteeQuorum marker.
+	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
+
+	// GetCommitteeMembers retrieves all active (non-deleted)
+	// snapshot-imported committee members.
+	GetCommitteeMembers(types.Txn) ([]*models.CommitteeMember, error)
+
+	// GetCommitteeMembersIncludeDeleted retrieves every committee
+	// member row, including rows whose deleted_slot is set. Used to
+	// distinguish "committee never seated" from "committee voted out
+	// via NoConfidence" — the latter leaves every row soft-deleted,
+	// which GetCommitteeMembers would hide.
+	GetCommitteeMembersIncludeDeleted(
+		types.Txn,
+	) ([]*models.CommitteeMember, error)
+
+	// DeleteCommitteeMembersAfterSlot removes committee state added
+	// after the given slot and clears deleted_slot for any members
+	// soft-deleted after that slot. Used during chain rollbacks.
+	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
+
+	// SoftDeleteCommitteeMembers marks the given cold credential hashes
+	// as removed by setting deleted_slot. Used by governance enactment
+	// to remove members (UpdateCommittee/NoConfidence action).
+	SoftDeleteCommitteeMembers(
+		coldCredHashes [][]byte,
+		slot uint64,
+		txn types.Txn,
+	) error
+
+	// SoftDeleteAllCommitteeMembers marks all active committee members as
+	// removed. Used by governance enactment for NoConfidence actions.
+	SoftDeleteAllCommitteeMembers(
+		slot uint64,
+		txn types.Txn,
+	) error
+
+	// DRep voting power and activity methods
+
+	// InsertDrepIfAbsent inserts a minimal DRep row when no record
+	// exists for the given full credential identity (tag + hash). If a
+	// row already exists, it is left untouched: added_slot, anchor_url,
+	// anchor_hash, and active are never overwritten. Used on the
+	// vote-replay recovery path to recreate rows lost during
+	// recovery/bootstrap without clobbering real registration metadata.
+	InsertDrepIfAbsent(
+		credentialTag uint8,
+		cred []byte,
+		slot uint64,
+		url string,
+		hash []byte,
+		active bool,
+		txn types.Txn,
+	) error
+
+	// GetDRepVotingPower calculates the voting power for a DRep by summing
+	// the current stake of all delegated accounts, approximated from live
+	// UTxO balance plus reward-account balance. credentialTag distinguishes
+	// key (0) from script (1) DRep credentials that share the same hash.
+	// expiryEpoch is the CIP-0163 reward-account inactivity gate: 0 excludes
+	// no accounts (gate off, byte-identical to the pre-CIP query); >0
+	// excludes accounts whose expiration_epoch is nonzero and less than
+	// expiryEpoch.
+	GetDRepVotingPower(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // expiryEpoch
+		types.Txn,
+	) (uint64, error)
+
+	// GetDRepDelegators returns the stake credentials currently delegating
+	// their voting power to the given DRep, in canonical (tag, hash) order.
+	// This populates the `delegators` member of the GetDRepState ledger
+	// query result. credentialTag distinguishes key (0) from script (1)
+	// DRep credentials that share the same 28-byte hash.
+	GetDRepDelegators(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
+	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
+	// no delegated stake are omitted. Use StakeCredentialRef to carry both
+	// the tag and hash so that key-hash and script-hash DReps sharing a
+	// 28-byte hash are tallied independently. expiryEpoch is the CIP-0163
+	// gate; see GetDRepVotingPower.
+	GetDRepVotingPowerBatch(
+		drepCredentials []models.StakeCredentialRef,
+		expiryEpoch uint64,
+		txn types.Txn,
+	) (map[string]uint64, error)
+
+	// GetDRepVotingPowerByType returns voting power grouped by DRep
+	// delegation type. This is used for predefined DRep options such
+	// as AlwaysAbstain and AlwaysNoConfidence, which do not have a
+	// credential hash. expiryEpoch is the CIP-0163 gate; see
+	// GetDRepVotingPower.
+	GetDRepVotingPowerByType(
+		drepTypes []uint64,
+		expiryEpoch uint64,
+		txn types.Txn,
+	) (map[uint64]uint64, error)
+
+	// UpdateDRepActivity updates the DRep's last activity epoch and
+	// recalculates the expiry epoch. credentialTag distinguishes key (0)
+	// from script (1) DRep credentials that share the same 28-byte hash.
+	UpdateDRepActivity(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // activityEpoch
+		uint64, // inactivityPeriod
+		types.Txn,
+	) error
+
+	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
+	// or before the given epoch.
+	GetExpiredDReps(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.Drep, error)
+
+	// Constitution methods
+
+	// GetConstitution retrieves the current constitution.
+	GetConstitution(types.Txn) (*models.Constitution, error)
+
+	// SetConstitution sets the constitution.
+	SetConstitution(
+		*models.Constitution,
+		types.Txn,
+	) error
+
+	// DeleteConstitutionsAfterSlot removes constitutions added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	// This is used during chain rollbacks.
+	DeleteConstitutionsAfterSlot(uint64, types.Txn) error
+
+	// Proposal and vote rollback methods
+
+	// DeleteGovernanceProposalsAfterSlot removes proposals added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	DeleteGovernanceProposalsAfterSlot(uint64, types.Txn) error
+
+	// DeleteGovernanceVotesAfterSlot removes votes added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	DeleteGovernanceVotesAfterSlot(uint64, types.Txn) error
+
+	// DRep registration and state methods
+
+	// GetDrep retrieves a DRep by credential hash only (no tag filter).
+	// Used for the protocol validation path where only a Blake2b224 hash
+	// is available (e.g. LedgerView.DRepRegistration from gouroboros).
+	GetDrep(
+		[]byte, // credential
+		bool, // includeInactive
+		types.Txn,
+	) (*models.Drep, error)
+
+	// GetDrepByCredential retrieves a DRep using the full credential
+	// identity: tag (0=key, 1=script) plus 28-byte hash. Use this for
+	// all internal callers that know the credential type.
+	GetDrepByCredential(
+		uint8, // credentialTag
+		[]byte, // credential
+		bool, // includeInactive
+		types.Txn,
+	) (*models.Drep, error)
+
+	// GetActiveDreps retrieves all active DReps.
+	GetActiveDreps(types.Txn) ([]*models.Drep, error)
+
+	// GetDreps retrieves every DRep row, including deregistered ones,
+	// ordered by the credential's first on-chain appearance (earliest
+	// registration, update, or delegation reference). Used by the
+	// Blockfrost DRep list endpoint.
+	GetDreps(types.Txn) ([]models.DrepListRow, error)
+
+	// GetPredefinedDrepFirstSeenSlots returns the earliest delegation
+	// added_slot per predefined DRep type (AlwaysAbstain,
+	// AlwaysNoConfidence). Types never delegated to are absent.
+	GetPredefinedDrepFirstSeenSlots(types.Txn) (map[uint64]uint64, error)
+
+	// GetDrepLastRegistrationSlot returns the added_slot of the most
+	// recent registration certificate for the DRep credential, or 0
+	// when no registration certificate history exists. Blockfrost's
+	// active_epoch reports the most recent registration, which the
+	// mutable drep.added_slot cannot provide because update and
+	// deregistration certificates overwrite it.
+	GetDrepLastRegistrationSlot(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (uint64, error)
+
+	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
+	// fixture seeding from outside the plugin packages) that already
+	// have a fully-populated model and want a single-row insert without
+	// the registration-record side effects of ImportDrep.
+	CreateDrep(types.Txn, *models.Drep) error
+
+	// RestoreDrepStateAtSlot reverts DRep state to the given slot. DReps
+	// registered only after the slot are deleted; remaining DReps have their
+	// anchor and active status restored.
+	RestoreDrepStateAtSlot(uint64, types.Txn) error
+}
+
 // MetadataStore composes domain capabilities for legacy callers. New
 // components should depend on the smallest domain interface they consume.
 // Additional domain interfaces are extracted as their SQL ports land.
@@ -154,6 +514,7 @@ type MetadataStore interface {
 	LifecycleStore
 	SettingsStore
 	TransactionStore
+	GovernanceStore
 
 	// Ledger state methods
 
@@ -185,12 +546,6 @@ type MetadataStore interface {
 		*models.RegistrationDrep,
 		types.Txn,
 	) error
-
-	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
-	// fixture seeding from outside the plugin packages) that already
-	// have a fully-populated model and want a single-row insert without
-	// the registration-record side effects of ImportDrep.
-	CreateDrep(types.Txn, *models.Drep) error
 
 	// CreateAccount inserts an Account row directly. See CreateDrep
 	// for the rationale; this is the simple-insert sibling of
@@ -857,51 +1212,6 @@ type MetadataStore interface {
 		lcommon.Blake2b256,
 		types.Txn,
 	) (*models.Datum, error)
-
-	// GetDrep retrieves a DRep by credential hash only (no tag filter).
-	// Used for the protocol validation path where only a Blake2b224 hash
-	// is available (e.g. LedgerView.DRepRegistration from gouroboros).
-	GetDrep(
-		[]byte, // credential
-		bool, // includeInactive
-		types.Txn,
-	) (*models.Drep, error)
-
-	// GetDrepByCredential retrieves a DRep using the full credential
-	// identity: tag (0=key, 1=script) plus 28-byte hash. Use this for
-	// all internal callers that know the credential type.
-	GetDrepByCredential(
-		uint8, // credentialTag
-		[]byte, // credential
-		bool, // includeInactive
-		types.Txn,
-	) (*models.Drep, error)
-
-	// GetActiveDreps retrieves all active DReps.
-	GetActiveDreps(types.Txn) ([]*models.Drep, error)
-
-	// GetDreps retrieves every DRep row, including deregistered ones,
-	// ordered by the credential's first on-chain appearance (earliest
-	// registration, update, or delegation reference). Used by the
-	// Blockfrost DRep list endpoint.
-	GetDreps(types.Txn) ([]models.DrepListRow, error)
-
-	// GetPredefinedDrepFirstSeenSlots returns the earliest delegation
-	// added_slot per predefined DRep type (AlwaysAbstain,
-	// AlwaysNoConfidence). Types never delegated to are absent.
-	GetPredefinedDrepFirstSeenSlots(types.Txn) (map[uint64]uint64, error)
-
-	// GetDrepLastRegistrationSlot returns the added_slot of the most
-	// recent registration certificate for the DRep credential, or 0
-	// when no registration certificate history exists. Blockfrost's
-	// active_epoch reports the most recent registration, which the
-	// mutable drep.added_slot cannot provide because update and
-	// deregistration certificates overwrite it.
-	GetDrepLastRegistrationSlot(
-		uint8, // credentialTag
-		[]byte, // credential
-		types.Txn,
-	) (uint64, error)
 
 	// GetActiveAccountCredentials returns the stake credentials (tag + key) of
 	// every currently active account. Used by Mithril v2 catch-up
@@ -1798,285 +2108,6 @@ type MetadataStore interface {
 	// label index records added after the given slot.
 	DeleteTransactionMetadataLabelsAfterSlot(uint64, types.Txn) error
 
-	// Governance methods
-
-	// GetGovernanceProposal retrieves a governance proposal by transaction hash and action index.
-	GetGovernanceProposal(
-		[]byte, // txHash
-		uint32, // actionIndex
-		types.Txn,
-	) (*models.GovernanceProposal, error)
-
-	// GetActiveGovernanceProposals retrieves all governance proposals that
-	// are still in the active pool (not expired, not enacted, not marked
-	// expired, not soft-deleted).
-	GetActiveGovernanceProposals(
-		uint64, // epoch
-		types.Txn,
-	) ([]*models.GovernanceProposal, error)
-
-	// GetRatifiedGovernanceProposals returns proposals that have been
-	// ratified but not yet enacted. Used at epoch start by enactment.
-	GetRatifiedGovernanceProposals(
-		types.Txn,
-	) ([]*models.GovernanceProposal, error)
-
-	// GetEnactedGovernanceProposalsAt returns proposals that were enacted at
-	// the given epoch-boundary slot. Used to replay enactment side effects when
-	// stake reward pot reset is reapplied after a boundary commit crash.
-	GetEnactedGovernanceProposalsAt(
-		epoch uint64,
-		slot uint64,
-		txn types.Txn,
-	) ([]*models.GovernanceProposal, error)
-
-	// GetExpiringGovernanceProposals returns proposals whose
-	// `expires_epoch` is strictly less than the given epoch and that
-	// have not yet been enacted, expired, or soft-deleted. Used at
-	// epoch boundaries to mark expired proposals and return deposits.
-	GetExpiringGovernanceProposals(
-		epoch uint64,
-		txn types.Txn,
-	) ([]*models.GovernanceProposal, error)
-
-	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
-	// the given epoch-boundary slot. Used to replay deposit-return side effects
-	// when stake reward pot reset is reapplied after a boundary commit crash.
-	GetExpiredGovernanceProposalsAt(
-		epoch uint64,
-		slot uint64,
-		txn types.Txn,
-	) ([]*models.GovernanceProposal, error)
-
-	// GetLastEnactedGovernanceProposal returns the most recently enacted
-	// proposal whose action_type is in the given set, or nil if none
-	// exist. Callers pass the set of action types that share a chain
-	// root per CIP-1694 (e.g., NoConfidence + UpdateCommittee together).
-	// Used to resolve governance action chain roots at ratification
-	// time.
-	GetLastEnactedGovernanceProposal(
-		actionTypes []uint8,
-		txn types.Txn,
-	) (*models.GovernanceProposal, error)
-
-	// SetGovernanceProposal creates or updates a governance proposal.
-	SetGovernanceProposal(
-		*models.GovernanceProposal,
-		types.Txn,
-	) error
-
-	// GetChildGovernanceProposals returns all active proposals whose parent
-	// is the given proposal (matched by txHash + actionIndex). Only returns
-	// proposals not yet enacted, expired, or soft-deleted. Used during
-	// epoch boundary orphan sweeps to find dependents of enacted/expired
-	// proposals and remove them transitively.
-	GetChildGovernanceProposals(
-		parentTxHash []byte,
-		parentActionIdx uint32,
-		txn types.Txn,
-	) ([]*models.GovernanceProposal, error)
-
-	// GetGovernanceVotes retrieves all votes for a governance proposal.
-	GetGovernanceVotes(
-		uint, // proposalID
-		types.Txn,
-	) ([]*models.GovernanceVote, error)
-
-	// SetGovernanceVote records a vote on a governance proposal.
-	SetGovernanceVote(
-		*models.GovernanceVote,
-		types.Txn,
-	) error
-
-	// Committee methods
-
-	// GetCommitteeMember retrieves a committee member by cold key.
-	GetCommitteeMember(
-		[]byte, // coldKey
-		types.Txn,
-	) (*models.AuthCommitteeHot, error)
-
-	// GetActiveCommitteeMembers retrieves all active committee members.
-	GetActiveCommitteeMembers(types.Txn) ([]*models.AuthCommitteeHot, error)
-
-	// IsCommitteeMemberResigned checks if a committee member has resigned.
-	IsCommitteeMemberResigned(
-		[]byte, // coldKey
-		types.Txn,
-	) (bool, error)
-
-	// GetResignedCommitteeMembers returns the cold credentials whose
-	// latest resignation is after their latest authorization.
-	GetResignedCommitteeMembers(
-		[][]byte, // coldKeys
-		types.Txn,
-	) (map[string]bool, error)
-
-	// GetCommitteeActiveCount returns the number of active (non-resigned)
-	// committee members.
-	GetCommitteeActiveCount(types.Txn) (int, error)
-
-	// Snapshot-imported committee member methods
-
-	// SetCommitteeMembers upserts committee members imported from a
-	// Mithril snapshot. On conflict (same cold_cred_hash), the
-	// expires_epoch and added_slot are updated.
-	SetCommitteeMembers(
-		[]*models.CommitteeMember,
-		types.Txn,
-	) error
-
-	// SetCommitteeQuorum stores the quorum threshold enacted with a
-	// committee update.
-	SetCommitteeQuorum(*types.Rat, uint64, types.Txn) error
-
-	// ClearCommitteeQuorum records that the committee has no
-	// enacted quorum as of the given slot. Used by NoConfidence
-	// enactment so GetCommitteeQuorum falls back to Conway
-	// genesis until a subsequent UpdateCommittee sets a new
-	// quorum.
-	ClearCommitteeQuorum(uint64, types.Txn) error
-
-	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
-	// Returns (nil, nil) when no quorum has been enacted or when the
-	// most recent record is a ClearCommitteeQuorum marker.
-	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
-
-	// GetCommitteeMembers retrieves all active (non-deleted)
-	// snapshot-imported committee members.
-	GetCommitteeMembers(types.Txn) ([]*models.CommitteeMember, error)
-
-	// GetCommitteeMembersIncludeDeleted retrieves every committee
-	// member row, including rows whose deleted_slot is set. Used to
-	// distinguish "committee never seated" from "committee voted out
-	// via NoConfidence" — the latter leaves every row soft-deleted,
-	// which GetCommitteeMembers would hide.
-	GetCommitteeMembersIncludeDeleted(
-		types.Txn,
-	) ([]*models.CommitteeMember, error)
-
-	// DeleteCommitteeMembersAfterSlot removes committee state added
-	// after the given slot and clears deleted_slot for any members
-	// soft-deleted after that slot. Used during chain rollbacks.
-	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
-
-	// SoftDeleteCommitteeMembers marks the given cold credential hashes
-	// as removed by setting deleted_slot. Used by governance enactment
-	// to remove members (UpdateCommittee/NoConfidence action).
-	SoftDeleteCommitteeMembers(
-		coldCredHashes [][]byte,
-		slot uint64,
-		txn types.Txn,
-	) error
-
-	// SoftDeleteAllCommitteeMembers marks all active committee members as
-	// removed. Used by governance enactment for NoConfidence actions.
-	SoftDeleteAllCommitteeMembers(
-		slot uint64,
-		txn types.Txn,
-	) error
-
-	// DRep voting power and activity methods
-
-	// InsertDrepIfAbsent inserts a minimal DRep row when no record
-	// exists for the given full credential identity (tag + hash). If a
-	// row already exists, it is left untouched: added_slot, anchor_url,
-	// anchor_hash, and active are never overwritten. Used on the
-	// vote-replay recovery path to recreate rows lost during
-	// recovery/bootstrap without clobbering real registration metadata.
-	InsertDrepIfAbsent(
-		credentialTag uint8,
-		cred []byte,
-		slot uint64,
-		url string,
-		hash []byte,
-		active bool,
-		txn types.Txn,
-	) error
-
-	// GetDRepVotingPower calculates the voting power for a DRep by summing
-	// the current stake of all delegated accounts, approximated from live
-	// UTxO balance plus reward-account balance. credentialTag distinguishes
-	// key (0) from script (1) DRep credentials that share the same hash.
-	// expiryEpoch is the CIP-0163 reward-account inactivity gate: 0 excludes
-	// no accounts (gate off, byte-identical to the pre-CIP query); >0
-	// excludes accounts whose expiration_epoch is nonzero and less than
-	// expiryEpoch.
-	GetDRepVotingPower(
-		uint8, // credentialTag
-		[]byte, // drepCredential
-		uint64, // expiryEpoch
-		types.Txn,
-	) (uint64, error)
-
-	// GetDRepDelegators returns the stake credentials currently delegating
-	// their voting power to the given DRep, in canonical (tag, hash) order.
-	// This populates the `delegators` member of the GetDRepState ledger
-	// query result. credentialTag distinguishes key (0) from script (1)
-	// DRep credentials that share the same 28-byte hash.
-	GetDRepDelegators(
-		uint8, // credentialTag
-		[]byte, // drepCredential
-		types.Txn,
-	) ([]models.StakeCredentialRef, error)
-
-	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
-	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
-	// no delegated stake are omitted. Use StakeCredentialRef to carry both
-	// the tag and hash so that key-hash and script-hash DReps sharing a
-	// 28-byte hash are tallied independently. expiryEpoch is the CIP-0163
-	// gate; see GetDRepVotingPower.
-	GetDRepVotingPowerBatch(
-		drepCredentials []models.StakeCredentialRef,
-		expiryEpoch uint64,
-		txn types.Txn,
-	) (map[string]uint64, error)
-
-	// GetDRepVotingPowerByType returns voting power grouped by DRep
-	// delegation type. This is used for predefined DRep options such
-	// as AlwaysAbstain and AlwaysNoConfidence, which do not have a
-	// credential hash. expiryEpoch is the CIP-0163 gate; see
-	// GetDRepVotingPower.
-	GetDRepVotingPowerByType(
-		drepTypes []uint64,
-		expiryEpoch uint64,
-		txn types.Txn,
-	) (map[uint64]uint64, error)
-
-	// UpdateDRepActivity updates the DRep's last activity epoch and
-	// recalculates the expiry epoch. credentialTag distinguishes key (0)
-	// from script (1) DRep credentials that share the same 28-byte hash.
-	UpdateDRepActivity(
-		uint8, // credentialTag
-		[]byte, // drepCredential
-		uint64, // activityEpoch
-		uint64, // inactivityPeriod
-		types.Txn,
-	) error
-
-	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
-	// or before the given epoch.
-	GetExpiredDReps(
-		uint64, // epoch
-		types.Txn,
-	) ([]*models.Drep, error)
-
-	// Constitution methods
-
-	// GetConstitution retrieves the current constitution.
-	GetConstitution(types.Txn) (*models.Constitution, error)
-
-	// SetConstitution sets the constitution.
-	SetConstitution(
-		*models.Constitution,
-		types.Txn,
-	) error
-
-	// DeleteConstitutionsAfterSlot removes constitutions added after the given slot
-	// and clears deleted_slot for any that were soft-deleted after that slot.
-	// This is used during chain rollbacks.
-	DeleteConstitutionsAfterSlot(uint64, types.Txn) error
-
 	// Network state methods
 
 	// SetNetworkState stores the treasury and reserves balances.
@@ -2111,16 +2142,6 @@ type MetadataStore interface {
 	// after the given slot. This is used during chain rollbacks.
 	DeleteNetworkDonationsAfterSlot(uint64, types.Txn) error
 
-	// Governance rollback methods
-
-	// DeleteGovernanceProposalsAfterSlot removes proposals added after the given slot
-	// and clears deleted_slot for any that were soft-deleted after that slot.
-	DeleteGovernanceProposalsAfterSlot(uint64, types.Txn) error
-
-	// DeleteGovernanceVotesAfterSlot removes votes added after the given slot
-	// and clears deleted_slot for any that were soft-deleted after that slot.
-	DeleteGovernanceVotesAfterSlot(uint64, types.Txn) error
-
 	// State rollback methods
 
 	// DeleteCertificatesAfterSlot removes all certificate records added after
@@ -2139,11 +2160,6 @@ type MetadataStore interface {
 	// denormalized fields restored from the most recent registration at or
 	// before the slot.
 	RestorePoolStateAtSlot(uint64, types.Txn) error
-
-	// RestoreDrepStateAtSlot reverts DRep state to the given slot. DReps
-	// registered only after the slot are deleted; remaining DReps have their
-	// anchor and active status restored.
-	RestoreDrepStateAtSlot(uint64, types.Txn) error
 
 	// ClearDanglingDRepDelegations implements the cardano-ledger Conway
 	// HARDFORK STS rule for protocol major version 10 (Plomin, mainnet

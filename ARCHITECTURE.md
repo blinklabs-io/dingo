@@ -66,9 +66,16 @@ business behavior is implemented once in `sqlstore` and dialect translation is
 limited to SQL mechanics.
 
 The public compatibility interface is decomposing into narrow
-`LifecycleStore`, `SettingsStore`, `TransactionStore`, and `SlotRangeStore`
-capabilities so components need not inherit the full historical metadata
-surface. Concrete SQL handles are not exposed; repository tests use internal
+`LifecycleStore`, `SettingsStore`, `TransactionStore`, `SlotRangeStore`, and
+`GovernanceStore` capabilities so components need not inherit the full
+historical metadata surface. `GovernanceStore` is the first whole storage
+domain to move rather than a cross-cutting capability: it owns the Conway
+governance tables (proposals, votes, the constitutional committee, DReps, and
+the constitution), and `Database`'s governance, committee, DRep, and
+constitution facades reach their backend through `governanceStore()` so the
+compiler holds them inside that domain. Treasury and reserves stay on
+`MetadataStore` -- they are ledger economics read by reward calculation, not
+governance state. Concrete SQL handles are not exposed; repository tests use internal
 fixtures when schema seeding or assertions require raw SQL.
 
 Startup reserves the write connection, acquires the backend migration lock,

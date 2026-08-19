@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -27,9 +28,10 @@ import (
 )
 
 // RunMetadataStoreConformance exercises the dialect-neutral contract
-// documented on metadata.SettingsStore, metadata.TransactionStore, and
-// metadata.SlotRangeStore against newStore(). newStore is called once; the
-// returned store is reused across every subtest.
+// documented on metadata.SettingsStore, metadata.TransactionStore,
+// metadata.SlotRangeStore, and metadata.GovernanceStore against newStore().
+// newStore is called once; the returned store is reused across every
+// subtest.
 //
 // The suite is deliberately scoped to that shared, capability-level surface
 // rather than the ~150 domain methods MetadataStore composes on top of it:
@@ -202,6 +204,75 @@ func RunMetadataStoreConformance(
 			require.Zero(t, stats.LastSlot)
 		})
 	}
+
+	// Unlike the SlotRangeStore block above this needs no runtime check:
+	// MetadataStore composes GovernanceStore, so the conversion is static.
+	// Naming the narrow handle is what makes the subtests below exercise
+	// the governance domain the way a GovernanceStore-only caller would,
+	// against a real database, on every backend that runs this suite.
+	var governanceStore metadata.GovernanceStore = store
+
+	t.Run("GovernanceReadsOnEmptyState", func(t *testing.T) {
+		// Reading through the narrowed handle, not through store: a
+		// GovernanceStore-only caller has no ReadTransaction of its own,
+		// so the combination it will actually use in production is a
+		// transaction handed in from outside.
+		txn := store.ReadTransaction()
+		defer func() { require.NoError(t, txn.Rollback()) }()
+
+		proposals, err := governanceStore.GetActiveGovernanceProposals(
+			1, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, proposals)
+
+		ratified, err := governanceStore.GetRatifiedGovernanceProposals(txn)
+		require.NoError(t, err)
+		require.Empty(t, ratified)
+
+		// Documented on GovernanceStore as (nil, nil) before any
+		// UpdateCommittee has been enacted, rather than a not-found error.
+		quorum, err := governanceStore.GetCommitteeQuorum(txn)
+		require.NoError(t, err)
+		require.Nil(t, quorum)
+
+		count, err := governanceStore.GetCommitteeActiveCount(txn)
+		require.NoError(t, err)
+		require.Zero(t, count)
+
+		dreps, err := governanceStore.GetActiveDreps(txn)
+		require.NoError(t, err)
+		require.Empty(t, dreps)
+	})
+
+	t.Run("ConstitutionRoundTripThroughNarrowStore", func(t *testing.T) {
+		// A write as well as a read: a domain interface that can only be
+		// read from would still compile at every call site the split
+		// moved over, so the round trip is what proves the narrowing is
+		// usable rather than merely type-correct.
+		write := store.Transaction()
+		require.NoError(t, governanceStore.SetConstitution(
+			&models.Constitution{
+				AnchorURL:  "https://example.invalid/constitution",
+				AnchorHash: []byte("conformance-anchor-hash"),
+				PolicyHash: []byte("conformance-policy-hash"),
+				AddedSlot:  42,
+			},
+			write,
+		))
+		require.NoError(t, write.Commit())
+
+		read := store.ReadTransaction()
+		defer func() { require.NoError(t, read.Rollback()) }()
+
+		got, err := governanceStore.GetConstitution(read)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Equal(
+			t, "https://example.invalid/constitution", got.AnchorURL,
+		)
+		require.Equal(t, uint64(42), got.AddedSlot)
+	})
 
 	t.Run("OperationsCompleteWithinTimeout", func(t *testing.T) {
 		// Not a benchmark: a generous bound that only catches a genuine

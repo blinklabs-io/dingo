@@ -15,11 +15,14 @@ is caught the same way regardless of which plugin it happens in.
   concurrent writes to distinct keys, a large (1MiB) payload round-trip, and
   a basic operation-timeout bound.
 - `RunMetadataStoreConformance` — the dialect-neutral capability surface
-  every metadata plugin shares (`SettingsStore`, `TransactionStore`, and
-  `SlotRangeStore` when the concrete store implements it): commit-timestamp
-  and node-settings round-trips, settings-gate first-write-wins semantics
-  including a concurrent insert-if-absent race, transaction commit/rollback,
-  slot-range stats on empty data, and the same operation-timeout bound.
+  every metadata plugin shares (`SettingsStore`, `TransactionStore`,
+  `SlotRangeStore` when the concrete store implements it, and
+  `GovernanceStore`): commit-timestamp and node-settings round-trips,
+  settings-gate first-write-wins semantics including a concurrent
+  insert-if-absent race, transaction commit/rollback, slot-range stats on
+  empty data, governance reads on empty state and a constitution round trip
+  through the narrowed governance handle, and the same operation-timeout
+  bound.
 - `AssertNoGoroutineLeak` / `AssertRepeatedLifecycleIsSafe` — resource checks
   run outside the two suites above (see [Resource checks](#resource-checks)).
 
@@ -29,14 +32,18 @@ BadCredentials}FailsCleanly` tests, living in that plugin's own package
 rather than in this shared suite because the failure mode differs per
 backend (a bad endpoint URL vs. a bad host:port vs. a bad credentials file).
 
-What this suite intentionally does not cover: the ~150 domain methods
-`MetadataStore` composes beyond `SettingsStore`/`TransactionStore` (accounts,
-pools, DReps, governance, stake snapshots, ...). `sqlite`, `mysql`, and
-`postgres` are thin driver shims around one shared
+What this suite intentionally does not cover: the remaining domain methods
+`MetadataStore` composes beyond the narrow interfaces above (accounts, pools,
+stake snapshots, rewards, UTxOs, ...). `sqlite`, `mysql`, and `postgres` are
+thin driver shims around one shared
 `database/plugin/metadata/sqlstore.Store` implementation, so those domain
 methods have no per-dialect logic to differentiate here;
 `database/plugin/metadata/sqlstore/dialect_integration_test.go` already
-exercises that shared implementation against real Postgres/MySQL.
+exercises that shared implementation against real Postgres/MySQL. The
+governance methods are the exception, and only because `GovernanceStore` is
+the first extracted domain: the handful covered here exist to prove the
+narrowed interface is usable against a live database on every backend, not
+to test governance behavior.
 
 ## Adding a new plugin's conformance test
 

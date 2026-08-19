@@ -21,7 +21,19 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+)
+
+// The sqlite, mysql, and postgres metadata providers are dialect shims that
+// each return *Store from their own NewSQLStore, so asserting on *Store here
+// covers all three backends rather than one. What the assertion cannot show
+// is that the narrowed interface actually works against a live database;
+// that is storagetest.RunMetadataStoreConformance, which every provider
+// package runs from its own conformance_test.go.
+var (
+	_ metadata.GovernanceStore = (*Store)(nil)
+	_ metadata.MetadataStore   = (*Store)(nil)
 )
 
 const governanceProposalColumns = `

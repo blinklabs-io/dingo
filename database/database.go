@@ -185,6 +185,14 @@ func (d *Database) Metadata() metadata.MetadataStore {
 	return d.metadata
 }
 
+// governanceStore returns the metadata store narrowed to the Conway
+// governance surface. The governance, committee, DRep, and constitution
+// facade methods go through this rather than d.metadata so the compiler
+// keeps them inside their own storage domain.
+func (d *Database) governanceStore() metadata.GovernanceStore {
+	return d.metadata
+}
+
 // Transaction starts a new database transaction and returns a handle to it
 func (d *Database) Transaction(readWrite bool) *Txn {
 	return NewTxn(d, readWrite)
