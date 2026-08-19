@@ -44,6 +44,15 @@ var guardedMutexes = []string{
 
 // knownNilQueuePublishersUnderLock is intentionally empty. A guarded caller
 // must always pass its pending queue; a nil queue would publish inline.
+//
+// The ledger.tx undo emit reached from rollbackChainAndState is covered by
+// neither test, and deliberately so. This scan is intra-procedural and that
+// path holds the lock and the publish in different functions, so it does not
+// match here; TestChainsyncResyncPublishPathsUnderLock does not match it
+// either, since that one parses only chainsync.go and only fires on
+// ChainsyncResyncEventType. The path is a documented exception rather than a
+// checked one -- see the ledger.tx section of ARCHITECTURE.md for why it has
+// to publish under chainsyncMutex and what that requires of subscribers.
 var knownNilQueuePublishersUnderLock []string
 
 // TestNoEventBusPublishWhileHoldingChainsyncMutex enforces that nothing in
@@ -271,7 +280,8 @@ func violations(fn *ast.FuncDecl, queueParam map[string]int) []violation {
 			events = append(events, lockEvent{
 				pos: call.Pos(), kind: kind, mutex: inner.Sel.Name,
 			})
-		case "Publish", "PublishBlocking", "PublishAsync":
+		case "Publish", "PublishBlocking", "PublishAsync",
+			"PublishOrdered", "PublishOrderedContext":
 			// Only EventBus publishes; other types have Publish methods.
 			// PublishAsync is included: it does not park on a
 			// subscriber's buffer, but it does wait for room in the
@@ -279,7 +289,9 @@ func violations(fn *ast.FuncDecl, queueParam map[string]int) []violation {
 			// queue is drained by a worker pool whose workers run
 			// subscriber handlers. A handler that needs the publisher's
 			// mutex parks a worker, the queue fills, and the same cycle
-			// closes.
+			// closes. PublishOrdered and PublishOrderedContext are
+			// included for the same reason against their per-event-type
+			// lane.
 			if inner.Sel.Name != "EventBus" {
 				return true
 			}

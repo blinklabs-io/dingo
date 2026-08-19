@@ -20,7 +20,6 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -245,25 +244,21 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// Emit transaction events only after all processing succeeds,
 	// so subscribers never see an "applied" event for a transaction
 	// whose governance processing failed and caused the apply to abort.
-	if ls.config.EventBus != nil {
-		for i, tr := range d.Transactions {
-			if !appliedTxs[i] {
-				continue
-			}
-			ls.config.EventBus.PublishAsync(
-				TransactionEventType,
-				event.NewEvent(
-					TransactionEventType,
-					TransactionEvent{
-						Transaction: tr.Tx,
-						Point:       d.Point,
-						BlockNumber: d.BlockNumber,
-						TxIndex:     uint32(tr.Index), //nolint:gosec
-						Rollback:    false,
-					},
-				),
-			)
+	// Emitted on the ledger.tx ordered lane so a subscriber sees this
+	// block's transactions in index order, and sees them after the undo
+	// events of any rollback that preceded them. See
+	// publishTransactionEvent.
+	for i, tr := range d.Transactions {
+		if !appliedTxs[i] {
+			continue
 		}
+		ls.publishTransactionEvent(TransactionEvent{
+			Transaction: tr.Tx,
+			Point:       d.Point,
+			BlockNumber: d.BlockNumber,
+			TxIndex:     uint32(tr.Index), //nolint:gosec
+			Rollback:    false,
+		})
 	}
 
 	return nil
