@@ -37,7 +37,7 @@ func (d *Database) DeleteCertificatesAfterSlot(
 			}
 		}()
 	}
-	if err := d.metadata.DeleteCertificatesAfterSlot(
+	if err := d.certificateStore().DeleteCertificatesAfterSlot(
 		slot,
 		txn.Metadata(),
 	); err != nil {
@@ -71,7 +71,7 @@ func (d *Database) GetStakeRegistrationsByCredential(
 	stakingKey []byte,
 	txn *Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
-	return d.metadata.GetStakeRegistrationsByCredential(
+	return d.certificateStore().GetStakeRegistrationsByCredential(
 		credentialTag,
 		stakingKey,
 		txn.Metadata(),

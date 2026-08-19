@@ -65,17 +65,30 @@ repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is
 limited to SQL mechanics.
 
-The public compatibility interface is decomposing into narrow
-`LifecycleStore`, `SettingsStore`, `TransactionStore`, `SlotRangeStore`, and
-`GovernanceStore` capabilities so components need not inherit the full
-historical metadata surface. `GovernanceStore` is the first whole storage
-domain to move rather than a cross-cutting capability: it owns the Conway
-governance tables (proposals, votes, the constitutional committee, DReps, and
-the constitution), and `Database`'s governance, committee, DRep, and
-constitution facades reach their backend through `governanceStore()` so the
-compiler holds them inside that domain. Treasury and reserves stay on
-`MetadataStore` -- they are ledger economics read by reward calculation, not
-governance state. Concrete SQL handles are not exposed; repository tests use internal
+The public compatibility interface is decomposing into narrow capabilities so
+components need not inherit the full historical metadata surface. Three are
+cross-cutting -- `LifecycleStore`, `SettingsStore`, and `TxnStore` (which
+creates the `database/types.Txn` handles), plus `SlotRangeStore` for the API
+adapters. Six are storage domains: `CertificateStore`, `EpochStore`,
+`GovernanceStore`, `StakeSnapshotStore`, `TransactionStore` (chain
+transactions, not to be confused with `TxnStore`), and `UtxoStore`.
+
+Each domain is drawn to match an implementation file in `sqlstore` rather
+than to a judgement call, so the boundary is checkable: `UtxoStore` is
+`utxo.go`, `TransactionStore` is `transaction_read.go` plus
+`transaction_write.go`, and so on. `EpochStore` is the exception and is
+defined by its table, because `operational.go` holds tip, nonces, datums,
+scripts, protocol parameters, network state, and sync state alongside the
+epoch methods.
+
+`Database` exposes one unexported accessor per domain (`utxoStore()`,
+`governanceStore()`, ...) and its facade methods go through the accessor for
+the domain they touch, so the compiler holds each method inside its domain
+and a method that genuinely spans two domains says so at the call site.
+`d.metadata` remains for the domains not yet extracted (accounts, pools,
+rewards, protocol parameters, block nonces, assets, Midnight, sync state).
+Treasury and reserves stay there too -- they are ledger economics read by
+reward calculation, not governance state. Concrete SQL handles are not exposed; repository tests use internal
 fixtures when schema seeding or assertions require raw SQL.
 
 Startup reserves the write connection, acquires the backend migration lock,

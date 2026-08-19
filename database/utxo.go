@@ -464,7 +464,7 @@ func (d *Database) UtxoByRef(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	utxo, err := d.metadata.GetUtxo(txId, outputIdx, txn.Metadata())
+	utxo, err := d.utxoStore().GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +488,7 @@ func (d *Database) UtxosByRefs(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	utxos, err := d.metadata.GetUtxosByRefs(refs, txn.Metadata())
+	utxos, err := d.utxoStore().GetUtxosByRefs(refs, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -507,10 +507,10 @@ func (d *Database) UtxosByRefs(
 // rolled back on error via Txn.Do.
 func (d *Database) CreateUtxo(txn *Txn, utxo *models.Utxo) error {
 	if txn != nil {
-		return d.metadata.CreateUtxo(txn.Metadata(), utxo)
+		return d.utxoStore().CreateUtxo(txn.Metadata(), utxo)
 	}
 	return d.MetadataTxn(true).Do(func(t *Txn) error {
-		return d.metadata.CreateUtxo(t.Metadata(), utxo)
+		return d.utxoStore().CreateUtxo(t.Metadata(), utxo)
 	})
 }
 
@@ -525,7 +525,7 @@ func (d *Database) UtxoByRefIncludingSpent(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	utxo, err := d.metadata.GetUtxoIncludingSpent(
+	utxo, err := d.utxoStore().GetUtxoIncludingSpent(
 		txId,
 		outputIdx,
 		txn.Metadata(),
@@ -562,7 +562,7 @@ func (d *Database) UtxosByAddress(
 		}
 		patterns[i] = pattern
 	}
-	utxos, err := d.metadata.GetUtxosByAddress(patterns, txn.Metadata())
+	utxos, err := d.utxoStore().GetUtxosByAddress(patterns, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +585,7 @@ func (d *Database) GetControlledAmountByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	total, err := d.metadata.GetControlledAmountByCredential(
+	total, err := d.utxoStore().GetControlledAmountByCredential(
 		credentialTag,
 		stakingKey,
 		txn.Metadata(),
@@ -615,7 +615,7 @@ func (d *Database) GetUtxoPaymentScriptByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	ret, err := d.metadata.GetUtxoPaymentScriptByCredential(
+	ret, err := d.utxoStore().GetUtxoPaymentScriptByCredential(
 		credentialTag,
 		stakingKey,
 		paymentKeys,
@@ -644,7 +644,7 @@ func (d *Database) UtxosByAddressWithOrdering(
 	if q.MatchAllAddresses ||
 		!models.RequiresExactAddressFilter(q.AddressPatterns) ||
 		q.Limit <= 0 {
-		utxos, err := d.metadata.GetUtxosByAddressWithOrdering(
+		utxos, err := d.utxoStore().GetUtxosByAddressWithOrdering(
 			q,
 			txn.Metadata(),
 		)
@@ -668,7 +668,7 @@ func (d *Database) UtxosByAddressWithOrdering(
 			return ret, errExactAddressCandidateScanLimit
 		}
 		scanQuery.Limit = min(scanQuery.Limit, remainingCandidates)
-		batch, err := d.metadata.GetUtxosByAddressWithOrdering(
+		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
 			&scanQuery,
 			txn.Metadata(),
 		)
@@ -719,7 +719,7 @@ func (d *Database) UtxosByAddressAtSlot(
 	if err != nil {
 		return nil, err
 	}
-	utxos, err := d.metadata.GetUtxosByAddressAtSlot(
+	utxos, err := d.utxoStore().GetUtxosByAddressAtSlot(
 		pattern,
 		slot,
 		txn.Metadata(),
@@ -819,7 +819,7 @@ func (d *Database) UtxosByAssets(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	utxos, err := d.metadata.GetUtxosByAssets(
+	utxos, err := d.utxoStore().GetUtxosByAssets(
 		policyId,
 		assetName,
 		txn.Metadata(),
@@ -851,7 +851,7 @@ func (d *Database) UtxosDeleteConsumed(
 		}()
 	}
 	// Get UTxOs that are marked as deleted and older than our slot window
-	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(
+	utxos, err := d.utxoStore().GetUtxosDeletedBeforeSlot(
 		slot,
 		limit,
 		txn.Metadata(),
@@ -872,7 +872,7 @@ func (d *Database) UtxosDeleteConsumed(
 	_ = deleteUtxoBlobs(d, utxos, txn)
 
 	// Then delete metadata (source of truth)
-	err = d.metadata.DeleteUtxos(deleteUtxos, txn.Metadata())
+	err = d.utxoStore().DeleteUtxos(deleteUtxos, txn.Metadata())
 	if err != nil {
 		return 0, err
 	}
@@ -901,7 +901,7 @@ func (d *Database) UtxosDeleteRolledback(
 			}
 		}()
 	}
-	utxos, err := d.metadata.GetUtxosAddedAfterSlot(slot, txn.Metadata())
+	utxos, err := d.utxoStore().GetUtxosAddedAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
 	}
@@ -910,7 +910,7 @@ func (d *Database) UtxosDeleteRolledback(
 	_ = deleteUtxoBlobs(d, utxos, txn)
 
 	// Then delete metadata (source of truth)
-	err = d.metadata.DeleteUtxosAfterSlot(slot, txn.Metadata())
+	err = d.utxoStore().DeleteUtxosAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
 	}
@@ -939,7 +939,10 @@ func (d *Database) UtxosUnspend(
 			}
 		}()
 	}
-	if err := d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata()); err != nil {
+	if err := d.utxoStore().SetUtxosNotDeletedAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
 		return err
 	}
 	if owned {
@@ -975,10 +978,10 @@ func (d *Database) IterateLiveUtxos(
 		}
 	}
 	if txn != nil {
-		return d.metadata.IterateLiveUtxos(txn.Metadata(), withCbor(txn))
+		return d.utxoStore().IterateLiveUtxos(txn.Metadata(), withCbor(txn))
 	}
 	return d.Transaction(false).Do(func(t *Txn) error {
-		return d.metadata.IterateLiveUtxos(t.Metadata(), withCbor(t))
+		return d.utxoStore().IterateLiveUtxos(t.Metadata(), withCbor(t))
 	})
 }
 
@@ -997,12 +1000,12 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 		return nil
 	}
 	if txn != nil {
-		return d.metadata.MarkUtxosDeletedAtSlot(
+		return d.utxoStore().MarkUtxosDeletedAtSlot(
 			txn.Metadata(), refs, atSlot,
 		)
 	}
 	return d.MetadataTxn(true).Do(func(t *Txn) error {
-		return d.metadata.MarkUtxosDeletedAtSlot(
+		return d.utxoStore().MarkUtxosDeletedAtSlot(
 			t.Metadata(), refs, atSlot,
 		)
 	})

@@ -28,7 +28,7 @@ import (
 )
 
 // RunMetadataStoreConformance exercises the dialect-neutral contract
-// documented on metadata.SettingsStore, metadata.TransactionStore,
+// documented on metadata.SettingsStore, metadata.TxnStore,
 // metadata.SlotRangeStore, and metadata.GovernanceStore against newStore().
 // newStore is called once; the returned store is reused across every
 // subtest.
@@ -178,7 +178,7 @@ func RunMetadataStoreConformance(
 	if slotRangeStore, ok := store.(metadata.SlotRangeStore); ok {
 		t.Run("SlotRangeStatsOnUnknownRange", func(t *testing.T) {
 			// Read through a real ReadTransaction rather than nil: the
-			// SettingsStore/TransactionStore doc comments specifically call
+			// SettingsStore/TxnStore doc comments specifically call
 			// out ReadTransaction as the read connection pool a caller
 			// should use for exactly this kind of query, so the combination
 			// -- not just each half in isolation -- needs to actually work.
@@ -205,12 +205,19 @@ func RunMetadataStoreConformance(
 		})
 	}
 
-	// Unlike the SlotRangeStore block above this needs no runtime check:
-	// MetadataStore composes GovernanceStore, so the conversion is static.
-	// Naming the narrow handle is what makes the subtests below exercise
-	// the governance domain the way a GovernanceStore-only caller would,
-	// against a real database, on every backend that runs this suite.
-	var governanceStore metadata.GovernanceStore = store
+	// Unlike the SlotRangeStore block above these need no runtime check:
+	// MetadataStore composes each domain, so the conversions are static.
+	// Naming the narrow handles is what makes the subtests below exercise
+	// each domain the way a single-domain caller would, against a real
+	// database, on every backend that runs this suite.
+	var (
+		certificateStore   metadata.CertificateStore   = store
+		epochStore         metadata.EpochStore         = store
+		governanceStore    metadata.GovernanceStore    = store
+		stakeSnapshotStore metadata.StakeSnapshotStore = store
+		transactionStore   metadata.TransactionStore   = store
+		utxoStore          metadata.UtxoStore          = store
+	)
 
 	t.Run("GovernanceReadsOnEmptyState", func(t *testing.T) {
 		// Reading through the narrowed handle, not through store: a
@@ -272,6 +279,45 @@ func RunMetadataStoreConformance(
 			t, "https://example.invalid/constitution", got.AnchorURL,
 		)
 		require.Equal(t, uint64(42), got.AddedSlot)
+	})
+
+	t.Run("DomainReadsOnEmptyState", func(t *testing.T) {
+		// One cheap read per extracted domain, through that domain's
+		// narrow handle. This is not coverage of the domains themselves --
+		// the shared sqlstore implementation is tested elsewhere -- it is
+		// evidence that each newly split interface is wired to a working
+		// backend on this dialect, which a compile-time assertion cannot
+		// show.
+		txn := store.ReadTransaction()
+		defer func() { require.NoError(t, txn.Rollback()) }()
+
+		utxo, err := utxoStore.GetUtxo(
+			make([]byte, 32), 0, txn,
+		)
+		require.NoError(t, err)
+		require.Nil(t, utxo)
+
+		hashes, err := transactionStore.GetTransactionHashesAfterSlot(
+			1_900_000_000, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, hashes)
+
+		epochs, err := epochStore.GetEpochs(txn)
+		require.NoError(t, err)
+		require.Empty(t, epochs)
+
+		snapshots, err := stakeSnapshotStore.GetPoolStakeSnapshotsByEpoch(
+			1, models.PoolStakeSnapshotTypeMark, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, snapshots)
+
+		mirs, err := certificateStore.GetMIRCertsInSlotRange(
+			1_900_000_000, 1_900_000_100, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, mirs)
 	})
 
 	t.Run("OperationsCompleteWithinTimeout", func(t *testing.T) {
