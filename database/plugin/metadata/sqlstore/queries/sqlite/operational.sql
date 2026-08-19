@@ -1148,3 +1148,45 @@ SELECT COUNT(*) AS count,
        CAST(COALESCE(MAX(slot), 0) AS INTEGER) AS last_slot
 FROM block_nonce
 WHERE slot >= ? AND slot <= ?;
+
+-- name: UpsertTokenRegistryEntry :exec
+-- A later sync is authoritative for the whole subject: every property column
+-- is overwritten from the incoming row, so a property the registry has since
+-- dropped stops being served rather than lingering from an earlier sync.
+INSERT INTO token_registry_entry (
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject) DO UPDATE SET
+    name = excluded.name,
+    ticker = excluded.ticker,
+    description = excluded.description,
+    url = excluded.url,
+    logo = excluded.logo,
+    decimals = excluded.decimals,
+    updated_at = excluded.updated_at;
+
+-- name: GetTokenRegistryEntry :one
+SELECT
+    id,
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+FROM token_registry_entry
+WHERE subject = ?;
+
+-- name: CountTokenRegistryEntries :one
+SELECT COUNT(*) FROM token_registry_entry;

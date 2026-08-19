@@ -268,6 +268,53 @@ var flagSpecs = []flagSpec{
 		"allow off-chain metadata fetches to private, loopback, and link-local addresses",
 	),
 	boolFlag(
+		"TokenRegistry.Enabled",
+		"token-registry-enabled",
+		`enable the CIP-26 token registry sync (requires storageMode "api")`,
+	),
+	stringFlag(
+		"TokenRegistry.SourceURL",
+		"token-registry-source-url",
+		"",
+		"CIP-26 token registry tarball URL (empty = select by network)",
+	),
+	durationFlag(
+		"TokenRegistry.Interval",
+		"token-registry-interval",
+		"CIP-26 token registry sync interval (0 = default)",
+	),
+	durationFlag(
+		"TokenRegistry.RequestTimeout",
+		"token-registry-request-timeout",
+		"CIP-26 token registry download timeout (0 = default)",
+	),
+	stringFlag(
+		"TokenRegistry.UserAgent",
+		"token-registry-user-agent",
+		"",
+		"CIP-26 token registry HTTP user agent (empty = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxBytes",
+		"token-registry-max-bytes",
+		"CIP-26 token registry max compressed download bytes (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxEntryBytes",
+		"token-registry-max-entry-bytes",
+		"CIP-26 token registry max bytes per mapping (0 = default)",
+	),
+	boolFlag(
+		"TokenRegistry.StoreLogos",
+		"token-registry-store-logos",
+		"persist CIP-26 token registry logos (roughly 90% of registry bytes)",
+	),
+	boolFlag(
+		"TokenRegistry.AllowPrivateAddresses",
+		"token-registry-allow-private-addresses",
+		"allow token registry sync from private, loopback, and link-local addresses",
+	),
+	boolFlag(
 		"Midnight.Enabled",
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,

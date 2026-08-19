@@ -1519,6 +1519,38 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]models.OffchainMetadata, error)
 
+	// Token registry methods
+
+	// UpsertTokenRegistryEntries writes CIP-26 off-chain token registry
+	// properties keyed by subject (hex policy ID followed by the
+	// hex-encoded asset name) and returns the number of rows written.
+	// Each entry replaces every property of an existing row for the same
+	// subject, so a property the upstream registry has dropped stops
+	// being served rather than surviving from an earlier sync. Written
+	// only by the API-mode token registry sync.
+	UpsertTokenRegistryEntries(
+		ctx context.Context,
+		entries []models.TokenRegistryEntry,
+		txn types.Txn,
+	) (int, error)
+
+	// GetTokenRegistryEntry returns the registry properties for a
+	// subject, or nil when the registry has nothing for it. Backs the
+	// `metadata` field of GET /assets/{asset}; an unknown subject is
+	// absence rather than an error and yields a null field.
+	GetTokenRegistryEntry(
+		subject string,
+		txn types.Txn,
+	) (*models.TokenRegistryEntry, error)
+
+	// CountTokenRegistryEntries returns the number of stored registry
+	// subjects, letting the syncer distinguish a sync that is fetching
+	// but persisting nothing from a working one.
+	CountTokenRegistryEntries(
+		ctx context.Context,
+		txn types.Txn,
+	) (int64, error)
+
 	// GetRetiringPools returns pools whose latest retirement
 	// certificate targets an epoch after currentEpoch and has not been
 	// cancelled by a later registration certificate. Certificate

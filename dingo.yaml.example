@@ -252,6 +252,59 @@ historyExpiry:
   # CLI: --history-expiry-frequency
   frequency: 1h
 
+# Optional CIP-26 off-chain token registry sync (API storage mode only).
+# When enabled, Dingo periodically pulls the community token registry and
+# populates the `metadata` field of GET /api/v0/assets/{asset} with each
+# token's name, ticker, decimals, description, and URL. Wallets can then show
+# readable token names without a per-asset lookup against a remote metadata
+# server -- which would reveal which assets the user holds. The sync is
+# holdings-agnostic: every node pulls the same complete registry.
+#
+# Disabled by default because the mainnet registry is a roughly 240MB
+# download. Subsequent syncs send a conditional request, so an unchanged
+# registry costs no download at all.
+tokenRegistry:
+  # Can be overridden with DINGO_TOKEN_REGISTRY_ENABLED
+  # CLI: --token-registry-enabled
+  enabled: false
+  # Registry tarball URL. Empty selects by network: the Cardano Foundation
+  # registry for mainnet, the IOG testnet registry otherwise. Set this to
+  # point at a mirror.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_SOURCE_URL
+  # CLI: --token-registry-source-url
+  sourceUrl: ""
+  # How often the registry is re-checked. Each check is a conditional
+  # request, so an unchanged registry costs no download.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_INTERVAL
+  # CLI: --token-registry-interval
+  interval: 6h
+  # Budget for the whole download, not one request round trip.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_REQUEST_TIMEOUT
+  # CLI: --token-registry-request-timeout
+  requestTimeout: 15m
+  # HTTP user agent sent with the registry request. Empty uses the default.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_USER_AGENT
+  # CLI: --token-registry-user-agent
+  userAgent: ""
+  # Cap on the compressed registry download. 0 uses the default (768MB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BYTES
+  # CLI: --token-registry-max-bytes
+  maxBytes: 0
+  # Cap on a single registry mapping document. 0 uses the default (4MB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ENTRY_BYTES
+  # CLI: --token-registry-max-entry-bytes
+  maxEntryBytes: 0
+  # Persist base64 token logos. Logos are roughly 90% of registry bytes and
+  # most consumers only need name/ticker/decimals, so this is off by default.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_STORE_LOGOS
+  # CLI: --token-registry-store-logos
+  storeLogos: false
+  # Allow syncing from private, loopback, and link-local addresses. Leave
+  # false for the default SSRF guard; set true only for a local mirror.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES
+  # CLI: --token-registry-allow-private-addresses
+  allowPrivateAddresses: false
+
 # Optional in-process Koios reward-parity observer (dingo #3098). When
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
 # event and validates each newly closed epoch's committed reward state

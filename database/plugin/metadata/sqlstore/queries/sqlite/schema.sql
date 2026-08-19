@@ -367,6 +367,20 @@ CREATE TABLE offchain_metadata (
     UNIQUE (source_type, url, hash)
 );
 
+CREATE TABLE token_registry_entry (
+    created_at DATETIME,
+    updated_at DATETIME,
+    subject TEXT NOT NULL,
+    name TEXT,
+    ticker TEXT,
+    description TEXT,
+    url TEXT,
+    logo TEXT,
+    id INTEGER PRIMARY KEY,
+    decimals INTEGER,
+    UNIQUE (subject)
+);
+
 CREATE TABLE utxo (
     transaction_id INTEGER,
     collateral_return_for_tx_id INTEGER UNIQUE,

@@ -14,6 +14,7 @@ type Querier interface {
 	BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillNodeSettingsNetworkParams) (int64, error)
 	ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffchainMetadataFetchParams) (int64, error)
 	ClearSyncState(ctx context.Context) error
+	CountTokenRegistryEntries(ctx context.Context) (int64, error)
 	CountTransactionsByMetadataLabel(ctx context.Context, label sql.NullString) (int64, error)
 	CountTransactionsByPaymentCred(ctx context.Context, paymentKey []byte) (int64, error)
 	CountTransactionsInSlotRange(ctx context.Context, arg CountTransactionsInSlotRangeParams) (int64, error)
@@ -137,6 +138,7 @@ type Querier interface {
 	GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error)
 	GetSyncState(ctx context.Context, syncKey string) (string, error)
 	GetTip(ctx context.Context) (GetTipRow, error)
+	GetTokenRegistryEntry(ctx context.Context, subject string) (GetTokenRegistryEntryRow, error)
 	GetTransactionByHash(ctx context.Context, hash []byte) (Transaction, error)
 	GetTransactionHashesAfterSlot(ctx context.Context, slot sql.NullInt64) ([][]byte, error)
 	GetTransactionIDByHash(ctx context.Context, hash []byte) (int64, error)
@@ -195,6 +197,10 @@ type Querier interface {
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
 	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error
+	// A later sync is authoritative for the whole subject: every property column
+	// is overwritten from the incoming row, so a property the registry has since
+	// dropped stops being served rather than lingering from an earlier sync.
+	UpsertTokenRegistryEntry(ctx context.Context, arg UpsertTokenRegistryEntryParams) error
 }
 
 var _ Querier = (*Queries)(nil)
