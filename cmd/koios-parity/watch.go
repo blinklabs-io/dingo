@@ -61,7 +61,10 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	}
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	workers, _ := cmd.Flags().GetInt("workers")
-	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
 	apiKey := koiosAPIKey(cmd)
 	accounts := accountsEnabled(cmd)
 

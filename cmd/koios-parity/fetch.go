@@ -62,7 +62,10 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	fromEpoch, _ := cmd.Flags().GetUint64("from-epoch")
 	throughEpoch, _ := cmd.Flags().GetUint64("through-epoch")
 	forceRefresh, _ := cmd.Flags().GetBool("force-refresh")
-	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
 
 	if forceRefresh && !cmd.Flags().Changed("from-epoch") {
 		return errors.New(

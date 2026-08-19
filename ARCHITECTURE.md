@@ -4201,7 +4201,14 @@ never the reverse.
   `complete = false` (recording the attempt, not the answer) when
   `len(rows) == 0` and the epoch's `EpochEndTime` (looked up from the
   already-committed `koios_epoch_info` row by `FetchEpochAccountsWithAddrs`)
-  is within `graceHours` of now — `Cache.GetEpochsMissingAccountCoverage`
+  is within `graceHours` of now. Only a genuinely missing row
+  (`sql.ErrNoRows`) is treated as "unknown end time" (leaves `EpochEndTime`
+  at its zero value, which the grace check itself already treats as
+  disabling the window); any other `GetEpochInfo` error — a real cache/DB
+  failure — is propagated as a failure of `FetchEpochAccountsWithAddrs`
+  instead, so a transient database error can never be silently
+  misinterpreted as "unknown end time," bypass the grace gate, and let an
+  empty account fetch commit as complete. `Cache.GetEpochsMissingAccountCoverage`
   then re-selects it on the next `Fetch`/`Observer` attempt instead of the
   coverage row locking in a stale empty snapshot forever. Once the grace
   window elapses, a persistently empty result is accepted as final

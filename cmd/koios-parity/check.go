@@ -55,7 +55,10 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 	all, _ := cmd.Flags().GetBool("all")
 	fromEpoch, _ := cmd.Flags().GetUint64("from-epoch")
 	throughEpoch, _ := cmd.Flags().GetUint64("through-epoch")
-	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
 
 	result, err := koiosparity.Check(cmd.Context(), koiosparity.CheckConfig{
 		Network:         network,

@@ -55,7 +55,10 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	all, _ := cmd.Flags().GetBool("all")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	workers, _ := cmd.Flags().GetInt("workers")
-	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
 	reportDir, _ := cmd.Flags().GetString("report-dir")
 
 	logger := slog.Default()

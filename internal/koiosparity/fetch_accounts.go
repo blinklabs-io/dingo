@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,15 @@ import (
 // requests run in parallel for a single epoch's account fetch — mirrors
 // fetchEpoch's per-pool worker pool concurrency.
 const accountFetchConcurrency = 5
+
+// afterChunkCancelForTest is a test-only synchronization seam: when non-nil,
+// FetchAccountRewardsForEpoch's chunk-error path invokes it synchronously
+// immediately after calling cancel(). Production code never sets it, so this
+// is always a nil check (no-op) outside of
+// fetch_accounts_test.go's TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError,
+// which uses it to know deterministically that cancellation has actually
+// happened instead of inferring it from a fixed sleep margin.
+var afterChunkCancelForTest func()
 
 // ResolveKoiosAccountUniverse returns the bech32 stake address of every
 // account Koios has ever seen — the Koios side of #3097's address universe.
@@ -284,6 +294,16 @@ outer:
 				// so an isolated transient failure still just drops this one
 				// epoch for a later retry.
 				cancel()
+				// afterChunkCancelForTest, when non-nil, lets a test observe
+				// deterministically that cancel() has actually fired for this
+				// chunk's error, rather than inferring it from a fixed sleep
+				// margin (see fetch_accounts_test.go's
+				// TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError).
+				// nil in every non-test build/call path, so this is a no-op
+				// outside that one test.
+				if afterChunkCancelForTest != nil {
+					afterChunkCancelForTest()
+				}
 				return
 			}
 
@@ -352,10 +372,14 @@ outer:
 // (see its doc comment); the epoch's EpochEndTime is looked up from the
 // already-committed koios_epoch_info row (fetchEpoch/fetchPoolsIfNeeded
 // always commit it before this is ever called — see
-// GetEpochsMissingAccountCoverage's join). A lookup failure (e.g. no
-// koios_epoch_info row exists yet, which should not happen in practice)
-// leaves epochEndTime at its zero value, which simply disables the grace
-// check rather than failing the fetch outright.
+// GetEpochsMissingAccountCoverage's join). Only a genuinely missing row
+// (sql.ErrNoRows — no koios_epoch_info row exists yet, which should not
+// happen in practice) leaves epochEndTime at its zero value, which simply
+// disables the grace check rather than failing the fetch outright. Any other
+// GetEpochInfo error (a real database error) is propagated as a failure of
+// this function instead: silently treating it the same as "unknown end
+// time" would let an empty account fetch bypass the grace gate and commit
+// as complete, suppressing retries and risking a false PASS.
 func FetchEpochAccountsWithAddrs(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -390,8 +414,19 @@ func FetchEpochAccountsWithAddrs(
 		)
 	}
 	var epochEndTime time.Time
-	if info, infoErr := cache.GetEpochInfo(network, epoch); infoErr == nil {
+	info, infoErr := cache.GetEpochInfo(network, epoch)
+	switch {
+	case infoErr == nil:
 		epochEndTime = info.EpochEndTime
+	case errors.Is(infoErr, sql.ErrNoRows):
+		// No koios_epoch_info row yet — leave epochEndTime at its zero
+		// value, which FetchAccountRewardsForEpoch's grace-hours gate
+		// already treats as "unknown end time" (see its epochEndTime.IsZero()
+		// checks).
+	default:
+		return 0, classifyFetchErr(
+			fmt.Errorf("get epoch info for grace-hours gate: %w", infoErr),
+		)
 	}
 	return FetchAccountRewardsForEpoch(
 		ctx,

@@ -15,6 +15,9 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -193,4 +196,84 @@ func TestAccountsEnabledExplicitTrueFlagWinsOverEnvFalse(t *testing.T) {
 	require.NoError(t, cmd.Flags().Set("accounts", "true"))
 
 	require.True(t, accountsEnabled(cmd))
+}
+
+// TestResolveGraceHoursRejectsNegative is a regression test for the reviewer
+// finding that a negative --grace-hours reached FetchAccountRewardsForEpoch's
+// zero-row/lag gate, where graceHours <= 0 disables the grace/reference-lag
+// protection the same way an explicit, documented 0 does — but silently,
+// without the operator ever having opted out. resolveGraceHours must reject
+// it consistently with internal/config/validate.go's identical
+// koiosParity.graceHours check ("must not be negative").
+func TestResolveGraceHoursRejectsNegative(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Int("grace-hours", defaultGraceHours, "")
+	require.NoError(t, cmd.Flags().Set("grace-hours", "-1"))
+
+	_, err := resolveGraceHours(cmd)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "--grace-hours must not be negative")
+}
+
+// TestResolveGraceHoursAcceptsZeroAndPositive proves resolveGraceHours only
+// rejects negative values -- 0 is the documented, explicit way to disable
+// the grace/reference-lag window, and any positive value is a normal
+// operator-configured window; neither should be treated as invalid input.
+func TestResolveGraceHoursAcceptsZeroAndPositive(t *testing.T) {
+	for _, v := range []int{0, 1, defaultGraceHours, 168} {
+		cmd := &cobra.Command{}
+		cmd.Flags().Int("grace-hours", defaultGraceHours, "")
+		require.NoError(t, cmd.Flags().Set("grace-hours", fmt.Sprintf("%d", v)))
+
+		got, err := resolveGraceHours(cmd)
+		require.NoError(t, err)
+		require.Equal(t, v, got)
+	}
+}
+
+// TestSubcommandsRejectNegativeGraceHours is an end-to-end regression test
+// for the reviewer finding on cmd/koios-parity/fetch.go: fetch, check, run,
+// and watch all expose --grace-hours (per this PR's description) and must
+// all reject a negative value before it ever reaches the fetch/check
+// library calls, not just fetch. Each RunE is invoked directly (bypassing
+// cobra's Execute/os.Exit) with --skip-fetch/--skip-check/--interval set so
+// a passing case would otherwise need network or Dingo DB access; a
+// negative --grace-hours must fail before any of that is ever reached.
+func TestSubcommandsRejectNegativeGraceHours(t *testing.T) {
+	withGlobalFlags(t, "preview", filepath.Join(t.TempDir(), "cache.db"))
+
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		run  func(cmd *cobra.Command, args []string) error
+	}{
+		{"fetch", fetchCommand(), fetchRun},
+		{"check", checkCommand(), checkRun},
+		{"run", func() *cobra.Command {
+			c := &cobra.Command{Use: "run"}
+			addRunFlags(c)
+			return c
+		}(), runCommand},
+		{"watch", watchCommand(), watchRun},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, tt.cmd.Flags().Set("grace-hours", "-1"))
+			if tt.cmd.Flags().Lookup("skip-fetch") != nil {
+				require.NoError(t, tt.cmd.Flags().Set("skip-fetch", "true"))
+			}
+			if tt.cmd.Flags().Lookup("skip-check") != nil {
+				require.NoError(t, tt.cmd.Flags().Set("skip-check", "true"))
+			}
+			if tt.cmd.Flags().Lookup("interval") != nil {
+				require.NoError(t, tt.cmd.Flags().Set("interval", "1h"))
+			}
+			tt.cmd.SetContext(context.Background())
+
+			err := tt.run(tt.cmd, nil)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "--grace-hours must not be negative")
+		})
+	}
 }

@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -482,12 +483,13 @@ func TestChunkAddresses(t *testing.T) {
 //     through before the unlucky one happened to run, with or without the
 //     fix — not a useful signal either way.
 //   - Every other chunk's response is held behind a test-controlled gate
-//     that only this test ever closes, and only after waiting a generous
-//     fixed margin past the poison chunk's response — long enough that
-//     cancel() is guaranteed to have already been called by the time the
-//     gate opens. This bounds every possible source of a freed semaphore
-//     slot (the poison chunk's own release, and every other chunk's release
-//     once the gate opens) to strictly after cancellation, so requestCount
+//     that only this test ever closes, and only once the production
+//     dispatch loop's own test seam (afterChunkCancelForTest) has reported —
+//     via a channel close, not a fixed sleep margin — that cancel() has
+//     actually already been called for the poison chunk's error. This
+//     bounds every possible source of a freed semaphore slot (the poison
+//     chunk's own release, and every other chunk's release once the gate
+//     opens) to strictly after cancellation, so requestCount
 //     — checked only once FetchAccountRewardsForEpoch has fully returned —
 //     can never legitimately exceed accountFetchConcurrency; anything more
 //     means a chunk was dispatched using a slot that only became available
@@ -512,13 +514,20 @@ func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
 ) {
 	const totalChunks = 30
 	const poisonAddr = "stake1poison"
-	// cancelMargin only needs to comfortably exceed how long it takes the
-	// dispatcher goroutine to receive the poison response, classify it as
-	// ErrKoiosPermanent, and call cancel() — all in-process, no further
-	// network I/O — not to influence the race itself (that race, if
-	// present, has already resolved one way or the other by the time this
-	// margin elapses).
-	const cancelMargin = 100 * time.Millisecond
+
+	// cancelled is closed exactly once, synchronously, from
+	// afterChunkCancelForTest — the production dispatch loop's own
+	// cancel()-path test seam (see fetch_accounts.go) — so this test can
+	// wait for the real cancellation to have happened deterministically
+	// instead of inferring it from a fixed sleep margin, which would be
+	// timing-dependent and could flake under load (per CLAUDE.md's no
+	// time.Sleep-for-synchronization rule).
+	cancelled := make(chan struct{})
+	var cancelledOnce sync.Once
+	afterChunkCancelForTest = func() {
+		cancelledOnce.Do(func() { close(cancelled) })
+	}
+	t.Cleanup(func() { afterChunkCancelForTest = nil })
 
 	var requestCount atomic.Int32
 	poisonSeen := make(chan struct{})
@@ -584,7 +593,11 @@ func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
 	case <-time.After(10 * time.Second):
 		t.Fatal("poison chunk was never dispatched")
 	}
-	time.Sleep(cancelMargin)
+	select {
+	case <-cancelled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fetchCtx was never cancelled after the poison chunk's error")
+	}
 	close(gate)
 
 	var fetchErr error

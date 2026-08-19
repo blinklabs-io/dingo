@@ -393,6 +393,28 @@ func checkResultErr(result *koiosparity.CheckResult) error {
 	}
 }
 
+// resolveGraceHours reads the --grace-hours flag and rejects a negative
+// value, mirroring internal/config/validate.go's identical check on
+// koiosParity.graceHours ("must not be negative; 0 selects the default of
+// 24"). This matters beyond input hygiene: FetchAccountRewardsForEpoch's and
+// compare.go's zero-row/reference-lag gates only disable the grace check
+// when graceHours <= 0 — a negative value reaches that same "disabled" branch
+// as 0, but arrives silently instead of through the explicit, documented
+// opt-out. Left unvalidated, a just-closed epoch's empty --accounts response
+// could be committed complete and later read back as a valid, authoritative
+// empty reference set. Every subcommand exposing --grace-hours (fetch, check,
+// run, watch) must call this instead of a bare GetInt.
+func resolveGraceHours(cmd *cobra.Command) (int, error) {
+	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	if graceHours < 0 {
+		return 0, fmt.Errorf(
+			"--grace-hours must not be negative, got %d (0 disables the grace/reference-lag window)",
+			graceHours,
+		)
+	}
+	return graceHours, nil
+}
+
 // koiosAPIKey returns the Koios Bearer token from flag or environment.
 func koiosAPIKey(cmd *cobra.Command) string {
 	if key, _ := cmd.Flags().GetString("api-key"); key != "" {
