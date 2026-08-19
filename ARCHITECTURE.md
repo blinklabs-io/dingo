@@ -4143,9 +4143,15 @@ Two consequences worth noting. `Publish` takes a build callback that runs under
 the listener's lock once the already-started check has passed, so each server
 installs its credential verifier atomically with the server it belongs to and a
 rejected second `Start` cannot replace a running server's. `Bind` reports
-whether it actually served the socket rather than closing it, so a `Start`
+whether it handed the socket to `Serve` rather than closing it, so a `Start`
 whose server was detached mid-bind returns without logging that a listener
-came up when none did. And because
+came up when none did. One window stays open by construction: a `Stop` landing
+between the ownership check and `Serve` being entered leaves `Serve` an
+already-closed socket. It is inert — `Serve` reports `ErrServerClosed`, which
+the error filter drops, and the port is released by the `Stop` that closed it —
+so the only trace is the log line. Closing it would require `Serve` to signal
+that it registered the listener, which `net/http` does not expose, and any such
+signal would still lose to a `Stop` landing an instant later. And because
 `api/utxorpc`'s context monitor now detaches rather than holding its mutex
 across the shutdown it runs, a concurrent `Stop` is answered by the teardown
 wait instead of blocking on that mutex for as long as a stuck stream keeps

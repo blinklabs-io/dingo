@@ -325,9 +325,19 @@ func awaitSignal(ctx context.Context, ch chan struct{}, what string) error {
 
 // Bind opens srv's listening socket and serves it in the background, closing
 // bindDone once the socket has been either published or closed again. It
-// reports whether the socket is actually being served: false means srv was
-// detached before the socket could be published, so Bind closed it instead, and
-// the caller must not report that a listener came up.
+// reports whether it handed the socket to Serve: false means srv was detached
+// before the socket could be published, so Bind closed it instead, and the
+// caller must not report that a listener came up.
+//
+// True is a statement about what this call did, not a promise that the listener
+// is still up: a Stop can detach and close the socket between the ownership
+// check below and Serve being entered, leaving Serve nothing to accept. That
+// window is inert -- Serve reports ErrServerClosed, which the goroutine's error
+// filter drops, and the port is released by the Stop that closed it -- so its
+// only trace is the caller having logged that the listener came up. Closing it
+// would need Serve to signal that it registered the listener, which net/http
+// does not expose, and any such signal would still lose to a Stop landing an
+// instant after it. See TestServeEnteredAfterShutdownStaysQuiet.
 //
 // The socket is opened synchronously so a port conflict -- and, when TLS is
 // enabled, a bad keypair -- surfaces as an error from Start rather than in a

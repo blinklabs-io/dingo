@@ -420,6 +420,37 @@ func TestBindReportsServed(t *testing.T) {
 	require.True(t, served)
 }
 
+// TestServeEnteredAfterShutdownStaysQuiet pins the residual window Bind cannot
+// close: a Stop can detach and tear down between Bind recording the listener
+// and its goroutine entering Serve, so Serve is handed an already-closed socket
+// it never serves.
+//
+// What matters is that the window is inert. Serve reports ErrServerClosed --
+// the one value the goroutine's error filter deliberately drops -- so the case
+// produces no spurious error log, and the port is released either way. The only
+// visible artifact is Start having already logged that the listener came up.
+// Closing the window entirely would need Serve to signal that it registered the
+// listener, which net/http does not expose, and would still lose to a Stop
+// landing an instant later.
+func TestServeEnteredAfterShutdownStaysQuiet(t *testing.T) {
+	addr := testutil.FreePort(t)
+	ln, err := net.Listen("tcp", addr)
+	require.NoError(t, err)
+	srv := &http.Server{Addr: addr} //nolint:gosec // test server
+
+	// The teardown, landing before Serve is entered.
+	require.NoError(t, srv.Shutdown(context.Background()))
+	require.NoError(t, ln.Close())
+
+	serveErr := srv.Serve(ln)
+
+	require.ErrorIs(
+		t, serveErr, http.ErrServerClosed,
+		"Serve entered after Shutdown must stay within the filtered error",
+	)
+	require.False(t, portAccepts(addr), "the port must still be released")
+}
+
 // --- shutdown coordination ----------------------------------------------
 
 // TestShutdownWaitsForAnInFlightBind asserts Stop does not report the server
