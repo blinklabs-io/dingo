@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,6 +58,19 @@ const (
 	koiosBurstCooldown  = 60 * time.Second
 
 	koiosRetryBackoff5xx = 2 * time.Second
+
+	// koiosAccountChunkSize bounds how many stake addresses go into a single
+	// /account_reward_history POST request. Koios does not document a hard
+	// limit on the _stake_addresses array for this endpoint, so this is a
+	// conservative, deliberately small choice: it keeps both the outbound
+	// request body and the worst-case response bounded regardless of how
+	// large the full requested address universe is, and limits the "blast
+	// radius" of a single failed/timed-out request to a small slice of the
+	// epoch's account universe rather than the whole thing. This is the
+	// minimal viable chunking for #3097; shaping requests further by actual
+	// encoded byte size, adaptive sizing, and mid-fetch resumable
+	// checkpointing is #3099's scope (see FetchAccountRewardsForEpoch).
+	koiosAccountChunkSize = 100
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -176,15 +190,32 @@ type KoiosClient struct {
 	limiter *burstLimiter
 }
 
-// NewKoiosClient creates a client for the given network.
-func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
-	base, ok := koiosBaseURLs[network]
-	if !ok {
-		return nil, fmt.Errorf(
+// validateKoiosNetwork rejects any network this tool doesn't support
+// (currently "preview"/"preprod" only, via koiosBaseURLs). Called both by
+// NewKoiosClient (the live-fetch path) and by Check/CheckEpoch (the
+// cache-only path, which never constructs a KoiosClient and so would
+// otherwise let an unsupported network — e.g. "mainnet" — reach
+// compareEpochAccounts/StakeAddressFromCredential unvalidated;
+// StakeAddressFromCredential hardcodes the testnet address network ID since
+// preview/preprod are the only networks this tool ever validates against,
+// so an unvalidated "mainnet" would silently generate wrong-network stake
+// addresses instead of erroring).
+func validateKoiosNetwork(network string) error {
+	if _, ok := koiosBaseURLs[network]; !ok {
+		return fmt.Errorf(
 			"unsupported network %q; supported: preview, preprod",
 			network,
 		)
 	}
+	return nil
+}
+
+// NewKoiosClient creates a client for the given network.
+func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
+	if err := validateKoiosNetwork(network); err != nil {
+		return nil, err
+	}
+	base := koiosBaseURLs[network]
 	return &KoiosClient{
 		baseURL: base,
 		apiKey:  apiKey,
@@ -438,6 +469,142 @@ func (k *KoiosClient) get(
 	// Unreachable: every loop iteration either returns or continues; the range
 	// is bounded by koiosMaxRetries and the last iteration always returns via
 	// retryOrFail's fail branch. Guard satisfies nilaway's nil-flow analysis.
+	return nil, errors.New("koios: internal: no response after retry loop")
+}
+
+// post executes a POST request with a JSON-encoded body against the Koios
+// API, retrying transport errors, 5xx responses, burst 429s, and body-read
+// failures with exactly the same policy as get() (see get()'s doc comment
+// for the retry/classification rationale) — the only structural difference
+// is that a POST body must be rebuilt fresh on every attempt (a
+// bytes.Reader, once drained by http.Client.Do, cannot be replayed the way
+// get()'s bodyless request can via req.Clone).
+func (k *KoiosClient) post(
+	ctx context.Context,
+	path string,
+	payload any,
+) (*koiosResponse, error) {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"koios POST %s: marshal request body: %w",
+			path,
+			err,
+		)
+	}
+	url := k.baseURL + path
+
+	// See get()'s identical helper for the meaning of retryOrFail's return.
+	retryOrFail := func(attempt int, delay time.Duration, failFmt string, failArgs ...any) error {
+		if attempt < koiosMaxRetries-1 {
+			return waitCtx(ctx, delay)
+		}
+		return fmt.Errorf(failFmt, failArgs...)
+	}
+
+	for attempt := range koiosMaxRetries {
+		if err := k.limiter.wait(ctx); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			url,
+			bytes.NewReader(bodyBytes),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"koios POST %s: build request: %w",
+				path,
+				err,
+			)
+		}
+		if k.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+k.apiKey)
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, doErr := k.http.Do(req)
+		if doErr != nil {
+			if err := retryOrFail(attempt,
+				koiosRetryBackoff5xx*time.Duration(attempt+1),
+				"koios POST %s: %w", path, doErr,
+			); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if resp == nil {
+			return nil, errors.New(
+				"koios: http.Do returned nil response without error",
+			)
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			if err := retryOrFail(attempt,
+				koiosRetryBackoff5xx*time.Duration(attempt+1),
+				"koios POST %s: read body: %w", path, readErr,
+			); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			bodyStr := strings.TrimSpace(string(body))
+			if isDailyQuotaExceeded(bodyStr) {
+				hint := "Public tier caps at 5,000 requests/day with no API key; set --api-key/KOIOS_API_KEY for the Free tier's 50,000/day or higher"
+				if k.apiKey != "" {
+					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
+				}
+				return nil, fmt.Errorf(
+					"%w: koios daily tier quota exceeded on %s: %s (%s)",
+					ErrKoiosPermanent,
+					path,
+					bodyStr,
+					hint,
+				)
+			}
+			if err := retryOrFail(attempt, retryAfterDelay(resp),
+				"koios burst rate-limited after %d retries on %s (Public/Free = %d req/%s; wait ~%s between bursts): %s",
+				koiosMaxRetries, path, koiosBurstLimitPublic, koiosBurstWindow, koiosBurstCooldown, bodyStr,
+			); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if resp.StatusCode >= 500 {
+			if err := retryOrFail(attempt,
+				koiosRetryBackoff5xx*time.Duration(attempt+1),
+				"koios server error after %d retries on %s: status %d body: %s",
+				koiosMaxRetries, path, resp.StatusCode, strings.TrimSpace(string(body)),
+			); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK &&
+			resp.StatusCode != http.StatusPartialContent {
+			return nil, fmt.Errorf(
+				"%w: koios POST %s: status %d body: %s",
+				ErrKoiosPermanent,
+				path,
+				resp.StatusCode,
+				strings.TrimSpace(string(body)),
+			)
+		}
+
+		return &koiosResponse{
+			StatusCode: resp.StatusCode,
+			Body:       body,
+			Header:     resp.Header,
+		}, nil
+	}
+	// Unreachable: see get()'s identical comment.
 	return nil, errors.New("koios: internal: no response after retry loop")
 }
 
@@ -699,6 +866,140 @@ func (k *KoiosClient) GetPoolEpochHistory(
 		)
 	}
 	return &items[0], nil
+}
+
+// GetAllAccountAddresses returns the bech32 stake address of every account
+// Koios knows about, including accounts with zero current stake or that have
+// since deregistered — the Koios-side "master list" for #3097's per-account
+// address universe, exactly analogous to GetAllHistoricalPoolIDs's role for
+// pools. /account_list is Range-paginated the same way /pool_list is.
+//
+// This alone is not sufficient to build a correct per-epoch address universe
+// — see FetchAccountRewardsForEpoch, which unions this with Dingo's own
+// committed reward_account_output addresses so a Koios-only-known account
+// Dingo never recorded a reward for still gets checked (and a Dingo-only
+// account not yet visible to /account_list still gets checked too).
+func (k *KoiosClient) GetAllAccountAddresses(
+	ctx context.Context,
+) ([]string, error) {
+	type listItem struct {
+		StakeAddress string `json:"stake_address"`
+	}
+	seen := make(map[string]bool)
+	var addrs []string
+	for start := 0; ; start += koiosPageSize {
+		end := start + koiosPageSize - 1
+		resp, err := k.get(
+			ctx,
+			"/account_list?select=stake_address",
+			start,
+			end,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK &&
+			resp.StatusCode != http.StatusPartialContent {
+			return nil, fmt.Errorf(
+				"koios /account_list: status %d body: %s",
+				resp.StatusCode,
+				resp.Body,
+			)
+		}
+		var page []listItem
+		if err := json.Unmarshal(resp.Body, &page); err != nil {
+			return nil, fmt.Errorf("koios /account_list decode: %w", err)
+		}
+		for _, item := range page {
+			if item.StakeAddress == "" {
+				continue
+			}
+			if !seen[item.StakeAddress] {
+				seen[item.StakeAddress] = true
+				addrs = append(addrs, item.StakeAddress)
+			}
+		}
+		if len(page) < koiosPageSize {
+			break
+		}
+		total := parseTotalFromContentRange(resp.Header.Get("Content-Range"))
+		if total > 0 && start+len(page) >= total {
+			break
+		}
+	}
+	return addrs, nil
+}
+
+// KoiosAccountRewardHistoryItem is one row from /account_reward_history,
+// covering every documented field. PoolIDBech32 is null for reward types with
+// no associated pool (treasury/reserves/refund; see CompareAccountEpoch's
+// doc comment on which Koios reward types are currently in scope).
+//
+// /account_rewards (the older endpoint some Koios docs still reference) is
+// deprecated; /account_reward_history is the replacement, taking the same
+// stake_addresses_with_epoch_no request body shape.
+type KoiosAccountRewardHistoryItem struct {
+	StakeAddress string `json:"stake_address"`
+	EarnedEpoch  uint64 `json:"earned_epoch"`
+	// SpendableEpoch is stored for reference (KoiosAccountRewards) but not
+	// currently compared against anything in Dingo's schema.
+	SpendableEpoch uint64  `json:"spendable_epoch"`
+	Amount         string  `json:"amount"`
+	Type           string  `json:"type"`
+	PoolIDBech32   *string `json:"pool_id_bech32"`
+}
+
+// GetAccountRewardHistory fetches Koios reward-history rows for the given
+// stake addresses filtered to epoch, via a single POST to
+// /account_reward_history. epoch is assumed to filter by the row's
+// earned_epoch — consistent with FetchAccountRewardsForEpoch always storing
+// the response under the koiosStakeEpoch-derived Koios reporting epoch it
+// requested (see check.go's koiosStakeEpoch/ARCHITECTURE.md's Epoch
+// alignment section), the same way /pool_history's _epoch_no filter already
+// behaves for GetPoolEpochHistory. This assumption could not be verified
+// against a live Koios instance in this environment (no network access);
+// EarnedEpoch is preserved on every returned item precisely so a future
+// caller with live access can cross-check it, and FetchAccountRewardsForEpoch
+// stores whatever Koios reports without silently overwriting EarnedEpoch
+// with the requested epoch.
+//
+// stakeAddresses must not exceed koiosAccountChunkSize — chunking is the
+// caller's responsibility (FetchAccountRewardsForEpoch), matching this
+// package's convention of keeping the low-level client method a single
+// request and putting chunking/concurrency in the fetch orchestration layer.
+// Returns nil, nil for an empty stakeAddresses slice without making a
+// request.
+func (k *KoiosClient) GetAccountRewardHistory(
+	ctx context.Context,
+	stakeAddresses []string,
+	epoch uint64,
+) ([]KoiosAccountRewardHistoryItem, error) {
+	if len(stakeAddresses) == 0 {
+		return nil, nil
+	}
+	payload := struct {
+		StakeAddresses []string `json:"_stake_addresses"`
+		EpochNo        uint64   `json:"_epoch_no"`
+	}{
+		StakeAddresses: stakeAddresses,
+		EpochNo:        epoch,
+	}
+	resp, err := k.post(ctx, "/account_reward_history", payload)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"koios /account_reward_history: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
+	}
+	var items []KoiosAccountRewardHistoryItem
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return nil, fmt.Errorf("koios /account_reward_history decode: %w", err)
+	}
+	return items, nil
 }
 
 // parseTotalFromContentRange extracts the total count from a Content-Range header

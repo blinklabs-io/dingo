@@ -721,3 +721,48 @@ func TestWithLeiosVoterPublicKeys(t *testing.T) {
 	keys["aabbcc"] = "mutated"
 	assert.Equal(t, "ddeeff", cfg.cfg.LeiosVoterPublicKeys["aabbcc"])
 }
+
+// TestWithKoiosParityAccountsNilDefaultsToEnabled locks in
+// KoiosParityConfig.Accounts's *bool semantics: an unset (nil) Accounts
+// pointer must default to enabled (true), matching
+// internalconfig.DefaultKoiosParityConfig's own Accounts: true default. A
+// plain bool field here would make "caller never set this" indistinguishable
+// from an explicit opt-out, silently disabling #3097's per-account checking.
+func TestWithKoiosParityAccountsNilDefaultsToEnabled(t *testing.T) {
+	cfg := NewConfig(WithKoiosParity(KoiosParityConfig{
+		Enabled:  true,
+		Accounts: nil,
+	}))
+
+	assert.True(
+		t,
+		cfg.cfg.KoiosParity.Accounts,
+		"a nil Accounts pointer must resolve to enabled",
+	)
+	require.NotNil(
+		t,
+		cfg.koiosParity.Accounts,
+		"syncCompatFields must always mirror a non-nil Accounts pointer",
+	)
+	assert.True(t, *cfg.koiosParity.Accounts)
+}
+
+// TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd proves an explicit
+// pointer-to-false actually disables #3097's per-account checking end to
+// end: through WithKoiosParity's resolution into the internal config
+// (internalconfig.KoiosParityConfig.Accounts, a plain bool), and through
+// syncCompatFields's mirror back into the exported root
+// KoiosParityConfig.Accounts *bool that
+// node_koiosparity.go's startKoiosParityObserver reads (with its own
+// defensive nil-check, per KoiosParityConfig's doc comment).
+func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
+	disabled := false
+	cfg := NewConfig(WithKoiosParity(KoiosParityConfig{
+		Enabled:  true,
+		Accounts: &disabled,
+	}))
+
+	assert.False(t, cfg.cfg.KoiosParity.Accounts)
+	require.NotNil(t, cfg.koiosParity.Accounts)
+	assert.False(t, *cfg.koiosParity.Accounts)
+}

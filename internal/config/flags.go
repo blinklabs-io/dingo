@@ -352,6 +352,11 @@ var flagSpecs = []flagSpec{
 		"koios-parity-grace-hours",
 		"hours after an epoch closes during which a missing Dingo-side row is treated as sync lag, not a failure",
 	),
+	boolFlag(
+		"KoiosParity.Accounts",
+		"koios-parity-accounts",
+		"also validate #3097 per-account exact reward parity for every epoch (default: true)",
+	),
 
 	// Peer governance
 	intFlag(

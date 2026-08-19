@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -29,6 +30,27 @@ const (
 	CategoryReferenceLag  = "reference_lag"
 	CategoryDBError       = "dingo_db_error"   // DB query returned an unexpected error
 	CategoryDBMissing     = "dingo_db_missing" // expected DB row is absent
+
+	// CategoryAcctOnlyDingo/CategoryAcctOnlyKoios mirror
+	// CategoryPoolOnlyDingo/CategoryPoolOnlyKoios but at per-account
+	// granularity (#3097) — a stake account (and specific reward type; see
+	// CompareAccountEpoch) with a reward row on only one side.
+	CategoryAcctOnlyDingo = "acct_only_dingo"
+	CategoryAcctOnlyKoios = "acct_only_koios"
+	// CategoryAcctDuplicate marks a genuine duplicate (stake_address,
+	// reward_type) row within a single side (Koios reference data or
+	// Dingo's committed reward_account_output) for one epoch — a
+	// data-integrity problem in whichever side produced it, never folded
+	// into CategoryValueMismatch.
+	CategoryAcctDuplicate = "acct_duplicate"
+	// CategoryAcctCoverageIncomplete marks an epoch whose Koios account-reward
+	// fetch (FetchAccountRewardsForEpoch) never completed successfully across
+	// every chunk of the requested address universe — see
+	// KoiosAccountCoverage. Treated as ERROR (see DetermineStatus), never as
+	// "nothing to compare": an incomplete reference set must never let an
+	// epoch read as PASS just because every row that *was* fetched happened
+	// to match.
+	CategoryAcctCoverageIncomplete = "acct_coverage_incomplete"
 )
 
 // Epoch check status values.
@@ -490,6 +512,263 @@ func ComparePoolEpoch(
 	return out
 }
 
+// koiosAccountRewardTypesOutOfScope lists Koios /account_reward_history
+// "type" enum values that Dingo's reward_account_output does not currently
+// produce (MIR/refund distribution mechanisms — treasury/reserves MIR
+// transfers and protocol-parameter-change refunds), per this issue's (#3097)
+// explicit scope note. Rows of these types are filtered out of the
+// comparison entirely — deliberately, not silently: they never contribute a
+// koios-only mismatch, so a real Dingo gap in ordinary member/leader reward
+// accounting is never masked by a flood of "missing" rows for a mechanism
+// Dingo was never expected to track in the first place. If Dingo's ledger
+// package ever starts tracking any of these (see
+// ledger/reward_calculation.go/ledger/rewards/rewards.go), this map (and
+// ARCHITECTURE.md's Koios Parity Tracker section) is the first place to
+// update.
+var koiosAccountRewardTypesOutOfScope = map[string]bool{
+	"treasury": true,
+	"reserves": true,
+	"refund":   true,
+}
+
+// DingoAccountReward is a Dingo reward_account_output row reduced to the
+// fields CompareAccountEpoch needs, with StakingKey/CredentialTag already
+// resolved to a bech32 stake address by the caller (checkEpoch, via
+// StakeAddressFromCredential) — CompareAccountEpoch itself never needs a
+// network ID and never touches raw credential bytes.
+type DingoAccountReward struct {
+	StakeAddress string
+	RewardType   string
+	Amount       string // lovelace decimal string
+}
+
+// accountRewardKey identifies one (stake_address, reward_type) reward row
+// within a single epoch — the granularity #3097 compares at, since one
+// account can legitimately carry both a member and a leader row in the same
+// epoch (a pool owner delegating to their own pool).
+type accountRewardKey struct {
+	address string
+	rtype   string
+}
+
+// CompareAccountEpoch compares every Koios /account_reward_history reference
+// row against Dingo's committed reward_account_output rows for one epoch,
+// exactly — integer lovelace, no rounding/sampling/tolerance — per #3097's
+// acceptance criteria. See ARCHITECTURE.md's Koios Parity Tracker
+// "Per-account exact parity (#3097)" subsection for the full design.
+//
+// koiosRows/dingoRows are each scanned for internal duplicates first: the
+// same (stake_address, reward_type) key appearing more than once within one
+// side is a data-integrity problem in whichever side produced it (not a
+// value disagreement), reported once per duplicate occurrence via
+// CategoryAcctDuplicate. The first occurrence of a duplicated key is still
+// kept for the union comparison below, so a real value mismatch on that key
+// is not masked by the duplicate report.
+//
+// The union of the two (deduplicated) keysets is then walked: present only
+// in Koios -> CategoryAcctOnlyKoios (or CategoryReferenceLag within
+// graceHours of epochEndTime, mirroring ComparePoolEpoch's identical
+// pattern), present only in Dingo -> CategoryAcctOnlyDingo, present on both
+// sides with differing amounts -> CategoryValueMismatch (compared as exact
+// integers via lovelaceEqual, never as floats/rationals), present on both
+// sides with equal amounts -> no mismatch. A zero-reward account present
+// identically on both sides is therefore a pass, exactly like any other
+// equal-amount case.
+//
+// graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
+// identical parameters and meaning.
+func CompareAccountEpoch(
+	network string,
+	epoch uint64,
+	koiosRows []KoiosAccountRewards,
+	dingoRows []DingoAccountReward,
+	now time.Time,
+	graceHours int,
+	epochEndTime time.Time,
+) []CheckMismatch {
+	var out []CheckMismatch
+
+	koiosByKey := make(map[accountRewardKey]KoiosAccountRewards, len(koiosRows))
+	koiosSeen := make(map[accountRewardKey]int, len(koiosRows))
+	for _, r := range koiosRows {
+		if koiosAccountRewardTypesOutOfScope[r.RewardType] {
+			continue
+		}
+		k := accountRewardKey{r.StakeAddress, r.RewardType}
+		koiosSeen[k]++
+		if koiosSeen[k] > 1 {
+			out = append(out, CheckMismatch{
+				Network:      network,
+				Epoch:        epoch,
+				StakeAddress: r.StakeAddress,
+				Field:        "account_reward_duplicate",
+				DingoValue:   "",
+				KoiosValue: fmt.Sprintf(
+					"reward_type=%s amount=%s duplicated in koios reference data (occurrence %d)",
+					r.RewardType,
+					r.Earned,
+					koiosSeen[k],
+				),
+				Category:  CategoryAcctDuplicate,
+				CheckedAt: now,
+			})
+			continue
+		}
+		koiosByKey[k] = r
+	}
+
+	dingoByKey := make(map[accountRewardKey]DingoAccountReward, len(dingoRows))
+	dingoSeen := make(map[accountRewardKey]int, len(dingoRows))
+	for _, r := range dingoRows {
+		k := accountRewardKey{r.StakeAddress, r.RewardType}
+		dingoSeen[k]++
+		if dingoSeen[k] > 1 {
+			out = append(out, CheckMismatch{
+				Network:      network,
+				Epoch:        epoch,
+				StakeAddress: r.StakeAddress,
+				Field:        "account_reward_duplicate",
+				DingoValue: fmt.Sprintf(
+					"reward_type=%s amount=%s duplicated in dingo committed state (occurrence %d)",
+					r.RewardType,
+					r.Amount,
+					dingoSeen[k],
+				),
+				KoiosValue: "",
+				Category:   CategoryAcctDuplicate,
+				CheckedAt:  now,
+			})
+			continue
+		}
+		dingoByKey[k] = r
+	}
+
+	allKeys := make([]accountRewardKey, 0, len(koiosByKey)+len(dingoByKey))
+	seenKey := make(map[accountRewardKey]bool, len(koiosByKey)+len(dingoByKey))
+	for k := range koiosByKey {
+		if !seenKey[k] {
+			seenKey[k] = true
+			allKeys = append(allKeys, k)
+		}
+	}
+	for k := range dingoByKey {
+		if !seenKey[k] {
+			seenKey[k] = true
+			allKeys = append(allKeys, k)
+		}
+	}
+	// Deterministic ordering: report output/tests should not depend on Go's
+	// randomised map iteration order.
+	slices.SortFunc(allKeys, func(a, b accountRewardKey) int {
+		if a.address != b.address {
+			if a.address < b.address {
+				return -1
+			}
+			return 1
+		}
+		switch {
+		case a.rtype < b.rtype:
+			return -1
+		case a.rtype > b.rtype:
+			return 1
+		default:
+			return 0
+		}
+	})
+
+	for _, k := range allKeys {
+		kr, koiosOK := koiosByKey[k]
+		dr, dingoOK := dingoByKey[k]
+		switch {
+		case koiosOK && !dingoOK:
+			cat := CategoryAcctOnlyKoios
+			if graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+				cat = CategoryReferenceLag
+			}
+			out = append(out, CheckMismatch{
+				Network:      network,
+				Epoch:        epoch,
+				StakeAddress: k.address,
+				Field:        "account_reward_presence",
+				DingoValue:   "",
+				KoiosValue: fmt.Sprintf(
+					"%s (type=%s)",
+					kr.Earned,
+					kr.RewardType,
+				),
+				Category:  cat,
+				CheckedAt: now,
+			})
+		case dingoOK && !koiosOK:
+			// Symmetric with the koiosOK && !dingoOK case above: Koios can
+			// lag in publishing /account_reward_history for a just-closed
+			// epoch the same way it can lag on any other endpoint, so an
+			// account Dingo has already committed a reward for but Koios
+			// hasn't published yet within graceHours is reference lag, not
+			// a real acct_only_dingo discrepancy.
+			cat := CategoryAcctOnlyDingo
+			if graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+				cat = CategoryReferenceLag
+			}
+			out = append(out, CheckMismatch{
+				Network:      network,
+				Epoch:        epoch,
+				StakeAddress: k.address,
+				Field:        "account_reward_presence",
+				DingoValue: fmt.Sprintf(
+					"%s (type=%s)",
+					dr.Amount,
+					dr.RewardType,
+				),
+				KoiosValue: "",
+				Category:   cat,
+				CheckedAt:  now,
+			})
+		default:
+			if !lovelaceEqual(dr.Amount, kr.Earned) {
+				out = append(out, CheckMismatch{
+					Network:      network,
+					Epoch:        epoch,
+					StakeAddress: k.address,
+					Field:        "account_reward_amount",
+					DingoValue:   dr.Amount,
+					KoiosValue:   kr.Earned,
+					Category:     CategoryValueMismatch,
+					CheckedAt:    now,
+				})
+			}
+		}
+	}
+
+	return out
+}
+
+// lovelaceEqual reports whether a and b represent the same non-negative
+// integer lovelace amount, parsed exactly via big.Int — never as a float or
+// rational — so #3097's "no rounding, sampling, or tolerance" requirement
+// holds even for values exceeding float64's exact-integer range. An
+// unparsable value on either side compares unequal (never silently equal),
+// so a corrupt/malformed amount always surfaces as a mismatch rather than a
+// false pass.
+func lovelaceEqual(a, b string) bool {
+	// Both values are parsed and validated (well-formed base-10 integer,
+	// non-negative — lovelace amounts are never negative) before any
+	// equality check, including the a == b case: a naive fast-path
+	// string-equality short-circuit would report two identical malformed or
+	// negative strings as "equal" without ever validating them, letting
+	// CompareAccountEpoch pass on invalid account data.
+	var x, y big.Int
+	if _, ok := x.SetString(a, 10); !ok || x.Sign() < 0 {
+		return false
+	}
+	if _, ok := y.SetString(b, 10); !ok || y.Sign() < 0 {
+		return false
+	}
+	return x.Cmp(&y) == 0
+}
+
 // rationalsEqual reports whether two numeric strings represent the same
 // rational (e.g. "0.1" and "1/10"). Returns false if either fails to parse.
 func rationalsEqual(a, b string) bool {
@@ -505,9 +784,16 @@ func rationalsEqual(a, b string) bool {
 
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
 //
-//   - FAIL: any value_mismatch, pool_only_dingo, or pool_only_koios entry.
-//   - ERROR: only DB-level failures (dingo_db_error, dingo_db_missing) or
-//     reference_lag (Koios data may be incomplete for a recent epoch).
+//   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
+//     acct_only_dingo, acct_only_koios, or acct_duplicate entry — a strict
+//     run cannot report PASS while any of these are present (#3097's
+//     acceptance criteria: a single missing, extra, duplicate, or differing
+//     account fails the whole epoch).
+//   - ERROR: only DB-level failures (dingo_db_error, dingo_db_missing),
+//     reference_lag (Koios data may be incomplete for a recent epoch), or
+//     acct_coverage_incomplete (the Koios account-reward fetch for this
+//     epoch never completed across every chunk, so there is no complete
+//     reference set to compare against yet).
 //   - PASS: no mismatches.
 func DetermineStatus(mismatches []CheckMismatch) string {
 	if len(mismatches) == 0 {
@@ -516,7 +802,10 @@ func DetermineStatus(mismatches []CheckMismatch) string {
 	hasError := false
 	for _, m := range mismatches {
 		switch m.Category {
-		case CategoryDBError, CategoryDBMissing, CategoryReferenceLag:
+		case CategoryDBError,
+			CategoryDBMissing,
+			CategoryReferenceLag,
+			CategoryAcctCoverageIncomplete:
 			hasError = true
 		default:
 			return StatusFail

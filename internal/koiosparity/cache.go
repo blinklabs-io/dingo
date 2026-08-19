@@ -125,13 +125,58 @@ type KoiosTotals struct {
 	ReservesWithdrawal string
 }
 
-// KoiosAccountRewards is schema-only; populated when #1875 is resolved.
+// KoiosAccountRewards holds one Koios /account_reward_history reference row
+// for (network, epoch, stake_address, reward_type) — issue #3097's
+// per-account exact-parity comparison consumes this. RewardType is part of
+// the key (not just a stored field) because a single account can
+// legitimately have both a "member" and a "leader" row in the same epoch
+// (e.g. a pool owner delegating to their own pool) — see
+// createCacheSchema's idx_kar_net_epoch_addr_type.
 type KoiosAccountRewards struct {
 	ID           uint
 	Network      string
 	Epoch        uint64
 	StakeAddress string
-	Earned       string
+	// RewardType is Koios's /account_reward_history "type" enum value
+	// verbatim: "member", "leader", "treasury", "reserves", or "refund".
+	// CompareAccountEpoch currently treats treasury/reserves/refund as out
+	// of scope (see its doc comment) — stored here regardless, per this
+	// cache's "store the full documented schema" convention.
+	RewardType string
+	Earned     string // lovelace decimal string (Koios "amount")
+	// SpendableEpoch is Koios's spendable_epoch — stored for reference only;
+	// not yet compared against anything in Dingo's schema.
+	SpendableEpoch uint64
+	// PoolIDBech32 is Koios's pool_id_bech32 — null/empty for reward types
+	// with no associated pool. Stored for reference only.
+	PoolIDBech32 string
+	FetchedAt    time.Time
+}
+
+// KoiosAccountCoverage records whether a per-epoch Koios account-reward fetch
+// (FetchAccountRewardsForEpoch) completed successfully across every chunk of
+// the requested address universe. Complete must only ever be set true when
+// every chunk succeeded — see FetchAccountRewardsForEpoch and
+// CommitAccountRewardsForEpoch. checkEpoch's per-account comparison phase
+// consults this before ever treating koios_account_rewards as a complete
+// reference set for the epoch (mirroring how a missing koios_totals row
+// already gates CompareEpochTotals); an absent or incomplete row must
+// produce an explicit ERROR-category mismatch
+// (CategoryAcctCoverageIncomplete), never a silent skip that could let a
+// partially-fetched epoch read as PASS.
+type KoiosAccountCoverage struct {
+	ID      uint
+	Network string
+	Epoch   uint64
+	// RequestedCount is the size of the address universe requested for this
+	// fetch (Dingo's own known addresses unioned with Koios's full
+	// historical account list — see FetchAccountRewardsForEpoch).
+	RequestedCount int
+	// FetchedCount is the number of Koios account-reward rows actually
+	// stored (can differ from RequestedCount: most requested addresses have
+	// no reward at all in a given epoch, so they contribute zero rows).
+	FetchedCount int
+	Complete     bool
 	FetchedAt    time.Time
 }
 
@@ -431,6 +476,115 @@ func (c *Cache) GetAllPoolsForEpoch(
 	return pools, rows.Err()
 }
 
+// CommitAccountRewardsForEpoch atomically replaces every koios_account_rewards
+// row for (network, epoch) and records coverage in a single transaction — the
+// same "delete then bulk insert, commit together" pattern CommitEpochData
+// uses for pool rows, so a partial account fetch (a crash or cancellation
+// mid-commit) can never leave a half-written epoch that GetAccountCoverage
+// would report as complete. requestedCount is the size of the address
+// universe FetchAccountRewardsForEpoch actually requested Koios reference
+// data for; complete must be true only when every chunk of that fetch
+// succeeded — passing complete=false records the attempt (for
+// observability) without ever letting the epoch read as a valid reference
+// set.
+func (c *Cache) CommitAccountRewardsForEpoch(
+	network string,
+	epoch uint64,
+	rows []KoiosAccountRewards,
+	requestedCount int,
+	complete bool,
+	fetchedAt time.Time,
+) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec("DELETE FROM koios_account_rewards WHERE network = ? AND epoch = ?", network, epoch); err != nil {
+		return err
+	}
+	if len(rows) > 0 {
+		var stmt *sql.Stmt
+		stmt, err = tx.Prepare(`INSERT INTO koios_account_rewards
+			(network, epoch, stake_address, reward_type, earned, spendable_epoch, pool_id_bech32, fetched_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close() //nolint:errcheck
+		for i := range rows {
+			rows[i].Network, rows[i].Epoch = network, epoch
+			if _, err = stmt.Exec(
+				rows[i].Network, rows[i].Epoch, rows[i].StakeAddress, rows[i].RewardType, rows[i].Earned,
+				rows[i].SpendableEpoch, rows[i].PoolIDBech32, rows[i].FetchedAt); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err = tx.Exec("DELETE FROM koios_account_coverage WHERE network = ? AND epoch = ?", network, epoch); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO koios_account_coverage
+		(network, epoch, requested_count, fetched_count, complete, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		network, epoch, requestedCount, len(rows), complete, fetchedAt); err != nil {
+		return err
+	}
+	err = tx.Commit()
+	return err
+}
+
+// GetAccountRewardsForEpoch retrieves all cached Koios account-reward rows
+// for (network, epoch).
+func (c *Cache) GetAccountRewardsForEpoch(
+	network string,
+	epoch uint64,
+) ([]KoiosAccountRewards, error) {
+	rows, err := c.db.Query(
+		`SELECT network, epoch, stake_address, reward_type, earned, spendable_epoch, pool_id_bech32, fetched_at
+		FROM koios_account_rewards WHERE network = ? AND epoch = ? ORDER BY id`,
+		network,
+		epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KoiosAccountRewards
+	for rows.Next() {
+		var r KoiosAccountRewards
+		if err := rows.Scan(&r.Network, &r.Epoch, &r.StakeAddress, &r.RewardType, &r.Earned,
+			&r.SpendableEpoch, &r.PoolIDBech32, &r.FetchedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetAccountCoverage retrieves the account-fetch coverage record for
+// (network, epoch). Returns sql.ErrNoRows (via the driver, propagated
+// unwrapped like GetEpochInfo/GetTotals) when no fetch has ever been
+// attempted for this epoch — callers must treat that identically to
+// Complete == false, never as "nothing to compare".
+func (c *Cache) GetAccountCoverage(
+	network string,
+	epoch uint64,
+) (*KoiosAccountCoverage, error) {
+	var cov KoiosAccountCoverage
+	err := c.db.QueryRow(`SELECT network, epoch, requested_count, fetched_count, complete, fetched_at
+		FROM koios_account_coverage WHERE network = ? AND epoch = ?`, network, epoch).
+		Scan(&cov.Network, &cov.Epoch, &cov.RequestedCount, &cov.FetchedCount, &cov.Complete, &cov.FetchedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &cov, nil
+}
+
 // GetFetchedEpochRange returns the min and max fetched epoch numbers.
 func (c *Cache) GetFetchedEpochRange(
 	network string,
@@ -469,21 +623,103 @@ func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
 }
 
 // GetEpochsNeedingCheck returns epochs that have Koios reference data but
-// either have no check result yet OR whose Koios data was refreshed (fetched_at
-// updated) after the last check. This ensures a forced re-fetch is followed by
-// an automatic re-check rather than leaving stale PASS/FAIL rows in the cache.
-func (c *Cache) GetEpochsNeedingCheck(network string) ([]uint64, error) {
-	// LEFT JOIN so we pick up epochs with no status row (NULL last_checked_at)
-	// AND epochs where fetched_at > last_checked_at (stale check).
-	rows, err := c.db.Query(`
+// either have no check result yet, OR whose Koios data was refreshed
+// (fetched_at updated) after the last check, OR — when accountsEnabled is
+// true — whose #3097 per-account reference data (koios_account_coverage) is
+// absent, incomplete, or was refreshed after the last check. This ensures a
+// forced re-fetch (pool-level or account-level) is always followed by an
+// automatic re-check rather than leaving stale PASS/FAIL/ERROR rows in the
+// cache.
+//
+// The accountsEnabled parameter exists because koios_account_coverage
+// freshness is only ever a meaningful recheck trigger when the caller
+// actually runs the per-account comparison phase (CheckConfig.AccountsEnabled/
+// ObserverConfig.AccountsEnabled) — passing false reproduces the exact
+// pre-#3097 query (pool/aggregate staleness only), so a caller that never
+// enables accounts sees no behavior change and never has an epoch queued for
+// recheck purely because its account coverage happens to be absent (which is
+// simply expected in that mode, not a discrepancy worth flagging). See
+// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity"
+// subsection for the full epoch-selection design this is part of.
+func (c *Cache) GetEpochsNeedingCheck(
+	network string,
+	accountsEnabled bool,
+) ([]uint64, error) {
+	// LEFT JOINs so we pick up epochs with no status row (NULL
+	// last_checked_at), epochs where fetched_at > last_checked_at (stale pool
+	// check), and — when accountsEnabled — epochs with no/incomplete/stale
+	// account coverage relative to the last check.
+	query := `
 		SELECT k.epoch
 		FROM koios_epoch_info k
 		LEFT JOIN check_epoch_status s
-		       ON k.network = s.network AND k.epoch = s.epoch
+		       ON k.network = s.network AND k.epoch = s.epoch`
+	if accountsEnabled {
+		query += `
+		LEFT JOIN koios_account_coverage a
+		       ON k.network = a.network AND k.epoch = a.epoch`
+	}
+	query += `
 		WHERE k.network = ?
-		  AND (s.epoch IS NULL OR k.fetched_at > s.last_checked_at)
+		  AND (s.epoch IS NULL OR k.fetched_at > s.last_checked_at`
+	if accountsEnabled {
+		query += `
+		       OR a.epoch IS NULL OR a.complete = 0 OR a.fetched_at > s.last_checked_at`
+	}
+	query += `)
+		ORDER BY k.epoch ASC`
+	rows, err := c.db.Query(query, network)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []uint64
+	for rows.Next() {
+		var e uint64
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
+// GetEpochsMissingAccountCoverage returns epoch numbers in [from, through]
+// that already have a fetched koios_epoch_info row but whose #3097
+// per-account Koios reference data (koios_account_coverage) is either absent
+// or present with complete = 0.
+//
+// This is the fetch-side counterpart to GetEpochsNeedingCheck's
+// accountsEnabled branch: GetUncachedEpochs alone (keyed purely off
+// koios_epoch_info presence) can never re-select an epoch whose pool-level
+// data was fetched before AccountsEnabled existed or was turned on — it would
+// look "already fetched" forever and never get a per-account backfill. Fetch
+// unions this into its epoch list only when cfg.AccountsEnabled, and skips
+// the redundant pool-history re-fetch for any epoch this returns that
+// GetUncachedEpochs did not also return (see fetchEpoch's caller in fetch.go).
+// See ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity"
+// subsection.
+func (c *Cache) GetEpochsMissingAccountCoverage(
+	network string,
+	from, through uint64,
+) ([]uint64, error) {
+	// pre_staking = 0 excludes epochs <= preStakingThroughEpoch: those get a
+	// koios_epoch_info row (the PreStaking marker) but never a
+	// koios_account_coverage row — FetchEpochAccountsWithAddrs skips them
+	// entirely, matching fetchEpoch/checkEpoch's own exclusion of the same
+	// epochs — so without this filter they would be selected for account
+	// backfill on every fetch run forever.
+	rows, err := c.db.Query(`
+		SELECT k.epoch
+		FROM koios_epoch_info k
+		LEFT JOIN koios_account_coverage a
+		       ON k.network = a.network AND k.epoch = a.epoch
+		WHERE k.network = ?
+		  AND k.epoch >= ? AND k.epoch <= ?
+		  AND k.pre_staking = 0
+		  AND (a.epoch IS NULL OR a.complete = 0)
 		ORDER BY k.epoch ASC
-	`, network)
+	`, network, from, through)
 	if err != nil {
 		return nil, err
 	}
@@ -700,8 +936,20 @@ func createCacheSchema(db *sql.DB) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kt_net_epoch ON koios_totals(network, epoch)`,
 		`CREATE TABLE IF NOT EXISTS koios_account_rewards (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
-			stake_address TEXT NOT NULL, earned TEXT NOT NULL, fetched_at DATETIME NOT NULL)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kar_net_epoch_addr ON koios_account_rewards(network, epoch, stake_address)`,
+			stake_address TEXT NOT NULL, reward_type TEXT NOT NULL DEFAULT '', earned TEXT NOT NULL,
+			spendable_epoch INTEGER NOT NULL DEFAULT 0, pool_id_bech32 TEXT NOT NULL DEFAULT '',
+			fetched_at DATETIME NOT NULL)`,
+		// idx_kar_net_epoch_addr_type is deliberately NOT created here: on an
+		// older cache.db (schema-only #1875 era) the table exists without a
+		// reward_type column yet, so creating an index that references it
+		// would fail. It's created below, after the additive-column
+		// migration guarantees reward_type exists on every koios_account_rewards
+		// table, old or new.
+		`CREATE TABLE IF NOT EXISTS koios_account_coverage (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+			requested_count INTEGER NOT NULL DEFAULT 0, fetched_count INTEGER NOT NULL DEFAULT 0,
+			complete INTEGER NOT NULL DEFAULT 0, fetched_at DATETIME NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kac_net_epoch ON koios_account_coverage(network, epoch)`,
 		`CREATE TABLE IF NOT EXISTS check_epoch_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			last_checked_at DATETIME NOT NULL, status TEXT NOT NULL, mismatch_count INTEGER NOT NULL,
@@ -740,7 +988,90 @@ func createCacheSchema(db *sql.DB) error {
 			_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
 		}
 	}
+
+	// Older cache files created before #3097 have a koios_account_rewards
+	// table missing reward_type/spendable_epoch/pool_id_bech32 (schema-only
+	// era, #1875) — add each column additively rather than dropping and
+	// recreating the table, so any rows a prior partial run may have written
+	// are preserved rather than lost. Guarded by pragma_table_info the same
+	// way the drop-column migration above is, just adding instead of
+	// dropping.
+	for _, col := range [][2]string{
+		{"reward_type", "TEXT NOT NULL DEFAULT ''"},
+		{"spendable_epoch", "INTEGER NOT NULL DEFAULT 0"},
+		{"pool_id_bech32", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := addColumnIfMissing(db, "koios_account_rewards", col[0], col[1]); err != nil {
+			return fmt.Errorf(
+				"migrate koios_account_rewards: add column %s: %w",
+				col[0],
+				err,
+			)
+		}
+	}
+	// The pre-#3097 unique index only covered (network, epoch,
+	// stake_address); drop it now that reward_type is guaranteed to exist
+	// (old rows default to "" via the ADD COLUMN above, which is fine:
+	// reward_type was never populated pre-#3097 in practice since the table
+	// was schema-only) and create the widened replacement.
+	if _, err := db.Exec("DROP INDEX IF EXISTS idx_kar_net_epoch_addr"); err != nil {
+		return fmt.Errorf(
+			"migrate koios_account_rewards: drop old index: %w",
+			err,
+		)
+	}
+	// idx_kar_net_epoch_addr_type must be non-unique: Koios can legitimately
+	// return duplicate (network, epoch, stake_address, reward_type) rows
+	// (see CategoryAcctDuplicate's doc comment), and a unique constraint
+	// would abort CommitAccountRewardsForEpoch's insert with a constraint
+	// error before CompareAccountEpoch ever gets a chance to detect and
+	// report the duplicate as an acct_duplicate FAIL. Explicitly drop any
+	// unique version of this index a previous run of this migration may
+	// already have created before this fix, since "CREATE INDEX IF NOT
+	// EXISTS" would otherwise leave an existing unique index in place.
+	if _, err := db.Exec("DROP INDEX IF EXISTS idx_kar_net_epoch_addr_type"); err != nil {
+		return fmt.Errorf(
+			"migrate koios_account_rewards: drop unique widened index: %w",
+			err,
+		)
+	}
+	if _, err := db.Exec(
+		"CREATE INDEX IF NOT EXISTS idx_kar_net_epoch_addr_type ON koios_account_rewards(network, epoch, stake_address, reward_type)",
+	); err != nil {
+		return fmt.Errorf(
+			"migrate koios_account_rewards: create widened index: %w",
+			err,
+		)
+	}
 	return nil
+}
+
+// addColumnIfMissing adds column columnDDL (e.g. TEXT NOT NULL DEFAULT with an
+// empty-string default) to table if it is not already present, so
+// re-running createCacheSchema
+// against an older cache.db is idempotent and never errors on a column that
+// already exists.
+func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
+	rows, err := db.Query(
+		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	present := rows.Next()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	_, err = db.Exec(
+		"ALTER TABLE " + table + " ADD COLUMN " + column + " " + columnDDL,
+	)
+	return err
 }
 
 func scanPool(rows *sql.Rows, p *KoiosPoolEpoch) error {

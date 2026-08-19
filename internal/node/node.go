@@ -529,6 +529,7 @@ func buildDingoConfig(
 			APIKey:     cfg.KoiosParity.APIKey,
 			Strict:     cfg.KoiosParity.Strict,
 			GraceHours: cfg.KoiosParity.GraceHours,
+			Accounts:   &cfg.KoiosParity.Accounts,
 		}),
 		dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 		dingo.WithOffchainMetadataConfig(
