@@ -405,12 +405,16 @@ func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
 	// The wait, not the unsubscribe, is what ctx bounds: this must return
 	// while the handler is still blocked, or a bounded shutdown path can be
 	// held open indefinitely by one stuck handler.
-	select {
-	case err := <-returned:
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-	case <-time.After(5 * time.Second):
-		t.Fatal("UnsubscribeAndWaitContext did not honor the context deadline")
-	}
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			returned,
+			5*time.Second,
+			"UnsubscribeAndWaitContext did not honor the context deadline",
+		),
+		context.DeadlineExceeded,
+	)
 
 	// Delivery stopped even though the wait was cut short.
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-unsubscribe"))

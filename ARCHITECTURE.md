@@ -2534,7 +2534,7 @@ Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcom
 
 The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
 
-`Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop()` removes them with `UnsubscribeAndWait`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects.
+`Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop(ctx)` removes them with `UnsubscribeAndWaitContext`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects. The unsubscribe itself always happens; only the wait for a handler already in flight is bounded by `ctx`, so one stuck handler cannot overrun the shutdown deadline. A deadline expiry is returned as an error, unprefixed — every caller adds its own `peer governor shutdown:` prefix, as it does for the other components.
 
 Outbound-dial goroutines are registered with the governor's wait group while
 holding the same mutex `Stop()` uses to clear `stopCh`. Runtime peer additions,
