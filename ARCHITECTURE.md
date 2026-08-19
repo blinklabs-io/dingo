@@ -3658,8 +3658,14 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   field-level matrix is emitted in every JSON report, and human-readable
   status output reports the class counts. `internal/koiosparity/coverage_test.go`
   requires every field in the consumed Koios response structs to remain
-  classified when those structs change. Account rewards are outside this
-  matrix until #3097 and #3099 are implemented.
+  classified when those structs change (the `/account_reward_history` entries
+  below are not covered by that test's automatic struct-field check, since
+  `CompareAccountEpoch` reads from `KoiosAccountRewardHistoryItem` rather than
+  one of the checked response types — they are still kept here and in
+  `coverage.go`'s matrix by hand for the same completeness reason). #3097
+  wired up exact per-account comparison against `/account_reward_history`;
+  #3099's chunked/resumable large-account fetch remains open and changes how
+  reliably the account universe is fetched, not which fields are compared.
 
   | Koios endpoint | Classification | Fields | Dingo mapping / reason |
   |---|---|---|---|
@@ -3682,6 +3688,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with aggregated `reward_pool_output.member_reward_total` at K-1. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
+  | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` row `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows; treasury/reserves/refund rows are filtered out, see `koiosAccountRewardTypesOutOfScope`. |
+  | `/account_reward_history` | unsupported | `spendable_epoch`, `pool_id_bech32` | Stored for reference only; not part of the match key or currently compared against Dingo's schema. |
 
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not

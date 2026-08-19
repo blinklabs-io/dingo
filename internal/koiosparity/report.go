@@ -112,7 +112,7 @@ func PrintStatus(
 	exact, derived, incomparable, unsupported := coverageCounts()
 	fmt.Fprintf(
 		w,
-		"  scope:    epoch/pool fields (exact %d / derived %d / intentionally incomparable %d / unsupported %d)\n",
+		"  scope:    epoch/pool/account fields (exact %d / derived %d / intentionally incomparable %d / unsupported %d)\n",
 		exact,
 		derived,
 		incomparable,

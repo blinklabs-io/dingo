@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -78,7 +79,11 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validTotalsTmpl, r.URL.Query().Get("_epoch_no"))
+				_, _ = fmt.Fprintf(
+					w,
+					validTotalsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			default:
 				t.Errorf("unexpected request path %s", r.URL.Path)
 				w.WriteHeader(http.StatusNotFound)
@@ -141,7 +146,11 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validTotalsTmpl, r.URL.Query().Get("_epoch_no"))
+				_, _ = fmt.Fprintf(
+					w,
+					validTotalsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			default:
 				t.Errorf("unexpected request path %s", r.URL.Path)
 				w.WriteHeader(http.StatusNotFound)
@@ -200,10 +209,18 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 				_, _ = w.Write([]byte(`[]`))
 			case r.URL.Path == "/epoch_info":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, r.URL.Query().Get("_epoch_no"))
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochInfoTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validTotalsTmpl, r.URL.Query().Get("_epoch_no"))
+				_, _ = fmt.Fprintf(
+					w,
+					validTotalsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			case r.URL.Path == "/pool_history":
 				poolHistoryAttempts.Add(1)
 				if r.URL.Query().Get("_pool_bech32") == "pool0" {
@@ -281,11 +298,19 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 			case r.URL.Path == "/epoch_info":
 				epochInfoCalls.Add(1)
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochInfoTmpl,
+					strconv.FormatUint(epoch, 10),
+				)
 			case r.URL.Path == "/totals":
 				totalsCalls.Add(1)
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validTotalsTmpl, epoch)
+				_, _ = fmt.Fprintf(
+					w,
+					validTotalsTmpl,
+					strconv.FormatUint(epoch, 10),
+				)
 			case r.URL.Path == "/account_list":
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(w, `[{"stake_address":%q}]`, koiosAddr)
