@@ -27,5 +27,9 @@ func (d *Database) GetMIRCertsInSlotRange(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetMIRCertsInSlotRange(startSlot, endSlot, txn.Metadata())
+	return d.certificateStore().GetMIRCertsInSlotRange(
+		startSlot,
+		endSlot,
+		txn.Metadata(),
+	)
 }

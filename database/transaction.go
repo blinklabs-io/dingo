@@ -280,7 +280,7 @@ func (d *Database) SetTransactionWithOpts(
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
-	if err := d.metadata.SetTransaction(
+	if err := d.transactionStore().SetTransaction(
 		tx, point, idx, certDeposits,
 		opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
 	); err != nil {
@@ -333,7 +333,7 @@ func (d *Database) SetTransactionMetadataOnly(
 	if metadataTxn == nil {
 		return types.ErrNilTxn
 	}
-	if err := d.metadata.SetTransaction(
+	if err := d.transactionStore().SetTransaction(
 		metadataOnlyTransaction{Transaction: tx},
 		point,
 		idx,
@@ -441,7 +441,7 @@ func (d *Database) SetGapBlockTransaction(
 		}
 	}
 
-	if err := d.metadata.SetGapBlockTransaction(
+	if err := d.transactionStore().SetGapBlockTransaction(
 		tx, point, idx, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
@@ -464,7 +464,7 @@ func (d *Database) SetGapBlockTransaction(
 	// when the tx declares no total collateral the fee was computed from an
 	// incomplete UTxO view and undercounts. Recompute it now that the inputs
 	// are materialized so the epoch fee pot is correct.
-	if err := d.metadata.RecomputeGapCollateralFee(
+	if err := d.transactionStore().RecomputeGapCollateralFee(
 		tx, point, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
@@ -527,7 +527,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			continue
 		}
 		seen[inputKey] = struct{}{}
-		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
+		existingUtxo, err := d.utxoStore().GetUtxoIncludingSpent(
 			inputTxId,
 			input.Index(),
 			txn.Metadata(),
@@ -548,7 +548,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// could not restore the row.
 			if existingUtxo.SpentAtTxId == nil &&
 				existingUtxo.DeletedSlot == point.Slot {
-				if err := d.metadata.SetUtxoDeletedAtSlot(
+				if err := d.utxoStore().SetUtxoDeletedAtSlot(
 					input,
 					point.Slot,
 					spenderTxHash,
@@ -645,7 +645,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	if len(recoveredUtxos) == 0 {
 		return nil
 	}
-	if err := d.metadata.ImportUtxos(
+	if err := d.utxoStore().ImportUtxos(
 		recoveredUtxos,
 		txn.Metadata(),
 	); err != nil {
@@ -676,7 +676,7 @@ func (d *Database) ensureGapConsumedUtxos(
 			continue
 		}
 		seen[inputKey] = struct{}{}
-		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
+		existingUtxo, err := d.utxoStore().GetUtxoIncludingSpent(
 			inputTxId,
 			input.Index(),
 			txn.Metadata(),
@@ -702,7 +702,7 @@ func (d *Database) ensureGapConsumedUtxos(
 			if existingUtxo.SpentAtTxId == nil &&
 				(existingUtxo.DeletedSlot == 0 ||
 					existingUtxo.DeletedSlot == point.Slot) {
-				if err := d.metadata.SetUtxoDeletedAtSlot(
+				if err := d.utxoStore().SetUtxoDeletedAtSlot(
 					input,
 					point.Slot,
 					spenderTxHash,
@@ -759,7 +759,7 @@ func (d *Database) ensureGapConsumedUtxos(
 	if len(recoveredUtxos) == 0 {
 		return nil
 	}
-	if err := d.metadata.ImportUtxos(
+	if err := d.utxoStore().ImportUtxos(
 		recoveredUtxos,
 		txn.Metadata(),
 	); err != nil {
@@ -1024,7 +1024,7 @@ func (d *Database) recoverConsumedUtxo(
 	// that drove recovery in some branches); in that case we leave
 	// the FK nil and the row stays unjoinable until backfilled by a
 	// later path that has the producer.
-	producerID, found, lookupErr := d.metadata.GetTransactionIDByHash(
+	producerID, found, lookupErr := d.transactionStore().GetTransactionIDByHash(
 		ledgerInputIDBytes(input),
 		txn.Metadata(),
 	)
@@ -1107,7 +1107,12 @@ func (d *Database) SetGenesisTransaction(
 	}
 
 	// Store transaction in metadata
-	if err := d.metadata.SetGenesisTransaction(txHash, blockHash, utxoModels, txn.Metadata()); err != nil {
+	if err := d.transactionStore().SetGenesisTransaction(
+		txHash,
+		blockHash,
+		utxoModels,
+		txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf(
 			"SetGenesisTransaction failed for tx %x block %x: %w",
 			txHash[:8],
@@ -1196,7 +1201,7 @@ func (d *Database) GetTransactionByHash(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
+	return d.transactionStore().GetTransactionByHash(hash, txn.Metadata())
 }
 
 // GetTransactionMetadataByHash returns only the stored metadata blob for the
@@ -1213,7 +1218,7 @@ func (d *Database) GetTransactionMetadataByHash(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetTransactionMetadataByHash(hash, txn.Metadata())
+	return d.transactionStore().GetTransactionMetadataByHash(hash, txn.Metadata())
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -1228,7 +1233,10 @@ func (d *Database) GetTransactionsByHashes(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByHashes(hashes, txn.Metadata())
+	txs, err := d.transactionStore().GetTransactionsByHashes(
+		hashes,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get txs by hashes: %w", err)
 	}
@@ -1248,7 +1256,7 @@ func (d *Database) GetTransactionsByBlockHash(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByBlockHash(
+	txs, err := d.transactionStore().GetTransactionsByBlockHash(
 		blockHash,
 		txn.Metadata(),
 	)
@@ -1352,7 +1360,7 @@ func (d *Database) getTransactionsByExactAddress(
 			return ret, errExactAddressCandidateScanLimit
 		}
 		batchSize := min(candidateBatchSize, remainingCandidates)
-		candidates, err := d.metadata.GetTransactionsByAddress(
+		candidates, err := d.transactionStore().GetTransactionsByAddress(
 			paymentKey,
 			credentialTag,
 			stakingKey,
@@ -1467,7 +1475,7 @@ func (d *Database) GetTransactionsByAddressKeys(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByAddress(
+	txs, err := d.transactionStore().GetTransactionsByAddress(
 		paymentKey,
 		credentialTag,
 		stakingKey,
@@ -1540,7 +1548,7 @@ func (d *Database) CountTransactionsByAddressKeys(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountTransactionsByAddress(
+	count, err := d.transactionStore().CountTransactionsByAddress(
 		paymentKey,
 		credentialTag,
 		stakingKey,
@@ -1568,7 +1576,7 @@ func (d *Database) CountTransactionsByPaymentCred(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountTransactionsByPaymentCred(
+	count, err := d.transactionStore().CountTransactionsByPaymentCred(
 		paymentKey,
 		txn.Metadata(),
 	)
@@ -1595,7 +1603,7 @@ func (d *Database) GetAddressesByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	addresses, err := d.metadata.GetAddressesByCredential(
+	addresses, err := d.transactionStore().GetAddressesByCredential(
 		credentialTag,
 		stakingKey,
 		limit,
@@ -1626,7 +1634,7 @@ func (d *Database) CountAddressesByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAddressesByCredential(
+	count, err := d.transactionStore().CountAddressesByCredential(
 		credentialTag,
 		stakingKey,
 		txn.Metadata(),
@@ -1655,7 +1663,7 @@ func (d *Database) GetTransactionsByMetadataLabel(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByMetadataLabel(
+	txs, err := d.transactionStore().GetTransactionsByMetadataLabel(
 		label,
 		limit,
 		offset,
@@ -1685,7 +1693,7 @@ func (d *Database) CountTransactionsByMetadataLabel(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountTransactionsByMetadataLabel(
+	count, err := d.transactionStore().CountTransactionsByMetadataLabel(
 		label,
 		txn.Metadata(),
 	)
@@ -1708,7 +1716,10 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	if txn == nil {
 		txn = d.MetadataTxn(true)
 		defer txn.Rollback() //nolint:errcheck
-		if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(slot, txn.Metadata()); err != nil {
+		if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
+			slot,
+			txn.Metadata(),
+		); err != nil {
 			return fmt.Errorf(
 				"delete transaction metadata labels after slot %d: %w",
 				slot,
@@ -1717,7 +1728,10 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 		}
 		return txn.Commit()
 	}
-	if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(slot, txn.Metadata()); err != nil {
+	if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf(
 			"delete transaction metadata labels after slot %d: %w",
 			slot,
@@ -1813,7 +1827,7 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Get transaction hashes that will be deleted
-	txHashes, err := d.metadata.GetTransactionHashesAfterSlot(
+	txHashes, err := d.transactionStore().GetTransactionHashesAfterSlot(
 		slot,
 		txn.Metadata(),
 	)
@@ -1829,14 +1843,17 @@ func (d *Database) TransactionsDeleteRolledback(
 	_ = deleteTxBlobs(d, txHashes, txn)
 
 	// Then delete metadata (source of truth)
-	if err := d.metadata.DeleteAddressTransactionsAfterSlot(slot, txn.Metadata()); err != nil {
+	if err := d.transactionStore().DeleteAddressTransactionsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf(
 			"failed to delete address transaction mappings after slot %d: %w",
 			slot,
 			err,
 		)
 	}
-	if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(
+	if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
 		slot,
 		txn.Metadata(),
 	); err != nil {
@@ -1847,7 +1864,7 @@ func (d *Database) TransactionsDeleteRolledback(
 		)
 	}
 
-	err = d.metadata.DeleteTransactionsAfterSlot(slot, txn.Metadata())
+	err = d.transactionStore().DeleteTransactionsAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return fmt.Errorf(
 			"failed to delete transactions after slot %d: %w",
