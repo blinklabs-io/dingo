@@ -149,7 +149,7 @@ func TestValidateBlockProducerStartup_KESAgentPath(t *testing.T) {
 	// local KES key) and still passes opcert / KES-period validation. The
 	// resulting credentials expose VRF + opcert but are not "fully loaded"
 	// (no local KES signing key).
-	vrf, _, opcert := devnetCredPaths()
+	vrf, _, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, "", opcert, cardanoCfg)
 	n.config.shelleyKESAgentSocket = "/run/kes-agent.sock"
@@ -169,7 +169,7 @@ func TestValidateBlockProducerStartup_KESAgentPath(t *testing.T) {
 	}
 
 	// The pool ID must match the fully-file-loaded credentials.
-	vrfFile, kesFile, opcertFile := devnetCredPaths()
+	vrfFile, kesFile, opcertFile := devnetCredPaths(t)
 	nFile := newTestNodeForBP(t, true, vrfFile, kesFile, opcertFile, cardanoCfg)
 	credsFile, err := nFile.validateBlockProducerStartupAtSlot(0)
 	if err != nil {
