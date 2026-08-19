@@ -40,7 +40,7 @@ func TestPeerSharingConfigSetsLocalDisabledFromNodeConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := NewOuroboros(OuroborosConfig{
+			o := newOuroboros(OuroborosConfig{
 				PeerSharing: tt.peerSharing,
 			})
 

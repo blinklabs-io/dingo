@@ -40,6 +40,7 @@ func addRunFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("skip-check", false, "skip compare phase")
 	cmd.Flags().
 		Bool("all", false, "re-check all cached epochs (not just unchecked/stale)")
+	addAccountsFlag(cmd)
 }
 
 func runCommand(cmd *cobra.Command, _ []string) error {
@@ -54,19 +55,45 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	all, _ := cmd.Flags().GetBool("all")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	workers, _ := cmd.Flags().GetInt("workers")
-	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
 	reportDir, _ := cmd.Flags().GetString("report-dir")
 
 	logger := slog.Default()
 	ctx := cmd.Context()
 
+	accounts := accountsEnabled(cmd)
+
 	if !skipFetch {
+		var accountsSource koiosparity.RewardParitySource
+		if accounts {
+			// See fetchRun's identical comment: only opened when --accounts
+			// is set, and only ever a direct read-only query, never an HTTP
+			// call to Dingo's own API. Scoped to the fetch phase itself (not
+			// opened at all for a report-only run with both phases skipped)
+			// — the check phase below opens its own DingoDB when it runs.
+			dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
+			if dingoErr != nil {
+				return fmt.Errorf(
+					"open dingo db (required for --accounts): %w",
+					dingoErr,
+				)
+			}
+			defer dingo.Close() //nolint:errcheck
+			accountsSource = dingo
+		}
+
 		slog.Info("koios-parity: fetch phase starting", "network", network)
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-			Network:     network,
-			APIKey:      koiosAPIKey(cmd),
-			CachePath:   cachePath,
-			Concurrency: concurrency,
+			Network:         network,
+			APIKey:          koiosAPIKey(cmd),
+			CachePath:       cachePath,
+			Concurrency:     concurrency,
+			AccountsEnabled: accounts,
+			AccountsSource:  accountsSource,
+			GraceHours:      graceHours,
 		}, logger)
 		if fetchErr != nil {
 			return fmt.Errorf("fetch: %w", fetchErr)
@@ -88,12 +115,13 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	if !skipCheck {
 		slog.Info("koios-parity: check phase starting", "network", network)
 		if _, err := koiosparity.Check(ctx, koiosparity.CheckConfig{
-			Network:    network,
-			DingoDB:    resolveDingoDB(cmd),
-			CachePath:  cachePath,
-			Workers:    workers,
-			All:        all,
-			GraceHours: graceHours,
+			Network:         network,
+			DingoDB:         resolveDingoDB(cmd),
+			CachePath:       cachePath,
+			Workers:         workers,
+			All:             all,
+			GraceHours:      graceHours,
+			AccountsEnabled: accounts,
 		}, logger); err != nil {
 			return fmt.Errorf("check: %w", err)
 		}

@@ -1100,7 +1100,7 @@ func TestHeaderDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 // cache (wrong key, skipped call, wrong metric), which none of the other
 // tests in this file can see since they all call the pieces separately.
 func TestBlockfetchClientBlockRawRoutesThroughSharedCache(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
 	blockType, raw := conwayBlockFixtureBytes(t)
 	ctx := blockfetch.CallbackContext{}
 
@@ -1121,7 +1121,7 @@ func TestBlockfetchClientBlockRawRoutesThroughSharedCache(t *testing.T) {
 // TestBlockfetchClientBlockRawRoutesThroughSharedCache's header/ChainSync
 // counterpart, covering the real chainsyncClientRollForwardRaw entry point.
 func TestChainsyncClientRollForwardRawRoutesThroughSharedCache(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
 	headerType, raw := conwayHeaderFixtureBytes(t)
 	ctx := ochainsync.CallbackContext{ConnectionId: decodeCacheTestConnId()}
 	tip := ochainsync.Tip{}
@@ -1158,7 +1158,7 @@ func TestChainsyncClientRollForwardRawRoutesThroughSharedCache(t *testing.T) {
 func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 	t *testing.T,
 ) {
-	o := NewOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
 	blockType, raw := conwayBlockFixtureBytes(t)
 	badRaw := make([]byte, len(raw))
 	copy(badRaw, raw)
@@ -1357,7 +1357,7 @@ func TestHashDecodeInputMixesInBlockType(t *testing.T) {
 // hit -- if the decoded flag were ever recorded backwards, this would catch
 // it, which nothing else in the suite checks.
 func TestDecodeCacheOutcomeMetricsCountHitsAndMissesCorrectly(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
 	require.NotNil(t, o.decodeCacheMetrics)
 
 	keyA := decodeCacheKey{0x10}

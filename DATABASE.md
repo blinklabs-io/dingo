@@ -98,13 +98,30 @@ Use the Go APIs when code runs inside Dingo:
 - `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`.
 - `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
-  compatibility composition of the SQL-facing domain capabilities. Lifecycle,
-  singleton settings, and transaction creation are separately available as
-  `LifecycleStore`, `SettingsStore`, and `TransactionStore`; new components
-  should accept the narrowest capability they use. The remaining ledger state,
-  transactions, UTxO, accounts, pools, stake snapshots, rewards, governance,
-  committee, rollback, sync-state, backfill, and off-chain metadata methods
-  remain composed while their SQL ports are completed.
+  compatibility composition of the SQL-facing capabilities. New components
+  should accept the narrowest one they use rather than the composition.
+  Cross-cutting: `LifecycleStore` (close), `SettingsStore` (singleton
+  database/node settings and gates), `TxnStore` (creates the
+  `database/types.Txn` read and write handles), and `SlotRangeStore` (the
+  small aggregate surface used by API adapters). Storage domains:
+  - `UtxoStore` — the UTxO set, its spent-output history, and the address,
+    credential, and asset lookups over it.
+  - `TransactionStore` — chain transactions, their metadata, and the address
+    and metadata-label indexes derived from them. Not `TxnStore`.
+  - `CertificateStore` — the `certs` table and its per-type detail tables,
+    MIR certificates, genesis delegations, and the per-credential
+    certificate-history readers.
+  - `EpochStore` — the `epoch` table.
+  - `GovernanceStore` — governance proposals and votes, the constitutional
+    committee and its quorum, DReps including voting power and activity, the
+    constitution, and the rollback deletes for those tables.
+  - `StakeSnapshotStore` — epoch-boundary pool stake snapshots, the epoch
+    summaries computed from them, and historical per-boundary stake.
+
+  Accounts, pools, rewards and live stake, protocol parameters, block nonces,
+  datums and scripts, assets, treasury/reserves and donations, Midnight
+  indexer state, sync state, and backfill checkpoints remain composed while
+  their SQL ports are completed.
 - `blob.BlobStore` in `database/plugin/blob/store.go` is the blob-facing interface. It provides raw `Get`/`Set`/`Delete`/iteration plus block, UTxO, transaction, signed-URL, tombstone, and commit-timestamp methods.
 - `types.Txn`, `types.BlobIterator`, `types.BlockMetadata`, and blob key helpers live in `database/types/`.
 
@@ -117,8 +134,10 @@ metadata plugin runs against, so `badger`/`aws`/`gcs` (blob) and
 `sqlite`/`mysql`/`postgres` (metadata) are all checked against the same
 `BlobStore`/`MetadataStore` contract instead of each plugin inventing its own
 CRUD test shape -- including a large-payload round-trip, an operation-timeout
-bound, and (as standalone per-plugin tests) unreachable-endpoint,
-bad-credential, and Stop/Close resource-cleanup checks.
+bound, one empty-state read through each extracted domain interface's
+narrowed handle plus a constitution round trip through `GovernanceStore`, and
+(as standalone per-plugin tests) unreachable-endpoint, bad-credential, and
+Stop/Close resource-cleanup checks.
 `internal/integration/storage_migration_test.go` separately covers migrating
 a dataset from one plugin to another. See
 [`internal/test/storagetest/README.md`](internal/test/storagetest/README.md)
@@ -243,6 +262,18 @@ flowchart LR
 - Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution soft deletes use nullable `deleted_slot`; `NULL` means active.
 - Certificate history ordering must use `added_slot DESC`, the producing transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets per transaction.
 - Storage mode is persisted in `node_settings_gate` (the `storage_mode` gate; `node_settings.storage_mode` is a read-only compatibility fallback, see below). `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, metadata-label indexes, and the best-effort `offchain_metadata` cache. API-only tables are still migrated in `core` mode but may be empty.
+
+In core mode, consumed UTxO rows are hard-deleted only by the background
+ledger cleanup after they are outside the current era's stability window.
+That cleanup is deferred while the local tip is materially behind a known
+upstream tip and is single-flight across its timer and epoch-boundary
+triggers. The deferral needs a known upstream tip: a node with no connected
+peer has no catch-up distance to measure, so cleanup falls back to running
+off the local tip alone rather than deferring for as long as the node stays
+peerless. This keeps the potentially large `utxo`/stake-reference scan from
+holding SQLite's single write connection during historical catch-up; the
+rows remain eligible and are reclaimed once the node is near the upstream tip.
+API mode retains spent UTxO metadata for historical transaction queries.
 
 ## ER Diagrams
 

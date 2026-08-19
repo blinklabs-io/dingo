@@ -2216,9 +2216,11 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 			"header_count", headerCount,
 		)
 		ls.chainsyncBlockfetchMutex.Lock()
+		var startErr error
 		if ls.chainsyncBlockfetchReadyChan == nil &&
 			!ls.blockfetchContinuationPending {
-			if err := ls.startQueuedBlockfetchLocked(connId, &pending); err != nil {
+			startErr = ls.startQueuedBlockfetchLocked(connId, &pending)
+			if startErr != nil {
 				// Recovery connection may have closed. Retry with
 				// the current active best peer before giving up,
 				// otherwise the pipeline stalls until restart.
@@ -2234,16 +2236,22 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 							"active_connection_id",
 							activeConnId.String(),
 							"error",
-							err,
+							startErr,
 						)
-						if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId, &pending); retryErr == nil {
-							err = nil
-						} else {
-							err = retryErr
-						}
+						// Retarget the selection too, not just this
+						// request: nextBlockfetchConnId prefers
+						// selectedBlockfetchConnId, so leaving it on the
+						// failed recovery connection sends the next batch
+						// of a multi-batch replay straight back to it.
+						// Matches the fallback in handleEventChainsync.
+						ls.selectedBlockfetchConnId = *activeConnId
+						startErr = ls.startQueuedBlockfetchLocked(
+							*activeConnId,
+							&pending,
+						)
 					}
 				}
-				if err != nil {
+				if startErr != nil {
 					ls.config.Logger.Warn(
 						"failed to start blockfetch after local rollback recovery",
 						"component",
@@ -2251,14 +2259,28 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 						"connection_id",
 						connId.String(),
 						"error",
-						err,
+						startErr,
 					)
 				}
 			}
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
+		if startErr != nil {
+			// Do not report recovery when the replayed headers could not
+			// be fetched. The caller must close these sessions so peer
+			// governance can establish a fresh chainsync intersection.
+			continue
+		}
 		return LocalRollbackRecoveryResult{Recovered: true}
 	}
+	// Every preferred connection failed. Clear the selection rather than
+	// leaving it on a connection known not to serve this range, matching what
+	// handleEventChainsync does when its own fallbacks are exhausted. Each
+	// successful replay reassigns this field before its blockfetch attempt, so
+	// nothing downstream currently reads a stale value -- but that makes the
+	// invariant depend on every future writer reassigning first, which is not a
+	// property worth relying on.
+	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	return LocalRollbackRecoveryResult{}
 }
 

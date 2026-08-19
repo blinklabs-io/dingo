@@ -56,7 +56,7 @@ func (o *Ouroboros) leiosvotesClientConnOpts() []oleiosvotes.LeiosVotesOptionFun
 func (o *Ouroboros) leiosvotesClientStart(
 	connId ouroboros.ConnectionId,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf(
 			"failed to lookup connection ID: %s",
@@ -102,7 +102,7 @@ func (o *Ouroboros) leiosvotesServerRequestNext(
 	ctx oleiosvotes.CallbackContext,
 	count uint64,
 ) ([]oleiosvotes.Vote, error) {
-	if o.LeiosVotes == nil {
+	if o.leiosVotes == nil {
 		o.config.Logger.Debug(
 			"leios votes requested but vote manager is not wired",
 			"protocol", "leios-votes",
@@ -118,7 +118,7 @@ func (o *Ouroboros) leiosvotesServerRequestNext(
 	if ctx.Server != nil {
 		done = ctx.Server.DoneChan()
 	}
-	return o.LeiosVotes.NextVotes(
+	return o.leiosVotes.NextVotes(
 		done,
 		leiosConnectionIdString(ctx.ConnectionId),
 		count,
@@ -138,8 +138,8 @@ func (o *Ouroboros) leiosvotesClientVote(
 		"voter_id", vote.VoterId,
 		"endorser_block_hash", vote.EndorserBlockHash.String(),
 	)
-	if o.LeiosVotes == nil {
+	if o.leiosVotes == nil {
 		return nil
 	}
-	return o.LeiosVotes.HandleVote(connId, vote)
+	return o.leiosVotes.HandleVote(connId, vote)
 }

@@ -78,7 +78,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 	connOpts := make(
 		[]ouroboros.ConnectionOptionFunc,
 		0,
-		2+len(c.config.OutboundConnOpts),
+		2+len(c.outboundConnOptList()),
 	)
 	connOpts = append(connOpts,
 		ouroboros.WithConnection(tmpConn),
@@ -86,7 +86,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 	)
 	connOpts = append(
 		connOpts,
-		c.config.OutboundConnOpts...,
+		c.outboundConnOptList()...,
 	)
 	// Setup Ouroboros connection
 	c.config.Logger.Debug(

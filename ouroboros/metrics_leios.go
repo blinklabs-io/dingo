@@ -35,7 +35,7 @@ type leiosMetrics struct {
 }
 
 func (o *Ouroboros) initLeiosMetrics() {
-	factory := promauto.With(o.config.PromRegistry)
+	factory := promauto.With(o.registerer)
 	o.leiosMetrics = &leiosMetrics{
 		certRbOutcomes: factory.NewCounterVec(
 			prometheus.CounterOpts{

@@ -106,6 +106,13 @@ type KoiosParityConfig struct {
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
 	GraceHours int
+	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// phase for every epoch the observer processes, alongside the existing
+	// epoch-aggregate/pool phases. A nil pointer defaults to true — see
+	// internalconfig.DefaultKoiosParityConfig — since a plain bool's zero
+	// value (false) can't be distinguished from an explicit opt-out. Pass a
+	// pointer to false to disable account-level checking explicitly.
+	Accounts *bool
 }
 
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
@@ -688,6 +695,10 @@ func (c *Config) syncCompatFields() {
 		Enabled:   c.cfg.HistoryExpiry.Enabled,
 		Frequency: c.cfg.HistoryExpiry.Frequency,
 	}
+	// c.cfg.KoiosParity.Accounts is already a fully-resolved bool by this
+	// point (defaulted by WithKoiosParity or internal/config's LoadConfig),
+	// so the mirror always carries a non-nil pointer.
+	koiosParityAccounts := c.cfg.KoiosParity.Accounts
 	c.koiosParity = KoiosParityConfig{
 		Enabled:    c.cfg.KoiosParity.Enabled,
 		Network:    c.cfg.KoiosParity.Network,
@@ -695,6 +706,7 @@ func (c *Config) syncCompatFields() {
 		APIKey:     c.cfg.KoiosParity.APIKey,
 		Strict:     c.cfg.KoiosParity.Strict,
 		GraceHours: c.cfg.KoiosParity.GraceHours,
+		Accounts:   &koiosParityAccounts,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
@@ -1448,6 +1460,15 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 // synced Dingo instance.
 func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 	return func(c *Config) {
+		// Accounts defaults to true (matching
+		// internalconfig.DefaultKoiosParityConfig) unless the caller
+		// explicitly opts out via a non-nil pointer to false — a plain bool
+		// field here would make an unset value indistinguishable from an
+		// explicit false, silently disabling #3097's per-account checking.
+		accounts := true
+		if cfg.Accounts != nil {
+			accounts = *cfg.Accounts
+		}
 		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
 			Enabled:    cfg.Enabled,
 			Network:    cfg.Network,
@@ -1455,6 +1476,7 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			APIKey:     cfg.APIKey,
 			Strict:     cfg.Strict,
 			GraceHours: cfg.GraceHours,
+			Accounts:   accounts,
 		}
 	}
 }

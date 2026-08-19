@@ -639,6 +639,7 @@ type LedgerState struct {
 	rewardInputRollbackActive          atomic.Int64               // non-zero while rollback can mutate reward calculation inputs
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
+	cleanupConsumedUtxosRunning        atomic.Bool
 	Scheduler                          *Scheduler
 	chain                              *chain.Chain
 	db                                 *database.Database
@@ -2220,14 +2221,29 @@ func (ls *LedgerState) protocolMajorForEvent(
 // the tip they are always on. Returns false when no upstream tip is known yet
 // (no peer connected), since we can't determine proximity.
 func (ls *LedgerState) isNearTip(slot uint64) bool {
+	return ls.isNearTipWithStabilityWindow(slot, ls.calculateStabilityWindow())
+}
+
+func (ls *LedgerState) isNearTipWithStabilityWindow(
+	slot, stabilityWindow uint64,
+) bool {
 	upstreamTip := ls.syncUpstreamTipSlot.Load()
 	if upstreamTip == 0 {
 		return false
 	}
+	return nearUpstreamTip(slot, upstreamTip, stabilityWindow)
+}
+
+// nearUpstreamTip reports whether slot is within stabilityWindow of a KNOWN
+// upstreamTip. Callers that must tell "upstream tip unknown" apart from
+// "known, and we are far behind it" read syncUpstreamTipSlot themselves and
+// call this directly; isNearTipWithStabilityWindow folds unknown into
+// not-near, which is the safe answer for its callers but not for all of them.
+func nearUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 	if slot >= upstreamTip {
 		return true
 	}
-	return upstreamTip-slot <= ls.calculateStabilityWindow()
+	return upstreamTip-slot <= stabilityWindow
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
@@ -2247,6 +2263,15 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) cleanupConsumedUtxos() {
+	// Cleanup is advisory pruning. Never let the periodic timer and the epoch
+	// transition trigger occupy SQLite's single write connection at the same
+	// time; a second invocation has no additional work to do after the first
+	// one drains the eligible rows.
+	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer ls.cleanupConsumedUtxosRunning.Store(false)
+
 	// In API storage mode we retain spent UTxO metadata rows past the
 	// stability window so historical transaction queries can resolve
 	// input/collateral/reference-input details via spent_at_tx_id,
@@ -2264,6 +2289,24 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	eraId := ls.currentEra.Id
 	ls.RUnlock()
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
+	// Read once and gate on a KNOWN upstream tip only. An unknown one is not
+	// evidence of catching up: no peer has ever connected, or the last active
+	// connection dropped and zeroed it (see handleEventChainsyncBlockfetch's
+	// active-connection handling in chainsync.go). Deferring on that would
+	// retain consumed rows forever on a node without peers, where cleanup
+	// previously ran off the local tip alone -- an unbounded utxo table in
+	// exactly the mode documented as minimal storage.
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip != 0 &&
+		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow) {
+		ls.config.Logger.Debug(
+			"deferring consumed UTxO cleanup while catching up",
+			"component", "ledger",
+			"tip_slot", tipSlot,
+			"upstream_tip_slot", upstreamTip,
+		)
+		return
+	}
 
 	// Delete UTxOs that are marked as deleted and older than our slot window
 	ls.config.Logger.Debug(

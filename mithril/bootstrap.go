@@ -18,16 +18,62 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+// ErrUnsafeSnapshotDigest reports an aggregator-supplied digest that cannot be
+// used to name a directory inside the download directory.
+var ErrUnsafeSnapshotDigest = errors.New("unsafe snapshot digest")
+
+// validateSnapshotDigest refuses a digest that would not stay one element deep
+// inside the download directory.
+//
+// The digest is the aggregator's string and v1 has nothing to check it
+// against — no computed hash, the way v2 recomputes an artifact's — yet it
+// names two directories, `immutable-<digest>` and `ancillary-<digest>`, that
+// get extracted into and later removed with os.RemoveAll. Joining it raw does
+// not keep it inside: a leading separator makes the `immutable-` prefix its own
+// path element, and a following `..` then pops it, so `/../..` names the
+// download directory's grandparent.
+//
+// Refused rather than reduced. A digest is an identifier, and one that is not a
+// single path element is not a digest — reducing it would silently give two
+// different snapshots the same cache key, which is how a stale extraction gets
+// reused for the wrong artifact.
+//
+// validateSnapshotIdentity runs ahead of this and is stricter today: a digest
+// of 64 hex characters holds no separator. This stays as the narrower rule it
+// is stating, because the two answer different questions — that one asks
+// whether the digest has the shape a digest has, this one whether it can name a
+// directory. A format rule relaxed for a private aggregator, the way the
+// network name already is, would take the first answer with it and not this
+// one.
+func validateSnapshotDigest(digest string) error {
+	if digest == "" {
+		return fmt.Errorf("%w: snapshot has no digest", ErrUnsafeSnapshotDigest)
+	}
+	if digest == "." || digest == ".." ||
+		strings.ContainsRune(digest, '/') ||
+		strings.ContainsRune(digest, '\\') ||
+		strings.ContainsRune(digest, filepath.Separator) {
+		return fmt.Errorf(
+			"%w: %q is not a single path element",
+			ErrUnsafeSnapshotDigest, digest,
+		)
+	}
+	return nil
+}
 
 // Mithril artifact backends.
 const (
@@ -119,14 +165,43 @@ type BootstrapConfig struct {
 	// OnChunkContiguous, when set, enables download<->processing
 	// pipelining: chunks are fetched in parallel (out of order) but this
 	// callback is invoked for each immutable file number in strict
-	// contiguous order (0,1,2,...) as soon as that prefix is fully
-	// downloaded. immutableDir is the directory the chunks are extracted
-	// into. It lets the caller copy blocks into the blob store while later
-	// chunks are still downloading. When nil, downloads run to completion
-	// before any processing (legacy behaviour). The callback runs on a
-	// single consumer goroutine and serializes processing, so it needs no
-	// internal locking.
-	OnChunkContiguous func(immutableDir string, num uint64) error
+	// contiguous order as soon as that prefix is fully downloaded. The order
+	// runs from StartImmutable upwards, not from zero — a catch-up leaves
+	// everything below the marker to the blob store this run is adding to, so
+	// those archives are neither downloaded nor extracted here and the files
+	// need not exist. It lets the caller copy blocks into the blob store while
+	// later chunks are still downloading. When nil, downloads run to
+	// completion before any processing (legacy behaviour).
+	// The callback runs on a single consumer goroutine and serializes
+	// processing, so it needs no internal locking.
+	OnChunkContiguous func(chunk ContiguousChunk) error
+}
+
+// ContiguousChunk describes the contiguous immutable prefix a pipelined
+// bootstrap has finished downloading, verifying and extracting.
+type ContiguousChunk struct {
+	// Dir is the directory the chunks are extracted into. It is the name the
+	// directory was vetted under, for messages; read through Root.
+	Dir string
+	// Root is the open handle extraction writes through. Read through it
+	// rather than through Dir: the name can be repointed while the download
+	// runs and the handle cannot.
+	Root *os.Root
+	// Digests is the certified SHA-256 of every file the download covers,
+	// keyed by the name beneath Dir. The handle settles which directory is
+	// read and these settle which bytes, which is the half a handle cannot
+	// carry — see BootstrapResult.ImmutableDigests.
+	Digests map[string]string
+	// Start is the lowest immutable file number this run covers, from
+	// BootstrapConfig.StartImmutable. Anything below it was left to the blob
+	// store the run is adding to and is not in Dir.
+	Start uint64
+	// Num is the highest immutable file number whose trio is complete. Every
+	// number in [Start, Num] has been downloaded, verified and extracted;
+	// below Start, nothing has, which is why the range is given rather than
+	// implied. Chunks are addressed by number — a number is not a position in
+	// Dir's listing unless Start is zero.
+	Num uint64
 }
 
 // VerificationMode selects the level of Mithril certificate verification.
@@ -163,8 +238,40 @@ type BootstrapResult struct {
 	// Snapshot is the snapshot that was downloaded and extracted.
 	Snapshot *SnapshotListItem
 	// ImmutableDir is the path to the extracted ImmutableDB
-	// directory.
+	// directory. It is the name the directory was vetted under; use
+	// ImmutableRoot to read it.
 	ImmutableDir string
+	// ImmutableRoot is an open handle on ImmutableDir, held from the moment
+	// the directory was vetted until Cleanup closes it.
+	//
+	// The load path opens the ImmutableDB through this handle rather than
+	// through ImmutableDir. The directory sits in a download area, so between
+	// vetting it and reading it a concurrent writer could put a different tree
+	// at that name; resolving the name at load time would then read the
+	// replacement, with the vetting having been about something else. The
+	// handle refers to the directory that was vetted, and keeps referring to it
+	// however the name is repointed.
+	//
+	// Both bootstrap paths set it. A result without it did not come from a
+	// vetted lookup, and loading refuses rather than falling back to the
+	// pathname — a silent fallback would reinstate exactly the open this
+	// replaces.
+	ImmutableRoot *os.Root
+	// ImmutableDigests is the certified SHA-256 of every file in ImmutableDir,
+	// keyed by the name beneath it ("00000.chunk"). Set by the v2 backend,
+	// which downloads each immutable trio against a digest list covered by the
+	// certificate's merkle root; nil for v1, which certifies one archive
+	// rather than the files inside it and so has nothing to re-check against.
+	//
+	// It is carried beside ImmutableRoot because the two answer different
+	// questions and both have to be answered. The handle says the load reads
+	// the directory that was vetted. It says nothing about the files in it: a
+	// writer who shares the download directory can rename a file of their own
+	// over a verified one without ever leaving the directory the handle refers
+	// to. The digests are what let the load refuse those bytes, checked from
+	// the descriptor the read goes through rather than from a name reopened
+	// after the check.
+	ImmutableDigests map[string]string
 	// ExtractDir is the root directory where the archive was
 	// extracted. Contains db/immutable/, db/ledger/, etc.
 	ExtractDir string
@@ -172,6 +279,39 @@ type BootstrapResult struct {
 	// archive was extracted. Contains ledger/<slot>/{meta,state,
 	// tables/tvar}. Empty if no ancillary data was downloaded.
 	AncillaryDir string
+	// AncillaryRoot is an open handle on AncillaryDir, on the same terms as
+	// ImmutableRoot: the ledger-state import discovers and reads through it, so
+	// the tree the signed manifest was checked against is the tree that gets
+	// loaded. Nil when no ancillary data was obtained.
+	AncillaryRoot *os.Root
+	// AncillaryVerified reports that the ancillary tree's contents were checked
+	// against the signed ancillary manifest (a verified v2 bootstrap).
+	//
+	// The ledger-state import will not look past a verified tree that yields no
+	// state. Falling through would move the import from a tree covered by a
+	// signature to one that is not, and an attacker who can empty the first can
+	// then choose the second. Where nothing was verified there is no such
+	// downgrade, and the fallback stays available — v1 keeps its ledger state
+	// in the main archive, so looking there is how that layout works at all.
+	AncillaryVerified bool
+	// AncillaryDigests is the signed ancillary manifest's digest map: every
+	// file the ancillary key vouched for, keyed by its slash-separated path
+	// under AncillaryDir. Set only when AncillaryVerified is true.
+	//
+	// The manifest check hashes each file and closes it; the import opens the
+	// state and table it selects afterwards. Between those two the tree is the
+	// same tree, but a file in it need not be the same file — so the map
+	// travels with the handle and the selected files are checked again from
+	// the descriptors the import reads through, before anything is parsed.
+	AncillaryDigests map[string]string
+	// ExtractRoot is an open handle on ExtractDir.
+	//
+	// The ledger-state import falls back to the main extraction directory when
+	// the ancillary archive carried no ledger state (v1 snapshots keep it in
+	// db/ledger). ExtractDir is derived inside the download directory like
+	// everything else here, so that fallback reads through a handle too rather
+	// than resolving a name nothing vetted.
+	ExtractRoot *os.Root
 	// AncillaryArchivePath is the path to the downloaded ancillary
 	// archive file. Empty if no ancillary data was downloaded.
 	AncillaryArchivePath string
@@ -279,6 +419,13 @@ func Bootstrap(
 			cfg.Network,
 			snapshot.Network,
 		)
+	}
+	// Before anything is derived from it. The digest names the extraction and
+	// ancillary directories, so a refusal that came after the first join would
+	// already have said where they are. v2 gets this from recomputing the
+	// artifact hash, which constrains it to hex; v1 has no such check.
+	if err := validateSnapshotDigest(snapshot.Digest); err != nil {
+		return nil, err
 	}
 
 	cfg.Logger.Info(
@@ -496,8 +643,15 @@ func Bootstrap(
 		downloadDir,
 		filepath.Base("immutable-"+snapshotCacheKey),
 	)
-	var ancillaryDir string
+	var ancillaryTree *vettedDir
 	var ancillaryArchivePath string
+	// Closed only when the result that would own it is never returned; on
+	// success it is carried to the ledger-state import and released by Cleanup.
+	defer func() {
+		if !success {
+			ancillaryTree.Close()
+		}
+	}()
 
 	// Launch ancillary download concurrently (non-fatal if it fails).
 	// Always wait for the goroutine before returning, even on error,
@@ -516,14 +670,14 @@ func Bootstrap(
 				downloadDir,
 				filepath.Base("ancillary-"+snapshotCacheKey),
 			)
-			if hasLedgerFiles(candidateDir) {
+			if cached := ledgerDir(candidateDir); cached != nil {
 				cfg.Logger.Info(
 					"ancillary data already "+
 						"extracted, skipping",
 					"component", "mithril",
-					"path", candidateDir,
+					"path", cached.Path(),
 				)
-				ancillaryDir = candidateDir
+				ancillaryTree = cached
 				// Only set archive path if the file still
 				// exists (it may have been cleaned up after
 				// a prior successful extraction).
@@ -542,9 +696,14 @@ func Bootstrap(
 				}
 				return
 			}
-			dir, archPath, ancErr := downloadAncillary(
+			tree, archPath, ancErr := downloadAncillary(
 				ancCtx, cfg, snapshot, downloadDir,
 			)
+			// Recorded whether or not the tree turned out usable, so a
+			// downloaded archive still gets cleaned up.
+			if archPath != "" {
+				ancillaryArchivePath = archPath
+			}
 			if ancErr != nil {
 				cfg.Logger.Warn(
 					"failed to download ancillary "+
@@ -555,20 +714,53 @@ func Bootstrap(
 				)
 				return
 			}
-			ancillaryDir = dir
-			ancillaryArchivePath = archPath
+			// The handle the tree was vetted through, carried across
+			// rather than reopened from its name here.
+			ancillaryTree = tree
 		})
 	}
 
 	// Step 4: Extract main archive (skip if already extracted)
-	immutableDir := findImmutableDir(extractDir)
-	if immutableDir != "" {
+	//
+	// One handle on the extraction directory, and both trees taken from it: the
+	// immutable DB below it, and — when the ancillary archive carries no ledger
+	// state — the ledger state below it too. Vetting the directory twice would
+	// be two resolutions of one name, so the ImmutableDB that was accepted and
+	// the ledger state that gets imported could come from different trees.
+	//
+	// Both handles are held from here until Cleanup, and closed on every error
+	// path below, since the result that would own them is never returned.
+	var extractTree *os.Root
+	var immutableTree *vettedDir
+	defer func() {
+		if !success {
+			immutableTree.Close()
+			if extractTree != nil {
+				_ = extractTree.Close()
+			}
+		}
+	}()
+
+	// Absent on a first run, which is not an error — it means no cached tree.
+	if extractTree, err = openVerifiedDir(extractDir); err == nil {
+		immutableTree = findImmutableDirIn(extractTree, extractDir)
+	}
+	if immutableTree != nil {
 		cfg.Logger.Info(
 			"snapshot already extracted, skipping",
 			"component", "mithril",
-			"immutable_dir", immutableDir,
+			"immutable_dir", immutableTree.Path(),
 		)
 	} else {
+		// Reopened after extracting, not before: publication renames a staging
+		// directory onto extractDir, so a handle taken beforehand would refer
+		// to the directory that rename replaced.
+		if extractTree != nil {
+			_ = extractTree.Close()
+			extractTree = nil
+		}
+		// Replace: a previous run may have left a partial extraction
+		// here, which the lookup above did not accept.
 		_, err = ExtractArchive(
 			ctx,
 			archivePath,
@@ -577,6 +769,7 @@ func Bootstrap(
 				"phase", "snapshot_extraction",
 				"artifact", "snapshot_archive",
 			),
+			WithReplaceDestination(),
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -585,8 +778,13 @@ func Bootstrap(
 			)
 		}
 
-		immutableDir = findImmutableDir(extractDir)
-		if immutableDir == "" {
+		if extractTree, err = openVerifiedDir(extractDir); err != nil {
+			return nil, fmt.Errorf(
+				"verifying extraction directory %s: %w", extractDir, err,
+			)
+		}
+		immutableTree = findImmutableDirIn(extractTree, extractDir)
+		if immutableTree == nil {
 			return nil, fmt.Errorf(
 				"immutable DB directory not found in "+
 					"extracted archive at %s",
@@ -602,16 +800,19 @@ func Bootstrap(
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
-		"immutable_dir", immutableDir,
-		"ancillary_dir", ancillaryDir,
+		"immutable_dir", immutableTree.Path(),
+		"ancillary_dir", ancillaryTree.Path(),
 	)
 
 	success = true
 	result := &BootstrapResult{
 		Snapshot:             snapshot,
-		ImmutableDir:         immutableDir,
+		ImmutableDir:         immutableTree.Path(),
+		ImmutableRoot:        immutableTree.Root(),
 		ExtractDir:           extractDir,
-		AncillaryDir:         ancillaryDir,
+		ExtractRoot:          extractTree,
+		AncillaryDir:         ancillaryTree.Path(),
+		AncillaryRoot:        ancillaryTree.Root(),
 		ArchivePath:          archivePath,
 		AncillaryArchivePath: ancillaryArchivePath,
 	}
@@ -622,15 +823,23 @@ func Bootstrap(
 }
 
 // downloadAncillary downloads and extracts the ancillary archive
-// which contains the ledger state in UTxO-HD format.
+// which contains the ledger state in UTxO-HD format. It returns the extracted
+// tree as the handle it was vetted through.
+//
+// v1 has no ancillary manifest, so nothing here is signature-bound the way the
+// v2 path is. The handle is still what is returned rather than the directory's
+// name: a function that vets a tree, drops the handle and hands back a name
+// invites the caller to reopen it and believe the check applies to what they
+// reopened — which is exactly how the v2 path went wrong once. The caller
+// closes the result.
 func downloadAncillary(
 	ctx context.Context,
 	cfg BootstrapConfig,
 	snapshot *SnapshotListItem,
 	downloadDir string,
-) (dir string, archivePath string, err error) {
+) (tree *vettedDir, archivePath string, err error) {
 	if len(snapshot.AncillaryLocations) == 0 {
-		return "", "", errors.New(
+		return nil, "", errors.New(
 			"snapshot has no ancillary locations",
 		)
 	}
@@ -649,6 +858,22 @@ func downloadAncillary(
 		snapshot.Network,
 		truncateDigest(snapshot.Digest),
 	))
+
+	// Where the download lands whether or not it completes: DownloadSnapshot
+	// resumes, so a failed attempt deliberately leaves a partial file here.
+	// Reporting the path with every error below is what lets Cleanup remove it
+	// — otherwise a failed ancillary download leaves a file behind in an
+	// operator-supplied download directory, which no temp-dir removal sweeps.
+	//
+	// Asked of the downloader rather than assembled here. The filename carries
+	// the network name, which comes from the aggregator, and the downloader
+	// reduces it to its last element before writing. Joining it raw would name
+	// a different file for a network like "../../etc" — one outside the
+	// download directory, which Cleanup would then remove.
+	ancillaryDest := downloadDestinationPath(DownloadConfig{
+		DestDir:  downloadDir,
+		Filename: ancillaryFilename,
+	})
 
 	var ancillaryPath string
 	for i, loc := range snapshot.AncillaryLocations {
@@ -683,7 +908,7 @@ func downloadAncillary(
 		)
 	}
 	if err != nil {
-		return "", "", fmt.Errorf(
+		return nil, ancillaryDest, fmt.Errorf(
 			"downloading ancillary archive "+
 				"(all %d locations failed): %w",
 			len(snapshot.AncillaryLocations),
@@ -695,6 +920,8 @@ func downloadAncillary(
 		downloadDir,
 		filepath.Base("ancillary-"+snapshot.Digest),
 	)
+	// Replace: the ancillary directory is keyed by digest, so a stale
+	// copy from an interrupted run may already be present.
 	if _, extractErr := ExtractArchive(
 		ctx,
 		ancillaryPath,
@@ -703,20 +930,34 @@ func downloadAncillary(
 			"phase", "ancillary_extraction",
 			"artifact", "ancillary_ledger_state",
 		),
+		WithReplaceDestination(),
 	); extractErr != nil {
-		return "", "", fmt.Errorf(
+		return nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
+		)
+	}
+
+	extracted := ledgerDir(ancillaryDir)
+	if extracted == nil {
+		// Removed here or not at all: Cleanup takes AncillaryDir from the
+		// returned handle, and this path has no handle to return. The archive
+		// path goes back even so, since removing the extraction is not
+		// removing the archive it came from.
+		os.RemoveAll(ancillaryDir)
+		return nil, ancillaryPath, fmt.Errorf(
+			"extracted ancillary data at %s holds no ledger state",
+			ancillaryDir,
 		)
 	}
 
 	cfg.Logger.Info(
 		"ancillary data extracted",
 		"component", "mithril",
-		"path", ancillaryDir,
+		"path", extracted.Path(),
 	)
 
-	return ancillaryDir, ancillaryPath, nil
+	return extracted, ancillaryPath, nil
 }
 
 // Cleanup removes the temporary files created during bootstrap.
@@ -727,6 +968,9 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Released before the directories go, so Windows — which refuses to remove
+	// a directory with an open handle beneath it — can remove the tree.
+	r.CloseHandles()
 	paths := []string{
 		r.ArchivePath,
 		r.ExtractDir,
@@ -772,33 +1016,87 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	}
 }
 
-// findImmutableDir looks for the ImmutableDB directory in the
-// extracted archive. It checks several common layouts:
-//   - extractDir itself (contains .chunk files)
-//   - extractDir/immutable/
-//   - extractDir/db/immutable/
-//   - any single top-level dir containing immutable/
-func findImmutableDir(extractDir string) string {
-	// Check if extractDir itself contains chunk files
-	if hasChunkFiles(extractDir) {
-		return extractDir
+// CloseHandles releases the directory handles the result carries. It is
+// idempotent, and callers that do not clean up (CleanupAfterLoad off, which
+// keeps the extracted tree for a later run) still owe this call once loading is
+// done — the handles are descriptors held for the lifetime of the result.
+//
+// Not safe to call while another goroutine reads the handle fields: it clears
+// them. Call it once the work that reads them has finished — in Sync that is
+// after the import errgroup is joined.
+func (r *BootstrapResult) CloseHandles() {
+	if r == nil {
+		return
+	}
+	for _, root := range []**os.Root{
+		&r.ImmutableRoot,
+		&r.AncillaryRoot,
+		&r.ExtractRoot,
+	} {
+		if *root != nil {
+			_ = (*root).Close()
+			*root = nil
+		}
+	}
+}
+
+// findImmutableDirIn is findImmutableDir with the extraction directory already
+// open, so that every read — the layout enumeration as much as the per-
+// candidate checks — resolves through the one handle that was vetted.
+//
+// root stays the caller's. When the extraction directory is itself the answer,
+// the returned vettedDir gets its own handle on it, derived from this one
+// through the open descriptor rather than by resolving the name a second time.
+// That is what lets a caller hold one vetted extraction handle and give both
+// the immutable lookup and the ledger-state fallback a share of it.
+//
+// Taking the handle as a parameter is also what lets a test place a directory
+// swap between the open and the reads, which is the window the enumeration and
+// the returned path were exposed to.
+func findImmutableDirIn(root *os.Root, extractDir string) *vettedDir {
+	if hasChunkFilesIn(root, ".") {
+		self, err := root.OpenRoot(".")
+		if err != nil {
+			return nil
+		}
+		return vetted(self, extractDir, ".")
+	}
+	chunkDir := func(rel string) *vettedDir {
+		if err := assertNoSymlinkComponents(root, rel); err != nil {
+			return nil
+		}
+		// The candidate is opened once, then read and handed on through that
+		// one handle. Resolving rel again for each step would be a fresh
+		// chance for it to be something other than what the previous step saw,
+		// and the answer would then be about whichever tree held the name last.
+		candidate, err := openVerifiedRoot(root, rel)
+		if err != nil {
+			return nil
+		}
+		if !hasChunkFilesIn(candidate, ".") {
+			_ = candidate.Close()
+			return nil
+		}
+		return vetted(candidate, extractDir, rel)
 	}
 
 	// Check common subdirectory layouts
 	candidates := []string{
-		filepath.Join(extractDir, "immutable"),
-		filepath.Join(extractDir, "db", "immutable"),
-	}
-	for _, c := range candidates {
-		if hasChunkFiles(c) {
-			return c
-		}
+		"immutable",
+		filepath.Join("db", "immutable"),
 	}
 
-	// Check for a single top-level directory
-	entries, err := os.ReadDir(extractDir)
+	// Check for a single top-level directory. ReadDir reports a symlink as
+	// its own type rather than the directory it points at, so one is never
+	// collected here.
+	//
+	// Read through the handle rather than by pathname: enumerating the pathname
+	// again would list the entries of a directory swapped in behind it, while
+	// the names taken from there are checked against the tree that was opened.
+	// A candidate passing that pair of reads is a path into the replacement.
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
-		return ""
+		return nil
 	}
 	var dirs []string
 	for _, e := range entries {
@@ -807,26 +1105,20 @@ func findImmutableDir(extractDir string) string {
 		}
 	}
 	if len(dirs) == 1 {
-		// Check the single subdirectory
-		subDir := filepath.Join(extractDir, dirs[0])
-		if hasChunkFiles(subDir) {
-			return subDir
-		}
-		// Check for immutable inside the single subdirectory
-		immutableSub := filepath.Join(subDir, "immutable")
-		if hasChunkFiles(immutableSub) {
-			return immutableSub
-		}
-		// Check for db/immutable inside the single subdirectory
-		dbImmutableSub := filepath.Join(
-			subDir, "db", "immutable",
+		candidates = append(candidates,
+			dirs[0],
+			filepath.Join(dirs[0], "immutable"),
+			filepath.Join(dirs[0], "db", "immutable"),
 		)
-		if hasChunkFiles(dbImmutableSub) {
-			return dbImmutableSub
+	}
+
+	for _, c := range candidates {
+		if dir := chunkDir(c); dir != nil {
+			return dir
 		}
 	}
 
-	return ""
+	return nil
 }
 
 // VerifyCertificateChain walks the Mithril certificate chain from
@@ -1053,13 +1345,50 @@ func VerifyCertificateChainWithMode(
 	)
 }
 
-// hasChunkFiles checks if a directory contains ImmutableDB chunk
-// files (*.chunk).
-func hasChunkFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
+// chunkDirIn returns rel beneath an already-open, already-vetted base when rel
+// is a directory holding chunk files, and nil when it is not. base is the name
+// baseRoot was vetted under, for the returned vettedDir's own name check.
+//
+// Both components end up checked rather than only the last: verifying only the
+// last is enough when the one above it is the operator's, but where that one is
+// itself derived content — the extraction directory holding `immutable`, say —
+// a symlink one level up would carry the whole lookup. The caller supplying a
+// vetted baseRoot is what covers that half.
+//
+// The directory is returned as the handle it was inspected through rather than
+// as a name the caller reassembles. A caller that builds the name itself is
+// naming whatever occupies it now, not what was verified a moment ago — and so
+// is a caller handed only a name.
+//
+// baseRoot stays the caller's; the returned vettedDir owns the child handle.
+func chunkDirIn(baseRoot *os.Root, base, rel string) *vettedDir {
+	root, err := openVerifiedRoot(baseRoot, rel)
+	if err != nil {
+		return nil
+	}
+	if !hasChunkFilesIn(root, ".") {
+		_ = root.Close()
+		return nil
+	}
+	return vetted(root, base, rel)
+}
+
+// hasChunkFilesIn reports whether rel, resolved through root, is a directory
+// holding chunk files.
+//
+// The root handle is what makes this different from hasChunkFiles: the
+// candidate is reached relative to a directory already open rather than walked
+// again as a string, so a path vetted a moment ago cannot be something else by
+// the time it is read.
+func hasChunkFilesIn(root *os.Root, rel string) bool {
+	entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(rel))
 	if err != nil {
 		return false
 	}
+	return holdsChunkFile(entries)
+}
+
+func holdsChunkFile[E fs.DirEntry](entries []E) bool {
 	for _, e := range entries {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".chunk" {
 			return true
@@ -1081,11 +1410,35 @@ func isFileComplete(path string, expectedSize int64) bool {
 	return fi.Size() == expectedSize
 }
 
-// hasLedgerFiles checks if a directory contains ledger state files.
-// It looks for any file named "state" in subdirectories, which is
-// the UTxO-HD layout: ledger/<slot>/state.
-func hasLedgerFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
+// ledgerDir returns dir when it holds ledger state files, and nil when it does
+// not or when the name no longer denotes the directory that was read.
+//
+// This replaced a bool-returning hasLedgerFiles: every caller went on to use
+// the directory, and a bool left each of them to name it again for themselves.
+//
+// This is hasLedgerFiles for the callers that go on to *use* the directory
+// rather than merely assert something about it: the "already extracted,
+// skipping" fast paths, which take the answer as licence to skip extraction and
+// hand the tree on as the node's ledger state. The handle it was read through
+// is what is returned, so the manifest verification and the ledger-state import
+// downstream are about the directory this inspected rather than about whatever
+// later holds its name. The caller must Close the result.
+func ledgerDir(dir string) *vettedDir {
+	root, err := openVerifiedDir(dir)
+	if err != nil {
+		return nil
+	}
+	if !hasLedgerFilesIn(root) {
+		_ = root.Close()
+		return nil
+	}
+	return vetted(root, dir, ".")
+}
+
+// hasLedgerFilesIn is hasLedgerFiles resolved through an open handle on the
+// directory, so the tree that is read is the one that was vetted.
+func hasLedgerFilesIn(root *os.Root) bool {
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return false
 	}
@@ -1095,8 +1448,7 @@ func hasLedgerFiles(dir string) bool {
 		}
 		// Check for ledger/<subdir>/state or
 		// ledger/<subdir>/<slot>/state
-		sub := filepath.Join(dir, e.Name())
-		if hasFileInSubdirs(sub, "state") {
+		if hasFileInSubdirsIn(root, e.Name(), "state") {
 			return true
 		}
 	}
@@ -1146,14 +1498,18 @@ func validateSnapshotIdentity(expectedNetwork, network, digest string) error {
 	return nil
 }
 
-// hasFileInSubdirs checks if a file with the given name exists in
-// dir or any of its immediate subdirectories (one level deep).
-func hasFileInSubdirs(dir string, name string) bool {
-	target := filepath.Join(dir, name)
-	if fi, err := os.Stat(target); err == nil && !fi.IsDir() {
+// hasFileInSubdirsIn checks whether a file with the given name exists in dir
+// or any of its immediate subdirectories (one level deep), resolved through an
+// open handle on an ancestor so every lookup stays inside the vetted tree.
+func hasFileInSubdirsIn(root *os.Root, dir, name string) bool {
+	isFile := func(rel string) bool {
+		fi, err := root.Stat(rel)
+		return err == nil && !fi.IsDir()
+	}
+	if isFile(path.Join(dir, name)) {
 		return true
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := fs.ReadDir(root.FS(), dir)
 	if err != nil {
 		return false
 	}
@@ -1161,9 +1517,7 @@ func hasFileInSubdirs(dir string, name string) bool {
 		if !e.IsDir() {
 			continue
 		}
-		target := filepath.Join(dir, e.Name(), name)
-		if fi, err := os.Stat(target); err == nil &&
-			!fi.IsDir() {
+		if isFile(path.Join(dir, e.Name(), name)) {
 			return true
 		}
 	}

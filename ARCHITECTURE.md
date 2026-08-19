@@ -65,10 +65,30 @@ repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is
 limited to SQL mechanics.
 
-The public compatibility interface is decomposing into narrow
-`LifecycleStore`, `SettingsStore`, `TransactionStore`, and `SlotRangeStore`
-capabilities so components need not inherit the full historical metadata
-surface. Concrete SQL handles are not exposed; repository tests use internal
+The public compatibility interface is decomposing into narrow capabilities so
+components need not inherit the full historical metadata surface. Three are
+cross-cutting -- `LifecycleStore`, `SettingsStore`, and `TxnStore` (which
+creates the `database/types.Txn` handles), plus `SlotRangeStore` for the API
+adapters. Six are storage domains: `CertificateStore`, `EpochStore`,
+`GovernanceStore`, `StakeSnapshotStore`, `TransactionStore` (chain
+transactions, not to be confused with `TxnStore`), and `UtxoStore`.
+
+Each domain is drawn to match an implementation file in `sqlstore` rather
+than to a judgement call, so the boundary is checkable: `UtxoStore` is
+`utxo.go`, `TransactionStore` is `transaction_read.go` plus
+`transaction_write.go`, and so on. `EpochStore` is the exception and is
+defined by its table, because `operational.go` holds tip, nonces, datums,
+scripts, protocol parameters, network state, and sync state alongside the
+epoch methods.
+
+`Database` exposes one unexported accessor per domain (`utxoStore()`,
+`governanceStore()`, ...) and its facade methods go through the accessor for
+the domain they touch, so the compiler holds each method inside its domain
+and a method that genuinely spans two domains says so at the call site.
+`d.metadata` remains for the domains not yet extracted (accounts, pools,
+rewards, protocol parameters, block nonces, assets, Midnight, sync state).
+Treasury and reserves stay there too -- they are ledger economics read by
+reward calculation, not governance state. Concrete SQL handles are not exposed; repository tests use internal
 fixtures when schema seeding or assertions require raw SQL.
 
 Startup reserves the write connection, acquires the backend migration lock,
@@ -500,7 +520,7 @@ sequenceDiagram
     participant BB as BlockBuilder
     participant MP as Mempool
     participant LS as LedgerState
-    participant ChM as ChainManager
+    participant PC as PrimaryChain
     participant EB as EventBus
 
     Note over SC,EB: Epoch Preparation
@@ -524,10 +544,10 @@ sequenceDiagram
         BB->>BB: assemble block body + header
         BB->>BB: sign with KES key, attach VRF proof
         BB-->>BF: block + CBOR
-        BF->>ChM: AddBlock(forgedBlock)
-        BF->>MP: remove confirmed transactions
-        ChM->>EB: publish ChainUpdateEvent
+        BF->>PC: AddLocalBlock(forgedBlock) via BlockBroadcaster
+        PC->>EB: publish ChainUpdateEvent, before AddLocalBlock returns
         BF->>EB: publish BlockForgedEvent
+        BF->>MP: remove confirmed transactions (RemoveTxsByHash)
     end
 
     Note over SC,EB: Slot Battle Detection
@@ -770,7 +790,8 @@ When `Node.Run()` is called, components are initialized in this order:
  1. EventBus creation in `New`, plus tracing/runtime metrics setup in `Run`
  2. Resolve blob and metadata providers, then inject both stores into Database
  3. ChainManager initialization and block-proposed event subscription
- 4. Ouroboros protocol handler creation
+ 4. (Ouroboros is NOT built here — see step 16. Components that consume its
+    callbacks are given closures that resolve it when they fire.)
  5. LedgerState creation, followed by mempool provider resolution
  6. Bark remote archive adapter, then database recovery if startup detects a
     recoverable timestamp conflict
@@ -827,11 +848,14 @@ When `Node.Run()` is called, components are initialized in this order:
     transaction — and captures a point-in-time database snapshot
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
-12. Mempool setup and injection into LedgerState/Ouroboros
+12. Mempool setup and injection into LedgerState
 13. ChainsyncState (multi-client tracking, stall detection)
 14. ChainSelector (genesis/Praos comparison) start
 15. ConnectionManager creation and event wiring
-16. PeerGovernor creation/start (topology + churn + ledger peers)
+16. PeerGovernor creation, then `NewOuroboros` with every dependency
+    (LedgerState, Mempool, ChainsyncState, ConnManager, PeerGov) supplied and
+    validated up front, then PeerGovernor start. See Ouroboros Dependency
+    Wiring below for how the apparent cycle is resolved.
 17. ConnectionManager listener start
 18. Chainsync stall recycler (`internal/chainsyncrecycler.Recycler.Start`)
 19. UTxO RPC server (if API storage mode and port configured)
@@ -849,6 +873,67 @@ removals continue on the live pool. Mutations are recorded in an ordered
 journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
+
+### Ouroboros Dependency Wiring
+
+Three components consume callbacks from `ouroboros.Ouroboros`, which makes it
+look like Ouroboros must exist before them and therefore cannot receive them as
+constructor arguments:
+
+| Component | Needs from Ouroboros |
+| --- | --- |
+| `ledger.NewLedgerState` | `EndorserBlockTxsByHash`, `FetchEndorserBlockByPoint`, `BlockfetchClientRequestRange` |
+| `connmanager.NewConnectionManager` | `ConfigureListeners`, `OutboundConnOpts` |
+| `peergov.NewPeerGovernor` | `RequestPeersFromPeer` |
+
+The cycle is only apparent, because none of those callbacks runs at
+construction time. The node breaks it two ways:
+
+- **Closures, not method values.** Every callback the node hands to ledger and
+  peergov is a closure that reads `n.ouroboros` when it fires. A method value
+  would bind whatever `n.ouroboros` held at wiring time.
+- **Lazy providers.** `ConnectionManagerConfig.ListenersProvider` and
+  `OutboundConnOptsProvider` are invoked on first use (at `Start`, or the first
+  outbound dial) rather than at construction.
+
+So Ouroboros is constructed **last** (step 16), takes every dependency up
+front, and validates them, returning an error naming the first missing one. Its
+dependency fields are unexported and never reassigned, so an instance cannot be
+observed partially wired. Accessors (`LedgerState()`, `Mempool()`,
+`ChainsyncState()`, `ConnManager()`, `PeerGov()`, `EventBus()`) expose them
+read-only. The optional Leios prototype handlers are set separately via
+`SetLeiosVotes`/`SetLeiosPipeline`, since their managers start on their own
+path.
+
+**This makes Ouroboros immutable, so a live restore must replace it.** The
+snapshot/restore path discards and rebuilds the ledger state, mempool,
+chainsync state, connection manager and peer governor, so it discards and
+rebuilds Ouroboros too, from the retained `n.ouroborosConfig`. The outgoing
+instance must be `Close`d first, because it owns two things on registries that
+outlive it:
+
+- **Prometheus collectors.** Metrics go through `promauto`, which panics on
+  duplicate registration. `Close` unregisters them. Collectors are tracked
+  automatically as they are registered rather than by a hand-maintained list,
+  so adding a metric cannot silently reintroduce the panic.
+- **EventBus subscriptions.** `Close` removes the subscriptions Ouroboros makes
+  on its own behalf. A leaked one would be handled once per restore cycle,
+  forever.
+
+`Close` is idempotent, so `Run`'s deferred shutdown and an explicit restore
+teardown can both call it.
+
+Because the node's callbacks and the connection manager's providers all resolve
+the instance at call time, they follow the replacement automatically and are not
+re-registered. That property is what the closure rule above protects: a method
+value anywhere in either path would pin a component to the pre-restore instance,
+and the node would keep running while silently failing to sync.
+
+The instance is held in an `atomic.Pointer` and read through `Node.ouroboros()`,
+because those callbacks run on other goroutines while a restore replaces it. The
+optional Leios handlers are carried across explicitly: their managers restart on
+a path that runs *before* the replacement, so they would otherwise be set on the
+outgoing instance and silently lost.
 
 ### Shutdown Flow
 
@@ -875,6 +960,16 @@ Phase 3: Flush state and close database
 Phase 4: Cleanup resources
   Registered shutdown functions
 ```
+
+The node creates one shutdown context from the configured `shutdownTimeout`
+and passes it through every phase. PeerGovernor shutdown cancels its internal
+run context, which interrupts ledger-peer DNS discovery and outbound work,
+then waits for its tracked workers until that deadline. Its connection-event
+handlers are removed with `EventBus.UnsubscribeAndWaitContext`, so the
+unsubscribe still happens unconditionally but an already-running handler is
+waited for only until that same deadline. A deadline expiry is returned as a
+shutdown error while the remaining teardown continues, so a slow peer-governor
+operation cannot hold phase 1 indefinitely.
 
 The terminal EventBus close occurs after mempool teardown and runs concurrently
 with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
@@ -1100,6 +1195,13 @@ Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
+
+In core mode, the ledger's background consumed-UTxO pruner is advisory: it
+defers while the local tip is materially behind the known upstream tip, so its
+potentially large SQLite write transaction cannot compete with blockfetch
+state persistence during historical catch-up. The timer and epoch-boundary
+triggers are single-flight; once the node is near the upstream tip, one run
+drains eligible rows using the era's stability window.
 
 ### Midnight gRPC Server
 
@@ -2088,11 +2190,20 @@ shadow-blockfetch dispatch calls `BlockfetchRequestRangeFunc` directly and is
 intentionally excluded: it is a duplicate request whose failure says nothing
 about the primary still in flight. On reaching the bound the ledger drops the queued headers, clears the
 active blockfetch connection, and emits `chainsync.resync` with reason
-`blockfetch could not obtain the queued header range`. Dropping the headers is
-the purpose rather than a side effect: while a header sits at the head of the
-queue, `Chain.AddBlock` rejects every locally forged block with
-`BlockNotMatchHeaderError`, so a header whose body no peer can serve halts
-block production for as long as it stays queued. The earlier far-behind
+`blockfetch could not obtain the queued header range`. Dropping the headers keeps the
+pipeline moving rather than being a side effect: a header whose body no peer can
+serve otherwise sits at the head of the queue indefinitely, and the ledger
+cannot advance past it.
+
+Block production is no longer among the things it holds up. Peer and local
+admission take different paths into the chain: `Chain.AddBlock` compares the
+block against the queued peer headers and rejects a mismatch with
+`BlockNotMatchHeaderError`, while `Chain.AddLocalBlock` — what
+`node_forging.go` calls for a block this node forged — skips that comparison
+entirely, since a locally forged block invalidates those pending headers rather
+than contradicting them. The chain-tip and block-number checks stay mandatory
+on both paths. Before that split, a single unservable queued header halted
+forging for as long as it stayed queued. The earlier far-behind
 variant of this recovery (gated on a `blockfetchMinBatchGapSlots` tip gap,
 which never applied at tip) still runs for its own case before the bound is
 reached.
@@ -2439,7 +2550,7 @@ Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcom
 
 The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
 
-`Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop()` removes them with `UnsubscribeAndWait`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects.
+`Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop(ctx)` removes them with `UnsubscribeAndWaitContext`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects. The unsubscribe itself always happens; only the wait for a handler already in flight is bounded by `ctx`, so one stuck handler cannot overrun the shutdown deadline. A deadline expiry is returned as an error, unprefixed — every caller adds its own `peer governor shutdown:` prefix, as it does for the other components.
 
 Outbound-dial goroutines are registered with the governor's wait group while
 holding the same mutex `Stop()` uses to clear `stopCh`. Runtime peer additions,
@@ -2875,9 +2986,13 @@ script validation and large forging snapshots. Add/remove events remain
 published outside all locks, and candidate rejection emits only the same
 removal event and gauge changes as the former in-place rebuild.
 
-After a locally forged block is accepted by the chain manager, the production
-forger synchronously removes that block's transaction hashes through the
-backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild remains
+A locally forged block is admitted by `Chain.AddLocalBlock` on the primary
+chain, which the `BlockBroadcaster` the forger holds calls
+(`chainManager.PrimaryChain()`), not by `ChainManager` itself; the
+`ChainUpdateEvent` is published inside that call, before it returns. The forger
+then runs its `blockForged` observer, and only after that — and only if
+admission succeeded — synchronously removes the block's transaction hashes
+through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild remains
 responsible for transactions confirmed by peer blocks. This local fast path
 prevents confirmed transactions from accumulating when sustained admissions
 make a long rebuild repeatedly lose its pinned ledger generation.
@@ -2900,7 +3015,12 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
 3. Reads the parent ranking block's `LeiosAnnouncement`, selects only the matching eligible Leios endorser-block certificate, and independently produces and broadcasts a new endorser block for the current slot when eligible
 4. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
 5. Optionally self-validates the forged block before adoption (see below)
-6. Broadcasts the forged block through the chain manager
+6. Submits the forged block directly to the primary chain for synchronous local
+   admission, before running observability callbacks. Local admission validates
+   the actual chain tip and contiguous block number, but does not compare the
+   block with peer-delivered pending headers. Successful adoption clears those
+   now-conflicting headers; a genuinely stale parent is still rejected without
+   changing the queued headers.
 7. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
@@ -3032,6 +3152,500 @@ first hop itself, so redirect policy alone doesn't cover it.
 hatch for local development and tests against a plaintext aggregator; it
 threads from config through `SyncConfig`/`BootstrapConfig` down to both
 checks and must not be set in production.
+
+`ExtractArchive` treats the destination filesystem as untrusted, because an
+archive's contents being safe does not make the directory it is written into
+safe.
+
+Every write goes through an `os.Root` handle opened on the extraction root, so
+paths are resolved relative to that handle rather than re-walked as strings.
+This is what makes the guarantee hold under mutation: a directory replaced
+after any inspection cannot redirect a later write, because the handle refers
+to the directory itself and not to a name someone else can repoint. An entry
+resolving outside the root is refused by the runtime, so containment does not
+depend on a check that a writer could invalidate between inspection and open.
+Inspecting components and then opening by absolute path cannot offer that, and
+`O_NOFOLLOW` would not close it either — it constrains only the final
+component, not traversal through a replaced parent.
+
+Entries are additionally rejected if a symlink already sits anywhere along the
+path they are written to, not only at its last component. `os.Root` refuses an
+absolute symlink outright and refuses a relative one whose target leaves the
+root, so what this covers is the case it does follow: a relative symlink
+pointing back inside the destination. That cannot carry bytes out, but it does
+mean the tree on disk stops matching the tree the archive described, with a
+directory the archive never created holding its contents.
+
+Every component is inspected because inspecting the complete path does not
+amount to the same thing — it reports on the last component and *resolves*
+everything before it, so a symlink at `immutable` goes unnoticed while a write
+to `immutable/sub/00000.chunk` follows it. Components are walked shortest
+first, so each is inspected before it is used to reach the next.
+
+The destination is created and opened through a handle on its parent rather
+than by pathname, so a symlink swapped in for it is not followed. Opening
+cannot be made to reject one outright — `os.Root` follows a symlink whose
+target stays inside the root, and Go offers no directory open keyed on
+`O_NOFOLLOW` — so the opened handle is compared against the entry afterwards,
+the same way publication compares the staging directory. Directories *above*
+the parent are not inspected: they are chosen by the operator and are not part
+of this threat, and walking higher would reject ordinary layouts, since on
+macOS every temporary path resolves through `/var`, itself a symlink to
+`/private/var`.
+
+Directories the extractor creates carry `0750`. Group traversal is part of the
+contract for deployments that separate the downloader from the node, and it has
+to be restored explicitly on an exclusive extraction: staging is created `0700`
+so a partial extraction is never group-readable, and rename preserves the source
+mode, so publication widens the mode through the staging handle first.
+
+A **merge** destination that already exists keeps whatever mode it has.
+`MkdirAll` does not alter an existing directory, and merging writes into the
+destination rather than replacing it, so a pre-existing `0700` directory stays
+`0700`. That is deliberate: the mode of a directory the operator created is
+theirs to choose, and silently widening it would be the extractor overriding a
+decision it has no standing to make.
+
+An **exclusive** destination always ends up `0750`, however it started, because
+publication does not write into it — it renames the staging tree over it, and
+the mode arrives with that tree. An empty destination cleared out of the way
+and one replaced via `WithReplaceDestination` both end that way.
+
+Destinations come in two shapes, selected by the caller:
+
+- **Exclusive** (v1 snapshot, ancillary, digests): extraction is staged in a
+  fresh `0700` directory alongside the destination and renamed into place only
+  once complete, so a failed run publishes nothing and a pre-existing entry is
+  discarded rather than merged with. A non-empty destination is refused unless
+  the caller passes `WithReplaceDestination` to recover from an interrupted
+  run. The parent directory is held open for the whole extraction and publication
+  resolves through that handle, so a parent replaced at any point cannot
+  redirect it.
+
+  Without `WithReplaceDestination` the destination must be empty, which is not
+  the same as absent: an operator creating the directory ahead of time, or a
+  previous run cleaning up after itself, both leave one behind.
+
+  Publication attempts the rename before inspecting the destination at all,
+  because on a POSIX filesystem that single call already is the whole contract:
+  renaming over an absent or empty destination succeeds, over a populated one
+  fails with `ENOTEMPTY`, and over a file fails with `ENOTDIR` leaving the file
+  exactly as it was. One syscall has no interior, so there is no interleaving
+  for a concurrent writer to lose content to. Inspecting first and then acting
+  can only be worse than that, however narrow the gap is made.
+
+  The inspect-and-clear path exists for Windows, which refuses to rename over
+  an existing directory even an empty one, so a failed rename there does not on
+  its own mean the destination holds anything. Clearing an empty directory and
+  retrying is what keeps the behaviour uniform. A file or symlink is refused
+  untouched, and the removal is directory-only, so a writer who swaps the
+  directory for a file after it has been identified as a directory has the
+  removal fail rather than their file unlinked. `os.Root.Remove` would not do:
+  it unlinks a regular file as readily as it removes a directory, which is
+  exactly the behaviour that made such a swap costly.
+
+  Both platforms have a directory-only primitive, reached differently. Unix
+  uses `unlinkat` with `AT_REMOVEDIR`, addressed through the parent handle, so
+  neither the entry nor the parent can be redirected. Windows uses
+  `RemoveDirectory`, which fails on a file and on a populated directory but
+  addresses the entry by name, because Windows has no handle-relative removal;
+  a substituted parent could redirect it, which Windows makes hard by refusing
+  to move a directory while handles are open beneath it, and the parent is held
+  open for the whole extraction.
+
+  `WithReplaceDestination` remains the only path that removes a destination
+  holding content, which is what that option exists to authorise.
+
+  Renaming names its source, so it moves whatever occupies the staging name at
+  the instant it runs rather than the directory extraction wrote into, and Go
+  offers no rename keyed on a descriptor. A writer with access to the parent
+  can therefore move the staging directory aside and leave a tree or symlink of
+  their own under that name. Publication cannot prevent that substitution, so
+  it detects it: the staging directory's identity is recorded when it is
+  created, and what landed at the destination is compared against it
+  afterwards. A mismatch, or a symlink, removes the destination — only that
+  rename put anything there, the destination having been left empty or absent
+  beforehand — and fails the publish, so a substituted tree is never left
+  standing.
+- **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
+  archives populate one shared directory concurrently, so extraction writes
+  into it directly and accumulates. Staging is unavailable here, so the
+  destination itself is what gets created and opened through the parent handle,
+  and the per-component symlink checks carry the rest of the guarantee.
+
+The two are mutually exclusive and passing both is an error. They describe
+incompatible things, and merge silently winning would leave a caller that meant
+to replace quietly keeping the old tree.
+
+The v2 download applies the same rule to the directory it accumulates into:
+`<extract>/immutable` is created and opened through a handle on `<extract>`,
+and a failed trio is removed through that handle. Removing
+`<extract>/immutable/00000.chunk` by pathname resolves `immutable` on the way
+to the file, so a symlink there would make a failed download unlink somebody
+else's files.
+
+The same rule governs the cache-reuse fast paths — `findImmutableDir` and the
+ancillary "already extracted, skipping" checks — which decide whether a
+previous run left a usable tree and, when they say yes, skip extraction
+entirely. A candidate reached through a symlink is refused and the snapshot
+reported absent. Extraction never creates a symlink, so one in an extracted
+tree is evidence of tampering rather than something this node produced;
+treating the tree as absent re-extracts it from the verified archive, which
+discards it. Accepting it would load the chain from a directory somebody else
+chose.
+
+The directory being inspected is checked, not just the candidates below it.
+`immutable-<digest>` and `ancillary-<digest>` are derived inside the download
+directory rather than chosen by the operator, so a symlink at one of them is
+planted content like anything under it — and asking whether it holds chunk or
+ledger files by pathname would follow it. Each is opened through a handle on
+its parent and read through that handle. Directories *above* a candidate are
+the operator's and resolve normally, which is where extraction draws the same
+line.
+
+"Derived inside the download directory" is a property the digest has to be
+constrained to give, not one the join provides. The digest is the aggregator's
+string, and joining it raw does not stay inside: a leading separator makes the
+`immutable-` prefix its own path element, and the `..` that follows pops it, so
+the first `..` buys nothing and every one after it climbs a level. How far is
+the digest's to choose — `/../..` names the download directory's *parent*,
+`/../../..` its grandparent, and so on up — and whatever it names is then
+extracted into and, on `Cleanup`, removed with `os.RemoveAll`. v2 is closed by
+a check it already had, refusing an artifact whose hash is not the one it
+recomputes, and a computed hash is hex. v1 has nothing to recompute, so
+`validateSnapshotDigest` states the constraint directly and refuses anything
+that is not a single path element, before the first join. Refused rather than
+reduced: reducing it would give two different snapshots the same cache key, and
+a stale extraction would then be reused for the wrong artifact.
+
+Reading through the handle is half of it. A name refers to whatever occupies it
+at the moment it is resolved, so a lookup that ends by handing back a pathname
+discards everything the handle established: the consumer resolves that name
+afresh, and a tree swapped in behind it is read as though it were the one that
+was inspected. Each candidate is therefore opened once and then read *and*
+returned through that one handle — the immutable lookups
+(`findImmutableDir`, the v2 `<extract>/immutable` check) return a `vettedDir`,
+which carries the open handle alongside the name. Comparing a fresh resolution
+of the name against another fresh resolution would not do — a candidate replaced
+after it was read appears on both sides, the two agree, and a tree that was never
+inspected is returned. `findImmutableDir` reads its layout enumeration through
+the handle for the same reason: names taken from a re-walked pathname would be
+checked against the tree that was opened while resolving into the replacement.
+
+The handle then travels to the consumer rather than stopping at the package
+boundary. `BootstrapResult` carries three — `ImmutableRoot`, `AncillaryRoot`,
+and `ExtractRoot` — held from the lookup that vetted each until `CloseHandles`
+(which `Cleanup` calls first, since Windows will not remove a directory with an
+open handle beneath it). `CloseHandles` clears the fields, so it runs only once
+the work that reads them has joined.
+
+Every read of a bootstrapped tree goes through one of them:
+
+| tree | opened by | read by |
+|---|---|---|
+| immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
+
+The v2 pipelined copy reads through the same handle extraction is writing
+through, verified against the same digests and bounded to the contiguous prefix
+(see below). The directory names are carried alongside for messages; they are
+not what the load resolves. Each bootstrap opens the extraction directory once and
+derives both the immutable lookup and the ledger-state fallback from that one
+handle — vetting it twice would be two resolutions of one name, so the tree
+whose ImmutableDB was accepted could differ from the tree whose ledger state is
+imported.
+
+##### Handles bind directories; digests bind bytes; the inode has to be ours
+
+A handle settles *which directory* is read. It settles nothing about the files
+inside it, and those are a second substitution: a writer who shares the download
+directory never has to leave the directory the handle refers to in order to
+rename a file of their own over a verified one. Both halves of every tree's
+verification therefore have to reach the read, and a check that closed the file
+it looked at has not reached anything.
+
+There is a third layer under both, and it has to come first, because the two
+above are worthless without it. A digest binds bytes to a *descriptor*, and a
+descriptor is only as good as the inode behind it: a write through the same
+inode is visible through a descriptor already open on it, so no amount of
+verifying at the open catches it. What rules that out is owning the inode.
+Extraction therefore creates every file exclusively (`createExtractedFile`), so
+every extracted file is one this process made, at its own `0640`, owned by it.
+`O_CREATE|O_TRUNC` would have kept whatever inode was there — and merge
+extraction writes straight into a shared destination, where the name it is
+about to write can already be occupied by a world-writable file somebody else
+created. Certified bytes would then sit inside a file still theirs to rewrite.
+
+An occupied name is cleared and the create retried once, because `O_EXCL` alone
+would refuse a resume, which legitimately overwrites a partial file an
+interrupted run left. The clearing is `removeExtractedFile` — `unlinkat`
+without `AT_REMOVEDIR` on Unix, `DeleteFile` on Windows — which removes files
+and cannot remove a directory, so a directory at that name still fails the
+extraction as it always did rather than being deleted. It is the same rule as
+`removeEmptyExtractDir` one level up and exists for the same reason: the type
+has to be settled by the operation, not by a check in front of it, or a writer
+between the two turns "refuse the directory" into "unlink their file". Losing
+the race between the clear and the create is likewise a refusal rather than an
+adoption.
+
+Its traversal is verified rather than resolved. `Root.OpenRoot` on the whole
+path confines resolution to the root but still follows a symlink whose target
+stays inside it, which is enough to unlink a different file in the tree — and
+extraction's symlink checks run once, before the work, so the window is real.
+`openVerifiedParent` therefore opens each component through the one above it
+and confirms the handle refers to the entry the name denotes, holding those
+handles across the removal. On Windows only the immediate parent's own name is
+resolved a second time, since it has no handle-relative removal; that is the
+same residue `removeEmptyExtractDir` carries, now narrowed to one component and
+mitigated by the handle held on it.
+
+After that, an in-place write needs write permission on a `0640` file owned by
+the node's user — which is the node's own user, and no filesystem check defends
+a boundary that has already been crossed.
+
+That is a statement about who can attempt the write, not about whether it would
+be read, and the two are worth keeping apart: the layers above do not rely on
+it. A file read once and parsed from the buffer is not reachable by an in-place
+write at all, whoever makes it, because there is no second read for it to land
+in front of.
+
+That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
+downloaded trio as its archive lands and closes it; the tip read, the catch-up
+check and the blob copy open those files again. `verifyAncillaryManifest` hashes
+every file the ancillary key signed and closes it; the import opens the state
+and table it selects afterwards. In each case the tree between the two is the
+same tree — that is what the handle is for — and the bytes need not be.
+
+So the digests travel beside the handle and are re-established at the open the
+reader keeps:
+
+| tree | what travels | where it is re-checked |
+|---|---|---|
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` streams each chunk, primary and secondary file past a hash to establish its certified size, reads that many bytes, confirms the digest over the buffer, and the chunk and index parsers walk that buffer |
+| immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
+| ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
+| ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
+
+A file the map does not cover is refused rather than read. The manifest walk and
+the digest list both already reject an unlisted file, but those are statements
+about the tree as it was checked; a file planted afterwards is refused only at
+the point of use. For the same reason an ancillary tree flagged `AncillaryVerified`
+without a digest map is refused outright — the flag would otherwise rest on a
+check nothing downstream can repeat.
+
+Note what none of these rows do: hash a descriptor and hand the parser that same
+descriptor. It looks equivalent and is not, because the parser then reads the
+file a second time. Rewinding does not detach a descriptor from its inode, so a
+writer who can modify the file in place changes what the second pass reads
+without changing anything the first pass could have seen — the check and the
+parse become two readings of one mutable thing, and only the first is the one
+compared against the digest. Where the payload fits in memory the fix is to read
+once and give both the buffer; where it does not, it is to map once and hash the
+mapping. Either way there is no second read to catch out.
+
+For the ImmutableDB that means the reader takes bytes rather than a file:
+`entryReader` (`database/immutable/entry.go`) is what the chunk and index
+parsers read through, and a verified open supplies a `bytesEntry` over the
+buffer it hashed while an ordinary local open supplies a `fileEntry` over the
+descriptor, exactly as before. Only the verified path buffers, so a node reading
+its own ImmutableDB still streams chunks from disk and holds none of one in
+memory.
+
+The cost is one entry in memory at a time, bounded by the largest certified
+file, which is a chunk. The file is still read twice, as verifying it always
+meant: what the buffer removes is the parser's read, not one of those.
+
+The first pass is why the second is safe to allocate for. How large a file is,
+is whoever wrote it's choice; how large the *certified* file is, is not, because
+SHA-256 preimage resistance stands between the two. So the streaming pass holds
+nothing and returns a size only for an entry whose digest already matched, and
+the buffered pass reads that many bytes. Reading straight into memory instead
+would size an allocation from an untrusted file, and a planted entry large
+enough would be materialised in full before its digest could be found wrong —
+turning a refusal into an out-of-memory kill. A refusal that cannot be reached
+is not a refusal.
+
+The second pass hashes again, and not out of caution: the parser reads the
+buffer, so the buffer is the thing that has to be compared. That is also what
+makes a write landing between the two passes a refusal rather than a hole — it
+changes the bytes, so it changes the digest. An entry that grew is read only to
+its certified length and the remainder is never looked at; one that shrank fails
+to fill the buffer, which is a mismatch like any other.
+
+Re-hashing is the cost the alternative was not worth. Binding by retained
+descriptor would mean holding one for every file in the snapshot from
+verification until load, which for a mainnet ImmutableDB is tens of thousands;
+binding by file identity (`os.SameFile`, size, mtime) is defeatable by an
+attacker who creates the replacement, since inode numbers are reused and
+timestamps are settable. Hashing what is read costs a pass over data the reader
+is about to read anyway, so it is bounded by SHA-256 throughput rather than by
+I/O.
+
+A digest map that is present but empty is refused rather than treated as
+absent. Absence is v1, which certifies an archive and not the files in it;
+emptiness is a v2 result that lost its digests. Selecting the unverified read on
+emptiness would make "verify nothing" reachable by removing something, which is
+the direction a fail-open always comes from.
+
+The pipelined copy is bounded as well as verified, because it reads a tree the
+download pool is still filling. Archives arrive out of order, so a chunk above
+the contiguous prefix may be present and half written; `NewFromRootVerified`'s
+bound keeps the reader inside the prefix whose archives have been verified,
+rather than opening an unfinished file and refusing it as if it had been
+tampered with. The bound is the reason that database is rebuilt per callback
+rather than kept.
+
+Both the bound and the lookup are by chunk *name*, never by position in the
+directory listing (`immutable.ChunkName`, `LastSlotInChunk`). The two coincide
+only for a range starting at chunk 0, and a catch-up downloads only the
+archives above the import marker — so a position lookup would answer about a
+different chunk than the caller named and bound the copy by the wrong slot.
+`ContiguousChunk` carries `Start` alongside `Num` for the same reason: below
+`Start` the files belong to the blob store this run is adding to and are not in
+the extraction directory at all.
+
+Names are compared numerically rather than as text, both when sorting the
+listing and when applying the bound (`ChunkNameAbove`). `ChunkName` pads to
+five digits, so names are a fixed width only below 100000; past that `"99999"`
+sorts after `"100000"` as text. The listing's order is what the tip read and
+the point search rest on, so a lexical sort there would report the wrong tip
+and bisect a list that is not ordered, and a lexical bound would hide the chunk
+just below it while admitting the one just above.
+
+That ordering is only numeric while every name is `ChunkName`'s own output, so
+the listing drops anything that is not (`isCanonicalChunkName`, by
+round-tripping rather than by pattern, so the two cannot drift). A differently
+padded `0000001.chunk` is seven characters and would otherwise sort above every
+six-digit chunk and become the tip. Dropped rather than refused, unlike the
+slot entries in a ledger tree: there, ignoring a candidate selects another one,
+whereas a name that is not a chunk name names no chunk at all — and a verified
+database refuses anything absent from its digest map regardless.
+
+`checkImmutableTrio` hashes through the immutable directory's handle for a
+different reason, and remains necessary: it decides whether a downloaded archive
+is kept and lets the pool retry another location, and it runs while the tree is
+still being assembled and its name still resolvable. Hashing a joined pathname
+there would report a repointed name as a corrupt download — sending the pool
+round the locations again and deleting a trio this process wrote.
+
+Inside the ancillary tree the same rule applies one level down, to files.
+`ledgerstate.OpenSnapshotAtOrBefore` *opens* the ledger state and its UTxO-HD
+table as it selects them and hands back the open files, because a returned name
+would be resolved again by whoever read it. It also verifies every component on
+the way down — ledger directory, slot directory, state, table — since `os.Root`
+confines traversal to the root but still follows a symlink whose target stays
+inside it, and extraction never writes a symlink.
+
+Each candidate is settled by *opening* it rather than by inspecting it and
+opening it afterwards: asking whether `ledger` is a directory and later opening
+`ledger` are two questions, and a writer between them can make the answers
+describe different directories — the second still verified, just not the one the
+choice was made about. So a slot directory that never had a state is skipped
+and the next one down tried, while a symlink or a substitution fails the
+snapshot outright. Absence is settled by lstat, which describes the entry
+rather than what it points at: opening a dangling symlink fails exactly as
+opening an absent file does, so deciding by the open would read planted content
+as an unfinished extraction.
+
+That rule binds the enumeration as much as the selection, and the enumeration
+is the easier of the two to leave a hole in. `ReadDir` reports a symlink as a
+symlink rather than as whatever it points at, so a slot entry that is neither a
+directory nor a regular file never resembles a candidate at all — and an entry
+quietly left out of the candidate list is indistinguishable from one that was
+never there. So every entry naming a slot becomes a candidate or a refusal:
+directories are UTxO-HD candidates, regular files are legacy ones, and anything
+else fails the snapshot.
+
+Selection is then by slot across both layouts, with UTxO-HD winning a tie on the
+same slot number. Preferring UTxO-HD is a tie-break between layouts, not a
+licence to import an older state than the tree holds — draining the directories
+first and consulting the files only afterwards would let a legacy state at a
+newer slot be pre-empted by a directory at an older one.
+
+The same rule governs every choice between candidates, not just slot
+directories — which layout (`ledger/` before `db/ledger/`) and which tree (the
+ancillary one before the extraction directory) are picked the same way. Only a
+candidate that is genuinely absent moves on to the next; one that exists and is
+unusable fails the lookup. Otherwise making a candidate unopenable is a way of
+selecting the one after it.
+
+Tree selection carries one rule more, because emptying a tree is destruction
+rather than planting and would otherwise slip past the above. Nothing is looked
+at after an ancillary tree whose contents the ancillary key signed
+(`AncillaryVerified`), even when it yields no state: the extraction directory is
+not covered by that signature, so falling through would let whoever emptied the
+first tree choose the second. Where nothing was verified there is no downgrade
+to make and the fallback stays — v1 keeps its ledger state in the main archive,
+so looking there is how that layout works at all, and it is also what covers an
+ancillary tree holding only states newer than the certified tip.
+
+A symlinked UTxO table fails on the same rule rather than being reported
+absent: a caller cannot otherwise tell "this snapshot has no table" from "this
+snapshot's table is somebody else's".
+
+The ancillary tree matters most here, because what binds it is a signature. One
+handle spans the cache-reuse check, the manifest verification, and the import,
+so the tree whose digests satisfied the ancillary key is the tree whose bytes
+get loaded. Verifying and then importing by name would leave those two steps
+describing possibly different directories, with nothing but timing between
+them — and the manifest walk that proves the payload is completely covered would
+be about a third. The manifest's digests travel with that handle for the same
+reason one level down, and the files discovery selected are checked against them
+before parsing; see *Handles bind directories; digests bind bytes; the inode
+has to be ours* above.
+
+A result carrying no handle is refused rather than opened by name — by
+`openBootstrappedImmutable` for the immutable side and by `importLedgerState`
+for the ancillary one. Both bootstrap paths set them, so an absent handle means
+the result did not come from a vetted lookup, and a fallback would be invisible:
+the load would succeed, having read a directory nothing checked. For the same
+reason `node.WithImmutableDB` treats a nil argument as an error rather than as a
+pathname fallback.
+
+#### What a failed ancillary download leaves behind
+
+The ancillary downloaders (`downloadAncillary` for v1, `downloadAncillaryV2`
+for v2) return the archive path alongside every error, not only on success.
+`Bootstrap` records it into `BootstrapResult.AncillaryArchivePath` whenever it
+is non-empty, and `Cleanup` removes the archive and the extracted tree as two
+separate paths.
+
+That has to hold for each failure after the download begins, because each one
+leaves something:
+
+| failure | archive | extraction |
+|---|---|---|
+| every download location failed | a partial file — `DownloadSnapshot` resumes, so it deliberately does not remove one, and it returns no path for it | none yet |
+| extraction failed | complete, reported | none published — exclusive extraction stages elsewhere and renames in only once complete |
+| extracted tree holds no ledger state (v1 and v2) | complete, reported | removed by the downloader |
+| ancillary manifest unverified (v2) | complete, reported | removed by the downloader |
+
+The bottom two rows are where both halves have to be done deliberately, and each
+half reads as though the other covered it.
+
+The archive is reported rather than removed, because it is `Cleanup`'s to
+remove: it comes back with the error, `Bootstrap` records it into
+`AncillaryArchivePath` whenever it is non-empty, and an error that returns no
+path strands the download where nothing else sweeps it. Removing the extraction
+is not removing the archive it came from.
+
+The extraction is removed rather than reported, because it is *not* `Cleanup`'s
+to remove. `AncillaryDir` is taken from the returned handle, and a failure
+returns no handle — so an extraction not removed at the point it is found
+unusable is removed by nothing. That is why both downloaders remove it there
+rather than leaving it to the caller.
+
+Neither leak is visible when `DownloadDir` was left unset, since the
+auto-created temp directory goes wholesale; both are residue in the operator's
+own directory when they supplied one, which is the configuration that matters.
+
+The path reported on a failed download is asked of the downloader
+(`downloadDestinationPath`) rather than assembled at the call site. The filename
+carries the network name, which comes from the aggregator, and the downloader
+reduces it to its last element before writing; joining it raw would name a
+different file for a network like `../../etc` — one outside the download
+directory, which `Cleanup` would then remove.
 
 ### Catch-up vs bootstrap dispatch
 
@@ -3589,7 +4203,8 @@ internal/koiosparity/      # shared library
   dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
-  check.go                 # parity check orchestration (pool-level comparison)
+  fetch_accounts.go        # #3097 per-account Koios fetch (chunked, address-universe union)
+  check.go                 # parity check orchestration (pool-level + #3097 per-account comparison)
   report.go                # human-readable status + JSON report generation
 
 cmd/koios-parity/          # thin Cobra CLI wrapper
@@ -3603,7 +4218,17 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koios_pool_epoch`, and `koios_totals` rows per closed epoch, storing the
   full documented `/epoch_info`, `/pool_history`, and `/totals` field sets
   (not just the subset compared against Dingo) so the cache is a complete
-  Koios reference even as new comparisons are added later.
+  Koios reference even as new comparisons are added later. `cache.db` is this
+  tool's own private cache, not part of Dingo's own metadata schema —
+  `DATABASE.md` does not (and need not) document it. #3097 adds
+  `koios_account_rewards` (one row per `(network, epoch, stake_address,
+  reward_type)` from `/account_reward_history` — widened to include
+  `reward_type` in the key because a pool owner delegating to their own pool
+  legitimately has both a `member` and a `leader` row in the same epoch) and
+  `koios_account_coverage` (one row per `(network, epoch)` recording
+  `requested_count`/`fetched_count`/`complete` — see "Per-account exact
+  parity (#3097)" below for why `complete` gates every per-account
+  comparison).
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
@@ -3647,8 +4272,15 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   field-level matrix is emitted in every JSON report, and human-readable
   status output reports the class counts. `internal/koiosparity/coverage_test.go`
   requires every field in the consumed Koios response structs to remain
-  classified when those structs change. Account rewards are outside this
-  matrix until #3097 and #3099 are implemented.
+  classified when those structs change (the `/account_reward_history` entries
+  below are not covered by that test's automatic struct-field check, since
+  `CompareAccountEpoch` reads from `KoiosAccountRewards` — the cache struct
+  the fetch layer maps `/account_reward_history` responses into — rather
+  than one of the checked response types; they are still kept here and in
+  `coverage.go`'s matrix by hand for the same completeness reason). #3097
+  wired up exact per-account comparison against `/account_reward_history`;
+  #3099's chunked/resumable large-account fetch remains open and changes how
+  reliably the account universe is fetched, not which fields are compared.
 
   | Koios endpoint | Classification | Fields | Dingo mapping / reason |
   |---|---|---|---|
@@ -3671,6 +4303,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with aggregated `reward_pool_output.member_reward_total` at K-1. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
+  | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` row `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows; treasury/reserves/refund rows are filtered out, see `koiosAccountRewardTypesOutOfScope`. |
+  | `/account_reward_history` | unsupported | `spendable_epoch`, `pool_id_bech32` | Stored for reference only; not part of the match key or currently compared against Dingo's schema. |
 
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
@@ -3687,7 +4322,15 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     are being measured, i.e. K itself). `reward_pool_output` (`member_reward_
     total`) is written from that same `epochs.snapshot` value in the same
     reward-application call, so it is read at the identical epoch as
-    `reward_pool_input`'s stake fields, never at K.
+    `reward_pool_input`'s stake fields, never at K. `reward_account_output`
+    (#3097) shares this exact offset too: `ledger/reward_calculation.go`'s
+    `saveStakeRewardOutputs` calls `meta.SaveRewardAccountOutputs` in the same
+    transaction and at the same `app.epochs.snapshot` value as
+    `SaveRewardPoolOutputs`, and `rewardAccountOutputs`'s own `Epoch` field is
+    stamped from that identical `rewardSnapshotEpoch` parameter — so
+    `compareEpochAccounts` (`check.go`) reads Dingo's `reward_account_output`
+    at `stakeEpoch`, reusing `koiosStakeEpoch` rather than deriving a second,
+    possibly-diverging offset.
   - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced`, `Margin`,
     and `Cost` (fixed cost) describe the epoch *before* the row's own Epoch —
     `ledger/snapshot/rotation.go`'s `buildRewardStateInputs` stamps them from
@@ -3818,7 +4461,12 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
-may be transient). Results are stored in `check_mismatches` and summarised in
+may be transient), plus #3097's per-account categories: `acct_only_dingo`,
+`acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
+reward_type) row within one side — a data-integrity problem, not a value
+disagreement), and `acct_coverage_incomplete` (the per-account Koios fetch for
+this epoch never completed across every chunk — see "Per-account exact parity
+(#3097)" below). Results are stored in `check_mismatches` and summarised in
 `check_epoch_status`.
 
 Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
@@ -3909,9 +4557,9 @@ second sync:
   `GetRewardPoolOutputs`, `GetRewardAccountOutputs`) inside a fresh read-only
   transaction per call — the same tables `ledger/snapshot/rotation.go`
   already populates at every epoch boundary, with no new table and no
-  metadata export. `GetRewardAccountOutputs` is exposed on the interface now
-  (unused by any comparison yet) so #3097's per-account exact-parity check
-  can be wired in later without revisiting this abstraction.
+  metadata export. `GetRewardAccountOutputs` is what #3097's per-account
+  exact-parity comparison (`compareEpochAccounts`, "Per-account exact parity
+  (#3097)" below) reads Dingo's committed reward state through.
   - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
     `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
     for only a rolling 4-epoch window in core storage mode (API mode retains
@@ -4039,16 +4687,257 @@ second sync:
     against the fresh `n.db` and resubscribe it, before restarting
     `n.ledgerState` — mirroring `Run()`'s own hooks-then-observer-then-ledger
     ordering above so a live rebuild cannot reintroduce the same race.
-- **Out of scope for #3098** (left for #3097/#3099, and explicitly not
-  blocked by this design): per-account exact parity (`RewardParitySource`
-  already exposes `GetRewardAccountOutputs` for this) and chunked/paginated/
-  resumable large-account Koios fetches. `Observer.fetchIfNeeded` avoids
-  repeating the pool-universe scan across its own bounded retry loop (see
-  above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve or
-  reuse that universe only within a single `fetchIfNeeded` call, not across
-  distinct epochs or fetch runs — a deliberate simplicity trade-off for this
-  one-off validation use case, not a resumability guarantee; #3099 owns
-  making that path chunked/paginated/resumable across epochs.
+- **Out of scope for #3098, now addressed by #3097/#3099 below**:
+  per-account exact parity (`RewardParitySource` already exposed
+  `GetRewardAccountOutputs` for this at #3098 landing time) is wired up by
+  #3097, described in its own subsection immediately below. Fully
+  chunked/paginated/resumable large-account Koios fetches remain #3099's
+  scope — see that subsection's own boundary note. `Observer.fetchIfNeeded`
+  avoids repeating the pool-universe scan across its own bounded retry loop
+  (see above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve
+  or reuse that universe only within a single `fetchIfNeeded` call, not
+  across distinct epochs or fetch runs — a deliberate simplicity trade-off
+  for this one-off validation use case, not a resumability guarantee; #3099
+  owns making that path chunked/paginated/resumable across epochs.
+
+#### Per-account exact parity (dingo #3097)
+
+Extends the pool-level comparison above to a complete, exact, per-reward-
+account check: every relevant stake address, every closed epoch, compared as
+exact integer lovelace with no rounding/sampling/tolerance/aggregate-only
+shortcut. This is opt-in for both the standalone CLI and the in-process
+observer's underlying library calls, but **defaults to enabled for the
+in-process observer** (`ObserverConfig.AccountsEnabled`, wired from
+`KoiosParityConfig.Accounts` / `DefaultKoiosParityConfig`, mirroring
+`Strict`'s own "on once you opt into the feature at all" default) — the
+continuously-driven in-process path is the operationally-real one #3098
+exists to make possible, so it gets the complete check by default; the
+standalone CLI's `--accounts` flag (`cmd/koios-parity`) stays opt-in-only
+since per-account fetching issues substantially more Koios requests than
+pool-level fetching (one chunked request set covering the full address
+universe per epoch, versus one request per pool). The public
+`dingo.KoiosParityConfig.Accounts` field is `*bool`, not `bool` — a plain
+bool's zero value (`false`) would be indistinguishable from an explicit
+opt-out, silently defeating the documented "defaults to true" behavior for
+any caller (including `internal/node`'s own composition) that builds a
+`KoiosParityConfig` without setting it explicitly; `nil` means "apply the
+default," matching `internal/config.DefaultKoiosParityConfig`.
+`cmd/koios-parity`'s own `--accounts`/`KOIOS_PARITY_ACCOUNTS` precedence
+follows CLAUDE.md's CLI > env rule via `cmd.Flags().Changed("accounts")`: an
+explicitly-set `--accounts=false` always wins over the environment variable,
+never the reverse.
+
+- **Account universe.** `BuildAccountAddressUniverse`
+  (`fetch_accounts.go`) unions two sources for a given Koios reporting epoch:
+  Koios's own full historical account list (`GetAllAccountAddresses`,
+  `/account_list`, Range-paginated exactly like `GetAllHistoricalPoolIDs`,
+  hoisted once per `Fetch` run / observer fetch cycle via
+  `ResolveKoiosAccountUniverse`) and Dingo's own committed
+  `reward_account_output` addresses at `stakeEpoch` (converted from
+  `StakingKey`+`CredentialTag` to bech32 via `StakeAddressFromCredential`,
+  `dingo_db.go`). The union — not either side alone — is what lets a
+  Koios-only-known account Dingo never recorded a reward for surface as a
+  real `acct_only_dingo`-or-`acct_only_koios` mismatch (whichever side is
+  missing) rather than silently never being checked, mirroring why per-pool
+  comparison already unions Koios's and Dingo's pool sets. `source` may be
+  `nil` (the standalone CLI's `fetch` invoked without `--metadata-*`
+  configured for accounts) — the universe then falls back to Koios's list
+  alone.
+- **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
+  history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
+  the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`
+  client helper (mirrors `get()`'s retry/burst-limit/permanent-vs-transient
+  classification exactly, rebuilding the request body fresh on every retry
+  attempt since a drained `io.Reader` can't be replayed the way a bodyless
+  GET can via `req.Clone`). The response's `type` enum (`member`/`leader`/
+  `treasury`/`reserves`/`refund`) maps directly onto
+  `models.RewardAccountOutput.RewardType`'s `"member"`/`"leader"` string
+  constants for the two types Dingo currently produces;
+  `CompareAccountEpoch` filters `treasury`/`reserves`/`refund` rows out of
+  the comparison entirely (documented via
+  `koiosAccountRewardTypesOutOfScope`, not silently dropped) since Dingo's
+  reward accounting does not currently track those MIR/refund mechanisms —
+  wire them in if/when it does.
+- **Chunking.** `FetchAccountRewardsForEpoch` (`fetch_accounts.go`) splits
+  the address universe into `koiosAccountChunkSize` (100)-sized groups,
+  fetched with bounded concurrency mirroring `fetchEpoch`'s per-pool worker
+  pool, accumulates every returned row in memory, and commits to the cache
+  only once every chunk has succeeded
+  (`Cache.CommitAccountRewardsForEpoch`, one transaction: replace
+  `koios_account_rewards` for the epoch and upsert `koios_account_coverage`
+  together) — a single failed chunk commits nothing at all for that epoch,
+  never a partial "complete" result. This is deliberately the *minimal*
+  viable chunking (bounded blast radius and payload size per request,
+  nothing more) — full byte-size-aware request shaping, adaptive rate
+  limiting, and mid-fetch resumable checkpointing across a process restart
+  are #3099's scope (see below); a restart simply redoes the whole epoch's
+  account fetch from scratch, which is safe (idempotent, same final state)
+  even if not maximally efficient. A chunk failure — transient or
+  permanent — cancels `FetchAccountRewardsForEpoch`'s own per-epoch
+  `fetchCtx` immediately rather than waiting for/scheduling every remaining
+  chunk: since nothing is ever committed once any chunk has failed, letting
+  the rest of the epoch's chunks run to completion would only waste Koios
+  request budget on results that get discarded. This only cancels the local,
+  per-epoch `fetchCtx`, never the caller's shared multi-epoch context, so an
+  isolated transient chunk failure still just drops that one epoch into
+  `FailedEpochs` for a later retry, the same as an isolated pool-level
+  failure. The dispatch loop rechecks `fetchCtx.Err()` both before and
+  immediately after acquiring a semaphore slot, not relying on
+  `select { case <-fetchCtx.Done(): ...; case sem <- struct{}{}: }` alone —
+  Go's `select` does not prioritize between simultaneously-ready cases, so a
+  concurrently-running chunk's error firing `cancel()` right as another slot
+  frees up could otherwise still let the loop launch one more doomed worker
+  before observing the cancellation.
+- **Coverage gate.** `koios_account_coverage.complete` must be `true` before
+  `compareEpochAccounts` (`check.go`) ever treats `koios_account_rewards` as
+  a valid reference set for an epoch; an absent or incomplete coverage row
+  produces an explicit `acct_coverage_incomplete` / `ERROR` mismatch and
+  skips the per-account comparison for that epoch entirely — mirroring how a
+  missing `koios_totals` row already gates `CompareEpochTotals`. This is the
+  invariant #3099's chunking work must never violate: no code path may ever
+  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage`
+  propagates `sql.ErrNoRows` unwrapped for "no fetch attempted yet" — every
+  caller (`compareEpochAccounts`, `Observer.fetchAccountsIfNeeded`) treats
+  that specific error as incomplete coverage, but any other error from the
+  query is a genuine cache/DB failure and is surfaced as `dingo_db_error`
+  (or a propagated error, for the observer) rather than being conflated with
+  "nothing fetched yet."
+- **A zero-row fetch result is not automatically "complete" for a
+  just-closed epoch.** Every chunk succeeding does not by itself mean the
+  epoch's reference set is trustworthy: Koios's own `/account_reward_history`
+  publishing can lag behind `/pool_history`/`/epoch_info` by a similar window
+  to the `--grace-hours` lag already tolerated elsewhere in this tool (see
+  the mismatch-categories subsection's `reference_lag`), so a fetch that
+  lands entirely within that window and returns zero reward rows across the
+  whole address universe is far more likely to mean "Koios hasn't finished
+  publishing yet" than "zero accounts earned a reward this epoch."
+  `FetchAccountRewardsForEpoch` (`fetch_accounts.go`) therefore commits
+  `complete = false` (recording the attempt, not the answer) when
+  `len(rows) == 0` and the epoch's `EpochEndTime` (looked up from the
+  already-committed `koios_epoch_info` row by `FetchEpochAccountsWithAddrs`)
+  is within `graceHours` of now. Only a genuinely missing row
+  (`sql.ErrNoRows`) is treated as "unknown end time" (leaves `EpochEndTime`
+  at its zero value, which the grace check itself already treats as
+  disabling the window); any other `GetEpochInfo` error — a real cache/DB
+  failure — is propagated as a failure of `FetchEpochAccountsWithAddrs`
+  instead, so a transient database error can never be silently
+  misinterpreted as "unknown end time," bypass the grace gate, and let an
+  empty account fetch commit as complete. `Cache.GetEpochsMissingAccountCoverage`
+  then re-selects it on the next `Fetch`/`Observer` attempt instead of the
+  coverage row locking in a stale empty snapshot forever. Once the grace
+  window elapses, a persistently empty result is accepted as final
+  (`complete = true`) so a genuinely reward-less epoch is not retried
+  indefinitely. `graceHours = 0` (the historical default before this gate
+  existed) disables it, preserving the original immediate-`complete=true`
+  behavior for any caller that does not configure grace hours.
+- **Pre-staking epochs are excluded from account fetching too.**
+  `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject epoch <= 1,
+  not just epoch == 0, so `FetchEpochAccountsWithAddrs` skips both
+  pre-staking epochs entirely instead of running a real (and meaningless)
+  Koios `/account_reward_history` sweep for epoch 1 against a nonexistent
+  stake epoch. Neither epoch ever gets a `koios_account_coverage` row as a
+  result, so `Cache.GetEpochsMissingAccountCoverage`'s query explicitly
+  filters `k.pre_staking = 0` — without it, epochs 0-1 (which do get a
+  `koios_epoch_info` row via the `pre_staking` marker) would be
+  re-proposed for account backfill on every future `fetch` run forever.
+- **Epoch selection is account-coverage-aware, not just pool/aggregate-aware.**
+  `Cache.GetUncachedEpochs` (keyed on `koios_epoch_info` presence) and
+  `Cache.GetEpochsNeedingCheck`/`check_epoch_status.last_checked_at` staleness
+  alone can never re-select an epoch whose pool-level data was fetched before
+  per-account fetching existed, or before accounts were turned on for a given
+  run — it looks "already fetched"/"already checked" forever, so a Dingo
+  deployment upgrading from a pre-#3097 koios-parity attach would otherwise
+  keep reporting a stale pool-only `PASS` with zero per-account validation
+  ever attempted. Three additions close this gap, all gated on
+  `AccountsEnabled`/`cfg.Accounts` so pool-only mode (the standalone CLI's
+  default) is unaffected:
+  - `Cache.GetEpochsMissingAccountCoverage(network, from, through)` returns
+    epochs that already have a `koios_epoch_info` row but whose
+    `koios_account_coverage` is absent or `complete = 0`. `Fetch` (`fetch.go`)
+    unions this into its epoch list only when `cfg.AccountsEnabled`, and the
+    per-epoch worker skips the redundant pool/`epoch_info`/`totals` re-fetch
+    entirely for any epoch this returns that `GetUncachedEpochs` did not also
+    return (`accountOnlyEpochs`) — going straight to the account backfill
+    instead of re-fetching thousands of already-fresh pool-history rows.
+  - `Cache.GetEpochsNeedingCheck` takes an `accountsEnabled bool` parameter:
+    when true, its `LEFT JOIN` against `check_epoch_status` gains a second
+    `LEFT JOIN` against `koios_account_coverage`, and an epoch also qualifies
+    for recheck when that coverage row is absent, incomplete, or was
+    refreshed (`fetched_at`) after the last check — mirroring the existing
+    `koios_epoch_info.fetched_at > last_checked_at` pool-side staleness
+    check, so a `Fetch` run that backfills accounts for an already-checked
+    epoch automatically triggers a recheck the same way a pool refetch
+    already does. `Check` and `Observer.Start` both pass
+    `cfg.AccountsEnabled`/`o.cfg.AccountsEnabled` through.
+  - `Observer.Start`'s backlog seeding additionally calls
+    `GetEpochsMissingAccountCoverage(network, 0, throughEpoch)` when
+    `AccountsEnabled` and adds every epoch it returns to `o.pending`,
+    independent of whatever `GetEpochsNeedingCheck`/`GetUncachedEpochs`
+    already decided about that epoch for other reasons — the same
+    independent-gating shape `fetchAccountsIfNeeded` already used relative to
+    `fetchPoolsIfNeeded` for the per-epoch on-demand path.
+- **Comparison.** `CompareAccountEpoch` (`compare.go`) keys both sides by
+  `(stake_address, reward_type)` — not `stake_address` alone — since a pool
+  owner delegating to their own pool legitimately has both a `member` and a
+  `leader` row in the same epoch, checked independently (never merged or
+  summed). Internal duplicates within either side (the same key appearing
+  twice) are reported once per duplicate occurrence as `acct_duplicate`
+  before the union walk runs, so a duplicate is never mistaken for or masked
+  by a value disagreement. `koios_account_rewards`'s
+  `(network, epoch, stake_address, reward_type)` index
+  (`idx_kar_net_epoch_addr_type`) is deliberately non-unique: Koios can
+  itself return duplicate rows for the same key, and a unique constraint
+  would abort `CommitAccountRewardsForEpoch`'s insert with a constraint
+  error before `CompareAccountEpoch` ever gets the chance to detect and
+  report that duplication as `acct_duplicate`. Amounts are compared via
+  `lovelaceEqual`. Both sides of every amount comparison are parsed and
+  validated as non-negative `big.Int` values before any equality check —
+  including the identical-string case, so two identical malformed or
+  negative amounts never compare equal-by-accident — never a float/rational,
+  so #3097's "no rounding, sampling, or tolerance" requirement holds exactly,
+  including a 1-lovelace difference. `graceHours`/`epochEndTime` apply the
+  identical `reference_lag` treatment `ComparePoolEpoch` already uses for a
+  genuinely-too-recent epoch, symmetrically for both presence-mismatch
+  directions: `acct_only_koios` (Koios has a row Dingo doesn't yet) and
+  `acct_only_dingo` (Dingo has a row Koios hasn't published yet — Koios can
+  lag in publishing `/account_reward_history` for a just-closed epoch the
+  same way it can lag on any other endpoint) both fall back to
+  `reference_lag` within the grace window rather than only the
+  Koios-side direction.
+- **Strict-mode propagation.** An account-level `FAIL` flows through
+  `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
+  forces `FAIL`, exactly like the pool-level categories) into
+  `EpochCompareResult.Status`, then into `Observer.processEpoch`'s
+  `result.Status != StatusPass` check the same way a pool-level mismatch
+  already does — no separate code path, so strict mode stops the node on an
+  account-level mismatch exactly as it does on a pool/aggregate one.
+- **Out of scope for #3097, left for #3099**: fully paginated/resumable/
+  rate-shaped account fetching at arbitrary scale, mid-epoch chunk-level
+  resume-from-checkpoint after a process restart, and duplicate-page
+  detection from Koios's own pagination (not applicable to
+  `/account_reward_history`, which isn't Range-paginated). #3097's chunking
+  is correct and never silently marks a partially-fetched epoch complete
+  (the coverage-gate + atomic-commit invariants above already guarantee
+  that), but does not need to survive a restart mid-epoch-fetch with a
+  resumed cursor — redoing the whole epoch's account fetch from scratch is
+  an acceptable (if not maximally efficient) fallback. Known limitation:
+  a *fully successful* fetch that happens to run before Koios has actually
+  published `/account_reward_history` for a just-closed epoch (as opposed to
+  a partial/failed fetch) can legitimately return zero rows and still be
+  recorded `complete = true` — the grace-window `reference_lag` treatment
+  above absorbs this for the duration of `--grace-hours`, but nothing
+  currently re-triggers a refetch of that epoch's account coverage once
+  Koios's real data appears after the window closes; #3099's chunking work
+  should address this alongside its other coverage-staleness invariants.
+- **Network validation.** `Check`/`CheckEpoch` never construct a
+  `KoiosClient` (they work entirely from the cache), so unlike `Fetch` they
+  don't get `NewKoiosClient`'s network-allow-list check for free — both call
+  `validateKoiosNetwork` (`koios_client.go`) explicitly. This matters
+  specifically for `StakeAddressFromCredential` (`dingo_db.go`), which
+  hardcodes the Cardano testnet address network ID since preview/preprod are
+  the only networks this tool ever validates against: an unvalidated
+  `network` value reaching `compareEpochAccounts` could otherwise silently
+  generate wrong-network-tagged stake addresses instead of erroring.
 
 ### Bark (`bark/`)
 

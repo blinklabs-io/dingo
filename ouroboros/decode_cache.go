@@ -358,7 +358,12 @@ type decodeCacheMetrics struct {
 }
 
 func (o *Ouroboros) initDecodeCacheMetrics() {
-	factory := promauto.With(o.config.PromRegistry)
+	// o.registerer, not o.config.PromRegistry: it tracks what it registers so
+	// Close can hand the collectors back. Registering straight against the
+	// node's registry would leave these behind, and the next live restore --
+	// which rebuilds Ouroboros against that same retained registry -- would
+	// panic on duplicate registration. See lifecycle.go.
+	factory := promauto.With(o.registerer)
 	o.decodeCacheMetrics = &decodeCacheMetrics{
 		blockCacheHits: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_decode_cache_block_hits_total",

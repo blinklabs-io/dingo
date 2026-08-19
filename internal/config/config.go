@@ -301,17 +301,31 @@ type KoiosParityConfig struct {
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
 	GraceHours int `yaml:"graceHours" envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
+	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// phase for every epoch the observer processes, alongside the existing
+	// epoch-aggregate/pool phases. Defaults to true (see
+	// DefaultKoiosParityConfig): the in-process observer is the
+	// operationally-real, continuously-driven path #3098 exists to make
+	// possible, unlike the standalone koios-parity CLI's `--accounts` flag,
+	// which stays opt-in-only for cost/compatibility reasons (see
+	// cmd/koios-parity's addAccountsFlag). Set false explicitly to keep the
+	// observer pool-level-only, e.g. to bound Koios request volume on a
+	// resource-constrained deployment.
+	Accounts bool `yaml:"accounts"   envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
 }
 
 // DefaultKoiosParityConfig returns the default (disabled) Koios parity
-// observer settings. Strict defaults to true: once an operator opts into the
-// feature at all (Enabled), the safety-motivated fail-stop behavior it exists
-// for is on unless explicitly disabled with --koios-parity-strict=false /
-// DINGO_KOIOS_PARITY_STRICT=false — matching KoiosParityConfig.Strict's and
+// observer settings. Strict and Accounts both default to true: once an
+// operator opts into the feature at all (Enabled), the safety-motivated
+// fail-stop behavior (Strict) and the complete per-account exact-parity
+// coverage (Accounts, #3097) it exists for are both on unless explicitly
+// disabled with --koios-parity-strict=false/--koios-parity-accounts=false or
+// their DINGO_KOIOS_PARITY_STRICT/DINGO_KOIOS_PARITY_ACCOUNTS env var
+// equivalents — matching KoiosParityConfig.Strict/Accounts's and
 // internal/koiosparity.Observer's own doc comments, which already describe
-// Strict as the operator default.
+// both as the operator default.
 func DefaultKoiosParityConfig() KoiosParityConfig {
-	return KoiosParityConfig{GraceHours: 24, Strict: true}
+	return KoiosParityConfig{GraceHours: 24, Strict: true, Accounts: true}
 }
 
 // OffchainMetadataConfig holds API-mode off-chain metadata fetcher settings.

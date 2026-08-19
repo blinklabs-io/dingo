@@ -32,7 +32,7 @@ type BatchAccumulator = types.MetadataBatchAccumulator
 // NewBatchAccumulator creates an accumulator for the configured metadata
 // plugin.
 func (d *Database) NewBatchAccumulator() BatchAccumulator {
-	return d.metadata.NewBatchAccumulator()
+	return d.transactionStore().NewBatchAccumulator()
 }
 
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
@@ -50,7 +50,7 @@ func (d *Database) FlushBatch(
 			return types.ErrNilTxn
 		}
 	}
-	return d.metadata.FlushBatch(acc, metadataTxn)
+	return d.transactionStore().FlushBatch(acc, metadataTxn)
 }
 
 // BatchedTxIngestOpts toggles optional behaviors of SetTransactionBatched.
@@ -294,7 +294,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if setter, ok := acc.(batchStatsSetter); ok {
 		setter.SetBackfillStats(opts.Stats)
 	}
-	if err := d.metadata.SetTransactionBatched(
+	if err := d.transactionStore().SetTransactionBatched(
 		tx, point, idx, certDeposits,
 		opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
 	); err != nil {

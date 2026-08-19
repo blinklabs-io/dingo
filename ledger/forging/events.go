@@ -17,7 +17,7 @@
 // # Block Propagation
 //
 // Block propagation to peers is handled automatically by the chain package.
-// When a forged block is added via chain.AddBlock(), the method closes
+// When a forged block is added via chain.AddLocalBlock(), the method closes
 // the chain's waitingChan (see chain/chain.go lines 174-180), which signals
 // any blocking ChainIterators. The ouroboros chainsync server (see
 // ouroboros/chainsync.go chainsyncServerRequestNext) waits on these iterators

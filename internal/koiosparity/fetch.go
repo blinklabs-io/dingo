@@ -35,6 +35,32 @@ type FetchConfig struct {
 	FromEpoch    uint64 // 0 = resume from last cached + 1
 	ThroughEpoch uint64 // 0 = tip - 1
 	ForceRefresh bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
+	// AccountsEnabled additionally fetches #3097's per-account Koios
+	// reference data (FetchAccountRewardsForEpoch) for every epoch this run
+	// fetches. False by default: per-account fetching issues far more Koios
+	// requests than pool-level fetching (one chunked request set per epoch
+	// covering the full address universe, versus one request per pool), so
+	// this is opt-in for the standalone CLI. See ObserverConfig.AccountsEnabled
+	// for the in-process observer's default.
+	AccountsEnabled bool
+	// AccountsSource supplies Dingo's own known reward-account addresses to
+	// union with Koios's full account list (see BuildAccountAddressUniverse)
+	// when AccountsEnabled is true. nil is valid (e.g. the standalone CLI's
+	// `fetch` command run without Dingo database access configured for
+	// accounts) — the address universe then falls back to Koios's list
+	// alone, which still checks every Koios-known account, just cannot also
+	// surface a Dingo-only account Koios has never indexed.
+	AccountsSource RewardParitySource
+	// GraceHours is forwarded to FetchAccountRewardsForEpoch's zero-row/lag
+	// gate (see its doc comment): a just-closed epoch (within this many
+	// hours of EpochEndTime) whose #3097 account fetch returns zero rows
+	// across the whole address universe is left with koios_account_coverage
+	// incomplete rather than permanently accepted as "zero accounts earned
+	// rewards", since Koios's own /account_reward_history publishing lag is
+	// a far more likely explanation. 0 disables the gate (every zero-row
+	// result is accepted as final immediately). Unused when AccountsEnabled
+	// is false.
+	GraceHours int
 }
 
 // FetchResult summarises a completed fetch run.
@@ -153,12 +179,35 @@ func Fetch(
 		return nil, fmt.Errorf("get pool first-active epochs: %w", err)
 	}
 
+	// Koios's full historical account list (#3097) — hoisted once per Fetch
+	// run for the same reason poolIDs is, when account fetching is enabled.
+	var koiosAccountAddrs []string
+	if cfg.AccountsEnabled {
+		koiosAccountAddrs, err = ResolveKoiosAccountUniverse(ctx, koios)
+		if err != nil {
+			return nil, fmt.Errorf("get all koios account addresses: %w", err)
+		}
+	}
+
 	// Build list of epochs to fetch.
-	// Normal mode: only epochs NOT already in the cache (fills holes from prior
-	// failed/interrupted runs rather than naively resuming from max+1).
+	// Normal mode: epochs NOT already in the cache (fills holes from prior
+	// failed/interrupted runs rather than naively resuming from max+1),
+	// UNIONED — when cfg.AccountsEnabled — with epochs that already have
+	// fresh pool-level Koios data but are still missing #3097's per-account
+	// coverage (accountOnlyEpochs below). Without this union, an epoch fetched
+	// before per-account fetching existed (or before AccountsEnabled was
+	// turned on) would look "already fetched" to GetUncachedEpochs forever and
+	// never get a per-account backfill — see GetEpochsMissingAccountCoverage's
+	// doc comment and ARCHITECTURE.md's Koios Parity Tracker "Per-account
+	// exact parity" subsection.
 	// ForceRefresh mode: fetch the full range and overwrite cached rows, used
 	// when the user suspects stale or corrupt cached data in [fromEpoch, through].
 	var epochs []uint64
+	// accountOnlyEpochs marks epochs that only need the #3097 account-level
+	// backfill below — their pool-level Koios data is already fresh, so the
+	// per-epoch worker skips the redundant pool/epoch_info/totals fetchEpoch
+	// call for these and fetches only account rewards.
+	accountOnlyEpochs := make(map[uint64]bool)
 	if cfg.ForceRefresh {
 		for e := fromEpoch; e <= throughEpoch; e++ {
 			epochs = append(epochs, e)
@@ -167,6 +216,30 @@ func Fetch(
 		epochs, err = cache.GetUncachedEpochs(cfg.Network, fromEpoch, throughEpoch)
 		if err != nil {
 			return nil, fmt.Errorf("get uncached epochs: %w", err)
+		}
+		if cfg.AccountsEnabled {
+			have := make(map[uint64]bool, len(epochs))
+			for _, e := range epochs {
+				have[e] = true
+			}
+			missingAccounts, err := cache.GetEpochsMissingAccountCoverage(
+				cfg.Network,
+				fromEpoch,
+				throughEpoch,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"get epochs missing account coverage: %w",
+					err,
+				)
+			}
+			for _, e := range missingAccounts {
+				if !have[e] {
+					accountOnlyEpochs[e] = true
+					epochs = append(epochs, e)
+				}
+			}
+			slices.Sort(epochs)
 		}
 	}
 
@@ -262,8 +335,15 @@ loop:
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			cnt, fetchErr := fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, firstActiveEpochs, logger)
-			if fetchErr != nil {
+			// handleEpochFetchErr applies the shared "transient isolates to
+			// this epoch, anything else aborts the whole run" classification
+			// to both the pool-level fetch below and the optional #3097
+			// account-level fetch that follows it, so a permanent/other
+			// error from either phase cancels the run the same way and a
+			// transient error from either phase lands this epoch in
+			// FailedEpochs the same way — the two phases must not diverge in
+			// how they report failure.
+			handleEpochFetchErr := func(phase string, fetchErr error) {
 				if transient, ok := errors.AsType[*transientEpochFetchErr](fetchErr); ok {
 					// Isolated to this epoch (e.g. one flaky Koios 5xx among
 					// thousands of requests this run makes) — skip it rather
@@ -275,13 +355,14 @@ loop:
 					logger.Warn("koiosparity: epoch fetch failed transiently, skipping (will retry on next run)",
 						"network", cfg.Network,
 						"epoch", epoch,
+						"phase", phase,
 						"error", transient,
 					)
 					epochsDone.Add(1)
 					return
 				}
 				select {
-				case errCh <- fmt.Errorf("epoch %d: %w", epoch, fetchErr):
+				case errCh <- fmt.Errorf("epoch %d (%s): %w", epoch, phase, fetchErr):
 				default:
 				}
 				// Stop dispatching/running further epochs immediately rather
@@ -290,8 +371,40 @@ loop:
 				// don't finish committing just stay uncached and are retried
 				// (along with any not-yet-attempted epochs) on the next run.
 				cancel()
-				return
 			}
+
+			var cnt int
+			if accountOnlyEpochs[epoch] {
+				// Pool-level Koios data for this epoch is already fresh —
+				// only #3097's per-account coverage is missing/incomplete —
+				// so skip the redundant pool/epoch_info/totals fetchEpoch
+				// call entirely and go straight to the account backfill
+				// below, rather than re-fetching thousands of already-fresh
+				// pool-history rows just to reach it.
+				logger.Debug(
+					"koiosparity: epoch pool data already fresh, backfilling accounts only",
+					"network", cfg.Network,
+					"epoch", epoch,
+				)
+			} else {
+				var fetchErr error
+				cnt, fetchErr = fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, firstActiveEpochs, logger)
+				if fetchErr != nil {
+					handleEpochFetchErr("pools", fetchErr)
+					return
+				}
+			}
+
+			if cfg.AccountsEnabled {
+				if _, acctErr := FetchEpochAccountsWithAddrs(
+					fetchCtx, koios, cache, cfg.Network, epoch,
+					cfg.AccountsSource, koiosAccountAddrs, cfg.GraceHours, logger,
+				); acctErr != nil {
+					handleEpochFetchErr("accounts", acctErr)
+					return
+				}
+			}
+
 			mu.Lock()
 			result.EpochsFetched++
 			result.PoolsFetched += cnt
@@ -478,7 +591,6 @@ func fetchEpoch(
 	// Treating that as permanent pre-staking would silently and permanently
 	// stop comparing a real epoch, so it is rejected as a retryable error
 	// instead of being cached.
-	const preStakingThroughEpoch = 1
 	if info.ActiveStake == nil && epoch <= preStakingThroughEpoch {
 		if err := cache.CommitEpochData(KoiosEpochInfo{
 			Network:        network,

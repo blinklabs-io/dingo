@@ -224,7 +224,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		return nil
 	}
 	// Validate that the start point exists in our chain (#397)
-	chainIter, err := o.LedgerState.GetChainFromPoint(start, true)
+	chainIter, err := o.ledgerState.GetChainFromPoint(start, true)
 	if err != nil {
 		o.config.Logger.Debug(
 			"blockfetch: start point not found in chain, sending NoBlocks",
@@ -249,7 +249,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
-		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 		if conn == nil {
 			chainIter.Cancel()
 			return
@@ -497,10 +497,10 @@ func (o *Ouroboros) blockfetchRecordNoBlocksAndMaybeClose(
 		"connection_id", connId.String(),
 		"start_slot", start.Slot,
 	)
-	if o.ConnManager == nil {
+	if o.connManager == nil {
 		return
 	}
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return
 	}
@@ -541,10 +541,10 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	if o.ConnManager == nil {
+	if o.connManager == nil {
 		return errors.New("ConnManager not initialized")
 	}
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
@@ -558,9 +558,9 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 		startTime, exists := o.blockFetchStarts[connId]
 		delete(o.blockFetchStarts, connId)
 		o.blockFetchMutex.Unlock()
-		if exists && o.PeerGov != nil {
+		if exists && o.peerGov != nil {
 			latencyMs := time.Since(startTime).Milliseconds()
-			o.PeerGov.UpdatePeerBlockFetchObservation(
+			o.peerGov.UpdatePeerBlockFetchObservation(
 				connId,
 				float64(latencyMs),
 				false,
@@ -586,11 +586,11 @@ func (o *Ouroboros) blockfetchClientBlock(
 		// Only publish block delay metrics after reaching tip once.
 		// During catch-up all blocks are naturally "late" relative to
 		// wall-clock time, which permanently poisons the CDF.
-		atTip := o.LedgerState != nil && o.LedgerState.IsAtTip()
+		atTip := o.ledgerState != nil && o.ledgerState.IsAtTip()
 		if atTip && o.blockfetchMetrics != nil {
 			// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
 			var delaySeconds float64
-			if blockSlotTime, err := o.LedgerState.SlotToTime(block.SlotNumber()); err == nil {
+			if blockSlotTime, err := o.ledgerState.SlotToTime(block.SlotNumber()); err == nil {
 				delaySeconds = time.Since(blockSlotTime).Seconds()
 			} else {
 				delaySeconds = fetchDuration.Seconds()
@@ -629,18 +629,18 @@ func (o *Ouroboros) blockfetchClientBlock(
 			}
 		}
 
-		if o.PeerGov != nil {
+		if o.peerGov != nil {
 			latencyMs := fetchDuration.Milliseconds()
-			o.PeerGov.UpdatePeerBlockFetchObservation(
+			o.peerGov.UpdatePeerBlockFetchObservation(
 				ctx.ConnectionId,
 				float64(latencyMs),
 				true,
 			)
 		}
 	}
-	if o.EventBus != nil &&
-		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.EventBus.Publish(
+	if o.eventBus != nil &&
+		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
+		o.eventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
@@ -666,9 +666,9 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, ctx.ConnectionId)
 	o.blockFetchMutex.Unlock()
-	if o.EventBus != nil &&
-		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.EventBus.Publish(
+	if o.eventBus != nil &&
+		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
+		o.eventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(
 				ledger.BlockfetchEventType,

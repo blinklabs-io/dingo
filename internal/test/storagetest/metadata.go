@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -27,9 +28,10 @@ import (
 )
 
 // RunMetadataStoreConformance exercises the dialect-neutral contract
-// documented on metadata.SettingsStore, metadata.TransactionStore, and
-// metadata.SlotRangeStore against newStore(). newStore is called once; the
-// returned store is reused across every subtest.
+// documented on metadata.SettingsStore, metadata.TxnStore,
+// metadata.SlotRangeStore, and metadata.GovernanceStore against newStore().
+// newStore is called once; the returned store is reused across every
+// subtest.
 //
 // The suite is deliberately scoped to that shared, capability-level surface
 // rather than the ~150 domain methods MetadataStore composes on top of it:
@@ -176,7 +178,7 @@ func RunMetadataStoreConformance(
 	if slotRangeStore, ok := store.(metadata.SlotRangeStore); ok {
 		t.Run("SlotRangeStatsOnUnknownRange", func(t *testing.T) {
 			// Read through a real ReadTransaction rather than nil: the
-			// SettingsStore/TransactionStore doc comments specifically call
+			// SettingsStore/TxnStore doc comments specifically call
 			// out ReadTransaction as the read connection pool a caller
 			// should use for exactly this kind of query, so the combination
 			// -- not just each half in isolation -- needs to actually work.
@@ -202,6 +204,127 @@ func RunMetadataStoreConformance(
 			require.Zero(t, stats.LastSlot)
 		})
 	}
+
+	// Unlike the SlotRangeStore block above these need no runtime check:
+	// MetadataStore composes each domain, so the conversions are static.
+	// Naming the narrow handles is what makes the subtests below exercise
+	// each domain the way a single-domain caller would, against a real
+	// database, on every backend that runs this suite.
+	var (
+		certificateStore   metadata.CertificateStore   = store
+		epochStore         metadata.EpochStore         = store
+		governanceStore    metadata.GovernanceStore    = store
+		stakeSnapshotStore metadata.StakeSnapshotStore = store
+		transactionStore   metadata.TransactionStore   = store
+		utxoStore          metadata.UtxoStore          = store
+	)
+
+	t.Run("GovernanceReadsOnEmptyState", func(t *testing.T) {
+		// Reading through the narrowed handle, not through store: a
+		// GovernanceStore-only caller has no ReadTransaction of its own,
+		// so the combination it will actually use in production is a
+		// transaction handed in from outside.
+		txn := store.ReadTransaction()
+		defer func() { require.NoError(t, txn.Rollback()) }()
+
+		proposals, err := governanceStore.GetActiveGovernanceProposals(
+			1, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, proposals)
+
+		ratified, err := governanceStore.GetRatifiedGovernanceProposals(txn)
+		require.NoError(t, err)
+		require.Empty(t, ratified)
+
+		// Documented on GovernanceStore as (nil, nil) before any
+		// UpdateCommittee has been enacted, rather than a not-found error.
+		quorum, err := governanceStore.GetCommitteeQuorum(txn)
+		require.NoError(t, err)
+		require.Nil(t, quorum)
+
+		count, err := governanceStore.GetCommitteeActiveCount(txn)
+		require.NoError(t, err)
+		require.Zero(t, count)
+
+		dreps, err := governanceStore.GetActiveDreps(txn)
+		require.NoError(t, err)
+		require.Empty(t, dreps)
+	})
+
+	t.Run("ConstitutionRoundTripThroughNarrowStore", func(t *testing.T) {
+		// A write as well as a read: a domain interface that can only be
+		// read from would still compile at every call site the split
+		// moved over, so the round trip is what proves the narrowing is
+		// usable rather than merely type-correct.
+		write := store.Transaction()
+		// Registered before the write, not after it: require.NoError
+		// stops the subtest on failure, so a SetConstitution error would
+		// otherwise leave this transaction holding its connection for the
+		// rest of the suite. Rollback after a successful Commit is a
+		// no-op -- sqlTxn returns nil once the transaction is finished.
+		defer func() { require.NoError(t, write.Rollback()) }()
+		require.NoError(t, governanceStore.SetConstitution(
+			&models.Constitution{
+				AnchorURL:  "https://example.invalid/constitution",
+				AnchorHash: []byte("conformance-anchor-hash"),
+				PolicyHash: []byte("conformance-policy-hash"),
+				AddedSlot:  42,
+			},
+			write,
+		))
+		require.NoError(t, write.Commit())
+
+		read := store.ReadTransaction()
+		defer func() { require.NoError(t, read.Rollback()) }()
+
+		got, err := governanceStore.GetConstitution(read)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Equal(
+			t, "https://example.invalid/constitution", got.AnchorURL,
+		)
+		require.Equal(t, uint64(42), got.AddedSlot)
+	})
+
+	t.Run("DomainReadsOnEmptyState", func(t *testing.T) {
+		// One cheap read per extracted domain, through that domain's
+		// narrow handle. This is not coverage of the domains themselves --
+		// the shared sqlstore implementation is tested elsewhere -- it is
+		// evidence that each newly split interface is wired to a working
+		// backend on this dialect, which a compile-time assertion cannot
+		// show.
+		txn := store.ReadTransaction()
+		defer func() { require.NoError(t, txn.Rollback()) }()
+
+		utxo, err := utxoStore.GetUtxo(
+			make([]byte, 32), 0, txn,
+		)
+		require.NoError(t, err)
+		require.Nil(t, utxo)
+
+		hashes, err := transactionStore.GetTransactionHashesAfterSlot(
+			1_900_000_000, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, hashes)
+
+		epochs, err := epochStore.GetEpochs(txn)
+		require.NoError(t, err)
+		require.Empty(t, epochs)
+
+		snapshots, err := stakeSnapshotStore.GetPoolStakeSnapshotsByEpoch(
+			1, models.PoolStakeSnapshotTypeMark, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, snapshots)
+
+		mirs, err := certificateStore.GetMIRCertsInSlotRange(
+			1_900_000_000, 1_900_000_100, txn,
+		)
+		require.NoError(t, err)
+		require.Empty(t, mirs)
+	})
 
 	t.Run("OperationsCompleteWithinTimeout", func(t *testing.T) {
 		// Not a benchmark: a generous bound that only catches a genuine

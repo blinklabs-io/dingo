@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
@@ -36,11 +37,15 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/mempool"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
+	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -143,12 +148,6 @@ func newLiveLifecycleTestNodeWithGenesis(
 		cardanoNodeCfg = newNodeTestCardanoNodeCfg(t)
 	}
 
-	ouro := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
-		Logger:       logger,
-		EventBus:     eventBus,
-		NetworkMagic: 2, // preview
-	})
-
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:                 db,
 		ChainManager:             cm,
@@ -159,7 +158,36 @@ func newLiveLifecycleTestNodeWithGenesis(
 		DatabaseWorkerPoolConfig: workerPoolCfg,
 	})
 	require.NoError(t, err)
-	ouro.LedgerState = ledgerState
+	// Build the harness ouroboros the way Run() does: every dependency up
+	// front, through the validating constructor, so the live-restore
+	// reconstruction assertions below exercise the production path rather
+	// than a hand-assembled instance.
+	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       ledgerState,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	harnessConnManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	ouroborosCfg := ouroborosPkg.OuroborosConfig{
+		Logger:         logger,
+		EventBus:       eventBus,
+		NetworkMagic:   2, // preview
+		LedgerState:    ledgerState,
+		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
+		ChainsyncState: chainsync.NewState(eventBus, ledgerState),
+		ConnManager:    harnessConnManager,
+		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger:      logger,
+			EventBus:    eventBus,
+			ConnManager: harnessConnManager,
+		}),
+	}
+	ouro, err := ouroborosPkg.NewOuroboros(ouroborosCfg)
+	require.NoError(t, err)
 	require.NoError(t, ledgerState.Start(context.Background()))
 
 	cfg := NewConfig(
@@ -186,10 +214,13 @@ func newLiveLifecycleTestNodeWithGenesis(
 		pluginHost:   pluginHost,
 		chainManager: cm,
 		ledgerState:  ledgerState,
-		ouroboros:    ouro,
-		ctx:          ctx,
-		cancel:       cancel,
+		// Retained so reinitializeNetworkingCore can rebuild ouroboros the
+		// way Run() does.
+		ouroborosConfig: ouroborosCfg,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
+	n.ouroborosRef.Store(ouro)
 	t.Cleanup(func() {
 		cancel()
 		if n.pluginHost != nil {
@@ -202,7 +233,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 			_ = n.connManager.Stop(context.Background())
 		}
 		if n.peerGov != nil {
-			n.peerGov.Stop()
+			_ = n.peerGov.Stop(context.Background())
 		}
 		if n.snapshotMgr != nil {
 			_ = n.snapshotMgr.Stop()
@@ -326,6 +357,61 @@ func lifecycleSnapshot(
 	)
 }
 
+// TestInitLeiosManagersDoNotRequireOuroboros pins the startup ordering. Run
+// initializes the Leios managers well before it constructs Ouroboros, so the
+// init path must not reach for the instance: doing so dereferences a nil
+// pointer and panics before the node ever finishes starting. The handlers are
+// attached separately, once the instance exists, by attachLeiosHandlers.
+func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 2)
+	// Exactly the state Run is in when it reaches the Leios init calls.
+	n.ouroborosRef.Store(nil)
+	require.Nil(t, n.ouroboros())
+
+	require.NotPanics(t, func() {
+		require.NoError(t, n.initLeiosVoteManager(t.Context()))
+		require.NoError(t, n.initLeiosPipelineManager(t.Context()))
+	})
+	require.NotNil(t, n.leiosVoteManager)
+	require.NotNil(t, n.leiosPipelineManager)
+}
+
+// TestLiveLifecycleRebuildPreservesLeiosHandlers pins a regression that the
+// storage-rebuild assertions cannot see. The Leios vote and pipeline handlers
+// are not part of OuroborosConfig -- their managers start on a separate path
+// that runs BEFORE reinitializeNetworkingCore replaces Ouroboros -- so a
+// rebuild that does not carry them across silently drops Leios vote and
+// pipeline handling on a Dijkstra node, while everything else keeps working.
+func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 4)
+
+	// Zero-value managers: this asserts only that the same handlers survive
+	// the rebuild, and never invokes them.
+	votes := &leios.VoteManager{}
+	pipeline := &leios.PipelineManager{}
+	n.leiosVoteManager = votes
+	n.leiosPipelineManager = pipeline
+	require.NoError(t, n.ouroboros().SetLeiosVotes(votes))
+	require.NoError(t, n.ouroboros().SetLeiosPipeline(pipeline))
+
+	before := n.ouroboros()
+	require.NoError(t, n.reinitializeNetworkingCore(context.Background()))
+
+	require.NotSame(t, before, n.ouroboros())
+	require.NotNil(
+		t,
+		n.ouroboros().LeiosVotes(),
+		"leios vote handler was dropped by the rebuild",
+	)
+	require.NotNil(
+		t,
+		n.ouroboros().LeiosPipeline(),
+		"leios pipeline handler was dropped by the rebuild",
+	)
+	require.Same(t, votes, n.ouroboros().LeiosVotes())
+	require.Same(t, pipeline, n.ouroboros().LeiosPipeline())
+}
+
 // TestLiveTruncateRebuildsStorageAndKeepsNodeUsable is the core Phase 2
 // verification: truncating a real, multi-block chain on an already-running
 // node's live objects must (a) actually remove the truncated blocks and
@@ -341,6 +427,7 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	oldLedgerState := n.ledgerState
 	oldChainManager := n.chainManager
 	oldCtx := n.ctx
+	ouroBeforeRestore := n.ouroboros()
 
 	targetIndex := numBlocks / 2
 	targetSlot := points[targetIndex].Slot
@@ -373,13 +460,24 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.NotNil(t, n.snapshotMgr)
 	require.NotNil(t, n.dbLifecycleMgr)
 
-	// The kept-alive ouroboros object must be rewired to the NEW
-	// dependencies, not left pointing at the closed ones.
-	require.Same(t, n.ledgerState, n.ouroboros.LedgerState)
-	require.Same(t, n.mempool, n.ouroboros.Mempool)
-	require.Same(t, n.chainsyncState, n.ouroboros.ChainsyncState)
-	require.Same(t, n.connManager, n.ouroboros.ConnManager)
-	require.Same(t, n.peerGov, n.ouroboros.PeerGov)
+	// Ouroboros takes its dependencies at construction and never reassigns
+	// them, so rebuilding those dependencies must have produced a REPLACEMENT
+	// instance holding the new ones -- not the original still pointing at the
+	// closed ledger, mempool and connection manager.
+	require.NotSame(t, ouroBeforeRestore, n.ouroboros())
+	require.Same(t, n.ledgerState, n.ouroboros().LedgerState())
+	require.Same(t, n.mempool, n.ouroboros().Mempool())
+	require.Same(t, n.chainsyncState, n.ouroboros().ChainsyncState())
+	require.Same(t, n.connManager, n.ouroboros().ConnManager())
+	require.Same(t, n.peerGov, n.ouroboros().PeerGov())
+
+	// Everything the node handed to other components as a callback must
+	// resolve the replacement, not the instance it was built alongside. This
+	// is the failure mode that silently stops a restored node from syncing:
+	// the callbacks still run, but against a closed Ouroboros. Asserting on
+	// the connection manager's providers covers the listener and outbound
+	// paths, which are resolved lazily for exactly this reason.
+	require.NotNil(t, n.connManager.ResolvedListeners())
 
 	// The truncate itself must have taken effect: tip at the target, and
 	// blocks after it gone from the new database.
@@ -793,7 +891,7 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.NotNil(t, n.chainsyncState)
 	require.NotNil(t, n.connManager)
 	require.NotNil(t, n.peerGov)
-	require.Same(t, n.ledgerState, n.ouroboros.LedgerState)
+	require.Same(t, n.ledgerState, n.ouroboros().LedgerState())
 
 	tip, err := n.db.GetTip(nil)
 	require.NoError(t, err)

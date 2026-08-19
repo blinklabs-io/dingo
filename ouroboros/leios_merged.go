@@ -67,8 +67,8 @@ func (o *Ouroboros) leiosClosureWaitTimeout() time.Duration {
 	if o.config.LeiosClosureWaitTimeout > 0 {
 		return o.config.LeiosClosureWaitTimeout
 	}
-	if o.LedgerState != nil {
-		if d := o.LedgerState.EndorserBlockWaitDuration(); d > 0 {
+	if o.ledgerState != nil {
+		if d := o.ledgerState.EndorserBlockWaitDuration(); d > 0 {
 			return d
 		}
 	}
@@ -223,13 +223,13 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	o.enqueueLeiosPersist(point, blockRaw, data)
 	// Trigger local vote emission for the stored block, outside the
 	// cache lock
-	if o.LeiosVotes != nil {
-		o.LeiosVotes.HandleEndorserBlock(point.Slot, blockHash)
+	if o.leiosVotes != nil {
+		o.leiosVotes.HandleEndorserBlock(point.Slot, blockHash)
 	}
 	// Register the block into the Leios pipeline for stage/timing
 	// tracking and EB equivocation detection
-	if o.LeiosPipeline != nil {
-		o.LeiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
+	if o.leiosPipeline != nil {
+		o.leiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
 	}
 	return nil
 }
@@ -237,10 +237,10 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 // leiosDatabase returns the underlying Database when the LedgerState is wired
 // up, or nil when running without a database (unit tests, etc.).
 func (o *Ouroboros) leiosDatabase() *database.Database {
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return nil
 	}
-	return o.LedgerState.Database()
+	return o.ledgerState.Database()
 }
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
@@ -675,11 +675,11 @@ func (o *Ouroboros) certifiedEndorserBlockHash(
 	}
 	// The header is certified from here on; a resolution failure below keeps
 	// certified=true so the caller disconnects instead of serving raw.
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return lcommon.Blake2b256{}, true, false
 	}
 	prevHash := header.PrevHash()
-	parent, err := o.LedgerState.BlockByHash(prevHash.Bytes())
+	parent, err := o.ledgerState.BlockByHash(prevHash.Bytes())
 	if err != nil {
 		return lcommon.Blake2b256{}, true, false
 	}
