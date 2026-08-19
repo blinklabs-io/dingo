@@ -269,8 +269,8 @@ That cleanup is deferred while the local tip is materially behind the known
 upstream tip and is single-flight across its timer and epoch-boundary
 triggers. This keeps the potentially large `utxo`/stake-reference scan from
 holding SQLite's single write connection during historical catch-up; the
-rows remain eligible and are reclaimed once the node reaches the tip. API
-mode retains spent UTxO metadata for historical transaction queries.
+rows remain eligible and are reclaimed once the node is near the upstream tip.
+API mode retains spent UTxO metadata for historical transaction queries.
 
 ## ER Diagrams
 

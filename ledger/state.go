@@ -2221,6 +2221,12 @@ func (ls *LedgerState) protocolMajorForEvent(
 // the tip they are always on. Returns false when no upstream tip is known yet
 // (no peer connected), since we can't determine proximity.
 func (ls *LedgerState) isNearTip(slot uint64) bool {
+	return ls.isNearTipWithStabilityWindow(slot, ls.calculateStabilityWindow())
+}
+
+func (ls *LedgerState) isNearTipWithStabilityWindow(
+	slot, stabilityWindow uint64,
+) bool {
 	upstreamTip := ls.syncUpstreamTipSlot.Load()
 	if upstreamTip == 0 {
 		return false
@@ -2228,7 +2234,7 @@ func (ls *LedgerState) isNearTip(slot uint64) bool {
 	if slot >= upstreamTip {
 		return true
 	}
-	return upstreamTip-slot <= ls.calculateStabilityWindow()
+	return upstreamTip-slot <= stabilityWindow
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
@@ -2273,7 +2279,8 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	tipSlot := ls.currentTip.Point.Slot
 	eraId := ls.currentEra.Id
 	ls.RUnlock()
-	if !ls.isNearTip(tipSlot) {
+	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
+	if !ls.isNearTipWithStabilityWindow(tipSlot, stabilityWindow) {
 		ls.config.Logger.Debug(
 			"deferring consumed UTxO cleanup while catching up",
 			"component", "ledger",
@@ -2282,7 +2289,6 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		)
 		return
 	}
-	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
 
 	// Delete UTxOs that are marked as deleted and older than our slot window
 	ls.config.Logger.Debug(

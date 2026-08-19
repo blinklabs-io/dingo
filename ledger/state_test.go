@@ -1064,6 +1064,16 @@ func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
 	assert.False(t, ls.isNearTip(993), "gap above 3k/f should be catch-up")
 	assert.True(t, ls.isNearTip(994), "gap equal to 3k/f should be near tip")
 	assert.True(t, ls.isNearTip(1001), "local tip beyond upstream is near tip")
+	assert.False(
+		t,
+		ls.isNearTipWithStabilityWindow(989, 10),
+		"explicit window must reject a larger upstream gap",
+	)
+	assert.True(
+		t,
+		ls.isNearTipWithStabilityWindow(990, 10),
+		"explicit window must accept an equal upstream gap",
+	)
 }
 
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
