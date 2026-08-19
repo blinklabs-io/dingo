@@ -286,7 +286,12 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			if conn := p.config.ConnManager.GetConnectionById(
 				orphanPeer.Connection.Id,
 			); conn != nil {
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing connection for peer removed by topology",
+					"address", orphanPeer.Address,
+				)
 			}
 		}
 	}

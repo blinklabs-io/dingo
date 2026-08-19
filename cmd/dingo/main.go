@@ -250,6 +250,15 @@ func listCommand() *cobra.Command {
 	return cmd
 }
 
+// closeProfileFile closes f, reporting a close failure to stderr instead of
+// silently dropping it -- a truncated profile file is otherwise
+// indistinguishable from a clean one until someone tries to load it.
+func closeProfileFile(stderr io.Writer, f *os.File, kind string) {
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(stderr, "could not close %s profile file: %v\n", kind, err)
+	}
+}
+
 func main() {
 	// Parse profiling flags before cobra setup (handle both --flag=value and --flag value syntax)
 	cpuprofile := ""
@@ -303,7 +312,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			os.Exit(1)
 		}
-		defer f.Close()
+		defer closeProfileFile(os.Stderr, f, "CPU")
 		if err := pprof.StartCPUProfile(f); err != nil {
 			fmt.Fprintf(os.Stderr, "could not start CPU profile: %v\n", err)
 			os.Exit(1)
@@ -490,7 +499,7 @@ Database Workers:
 			} else {
 				fmt.Fprintf(os.Stderr, "Memory profiling complete\n")
 			}
-			f.Close()
+			closeProfileFile(os.Stderr, f, "memory")
 		}
 	}
 
