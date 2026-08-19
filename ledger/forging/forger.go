@@ -143,8 +143,8 @@ type ConfirmedTxRemover interface {
 	RemoveTxsByHash(hashes []string)
 }
 
-// BlockForgedObserver observes blocks after they are successfully built,
-// before chain adoption is attempted.
+// BlockForgedObserver observes blocks after they are successfully built and
+// chain adoption has been attempted.
 type BlockForgedObserver func(
 	block ledger.Block,
 	cbor []byte,
@@ -771,6 +771,11 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			float64(len(block.Transactions())),
 		)
 	}
+
+	// Attempt local adoption immediately after building and validation. Keep
+	// observability callbacks out of this critical path: subscribers may be
+	// slow, while the block's parent must still be the active chain tip.
+	addErr := f.blockBroadcaster.AddBlock(block, blockCbor)
 	if f.blockForged != nil {
 		func() {
 			defer func() {
@@ -785,13 +790,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
 		}()
 	}
-
-	// Add block to chain and broadcast
-	if err := f.blockBroadcaster.AddBlock(
-		block, blockCbor,
-	); err != nil {
+	if addErr != nil {
 		f.incCouldNotForge()
-		return fmt.Errorf("failed to add block: %w", err)
+		return fmt.Errorf("failed to add block: %w", addErr)
 	}
 
 	// AddBlock accepted the block, so its transactions are confirmed. Remove

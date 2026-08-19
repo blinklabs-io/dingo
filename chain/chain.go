@@ -205,7 +205,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, true)
 	if err != nil {
 		return err
 	}
@@ -216,18 +216,24 @@ func (c *Chain) AddBlock(
 	return nil
 }
 
-// HandleBlockProposedEvent applies locally forged block proposals published on
-// the EventBus and acknowledges the result to the proposer when requested.
-func (c *Chain) HandleBlockProposedEvent(evt event.Event) {
-	proposal, ok := evt.Data.(BlockProposedEvent)
-	if !ok {
-		return
+// AddLocalBlock adds a locally forged block without comparing it to queued
+// peer headers. A successful local block invalidates those pending headers;
+// the actual chain-tip and block-number checks remain mandatory.
+func (c *Chain) AddLocalBlock(block ledger.Block) error {
+	evt, err := c.addBlockInternal(
+		block,
+		ocommon.Point{},
+		nil,
+		true,
+		false,
+	)
+	if err != nil {
+		return err
 	}
-	if proposal.Block == nil {
-		proposal.Respond(errors.New("proposed block is nil"))
-		return
+	if c.eventBus != nil && evt.Type != "" {
+		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
-	proposal.Respond(c.AddBlock(proposal.Block, nil))
+	return nil
 }
 
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
@@ -238,7 +244,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true)
+	evt, err := c.addBlockInternal(block, point, txn, true, true)
 	if err != nil {
 		return err
 	}
@@ -257,6 +263,7 @@ func (c *Chain) addBlockInternal(
 	point ocommon.Point,
 	txn *database.Txn,
 	notifyWaiters bool,
+	matchPendingHeader bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
@@ -270,7 +277,13 @@ func (c *Chain) addBlockInternal(
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
-	return c.addBlockLocked(block, point, txn, notifyWaiters)
+	return c.addBlockLocked(
+		block,
+		point,
+		txn,
+		notifyWaiters,
+		matchPendingHeader,
+	)
 }
 
 func (c *Chain) addBlockLocked(
@@ -278,6 +291,7 @@ func (c *Chain) addBlockLocked(
 	point ocommon.Point,
 	txn *database.Txn,
 	notifyWaiters bool,
+	matchPendingHeader bool,
 ) (event.Event, error) {
 	blockHashBytes := point.Hash
 	if len(blockHashBytes) == 0 {
@@ -287,7 +301,7 @@ func (c *Chain) addBlockLocked(
 	blockPrevHashBytes := []byte(nil)
 	blockNumber := block.BlockNumber()
 	// Check that the new block matches our first header, if any
-	if len(c.headers) > 0 {
+	if matchPendingHeader && len(c.headers) > 0 {
 		firstHeader := c.headers[0]
 		if !bytes.Equal(blockHashBytes, firstHeader.point.Hash) {
 			return event.Event{}, NewBlockNotMatchHeaderError(
@@ -344,8 +358,10 @@ func (c *Chain) addBlockLocked(
 		c.blocks = append(c.blocks, tmpPoint)
 	}
 	// Remove matching header entry, if any
-	if len(c.headers) > 0 {
+	if matchPendingHeader && len(c.headers) > 0 {
 		c.headers = slices.Delete(c.headers, 0, 1)
+	} else if !matchPendingHeader {
+		c.headers = c.headers[:0]
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -404,6 +420,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 					ocommon.Point{},
 					txn,
 					false,
+					true,
 				)
 				if err != nil {
 					return err

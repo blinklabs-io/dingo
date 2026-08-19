@@ -2985,7 +2985,12 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
 3. Reads the parent ranking block's `LeiosAnnouncement`, selects only the matching eligible Leios endorser-block certificate, and independently produces and broadcasts a new endorser block for the current slot when eligible
 4. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
 5. Optionally self-validates the forged block before adoption (see below)
-6. Broadcasts the forged block through the chain manager
+6. Submits the forged block directly to the primary chain for synchronous local
+   admission, before running observability callbacks. Local admission validates
+   the actual chain tip and contiguous block number, but does not compare the
+   block with peer-delivered pending headers. Successful adoption clears those
+   now-conflicting headers; a genuinely stale parent is still rejected without
+   changing the queued headers.
 7. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
