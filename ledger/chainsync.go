@@ -3237,10 +3237,19 @@ func (ls *LedgerState) startQueuedBlockfetchOnLocked(
 	// connection that just failed and preferring the current selection, so
 	// pointing the selection at the failed connection first collapses that
 	// lookup onto activeBlockfetchConnId instead.
+	//
+	// Captured first because startQueuedBlockfetchLocked releases
+	// chainsyncBlockfetchMutex around the network request: a connection switch
+	// or close can install a newer selection while we are outside it, and this
+	// retarget must not overwrite that. If the selection moved, the concurrent
+	// writer's choice is the current one and wins.
+	before := ls.selectedBlockfetchConnId
 	if err := ls.startQueuedBlockfetchLocked(connId, pending); err != nil {
 		return err
 	}
-	ls.selectedBlockfetchConnId = connId
+	if sameConnectionId(ls.selectedBlockfetchConnId, before) {
+		ls.selectedBlockfetchConnId = connId
+	}
 	return nil
 }
 

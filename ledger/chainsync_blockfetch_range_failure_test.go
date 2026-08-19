@@ -298,9 +298,11 @@ func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		// fail reports whether a request on this connection should fail,
-		// letting the subtest drive either the primary start or its retry.
+		// letting the subtest drive the primary start, its retry, or neither.
 		fail func(ouroboros.ConnectionId, ouroboros.ConnectionId) bool
-		want func(primary, retry ouroboros.ConnectionId) ouroboros.ConnectionId
+		want func(
+			stale, primary, retry ouroboros.ConnectionId,
+		) ouroboros.ConnectionId
 	}{
 		{
 			name: "primary start",
@@ -308,9 +310,24 @@ func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
 				return false
 			},
 			want: func(
-				primary, _ ouroboros.ConnectionId,
+				_, primary, _ ouroboros.ConnectionId,
 			) ouroboros.ConnectionId {
 				return primary
+			},
+		},
+		{
+			// Pins the other half of the contract: a failed attempt must not
+			// move the selection. Without this case a regression that
+			// retargeted on the attempt would still pass, because the
+			// following successful retry puts the expected value back.
+			name: "neither the primary nor its retry succeeds",
+			fail: func(ouroboros.ConnectionId, ouroboros.ConnectionId) bool {
+				return true
+			},
+			want: func(
+				stale, _, _ ouroboros.ConnectionId,
+			) ouroboros.ConnectionId {
+				return stale
 			},
 		},
 		{
@@ -319,7 +336,7 @@ func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
 				return sameConnectionId(connId, primary)
 			},
 			want: func(
-				_, retry ouroboros.ConnectionId,
+				_, _, retry ouroboros.ConnectionId,
 			) ouroboros.ConnectionId {
 				return retry
 			},
@@ -383,12 +400,63 @@ func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
 			ls.chainsyncBlockfetchMutex.Unlock()
 
 			assert.True(
-				t, sameConnectionId(got, test.want(primary, retry)),
+				t, sameConnectionId(got, test.want(stale, primary, retry)),
 				"the selection must name the connection that served the "+
 					"continuation, got %s", got.String(),
 			)
 		})
 	}
+}
+
+// TestBlockfetchRetargetPreservesConcurrentSelection asserts the retarget does
+// not overwrite a newer selection installed while the start was outside the
+// mutex. startQueuedBlockfetchLocked releases chainsyncBlockfetchMutex around
+// the network request, so a connection switch or close can land in that window;
+// its choice is the current one and has to win. The request callback stands in
+// for that concurrent writer, since it runs with the mutex released.
+func TestBlockfetchRetargetPreservesConcurrentSelection(t *testing.T) {
+	stale := testChainsyncConnId(6300, 3001)
+	starting := testChainsyncConnId(6300, 3002)
+	switched := testChainsyncConnId(6300, 3003)
+
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("concurrent-switch")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+
+	ls := &LedgerState{
+		chain:                    testChain,
+		selectedBlockfetchConnId: stale,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) error {
+		// Runs with the mutex released, exactly where a real connection
+		// switch would install its own selection.
+		ls.selectedBlockfetchConnId = switched
+		return nil
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	require.NoError(t, ls.startQueuedBlockfetchOnLocked(starting, nil))
+	got := ls.selectedBlockfetchConnId
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	assert.True(
+		t, sameConnectionId(got, switched),
+		"a selection installed while the request was outside the mutex must "+
+			"survive the retarget, got %s", got.String(),
+	)
 }
 
 // newNoBlocksLedgerState builds a LedgerState with one queued header whose
