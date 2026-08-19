@@ -499,7 +499,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Discover peers from ledger (stake pool relays) before peer sharing,
 	// which can block on unresponsive peers.
-	p.discoverLedgerPeers()
+	p.discoverLedgerPeersContext(ctx)
 
 	for i := range eligiblePeersCopy {
 		addrs := p.config.PeerRequestFunc(&eligiblePeersCopy[i])

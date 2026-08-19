@@ -1440,6 +1440,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.peerGov.LoadTopologyConfig(topologyConfig)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
+				n.ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added > 0 {
@@ -1465,7 +1466,23 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("peer governor start failed: %w", err)
 	}
-	started = append(started, func() { n.peerGov.Stop() })
+	// Bounded, not context.Background(): Stop waits for an in-flight
+	// GetPoolRelays call, so an unbounded wait here would let a later
+	// startup failure block Node.Run forever instead of returning its
+	// error.
+	started = append(started, func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			n.configuredShutdownTimeout(),
+		)
+		defer cancel()
+		if err := n.peerGov.Stop(stopCtx); err != nil {
+			n.config.logger.Warn(
+				"peer governor shutdown during startup rollback",
+				"error", err,
+			)
+		}
+	})
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err

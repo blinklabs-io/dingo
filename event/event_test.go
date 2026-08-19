@@ -15,6 +15,7 @@
 package event_test
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -365,6 +366,87 @@ func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
 	close(release)
 	testutil.RequireReceive(t, unsubscribed, time.Second, "UnsubscribeAndWait did not finish")
 	require.Equal(t, int32(3), handled.Load(), "ordinary unsubscribe discarded queued events")
+}
+
+func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
+	const testEvtType event.EventType = "test.unsubscribe.ctx"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	// Registered after the deferred Close so it runs first: a failure here
+	// leaves the handler blocked, and Close would otherwise wait on it
+	// forever instead of letting the test report the failure.
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHandler()
+
+	var handled atomic.Int32
+	subID := eb.SubscribeFunc(testEvtType, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- eb.UnsubscribeAndWaitContext(ctx, testEvtType, subID)
+	}()
+	// The wait, not the unsubscribe, is what ctx bounds: this must return
+	// while the handler is still blocked, or a bounded shutdown path can be
+	// held open indefinitely by one stuck handler.
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			returned,
+			5*time.Second,
+			"UnsubscribeAndWaitContext did not honor the context deadline",
+		),
+		context.DeadlineExceeded,
+	)
+
+	// Delivery stopped even though the wait was cut short.
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-unsubscribe"))
+	releaseHandler()
+	// Never, not Eventually: handled is already 1 from the in-flight event,
+	// so an Eventually would pass on its first poll without ever observing
+	// whether the post-unsubscribe publish got delivered.
+	require.Never(
+		t,
+		func() bool { return handled.Load() != 1 },
+		time.Second,
+		10*time.Millisecond,
+		"unsubscribe must still take effect when the wait is cut short",
+	)
+}
+
+func TestUnsubscribeAndWaitContextReturnsNilOnceHandlerFinishes(t *testing.T) {
+	const testEvtType event.EventType = "test.unsubscribe.ctx.ok"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Close()
+
+	handled := make(chan struct{})
+	subID := eb.SubscribeFunc(testEvtType, func(event.Event) {
+		close(handled)
+	})
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "handled"))
+	testutil.RequireReceive(t, handled, time.Second, "handler did not run")
+
+	require.NoError(
+		t,
+		eb.UnsubscribeAndWaitContext(t.Context(), testEvtType, subID),
+	)
 }
 
 func TestSubscribeFuncPanicRecovery(t *testing.T) {

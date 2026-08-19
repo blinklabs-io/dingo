@@ -961,6 +961,16 @@ Phase 4: Cleanup resources
   Registered shutdown functions
 ```
 
+The node creates one shutdown context from the configured `shutdownTimeout`
+and passes it through every phase. PeerGovernor shutdown cancels its internal
+run context, which interrupts ledger-peer DNS discovery and outbound work,
+then waits for its tracked workers until that deadline. Its connection-event
+handlers are removed with `EventBus.UnsubscribeAndWaitContext`, so the
+unsubscribe still happens unconditionally but an already-running handler is
+waited for only until that same deadline. A deadline expiry is returned as a
+shutdown error while the remaining teardown continues, so a slow peer-governor
+operation cannot hold phase 1 indefinitely.
+
 The terminal EventBus close occurs after mempool teardown and runs concurrently
 with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
 network protocol callback on a full ledger subscriber, while a blockfetch
@@ -2531,7 +2541,7 @@ Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcom
 
 The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
 
-`Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop()` removes them with `UnsubscribeAndWait`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects.
+`Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop(ctx)` removes them with `UnsubscribeAndWaitContext`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects. The unsubscribe itself always happens; only the wait for a handler already in flight is bounded by `ctx`, so one stuck handler cannot overrun the shutdown deadline. A deadline expiry is returned as an error, unprefixed — every caller adds its own `peer governor shutdown:` prefix, as it does for the other components.
 
 Outbound-dial goroutines are registered with the governor's wait group while
 holding the same mutex `Stop()` uses to clear `stopCh`. Runtime peer additions,

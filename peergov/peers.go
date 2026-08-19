@@ -287,8 +287,8 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 
 // resolveLedgerDiscoveryAddress resolves a ledger relay hostname at initial
 // discovery time, filtering the resolved records to the locally-supported
-// address families before picking one. This function performs blocking DNS
-// lookups and must NOT be called while holding locks.
+// address families before picking one. The lookup is bounded and honors ctx;
+// this function must NOT be called while holding locks.
 //
 // It is ledger-specific rather than a change to resolveAddress (shared by
 // every peer source — topology, gossip, inbound, TestPeer/DenyPeer lookups)
@@ -304,7 +304,10 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 // unchanged, and a resolution failure or empty result falls back to the
 // lowercased hostname so the peer is still added (with routability decided
 // downstream) rather than dropped.
-func (p *PeerGovernor) resolveLedgerDiscoveryAddress(address string) string {
+func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
+	ctx context.Context,
+	address string,
+) string {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return strings.ToLower(address)
@@ -315,7 +318,9 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(address string) string {
 		return net.JoinHostPort(ip.String(), port)
 	}
 
-	ips, err := lookupIP(host)
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
 		p.config.Logger.Warn(
 			"failed to resolve ledger relay hostname",

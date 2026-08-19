@@ -197,7 +197,7 @@ func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(
 	pg.ctx = t.Context()
 	pg.stopCh = make(chan struct{})
 	pg.mu.Unlock()
-	t.Cleanup(pg.Stop)
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 
 	target := &Peer{
 		Address:           "relay.example.com:1",
@@ -313,7 +313,7 @@ func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityChecked
 	pg.ctx = ctx
 	pg.stopCh = make(chan struct{})
 	pg.mu.Unlock()
-	t.Cleanup(pg.Stop)
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 
 	target := &Peer{
 		Address:           "relay5.example.com:3001",
@@ -451,14 +451,14 @@ func TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer(
 func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
 	setLocalAddrFamilies(t, true, false) // v4-only host
 
-	oldLookupIP := lookupIP
-	lookupIP = func(string) ([]net.IP, error) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
 		return []net.IP{
 			net.ParseIP("2001:db8::1"), // AAAA returned first
 			net.ParseIP("198.51.100.9"),
 		}, nil
 	}
-	t.Cleanup(func() { lookupIP = oldLookupIP })
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
 	pg := newDialSpreadGovernor()
 	require.True(t, pg.addLedgerPeer("relay.example.com:3001"))
@@ -473,4 +473,94 @@ func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
 	got, err := pg.resolveLedgerDialTarget(t.Context(), pg.peers[0])
 	require.NoError(t, err)
 	assert.Equal(t, "198.51.100.9:3001", got)
+}
+
+// TestAddLedgerPeerContextRejectsCancellationDuringResolution covers the
+// window after resolution: a canceled DNS lookup falls back to the bare
+// hostname, which isRoutableAddr accepts, so checking ctx only before the
+// lookup let a peer be added -- and its reconnect path started -- by a
+// governor that was already shutting down.
+func TestAddLedgerPeerContextRejectsCancellationDuringResolution(t *testing.T) {
+	oldLookupIPAddr := lookupIPAddr
+	started := make(chan struct{})
+	lookupIPAddr = func(ctx context.Context, _ string) ([]net.IP, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DisableOutbound: true,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	added := make(chan bool, 1)
+	go func() {
+		added <- pg.addLedgerPeerContext(ctx, "relay.example.com:3001")
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ledger DNS lookup did not start")
+	}
+	cancel()
+
+	select {
+	case got := <-added:
+		require.False(
+			t,
+			got,
+			"a peer resolved after cancellation must not be added",
+		)
+	case <-time.After(5 * time.Second):
+		t.Fatal("addLedgerPeerContext did not return after cancellation")
+	}
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	require.Empty(t, pg.peers, "no peer may be recorded after cancellation")
+	require.Empty(
+		t,
+		pg.ledgerKnownAddrs,
+		"no ledger address may be recorded after cancellation",
+	)
+}
+
+func TestResolveLedgerDiscoveryAddressHonorsCancellation(t *testing.T) {
+	oldLookupIPAddr := lookupIPAddr
+	started := make(chan struct{})
+	lookupIPAddr = func(ctx context.Context, _ string) ([]net.IP, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan string, 1)
+	go func() {
+		result <- pg.resolveLedgerDiscoveryAddress(ctx, "RELAY.EXAMPLE.COM:3001")
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ledger DNS lookup did not start")
+	}
+	cancel()
+
+	select {
+	case got := <-result:
+		require.Equal(t, "relay.example.com:3001", got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ledger DNS lookup did not honor cancellation")
+	}
 }
