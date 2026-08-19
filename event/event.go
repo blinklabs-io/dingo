@@ -334,7 +334,16 @@ func (c *channelSubscriber) waitDoneContext(ctx context.Context) error {
 	case <-c.done:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		// Recheck: when the handler finishes concurrently with
+		// cancellation both cases are ready and select picks at random,
+		// so reporting ctx.Err() here without looking would turn a
+		// completed teardown into a spurious shutdown error.
+		select {
+		case <-c.done:
+			return nil
+		default:
+			return ctx.Err()
+		}
 	}
 }
 

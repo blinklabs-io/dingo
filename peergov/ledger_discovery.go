@@ -265,6 +265,16 @@ func (p *PeerGovernor) addLedgerPeerContext(
 
 	p.mu.Lock()
 
+	// Rechecked under the lock, which is what actually closes the window:
+	// the pre-resolution and post-resolution checks above both run lock-free,
+	// so a cancellation landing between them and here would otherwise still
+	// mutate peer state and spawn a reconnect. Every mutation below happens
+	// under this same acquisition, so nothing can slip past this point.
+	if err := ctx.Err(); err != nil {
+		p.mu.Unlock()
+		return false
+	}
+
 	// Check deny list
 	if p.isDeniedLocked(normalized) ||
 		p.isDeniedLocked(p.normalizeAddress(address)) {

@@ -415,9 +415,12 @@ func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
 	// Delivery stopped even though the wait was cut short.
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-unsubscribe"))
 	releaseHandler()
-	require.Eventually(
+	// Never, not Eventually: handled is already 1 from the in-flight event,
+	// so an Eventually would pass on its first poll without ever observing
+	// whether the post-unsubscribe publish got delivered.
+	require.Never(
 		t,
-		func() bool { return handled.Load() == 1 },
+		func() bool { return handled.Load() != 1 },
 		time.Second,
 		10*time.Millisecond,
 		"unsubscribe must still take effect when the wait is cut short",
