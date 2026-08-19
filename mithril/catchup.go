@@ -34,6 +34,62 @@ var errCatchUpLocalAhead = errors.New(
 	"local chain is ahead of the target Mithril artifact",
 )
 
+// openBootstrappedImmutable opens the ImmutableDB a bootstrap produced, through
+// the handle the bootstrap vetted the directory under and held open. What gets
+// loaded is then the tree the bootstrap accepted, not whatever holds its name
+// by the time the load runs.
+//
+// A result without that handle is refused rather than opened by pathname. Both
+// bootstrap paths set it, so a missing one means the result did not come from a
+// vetted lookup — and falling back would silently reinstate the name-resolved
+// open this exists to replace, which is the kind of downgrade nobody notices
+// until it matters.
+//
+// Where the result also carries per-file digests, every file is checked against
+// them as it is opened, from the descriptor the read then goes through. The
+// handle and the digests answer different questions: the handle says the tip
+// read, the catch-up check and the blob copy are about the directory the
+// bootstrap vetted, and the digests say the bytes in it are the certified
+// bytes. Without the second, a writer sharing the download directory renames a
+// file of their own over a verified one — never leaving the directory the
+// handle refers to — and the copy loads what they wrote.
+//
+// v2 always carries them. v1 does not: it certifies one archive rather than the
+// files inside it, so after extraction there is nothing to re-check against and
+// its reads are bound to the directory alone.
+//
+// The absence of a map, not its emptiness, is what selects that unverified
+// read. A map that is present but empty is a v2 result that lost its digests,
+// and treating it as v1 would answer "verify nothing" to a question nobody
+// asked — reachable by removing something, which is the direction a fail-open
+// always comes from. NewFromRootVerified refuses it instead.
+func openBootstrappedImmutable(
+	result *BootstrapResult,
+) (*immutable.ImmutableDb, error) {
+	if result.ImmutableRoot == nil {
+		return nil, fmt.Errorf(
+			"opening certified ImmutableDB %s: bootstrap result carries no "+
+				"verified directory handle",
+			result.ImmutableDir,
+		)
+	}
+	var imm *immutable.ImmutableDb
+	var err error
+	if result.ImmutableDigests != nil {
+		imm, err = immutable.NewFromRootVerified(
+			result.ImmutableRoot, result.ImmutableDigests, "",
+		)
+	} else {
+		imm, err = immutable.NewFromRoot(result.ImmutableRoot)
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"opening certified ImmutableDB: %w", err,
+		)
+	}
+	return imm, nil
+}
+
 // verifyCatchupBeforeImport wraps verifyCatchupIntersection for Sync: a
 // strictly-ahead local chain is mapped to (upToDate=true) after advancing the
 // import marker to targetImmutable, so later runs no-op without re-downloading.
@@ -49,12 +105,12 @@ var errCatchUpLocalAhead = errors.New(
 // with the normal completion path.
 func verifyCatchupBeforeImport(
 	db *database.Database,
-	immutableDir string,
+	imm *immutable.ImmutableDb,
 	targetImmutable uint64,
 	resuming bool,
 	logger *slog.Logger,
 ) (upToDate bool, err error) {
-	verifyErr := verifyCatchupIntersection(db, immutableDir, logger)
+	verifyErr := verifyCatchupIntersection(db, imm, logger)
 	if verifyErr == nil {
 		return false, nil
 	}
@@ -96,9 +152,14 @@ func verifyCatchupBeforeImport(
 // snapshot over a newer database: the reconcile pass would tombstone every
 // live row created after the artifact tip and the volatile cleanup would
 // rewind the chain, permanently corrupting the database.
+//
+// The ImmutableDB is passed in already open rather than opened from a pathname
+// here, so this reads whatever the caller vetted. Opening by name would make
+// the check about whichever tree holds that name now, which is not necessarily
+// the one the import is about to read.
 func verifyCatchupIntersection(
 	db *database.Database,
-	immutableDir string,
+	imm *immutable.ImmutableDb,
 	logger *slog.Logger,
 ) error {
 	recent, err := database.BlocksRecent(db, 1)
@@ -110,10 +171,6 @@ func verifyCatchupIntersection(
 	}
 	tip := recent[0]
 
-	imm, err := immutable.New(immutableDir)
-	if err != nil {
-		return fmt.Errorf("opening target immutable DB: %w", err)
-	}
 	iter, err := imm.BlocksFromPoint(
 		ocommon.Point{Slot: tip.Slot, Hash: tip.Hash},
 	)
