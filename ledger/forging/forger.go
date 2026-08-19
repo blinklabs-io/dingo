@@ -216,9 +216,8 @@ type EndorserBlockBroadcaster interface {
 // LeiosEndorserBlockAnnouncement is the header extension payload for an
 // endorser block announced by a Dijkstra ranking block.
 type LeiosEndorserBlockAnnouncement struct {
-	Hash              lcommon.Blake2b256
-	Size              uint64
-	TransactionHashes []string
+	Hash lcommon.Blake2b256
+	Size uint64
 }
 
 // LeiosBlockData carries the Leios prototype data a Dijkstra ranking block
@@ -354,6 +353,11 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		}
 		if cfg.SlotClock == nil {
 			return nil, errors.New("production mode requires slot clock")
+		}
+		if cfg.LeiosProduceChecker != nil && cfg.LeiosTxValidator == nil {
+			return nil, errors.New(
+				"production Leios forging requires transaction validator",
+			)
 		}
 	}
 	if cfg.LeiosProduceChecker != nil {
@@ -1048,7 +1052,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
-	ebCbor, ebHash, bodies, txHashes, err := buildLeiosEB(txs)
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
@@ -1083,9 +1087,8 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		f.metrics.leiosEbForged.Inc()
 	}
 	return &LeiosEndorserBlockAnnouncement{
-		Hash:              lcommon.NewBlake2b256(ebHash),
-		Size:              uint64(len(ebCbor)),
-		TransactionHashes: txHashes,
+		Hash: lcommon.NewBlake2b256(ebHash),
+		Size: uint64(len(ebCbor)),
 	}, nil
 }
 
@@ -1111,6 +1114,12 @@ func selectValidLeiosTransactions(
 			consumed := make(map[string]struct{})
 			created := make(map[string]lcommon.Utxo)
 			for _, mempoolTx := range txs {
+				// The EB wire reference is the transaction's only representation
+				// in this slot. Do not expose outputs from a transaction that the
+				// manifest builder will later drop as unrepresentable.
+				if !validLeiosTransactionReference(mempoolTx) {
+					continue
+				}
 				tx, err := decodeMempoolTx(mempoolTx)
 				if err != nil || validate(tx, consumed, created) != nil {
 					continue
@@ -1146,7 +1155,6 @@ func buildLeiosEB(
 	cbor []byte,
 	hash []byte,
 	bodies [][]byte,
-	txHashes []string,
 	err error,
 ) {
 	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
@@ -1155,33 +1163,37 @@ func buildLeiosEB(
 	// transaction dropped from refs (bad hash or size) is dropped here too,
 	// keeping body i aligned with reference i.
 	bodies = make([][]byte, 0, len(txs))
-	txHashes = make([]string, 0, len(txs))
 	for _, tx := range txs {
-		raw, hexErr := hex.DecodeString(tx.Hash)
-		if hexErr != nil || len(raw) != 32 {
-			continue
-		}
-		sz := len(tx.Cbor)
-		if sz == 0 || sz > math.MaxUint16 {
+		raw, ok := validLeiosTransactionHash(tx.Hash)
+		if !ok || len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.NewBlake2b256(raw),
-			TransactionSize: uint16(sz), // #nosec G115 -- bounded above
+			TransactionSize: uint16(len(tx.Cbor)), // #nosec G115 -- bounded above
 		})
 		bodies = append(bodies, tx.Cbor)
-		txHashes = append(txHashes, tx.Hash)
 	}
 	if len(refs) == 0 {
-		return nil, nil, nil, nil, errNoValidTxRefs
+		return nil, nil, nil, errNoValidTxRefs
 	}
 	eb := lcommon.LeiosEndorserBlock{TransactionReferences: refs}
 	ebCbor, marshalErr := eb.MarshalCBOR()
 	if marshalErr != nil {
-		return nil, nil, nil, nil, fmt.Errorf("marshal leios EB: %w", marshalErr)
+		return nil, nil, nil, fmt.Errorf("marshal leios EB: %w", marshalErr)
 	}
 	h := lcommon.Blake2b256Hash(ebCbor)
-	return ebCbor, h.Bytes(), bodies, txHashes, nil
+	return ebCbor, h.Bytes(), bodies, nil
+}
+
+func validLeiosTransactionHash(hash string) ([]byte, bool) {
+	raw, err := hex.DecodeString(hash)
+	return raw, err == nil && len(raw) == 32
+}
+
+func validLeiosTransactionReference(tx MempoolTransaction) bool {
+	_, hashOK := validLeiosTransactionHash(tx.Hash)
+	return hashOK && len(tx.Cbor) > 0 && len(tx.Cbor) <= math.MaxUint16
 }
 
 // modeString returns a string representation of the forging mode.

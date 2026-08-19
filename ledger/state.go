@@ -5037,12 +5037,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 					pp,
 				)
 				// When a TX has isValid=true, the block producer's
-				// Plutus evaluator verified the script passed. If our
-				// evaluator disagrees, the fault is in our VM (known
-				// gouroboros CEK machine limitations), not in the block.
-				// Log the disagreement but trust the block producer.
+				// Plutus evaluator verified the script passed. For
+				// pre-Dijkstra eras, log a local evaluator disagreement
+				// and trust the block producer. Standard Dijkstra keeps
+				// the validation error so invalid Leios blocks are rejected;
+				// the Musashi prototype retains its explicit trust bypass.
 				var plutusErr conway.PlutusScriptFailedError
-				if err != nil && errors.As(err, &plutusErr) {
+				if err != nil && errors.As(err, &plutusErr) &&
+					(validationEra.Id != dijkstra.EraIdDijkstra ||
+						ls.trustDijkstraTxValidationError(validationEra.Id)) {
 					ls.config.Logger.Warn(
 						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
 						"component",

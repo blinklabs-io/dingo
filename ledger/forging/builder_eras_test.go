@@ -348,9 +348,8 @@ func TestBuildBlockDijkstraDoesNotMixAnnouncedEndorserTransactions(t *testing.T)
 
 	block, _, err := builder.BuildBlockWithLeios(1001, 0, LeiosBlockData{
 		Announcement: &LeiosEndorserBlockAnnouncement{
-			Hash:              lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
-			Size:              1234,
-			TransactionHashes: []string{"eb-tx"},
+			Hash: lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
+			Size: 1234,
 		},
 	})
 	require.NoError(t, err)

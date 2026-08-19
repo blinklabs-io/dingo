@@ -38,13 +38,12 @@ func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 		{Hash: strings.Repeat("33", 32), Cbor: []byte{0x03, 0x04}},
 	}
 
-	ebCbor, ebHash, bodies, hashes, err := buildLeiosEB(txs)
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
 	require.NoError(t, err)
 	require.NotEmpty(t, ebHash)
 
 	// Only the two valid transactions survive, in input order.
 	require.Len(t, bodies, 2)
-	require.Equal(t, []string{txs[0].Hash, txs[3].Hash}, hashes)
 	require.Equal(t, []byte{0x01}, bodies[0])
 	require.Equal(t, []byte{0x03, 0x04}, bodies[1])
 
@@ -66,12 +65,11 @@ func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 // TestBuildLeiosEBNoValidRefs verifies buildLeiosEB returns errNoValidTxRefs
 // when no transaction yields a valid reference.
 func TestBuildLeiosEBNoValidRefs(t *testing.T) {
-	_, _, bodies, hashes, err := buildLeiosEB([]MempoolTransaction{
+	_, _, bodies, err := buildLeiosEB([]MempoolTransaction{
 		{Hash: "not-hex", Cbor: []byte{0x01}},
 	})
 	require.ErrorIs(t, err, errNoValidTxRefs)
 	require.Nil(t, bodies)
-	require.Nil(t, hashes)
 }
 
 type leiosOverlayValidator struct {
@@ -150,4 +148,25 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Empty(t, selected, "a rejected parent must not expose its output")
+}
+
+func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(t *testing.T) {
+	parentCbor := makeMinimalTxCbor(t, 0x43, 29)
+	parent, err := conway.NewConwayTransactionFromCbor(parentCbor)
+	require.NoError(t, err)
+	childCbor := makeMinimalTxCborWithInput(t, parent.Hash().Bytes(), 0)
+	child, err := conway.NewConwayTransactionFromCbor(childCbor)
+	require.NoError(t, err)
+	baseInput := parent.Inputs()[0]
+	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
+
+	selected, err := selectValidLeiosTransactions(
+		[]MempoolTransaction{
+			{Hash: "not-hex", Cbor: parentCbor, Type: conway.TxTypeConway},
+			{Hash: child.Hash().String(), Cbor: childCbor, Type: conway.TxTypeConway},
+		},
+		&leiosOverlayValidator{base: map[string]struct{}{baseKey: {}}},
+	)
+	require.NoError(t, err)
+	require.Empty(t, selected)
 }
