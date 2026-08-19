@@ -375,6 +375,61 @@ func TestStopWaitsForAnInFlightBind(t *testing.T) {
 	require.NoError(t, srv.Stop(t.Context()))
 }
 
+// TestStopTearsDownEvenWhenTheBindWaitTimesOut asserts a Stop whose context
+// expires mid-wait still releases the socket it detached. The detach is what
+// makes Stop the only remaining reference to that listener, so returning the
+// wait error without tearing down would leave the port bound with nothing left
+// able to close it.
+func TestStopTearsDownEvenWhenTheBindWaitTimesOut(t *testing.T) {
+	srv := newTestServer(t, newTestDeps())
+	addr := testutil.FreePort(t)
+	ln, err := net.Listen("tcp", addr)
+	require.NoError(t, err)
+
+	// A published listener plus a bind that never settles.
+	srv.mu.Lock()
+	srv.httpServer = &http.Server{Addr: addr}
+	srv.listener = ln
+	srv.bindDone = make(chan struct{})
+	srv.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, srv.Stop(ctx), context.DeadlineExceeded)
+
+	require.False(
+		t, portAccepts(addr),
+		"Stop must release the socket it detached even when the bind "+
+			"wait times out",
+	)
+}
+
+// TestStopWaitsForATeardownItLost asserts the loser of the takeServer race
+// does not report the server down early. Stop and the context monitor both
+// detach; only one wins, and a Stop that returned nil while the winner was
+// still releasing the port would let an immediate restart fail to bind.
+func TestStopWaitsForATeardownItLost(t *testing.T) {
+	srv := newTestServer(t, newTestDeps())
+
+	// Stands in for another caller having already detached the server and
+	// still being mid-teardown.
+	teardown := make(chan struct{})
+	srv.mu.Lock()
+	srv.httpServer = nil
+	srv.teardown = teardown
+	srv.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(
+		t, srv.Stop(ctx), context.DeadlineExceeded,
+		"Stop must wait for the teardown it lost rather than returning nil",
+	)
+
+	close(teardown)
+	require.NoError(t, srv.Stop(t.Context()))
+}
+
 // TestServerShutdownOnContextCancel asserts cancelling the context
 // passed to Start shuts the listener down, which is how the node stops
 // the API during its own shutdown.
