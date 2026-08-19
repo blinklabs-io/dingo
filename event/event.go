@@ -15,6 +15,7 @@
 package event
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -321,6 +322,22 @@ func (c *channelSubscriber) waitDone() {
 	<-c.done
 }
 
+// waitDoneContext is waitDone bounded by ctx, returning ctx.Err() if the
+// dispatch goroutine is still running when ctx is done. A subscriber with no
+// dispatch goroutine has nothing to wait for and reports success even for an
+// already-canceled ctx.
+func (c *channelSubscriber) waitDoneContext(ctx context.Context) error {
+	if c.done == nil {
+		return nil
+	}
+	select {
+	case <-c.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // deliverWait hands evt to the subscriber channel, waiting for buffer capacity
 // instead of dropping the event. It returns errChannelSubscriberClosed when
 // the subscriber is closed or the bus stops before the event can be handed
@@ -609,7 +626,7 @@ func (e *EventBus) safeHandlerCall(
 
 // Unsubscribe stops delivery of events for a particular type for an existing subscriber
 func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
-	e.unsubscribe(eventType, subId, false)
+	e.unsubscribe(eventType, subId)
 }
 
 // UnsubscribeAndWait is like Unsubscribe, but for SubscribeFunc/
@@ -637,14 +654,43 @@ func (e *EventBus) UnsubscribeAndWait(
 	eventType EventType,
 	subId EventSubscriberId,
 ) {
-	e.unsubscribe(eventType, subId, true)
+	if chSub := e.unsubscribe(eventType, subId); chSub != nil {
+		chSub.waitDone()
+	}
 }
 
+// UnsubscribeAndWaitContext is UnsubscribeAndWait with the wait for an
+// in-flight handler bounded by ctx, returning ctx.Err() if the handler is
+// still running when ctx is done.
+//
+// The unsubscribe itself is never skipped or bounded: it is synchronous and
+// runs even for an already-canceled ctx, so future deliveries stop either
+// way and only the wait can be cut short. A caller that gets a non-nil error
+// therefore knows the handler may still be executing concurrently with
+// whatever it does next, which is the whole reason to wait -- prefer
+// UnsubscribeAndWait wherever there is no deadline to honor.
+//
+// Use this from a shutdown path that must respect a deadline: plain
+// UnsubscribeAndWait blocks for as long as the handler runs, which lets a
+// single stuck handler overrun a bounded shutdown.
+func (e *EventBus) UnsubscribeAndWaitContext(
+	ctx context.Context,
+	eventType EventType,
+	subId EventSubscriberId,
+) error {
+	if chSub := e.unsubscribe(eventType, subId); chSub != nil {
+		return chSub.waitDoneContext(ctx)
+	}
+	return nil
+}
+
+// unsubscribe removes the subscriber and, when it is a channelSubscriber,
+// closes it and returns it so a caller that needs to can wait for its
+// dispatch goroutine to exit. Returns nil when there is nothing to wait for.
 func (e *EventBus) unsubscribe(
 	eventType EventType,
 	subId EventSubscriberId,
-	wait bool,
-) {
+) *channelSubscriber {
 	e.mu.Lock()
 	var subToClose Subscriber
 	if evtTypeSubs, ok := e.subscribers[eventType]; ok {
@@ -702,10 +748,8 @@ func (e *EventBus) unsubscribe(
 		// Close is idempotent, so this is safe even if a concurrent
 		// caller already closed the same subscriber via subToClose above.
 		chSub.close(false)
-		if wait {
-			chSub.waitDone()
-		}
 	}
+	return chSub
 }
 
 // deliverWithTimeout calls sub.Deliver with a timeout for non-channel

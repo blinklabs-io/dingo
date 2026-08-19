@@ -288,10 +288,22 @@ func TestPeerGovernorStopHonorsContextDeadline(t *testing.T) {
 		t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
 	}
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	stopCtx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
 	defer cancel()
 	err := pg.Stop(stopCtx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	// Every caller wraps this with its own "peer governor shutdown: %w",
+	// matching how the other components' Stop errors are reported, so
+	// self-prefixing here doubles the prefix in the joined shutdown error.
+	require.NotContains(
+		t,
+		err.Error(),
+		"peer governor shutdown",
+		"Stop must not repeat the prefix its callers add",
+	)
 
 	close(blocking.release)
 	require.NoError(t, pg.Stop(context.Background()))

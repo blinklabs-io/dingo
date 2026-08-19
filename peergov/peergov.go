@@ -16,6 +16,7 @@ package peergov
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -598,17 +599,31 @@ func (p *PeerGovernor) Stop(ctx context.Context) error {
 	// old instance's handlers before its replacement starts so a delayed
 	// connection event cannot mutate stale peer state and publish a
 	// conflicting chain-selection update after reconnection.
+	//
+	// Bounded by ctx: the unsubscribe itself always happens, but a handler
+	// already in flight is waited for only until ctx is done, so one stuck
+	// connection-event handler cannot overrun the shutdown deadline here
+	// before the worker wait below even starts.
+	var unsubErr error
 	if p.config.EventBus != nil {
 		if inboundConnSubId != 0 {
-			p.config.EventBus.UnsubscribeAndWait(
-				connmanager.InboundConnectionEventType,
-				inboundConnSubId,
+			unsubErr = errors.Join(
+				unsubErr,
+				p.config.EventBus.UnsubscribeAndWaitContext(
+					ctx,
+					connmanager.InboundConnectionEventType,
+					inboundConnSubId,
+				),
 			)
 		}
 		if connClosedSubId != 0 {
-			p.config.EventBus.UnsubscribeAndWait(
-				connmanager.ConnectionClosedEventType,
-				connClosedSubId,
+			unsubErr = errors.Join(
+				unsubErr,
+				p.config.EventBus.UnsubscribeAndWaitContext(
+					ctx,
+					connmanager.ConnectionClosedEventType,
+					connClosedSubId,
+				),
 			)
 		}
 	}
@@ -624,8 +639,14 @@ func (p *PeerGovernor) Stop(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
-		return nil
+		return unsubErr
 	case <-ctx.Done():
-		return fmt.Errorf("peer governor shutdown: %w", ctx.Err())
+		// Unprefixed: every caller already wraps this with its own
+		// "peer governor shutdown: %w", matching how the other
+		// components' Stop errors are reported.
+		return errors.Join(
+			unsubErr,
+			fmt.Errorf("waiting for background workers: %w", ctx.Err()),
+		)
 	}
 }

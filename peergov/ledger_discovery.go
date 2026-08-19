@@ -248,6 +248,13 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// whatever ends up here unchanged for the peer's whole lifetime, so this
 	// (unlike resolveAddress) filters to a locally-dialable address family.
 	normalized := p.resolveLedgerDiscoveryAddress(ctx, address)
+	// Rechecked after resolution, not just before it: a canceled DNS lookup
+	// falls back to the bare hostname, which isRoutableAddr accepts, so
+	// without this a shutdown that lands during resolution would still add
+	// the peer and let the reconnect path start dialing it.
+	if err := ctx.Err(); err != nil {
+		return false
+	}
 
 	// Reject non-routable IPs (private, loopback, link-local, etc.)
 	if !isRoutableAddr(normalized) {

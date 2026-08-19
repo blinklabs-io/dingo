@@ -475,6 +475,61 @@ func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
 	assert.Equal(t, "198.51.100.9:3001", got)
 }
 
+// TestAddLedgerPeerContextRejectsCancellationDuringResolution covers the
+// window after resolution: a canceled DNS lookup falls back to the bare
+// hostname, which isRoutableAddr accepts, so checking ctx only before the
+// lookup let a peer be added -- and its reconnect path started -- by a
+// governor that was already shutting down.
+func TestAddLedgerPeerContextRejectsCancellationDuringResolution(t *testing.T) {
+	oldLookupIPAddr := lookupIPAddr
+	started := make(chan struct{})
+	lookupIPAddr = func(ctx context.Context, _ string) ([]net.IP, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DisableOutbound: true,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	added := make(chan bool, 1)
+	go func() {
+		added <- pg.addLedgerPeerContext(ctx, "relay.example.com:3001")
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ledger DNS lookup did not start")
+	}
+	cancel()
+
+	select {
+	case got := <-added:
+		require.False(
+			t,
+			got,
+			"a peer resolved after cancellation must not be added",
+		)
+	case <-time.After(5 * time.Second):
+		t.Fatal("addLedgerPeerContext did not return after cancellation")
+	}
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	require.Empty(t, pg.peers, "no peer may be recorded after cancellation")
+	require.Empty(
+		t,
+		pg.ledgerKnownAddrs,
+		"no ledger address may be recorded after cancellation",
+	)
+}
+
 func TestResolveLedgerDiscoveryAddressHonorsCancellation(t *testing.T) {
 	oldLookupIPAddr := lookupIPAddr
 	started := make(chan struct{})
