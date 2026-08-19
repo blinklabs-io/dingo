@@ -521,6 +521,7 @@ sequenceDiagram
     participant MP as Mempool
     participant LS as LedgerState
     participant ChM as ChainManager
+    participant PC as Chain (primary)
     participant EB as EventBus
 
     Note over SC,EB: Epoch Preparation
@@ -544,10 +545,10 @@ sequenceDiagram
         BB->>BB: assemble block body + header
         BB->>BB: sign with KES key, attach VRF proof
         BB-->>BF: block + CBOR
-        BF->>ChM: AddLocalBlock(forgedBlock)
-        BF->>MP: remove confirmed transactions
-        ChM->>EB: publish ChainUpdateEvent
+        BF->>PC: AddLocalBlock(forgedBlock) via BlockBroadcaster
+        PC->>EB: publish ChainUpdateEvent (before AddLocalBlock returns)
         BF->>EB: publish BlockForgedEvent
+        BF->>MP: remove confirmed transactions (RemoveTxsByHash)
     end
 
     Note over SC,EB: Slot Battle Detection
@@ -2969,9 +2970,13 @@ script validation and large forging snapshots. Add/remove events remain
 published outside all locks, and candidate rejection emits only the same
 removal event and gauge changes as the former in-place rebuild.
 
-After a locally forged block is accepted by the chain manager through
-`Chain.AddLocalBlock`, the production forger synchronously removes that block's
-transaction hashes through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild remains
+A locally forged block is admitted by `Chain.AddLocalBlock` on the primary
+chain, which the `BlockBroadcaster` the forger holds calls
+(`chainManager.PrimaryChain()`), not by `ChainManager` itself; the
+`ChainUpdateEvent` is published inside that call, before it returns. The forger
+then runs its `blockForged` observer, and only after that — and only if
+admission succeeded — synchronously removes the block's transaction hashes
+through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild remains
 responsible for transactions confirmed by peer blocks. This local fast path
 prevents confirmed transactions from accumulating when sustained admissions
 make a long rebuild repeatedly lose its pinned ledger generation.
