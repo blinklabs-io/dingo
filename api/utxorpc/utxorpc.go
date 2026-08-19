@@ -25,7 +25,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -33,8 +32,8 @@ import (
 	"connectrpc.com/grpcreflect"
 	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
-	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -66,10 +65,12 @@ const (
 )
 
 type Utxorpc struct {
-	server   *http.Server
+	// listener owns the start/stop protocol, including releasing the
+	// listening socket as part of what Stop waits for -- see
+	// internal/apilistener.
+	listener *apilistener.Listener
 	config   UtxorpcConfig
 	verifier *apiauth.Verifier
-	mu       sync.Mutex
 }
 
 type UtxorpcConfig struct {
@@ -142,6 +143,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	return &Utxorpc{
 		config: cfg,
+		listener: apilistener.New(
+			"utxorpc gRPC", cfg.Logger,
+		),
 	}
 }
 
@@ -182,12 +186,65 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("utxorpc: %w", err)
 	}
-	u.mu.Lock()
-	if u.server != nil {
-		u.mu.Unlock()
-		return errors.New("server already started")
+	// The verifier is installed inside the build callback so it is published
+	// with the server it belongs to: a second Start is rejected before the
+	// callback runs, and so cannot replace a running server's verifier.
+	server, bindDone, err := u.listener.Publish(func() *http.Server {
+		u.verifier = verifier
+		return u.buildServer()
+	})
+	if err != nil {
+		return err
 	}
-	u.verifier = verifier
+
+	// Launched before the bind so a context cancelled mid-bind still tears the
+	// server down: Take is what makes an in-flight bind close its own socket.
+	//
+	// The detach also means this no longer holds a lock across the shutdown it
+	// runs, so a concurrent Stop is answered by the teardown wait rather than
+	// blocking on the mutex for as long as a stuck stream keeps Shutdown busy.
+	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
+		<-ctx.Done()
+		job, _ := u.listener.Take()
+		// A concurrent Stop may have won the detach. It owns the teardown and
+		// its caller is already waiting on it, so there is nothing to do and
+		// nothing to wait for here.
+		if job != nil {
+			u.config.Logger.Debug(
+				"context cancelled, shutting down utxorpc gRPC server",
+			)
+			//nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
+			shutdownCtx, cancel := context.WithTimeout(
+				context.Background(),
+				30*time.Second,
+			)
+			defer cancel()
+			//nolint:contextcheck // see above
+			if err := u.listener.Shutdown(
+				shutdownCtx, job, u.gracefulShutdown,
+			); err != nil {
+				u.config.Logger.Error(
+					"failed to shutdown utxorpc gRPC server on context cancellation",
+					"error",
+					err,
+				)
+			}
+		}
+	}()
+
+	if err := u.listener.Bind(server, bindDone, u.config.TLS); err != nil {
+		u.listener.Unpublish(server)
+		return err
+	}
+
+	return nil
+}
+
+// buildServer assembles the listener's http.Server. The two shapes differ only
+// in how HTTP/2 is reached: over TLS the standard negotiation applies, while
+// the plaintext listener has to opt into unencrypted HTTP/2 explicitly, which
+// gRPC clients require.
+func (u *Utxorpc) buildServer() *http.Server {
 	// CORS must wrap authentication, not the reverse: httpcors.Handler
 	// fully answers an OPTIONS preflight itself and never calls the
 	// handler it wraps for one, so browsers -- which never attach
@@ -246,44 +303,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			// endpoints (FollowTip, WatchTx, WaitForTx).
 		}
 	}
-	u.server = server
-	u.mu.Unlock()
-
-	// Start the server
-	if err := u.startServer(server); err != nil {
-		u.mu.Lock()
-		u.server = nil
-		u.mu.Unlock()
-		return err
-	}
-
-	// Monitor context for cancellation and shutdown server
-	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
-		<-ctx.Done()
-		u.mu.Lock()
-		if u.server != nil {
-			u.config.Logger.Debug(
-				"context cancelled, shutting down utxorpc gRPC server",
-			)
-			//nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				30*time.Second,
-			)
-			defer cancel()
-			if err := u.server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
-				u.config.Logger.Error(
-					"failed to shutdown utxorpc gRPC server on context cancellation",
-					"error",
-					err,
-				)
-			}
-			u.server = nil
-		}
-		u.mu.Unlock()
-	}()
-
-	return nil
+	return server
 }
 
 // newServeMux builds the complete routing table this listener serves: both API
@@ -467,25 +487,36 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 	return protocols
 }
 
-// Stop shuts down the server, escalating to a hard Close if it does not
-// complete within u.config.ShutdownTimeout (or the caller ctx's own
-// deadline, if sooner), and also escalates immediately if ctx is cancelled
-// (even when ctx carries no deadline at all), so a caller that wants to
-// give up early is never stuck waiting out the full ShutdownTimeout.
-// WatchTx/WatchMempool are unbounded streaming RPCs, so a connected client
-// can otherwise keep http.Server.Shutdown blocked indefinitely, hanging any
-// live database restore/truncate quiesce that waits on Stop -- matching
-// midnight/server's identical Stop/gracefulStop pattern for a grpc.Server.
+// Stop shuts down the server and does not return until the listening socket
+// has been released, so a capability restart on the same port can rebind --
+// see internal/apilistener.
 func (u *Utxorpc) Stop(ctx context.Context) error {
-	u.mu.Lock()
-	server := u.server
-	u.server = nil
-	u.mu.Unlock()
-
-	if server == nil {
-		return nil
+	job, inFlight := u.listener.Take()
+	if job == nil {
+		return u.listener.AwaitTeardown(ctx, inFlight)
 	}
+	u.config.Logger.Debug("shutting down utxorpc gRPC server")
+	return u.listener.Shutdown(ctx, job, u.gracefulShutdown)
+}
 
+// gracefulShutdown drains server, escalating to a hard Close if it does not
+// complete within u.config.ShutdownTimeout (or the caller ctx's own deadline,
+// if sooner), and also escalates immediately if ctx is cancelled (even when ctx
+// carries no deadline at all), so a caller that wants to give up early is never
+// stuck waiting out the full ShutdownTimeout. WatchTx/WatchMempool are
+// unbounded streaming RPCs, so a connected client can otherwise keep
+// http.Server.Shutdown blocked indefinitely, hanging any live database
+// restore/truncate quiesce that waits on Stop -- matching midnight/server's
+// identical Stop/gracefulStop pattern for a grpc.Server.
+//
+// It is the ShutdownFunc apilistener runs before closing the socket, so every
+// exit path here -- graceful, timed out, or cancelled -- is still followed by
+// that close. server.Close() on the escalation paths only reaches the listeners
+// Serve registered, which is exactly the set that may be missing ours.
+func (u *Utxorpc) gracefulShutdown(
+	ctx context.Context,
+	server *http.Server,
+) error {
 	timeout := u.config.ShutdownTimeout
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining > 0 {
@@ -495,14 +526,13 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 		}
 	}
 
-	u.config.Logger.Debug("shutting down utxorpc gRPC server")
-	// Shutdown itself is given a ctx that never expires (not shutdownCtx
-	// below): it races that ctx internally, and racing it a second time
-	// here too would be nondeterministic about which timeout error wins --
-	// sometimes returning Shutdown's own ctx-expired error instead of
-	// actually escalating to the hard Close this exists for. A plain timer
-	// avoids that, matching midnight/server's gracefulStop, which for the
-	// same reason never passes a ctx into grpc.Server.GracefulStop either.
+	// Shutdown itself is given a ctx that never expires (not the timer below):
+	// it races that ctx internally, and racing it a second time here too would
+	// be nondeterministic about which timeout error wins -- sometimes returning
+	// Shutdown's own ctx-expired error instead of actually escalating to the
+	// hard Close this exists for. A plain timer avoids that, matching
+	// midnight/server's gracefulStop, which for the same reason never passes a
+	// ctx into grpc.Server.GracefulStop either.
 	shutdownErr := make(chan error, 1)
 	//nolint:gosec,contextcheck // G118: intentionally outlives ctx, see comment above
 	go func() {
@@ -511,10 +541,7 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 
 	select {
 	case err := <-shutdownErr:
-		if err != nil {
-			return fmt.Errorf("failed to shutdown utxorpc gRPC server: %w", err)
-		}
-		return nil
+		return err
 	case <-time.After(timeout):
 		u.config.Logger.Warn(
 			"utxorpc gRPC graceful shutdown timed out; forcing close",
@@ -538,57 +565,13 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 // forceCloseUtxorpc hard-closes server after a graceful Shutdown failed to
 // finish in time -- whether because ShutdownTimeout (or the caller's own
 // deadline) elapsed or because the caller's ctx was cancelled early -- then
-// drains shutdownErr so the Shutdown goroutine started in Stop never leaks.
+// drains shutdownErr so the Shutdown goroutine started above never leaks.
 func forceCloseUtxorpc(server *http.Server, shutdownErr <-chan error) error {
 	if err := server.Close(); err != nil {
-		return fmt.Errorf("failed to force-close utxorpc gRPC server: %w", err)
+		return fmt.Errorf(
+			"force-close after graceful shutdown failed: %w", err,
+		)
 	}
 	<-shutdownErr
-	return nil
-}
-
-// startServer starts the HTTP server with deterministic error
-// detection. It binds the listening socket and pre-loads any TLS
-// keypair synchronously so port and certificate errors surface before
-// returning, then serves in a background goroutine.
-func (u *Utxorpc) startServer(server *http.Server) error {
-	useTLS := u.config.TLS.Enabled
-	serverType := "non-TLS"
-	if useTLS {
-		serverType = "TLS"
-		if err := tlsutil.ConfigureServerTLS(
-			server,
-			u.config.TLS.CertFilePath,
-			u.config.TLS.KeyFilePath,
-		); err != nil {
-			return fmt.Errorf(
-				"failed to load TLS keypair for utxorpc gRPC %s server: %w",
-				serverType, err,
-			)
-		}
-	}
-	ln, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		return fmt.Errorf("failed to start utxorpc gRPC %s server: %w",
-			serverType, err)
-	}
-	go func() {
-		var serveErr error
-		if useTLS {
-			serveErr = server.ServeTLS(
-				ln,
-				"",
-				"",
-			)
-		} else {
-			serveErr = server.Serve(ln)
-		}
-		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			u.config.Logger.Error(
-				"utxorpc gRPC server error",
-				"error", serveErr,
-			)
-		}
-	}()
 	return nil
 }

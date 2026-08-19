@@ -236,8 +236,13 @@ func TestServerBindFailure(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to listen")
-	// A failed start must leave the server restartable.
-	require.Nil(t, srv.httpServer)
+
+	// A failed start must leave the server restartable rather than holding a
+	// server it never brought up, so a retry once the address frees up is not
+	// refused as "already started".
+	require.NoError(t, occupied.Close())
+	require.NoError(t, srv.Start(t.Context()))
+	require.NoError(t, srv.Stop(t.Context()))
 }
 
 // TestServerDoubleStart asserts a second Start is refused rather than
@@ -302,192 +307,6 @@ func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
 	}
 }
 
-// TestStartServerReleasesListenerWhenServerAlreadyDetached covers the
-// window between Start publishing s.httpServer and startServer recording
-// the listener. A Stop landing inside it detaches the server, so takeServer
-// later hands back a nil server and shutdownServer never runs -- meaning
-// startServer must not leave its own socket bound, and must not overwrite
-// the listener of whichever server is current now.
-func TestStartServerReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
-	srv := newTestServer(t, newTestDeps())
-	addr := testutil.FreePort(t)
-
-	// Stands in for the server a concurrent restart already published;
-	// it must survive this call untouched.
-	currentListener, err := net.Listen("tcp", testutil.FreePort(t))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = currentListener.Close() })
-	current := &http.Server{Addr: currentListener.Addr().String()}
-	srv.mu.Lock()
-	srv.httpServer = current
-	srv.listener = currentListener
-	srv.mu.Unlock()
-
-	// The detached server this startServer call is bringing up.
-	detached := &http.Server{Addr: addr}
-	bindDone := make(chan struct{})
-	require.NoError(t, srv.startServer(detached, bindDone))
-	testutil.RequireReceive(
-		t, bindDone, time.Second,
-		"startServer must signal that the bind settled",
-	)
-
-	require.False(
-		t, portAccepts(addr),
-		"startServer must not leave a stopped server's port bound",
-	)
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	require.Same(
-		t, current, srv.httpServer,
-		"startServer must not disturb the current server",
-	)
-	require.Same(
-		t, currentListener, srv.listener,
-		"startServer must not overwrite the current server's listener",
-	)
-}
-
-// TestStopWaitsForAnInFlightBind asserts Stop does not report the server
-// down while a startServer call is still between net.Listen and releasing
-// its socket. Detaching the server is what makes that bind close its own
-// listener, so without waiting here Stop could return -- and a caller could
-// rebind the same port -- while the old socket was still open.
-func TestStopWaitsForAnInFlightBind(t *testing.T) {
-	srv := newTestServer(t, newTestDeps())
-
-	// Stands in for Start having published a server and a bind that has
-	// not finished yet.
-	bindDone := make(chan struct{})
-	srv.mu.Lock()
-	srv.httpServer = &http.Server{Addr: testutil.FreePort(t)}
-	srv.bindDone = bindDone
-	srv.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	err := srv.Stop(ctx)
-	require.ErrorIs(
-		t, err, context.DeadlineExceeded,
-		"Stop must wait for the in-flight bind rather than returning",
-	)
-
-	// Once the bind settles, Stop completes.
-	close(bindDone)
-	require.NoError(t, srv.Stop(t.Context()))
-}
-
-// TestStopTearsDownEvenWhenTheBindWaitTimesOut asserts a Stop whose context
-// expires mid-wait still releases the socket it detached. The detach is what
-// makes Stop the only remaining reference to that listener, so returning the
-// wait error without tearing down would leave the port bound with nothing left
-// able to close it.
-func TestStopTearsDownEvenWhenTheBindWaitTimesOut(t *testing.T) {
-	srv := newTestServer(t, newTestDeps())
-	addr := testutil.FreePort(t)
-	ln, err := net.Listen("tcp", addr)
-	require.NoError(t, err)
-
-	// A published listener plus a bind that never settles.
-	srv.mu.Lock()
-	srv.httpServer = &http.Server{Addr: addr}
-	srv.listener = ln
-	srv.bindDone = make(chan struct{})
-	srv.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	require.ErrorIs(t, srv.Stop(ctx), context.DeadlineExceeded)
-
-	require.False(
-		t, portAccepts(addr),
-		"Stop must release the socket it detached even when the bind "+
-			"wait times out",
-	)
-}
-
-// TestStopWaitsForATeardownItLost asserts the loser of the takeServer race
-// does not report the server down early. Stop and the context monitor both
-// detach; only one wins, and a Stop that returned nil while the winner was
-// still releasing the port would let an immediate restart fail to bind.
-func TestStopWaitsForATeardownItLost(t *testing.T) {
-	srv := newTestServer(t, newTestDeps())
-
-	// Stands in for another caller having already detached the server and
-	// still being mid-teardown.
-	teardown := make(chan struct{})
-	srv.mu.Lock()
-	srv.httpServer = nil
-	srv.teardown = teardown
-	srv.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	require.ErrorIs(
-		t, srv.Stop(ctx), context.DeadlineExceeded,
-		"Stop must wait for the teardown it lost rather than returning nil",
-	)
-
-	close(teardown)
-	require.NoError(t, srv.Stop(t.Context()))
-}
-
-// TestAwaitTeardownPrefersACompletedTeardown asserts a finished teardown is
-// never reported as a timeout. When the completion channel and the context are
-// both ready, select picks at random, so the loop is what makes the absence of
-// a recheck fail rather than flake.
-func TestAwaitTeardownPrefersACompletedTeardown(t *testing.T) {
-	done := make(chan struct{})
-	close(done)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	for i := range 200 {
-		require.NoError(
-			t, awaitTeardown(ctx, done),
-			"a completed teardown must not be reported as a timeout "+
-				"(iteration %d)", i,
-		)
-	}
-}
-
-// TestTimedOutTeardownDoesNotSignalCompletionEarly asserts a Stop whose bind
-// wait times out does not mark the teardown complete. startServer still owns a
-// socket that Stop cannot close, so a second caller waiting on the teardown has
-// to keep waiting rather than read it as "the port is free".
-func TestTimedOutTeardownDoesNotSignalCompletionEarly(t *testing.T) {
-	srv := newTestServer(t, newTestDeps())
-	bindDone := make(chan struct{})
-
-	srv.mu.Lock()
-	srv.httpServer = &http.Server{Addr: testutil.FreePort(t)}
-	srv.bindDone = bindDone
-	srv.mu.Unlock()
-
-	// First caller detaches and times out waiting for the bind.
-	stopCtx, cancelStop := context.WithTimeout(
-		context.Background(),
-		100*time.Millisecond,
-	)
-	defer cancelStop()
-	require.ErrorIs(t, srv.Stop(stopCtx), context.DeadlineExceeded)
-
-	// Second caller lost the detach and must not be told the teardown is done.
-	loserCtx, cancelLoser := context.WithTimeout(
-		context.Background(),
-		100*time.Millisecond,
-	)
-	defer cancelLoser()
-	require.ErrorIs(
-		t, srv.Stop(loserCtx), context.DeadlineExceeded,
-		"a teardown blocked on an in-flight bind must not report completion",
-	)
-
-	// Once the bind settles the teardown is genuinely complete.
-	close(bindDone)
-	require.NoError(t, srv.Stop(t.Context()))
-}
-
 // TestConcurrentStartStopNeverLeavesThePortBound hammers the interleavings the
 // individual lifecycle tests each pin one of: Start racing Stop, Stop racing the
 // context monitor, and a restart on the same address immediately after.
@@ -498,11 +317,9 @@ func TestTimedOutTeardownDoesNotSignalCompletionEarly(t *testing.T) {
 // What this does NOT cover, verified by running it against the earlier buggy
 // revisions, where it passed: the paths that need a bind still in flight when a
 // wait expires. A real bind settles far too quickly for that, so a stalled bind
-// has to be constructed. Those live in
-// TestStopTearsDownEvenWhenTheBindWaitTimesOut,
-// TestStopWaitsForATeardownItLost, and
-// TestTimedOutTeardownDoesNotSignalCompletionEarly, each checked against the
-// defect it names. Do not read a pass here as covering them.
+// has to be constructed, which needs the protocol's internals. Those tests live
+// with the protocol, in internal/apilistener. Do not read a pass here as
+// covering them.
 func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
 	addr := testutil.FreePort(t)
 
@@ -712,9 +529,7 @@ func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
 func TestServerTimeoutsAreConfigured(t *testing.T) {
 	srv, _ := startTestServer(t, newTestDeps())
 
-	srv.mu.Lock()
-	httpServer := srv.httpServer
-	srv.mu.Unlock()
+	httpServer := srv.listener.Server()
 
 	require.NotNil(t, httpServer)
 	require.Equal(

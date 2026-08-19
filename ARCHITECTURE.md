@@ -1575,7 +1575,12 @@ not to the caller actually calling `cancel()` ahead of it — so `Stop`'s
 the same hard `Close` immediately if the caller gives up before either the
 timer or a graceful `Shutdown` completes; a live database restore/truncate
 quiesce cancelling its own `ctx` to abandon a slow shutdown no longer
-stalls for the rest of `ShutdownTimeout`.
+stalls for the rest of `ShutdownTimeout`. That escalation is now supplied to
+the shared listener lifecycle as `api/utxorpc`'s own `ShutdownFunc` rather
+than being `Stop`'s whole body — the surrounding protocol, including
+releasing the listening socket before `Stop` returns so this same
+reinitialization can rebind the port, is `internal/apilistener`'s; see "API
+listener lifecycle" below.
 
 A caller-supplied `connmanager.ListenerConfig.Listener` (a test harness binding an OS-assigned port up front and handing the listener object itself to the node, rather than an address string, so a peer can be told the exact port with no discovery race — see `node_lifecycle_multinode_test.go`'s `newLoopbackListener`) needs its own handling across this quiesce/reinit cycle: `ConnectionManager.Stop`'s `stopListeners` closes every listener it is tracking unconditionally, with no way to distinguish one it created itself from one a caller handed it, and a closed `net.Listener` can never be reused. `reinitializeNetworkingCore` rebuilds `connManager` from `n.config.listeners` via `ouroboros.ConfigureListeners`, which only appends connection options and never touches `.Listener` — so without further handling, the same now-closed listener object would be fed straight back in, `connmanager.startListener` would skip rebinding (it only binds fresh when `.Listener == nil`), and the accept loop launched on it would exit immediately on `net.ErrClosed` while `connManager.Start` still returned successfully, silently leaving that listener permanently deaf to new inbound connections after the very first live Restore/Truncate. `ConnectionManager.ResolvedListeners` (called right after every successful `connManager.Start`, both at initial startup in `node.go` and after every reinit in `node_lifecycle.go`) closes this gap: for any listener config entry that came in with a caller-supplied `Listener`, it replaces that field with the concrete `ListenNetwork`/`ListenAddress` the listener actually resolved to (nil-ing `Listener` out), so the next reinit rebinds a fresh listener at that same address instead of trying to reuse the dead object — exactly the self-healing behavior an address-configured entry already had. Entries that started address-configured are left untouched entirely. A caller-supplied Windows named-pipe listener is a special case even though it does get its `Listener` field cleared here: `ListenNetwork` is deliberately *not* overwritten with the resolved listener's own `Addr().Network()` when it is already `"unix"`, because on Windows that value is a cross-platform sentinel meaning "reconstruct via `createPipeListener`" (checked by `startListener`'s pipe-creation branch), while the real `go-winio` pipe listener's `Addr().Network()` reports `"pipe"` — copying that raw value in would silently break the sentinel and make the next reinit's rebind fail.
 
@@ -4075,6 +4080,70 @@ without one.
   Authentication has no legacy root field at all — its default is simply
   `"disabled"` everywhere, so existing reverse-proxy/no-auth deployments
   are unaffected regardless.
+
+### API listener lifecycle (`internal/apilistener`)
+
+All three API servers (`api/blockfrost`, `api/mesh`, `api/utxorpc`) share one
+start/stop protocol rather than each implementing its own, because the way they
+bind makes a correct `Stop` genuinely subtle and the subtlety is identical in
+all three.
+
+The problem is that `http.Server.Shutdown` closes only the listeners `Serve`
+has already registered, and each server opens its socket synchronously — so a
+port conflict surfaces as an error from `Start` rather than a log line from a
+goroutine nobody is watching — then hands it to `Serve` in a goroutine it does
+not wait for. A `Stop` landing inside that window finds a server with nothing
+registered and returns with the port still bound. This is not a test-only
+concern: `quiesceForLiveLifecycleOp` stops these capabilities and
+`reinitializeAPIServers` re-resolves them on the same configured port
+(`node_lifecycle.go`), so any live Restore or Truncate could fail to rebind
+with `EADDRINUSE`. An instrumented 500-iteration probe left the port accepting
+in roughly 9% of runs before the fix.
+
+Releasing the port is therefore something `Stop` has to do itself, and doing
+that safely needs three pieces that only make sense together:
+
+- **`Take` — exactly one caller tears a server down.** A server's `Stop` and
+  the context monitor its `Start` launched both race to detach the running
+  server and its listener. The winner gets a `Job` and owns completing it; the
+  loser gets the winner's completion channel and waits on it (`AwaitTeardown`)
+  rather than reporting the server down while the port is still bound.
+- **`bindDone` — `Stop` cannot outrun a bind still in flight.** `Bind` closes
+  this channel on every exit path, including the one where it finds its server
+  already detached and closes its own socket instead of serving it. `Shutdown`
+  waits on it, which is what lets `Stop` promise the port is free when it
+  returns rather than merely that closing has started. A bind wait that times
+  out still tears down what it detached — the detach made this caller the only
+  remaining reference to that socket — but deliberately does *not* signal
+  completion to a waiting second caller, because `Bind` still owns a socket it
+  could not close.
+- **`teardown` — the loser's wait is honest.** Only a genuinely finished
+  teardown closes it, so a caller that reads it as "the port is free" is right.
+
+`ShutdownFunc` is the one axis the three servers differ on. `apilistener.Graceful`
+(plain `http.Server.Shutdown`) covers Blockfrost and Mesh. `api/utxorpc` supplies
+its own, keeping the escalation described under "Live database lifecycle
+operations" above: `WatchTx`/`WatchMempool` are unbounded streaming RPCs, so a
+connected client can keep `Shutdown` blocked indefinitely, and a `ShutdownTimeout`
+timer (or the caller `ctx`'s own deadline, or its cancellation) escalates to a
+hard `Close`. The socket close runs after whichever path that function takes, so
+the escalation paths release the port too — `server.Close()` reaches only the
+listeners `Serve` registered, which is exactly the set that may be missing ours.
+
+Two consequences worth noting. `Publish` takes a build callback that runs under
+the listener's lock once the already-started check has passed, so each server
+installs its credential verifier atomically with the server it belongs to and a
+rejected second `Start` cannot replace a running server's. And because
+`api/utxorpc`'s context monitor now detaches rather than holding its mutex
+across the shutdown it runs, a concurrent `Stop` is answered by the teardown
+wait instead of blocking on that mutex for as long as a stuck stream keeps
+`Shutdown` busy.
+
+The protocol's own tests live with it in `internal/apilistener`, including the
+paths that need a bind still in flight when a wait expires — a real bind settles
+far too quickly to race, so those windows are constructed. Each API package
+keeps the black-box checks that it is wired to the protocol: the port is free
+when `Stop` returns, and the address is rebindable afterwards.
 
 ### Blockfrost API (`api/blockfrost/`)
 
