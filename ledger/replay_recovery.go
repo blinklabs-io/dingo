@@ -458,6 +458,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			)
 		}
 		nextPoint := ocommon.NewPoint(nextBlock.Slot, nextBlock.Hash)
+		// Emit undo events before each window's truncation, for the
+		// ordering reason documented on emitRollbackTransactionEvents.
+		ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(nextPoint.Slot))
 		if err := ls.chain.Rollback(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
@@ -467,6 +470,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		}
 		tipIndex = nextIndex
 	}
+	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(point.Slot))
 	if err := ls.chain.Rollback(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}

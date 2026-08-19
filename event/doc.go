@@ -62,6 +62,17 @@
 // detached goroutine, a subscriber could apply an undo after the redo
 // that followed it and stay wrong indefinitely.
 //
+// A lane orders what reaches it; it cannot order two publishers racing
+// to reach it. Where events for one stream come from more than one
+// goroutine, as ledger.tx does, the publishers need their own
+// happens-before -- see the ledger.tx section of ARCHITECTURE.md for how
+// the rollback and block-apply paths establish theirs.
+//
+// Only shutdown releases a publisher waiting on a full lane. A caller on
+// a goroutine something else waits for before the bus stops must use
+// PublishOrderedContext and cancel that context, or the wait is
+// unbounded.
+//
 // # Delivery guarantees
 //
 // The bus does not drop events. When a subscriber's channel buffer or

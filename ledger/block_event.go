@@ -15,12 +15,14 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -34,38 +36,44 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 		for _, blk := range data.RolledBackBlocks {
 			ls.publishBlockEvent(BlockActionUndo, blk)
 		}
-		if ls.closed.Load() {
-			return
-		}
-		// Emit per-transaction rollback events on this goroutine, not a
-		// detached one. handleEventChainUpdate is a SubscribeFunc
-		// dispatch, so its invocations are already serialized in
-		// chain-update order; emitting inline is what puts the undo
-		// events ahead of whatever the ledger publishes for the next
-		// chain update. See the ordering contract on
-		// emitTransactionRollbackEvents (blinklabs-io/dingo#2287).
-		ls.emitTransactionRollbackEvents(data)
+		// Per-transaction undo events are deliberately NOT emitted here.
+		// This handler is a SubscribeFunc dispatch on its own goroutine,
+		// reached only after chain.Rollback has already published and
+		// returned, so anything it emits races the block-apply goroutine
+		// that publishes forward transaction events -- and loses, since
+		// that goroutine is free to apply the post-rollback chain the
+		// moment the truncation lands. emitRollbackTransactionEvents is
+		// called from the rollback path instead, before the truncation.
+		// See blinklabs-io/dingo#2287.
 	}
 }
 
-// emitTransactionRollbackEvents emits TransactionEvent for each transaction
-// in the rolled-back blocks, allowing subscribers to undo any state changes.
+// emitRollbackTransactionEvents emits a TransactionEvent for every
+// transaction in blocks, letting subscribers undo the state those
+// transactions produced.
 //
-// Ordering contract: the events for one rollback are emitted newest block
-// first and, within a block, in reverse transaction order -- the reverse of
-// how they were applied -- and all of them are handed to the bus before this
-// returns, so every one of them precedes any transaction event the ledger
-// emits for a later chain update. publishTransactionEvent carries that order
-// through to subscribers. A subscriber maintaining derived state can therefore
-// apply the undos and the next block's redos in the order they happened.
-func (ls *LedgerState) emitTransactionRollbackEvents(
-	rollbackEvt chain.ChainRollbackEvent,
+// # Ordering contract
+//
+// Events are emitted newest block first and, within a block, in reverse
+// transaction order -- the reverse of how they were applied -- and every one
+// of them is on the ledger.tx lane before this returns.
+//
+// The caller must invoke this *before* the chain is truncated, which is what
+// orders these events against the forward transaction events published by the
+// block-apply goroutine. That goroutine can only apply a post-rollback block
+// after it observes the truncation, so an undo enqueued before the truncation
+// is necessarily already ahead of any forward event for a block applied after
+// it. Emitting after the truncation -- or from a different goroutine that
+// merely learns of it later, as the chain-update handler does -- loses that
+// race and lets a subscriber apply an undo after the redo that followed it.
+func (ls *LedgerState) emitRollbackTransactionEvents(
+	blocks []models.Block,
 ) {
 	if ls.config.EventBus == nil {
 		return
 	}
 
-	for _, block := range rollbackEvt.RolledBackBlocks {
+	for _, block := range blocks {
 		blk, err := block.Decode()
 		if err != nil {
 			blockPoint := ocommon.Point{
@@ -134,7 +142,17 @@ func (ls *LedgerState) publishTransactionEvent(evt TransactionEvent) {
 	if ls.config.EventBus == nil {
 		return
 	}
-	ls.config.EventBus.PublishOrdered(
+	// publishCtx is cancelled as Close begins. Without it a publish parked
+	// on a full lane is released only by the EventBus stopping, and a live
+	// restore/truncate closes the LedgerState while deliberately keeping
+	// the bus running -- so Close would wait unbounded on a subscriber that
+	// stopped draining.
+	ctx := ls.publishCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ls.config.EventBus.PublishOrderedContext(
+		ctx,
 		TransactionEventType,
 		event.NewEvent(TransactionEventType, evt),
 	)
@@ -183,4 +201,54 @@ func (ls *LedgerState) publishBlockEvent(
 			ls.config.FatalErrorFunc(publishErr)
 		}
 	}
+}
+
+// blocksAboveSlot returns the blocks a rollback to slot would discard,
+// newest first, or nil when they cannot be read.
+//
+// The descending order matters: it is the reverse of the order the blocks
+// were applied in, which is the order their effects have to be undone in, and
+// it matches the order chain.rollbackLocked itself reports rolled-back blocks
+// (it walks the chain down from the tip). BlocksAfterSlotTxn returns ascending
+// slot order, so the result is reversed here.
+//
+// It must be called before the chain is truncated, while those blocks still
+// exist. A read failure is logged and yields no undo events rather than
+// failing the rollback: the rollback itself is what keeps the ledger correct,
+// and refusing to roll back because a notification could not be built would
+// trade a subscriber's derived state for the node's own.
+func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
+	if ls.config.EventBus == nil || ls.db == nil {
+		return nil
+	}
+	// Skip the read entirely when nothing consumes ledger.tx, which is the
+	// default node: this runs under chainsyncMutex on every rollback, and
+	// reading plus decoding up to a security parameter's worth of blocks
+	// there to build events for no one is pure cost on the rollback path.
+	//
+	// A subscriber attaching between this check and the publish misses the
+	// events, but it would have missed them anyway -- it was not subscribed
+	// when the rollback began, and Publish to zero subscribers is already a
+	// no-op. So this weakens no guarantee that existed.
+	if !ls.config.EventBus.HasSubscribers(TransactionEventType) {
+		return nil
+	}
+	var blocks []models.Block
+	txn := ls.db.Transaction(false)
+	err := txn.Do(func(txn *database.Txn) error {
+		var err error
+		blocks, err = database.BlocksAfterSlotTxn(txn, slot)
+		return err
+	})
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read rolled-back blocks for tx undo events",
+			"component", "ledger",
+			"error", err,
+			"slot", slot,
+		)
+		return nil
+	}
+	slices.Reverse(blocks)
+	return blocks
 }

@@ -784,6 +784,16 @@ type LedgerState struct {
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
 
+	// publishCtx is cancelled at the top of Close so a ledger.tx publish
+	// parked on a full ordered lane cannot outlive shutdown. Only the
+	// EventBus stopping otherwise releases such a publisher, and a live
+	// restore/truncate closes the LedgerState while keeping the bus
+	// running, so without this the Close waits below are unbounded.
+	// Nil on a bare-struct LedgerState (tests), which reads as "no
+	// cancellation" and matches the pre-existing behaviour.
+	publishCtx    context.Context
+	publishCancel context.CancelFunc
+
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
 	// closed.Load() and Add(1) in replayBufferedHeadersAsync (#2107).
@@ -899,6 +909,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
 	ls.publishSnapshotsLocked()
 	// Cache configured chain checkpoints (keyed by block height) so the
@@ -1561,6 +1572,11 @@ var (
 )
 
 func (ls *LedgerState) Close() error {
+	// Release any ledger.tx publish parked on a full ordered lane before
+	// waiting on the goroutines that might be doing the publishing.
+	if ls.publishCancel != nil {
+		ls.publishCancel()
+	}
 	if !ls.closed.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -2587,6 +2603,13 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
+	// Emit the per-transaction undo events before the truncation, not
+	// after: the block-apply goroutine can start applying the
+	// post-rollback chain the moment chain.Rollback lands, and it
+	// publishes its forward transaction events on the same ledger.tx
+	// lane. Enqueuing the undos first is what keeps them ahead of it.
+	// See emitRollbackTransactionEvents (blinklabs-io/dingo#2287).
+	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(point.Slot))
 	if err := ls.chain.Rollback(point); err != nil {
 		return err
 	}
@@ -4263,7 +4286,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// applied after commit to avoid mutating in-memory state on txn failure)
 			var wantEnableValidation bool
 
-			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+			// The transaction events this eventually publishes are
+			// bounded by ls.publishCtx, not by this loop's ctx, on
+			// purpose: that ctx is re-derived whenever the pipeline
+			// restarts (errRestartLedgerPipeline), and abandoning a
+			// publish on a restart would drop events subscribers
+			// derive state from. Only Close cancels publishCtx.
+			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error { //nolint:contextcheck
 				deltaBatch = NewLedgerDeltaBatch()
 				for offset, next := range nextBatch[i:end] {
 					tmpPoint := ocommon.Point{
@@ -4490,7 +4519,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				return nil
 			}, true)
 			if err != nil {
-				recovered, recoverErr := ls.tryRecoverFromTxValidationError(
+				// Undo events published down this recovery path are
+				// bounded by ls.publishCtx, not this loop's ctx, for the
+				// same reason as the apply path above.
+				recovered, recoverErr := ls.tryRecoverFromTxValidationError( //nolint:contextcheck
 					err,
 				)
 				if recoverErr != nil {
@@ -4509,7 +4541,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// the same block and fails identically. Rewind past it so
 				// chain selection can offer another candidate. The block is
 				// still rejected.
-				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError(
+				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
 					err,
 				)
 				if recoverErr != nil {

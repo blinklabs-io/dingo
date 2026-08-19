@@ -14,6 +14,8 @@
 
 package event
 
+import "context"
+
 // OrderedQueueSize is the per-event-type buffer behind PublishOrdered. It is
 // larger than AsyncQueueSize because an ordered lane is drained by exactly one
 // worker rather than by the shared pool, so it has to absorb the same bursts
@@ -57,6 +59,23 @@ type orderedLane struct {
 // event type instead of holding up every async event as it would on the shared
 // pool.
 func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
+	return e.PublishOrderedContext(context.Background(), eventType, evt)
+}
+
+// PublishOrderedContext is PublishOrdered that also abandons the publish when
+// ctx is done. Only shutdown otherwise releases a publisher waiting on a full
+// lane, so a caller on a shutdown-critical goroutine -- one something else
+// waits for before the EventBus itself stops, such as a LedgerState the node
+// closes while keeping the bus running for a live restore -- must pass a
+// context it cancels, or that wait is unbounded.
+//
+// Abandoning is not a drop in the delivery-guarantee sense: the event was
+// never accepted, and the false return says so.
+func (e *EventBus) PublishOrderedContext(
+	ctx context.Context,
+	eventType EventType,
+	evt Event,
+) bool {
 	e.stopMu.RLock()
 	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
@@ -79,6 +98,8 @@ func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
 		select {
 		case lane.queue <- evt:
 		case <-stopCh:
+			return false
+		case <-ctx.Done():
 			return false
 		}
 	}

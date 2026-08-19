@@ -375,23 +375,56 @@ sequenceDiagram
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
-event the ledger emits afterwards. Both halves of that contract are required:
-`handleEventChainUpdate` (`ledger/block_event.go`) emits the per-transaction
-undo events on its own goroutine rather than a detached one — it is a
-`SubscribeFunc` dispatch, so its invocations are already serialized in
-chain-update order — and the ordered lane carries that order through to
-subscribers. Until #2287 the undo events were emitted from a `go` statement
-onto the reordering shared pool, so a subscriber could apply an undo after the
-redo that followed it and stay inconsistent with no later event to correct it.
-`LedgerState.Close` therefore no longer drains in-flight rollback goroutines;
-the `UnsubscribeAndWait` on `chain.ChainUpdateEventType` is what guarantees no
-emission is in flight.
+event the ledger emits afterwards.
 
-The forward path keeps async semantics deliberately: `LedgerDelta.apply`
-(`ledger/delta.go`) publishes from inside the block-apply database
-transaction, so a synchronous publish would hold that transaction open under
-subscriber backpressure. `ledger.block` remains `PublishBlocking` on the
-handler's own goroutine.
+Two producers feed that lane, on different goroutines: `LedgerDelta.apply`
+(`ledger/delta.go`) publishes forward events from the `ledgerProcessBlocks`
+goroutine, and the rollback path publishes undo events from whichever
+goroutine performs the rollback. Nothing serializes those two, so the ordering
+comes from a happens-before rather than from a lock:
+`rollbackChainAndState` calls `emitRollbackTransactionEvents` **before**
+`chain.Rollback` truncates. The apply goroutine can only apply a
+post-rollback block after it observes that truncation, so an undo enqueued
+ahead of the truncation is necessarily ahead of any forward event for a block
+applied after it.
+
+Getting this wrong is subtle, so the constraint is worth stating plainly:
+**the undo events must be emitted before the truncation, by the rollback
+path.** `handleEventChainUpdate` deliberately does *not* emit them, even
+though it receives `ChainRollbackEvent` with the rolled-back blocks. It is a
+`SubscribeFunc` dispatch reached only after `chain.Rollback` has published and
+returned, by which point the apply goroutine is already free to publish
+forward events — emitting there loses the race reproducibly. It still emits
+the `ledger.block` undo events, which are a different event type and so a
+different lane. Before #2287 the undo events were emitted from a `go`
+statement onto the reordering shared pool, which lost the same race twice
+over.
+
+The forward path keeps async semantics deliberately: it publishes from inside
+the block-apply database transaction, so a synchronous publish would hold that
+transaction open under subscriber backpressure. `ledger.block` remains
+`PublishBlocking` on the handler's own goroutine.
+
+Because a publisher parked on a full lane is released only by the EventBus
+stopping, and a live restore/truncate closes the `LedgerState` while keeping
+the bus running, ledger publishes go through `PublishOrderedContext` with a
+context `LedgerState.Close` cancels first thing. Without it `Close` waits
+unbounded on a `ledger.tx` subscriber that stopped draining.
+
+This is also the one deliberate exception to the publish-under-lock rule
+above. `rollbackChainAndState` runs under `chainsyncMutex` — it is reached
+through the `pendingPublishes` call chain — and emits undo events from there,
+because the ordering requires them to be enqueued before the truncation and
+the truncation happens under that same lock; deferring them to
+`pendingPublishes`' post-unlock flush would put them after it and lose the
+guarantee. What makes it safe is narrower than the general rule: the emit only
+*enqueues* onto a 10000-entry lane and never runs a subscriber callback
+inline, so it can block only if a `ledger.tx` subscriber stops draining long
+enough to fill the lane. **A `ledger.tx` subscriber must therefore not call
+back into `LedgerState` methods that take `chainsyncMutex`** (in practice
+`RecoverAfterLocalRollback` and anything reaching it). Subscribers that need
+to do real work should hand off to their own goroutine, which
+`event/doc.go` already requires of every subscriber callback.
 
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
 when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
@@ -1003,7 +1036,7 @@ All event types follow the `subsystem.snake_case_name` convention.
   on it — every parked publisher observes the same stall, so a per-delivery
   limit made the log volume scale with publisher count rather than with time
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
-  while holding a lock that a subscriber of that event acquires.** Because all three wait for
+  while holding a lock that a subscriber of that event acquires.** Because all four wait for
   capacity rather than dropping, this is a deadlock, not merely a slow path:
   once the subscriber's buffer fills, the subscriber waits for the lock the
   publisher holds while the publisher waits for the capacity the subscriber

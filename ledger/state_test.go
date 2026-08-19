@@ -4319,8 +4319,10 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 }
 
 // TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime covers Close()'s
-// database-worker-pool wait, which had the same silent-timeout gap as the
-// rollback wait above.
+// database-worker-pool wait: a timeout there used to be logged as a Warn while
+// Close() still returned nil, which let live restore/truncate's caller
+// (closeStorageForLiveLifecycleOp) treat an unconfirmed drain as a green light
+// to close and reopen the data directory.
 func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
 	origTimeout := CloseDBWorkerPoolShutdownTimeout
 	CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
