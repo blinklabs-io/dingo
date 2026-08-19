@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -430,4 +431,93 @@ func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
 	le, ok := evt.Data.(LedgerErrorEvent)
 	require.True(t, ok, "unexpected payload %T", evt.Data)
 	require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+}
+
+// TestRejectedWindowedRollbackEmitsNoUndoEvents is the
+// rollbackPrimaryChainInSecurityParamWindows counterpart to
+// TestRejectedRollbackEmitsNoUndoEvents.
+//
+// That function shipped the emit-before-truncate pattern without the
+// validate guard, so a rewind the chain rejects published undo events for
+// blocks it then left fully applied. Its own doc comment notes the chain can
+// move between reading the tip and rewinding to it, so the rejection is
+// reachable rather than theoretical.
+//
+// The chain manager's security parameter (2 here) is what ValidateRollback
+// enforces, while the function's own window comes from the ledger's genesis
+// and is much larger. A rewind past 2 blocks therefore reaches the emit and is
+// then rejected -- exactly the shape the guard exists for.
+func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	// Five blocks, so a rewind to the first exceeds the chain's k of 2.
+	const blockCount = 5
+	raw := make([]chain.RawBlock, 0, blockCount)
+	var prev []byte
+	for i := 1; i <= blockCount; i++ {
+		h := testHashBytes(fmt.Sprintf("windowed-block-%d", i))
+		raw = append(raw, chain.RawBlock{
+			Slot:        uint64(i * 10),
+			Hash:        h,
+			BlockNumber: uint64(i),
+			Type:        1,
+			PrevHash:    prev,
+			Cbor:        []byte{0x80},
+		})
+		prev = h
+	}
+	require.Len(t, raw, blockCount)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(raw))
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// The window comes from the ledger, not the chain, so no intermediate
+	// step is taken and the single rewind is rejected on fork depth.
+	require.Greater(
+		t,
+		ls.SecurityParam(),
+		2,
+		"ledger window must exceed the chain's k",
+	)
+
+	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	require.Error(t, ls.rollbackPrimaryChainInSecurityParamWindows(target))
+
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"a rejected windowed rewind must not publish undo events",
+	)
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"a rejected windowed rewind must not publish undo decode errors",
+	)
+
+	require.Equal(
+		t,
+		raw[4].Slot,
+		ls.chain.Tip().Point.Slot,
+		"chain must be untouched by a rejected rewind",
+	)
 }

@@ -203,6 +203,32 @@ func (ls *LedgerState) publishBlockEvent(
 	}
 }
 
+// validateAndEmitRollbackUndo rejects a rollback that the chain will not
+// accept, then emits the undo events for the blocks it is about to discard.
+//
+// The two steps belong together and callers must use this rather than pairing
+// them by hand. The emit has to happen before the truncation for ordering (see
+// emitRollbackTransactionEvents), which means emitting first and letting
+// chain.Rollback reject afterwards tells every ledger.tx consumer to undo
+// blocks that are still applied -- the exact corruption the ordering exists to
+// prevent. Keeping the validate inseparable from the emit is what stops a new
+// rollback path from acquiring the emit without the guard, which is how
+// rollbackPrimaryChainInSecurityParamWindows initially shipped it.
+//
+// It does not close the window completely: the chain can still grow between
+// this validation and the rollback and push the rollback past the security
+// parameter, and an I/O failure mid-truncation is not predictable at all.
+// Both leave the chain needing recovery regardless.
+func (ls *LedgerState) validateAndEmitRollbackUndo(
+	point ocommon.Point,
+) error {
+	if err := ls.chain.ValidateRollback(point); err != nil {
+		return err
+	}
+	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(point.Slot))
+	return nil
+}
+
 // blocksAboveSlot returns the blocks a rollback to slot would discard,
 // newest first, or nil when they cannot be read.
 //
