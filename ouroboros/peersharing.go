@@ -84,13 +84,13 @@ func (o *Ouroboros) peersharingShareRequest(
 	amount int,
 ) ([]opeersharing.PeerAddress, error) {
 	// If PeerGov isn't wired yet, don't share any peers rather than panic
-	if o.PeerGov == nil {
+	if o.peerGov == nil {
 		return []opeersharing.PeerAddress{}, nil
 	}
 
 	peers := []opeersharing.PeerAddress{}
 	shared := 0
-	for _, peer := range o.PeerGov.GetPeers() {
+	for _, peer := range o.peerGov.GetPeers() {
 		if !peer.Sharable {
 			continue
 		}
@@ -126,11 +126,11 @@ func (o *Ouroboros) RequestPeersFromPeer(peer *peergov.Peer) []string {
 	if peer == nil || peer.Connection == nil {
 		return nil
 	}
-	if o.ConnManager == nil {
+	if o.connManager == nil {
 		o.config.Logger.Debug("ConnManager not available")
 		return nil
 	}
-	conn := o.ConnManager.GetConnectionById(peer.Connection.Id)
+	conn := o.connManager.GetConnectionById(peer.Connection.Id)
 	if conn == nil {
 		return nil
 	}

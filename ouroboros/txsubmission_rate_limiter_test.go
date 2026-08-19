@@ -282,7 +282,7 @@ func TestTxSubmissionRateLimiter_ConcurrentAccess(t *testing.T) {
 
 func TestNewOuroboros_DefaultRateLimitDisabled(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -296,7 +296,7 @@ func TestNewOuroboros_DefaultRateLimitDisabled(t *testing.T) {
 
 func TestNewOuroboros_CustomRateLimit(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: 50,
@@ -319,7 +319,7 @@ func TestNewOuroboros_CustomRateLimit(t *testing.T) {
 
 func TestNewOuroboros_DisabledRateLimit(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: -1,
@@ -334,7 +334,7 @@ func TestNewOuroboros_DisabledRateLimit(t *testing.T) {
 
 func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: 10,
@@ -372,7 +372,7 @@ func TestTxSubmissionRateLimiter_CustomRatePlumbing(t *testing.T) {
 	// correctly plumbed through to the rate limiter with the
 	// expected rate and burst (2x rate).
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: 10,

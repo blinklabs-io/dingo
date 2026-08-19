@@ -44,7 +44,7 @@ type ListenerConfig struct {
 }
 
 func (c *ConnectionManager) startListeners(ctx context.Context) error {
-	for _, l := range c.config.Listeners {
+	for _, l := range c.listenerConfigList() {
 		if err := c.startListener(ctx, l); err != nil {
 			return err
 		}

@@ -75,7 +75,7 @@ func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
@@ -104,7 +104,7 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 11, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	first := &diffusingBlockTxsRequester{available: diffused}
@@ -153,7 +153,7 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 13, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
@@ -179,7 +179,7 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 	const txCount = 100
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 17, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	head := make([]cbor.RawMessage, txCount)
@@ -216,7 +216,7 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 // Retention is scoped to endorser blocks dingo is actually tracking: a partial
 // for an unknown hash is dropped rather than growing the cache.
 func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.retainLeiosPartialTxs([]byte{0xde, 0xad}, []cbor.RawMessage{
 		mustCbor(t, "tx0"),
 	})
@@ -235,7 +235,7 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 19, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}

@@ -28,7 +28,7 @@ type protocolMetrics struct {
 }
 
 func (o *Ouroboros) initProtocolMetrics() {
-	factory := promauto.With(o.config.PromRegistry)
+	factory := promauto.With(o.registerer)
 	o.protocolMetrics = &protocolMetrics{
 		messagesReceived: factory.NewCounterVec(
 			prometheus.CounterOpts{

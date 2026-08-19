@@ -161,7 +161,7 @@ func TestLeiosBackfillConnOrderPreservesRotation(t *testing.T) {
 // must not change the connection's cooldown state.
 func TestFetchEndorserBlockOnConnSkipsBusyConnection(t *testing.T) {
 	t.Parallel()
-	o := NewOuroboros(OuroborosConfig{})
+	o := newOuroboros(OuroborosConfig{})
 	connId := namedConnId("busy")
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x03}}
 	// Keep the failure path safe: if a regression blocks until the test releases

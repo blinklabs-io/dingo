@@ -27,7 +27,7 @@ import (
 
 func TestRecordProtocolMessage_LabelsByOutcome(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	o := NewOuroboros(OuroborosConfig{PromRegistry: reg})
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
 
 	o.recordProtocolMessage("chainsync", nil, time.Millisecond)
 	o.recordProtocolMessage("chainsync", nil, time.Millisecond)
@@ -71,7 +71,7 @@ func TestRecordProtocolMessage_LabelsByOutcome(t *testing.T) {
 }
 
 func TestRecordProtocolMessage_NoopWhenMetricsDisabled(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{}) // no PromRegistry → no metrics
+	o := newOuroboros(OuroborosConfig{}) // no PromRegistry → no metrics
 	// Must not panic when metrics are uninitialized.
 	o.recordProtocolMessage("chainsync", nil, time.Millisecond)
 	o.recordProtocolMessage("chainsync", errors.New("x"), time.Millisecond)
@@ -80,7 +80,7 @@ func TestRecordProtocolMessage_NoopWhenMetricsDisabled(t *testing.T) {
 
 func TestRecordTxsubmissionAdmissionRetry_RecordsStreak(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	o := NewOuroboros(OuroborosConfig{PromRegistry: reg})
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
 
 	o.recordTxsubmissionAdmissionRetry(1)
 	o.recordTxsubmissionAdmissionRetry(2)

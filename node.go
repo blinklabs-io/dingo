@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
@@ -60,6 +61,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
@@ -72,27 +74,37 @@ type Node struct {
 	// no Stop of its own otherwise, so a live database restore/truncate,
 	// which constructs a fresh one on every cycle, would leak its EventBus
 	// subscription every time (node_lifecycle.go).
-	poolRelayProvider                *ledger.PoolRelayProvider
-	chainsyncState                   *chainsync.State
-	chainSelector                    *chainselection.ChainSelector
-	eventBus                         *event.EventBus
-	pluginHost                       *plugin.Host
-	destinationRegistry              *lifecycle.DestinationRegistry
-	mempool                          mempool.Service
-	chainManager                     *chain.ChainManager
-	db                               *database.Database
-	ledgerState                      *ledger.LedgerState
-	snapshotMgr                      *snapshot.Manager
-	dbLifecycleMgr                   *dblifecycle.Manager
-	leiosVoteManager                 *leios.VoteManager
-	leiosPipelineManager             *leios.PipelineManager
-	bark                             *bark.Bark
-	historyExpiry                    *historyexpiry.Pruner
-	koiosParityObserver              *koiosparity.Observer
-	midnightServer                   *midnightserver.Server
-	offchainMetadataFetcher          *offchainmetadata.Fetcher
-	midnightIndexer                  *midnightindexer.Indexer
-	ouroboros                        *ouroborosPkg.Ouroboros
+	poolRelayProvider       *ledger.PoolRelayProvider
+	chainsyncState          *chainsync.State
+	chainSelector           *chainselection.ChainSelector
+	eventBus                *event.EventBus
+	pluginHost              *plugin.Host
+	destinationRegistry     *lifecycle.DestinationRegistry
+	mempool                 mempool.Service
+	chainManager            *chain.ChainManager
+	db                      *database.Database
+	ledgerState             *ledger.LedgerState
+	snapshotMgr             *snapshot.Manager
+	dbLifecycleMgr          *dblifecycle.Manager
+	leiosVoteManager        *leios.VoteManager
+	leiosPipelineManager    *leios.PipelineManager
+	bark                    *bark.Bark
+	historyExpiry           *historyexpiry.Pruner
+	koiosParityObserver     *koiosparity.Observer
+	midnightServer          *midnightserver.Server
+	offchainMetadataFetcher *offchainmetadata.Fetcher
+	midnightIndexer         *midnightindexer.Indexer
+	// ouroborosRef holds the current Ouroboros. It is atomic because a live
+	// snapshot/restore replaces the instance while EventBus handlers and
+	// component callbacks -- which resolve it at call time, by design -- may
+	// be reading it from other goroutines. Read it through the ouroboros()
+	// accessor; the only writer is the replacement in
+	// reinitializeNetworkingCore and the initial construction in Run.
+	ouroborosRef atomic.Pointer[ouroborosPkg.Ouroboros]
+	// ouroborosConfig retains the settings half of the config Run built, so a
+	// live restore can reconstruct ouroboros against rebuilt dependencies
+	// without recomputing them and drifting from Run.
+	ouroborosConfig                  ouroborosPkg.OuroborosConfig
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
 	rtsMetrics                       *rtsMetrics
@@ -412,6 +424,13 @@ func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	return ""
 }
 
+// ouroboros returns the current Ouroboros instance. Callers resolve it through
+// here rather than caching it, so a live restore's replacement is picked up
+// automatically and the read is synchronized against the replacement.
+func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
+	return n.ouroborosRef.Load()
+}
+
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
@@ -651,57 +670,10 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.isMusashiNetwork() {
 		keepAliveTimeout = okeepalive.ServerTimeout
 	}
-	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
-		Logger:                n.config.logger,
-		EventBus:              n.eventBus,
-		ConnManager:           n.connManager,
-		NetworkMagic:          n.config.networkMagic,
-		PeerSharing:           n.config.peerSharing,
-		IntersectTip:          n.config.intersectTip,
-		IntersectPoints:       n.config.intersectPoints,
-		PromRegistry:          n.retainedComponentPromRegistry(),
-		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
-		EnableLeios:           enableLeiosNetworking,
-		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
-		// extension ahead of the IOG Leios prototype. The prototype relays do
-		// not run a protocol-20 responder and reset the connection if we
-		// initiate it, so disable it on the Leios prototype network; there
-		// votes are diffused inline over leios-notify. Keep it available for
-		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
-		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
-		// Request endorser-block transaction bodies over leios-fetch, driven by
-		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
-		// that the EB's transactions are ready. Fetching before that offer
-		// (e.g. right after the manifest) makes the prototype relay reset the
-		// connection, so the fetch is gated on the txs offer, not the block
-		// offer. Best-effort: a fetch failure never tears down the shared
-		// connection.
-		EnableLeiosTxFetch:           enableLeiosNetworking,
-		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
-		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
-		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
-		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
-		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
-		// On the Musashi prototype network every mini-protocol shares one muxer
-		// to a single relay; block/EB traffic can delay the relay's keep-alive
-		// pong past the tight 10s gouroboros default, making dingo drop the
-		// only relay and pay a reconnect + fork rollback. Wait up to the
-		// keep-alive server timeout there so a slow-but-alive relay is not
-		// dropped. Unset on other networks (fast dead-peer eviction retained).
-		KeepAliveTimeout: keepAliveTimeout,
-	})
-	// Stop the asynchronous Leios endorser-block persistence writer during
-	// shutdown so it drains queued blob writes and its goroutine exits cleanly.
-	// No-op when no endorser block was ever fetched (writer never started), and
-	// idempotent, so registering it on both shutdown paths is safe.
-	//
-	// The `started` stack is only unwound on startup failure/panic; a graceful
-	// shutdown returns from Run via <-n.ctx.Done() without draining it. Register
-	// a defer as well so the writer is drained (before the process exits) on the
-	// normal shutdown path too. On the failure path the `started` entry keeps the
-	// LIFO ordering so the drain still runs before n.db.Close().
-	defer n.ouroboros.StopLeiosPersistWriter()
-	started = append(started, func() { n.ouroboros.StopLeiosPersistWriter() })
+	// n.ouroboros is constructed further down, once every dependency it
+	// requires exists. Nothing between here and there dereferences it: the
+	// callbacks handed to ledger, connmanager and peergov below are closures
+	// that resolve n.ouroboros when they fire, not method values bound now.
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
@@ -721,13 +693,22 @@ func (n *Node) Run(ctx context.Context) error {
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
-			EndorserBlockProvider: n.ouroboros.EndorserBlockTxsByHash,
+			// Closure, not a method value: n.ouroboros does not exist yet
+			// here, so this resolves it when the callback fires. Same for
+			// EndorserBlockFetcher and BlockfetchRequestRangeFunc below.
+			EndorserBlockProvider: func(
+				ebHash []byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return n.ouroboros().EndorserBlockTxsByHash(ebHash)
+			},
 			// Actively fetches a referenced endorser block by point and caches
 			// it. Used during historical catch-up: the prototype relay serves
 			// any endorser block by point on demand, so a from-scratch sync can
 			// backfill older ranking blocks' endorser-resident outputs and build
 			// a complete UTxO set instead of trusting the chain.
-			EndorserBlockFetcher: n.ouroboros.FetchEndorserBlockByPoint,
+			EndorserBlockFetcher: func(ebSlot uint64, ebHash []byte) error {
+				return n.ouroboros().FetchEndorserBlockByPoint(ebSlot, ebHash)
+			},
 			// Wait, at the tip, for a ranking block's referenced endorser block
 			// to arrive before applying it. Sourced from the pipeline timing
 			// (CIP-0164-tracking, override-able via WithLeiosPipelineTiming)
@@ -773,7 +754,13 @@ func (n *Node) Run(ctx context.Context) error {
 			// CIP-0163 reward-account inactivity expiry (operator-set)
 			DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
 			DelegatorInactivity:        n.config.delegatorInactivity,
-			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				return n.ouroboros().BlockfetchClientRequestRange(connId, start, end)
+			},
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
 				point ocommon.Point,
@@ -881,7 +868,8 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
 	n.ledgerState = state
-	n.ouroboros.LedgerState = n.ledgerState
+	// n.ouroboros is constructed once every dependency exists; see the
+	// NewOuroboros call below.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
 		return fmt.Errorf(
 			"failed to configure chain security parameter: %w",
@@ -1189,7 +1177,6 @@ func (n *Node) Run(ctx context.Context) error {
 	)
 	// Set mempool adapter in ledger state for block forging.
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
-	n.ouroboros.Mempool = n.mempool
 	// Initialize chainsync state with multi-client configuration
 	chainsyncCfg := chainsync.DefaultConfig()
 	if n.config.chainsyncMaxClients > 0 {
@@ -1220,14 +1207,15 @@ func (n *Node) Run(ctx context.Context) error {
 		n.ledgerState,
 		chainsyncCfg,
 	)
-	n.ouroboros.ChainsyncState = n.chainsyncState
 	n.eventBus.SubscribeFunc(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
 	)
 	n.eventBus.SubscribeFunc(
 		peergov.PeerEligibilityChangedEventType,
-		n.ouroboros.HandlePeerEligibilityChangedEvent,
+		func(evt event.Event) {
+			n.ouroboros().HandlePeerEligibilityChangedEvent(evt)
+		},
 	)
 	// Subscriber ID captured for the same reason as chainManager's above —
 	// n.chainsyncState is rebuilt during a live database restore/truncate.
@@ -1285,15 +1273,22 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start chain selector: %w", err)
 	}
 	started = append(started, func() { n.chainSelector.Stop() })
-	// Configure connection manager
-	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
+	// Configure connection manager. The listener configs and outbound
+	// connection options come from ouroboros, which does not exist yet
+	// because it needs this ConnectionManager — so they are supplied as
+	// providers, resolved on first use at Start, by which point ouroboros is
+	// built.
 	n.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
-			Logger:              n.config.logger,
-			EventBus:            n.eventBus,
-			Listeners:           tmpListeners,
-			OutboundSourcePort:  n.config.outboundSourcePort,
-			OutboundConnOpts:    n.ouroboros.OutboundConnOpts(),
+			Logger:   n.config.logger,
+			EventBus: n.eventBus,
+			ListenersProvider: func() []connmanager.ListenerConfig {
+				return n.ouroboros().ConfigureListeners(n.config.listeners)
+			},
+			OutboundSourcePort: n.config.outboundSourcePort,
+			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
+				return n.ouroboros().OutboundConnOpts()
+			},
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
@@ -1322,12 +1317,14 @@ func (n *Node) Run(ctx context.Context) error {
 
 	n.peerGov = peergov.NewPeerGovernor(
 		peergov.PeerGovernorConfig{
-			Logger:                               n.config.logger,
-			EventBus:                             n.eventBus,
-			ConnManager:                          n.connManager,
-			DisableOutbound:                      n.config.isDevMode(),
-			PromRegistry:                         n.config.promRegistry,
-			PeerRequestFunc:                      n.ouroboros.RequestPeersFromPeer,
+			Logger:          n.config.logger,
+			EventBus:        n.eventBus,
+			ConnManager:     n.connManager,
+			DisableOutbound: n.config.isDevMode(),
+			PromRegistry:    n.config.promRegistry,
+			PeerRequestFunc: func(peer *peergov.Peer) []string {
+				return n.ouroboros().RequestPeersFromPeer(peer)
+			},
 			LedgerPeerProvider:                   ledgerPeerProvider,
 			UseLedgerAfterSlot:                   useLedgerAfterSlot,
 			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
@@ -1351,11 +1348,87 @@ func (n *Node) Run(ctx context.Context) error {
 			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 		},
 	)
-	n.ouroboros.PeerGov = n.peerGov
+	// Construct ouroboros now that every dependency exists. It takes them all
+	// up front and validates them, so it can never be observed partially
+	// wired. This is deliberately the last construction before the peer
+	// governor and connection manager start below.
+	n.ouroborosConfig = ouroborosPkg.OuroborosConfig{
+		Logger:                n.config.logger,
+		EventBus:              n.eventBus,
+		ConnManager:           n.connManager,
+		LedgerState:           n.ledgerState,
+		Mempool:               n.mempool,
+		ChainsyncState:        n.chainsyncState,
+		PeerGov:               n.peerGov,
+		NetworkMagic:          n.config.networkMagic,
+		PeerSharing:           n.config.peerSharing,
+		IntersectTip:          n.config.intersectTip,
+		IntersectPoints:       n.config.intersectPoints,
+		PromRegistry:          n.retainedComponentPromRegistry(),
+		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
+		EnableLeios:           enableLeiosNetworking,
+		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
+		// extension ahead of the IOG Leios prototype. The prototype relays do
+		// not run a protocol-20 responder and reset the connection if we
+		// initiate it, so disable it on the Leios prototype network; there
+		// votes are diffused inline over leios-notify. Keep it available for
+		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
+		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
+		// Request endorser-block transaction bodies over leios-fetch, driven by
+		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
+		// that the EB's transactions are ready. Fetching before that offer
+		// (e.g. right after the manifest) makes the prototype relay reset the
+		// connection, so the fetch is gated on the txs offer, not the block
+		// offer. Best-effort: a fetch failure never tears down the shared
+		// connection.
+		EnableLeiosTxFetch:           enableLeiosNetworking,
+		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
+		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
+		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
+		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
+		// On the Musashi prototype network every mini-protocol shares one muxer
+		// to a single relay; block/EB traffic can delay the relay's keep-alive
+		// pong past the tight 10s gouroboros default, making dingo drop the
+		// only relay and pay a reconnect + fork rollback. Wait up to the
+		// keep-alive server timeout there so a slow-but-alive relay is not
+		// dropped. Unset on other networks (fast dead-peer eviction retained).
+		KeepAliveTimeout: keepAliveTimeout,
+	}
+	ouro, err := ouroborosPkg.NewOuroboros(n.ouroborosConfig)
+	if err != nil {
+		return fmt.Errorf("failed to construct ouroboros: %w", err)
+	}
+	// The Leios managers were started earlier in Run, before this instance
+	// existed, so their handlers are attached here rather than at their own
+	// construction. reinitializeNetworkingCore does the same after its
+	// rebuild.
+	if err := n.attachLeiosHandlers(ouro); err != nil {
+		return err
+	}
+	n.ouroborosRef.Store(ouro)
+	// The asynchronous Leios endorser-block persistence writer, the EventBus
+	// subscriptions ouroboros makes on its own behalf, and its Prometheus
+	// collectors are all released by Close. Registering it on both the
+	// unwind stack and a defer covers startup failure and graceful shutdown;
+	// Close is idempotent.
+	defer func() { _ = n.ouroboros().Close() }()
+	started = append(started, func() { _ = n.ouroboros().Close() })
+	// A closure, not a method value, even though n.ouroboros already exists
+	// here: a live restore replaces the instance, and a method value would
+	// pin this subscription to the replaced one forever, so outbound
+	// connections would be handled by a closed Ouroboros and the node would
+	// silently stop starting chainsync clients after any restore.
 	n.eventBus.SubscribeFunc(
 		peergov.OutboundConnectionEventType,
-		n.ouroboros.HandleOutboundConnEvent,
+		func(evt event.Event) { n.ouroboros().HandleOutboundConnEvent(evt) },
 	)
+	// Subscribe ouroboros to chainsync resync events from the ledger, so all
+	// stop/restart orchestration lives in the ouroboros/chainsync component.
+	// This is a method call rather than a handler registration, so unlike the
+	// subscriptions in subscribeConnectionEvents it has to run after the
+	// constructor above.
+	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 	if n.config.topologyConfig != nil {
 		topologyConfig := n.config.topologyConfig
 		usePeerSnapshot := genesisSelectionMode &&
@@ -1784,18 +1857,15 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
-	n.ouroboros.ConnManager = n.connManager
-	// Subscribe ouroboros to chainsync resync events from the
-	// ledger. This replaces the previous ChainsyncResyncFunc
-	// closure so all stop/restart orchestration lives in the
-	// ouroboros/chainsync component. Registered after ConnManager
-	// is wired so the handler can look up connections.
-	n.ouroboros.SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 	// Subscribe to connection events BEFORE starting listeners so that
 	// inbound connections from peers that connect immediately are not lost.
+	//
+	// These are closures rather than method values because this runs before
+	// n.ouroboros is constructed; each resolves it when the event fires,
+	// which cannot happen until the listeners below are open.
 	n.eventBus.SubscribeFunc(
 		connmanager.ConnectionClosedEventType,
-		n.ouroboros.HandleConnClosedEvent,
+		func(evt event.Event) { n.ouroboros().HandleConnClosedEvent(evt) },
 	)
 	// Translate connmanager connection-closed events to ledger-owned events so
 	// ledger/ does not import connmanager/.
@@ -1820,7 +1890,7 @@ func (n *Node) subscribeConnectionEvents() {
 	)
 	n.eventBus.SubscribeFunc(
 		connmanager.InboundConnectionEventType,
-		n.ouroboros.HandleInboundConnEvent,
+		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
 }
 
