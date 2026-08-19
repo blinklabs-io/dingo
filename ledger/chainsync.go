@@ -3202,6 +3202,48 @@ func (ls *LedgerState) noteBlockfetchRangeUnavailable(
 	return true
 }
 
+// startQueuedBlockfetchOnLocked starts the queued range on connId and, if that
+// succeeds, retargets the blockfetch selection to it.
+//
+// Every path that moves the fetch to a different connection has to go through
+// this rather than calling startQueuedBlockfetchLocked directly:
+// nextBlockfetchConnId prefers selectedBlockfetchConnId over
+// activeBlockfetchConnId, and the batch-completion continuation uses it to pick
+// the connection for the next batch. Starting on one connection while the
+// selection still names another therefore recovers a single batch from the
+// working peer and sends the next one back to the peer that just failed.
+//
+// Callers that already own the selection (handoffPipelineOnSwitchLocked,
+// handleEventChainsyncBlockHeaderWithPending, and the recovery replay, each of
+// which assigns it first) may call startQueuedBlockfetchLocked directly. Note
+// that selectInitialBlockfetchConn is the identity function today, so that path
+// starts on the connection it just selected; if it ever returns a different
+// connection it needs this helper too.
+//
+// One current caller gains nothing from it: the timeout handler's alternate
+// connection comes from nextBlockfetchConnIdExcept, which can only return a
+// connection other than the excluded one when that connection already is the
+// selection -- a failed attempt has by then overwritten activeBlockfetchConnId
+// with the excluded connection, so the retarget there cannot change anything. It
+// is routed through here anyway so the invariant lives in one place rather than
+// depending on that reachability argument staying true.
+func (ls *LedgerState) startQueuedBlockfetchOnLocked(
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) error {
+	// Retarget only once the start has actually succeeded. Moving the selection
+	// on an attempt would discard what the caller's own fallback needs:
+	// nextBlockfetchConnIdExcept picks the next candidate by excluding the
+	// connection that just failed and preferring the current selection, so
+	// pointing the selection at the failed connection first collapses that
+	// lookup onto activeBlockfetchConnId instead.
+	if err := ls.startQueuedBlockfetchLocked(connId, pending); err != nil {
+		return err
+	}
+	ls.selectedBlockfetchConnId = connId
+	return nil
+}
+
 func (ls *LedgerState) startQueuedBlockfetchLocked(
 	connId ouroboros.ConnectionId,
 	pending *pendingPublishes,
@@ -3472,7 +3514,7 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 			return
 		}
 		ls.blockfetchContinuationPending = false
-		err := ls.startQueuedBlockfetchLocked(connId, &pending)
+		err := ls.startQueuedBlockfetchOnLocked(connId, &pending)
 		if err != nil {
 			// A continuation can race a peer disconnect just as the previous
 			// batch completes. Try the next tracked peer before abandoning the
@@ -3480,7 +3522,7 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 			retryConnId := ls.selectRetryBlockfetchConn(connId)
 			if connIdKey(retryConnId) != "" &&
 				!sameConnectionId(retryConnId, connId) {
-				err = ls.startQueuedBlockfetchLocked(
+				err = ls.startQueuedBlockfetchOnLocked(
 					retryConnId,
 					&pending,
 				)
@@ -5303,7 +5345,10 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		"header_end_slot", headerEnd.Slot,
 		"header_count", headerCount,
 	)
-	if err := ls.startQueuedBlockfetchLocked(retryConnId, pending); err != nil {
+	if err := ls.startQueuedBlockfetchOnLocked(
+		retryConnId,
+		pending,
+	); err != nil {
 		ls.config.Logger.Error(
 			"failed to retry blockfetch range after timeout",
 			"component", "ledger",
@@ -5318,7 +5363,10 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 				"retry_connection_id", nextConnId.String(),
 				"header_count", ls.chain.HeaderCount(),
 			)
-			if retryErr := ls.startQueuedBlockfetchLocked(nextConnId, pending); retryErr != nil {
+			if retryErr := ls.startQueuedBlockfetchOnLocked(
+				nextConnId,
+				pending,
+			); retryErr != nil {
 				ls.config.Logger.Error(
 					"failed to restart queued blockfetch after timeout retry failure",
 					"component",
