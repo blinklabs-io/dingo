@@ -49,7 +49,7 @@ var (
 	configFile string
 )
 
-func commonRun(cfg *config.Config) *slog.Logger {
+func commonRun(cfg *config.Config) (*slog.Logger, error) {
 	// Configure logger from config. The --debug flag is the highest-precedence
 	// override (CLI > env > YAML > defaults): it forces debug level and source
 	// locations regardless of the configured level.
@@ -80,15 +80,13 @@ func commonRun(cfg *config.Config) *slog.Logger {
 	// Configure max processes with our logger wrapper, toss undo func
 	_, err := maxprocs.Set(maxprocs.Logger(slogPrintf))
 	if err != nil {
-		// If we hit this, something really wrong happened
-		slog.Error(err.Error())
-		os.Exit(1)
+		return nil, fmt.Errorf("configuring max processes: %w", err)
 	}
 	logger.Info(
 		"version: "+version.GetVersionString(),
 		"component", programName,
 	)
-	return logger
+	return logger, nil
 }
 
 // newLogger builds a slog.Logger writing to w. format selects the handler
@@ -332,8 +330,9 @@ func run() int {
 	}
 
 	rootCmd := &cobra.Command{
-		Use:   programName,
-		Short: "Dingo - a Go Cardano node",
+		Use:           programName,
+		Short:         "Dingo - a Go Cardano node",
+		SilenceErrors: true,
 		Long: `Dingo - a Go Cardano node by Blink Labs.
 
 Configuration Precedence (highest to lowest):
@@ -383,15 +382,14 @@ Database Workers:
 			case config.RunModeLoad:
 				// Validate() has already enforced that ImmutableDbPath
 				// is set for load mode
-				loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
+				return loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
 			case config.RunModeServe, config.RunModeDev, config.RunModeLeios:
 				// serve, dev, and leios modes all run the server
-				serveRun(cmd, args, cfg)
+				return serveRun(cmd, args, cfg)
 			default:
 				// Empty or unrecognized RunMode defaults to serve mode
-				serveRun(cmd, args, cfg)
+				return serveRun(cmd, args, cfg)
 			}
-			return nil
 		},
 	}
 
@@ -488,6 +486,7 @@ Database Workers:
 	// Execute cobra command
 	exitCode := 0
 	if err := rootCmd.Execute(); err != nil {
+		slog.Error(err.Error())
 		exitCode = 1
 	}
 

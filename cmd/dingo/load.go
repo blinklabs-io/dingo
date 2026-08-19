@@ -16,15 +16,15 @@ package main
 
 import (
 	"context"
-	"log/slog"
-	"os"
+	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/spf13/cobra"
 )
 
-func loadRun(ctx context.Context, args []string, cfg *config.Config) {
+func loadRun(ctx context.Context, args []string, cfg *config.Config) error {
 	var immutablePath string
 
 	// CLI argument takes priority over config
@@ -33,30 +33,31 @@ func loadRun(ctx context.Context, args []string, cfg *config.Config) {
 	} else if cfg.ImmutableDbPath != "" {
 		immutablePath = cfg.ImmutableDbPath
 	} else {
-		slog.Error(
+		return errors.New(
 			"path to ImmutableDB required (via argument or immutableDbPath config)",
 		)
-		os.Exit(1)
 	}
 
-	logger := commonRun(cfg)
-	if err := node.Load(ctx, cfg, logger, immutablePath); err != nil {
-		slog.Error(err.Error())
-		os.Exit(1)
+	logger, err := commonRun(cfg)
+	if err != nil {
+		return err
 	}
+	if err := node.Load(ctx, cfg, logger, immutablePath); err != nil {
+		return fmt.Errorf("loading ImmutableDB: %w", err)
+	}
+	return nil
 }
 
 func loadCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "load [db-path]",
 		Short: "Load blocks from ImmutableDB (path via arg or immutableDbPath config)",
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
-				slog.Error("no config found in context")
-				os.Exit(1)
+				return errors.New("no config found in context")
 			}
-			loadRun(cmd.Context(), args, cfg)
+			return loadRun(cmd.Context(), args, cfg)
 		},
 	}
 	return cmd
