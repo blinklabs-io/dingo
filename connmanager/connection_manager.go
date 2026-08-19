@@ -687,6 +687,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			}
 			c.updateConnectionMetricsLocked(existing, false)
 			existingConn := existing.conn
+			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
 			// Remove the old entry so the evicted connection's
 			// error-watcher goroutine cannot double-decrement
@@ -697,7 +698,7 @@ func (c *ConnectionManager) addConnectionImpl(
 				c.config.Logger,
 				existingConn,
 				"error closing evicted inbound connection",
-				"peer_addr", peerAddr,
+				"peer_addr", existingPeerAddr,
 			)
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
@@ -725,6 +726,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			}
 			c.updateConnectionMetricsLocked(existing, false)
 			existingConn := existing.conn
+			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
 			delete(c.connections, connId)
 			c.connectionsMutex.Unlock()
@@ -732,7 +734,7 @@ func (c *ConnectionManager) addConnectionImpl(
 				c.config.Logger,
 				existingConn,
 				"error closing replaced connection",
-				"peer_addr", peerAddr,
+				"peer_addr", existingPeerAddr,
 			)
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)

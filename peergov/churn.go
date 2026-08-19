@@ -120,7 +120,7 @@ func (p *PeerGovernor) gossipChurn() {
 			}
 			peer.Connection = nil
 			p.config.Logger.Debug(
-				"gossip churn: closed connection for demoted peer",
+				"gossip churn: cleared connection for demoted peer",
 				"address", peer.Address,
 			)
 		}

@@ -68,7 +68,9 @@ func TestCloseConnAndLogLogsOnCloseError(t *testing.T) {
 // exists to surface.
 func TestCloseConnAndLogStaysQuietOnSuccess(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	logger := slog.New(
+		slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+	)
 
 	closeConnAndLog(
 		logger,
@@ -90,7 +92,9 @@ func TestCloseConnAndLogStaysQuietOnSuccess(t *testing.T) {
 // nil closer as a no-op rather than panic.
 func TestCloseConnAndLogHandlesNilCloser(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	logger := slog.New(
+		slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+	)
 
 	closeConnAndLog(logger, nil, "error closing connection")
 

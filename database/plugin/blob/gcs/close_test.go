@@ -57,10 +57,7 @@ func TestJoinCloseErrReturnsOriginalOnCloseSuccess(t *testing.T) {
 
 	got := joinCloseErr(writeErr, &fakeCloser{err: nil})
 
-	if !errors.Is(got, writeErr) {
-		t.Fatalf("expected original error, got: %v", got)
-	}
-	if errors.Unwrap(got) != nil {
-		t.Fatalf("expected no joined error when close succeeds, got: %v", got)
+	if got != writeErr {
+		t.Fatalf("expected original error identity, got: %v", got)
 	}
 }

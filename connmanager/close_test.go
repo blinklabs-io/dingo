@@ -92,7 +92,9 @@ func TestCloseConnAndLogStaysQuietOnSuccess(t *testing.T) {
 // closeConnAndLog must treat a nil closer as a no-op rather than panic.
 func TestCloseConnAndLogHandlesNilCloser(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	logger := slog.New(
+		slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+	)
 
 	closeConnAndLog(logger, nil, "error closing connection")
 
@@ -129,10 +131,7 @@ func TestJoinCloseErrReturnsOriginalOnCloseSuccess(t *testing.T) {
 
 	got := joinCloseErr(origErr, &fakeCloser{err: nil})
 
-	if !errors.Is(got, origErr) {
-		t.Fatalf("expected original error, got: %v", got)
-	}
-	if errors.Unwrap(got) != nil {
-		t.Fatalf("expected no joined error when close succeeds, got: %v", got)
+	if got != origErr {
+		t.Fatalf("expected original error identity, got: %v", got)
 	}
 }
