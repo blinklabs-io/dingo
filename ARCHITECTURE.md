@@ -3660,8 +3660,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   requires every field in the consumed Koios response structs to remain
   classified when those structs change (the `/account_reward_history` entries
   below are not covered by that test's automatic struct-field check, since
-  `CompareAccountEpoch` reads from `KoiosAccountRewardHistoryItem` rather than
-  one of the checked response types — they are still kept here and in
+  `CompareAccountEpoch` reads from `KoiosAccountRewards` — the cache struct
+  the fetch layer maps `/account_reward_history` responses into — rather
+  than one of the checked response types; they are still kept here and in
   `coverage.go`'s matrix by hand for the same completeness reason). #3097
   wired up exact per-account comparison against `/account_reward_history`;
   #3099's chunked/resumable large-account fetch remains open and changes how
