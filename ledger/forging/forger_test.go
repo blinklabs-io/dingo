@@ -286,8 +286,13 @@ func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
 		block: block,
 		cbor:  blockCbor,
 	}
-	broadcaster := &forgerTestBroadcaster{
+	innerBroadcaster := &forgerTestBroadcaster{
 		err: errors.New("not adopted"),
+	}
+	var callOrder []string
+	broadcaster := &trackingBroadcaster{
+		inner: innerBroadcaster,
+		onAdd: func() { callOrder = append(callOrder, "adopt") },
 	}
 	var (
 		observedBlock   ledger.Block
@@ -307,6 +312,7 @@ func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
 			cbor []byte,
 			latency time.Duration,
 		) {
+			callOrder = append(callOrder, "observe")
 			observedBlock = block
 			observedCbor = append([]byte(nil), cbor...)
 			observedLatency = latency
@@ -327,8 +333,9 @@ func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
 	require.Same(t, block, observedBlock)
 	assert.Equal(t, blockCbor, observedCbor)
 	assert.GreaterOrEqual(t, observedLatency, time.Duration(0))
+	assert.Equal(t, []string{"adopt", "observe"}, callOrder)
 	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, broadcaster.calls)
+	assert.Equal(t, 1, innerBroadcaster.calls)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
 	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }

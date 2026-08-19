@@ -308,7 +308,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// Unsubscribe the handlers bound to components being discarded, so the
 	// EventBus (which is never stopped/restarted here) doesn't accumulate a
 	// stale subscriber pointing at an object this function just tore down.
-	// See the Node struct field comments (node.go) for why only these three
+	// See the Node struct field comments (node.go) for why only these two
 	// of Run()'s ~19 direct subscriptions need this.
 	//
 	// UnsubscribeAndWait, not Unsubscribe: closeStorageForLiveLifecycleOp
@@ -317,13 +317,6 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// Unsubscribe only stops future deliveries, so a handler goroutine
 	// already dispatched before this loop runs could still be reading
 	// those fields concurrently with that teardown.
-	if n.chainManagerBlockProposedSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			chain.BlockProposedEventType,
-			n.chainManagerBlockProposedSubId,
-		)
-		n.chainManagerBlockProposedSubId = 0
-	}
 	if n.chainsyncClientRemoveSubId != 0 {
 		n.eventBus.UnsubscribeAndWait(
 			chainsync.ClientRemoveRequestedEventType,
@@ -513,12 +506,6 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to reload chain manager: %w", err)
 	}
 	n.chainManager = cm
-	primaryChain := n.chainManager.PrimaryChain()
-	n.chainManagerBlockProposedSubId = n.eventBus.SubscribeFunc(
-		chain.BlockProposedEventType,
-		primaryChain.HandleBlockProposedEvent,
-	)
-
 	enableDijkstra := n.config.experimentalDijkstraEnabled()
 
 	state, err := ledger.NewLedgerState(

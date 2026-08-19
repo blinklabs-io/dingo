@@ -757,40 +757,78 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 	}
 }
 
-func TestHandleBlockProposedEventAddsBlockAndAcks(t *testing.T) {
+func TestAddLocalBlockIgnoresAndClearsPendingPeerHeaders(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
 	c := cm.PrimaryChain()
-	ack := make(chan error, 1)
+	for _, testBlock := range testBlocks[:3] {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	if err := c.AddBlockHeader(testBlocks[3]); err != nil {
+		t.Fatalf("unexpected error adding peer header: %s", err)
+	}
+	localBlock := &MockBlock{
+		MockBlockNumber: testBlocks[3].MockBlockNumber,
+		MockSlot:        testBlocks[3].MockSlot + 1,
+		MockHash:        testHashPrefix + "00ff",
+		MockPrevHash:    testBlocks[2].MockHash,
+	}
 
-	c.HandleBlockProposedEvent(
-		event.NewEvent(
-			chain.BlockProposedEventType,
-			chain.BlockProposedEvent{
-				Block: testBlocks[0],
-				Ack:   ack,
-			},
-		),
-	)
-
-	if err := testutil.RequireReceive(
-		t,
-		ack,
-		time.Second,
-		"block proposal ack",
-	); err != nil {
-		t.Fatalf("unexpected block proposal error: %s", err)
+	if err := c.AddLocalBlock(localBlock); err != nil {
+		t.Fatalf("unexpected error adding local block: %s", err)
 	}
 	tip := c.Tip()
-	if tip.Point.Slot != testBlocks[0].MockSlot ||
-		!bytes.Equal(tip.Point.Hash, testBlocks[0].Hash().Bytes()) {
+	if tip.Point.Slot != localBlock.MockSlot ||
+		!bytes.Equal(tip.Point.Hash, localBlock.Hash().Bytes()) {
 		t.Fatalf(
-			"unexpected tip after block proposal: %d.%x",
+			"unexpected tip after local block: %d.%x",
 			tip.Point.Slot,
 			tip.Point.Hash,
 		)
+	}
+	if got := c.HeaderCount(); got != 0 {
+		t.Fatalf("expected local block to clear pending headers, got %d", got)
+	}
+}
+
+func TestAddLocalBlockRejectsStaleParentAndPreservesPendingHeaders(
+	t *testing.T,
+) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks[:3] {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	if err := c.AddBlockHeader(testBlocks[3]); err != nil {
+		t.Fatalf("unexpected error adding peer header: %s", err)
+	}
+	staleBlock := &MockBlock{
+		MockBlockNumber: testBlocks[3].MockBlockNumber,
+		MockSlot:        testBlocks[3].MockSlot + 1,
+		MockHash:        testHashPrefix + "00fe",
+		MockPrevHash:    testBlocks[1].MockHash,
+	}
+
+	err = c.AddLocalBlock(staleBlock)
+	var staleErr chain.BlockNotFitChainTipError
+	if !errors.As(err, &staleErr) {
+		t.Fatalf("expected stale parent error, got %v", err)
+	}
+	if got := c.HeaderCount(); got != 1 {
+		t.Fatalf("expected rejected block to preserve pending header, got %d", got)
+	}
+	tip := c.Tip()
+	if !bytes.Equal(tip.Point.Hash, testBlocks[2].Hash().Bytes()) {
+		t.Fatalf("rejected local block changed tip to %x", tip.Point.Hash)
 	}
 }
 

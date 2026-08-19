@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -247,10 +246,10 @@ func (n *Node) initBlockForger(
 		return fmt.Errorf("failed to create block builder: %w", err)
 	}
 
-	// Create block broadcaster (uses the chain manager and event bus)
+	// Create block broadcaster for synchronous local chain adoption.
 	broadcaster := &blockBroadcaster{
-		eventBus: n.eventBus,
-		logger:   n.config.logger,
+		chain:  n.chainManager.PrimaryChain(),
+		logger: n.config.logger,
 	}
 
 	// Create the leader election component
@@ -447,14 +446,13 @@ func (a *forgingMempoolAdapter) RemoveTxsByHash(hashes []string) {
 	a.source.RemoveTxsByHash(hashes)
 }
 
-// blockBroadcaster implements forging.BlockBroadcaster by proposing locally
-// forged blocks to the chain component over the EventBus.
+// blockBroadcaster implements forging.BlockBroadcaster through synchronous
+// local chain admission. Block proposals are requests, not notifications, so
+// they must not wait in the asynchronous EventBus while the chain advances.
 type blockBroadcaster struct {
-	eventBus *event.EventBus
-	logger   *slog.Logger
+	chain  *chain.Chain
+	logger *slog.Logger
 }
-
-const blockProposalAckTimeout = 30 * time.Second
 
 func (b *blockBroadcaster) AddBlock(
 	block gledger.Block,
@@ -463,38 +461,11 @@ func (b *blockBroadcaster) AddBlock(
 	if block == nil {
 		return errors.New("proposed block is nil")
 	}
-	if b.eventBus == nil {
-		return errors.New("event bus unavailable")
+	if b.chain == nil {
+		return errors.New("chain unavailable")
 	}
-	if !b.eventBus.HasSubscribers(chain.BlockProposedEventType) {
-		return errors.New("no chain block proposal subscribers")
-	}
-
-	ack := make(chan error, 1)
-	b.eventBus.Publish(
-		chain.BlockProposedEventType,
-		event.NewEvent(
-			chain.BlockProposedEventType,
-			chain.BlockProposedEvent{
-				Block: block,
-				Ack:   ack,
-			},
-		),
-	)
-
-	timer := time.NewTimer(blockProposalAckTimeout)
-	defer timer.Stop()
-
-	select {
-	case err := <-ack:
-		if err != nil {
-			return fmt.Errorf("chain rejected proposed block: %w", err)
-		}
-	case <-timer.C:
-		return fmt.Errorf(
-			"timed out waiting for proposed block ack after %s",
-			blockProposalAckTimeout,
-		)
+	if err := b.chain.AddLocalBlock(block); err != nil {
+		return fmt.Errorf("chain rejected proposed block: %w", err)
 	}
 
 	b.logger.Info(

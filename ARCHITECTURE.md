@@ -520,7 +520,7 @@ sequenceDiagram
     participant BB as BlockBuilder
     participant MP as Mempool
     participant LS as LedgerState
-    participant ChM as ChainManager
+    participant PC as PrimaryChain
     participant EB as EventBus
 
     Note over SC,EB: Epoch Preparation
@@ -544,10 +544,10 @@ sequenceDiagram
         BB->>BB: assemble block body + header
         BB->>BB: sign with KES key, attach VRF proof
         BB-->>BF: block + CBOR
-        BF->>ChM: AddBlock(forgedBlock)
-        BF->>MP: remove confirmed transactions
-        ChM->>EB: publish ChainUpdateEvent
+        BF->>PC: AddLocalBlock(forgedBlock) via BlockBroadcaster
+        PC->>EB: publish ChainUpdateEvent, before AddLocalBlock returns
         BF->>EB: publish BlockForgedEvent
+        BF->>MP: remove confirmed transactions (RemoveTxsByHash)
     end
 
     Note over SC,EB: Slot Battle Detection
@@ -2190,11 +2190,20 @@ shadow-blockfetch dispatch calls `BlockfetchRequestRangeFunc` directly and is
 intentionally excluded: it is a duplicate request whose failure says nothing
 about the primary still in flight. On reaching the bound the ledger drops the queued headers, clears the
 active blockfetch connection, and emits `chainsync.resync` with reason
-`blockfetch could not obtain the queued header range`. Dropping the headers is
-the purpose rather than a side effect: while a header sits at the head of the
-queue, `Chain.AddBlock` rejects every locally forged block with
-`BlockNotMatchHeaderError`, so a header whose body no peer can serve halts
-block production for as long as it stays queued. The earlier far-behind
+`blockfetch could not obtain the queued header range`. Dropping the headers keeps the
+pipeline moving rather than being a side effect: a header whose body no peer can
+serve otherwise sits at the head of the queue indefinitely, and the ledger
+cannot advance past it.
+
+Block production is no longer among the things it holds up. Peer and local
+admission take different paths into the chain: `Chain.AddBlock` compares the
+block against the queued peer headers and rejects a mismatch with
+`BlockNotMatchHeaderError`, while `Chain.AddLocalBlock` — what
+`node_forging.go` calls for a block this node forged — skips that comparison
+entirely, since a locally forged block invalidates those pending headers rather
+than contradicting them. The chain-tip and block-number checks stay mandatory
+on both paths. Before that split, a single unservable queued header halted
+forging for as long as it stayed queued. The earlier far-behind
 variant of this recovery (gated on a `blockfetchMinBatchGapSlots` tip gap,
 which never applied at tip) still runs for its own case before the bound is
 reached.
@@ -2977,9 +2986,13 @@ script validation and large forging snapshots. Add/remove events remain
 published outside all locks, and candidate rejection emits only the same
 removal event and gauge changes as the former in-place rebuild.
 
-After a locally forged block is accepted by the chain manager, the production
-forger synchronously removes that block's transaction hashes through the
-backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild remains
+A locally forged block is admitted by `Chain.AddLocalBlock` on the primary
+chain, which the `BlockBroadcaster` the forger holds calls
+(`chainManager.PrimaryChain()`), not by `ChainManager` itself; the
+`ChainUpdateEvent` is published inside that call, before it returns. The forger
+then runs its `blockForged` observer, and only after that — and only if
+admission succeeded — synchronously removes the block's transaction hashes
+through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild remains
 responsible for transactions confirmed by peer blocks. This local fast path
 prevents confirmed transactions from accumulating when sustained admissions
 make a long rebuild repeatedly lose its pinned ledger generation.
@@ -3002,7 +3015,12 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
 3. Reads the parent ranking block's `LeiosAnnouncement`, selects only the matching eligible Leios endorser-block certificate, and independently produces and broadcasts a new endorser block for the current slot when eligible
 4. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
 5. Optionally self-validates the forged block before adoption (see below)
-6. Broadcasts the forged block through the chain manager
+6. Submits the forged block directly to the primary chain for synchronous local
+   admission, before running observability callbacks. Local admission validates
+   the actual chain tip and contiguous block number, but does not compare the
+   block with peer-delivered pending headers. Successful adoption clears those
+   now-conflicting headers; a genuinely stale parent is still rejected without
+   changing the queued headers.
 7. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.

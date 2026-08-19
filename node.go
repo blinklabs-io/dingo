@@ -127,10 +127,9 @@ type Node struct {
 	// tracked ID. Captured here (rather than discarded, as Run() otherwise
 	// would) purely so node_lifecycle.go can unsubscribe the stale handler
 	// before rebuilding its component; Run()'s own behavior is unchanged.
-	chainManagerBlockProposedSubId event.EventSubscriberId
-	chainsyncClientRemoveSubId     event.EventSubscriberId
-	connManagerRecycleSubId        event.EventSubscriberId
-	leiosVoteEmittedSubId          event.EventSubscriberId
+	chainsyncClientRemoveSubId event.EventSubscriberId
+	connManagerRecycleSubId    event.EventSubscriberId
+	leiosVoteEmittedSubId      event.EventSubscriberId
 	// koiosParitySubId is tracked for the same reason: observer.
 	// HandleEpochTransitionEvent is bound to the *koiosparity.Observer
 	// instance startKoiosParityObserver creates, which a live database
@@ -625,14 +624,6 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
-	primaryChain := n.chainManager.PrimaryChain()
-	// Subscriber ID captured (rather than discarded) so a live database
-	// restore/truncate can unsubscribe this handler before rebuilding
-	// n.chainManager — see node_lifecycle.go.
-	n.chainManagerBlockProposedSubId = n.eventBus.SubscribeFunc(
-		chain.BlockProposedEventType,
-		primaryChain.HandleBlockProposedEvent,
-	)
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)
