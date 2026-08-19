@@ -99,12 +99,16 @@ func TestParseTokenRegistryEntryRejectsNonHexSubject(t *testing.T) {
 	// The subject is policy ID + asset name, both hex; anything else cannot
 	// be matched back to an on-chain asset and is dropped rather than stored
 	// under a key no lookup will ever produce.
-	raw := []byte(`{"subject":"not-hex-at-all"}`)
+	//
+	// The subject has to be a legal *length* for this to reach the hex check
+	// at all -- a short non-hex string fails the length check first and would
+	// pass this test without ever exercising hex validation.
+	raw := []byte(`{"subject":"` + strings.Repeat("zz", 28) + `"}`)
 
 	_, err := ParseTokenRegistryEntry(raw)
 
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "subject")
+	require.Contains(t, err.Error(), "not hex")
 }
 
 func TestParseTokenRegistryEntryRejectsShortSubject(t *testing.T) {

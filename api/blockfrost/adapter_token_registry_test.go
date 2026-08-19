@@ -17,6 +17,7 @@ package blockfrost
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
@@ -146,6 +147,7 @@ func TestAssetPopulatesRegistryMetadata(t *testing.T) {
 			Ticker:   "NUT",
 			Decimals: new(6),
 		}},
+		time.Now(),
 		nil,
 	)
 	require.NoError(t, err)

@@ -78,8 +78,14 @@ type TokenRegistryStore interface {
 	UpsertTokenRegistryEntries(
 		ctx context.Context,
 		entries []models.TokenRegistryEntry,
+		syncedAt time.Time,
 		txn types.Txn,
 	) (int, error)
+	PruneTokenRegistryEntriesBefore(
+		ctx context.Context,
+		cutoff time.Time,
+		txn types.Txn,
+	) (int64, error)
 	GetSyncState(key string, txn types.Txn) (string, error)
 	SetSyncState(key, value string, txn types.Txn) error
 }
@@ -131,6 +137,7 @@ type TokenRegistrySync struct {
 	maxEntryBytes int64
 	storeLogos    bool
 	allowPrivate  bool
+	now           func() time.Time
 	mu            sync.Mutex
 	cancel        context.CancelFunc
 	done          chan struct{}
@@ -169,6 +176,13 @@ func NewTokenRegistrySync(
 	if err != nil {
 		return nil, err
 	}
+	// secureHTTPClient only sets Timeout on a client it constructs itself, so
+	// a caller-supplied client with no Timeout would leave the whole-download
+	// budget unenforced and let a stalled source hold SyncOnce open. A caller
+	// that asked for something stricter meant it, so only widen from unset.
+	if client.Timeout <= 0 || client.Timeout > timeout {
+		client.Timeout = timeout
+	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
 		userAgent = defaultTokenRegistryUserAgent
@@ -192,6 +206,7 @@ func NewTokenRegistrySync(
 		maxEntryBytes: maxEntryBytes,
 		storeLogos:    cfg.StoreLogos,
 		allowPrivate:  cfg.AllowPrivateAddresses,
+		now:           time.Now,
 	}, nil
 }
 
@@ -222,6 +237,20 @@ func (s *TokenRegistrySync) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop signals the worker and waits for it to exit.
+//
+// The wait is not abandoned when ctx expires. Callers tear the metadata store
+// down immediately after Stop returns (node_shutdown.go phase 3,
+// node_lifecycle.go's live storage swap), so returning while the worker could
+// still reach that store would hand it a closed database. An expired context
+// downgrades to a warning and the wait continues, matching
+// koiosparity.Observer.Stop, which releases its cache under the same
+// constraint. Cancelling the worker aborts any in-flight download, so the
+// remaining wait is bounded by one store write rather than by the registry
+// transfer.
+//
+// Stop is idempotent: the startup-failure rollback stack and shutdown() can
+// both reach it for the same instance.
 func (s *TokenRegistrySync) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	cancel := s.cancel
@@ -235,7 +264,11 @@ func (s *TokenRegistrySync) Stop(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		s.logger.Warn(
+			"token registry sync: stop context expired, still waiting for the worker to exit before the store is released",
+		)
+		<-done
+		return nil
 	}
 }
 
@@ -340,9 +373,32 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 			resp.StatusCode,
 		)
 	}
-	written, err := s.applySnapshot(ctx, resp.Body)
+	// One stamp for the whole snapshot: every row it carries gets this
+	// value, so anything older afterwards is a subject the snapshot did not
+	// carry. Taken before the first write so no row can predate it.
+	syncedAt := s.now().UTC()
+	written, err := s.applySnapshot(ctx, resp.Body, syncedAt)
 	if err != nil {
 		return written, err
+	}
+	// The snapshot applied in full, so it is authoritative: retire subjects
+	// it did not carry. An upsert-only sync would keep serving a token the
+	// registry has delisted, or one that lost every property, forever. This
+	// is deliberately after the error return above -- pruning against a
+	// partial snapshot would delete live subjects it never reached.
+	pruned, err := s.store.PruneTokenRegistryEntriesBefore(
+		ctx,
+		syncedAt,
+		nil,
+	)
+	if err != nil {
+		return written, fmt.Errorf("prune stale token registry entries: %w", err)
+	}
+	if pruned > 0 {
+		s.logger.Info(
+			"token registry entries retired",
+			"count", pruned,
+		)
 	}
 	etag := strings.TrimSpace(resp.Header.Get("ETag"))
 	if etag != "" && etag != previousETag {
@@ -372,6 +428,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 func (s *TokenRegistrySync) applySnapshot(
 	ctx context.Context,
 	body io.Reader,
+	syncedAt time.Time,
 ) (int, error) {
 	limited := io.LimitReader(body, s.maxBytes+1)
 	counter := &countingReader{reader: limited}
@@ -395,7 +452,12 @@ func (s *TokenRegistrySync) applySnapshot(
 		if len(batch) == 0 {
 			return nil
 		}
-		count, err := s.store.UpsertTokenRegistryEntries(ctx, batch, nil)
+		count, err := s.store.UpsertTokenRegistryEntries(
+			ctx,
+			batch,
+			syncedAt,
+			nil,
+		)
 		if err != nil {
 			return fmt.Errorf("store token registry entries: %w", err)
 		}

@@ -1427,6 +1427,27 @@ unchanged registry answers `304` and costs one request with no body. The tag is
 written only after the whole snapshot has been applied, so an interrupted sync
 retries in full rather than recording progress it did not make.
 
+Upserting alone cannot retire anything, so each snapshot is also reconciled
+against the table. Every row a snapshot carries is stamped with that snapshot's
+timestamp in `updated_at`; once the snapshot has applied in full, rows older
+than the stamp are deleted, because the snapshot did not carry them. That
+retires a subject the registry has delisted, and a subject that remains in the
+archive but has lost every property (which the parser yields as an empty entry
+the sync skips). The prune runs only on a fully applied snapshot — never on a
+`304`, which applies none, and never after a failed one, where it would delete
+live subjects the failed run had not reached yet. Turning `storeLogos` off
+needs no special handling: the upsert overwrites every property column, so the
+next snapshot clears previously stored logos.
+
+`Stop` waits for the worker to exit and does not abandon that wait when its
+context expires — it downgrades to a warning and keeps waiting, the same
+guarantee `koiosparity.Observer.Stop` makes for the same reason. Both teardown
+paths release the metadata store immediately afterwards
+(`node_shutdown.go` phase 3, `node_lifecycle.go`'s live storage swap), so a
+context-bounded stop would hand the worker a closed database. Cancelling the
+worker aborts any in-flight download, so the remaining wait is bounded by one
+store write rather than by the registry transfer.
+
 Logos are dropped before persisting unless `tokenRegistry.storeLogos` is set:
 base64 logo payloads are roughly 90% of registry bytes and most consumers only
 need name, ticker, and decimals. The whole sync is disabled by default, since

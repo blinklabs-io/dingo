@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -28,6 +29,7 @@ type tokenRegistryStore interface {
 	UpsertTokenRegistryEntries(
 		context.Context,
 		[]models.TokenRegistryEntry,
+		time.Time,
 		types.Txn,
 	) (int, error)
 	GetTokenRegistryEntry(
@@ -38,6 +40,8 @@ type tokenRegistryStore interface {
 
 //go:fix inline
 func intPtr(v int) *int { return new(v) }
+
+var testSyncedAt = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 const (
 	testSubjectNut  = "00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae6e7574636f696e"
@@ -72,6 +76,7 @@ func exerciseTokenRegistryStore(t *testing.T, store tokenRegistryStore) {
 				Decimals: new(6),
 			},
 		},
+		testSyncedAt,
 		nil,
 	)
 	require.NoError(t, err)
@@ -109,6 +114,7 @@ func TestSharedSQLStoreTokenRegistryUpsertReplacesProperties(t *testing.T) {
 			Ticker:   "OLD",
 			Decimals: new(2),
 		}},
+		testSyncedAt,
 		nil,
 	)
 	require.NoError(t, err)
@@ -122,6 +128,7 @@ func TestSharedSQLStoreTokenRegistryUpsertReplacesProperties(t *testing.T) {
 			Subject: testSubjectNut,
 			Name:    "new name",
 		}},
+		testSyncedAt.Add(time.Hour),
 		nil,
 	)
 	require.NoError(t, err)
@@ -155,6 +162,7 @@ func TestSharedSQLStoreTokenRegistryLookupNormalizesSubject(t *testing.T) {
 			Subject: testSubjectNut,
 			Name:    "nutcoin",
 		}},
+		testSyncedAt,
 		nil,
 	)
 	require.NoError(t, err)
@@ -173,7 +181,12 @@ func TestSharedSQLStoreTokenRegistryUpsertEmptyBatch(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
 
-	written, err := store.UpsertTokenRegistryEntries(t.Context(), nil, nil)
+	written, err := store.UpsertTokenRegistryEntries(
+		t.Context(),
+		nil,
+		testSyncedAt,
+		nil,
+	)
 
 	require.NoError(t, err)
 	require.Zero(t, written)
@@ -186,8 +199,91 @@ func TestSharedSQLStoreTokenRegistryRejectsBlankSubject(t *testing.T) {
 	_, err := store.UpsertTokenRegistryEntries(
 		t.Context(),
 		[]models.TokenRegistryEntry{{Name: "no subject"}},
+		testSyncedAt,
 		nil,
 	)
 
 	require.Error(t, err)
+}
+
+type tokenRegistryPruneStore interface {
+	tokenRegistryStore
+	PruneTokenRegistryEntriesBefore(
+		context.Context,
+		time.Time,
+		types.Txn,
+	) (int64, error)
+}
+
+// TestSharedSQLStoreTokenRegistryPrune covers the reconciliation half of a
+// snapshot: subjects the upstream registry has dropped must stop being served,
+// which an upsert-only sync cannot achieve on its own.
+func TestSharedSQLStoreTokenRegistryPrune(t *testing.T) {
+	t.Parallel()
+	var store tokenRegistryPruneStore
+	sqlStore, _ := newSharedSQLStore(t)
+	store = sqlStore
+	ctx := t.Context()
+
+	firstSync := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	_, err := store.UpsertTokenRegistryEntries(
+		ctx,
+		[]models.TokenRegistryEntry{
+			{Subject: testSubjectNut, Name: "nutcoin"},
+			{Subject: testSubjectDjed, Name: "Djed USD"},
+		},
+		firstSync,
+		nil,
+	)
+	require.NoError(t, err)
+
+	// A later snapshot carries only one of the two subjects.
+	secondSync := firstSync.Add(time.Hour)
+	_, err = store.UpsertTokenRegistryEntries(
+		ctx,
+		[]models.TokenRegistryEntry{
+			{Subject: testSubjectNut, Name: "nutcoin"},
+		},
+		secondSync,
+		nil,
+	)
+	require.NoError(t, err)
+
+	pruned, err := store.PruneTokenRegistryEntriesBefore(ctx, secondSync, nil)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(1), pruned)
+	survivor, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
+	require.NoError(t, err)
+	require.NotNil(t, survivor)
+	dropped, err := store.GetTokenRegistryEntry(testSubjectDjed, nil)
+	require.NoError(t, err)
+	require.Nil(t, dropped, "a subject absent from the snapshot must be gone")
+}
+
+func TestSharedSQLStoreTokenRegistryPruneKeepsCurrentSnapshot(t *testing.T) {
+	t.Parallel()
+	var store tokenRegistryPruneStore
+	sqlStore, _ := newSharedSQLStore(t)
+	store = sqlStore
+	ctx := t.Context()
+
+	syncedAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	_, err := store.UpsertTokenRegistryEntries(
+		ctx,
+		[]models.TokenRegistryEntry{{Subject: testSubjectNut, Name: "nutcoin"}},
+		syncedAt,
+		nil,
+	)
+	require.NoError(t, err)
+
+	// The cutoff is the snapshot's own stamp, so rows written by that
+	// snapshot are at the boundary and must survive it.
+	pruned, err := store.PruneTokenRegistryEntriesBefore(ctx, syncedAt, nil)
+
+	require.NoError(t, err)
+	require.Zero(t, pruned)
+	entry, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
+	require.NoError(t, err)
+	require.NotNil(t, entry)
 }

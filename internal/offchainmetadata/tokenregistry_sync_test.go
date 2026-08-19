@@ -29,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,11 +40,13 @@ const (
 
 // fakeTokenRegistryStore records what the syncer writes without a database.
 type fakeTokenRegistryStore struct {
-	mu        sync.Mutex
-	entries   map[string]models.TokenRegistryEntry
-	syncState map[string]string
-	upserts   int
-	upsertErr error
+	mu         sync.Mutex
+	entries    map[string]models.TokenRegistryEntry
+	syncState  map[string]string
+	upserts    int
+	prunes     int
+	upsertErr  error
+	upsertHook func()
 }
 
 func newFakeTokenRegistryStore() *fakeTokenRegistryStore {
@@ -56,8 +59,15 @@ func newFakeTokenRegistryStore() *fakeTokenRegistryStore {
 func (f *fakeTokenRegistryStore) UpsertTokenRegistryEntries(
 	_ context.Context,
 	entries []models.TokenRegistryEntry,
+	syncedAt time.Time,
 	_ types.Txn,
 ) (int, error) {
+	f.mu.Lock()
+	hook := f.upsertHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.upsertErr != nil {
@@ -65,9 +75,28 @@ func (f *fakeTokenRegistryStore) UpsertTokenRegistryEntries(
 	}
 	f.upserts++
 	for _, entry := range entries {
+		entry.UpdatedAt = syncedAt
 		f.entries[entry.Subject] = entry
 	}
 	return len(entries), nil
+}
+
+func (f *fakeTokenRegistryStore) PruneTokenRegistryEntriesBefore(
+	_ context.Context,
+	cutoff time.Time,
+	_ types.Txn,
+) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prunes++
+	var removed int64
+	for subject, entry := range f.entries {
+		if entry.UpdatedAt.Before(cutoff) {
+			delete(f.entries, subject)
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 func (f *fakeTokenRegistryStore) GetSyncState(
@@ -193,6 +222,19 @@ func newRegistryServer(t *testing.T, body []byte) *registryServer {
 	)
 	t.Cleanup(rs.Close)
 	return rs
+}
+
+func (rs *registryServer) setBody(body []byte, etag string) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.body = body
+	rs.etag = etag
+}
+
+func (rs *registryServer) setStatus(status int) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.status = status
 }
 
 func (rs *registryServer) requestCount() int {
@@ -492,4 +534,235 @@ func TestTokenRegistrySyncStartStop(t *testing.T) {
 	defer cancel()
 	require.NoError(t, sync.Stop(stopCtx))
 	require.NoError(t, sync.Stop(stopCtx), "Stop must be idempotent")
+}
+
+// TestNewTokenRegistrySyncBoundsCallerSuppliedClient covers a caller-supplied
+// HTTP client with no Timeout of its own: secureHTTPClient does not set one,
+// so without an explicit bound here a stalled source could hold SyncOnce open
+// past the configured whole-download budget indefinitely.
+func TestNewTokenRegistrySyncBoundsCallerSuppliedClient(t *testing.T) {
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:          newFakeTokenRegistryStore(),
+		Network:        "mainnet",
+		HTTPClient:     &http.Client{},
+		RequestTimeout: 42 * time.Second,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 42*time.Second, sync.client.Timeout)
+}
+
+func TestNewTokenRegistrySyncKeepsStricterCallerTimeout(t *testing.T) {
+	// A caller who asked for something tighter than the configured budget
+	// meant it; do not loosen it.
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:          newFakeTokenRegistryStore(),
+		Network:        "mainnet",
+		HTTPClient:     &http.Client{Timeout: 5 * time.Second},
+		RequestTimeout: 42 * time.Second,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 5*time.Second, sync.client.Timeout)
+}
+
+func TestNewTokenRegistrySyncBoundsDefaultClient(t *testing.T) {
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:          newFakeTokenRegistryStore(),
+		Network:        "mainnet",
+		RequestTimeout: 42 * time.Second,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 42*time.Second, sync.client.Timeout)
+}
+
+// TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry is the shutdown
+// safety property: node_shutdown.go closes the metadata store immediately
+// after Stop returns, so a Stop that gives up on an expired context would
+// leave the worker free to use a closed store. Stop must therefore keep
+// waiting for the worker to exit even once its context is done.
+func TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "", "",
+		),
+	})
+	server := newRegistryServer(t, body)
+	store := newFakeTokenRegistryStore()
+	// Block the worker inside a store write, where cancelling its context
+	// does not release it. This is the case a context-bounded Stop would
+	// return early on.
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	store.upsertHook = func() {
+		close(entered)
+		<-release
+	}
+	sync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.Interval = time.Hour
+	})
+	require.NoError(t, sync.Start(t.Context()))
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"worker did not reach the store write",
+	)
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped := make(chan error, 1)
+	go func() { stopped <- sync.Stop(expired) }()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while the worker was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the worker drained")
+	}
+	// The worker goroutine has actually exited, not merely been signaled.
+	select {
+	case <-sync.done:
+	default:
+		t.Fatal("worker goroutine still running after Stop returned")
+	}
+}
+
+// TestTokenRegistrySyncRetiresSubjectsDroppedUpstream is the reconciliation
+// property: an upsert-only sync would serve a delisted token's metadata
+// forever, because nothing in a later snapshot mentions it.
+func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 2)
+
+	// The next snapshot no longer carries DJED.
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+	}), `"etag2"`)
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	entries := store.snapshot()
+	require.Contains(t, entries, syncSubjectNut)
+	require.NotContains(t, entries, syncSubjectDjed)
+}
+
+// TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties covers the other
+// way a subject stops being useful: it stays in the archive but its properties
+// are removed, so the parser yields an empty entry the sync skips. Skipping
+// alone would leave the old row serving stale metadata.
+func TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 1)
+
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": `{"subject":"` + syncSubjectNut + `"}`,
+	}), `"etag2"`)
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.NotContains(t, store.snapshot(), syncSubjectNut)
+}
+
+// TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot is the safety half:
+// pruning against a snapshot that never finished would delete live subjects
+// the failed run simply had not reached yet.
+func TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 1)
+	// The first, successful sync legitimately reconciles; only the failed one
+	// that follows must not.
+	prunesAfterSuccess := store.prunes
+
+	server.setStatus(http.StatusInternalServerError)
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.Error(t, err)
+	require.Equal(
+		t,
+		prunesAfterSuccess,
+		store.prunes,
+		"a failed snapshot must not prune",
+	)
+	require.Contains(t, store.snapshot(), syncSubjectNut)
+}
+
+// TestTokenRegistrySyncDoesNotPruneOnNotModified: a 304 applies no snapshot,
+// so there is nothing to reconcile against.
+func TestTokenRegistrySyncDoesNotPruneOnNotModified(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+	}))
+	server.notModifiedOnTag = true
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	prunesAfterFirst := store.prunes
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, prunesAfterFirst, store.prunes)
+	require.Contains(t, store.snapshot(), syncSubjectNut)
+}
+
+// TestTokenRegistrySyncClearsLogosWhenDisabled documents that the logo column
+// needs no special handling: the upsert overwrites every property column, so
+// turning storeLogos off clears previously stored logos on the next snapshot.
+func TestTokenRegistrySyncClearsLogosWhenDisabled(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "iVBORw0KGgoAAAA=",
+		),
+	})
+	server := newRegistryServer(t, body)
+	store := newFakeTokenRegistryStore()
+	withLogos := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.StoreLogos = true
+	})
+	_, err := withLogos.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, store.snapshot()[syncSubjectNut].Logo)
+
+	// Operator restarts with logo storage turned off.
+	withoutLogos := newTestSync(t, store, server.URL, nil)
+	_, err = withoutLogos.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Empty(t, store.snapshot()[syncSubjectNut].Logo)
 }

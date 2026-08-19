@@ -1528,11 +1528,30 @@ type MetadataStore interface {
 	// subject, so a property the upstream registry has dropped stops
 	// being served rather than surviving from an earlier sync. Written
 	// only by the API-mode token registry sync.
+	//
+	// syncedAt stamps every written row with the timestamp of the
+	// snapshot being applied, so PruneTokenRegistryEntriesBefore can
+	// afterwards find rows that snapshot did not carry. Every batch of
+	// one snapshot must pass the same value.
 	UpsertTokenRegistryEntries(
 		ctx context.Context,
 		entries []models.TokenRegistryEntry,
+		syncedAt time.Time,
 		txn types.Txn,
 	) (int, error)
+
+	// PruneTokenRegistryEntriesBefore deletes registry rows last
+	// confirmed by a snapshot older than cutoff and returns the number
+	// removed. Callers pass the same timestamp they gave
+	// UpsertTokenRegistryEntries for the snapshot just applied, so that
+	// snapshot's rows survive and everything it did not carry is
+	// removed. This is what retires a subject the upstream registry has
+	// dropped. Run only after a snapshot has fully applied.
+	PruneTokenRegistryEntriesBefore(
+		ctx context.Context,
+		cutoff time.Time,
+		txn types.Txn,
+	) (int64, error)
 
 	// GetTokenRegistryEntry returns the registry properties for a
 	// subject, or nil when the registry has nothing for it. Backs the
@@ -1542,14 +1561,6 @@ type MetadataStore interface {
 		subject string,
 		txn types.Txn,
 	) (*models.TokenRegistryEntry, error)
-
-	// CountTokenRegistryEntries returns the number of stored registry
-	// subjects, letting the syncer distinguish a sync that is fetching
-	// but persisting nothing from a working one.
-	CountTokenRegistryEntries(
-		ctx context.Context,
-		txn types.Txn,
-	) (int64, error)
 
 	// GetRetiringPools returns pools whose latest retirement
 	// certificate targets an epoch after currentEpoch and has not been

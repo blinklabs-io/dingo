@@ -68,17 +68,6 @@ func (q *Queries) ClearSyncState(ctx context.Context) error {
 	return err
 }
 
-const countTokenRegistryEntries = `-- name: CountTokenRegistryEntries :one
-SELECT COUNT(*) FROM token_registry_entry
-`
-
-func (q *Queries) CountTokenRegistryEntries(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countTokenRegistryEntries)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const countTransactionsByMetadataLabel = `-- name: CountTransactionsByMetadataLabel :one
 SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?
 `
@@ -3796,6 +3785,22 @@ func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnap
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const pruneTokenRegistryEntriesStaleBefore = `-- name: PruneTokenRegistryEntriesStaleBefore :execrows
+DELETE FROM token_registry_entry
+WHERE updated_at < ?
+`
+
+// Reconciles the table against a completed snapshot: every row the snapshot
+// carried was stamped with its timestamp, so anything older was not in the
+// snapshot and is no longer published upstream.
+func (q *Queries) PruneTokenRegistryEntriesStaleBefore(ctx context.Context, updatedAt sql.NullTime) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneTokenRegistryEntriesStaleBefore, updatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const releaseFallbackRewardSnapshotGuard = `-- name: ReleaseFallbackRewardSnapshotGuard :execrows

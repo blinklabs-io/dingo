@@ -14,7 +14,6 @@ type Querier interface {
 	BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillNodeSettingsNetworkParams) (int64, error)
 	ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffchainMetadataFetchParams) (int64, error)
 	ClearSyncState(ctx context.Context) error
-	CountTokenRegistryEntries(ctx context.Context) (int64, error)
 	CountTransactionsByMetadataLabel(ctx context.Context, label sql.NullString) (int64, error)
 	CountTransactionsByPaymentCred(ctx context.Context, paymentKey []byte) (int64, error)
 	CountTransactionsInSlotRange(ctx context.Context, arg CountTransactionsInSlotRangeParams) (int64, error)
@@ -161,6 +160,10 @@ type Querier interface {
 	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
 	InsertOffchainMetadataPointer(ctx context.Context, arg InsertOffchainMetadataPointerParams) (int64, error)
 	InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error)
+	// Reconciles the table against a completed snapshot: every row the snapshot
+	// carried was stamped with its timestamp, so anything older was not in the
+	// snapshot and is no longer published upstream.
+	PruneTokenRegistryEntriesStaleBefore(ctx context.Context, updatedAt sql.NullTime) (int64, error)
 	ReleaseFallbackRewardSnapshotGuard(ctx context.Context, id int64) (int64, error)
 	RestoreCommitteeMembersDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
 	RestoreConstitutionsDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error

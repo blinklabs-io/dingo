@@ -1188,5 +1188,9 @@ SELECT
 FROM token_registry_entry
 WHERE subject = ?;
 
--- name: CountTokenRegistryEntries :one
-SELECT COUNT(*) FROM token_registry_entry;
+-- name: PruneTokenRegistryEntriesStaleBefore :execrows
+-- Reconciles the table against a completed snapshot: every row the snapshot
+-- carried was stamped with its timestamp, so anything older was not in the
+-- snapshot and is no longer published upstream.
+DELETE FROM token_registry_entry
+WHERE updated_at < ?;

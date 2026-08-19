@@ -272,8 +272,10 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 				fmt.Errorf("token registry sync shutdown: %w", stopErr),
 			)
 		}
-		// Cleared so reinitializeStorage's gating rebuilds it rather than
-		// restarting an instance bound to the closed store.
+		// Stop does not return until the worker has exited (see its doc
+		// comment), so by here nothing can still reach the store being
+		// closed. Cleared so reinitializeStorage's gating rebuilds it
+		// rather than restarting an instance bound to the closed store.
 		n.tokenRegistrySync = nil
 	}
 	// midnightIndexer and chainManager/chainsyncState have no corresponding

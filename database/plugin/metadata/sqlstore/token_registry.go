@@ -34,6 +34,11 @@ import (
 // registry has dropped stops being served rather than surviving from an
 // earlier sync.
 //
+// syncedAt stamps every written row with the timestamp of the snapshot being
+// applied, so that PruneTokenRegistryEntriesBefore can afterwards identify
+// rows the snapshot did not carry. All batches of one snapshot must pass the
+// same value, or a later batch would make earlier ones look stale.
+//
 // Entries are written one statement at a time rather than as a single
 // multi-row INSERT: a registry sync is an infrequent background pass whose
 // latency nobody waits on, and a per-row statement keeps one malformed subject
@@ -41,6 +46,7 @@ import (
 func (s *Store) UpsertTokenRegistryEntries(
 	ctx context.Context,
 	entries []models.TokenRegistryEntry,
+	syncedAt time.Time,
 	txn types.Txn,
 ) (int, error) {
 	if len(entries) == 0 {
@@ -52,7 +58,7 @@ func (s *Store) UpsertTokenRegistryEntries(
 		return 0, err
 	}
 	q := s.operationalQueries(db)
-	now := time.Now().UTC()
+	now := syncedAt.UTC()
 	written := 0
 	for idx := range entries {
 		entry := &entries[idx]
@@ -113,24 +119,35 @@ func (s *Store) GetTokenRegistryEntry(
 	return &ret, nil
 }
 
-// CountTokenRegistryEntries returns the number of stored registry subjects.
-// The syncer logs it so operators can tell a working sync from one that is
-// fetching but persisting nothing.
-func (s *Store) CountTokenRegistryEntries(
+// PruneTokenRegistryEntriesBefore deletes registry rows last confirmed by a
+// snapshot older than cutoff, returning the number removed. Callers pass the
+// timestamp they gave UpsertTokenRegistryEntries for the snapshot just
+// applied, which leaves that snapshot's own rows (stamped exactly at the
+// cutoff) in place and removes everything it did not carry.
+//
+// This is what stops a subject the upstream registry has dropped, or one that
+// lost every property, from being served forever by an upsert-only sync. It
+// must run only after a snapshot has fully applied: pruning against a partial
+// snapshot would delete live subjects the failed run never reached.
+func (s *Store) PruneTokenRegistryEntriesBefore(
 	ctx context.Context,
+	cutoff time.Time,
 	txn types.Txn,
 ) (int64, error) {
 	ctx = nonNilContext(ctx)
-	db, err := s.readDBFromTxn(txn)
+	db, err := s.dbFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	q := s.operationalQueries(db)
-	count, err := q.CountTokenRegistryEntries(ctx)
+	pruned, err := q.PruneTokenRegistryEntriesStaleBefore(
+		ctx,
+		sql.NullTime{Time: cutoff.UTC(), Valid: true},
+	)
 	if err != nil {
-		return 0, fmt.Errorf("count token registry entries: %w", err)
+		return 0, fmt.Errorf("prune token registry entries: %w", err)
 	}
-	return count, nil
+	return pruned, nil
 }
 
 // normalizeTokenRegistrySubject lower-cases and trims a subject so that a
