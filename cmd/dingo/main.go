@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -260,6 +261,13 @@ func closeProfileFile(stderr io.Writer, f *os.File, kind string) {
 }
 
 func main() {
+	// run's body executes as a normal function return -- not os.Exit --
+	// specifically so its deferred CPU-profile cleanup always runs before
+	// the process actually terminates, on every path out of run().
+	os.Exit(run())
+}
+
+func run() int {
 	// Parse profiling flags before cobra setup (handle both --flag=value and --flag value syntax)
 	cpuprofile := ""
 	memprofile := ""
@@ -310,12 +318,12 @@ func main() {
 		) //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		defer closeProfileFile(os.Stderr, f, "CPU")
 		if err := pprof.StartCPUProfile(f); err != nil {
 			fmt.Fprintf(os.Stderr, "could not start CPU profile: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		defer func() {
 			pprof.StopCPUProfile()
@@ -361,11 +369,10 @@ Database Workers:
 		// PersistentPreRunE, not explicit `--help` or `-h` output, so this
 		// does not touch the help text itself.
 		SilenceUsage: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
-				slog.Error("no config found in context")
-				os.Exit(1)
+				return errors.New("no config found in context")
 			}
 
 			// When no subcommand given, check RunMode from config.
@@ -384,6 +391,7 @@ Database Workers:
 				// Empty or unrecognized RunMode defaults to serve mode
 				serveRun(cmd, args, cfg)
 			}
+			return nil
 		},
 	}
 
@@ -503,7 +511,5 @@ Database Workers:
 		}
 	}
 
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
+	return exitCode
 }
