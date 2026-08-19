@@ -65,11 +65,13 @@ const (
 	// DetermineStatus's dedicated no-op case for these three).
 	CategoryAcctZeroReward = "acct_zero_reward"
 	// CategoryAcctNewlyRegistered marks a stake address present in this
-	// epoch's persisted koios_account_checked universe but absent from the
-	// previous epoch's — see Cache.GetAccountUniverseForEpoch.
+	// stake epoch's Dingo-committed reward_account_output universe but
+	// absent from the previous stake epoch's — see
+	// check.go's accountLifecycleMismatches/dingoRewardAddressSet.
 	CategoryAcctNewlyRegistered = "acct_newly_registered"
 	// CategoryAcctDeregistered marks a stake address present in the previous
-	// epoch's persisted universe but absent from this epoch's.
+	// stake epoch's reward_account_output universe but absent from this
+	// epoch's.
 	CategoryAcctDeregistered = "acct_deregistered"
 )
 

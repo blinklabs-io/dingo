@@ -15,6 +15,9 @@
 package koiosparity
 
 import (
+	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -60,7 +63,18 @@ func TestChunkAddressesByCountAndSizeByteBoundary(t *testing.T) {
 	addr := strings.Repeat("a", 10)
 	addrs := []string{addr, addr, addr, addr, addr, addr, addr}
 	chunks := chunkAddressesByCountAndSize(addrs, 1_000_000, 40)
-	require.NotEmpty(t, chunks)
+	// Asserting the exact chunk count (not just a per-chunk upper bound)
+	// matters: a regression that silently ignored maxBytes entirely would
+	// still satisfy "every chunk has <=3 addresses" and "total == 7" if it
+	// happened to return one single 7-address chunk, since chunks[:len-1]
+	// would then be empty and every one of its (zero) elements trivially
+	// satisfies LessOrEqual.
+	require.Len(
+		t,
+		chunks,
+		3,
+		"7x13-byte addresses @ maxBytes=40 must split into chunks of 3,3,1",
+	)
 	for _, c := range chunks[:len(chunks)-1] {
 		require.LessOrEqual(t, len(c), 3)
 	}
@@ -109,23 +123,56 @@ func TestChunkAddressesByCountAndSizeZeroMaxCountUsesDefault(t *testing.T) {
 }
 
 // TestChunkAddressesByCountAndSizeDeterministicAcrossRepeatedCalls proves the
-// same input plus the same bounds always produce byte-for-byte identical
-// chunk boundaries — the property dingo #3099's content-addressed
-// chunk-hash resume mechanism depends on.
+// property dingo #3099's content-addressed chunk-hash resume mechanism
+// actually depends on: the same underlying address *set*, fed in a
+// different order, must still produce identical chunk boundaries once
+// sorted — matching what every real caller does (fetchAccountRewardsForEpoch
+// sorts the address universe before calling this function; see its own doc
+// comment on why). Feeding the identical, unsorted slice to both calls would
+// only prove this function is a pure/deterministic function of its literal
+// input order, not the actual property that matters: BuildAccountAddressUniverse
+// does not itself guarantee stable ordering across calls, so a resumed fetch
+// must still land on the same chunk hashes even if the universe arrives in a
+// different order the second time.
 func TestChunkAddressesByCountAndSizeDeterministicAcrossRepeatedCalls(
 	t *testing.T,
 ) {
 	addrs := make([]string, 237)
 	for i := range addrs {
-		addrs[i] = strings.Repeat("z", (i%7)+1)
+		addrs[i] = strings.Repeat("z", (i%7)+1) + fmt.Sprintf("%03d", i)
 	}
-	first := chunkAddressesByCountAndSize(addrs, 20, 200)
-	second := chunkAddressesByCountAndSize(addrs, 20, 200)
+
+	// A second copy of the exact same set, in a rotated (different) order.
+	rotated := make([]string, len(addrs))
+	copy(rotated, addrs[len(addrs)/3:])
+	copy(rotated[len(addrs)-len(addrs)/3:], addrs[:len(addrs)/3])
+	require.ElementsMatch(
+		t,
+		addrs,
+		rotated,
+		"test setup sanity check: same set, different order",
+	)
+	require.NotEqual(
+		t,
+		addrs,
+		rotated,
+		"test setup sanity check: order must actually differ",
+	)
+
+	sortedAddrs := slices.Clone(addrs)
+	sort.Strings(sortedAddrs)
+	sortedRotated := slices.Clone(rotated)
+	sort.Strings(sortedRotated)
+
+	first := chunkAddressesByCountAndSize(sortedAddrs, 20, 200)
+	second := chunkAddressesByCountAndSize(sortedRotated, 20, 200)
 	require.Equal(
 		t,
 		first,
 		second,
-		"same input + same bounds must always produce identical chunk boundaries (content-addressed resume depends on this)",
+		"the same address set, sorted before chunking regardless of its "+
+			"original arrival order, must always produce identical chunk "+
+			"boundaries (content-addressed resume depends on this)",
 	)
 }
 

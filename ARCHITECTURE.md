@@ -4945,7 +4945,15 @@ every one of #3097's own tests passes unmodified.
   checkpointed, `Cache.GetStagedAccountRows` reads them all back and calls
   the existing, unmodified `Cache.CommitAccountRewardsForEpoch` exactly
   once — the same atomic replace-and-gate #3097 always used, now fed from
-  durable staging instead of an in-memory slice.
+  durable staging instead of an in-memory slice. **Neither staging table is
+  ever bulk-cleared after a successful commit** — `koios_account_checked`
+  must persist indefinitely since the zero-reward/lifecycle reporting below
+  reads it long after the fetch completes, and `koios_account_fetch_staged_rows`
+  must persist too so a later idempotent re-run of an already-complete epoch
+  (e.g. `--force-refresh` with an unchanged universe) finds real rows to
+  re-commit instead of committing an empty set over the correct one; the two
+  tables grow at the same rate `koios_account_rewards` itself already does,
+  which is an accepted characteristic of this cache, not a new problem.
 - **Selective invalidation on universe/chunk-plan change.**
   `Cache.InvalidateStaleAccountChunks` prunes staged rows/checked markers for
   any chunk hash no longer present in the current plan before dispatch —
@@ -4953,7 +4961,23 @@ every one of #3097's own tests passes unmodified.
   grouping actually changed (a changed address universe, or an operator
   tuning `--account-chunk-size`/`--account-chunk-max-bytes` between runs) are
   invalidated; an unaffected chunk keeps its checkpointed progress and still
-  counts as done.
+  counts as done. Both this and `Cache.SaveAccountFetchChunkProgress` run
+  their multi-table deletes/inserts inside a single transaction each, so a
+  crash partway through can never leave `koios_account_checked` pointing at
+  a chunk whose staged rows are gone (which `GetDoneAccountChunkHashes` would
+  otherwise still report as "done").
+- **A checkpointed empty chunk is not trusted during the grace window.**
+  A subtle interaction with the zero-row/grace-hours gate below: if Koios's
+  publishing lag means a chunk returns zero rows early in the grace window,
+  that chunk still checkpoints (a real HTTP success, just an empty result).
+  Naively treating it as "done" forever would mean a later retry — even
+  within the same still-open grace window — would never re-ask Koios and
+  could eventually commit a stale, empty result as `complete = true` once
+  `graceHours` elapses, silently losing rewards Koios published in the
+  meantime. `fetchAccountRewardsForEpoch` therefore only trusts a checkpointed
+  chunk as skippable when either it has genuinely non-empty staged rows
+  (`Cache.GetChunkHashesWithStagedRows`) or the grace window has already
+  closed by the time of the call — otherwise it's re-dispatched.
 - **Page-safety hardening.** `/account_reward_history` is not usably
   Range-paginated — confirmed live against preview: repeated requests with
   different `Range` values return the same first row window rather than
@@ -4963,25 +4987,49 @@ every one of #3097's own tests passes unmodified.
   answer — there is no reliable way to fetch "the rest," so the only safe
   response is to refuse and require a smaller `--account-chunk-size`, never
   silently truncate. `get()`/`post()` also now bound every response body
-  read at `koiosMaxResponseBytes` (32 MiB), a defensive ceiling neither had
-  before.
-- **Zero-reward and lifecycle reporting.** `koios_account_checked` also
-  answers two dimensions #3097's `CompareAccountEpoch` structurally cannot:
-  it only ever compares keys present in at least one side's row map, so a
+  read at `koiosMaxResponseBytes` (32 MiB) via `readBodyLimited`, a
+  defensive ceiling neither had before; `errKoiosResponseTooLarge` wraps
+  `ErrKoiosPermanent` so an oversized response is never blindly retried,
+  either within one call or automatically on a later `fetch` run (the fix is
+  a smaller configured chunk size, not a retry). Chunking also reserves a
+  fixed `koiosAccountRequestEnvelopeOverhead` (64 bytes) from the configured
+  `--account-chunk-max-bytes` budget before chunking, since
+  `chunkAddressesByCountAndSize` only bounds the address array's own encoded
+  size, not the `{"_stake_addresses":[...],"_epoch_no":N}` wrapper around
+  it — without this, the true request body could exceed a small configured
+  budget by that fixed amount on every chunk.
+- **Zero-reward and lifecycle reporting.** `accountLifecycleMismatches`
+  (`check.go`), appended to `compareEpochAccounts`'s result, answers two
+  dimensions #3097's `CompareAccountEpoch` structurally cannot: it only ever
+  compares keys present in at least one side's row map, so a
   confirmed-zero-reward address (Koios answered, no reward, so no row is
-  ever emitted for it) never enters that comparison at all, and #3097's
-  address universe is a single flat list reused across every epoch in one
-  run, with no per-epoch persisted snapshot to diff for newly-registered/
-  deregistered accounts. `accountLifecycleMismatches` (`check.go`), appended
-  to `compareEpochAccounts`'s result, reports both via three new categories —
-  `CategoryAcctZeroReward`, `CategoryAcctNewlyRegistered`,
-  `CategoryAcctDeregistered` — all purely informational: `DetermineStatus`
-  has a dedicated no-op case for them, so none can ever turn an otherwise
-  clean epoch into `FAIL` or `ERROR`. The lifecycle diff only trusts the
-  previous epoch's persisted universe once that epoch's own
-  `koios_account_coverage.complete` is true; an absent or incomplete
-  previous fetch disables the report entirely rather than flagging every
-  current address as newly registered.
+  ever emitted for it) never enters that comparison at all — this half is
+  read from `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`).
+  Newly-registered/deregistered accounts are diffed from **Dingo's own
+  epoch-scoped `reward_account_output` rows** at the current and previous
+  stake epoch (`dingo.GetRewardAccountOutputs`, decoded via
+  `dingoRewardAddressSet`) — deliberately *not* from
+  `koios_account_checked`'s persisted "requested universe": that set unions
+  in Koios's own all-time historical account list
+  (`BuildAccountAddressUniverse`), resolved once per `Fetch` run and reused
+  across every epoch, so it stays essentially static regardless of whether
+  an account is genuinely active/delegated in a given epoch — diffing
+  against it would make the lifecycle categories reflect almost nothing for
+  a Koios-known account, since it never leaves the union. Every row from
+  either dimension is reported as one aggregate `CheckMismatch` per category
+  (`aggregateAccountLifecycleMismatch`) — a total count plus a sample capped
+  at `maxAccountLifecycleSample` (20) addresses — rather than one row per
+  address: zero-reward accounts in particular can be the majority of a whole
+  network's address universe, and one-row-per-address would scale cache
+  growth, insert time, and JSON report size with the size of that universe.
+  All three categories — `CategoryAcctZeroReward`,
+  `CategoryAcctNewlyRegistered`, `CategoryAcctDeregistered` — are purely
+  informational: `DetermineStatus` has a dedicated no-op case for them, so
+  none can ever turn an otherwise clean epoch into `FAIL` or `ERROR`. A
+  genuine cache or Dingo DB error from either lookup is reported as
+  `CategoryDBError` rather than silently swallowed; only `stakeEpoch == 0`
+  (no valid previous stake epoch to diff against) disables the
+  newly-registered/deregistered half specifically.
 - **Configuration.** `--account-chunk-size`/`--account-chunk-max-bytes`
   (standalone CLI: `fetch`/`run`/`watch`) thread through `FetchConfig`/
   `ObserverConfig` the same way `GraceHours` already does, down to

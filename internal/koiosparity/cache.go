@@ -704,6 +704,38 @@ func (c *Cache) GetDoneAccountChunkHashes(
 	return done, rows.Err()
 }
 
+// GetChunkHashesWithStagedRows returns the set of chunk hashes for
+// (network, epoch) that have at least one row in
+// koios_account_fetch_staged_rows — i.e. chunks whose checkpointed result
+// was genuinely non-empty, as opposed to a chunk that checkpointed with zero
+// rows (see fetchAccountRewardsForEpoch's grace-window trust logic: an
+// empty-but-done chunk checkpointed while Koios's account_reward_history
+// publishing lag was still possible must not be blindly trusted as final
+// until that grace window has actually closed).
+func (c *Cache) GetChunkHashesWithStagedRows(
+	network string,
+	epoch uint64,
+) (map[string]bool, error) {
+	rows, err := c.db.Query(
+		`SELECT DISTINCT chunk_hash FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ?`,
+		network,
+		epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	withRows := make(map[string]bool)
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		withRows[hash] = true
+	}
+	return withRows, rows.Err()
+}
+
 // GetStagedAccountRows returns every checkpointed row for (network, epoch)
 // across all committed chunks — read back once every chunk in the current
 // plan is done, then passed as-is to the existing, unmodified
@@ -737,25 +769,6 @@ func (c *Cache) GetStagedAccountRows(
 	return out, rows.Err()
 }
 
-// ClearAccountFetchStaging deletes checkpoint staging (both staged rows and
-// checked markers) for (network, epoch) — called after a successful
-// complete=true CommitAccountRewardsForEpoch, since the staged data has now
-// been folded into the authoritative koios_account_rewards/koios_account_coverage
-// and no longer needs to survive for resume purposes.
-func (c *Cache) ClearAccountFetchStaging(network string, epoch uint64) error {
-	if _, err := c.db.Exec(
-		`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ?`,
-		network, epoch,
-	); err != nil {
-		return err
-	}
-	_, err := c.db.Exec(
-		`DELETE FROM koios_account_checked WHERE network = ? AND epoch = ?`,
-		network, epoch,
-	)
-	return err
-}
-
 // InvalidateStaleAccountChunks deletes staged rows/checked markers for any
 // chunk hash not present in currentChunkHashes — dingo #3099's "invalidate/
 // re-fetch affected chunks when request parameters or reference data change"
@@ -764,6 +777,15 @@ func (c *Cache) ClearAccountFetchStaging(network string, epoch uint64) error {
 // longer part of the current plan are pruned; an unaffected chunk (same
 // address set under the new plan) keeps its checkpointed progress and still
 // counts as done.
+//
+// Every stale chunk's pair of deletes — and every stale chunk together —
+// runs in one transaction. Without this, a crash partway through (either
+// between a chunk's two deletes, or between two chunks) could delete a
+// chunk's staged rows but leave its koios_account_checked markers in place;
+// GetDoneAccountChunkHashes would then still report that chunk as done, so
+// fetchAccountRewardsForEpoch would skip it and GetStagedAccountRows would
+// return nothing for it — letting the epoch commit complete=true with a
+// silently incomplete reward set, exactly what #3099 must prevent.
 func (c *Cache) InvalidateStaleAccountChunks(
 	network string,
 	epoch uint64,
@@ -780,24 +802,41 @@ func (c *Cache) InvalidateStaleAccountChunks(
 	for _, h := range currentChunkHashes {
 		current[h] = true
 	}
+	var stale []string
 	for hash := range done {
-		if current[hash] {
-			continue
+		if !current[hash] {
+			stale = append(stale, hash)
 		}
-		if _, err := c.db.Exec(
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, hash := range stale {
+		if _, err = tx.Exec(
 			`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
 			network, epoch, hash,
 		); err != nil {
 			return err
 		}
-		if _, err := c.db.Exec(
+		if _, err = tx.Exec(
 			`DELETE FROM koios_account_checked WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
 			network, epoch, hash,
 		); err != nil {
 			return err
 		}
 	}
-	return nil
+	err = tx.Commit()
+	return err
 }
 
 // GetZeroRewardAccountsForEpoch returns addresses Koios confirmed it

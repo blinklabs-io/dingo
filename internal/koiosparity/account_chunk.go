@@ -29,6 +29,19 @@ import (
 // --account-chunk-max-bytes down.
 const koiosAccountChunkMaxBytesDefault = 32 * 1024
 
+// koiosAccountRequestEnvelopeOverhead reserves space, out of a configured
+// --account-chunk-max-bytes budget, for the fixed JSON wrapper around
+// /account_reward_history's address array:
+// {"_stake_addresses":[...],"_epoch_no":18446744073709551615} — the
+// "_stake_addresses":/"_epoch_no": key names, braces, and the widest
+// possible uint64 epoch number add up to roughly 60 bytes regardless of how
+// many addresses are in the array; chunkAddressesByCountAndSize itself only
+// bounds the array's own encoded size, so fetchAccountRewardsForEpoch
+// subtracts this constant from the configured budget before chunking —
+// otherwise the true request body could exceed the configured bound by this
+// fixed amount every time.
+const koiosAccountRequestEnvelopeOverhead = 64
+
 // hashAddressChunk returns a content-addressed identifier for one chunk's
 // address set: sha256 of the addresses joined in the given order. Called
 // with an already-sorted chunk (chunkAddressesByCountAndSize's chunks are

@@ -15,18 +15,29 @@
 package koiosparity
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // TestAccountLifecycleMismatchesReportsZeroReward proves dingo #3099's
 // zero-reward-confirmed reporting: an address Koios answered for with no
 // reward rows is reported via CategoryAcctZeroReward — a dimension #3097's
 // merged CompareAccountEpoch structurally cannot see (it only ever compares
-// keys present in at least one side's row map).
+// keys present in at least one side's row map). Reported as one aggregate
+// row (count + a capped sample), not one row per address — see
+// aggregateAccountLifecycleMismatch's doc comment. stakeEpoch=0 skips the
+// separate lifecycle (newly-registered/deregistered) diff entirely, keeping
+// this test focused on zero-reward alone.
 func TestAccountLifecycleMismatchesReportsZeroReward(t *testing.T) {
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
@@ -46,17 +57,27 @@ func TestAccountLifecycleMismatchesReportsZeroReward(t *testing.T) {
 		now,
 	))
 
-	mismatches := accountLifecycleMismatches(cache, "preview", 500, now)
+	mismatches := accountLifecycleMismatches(
+		context.Background(), cache, nil, "preview", 500, 0, nil, now,
+	)
 	require.Len(t, mismatches, 1)
-	require.Equal(t, "addr2", mismatches[0].StakeAddress)
 	require.Equal(t, CategoryAcctZeroReward, mismatches[0].Category)
-	require.Equal(t, "0", mismatches[0].KoiosValue)
+	require.Equal(
+		t,
+		"1",
+		mismatches[0].KoiosValue,
+		"KoiosValue carries the affected-address count, not a single address",
+	)
+	require.Contains(t, mismatches[0].DingoValue, "addr2")
 }
 
 // TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered proves
 // the epoch-over-epoch universe diff: an address present in the current
-// epoch's checked set but not the previous epoch's is newly registered; the
-// reverse is deregistered.
+// stake epoch's Dingo-committed reward_account_output rows but not the
+// previous stake epoch's is newly registered; the reverse is deregistered.
+// Uses a real DingoDB (sqlite fixture), not a hand-rolled fake, per this
+// package's existing RewardParitySource test convention
+// (dingo_db_test.go/fetch_accounts_test.go).
 func TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered(
 	t *testing.T,
 ) {
@@ -64,89 +85,192 @@ func TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered(
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	addrOldKey := testPoolKeyHash(t, 0x01)
+	addrBothKey := testPoolKeyHash(t, 0x02)
+	addrNewKey := testPoolKeyHash(t, 0x03)
+	poolKey := testPoolKeyHash(t, 0xAA)
+
+	// Previous stake epoch (498): addrOld, addrBoth.
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 498, StakingKey: addrOldKey, PoolKeyHash: poolKey,
+		RewardType: "member", Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 498, StakingKey: addrBothKey, PoolKeyHash: poolKey,
+		RewardType: "member", Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+
+	// Current stake epoch (499): addrBoth, addrNew.
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 499, StakingKey: addrBothKey, PoolKeyHash: poolKey,
+		RewardType: "member", Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 499, StakingKey: addrNewKey, PoolKeyHash: poolKey,
+		RewardType: "member", Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+
+	ctx := context.Background()
+	currentOutputs, err := dingo.GetRewardAccountOutputs(ctx, 499)
+	require.NoError(t, err)
+	require.Len(t, currentOutputs, 2)
+
 	now := time.Now()
-	// Previous epoch (499): addrOld, addrBoth checked; coverage complete.
-	require.NoError(t, cache.SaveAccountFetchChunkProgress(
-		"preview", 499, "chunkA", nil, []string{"addrOld", "addrBoth"}, now,
-	))
-	require.NoError(t, cache.CommitAccountRewardsForEpoch(
-		"preview", 499, nil, 2, true, now,
-	))
+	mismatches := accountLifecycleMismatches(
+		ctx, cache, dingo, "preview", 500, 499, currentOutputs, now,
+	)
 
-	// Current epoch (500): addrBoth, addrNew checked.
-	require.NoError(t, cache.SaveAccountFetchChunkProgress(
-		"preview", 500, "chunkA", nil, []string{"addrBoth", "addrNew"}, now,
-	))
-
-	mismatches := accountLifecycleMismatches(cache, "preview", 500, now)
+	wantNewAddr, err := StakeAddressFromCredential(addrNewKey, 0)
+	require.NoError(t, err)
+	wantOldAddr, err := StakeAddressFromCredential(addrOldKey, 0)
+	require.NoError(t, err)
 
 	var sawNew, sawDeregistered bool
 	for _, m := range mismatches {
 		switch m.Category {
 		case CategoryAcctNewlyRegistered:
-			require.Equal(t, "addrNew", m.StakeAddress)
+			require.Equal(t, "1", m.KoiosValue)
+			require.Contains(t, m.DingoValue, wantNewAddr)
 			sawNew = true
 		case CategoryAcctDeregistered:
-			require.Equal(t, "addrOld", m.StakeAddress)
+			require.Equal(t, "1", m.KoiosValue)
+			require.Contains(t, m.DingoValue, wantOldAddr)
 			sawDeregistered = true
-		case CategoryAcctZeroReward:
-			// Both addresses have zero reward rows here (nil rows passed
-			// above) — expected alongside the lifecycle categories, not
-			// asserted on further in this test.
 		default:
 			t.Fatalf("unexpected category %q", m.Category)
 		}
 	}
-	require.True(t, sawNew, "addrNew must be reported as newly registered")
-	require.True(t, sawDeregistered, "addrOld must be reported as deregistered")
+	require.True(
+		t,
+		sawNew,
+		"the new address must be reported as newly registered",
+	)
+	require.True(
+		t,
+		sawDeregistered,
+		"the old address must be reported as deregistered",
+	)
 }
 
-// TestAccountLifecycleMismatchesDisablesLifecycleReportWhenPreviousEpochIncomplete
-// proves the previous epoch's universe is only trusted once its own coverage
-// is complete — an absent or incomplete previous fetch must disable the
-// newly-registered/deregistered report entirely rather than let every
-// current address look newly registered.
-func TestAccountLifecycleMismatchesDisablesLifecycleReportWhenPreviousEpochIncomplete(
+// TestAccountLifecycleMismatchesZeroRewardRowCountIsBounded proves the fix
+// for a real scale problem: reporting one CheckMismatch row per zero-reward
+// address would make cache growth, insert time, and JSON report size scale
+// with the size of the account universe (Koios never emits a row at all for
+// a zero-reward account, so on a large network most checked addresses can
+// fall into this category). Regardless of how many zero-reward addresses
+// exist, exactly one aggregate row must be produced, with an accurate total
+// count and a sample capped at maxAccountLifecycleSample.
+func TestAccountLifecycleMismatchesZeroRewardRowCountIsBounded(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now()
+	const numZeroReward = maxAccountLifecycleSample * 5
+	addrs := make([]string, numZeroReward)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("addr%04d", i)
+	}
+	require.NoError(t, cache.SaveAccountFetchChunkProgress(
+		"preview", 500, "chunkA", nil, addrs, now,
+	))
+
+	mismatches := accountLifecycleMismatches(
+		context.Background(), cache, nil, "preview", 500, 0, nil, now,
+	)
+	require.Len(
+		t,
+		mismatches,
+		1,
+		"any number of zero-reward addresses must still produce exactly one aggregate row",
+	)
+	require.Equal(t, strconv.Itoa(numZeroReward), mismatches[0].KoiosValue)
+	sampleAddrs := strings.Split(
+		strings.TrimPrefix(mismatches[0].DingoValue, "sample: "),
+		",",
+	)
+	require.Len(
+		t,
+		sampleAddrs,
+		maxAccountLifecycleSample,
+		"the embedded sample must never grow with the total count",
+	)
+}
+
+// TestAccountLifecycleMismatchesStakeEpochZeroSkipsLifecycleReport proves
+// stakeEpoch==0 (no possible previous stake epoch, stakeEpoch-1 would
+// underflow) skips the newly-registered/deregistered diff entirely, without
+// ever dereferencing the dingo source.
+func TestAccountLifecycleMismatchesStakeEpochZeroSkipsLifecycleReport(
 	t *testing.T,
 ) {
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
-	now := time.Now()
-	// Current epoch (500) has data; epoch 499 was never fetched at all.
-	require.NoError(t, cache.SaveAccountFetchChunkProgress(
-		"preview",
-		500,
-		"chunkA",
-		[]KoiosAccountRewards{
-			{StakeAddress: "addrNew", RewardType: "member", Earned: "1000"},
-		},
-		[]string{"addrNew"},
-		now,
-	))
-
-	mismatches := accountLifecycleMismatches(cache, "preview", 500, now)
-	for _, m := range mismatches {
-		require.NotEqual(
-			t,
-			CategoryAcctNewlyRegistered,
-			m.Category,
-			"no previous-epoch coverage means the lifecycle report must be disabled entirely",
-		)
-		require.NotEqual(t, CategoryAcctDeregistered, m.Category)
-	}
+	mismatches := accountLifecycleMismatches(
+		context.Background(), cache, nil, "preview", 500, 0, nil, time.Now(),
+	)
+	require.Empty(t, mismatches)
 }
 
-// TestAccountLifecycleMismatchesEpochZeroSkipsLifecycleReport proves epoch 0
-// (no possible previous epoch) never attempts the lifecycle diff.
-func TestAccountLifecycleMismatchesEpochZeroSkipsLifecycleReport(t *testing.T) {
+// TestAccountLifecycleMismatchesPropagatesDingoErrorAsDBError proves a
+// genuine Dingo DB failure while fetching the previous stake epoch's
+// reward_account_output rows is reported as CategoryDBError, never silently
+// swallowed as if there were simply no lifecycle changes to report.
+func TestAccountLifecycleMismatchesPropagatesDingoErrorAsDBError(t *testing.T) {
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
-	mismatches := accountLifecycleMismatches(cache, "preview", 0, time.Now())
-	require.Empty(t, mismatches)
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	// Simulate a genuine Dingo DB failure (not "no rows") by closing the
+	// underlying connection before it's queried — mirrors
+	// TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage's
+	// established technique for this exact distinction.
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	mismatches := accountLifecycleMismatches(
+		context.Background(),
+		cache,
+		dingo,
+		"preview",
+		500,
+		499,
+		nil,
+		time.Now(),
+	)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBError, mismatches[0].Category)
+}
+
+// TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError proves a
+// genuine cache failure while looking up zero-reward accounts is reported as
+// CategoryDBError, never silently swallowed.
+func TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// Force a genuine query error (not "no rows") for
+	// GetZeroRewardAccountsForEpoch by dropping the table its SELECT reads
+	// from — mirrors the "break the schema, not just leave it empty"
+	// technique check_test.go's own DB-error tests already use.
+	_, err = cache.db.Exec("DROP TABLE koios_account_checked")
+	require.NoError(t, err)
+
+	mismatches := accountLifecycleMismatches(
+		context.Background(), cache, nil, "preview", 500, 0, nil, time.Now(),
+	)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBError, mismatches[0].Category)
 }
 
 // TestDetermineStatusAccountLifecycleCategoriesAreInformational proves the

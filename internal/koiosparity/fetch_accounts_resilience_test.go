@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -275,6 +276,110 @@ func TestFetchAccountRewardsForEpochInvalidatesOnlyChangedChunksOnUniverseChange
 	require.Equal(t, len(secondUniverse), cov.RequestedCount)
 }
 
+// TestFetchAccountRewardsForEpochDoesNotTrustEmptyCheckpointWithinGraceWindow
+// proves a real bug fix: a chunk that checkpointed with zero rows while
+// still within the grace window must be re-dispatched on a later retry
+// (still within the window), not skipped as "already done" — otherwise a
+// retry could never notice that Koios has since published real data, and
+// the epoch would eventually commit complete=true with a stale, empty
+// result once graceHours elapses, silently losing rewards Koios published
+// in the meantime.
+func TestFetchAccountRewardsForEpochDoesNotTrustEmptyCheckpointWithinGraceWindow(
+	t *testing.T,
+) {
+	var hasData atomic.Bool
+	var requestCount atomic.Int32
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount.Add(1)
+			addrs, _ := decodeAccountRewardHistoryRequest(t, r)
+			if !hasData.Load() {
+				// Koios hasn't published yet: a legitimate empty response, not
+				// an error.
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			writeAccountRewardHistoryRows(w, addrs)
+		}),
+	)
+	defer srv.Close()
+
+	k := &KoiosClient{
+		baseURL: srv.URL,
+		http:    &http.Client{Timeout: 2 * time.Second},
+		limiter: newBurstLimiter(0, koiosBurstWindow),
+	}
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addrs := []string{"stake1a", "stake1b", "stake1c"}
+	epochEndTime := time.Now()
+	const graceHours = 24
+
+	// First attempt: Koios hasn't published yet — the chunk succeeds with
+	// zero rows, checkpoints, but the epoch correctly stays incomplete
+	// because we're still within the grace window.
+	_, err = FetchAccountRewardsForEpoch(
+		t.Context(),
+		k,
+		cache,
+		"preview",
+		700,
+		addrs,
+		epochEndTime,
+		graceHours,
+		nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, requestCount.Load())
+
+	cov, err := cache.GetAccountCoverage("preview", 700)
+	require.NoError(t, err)
+	require.NotNil(t, cov)
+	require.False(
+		t,
+		cov.Complete,
+		"a zero-row result within the grace window must leave the epoch incomplete",
+	)
+
+	// Koios has since published real data. Retry, still within the grace
+	// window (epochEndTime unchanged, no real time has meaningfully passed).
+	hasData.Store(true)
+	_, err = FetchAccountRewardsForEpoch(
+		t.Context(),
+		k,
+		cache,
+		"preview",
+		700,
+		addrs,
+		epochEndTime,
+		graceHours,
+		nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(
+		t,
+		2,
+		requestCount.Load(),
+		"the previously-empty, still-within-grace chunk must be re-dispatched, "+
+			"not trusted as already done",
+	)
+
+	cov, err = cache.GetAccountCoverage("preview", 700)
+	require.NoError(t, err)
+	require.NotNil(t, cov)
+	require.True(t, cov.Complete)
+	require.Equal(
+		t,
+		len(addrs),
+		cov.FetchedCount,
+		"the real data Koios published in the meantime must actually be captured",
+	)
+}
+
 // TestFetchAccountRewardsForEpochMegaScenario is the combined exercise the
 // issue asks for directly: large synthetic snapshot plus injected timeout,
 // rate-limit, truncated-response, duplicate-page, and restart failures, all
@@ -512,6 +617,72 @@ func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 		1,
 		duplicateKeys,
 		"exactly one (address, reward_type) key must show the injected duplicate",
+	)
+}
+
+// TestFetchAccountRewardsForEpochRequestBodyNeverExceedsConfiguredMaxBytes
+// proves chunkAddressesByCountAndSize's byte budget accounts for the fixed
+// {"_stake_addresses":[...],"_epoch_no":N} JSON envelope, not just the
+// address array itself — without reserving that overhead, the real request
+// body could exceed a small configured --account-chunk-max-bytes by a fixed
+// amount on every single chunk.
+func TestFetchAccountRewardsForEpochRequestBodyNeverExceedsConfiguredMaxBytes(
+	t *testing.T,
+) {
+	const chunkMaxBytes = 100 // deliberately tiny, to make the envelope's
+	// fixed overhead a large fraction of the budget rather than negligible.
+
+	// Chunks dispatch concurrently (accountFetchConcurrency workers), so the
+	// handler runs on multiple goroutines at once — guard the shared max
+	// with a mutex rather than a plain int.
+	var mu sync.Mutex
+	var maxBodyLen int
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			mu.Lock()
+			if len(body) > maxBodyLen {
+				maxBodyLen = len(body)
+			}
+			mu.Unlock()
+			var decoded struct {
+				StakeAddresses []string `json:"_stake_addresses"`
+			}
+			require.NoError(t, json.Unmarshal(body, &decoded))
+			writeAccountRewardHistoryRows(w, decoded.StakeAddresses)
+		}),
+	)
+	defer srv.Close()
+
+	k := &KoiosClient{
+		baseURL: srv.URL,
+		http:    &http.Client{Timeout: 2 * time.Second},
+		limiter: newBurstLimiter(0, koiosBurstWindow),
+	}
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addrs := make([]string, 50)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("stake1addr%03d", i)
+	}
+
+	_, err = FetchEpochAccountsWithAddrs(
+		t.Context(), k, cache, "preview", 900, nil, addrs, 0,
+		1_000_000, chunkMaxBytes, nil,
+	)
+	require.NoError(t, err)
+	mu.Lock()
+	got := maxBodyLen
+	mu.Unlock()
+	require.Greater(t, got, 0, "at least one request must have been sent")
+	require.LessOrEqual(
+		t,
+		got,
+		chunkMaxBytes,
+		"the real encoded request body, envelope included, must never exceed --account-chunk-max-bytes",
 	)
 }
 

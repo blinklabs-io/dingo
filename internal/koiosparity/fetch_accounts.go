@@ -256,17 +256,6 @@ func fetchAccountRewardsForEpoch(
 		if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, nil, 0, true, now); commitErr != nil {
 			return 0, fmt.Errorf("commit empty account coverage: %w", commitErr)
 		}
-		if clearErr := cache.ClearAccountFetchStaging(network, epoch); clearErr != nil {
-			logger.Warn(
-				"koiosparity: failed to clear account fetch staging for empty universe",
-				"network",
-				network,
-				"epoch",
-				epoch,
-				"error",
-				clearErr,
-			)
-		}
 		return 0, nil
 	}
 
@@ -286,7 +275,24 @@ func fetchAccountRewardsForEpoch(
 	if chunkMaxBytes <= 0 {
 		chunkMaxBytes = koiosAccountChunkMaxBytesDefault
 	}
-	groups := chunkAddressesByCountAndSize(sorted, chunkSize, chunkMaxBytes)
+	// chunkAddressesByCountAndSize only bounds the encoded size of the
+	// address array itself; the actual /account_reward_history POST body is
+	// that array wrapped in {"_stake_addresses":[...],"_epoch_no":N} (see
+	// GetAccountRewardHistory) — a fixed envelope that isn't otherwise
+	// accounted for. Reserve it from the configured budget so the true
+	// request body can never exceed --account-chunk-max-bytes; for any
+	// reasonable configured budget this reservation is negligible, but for a
+	// deliberately tiny one it's the difference between honoring the
+	// configured bound and silently exceeding it.
+	effectiveChunkMaxBytes := max(
+		chunkMaxBytes-koiosAccountRequestEnvelopeOverhead,
+		1,
+	)
+	groups := chunkAddressesByCountAndSize(
+		sorted,
+		chunkSize,
+		effectiveChunkMaxBytes,
+	)
 
 	type chunkPlan struct {
 		hash  string
@@ -308,11 +314,33 @@ func fetchAccountRewardsForEpoch(
 		return 0, fmt.Errorf("get done account chunks: %w", err)
 	}
 
+	// A chunk that checkpointed with zero rows while still within the grace
+	// window must not be trusted as final: Koios's own /account_reward_history
+	// publishing can lag behind epoch closure (see the zero-row/grace-hours
+	// gate below), so an empty result checkpointed early could simply mean
+	// "hasn't published yet," not "confirmed nothing." Without this check, a
+	// resumed/retried call would see every such chunk as already "done,"
+	// never re-ask Koios, and eventually commit complete=true from stale,
+	// possibly-lagged empty checkpoints once graceHours elapses — silently
+	// losing rewards Koios published in the meantime. Only a chunk with
+	// genuinely non-empty staged rows, or one checked after the grace window
+	// has already closed, is safe to skip re-dispatching.
+	withinGrace := graceHours > 0 && !epochEndTime.IsZero() &&
+		now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour
+	var hashesWithRows map[string]bool
+	if withinGrace {
+		hashesWithRows, err = cache.GetChunkHashesWithStagedRows(network, epoch)
+		if err != nil {
+			return 0, fmt.Errorf("get chunk hashes with staged rows: %w", err)
+		}
+	}
+
 	var pending []chunkPlan
 	for _, p := range plans {
-		if !doneHashes[p.hash] {
-			pending = append(pending, p)
+		if doneHashes[p.hash] && (!withinGrace || hashesWithRows[p.hash]) {
+			continue
 		}
+		pending = append(pending, p)
 	}
 
 	var errMu sync.Mutex
@@ -453,19 +481,15 @@ outer:
 	if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, stagedRows, len(addressUniverse), complete, now); commitErr != nil {
 		return 0, fmt.Errorf("commit account rewards: %w", commitErr)
 	}
-	if complete {
-		if clearErr := cache.ClearAccountFetchStaging(network, epoch); clearErr != nil {
-			logger.Warn(
-				"koiosparity: failed to clear account fetch staging after commit",
-				"network",
-				network,
-				"epoch",
-				epoch,
-				"error",
-				clearErr,
-			)
-		}
-	}
+	// koios_account_fetch_staged_rows/koios_account_checked are deliberately
+	// NOT cleared here, even once complete=true: koios_account_checked is
+	// the durable ledger accountLifecycleMismatches (check.go) reads later
+	// to report zero-reward/newly-registered/deregistered accounts, and
+	// koios_account_fetch_staged_rows must survive so a later idempotent
+	// re-run of this same, already-complete epoch (e.g. --force-refresh
+	// with an unchanged universe) finds every chunk already done AND still
+	// has real staged rows to re-commit — clearing either table here would
+	// make that re-run commit an empty reward set over the correct one.
 
 	logger.Info("koiosparity: epoch account rewards fetched",
 		"network", network,

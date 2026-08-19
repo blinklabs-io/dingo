@@ -28,6 +28,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPostRejectsOversizedResponseAsPermanentNeverRetried proves dingo
+// #3099's response-size bound (readBodyLimited/koiosMaxResponseBytes):
+// a response exceeding the cap must fail with an error that classifies as
+// ErrKoiosPermanent — never retried within the call (a response that big
+// won't get smaller on retry) and never automatically retried on a future
+// fetch run either.
+func TestPostRejectsOversizedResponseAsPermanentNeverRetried(t *testing.T) {
+	var requestCount atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount.Add(1)
+			w.WriteHeader(http.StatusOK)
+			// Stream just past the cap without holding it all in memory
+			// twice: koiosMaxResponseBytes+1 zero bytes is already a
+			// deliberately oversized response for this test's purposes.
+			chunk := make([]byte, 1<<20) // 1 MiB
+			written := 0
+			for written < koiosMaxResponseBytes+1 {
+				n, werr := w.Write(chunk)
+				written += n
+				if werr != nil {
+					return
+				}
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.GetAccountRewardHistory(
+		context.Background(), []string{"stake1x"}, 100,
+	)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.True(t, errors.Is(err, errKoiosResponseTooLarge))
+	require.EqualValues(
+		t,
+		1,
+		requestCount.Load(),
+		"an oversized response must never be retried",
+	)
+}
+
 // newTestKoiosClient builds a client pointed at a test server. The burst
 // limiter is disabled (limit 0) so retries are not slowed by the sliding window.
 func newTestKoiosClient(baseURL string) *KoiosClient {

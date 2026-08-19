@@ -345,10 +345,17 @@ type koiosResponse struct {
 // errKoiosResponseTooLarge marks a response body that reached
 // koiosMaxResponseBytes without terminating — a response that big means
 // something is wrong upstream (or the request itself was shaped too large),
-// not a transient blip, so readBodyLimited's caller must never retry it the
-// way a plain read error is retried.
-var errKoiosResponseTooLarge = errors.New(
-	"koios: response body exceeded the maximum allowed size",
+// not a transient blip. It wraps ErrKoiosPermanent so classifyFetchErr
+// (and any caller checking errors.Is(err, ErrKoiosPermanent), e.g.
+// fetchAccountRewardsForEpoch's per-chunk classification) treats this the
+// same as any other permanent failure — never retried within a call, and
+// never automatically retried again on a future fetch run either, since
+// retrying an oversized chunk at the same configured size would just fail
+// the same way forever; the resolution is a smaller --account-chunk-size
+// or --account-chunk-max-bytes, not a retry.
+var errKoiosResponseTooLarge = fmt.Errorf(
+	"%w: koios response body exceeded the maximum allowed size",
+	ErrKoiosPermanent,
 )
 
 // readBodyLimited reads r fully, capped at koiosMaxResponseBytes — dingo
