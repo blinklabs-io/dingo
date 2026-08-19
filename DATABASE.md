@@ -1041,23 +1041,14 @@ replayed state; a database produced by an older version that already skipped a
 certified closure must be replayed from before the affected CertRB (normally by
 performing a clean metadata resync).
 
-`BatchedTxIngestOpts.StrictAppliedInputConservation` is the opposite-direction
-toggle on the same consumed-input path. When set (only by the ledger delta apply
-for a validated block once the node has reached tip), and with the database's
-`StrictUtxoValidation` also on, `ensureTransactionConsumedUtxos` refuses to
-recover a consumed input whose produced `utxo` row is absent from the metadata
-store past the `mithril_ledger_slot` boundary (the check keys on the produced
-UTxO row, not the producer `transaction` row, so it fires even when the producer
-transaction row is present): it errors (`ErrUtxoNotFound`) before consulting the
-append-only blob store, instead of rebuilding the row. This
-prevents a near-tip fork churn from importing a producer that lives only on an
-abandoned fork block the applied chain never followed, which would persist an
-input-conservation violation (a UTxO the applied chain never produced, and in
-the field a double-spend across two persisted blocks) and, once it accumulates
-past the security parameter K, wedge the node (issue #3005). The default is off,
-so every existing ingest path — bootstrap, gap-closure, historical/trusted
-replay, and the `SkipConsumedInputRecovery` Leios apply above — keeps its
-recovery behavior unchanged.
+`BatchedTxIngestOpts.StrictAppliedInputConservation` marks the same steady-state
+path. When set with `StrictUtxoValidation` enabled, a missing consumed-input row
+past the `mithril_ledger_slot` boundary is recovered only after the producer
+block is proven to be on the applied primary chain. This repairs a row removed
+by core-mode consumed-UTxO cleanup before rollback restoration needs it (issue
+#3170), while refusing a producer that exists only in an abandoned-fork blob
+(issue #3005). The default remains off for bootstrap, gap-closure,
+historical/trusted replay, and the `SkipConsumedInputRecovery` Leios apply.
 
 `StrictAppliedInputConservation` is armed only at tip, so it does not cover a
 divergence baked in during catch-up (a validated block below the tip stability

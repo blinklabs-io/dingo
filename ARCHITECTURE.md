@@ -3800,35 +3800,29 @@ always expected to be fully recoverable from the snapshot import.
 
 That default recovery is deliberately one-sided: it only fires when the produced
 `utxo` row is *absent* from the metadata store, and it rebuilds it from the
-blob store, which is append-only and retains blocks from abandoned forks. In
-steady-state, at-tip, validated block application that recovery must never run:
-every consumed input's producer is already applied and live in the metadata
-store. An absent metadata row alone does not prove divergence — it is also the
-normal state of an in-flight/intra-block producer whose row has not been flushed
-yet — but the guard runs only after the same-slot repair and the
-`HasInFlightProducer` intra-block check, so by the time it fires the row is
-absent *and* not in-flight/intra-block, which past the Mithril boundary means
-the applied ledger has diverged from the header chain (issue #3005). Recovering
-the producer from a fork block the applied chain never followed would then
-import a UTxO the chain never produced and persist an
-input-conservation violation — which, once it accumulates past the security
-parameter K, wedges the node behind the rollback-exceeds-K guard with no legal
-recovery. The ledger closes this by setting
+blob store, which is append-only and retains blocks from abandoned forks. An
+absent metadata row does not by itself prove divergence: core-mode cleanup can
+remove a spent row while the producer remains canonical, and rollback can later
+need that row restored (issue #3170). The recovery path therefore checks the
+producer block against the applied primary chain. It permits the canonical case
+and refuses a producer from an abandoned fork, preserving input conservation
+and preventing the #3005 rollback-exceeds-K wedge. The ledger sets
 `BatchedTxIngestOpts.StrictAppliedInputConservation` on the delta apply whenever
 the block is validated and the node has reached tip
 (`shouldValidate && (reachedTip || reachesTip)`, `ledgerProcessBlock`, where
 `reachesTip` is the per-block at-tip signal that guards the transition batch —
 the first batch whose blocks cross the tip cutoff — since `reachedTip` is only
 stored true after that batch commits); with that flag and
-`StrictUtxoValidation` both set, `ensureTransactionConsumedUtxos` refuses to
-recover an absent producer past the Mithril boundary and instead errors, which
-aborts the block's transaction so the inconsistent state is never committed and
-the node stalls loudly for resync rather than baking in a beyond-K fork. The
-flag is left off for from-genesis bootstrap and Mithril gap-closure (both run
-before `reachedTip`) and for non-validated/trusted replay and Leios
-endorser-block apply, where an absent producer is legitimately recovered, so
-this is the primary #3005 prevention while the K-guard and the non-convergence
-recovery hold remain as backstops.
+`StrictUtxoValidation` both set, `ensureTransactionConsumedUtxos` performs the
+primary-chain membership check past the Mithril boundary. A canonical producer
+is recovered, including after core-mode cleanup removed its spent row before a
+rollback (issue #3170); an off-primary producer still returns
+`ErrUtxoNotFound`, aborting the block rather than baking in a beyond-K fork
+(issue #3005). The flag is left off for from-genesis bootstrap and Mithril
+gap-closure (both run before `reachedTip`) and for non-validated/trusted replay
+and Leios endorser-block apply, where an absent producer is legitimately
+recovered, so this remains the primary #3005 prevention while the K-guard and
+the non-convergence recovery hold remain as backstops.
 
 Certified immutable blocks after the selected anchor remain in the primary
 chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
