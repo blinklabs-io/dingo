@@ -174,12 +174,21 @@ func (l *Listener) TakeIf(srv *http.Server) (*Job, chan struct{}) {
 func (l *Listener) take(match *http.Server) (*Job, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.srv == nil {
-		// Either never started, or someone else is already tearing it down.
-		return nil, l.teardown
-	}
+	// The identity check comes first, and deliberately also covers l.srv being
+	// nil. A caller that named a server and did not get it has nothing of its
+	// own left either way -- already detached, or replaced by a later Start --
+	// and the teardown that may be in flight belongs to whoever detached it.
+	// Falling through to the nil-server branch below would hand a monitor that
+	// unrelated teardown to block on.
 	if match != nil && l.srv != match {
 		return nil, nil
+	}
+	if l.srv == nil {
+		// Either never started, or someone else is already tearing it down.
+		// Only an unconditional Take reaches this, and it is the loser of a
+		// genuine race, so the winner's teardown is exactly what it must wait
+		// on.
+		return nil, l.teardown
 	}
 	job := &Job{
 		srv:      l.srv,

@@ -354,6 +354,37 @@ func TestTakeIfDetachesItsOwnServer(t *testing.T) {
 	require.Nil(t, l.Server())
 }
 
+// TestTakeIfHandsBackNoTeardownWhenItsServerIsGone covers the case where the
+// monitor's server has been detached but its teardown is still running, so
+// l.srv is nil rather than pointing at a replacement. The identity check has
+// to come first: a caller landing here must be told there is nothing of its own
+// left, not handed a teardown that belongs to whoever detached it. Waiting on
+// that would block a monitor on an unrelated shutdown.
+func TestTakeIfHandsBackNoTeardownWhenItsServerIsGone(t *testing.T) {
+	l := newListener()
+	srv, err := publishBound(l, "127.0.0.1:0")
+	require.NoError(t, err)
+
+	// Another caller detached it and is still tearing it down.
+	winner, _ := l.Take()
+	require.NotNil(t, winner)
+
+	job, inFlight := l.TakeIf(srv)
+
+	require.Nil(t, job)
+	require.Nil(
+		t, inFlight,
+		"a monitor whose server is gone has nothing of its own to wait on",
+	)
+
+	// Take, by contrast, is the loser of a genuine race and must wait.
+	_, loserWait := l.Take()
+	require.NotNil(
+		t, loserWait,
+		"Take must still hand the loser the winner's teardown",
+	)
+}
+
 // TestBindReportsLostPublication asserts Bind tells its caller when it closed
 // the socket instead of serving it, so Start does not log that a listener came
 // up when a concurrent Stop means none did.
