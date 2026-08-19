@@ -2216,9 +2216,11 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 			"header_count", headerCount,
 		)
 		ls.chainsyncBlockfetchMutex.Lock()
+		var startErr error
 		if ls.chainsyncBlockfetchReadyChan == nil &&
 			!ls.blockfetchContinuationPending {
-			if err := ls.startQueuedBlockfetchLocked(connId, &pending); err != nil {
+			startErr = ls.startQueuedBlockfetchLocked(connId, &pending)
+			if startErr != nil {
 				// Recovery connection may have closed. Retry with
 				// the current active best peer before giving up,
 				// otherwise the pipeline stalls until restart.
@@ -2234,16 +2236,15 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 							"active_connection_id",
 							activeConnId.String(),
 							"error",
-							err,
+							startErr,
 						)
-						if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId, &pending); retryErr == nil {
-							err = nil
-						} else {
-							err = retryErr
-						}
+						startErr = ls.startQueuedBlockfetchLocked(
+							*activeConnId,
+							&pending,
+						)
 					}
 				}
-				if err != nil {
+				if startErr != nil {
 					ls.config.Logger.Warn(
 						"failed to start blockfetch after local rollback recovery",
 						"component",
@@ -2251,12 +2252,18 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 						"connection_id",
 						connId.String(),
 						"error",
-						err,
+						startErr,
 					)
 				}
 			}
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
+		if startErr != nil {
+			// Do not report recovery when the replayed headers could not
+			// be fetched. The caller must close these sessions so peer
+			// governance can establish a fresh chainsync intersection.
+			continue
+		}
 		return LocalRollbackRecoveryResult{Recovered: true}
 	}
 	return LocalRollbackRecoveryResult{}
