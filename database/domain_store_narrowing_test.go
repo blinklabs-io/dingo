@@ -90,21 +90,28 @@ func TestFacadesDependOnNarrowStores(t *testing.T) {
 }
 
 // TestDomainAccessorsReturnBackingStore checks the accessors hand back the
-// configured metadata store rather than a nil placeholder that would satisfy
-// the type assertions above while breaking at runtime.
+// store the Database was configured with.
+//
+// Identity rather than non-nilness: an accessor that ignored d.metadata and
+// returned some other value would still be non-nil, so a NotNil assertion
+// passes on exactly the bug worth catching here -- an accessor wired to the
+// wrong source. Comparing against the pointer that was installed is what
+// makes that a failure.
 func TestDomainAccessorsReturnBackingStore(t *testing.T) {
-	d := &Database{metadata: stubDomainMetadataStore{}}
+	backing := &stubDomainMetadataStore{}
+	d := &Database{metadata: backing}
 
-	require.NotNil(t, d.certificateStore())
-	require.NotNil(t, d.epochStore())
-	require.NotNil(t, d.governanceStore())
-	require.NotNil(t, d.stakeSnapshotStore())
-	require.NotNil(t, d.transactionStore())
-	require.NotNil(t, d.utxoStore())
+	require.Same(t, backing, d.certificateStore())
+	require.Same(t, backing, d.epochStore())
+	require.Same(t, backing, d.governanceStore())
+	require.Same(t, backing, d.stakeSnapshotStore())
+	require.Same(t, backing, d.transactionStore())
+	require.Same(t, backing, d.utxoStore())
 }
 
 // stubDomainMetadataStore is a nil-method placeholder: the tests only need a
-// non-nil value of the composed interface type, never a call.
+// distinguishable value of the composed interface type, never a call. It is
+// used through a pointer so the assertions above can compare identity.
 type stubDomainMetadataStore struct {
 	metadata.MetadataStore
 }

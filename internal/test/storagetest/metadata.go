@@ -258,6 +258,12 @@ func RunMetadataStoreConformance(
 		// moved over, so the round trip is what proves the narrowing is
 		// usable rather than merely type-correct.
 		write := store.Transaction()
+		// Registered before the write, not after it: require.NoError
+		// stops the subtest on failure, so a SetConstitution error would
+		// otherwise leave this transaction holding its connection for the
+		// rest of the suite. Rollback after a successful Commit is a
+		// no-op -- sqlTxn returns nil once the transaction is finished.
+		defer func() { require.NoError(t, write.Rollback()) }()
 		require.NoError(t, governanceStore.SetConstitution(
 			&models.Constitution{
 				AnchorURL:  "https://example.invalid/constitution",

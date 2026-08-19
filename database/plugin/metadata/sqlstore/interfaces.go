@@ -18,8 +18,10 @@ import "github.com/blinklabs-io/dingo/database/plugin/metadata"
 
 // Store must satisfy the composed metadata interface and every domain
 // interface split out of it. The sqlite, mysql, and postgres providers are
-// dialect shims that each return *Store from their own NewSQLStore, so
-// asserting on *Store here covers all three backends rather than one.
+// dialect shims that each construct and return a *Store of their own --
+// sqlite through NewSQLStore, mysql and postgres through their package-local
+// openStore -- so asserting on *Store here covers all three backends at once
+// rather than one.
 //
 // Listing the domains individually rather than relying on the MetadataStore
 // assertion alone is what makes a botched extraction a build failure: a
