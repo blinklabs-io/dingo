@@ -4107,7 +4107,16 @@ that safely needs three pieces that only make sense together:
   the context monitor its `Start` launched both race to detach the running
   server and its listener. The winner gets a `Job` and owns completing it; the
   loser gets the winner's completion channel and waits on it (`AwaitTeardown`)
-  rather than reporting the server down while the port is still bound.
+  rather than reporting the server down while the port is still bound. A
+  monitor uses `TakeIf`, which detaches only while the server it published is
+  still the current one: a monitor sits on `ctx.Done()` until its caller's
+  context ends, which can be long after its own server was stopped and a
+  restart published another on the same `Listener`, and an unconditional
+  detach there would tear down a replacement it never published. Today every
+  production caller passes the node's `n.ctx` to both the initial start and
+  every restart (`node.go`, `node_lifecycle.go`), so the two contexts are the
+  same one and the cross-detach is not reachable; `TakeIf` closes it at the
+  protocol level rather than relying on that continuing to hold.
 - **`bindDone` — `Stop` cannot outrun a bind still in flight.** `Bind` closes
   this channel on every exit path, including the one where it finds its server
   already detached and closes its own socket instead of serving it. `Shutdown`
@@ -4133,7 +4142,10 @@ listeners `Serve` registered, which is exactly the set that may be missing ours.
 Two consequences worth noting. `Publish` takes a build callback that runs under
 the listener's lock once the already-started check has passed, so each server
 installs its credential verifier atomically with the server it belongs to and a
-rejected second `Start` cannot replace a running server's. And because
+rejected second `Start` cannot replace a running server's. `Bind` reports
+whether it actually served the socket rather than closing it, so a `Start`
+whose server was detached mid-bind returns without logging that a listener
+came up when none did. And because
 `api/utxorpc`'s context monitor now detaches rather than holding its mutex
 across the shutdown it runs, a concurrent `Stop` is answered by the teardown
 wait instead of blocking on that mutex for as long as a stuck stream keeps

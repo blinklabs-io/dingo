@@ -15,12 +15,25 @@
 package blockfrost
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// stopNow shuts srv down under a bounded context, matching the package's
+// existing convention (tls_auth_test.go): a hang in the teardown path should
+// fail the test rather than stall the suite until go test's own timeout.
+func stopNow(t *testing.T, srv *Blockfrost) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(
+		context.Background(), 5*time.Second,
+	)
+	defer cancel()
+	return srv.Stop(ctx)
+}
 
 // The shutdown protocol these two tests exercise is covered in depth, with the
 // windows constructed rather than raced, in internal/apilistener. What is
@@ -37,7 +50,7 @@ func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
 			t, t.Context(), BlockfrostConfig{},
 		)
 
-		require.NoError(t, srv.Stop(t.Context()))
+		require.NoError(t, stopNow(t, srv))
 
 		require.False(
 			t, portAccepts(addr),
@@ -54,7 +67,7 @@ func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
 // left that restart failing with EADDRINUSE.
 func TestServerRebindsAfterStop(t *testing.T) {
 	srv, addr := startOnFreePort(t, t.Context(), BlockfrostConfig{})
-	require.NoError(t, srv.Stop(t.Context()))
+	require.NoError(t, stopNow(t, srv))
 
 	restarted := New(
 		BlockfrostConfig{ListenAddress: addr}, &mockNode{}, nil,
@@ -63,7 +76,7 @@ func TestServerRebindsAfterStop(t *testing.T) {
 		t, restarted.Start(t.Context()),
 		"a capability restart must rebind the port Stop released",
 	)
-	require.NoError(t, restarted.Stop(t.Context()))
+	require.NoError(t, stopNow(t, restarted))
 }
 
 // portAccepts reports whether a TCP connection to addr succeeds.

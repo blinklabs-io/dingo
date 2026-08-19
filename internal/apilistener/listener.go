@@ -151,11 +151,35 @@ type Job struct {
 // was still bound, and an immediate restart on the same port would then fail to
 // bind.
 func (l *Listener) Take() (*Job, chan struct{}) {
+	return l.take(nil)
+}
+
+// TakeIf is Take restricted to srv: it detaches only while srv is still the
+// published server.
+//
+// This is what a context monitor must use. A monitor outlives the server it was
+// launched for -- it sits on ctx.Done() until its caller's context ends, which
+// can be long after that server was stopped and a restart published another one
+// on the same Listener. An unconditional Take there would tear down a
+// replacement the monitor never published.
+//
+// A caller whose server is already gone gets a nil job and nothing to wait on:
+// its own server is down either way, and a teardown in flight belongs to
+// whoever detached it.
+func (l *Listener) TakeIf(srv *http.Server) (*Job, chan struct{}) {
+	return l.take(srv)
+}
+
+// take detaches the current server, optionally only when it is match.
+func (l *Listener) take(match *http.Server) (*Job, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.srv == nil {
 		// Either never started, or someone else is already tearing it down.
 		return nil, l.teardown
+	}
+	if match != nil && l.srv != match {
+		return nil, nil
 	}
 	job := &Job{
 		srv:      l.srv,
@@ -291,7 +315,10 @@ func awaitSignal(ctx context.Context, ch chan struct{}, what string) error {
 }
 
 // Bind opens srv's listening socket and serves it in the background, closing
-// bindDone once the socket has been either published or closed again.
+// bindDone once the socket has been either published or closed again. It
+// reports whether the socket is actually being served: false means srv was
+// detached before the socket could be published, so Bind closed it instead, and
+// the caller must not report that a listener came up.
 //
 // The socket is opened synchronously so a port conflict -- and, when TLS is
 // enabled, a bad keypair -- surfaces as an error from Start rather than in a
@@ -300,7 +327,7 @@ func (l *Listener) Bind(
 	srv *http.Server,
 	bindDone chan struct{},
 	tls apiconfig.EffectiveTLS,
-) error {
+) (bool, error) {
 	// Closed on every exit path -- keypair failure, bind failure, publication,
 	// or closing our own socket after losing the race to Stop -- so a waiting
 	// Stop is never left hanging on a bind that already finished.
@@ -310,7 +337,7 @@ func (l *Listener) Bind(
 		if err := tlsutil.ConfigureServerTLS(
 			srv, tls.CertFilePath, tls.KeyFilePath,
 		); err != nil {
-			return fmt.Errorf(
+			return false, fmt.Errorf(
 				"failed to load TLS keypair for %s server: %w",
 				l.name, err,
 			)
@@ -318,7 +345,7 @@ func (l *Listener) Bind(
 	}
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 			"failed to listen for %s server: %w", l.name, err,
 		)
 	}
@@ -348,7 +375,7 @@ func (l *Listener) Bind(
 				"error", closeErr,
 			)
 		}
-		return nil
+		return false, nil
 	}
 	go func() {
 		var serveErr error
@@ -364,5 +391,5 @@ func (l *Listener) Bind(
 			)
 		}
 	}()
-	return nil
+	return true, nil
 }

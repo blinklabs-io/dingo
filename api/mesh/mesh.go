@@ -219,10 +219,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// server down: Take is what makes an in-flight bind close its own socket.
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
-		job, _ := s.listener.Take()
-		// A concurrent Stop may have won the detach. It owns the teardown
-		// and its caller is already waiting on it, so there is nothing to
-		// do and nothing to wait for here.
+		job, _ := s.listener.TakeIf(server)
+		// Nil when a concurrent Stop won the detach -- it owns the teardown
+		// and its caller is already waiting on it -- or when this server was
+		// already stopped and a restart published another one, which is not
+		// this monitor's to touch. Either way there is nothing to do here.
 		if job != nil {
 			s.logger.Debug(
 				"context cancelled, shutting down " +
@@ -248,9 +249,16 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	if err := s.listener.Bind(server, bindDone, s.config.TLS); err != nil {
+	served, err := s.listener.Bind(server, bindDone, s.config.TLS)
+	if err != nil {
 		s.listener.Unpublish(server)
 		return err
+	}
+	if !served {
+		// A concurrent Stop or context cancellation detached this server while
+		// it was binding, so Bind closed the socket rather than serving it.
+		// Saying the listener came up would be false.
+		return nil
 	}
 
 	s.logger.Info(

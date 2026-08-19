@@ -205,10 +205,11 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	// blocking on the mutex for as long as a stuck stream keeps Shutdown busy.
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
-		job, _ := u.listener.Take()
-		// A concurrent Stop may have won the detach. It owns the teardown and
-		// its caller is already waiting on it, so there is nothing to do and
-		// nothing to wait for here.
+		job, _ := u.listener.TakeIf(server)
+		// Nil when a concurrent Stop won the detach -- it owns the teardown
+		// and its caller is already waiting on it -- or when this server was
+		// already stopped and a restart published another one, which is not
+		// this monitor's to touch. Either way there is nothing to do here.
 		if job != nil {
 			u.config.Logger.Debug(
 				"context cancelled, shutting down utxorpc gRPC server",
@@ -232,7 +233,9 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 		}
 	}()
 
-	if err := u.listener.Bind(server, bindDone, u.config.TLS); err != nil {
+	if _, err := u.listener.Bind(
+		server, bindDone, u.config.TLS,
+	); err != nil {
 		u.listener.Unpublish(server)
 		return err
 	}
