@@ -1345,6 +1345,93 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	fixture.ls.blockfetchRequestRangeCleanup()
 }
 
+// TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn asserts the
+// active-peer fallback moves the blockfetch selection, not just the one request
+// it issues. nextBlockfetchConnId prefers selectedBlockfetchConnId, so a
+// selection left on the failed recovery connection sends the next batch of a
+// multi-batch replay straight back to the connection that just failed, and the
+// first batch is the only one that ever arrives.
+func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6001},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	fixture.ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &activeConnId
+	}
+	// The recovery connection is gone; only the active best peer answers.
+	var requested []ouroboros.ConnectionId
+	fixture.ls.config.BlockfetchRequestRangeFunc = func(
+		connId ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) error {
+		requested = append(requested, connId)
+		if sameConnectionId(connId, activeConnId) {
+			return nil
+		}
+		return errBlockfetchNoBlocks
+	}
+
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("rollback-retarget"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+		BlockHeader: header,
+	})
+
+	fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	require.Len(
+		t, requested, 2,
+		"the failed recovery connection then the active best peer",
+	)
+	assert.True(
+		t, sameConnectionId(requested[1], activeConnId),
+		"the fallback request must go to the active best peer",
+	)
+	assert.True(
+		t,
+		sameConnectionId(
+			fixture.ls.selectedBlockfetchConnId,
+			activeConnId,
+		),
+		"the blockfetch selection must follow the fallback, so the next "+
+			"batch does not return to the failed connection",
+	)
+}
+
 func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 	t *testing.T,
 ) {

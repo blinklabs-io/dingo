@@ -2238,6 +2238,13 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 							"error",
 							startErr,
 						)
+						// Retarget the selection too, not just this
+						// request: nextBlockfetchConnId prefers
+						// selectedBlockfetchConnId, so leaving it on the
+						// failed recovery connection sends the next batch
+						// of a multi-batch replay straight back to it.
+						// Matches the fallback in handleEventChainsync.
+						ls.selectedBlockfetchConnId = *activeConnId
 						startErr = ls.startQueuedBlockfetchLocked(
 							*activeConnId,
 							&pending,
