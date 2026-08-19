@@ -382,6 +382,31 @@ func TestCheckAndForgeProductionRecoversBlockForgedObserverPanic(
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }
 
+func TestNewBlockForgerRejectsProductionLeiosWithoutTxValidator(t *testing.T) {
+	creds := setupTestCredentials(t)
+	_, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
+		LeiosMempool:        forgerTestMempoolProvider{},
+	})
+	require.EqualError(
+		t,
+		err,
+		"production Leios forging requires transaction validator",
+	)
+}
+
 func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 	creds := setupTestCredentials(t)
 	block := newForgerTestBlock(10, 2)
@@ -404,11 +429,13 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 		},
 		LeiosProduceChecker: leiosChecker,
 		LeiosEBBroadcaster:  leiosCaster,
+		LeiosTxValidator:    &mockTxValidator{},
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: []MempoolTransaction{
 				{
 					Hash: strings.Repeat("11", 32),
-					Cbor: []byte{0x83, 0x01, 0x02, 0x03},
+					Cbor: makeMinimalTxCbor(t, 0x11, 0),
+					Type: conway.TxTypeConway,
 				},
 			},
 		},
@@ -497,15 +524,18 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				LeiosParentAnnouncementProvider: parent,
 				LeiosProduceChecker:             leiosChecker,
 				LeiosEBBroadcaster:              leiosCaster,
+				LeiosTxValidator:                &mockTxValidator{},
 				LeiosMempool: forgerTestMempoolProvider{
 					txs: []MempoolTransaction{
 						{
 							Hash: strings.Repeat("11", 32),
-							Cbor: []byte{0x83, 0x01, 0x02, 0x03},
+							Cbor: makeMinimalTxCbor(t, 0x11, 0),
+							Type: conway.TxTypeConway,
 						},
 						{
 							Hash: strings.Repeat("22", 32),
-							Cbor: []byte{0x83, 0x04, 0x05, 0x06},
+							Cbor: makeMinimalTxCbor(t, 0x22, 0),
+							Type: conway.TxTypeConway,
 						},
 					},
 				},
@@ -526,7 +556,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.NotEmpty(t, leiosCaster.hash)
 				require.Equal(
 					t,
-					[][]byte{{0x83, 0x04, 0x05, 0x06}},
+					[][]byte{makeMinimalTxCbor(t, 0x22, 0)},
 					leiosCaster.txBodies,
 				)
 			} else {

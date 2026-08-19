@@ -86,8 +86,18 @@ type Server struct {
 	genesisStartTimeSec int64
 	addrNetworkID       uint8
 	httpServer          *http.Server
-	verifier            *apiauth.Verifier
-	mu                  sync.Mutex
+	listener            net.Listener
+	// bindDone is closed by startServer once the listening socket has been
+	// either published on s.listener or closed again. Stop waits on it so a
+	// bind still in flight cannot outlive the Stop that raced it.
+	bindDone chan struct{}
+	// teardown is closed once the caller that detached the server has
+	// finished shutting it down. Stop and the context monitor race to detach;
+	// the loser gets no server back and would otherwise report the server
+	// down while the winner's shutdown was still releasing the port.
+	teardown chan struct{}
+	verifier *apiauth.Verifier
+	mu       sync.Mutex
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -212,18 +222,19 @@ func (s *Server) Start(ctx context.Context) error {
 		IdleTimeout:       120 * time.Second,
 	}
 	s.httpServer = server
+	bindDone := make(chan struct{})
+	s.bindDone = bindDone
 
 	// Launch context monitor before unlocking so there
 	// is no window where Stop() could race with the
 	// goroutine not yet existing.
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
-		s.mu.Lock()
-		srv := s.httpServer
-		s.httpServer = nil
-		s.mu.Unlock()
-
-		if srv != nil {
+		job, _ := s.takeServer()
+		// A concurrent Stop may have won the detach. It owns the teardown
+		// and its caller is already waiting on it, so there is nothing to
+		// do and nothing to wait for here.
+		if job != nil {
 			s.logger.Debug(
 				"context cancelled, shutting down " +
 					"Mesh API server",
@@ -235,9 +246,7 @@ func (s *Server) Start(ctx context.Context) error {
 			)
 			defer cancel()
 			//nolint:contextcheck
-			if err := srv.Shutdown(
-				shutdownCtx,
-			); err != nil {
+			if err := s.shutdown(shutdownCtx, job); err != nil {
 				s.logger.Error(
 					"failed to shutdown Mesh API "+
 						"server on context "+
@@ -250,9 +259,16 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.mu.Unlock()
 
-	if err := s.startServer(server); err != nil {
+	if err := s.startServer(server, bindDone); err != nil {
 		s.mu.Lock()
-		s.httpServer = nil
+		// Guarded: an overlapping Stop or restart may already have
+		// detached or replaced this server, and clearing the fields
+		// unconditionally would discard the newer one. Cleared as a set,
+		// matching takeServer, so "no server present" never leaves a
+		// listener or bind channel behind for the next caller to find.
+		if s.httpServer == server {
+			s.httpServer, s.listener, s.bindDone = nil, nil, nil
+		}
 		s.mu.Unlock()
 		return err
 	}
@@ -267,19 +283,142 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the HTTP server.
 func (s *Server) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	srv := s.httpServer
-	s.httpServer = nil
-	s.mu.Unlock()
+	job, inFlight := s.takeServer()
+	if job == nil {
+		return awaitTeardown(ctx, inFlight)
+	}
+	s.logger.Debug("shutting down Mesh API server")
+	return s.shutdown(ctx, job)
+}
 
-	if srv != nil {
-		s.logger.Debug("shutting down Mesh API server")
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf(
-				"failed to shutdown Mesh API server: %w",
-				err,
-			)
+// shutdownJob is everything one caller detaches from the Server in order to
+// tear it down, including the channel it must close when finished.
+type shutdownJob struct {
+	srv      *http.Server
+	ln       net.Listener
+	bindDone chan struct{}
+	done     chan struct{}
+}
+
+// takeServer detaches the running HTTP server and its listener so exactly one
+// caller shuts them down: Stop and the context monitor started by Start both
+// race for them.
+//
+// The winner gets a job and owns closing job.done. The loser gets a nil job and
+// the winner's completion channel, which it must wait on — returning early
+// would report the server down while the port was still bound, and an immediate
+// restart on the same port would then fail to bind.
+func (s *Server) takeServer() (*shutdownJob, chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.httpServer == nil {
+		// Either never started, or someone else is already tearing it down.
+		return nil, s.teardown
+	}
+	job := &shutdownJob{
+		srv:      s.httpServer,
+		ln:       s.listener,
+		bindDone: s.bindDone,
+		done:     make(chan struct{}),
+	}
+	s.httpServer, s.listener, s.bindDone = nil, nil, nil
+	s.teardown = job.done
+	return job, nil
+}
+
+// shutdown runs one detached job to completion and reports what went wrong.
+// The bind wait is not allowed to skip the teardown: a caller whose context
+// expires mid-wait still holds the only reference to a bound socket, so
+// returning early would leave the port bound with nothing left to close it.
+func (s *Server) shutdown(ctx context.Context, job *shutdownJob) error {
+	waitErr := awaitBind(ctx, job.bindDone)
+	stopErr := shutdownServer(ctx, job.srv, job.ln)
+	if waitErr == nil {
+		close(job.done)
+		return stopErr
+	}
+	// The bind is still in flight, so startServer still owns a socket this
+	// call cannot close. Closing job.done now would let a waiting Stop report
+	// the server down while that socket was still bound. startServer always
+	// closes bindDone on its way out -- and closes its own listener once it
+	// sees the detach -- so hand the signalling off until then, which also
+	// bounds this goroutine.
+	go func() {
+		<-job.bindDone
+		close(job.done)
+	}()
+	return errors.Join(waitErr, stopErr)
+}
+
+// awaitTeardown waits for another caller's in-flight shutdown to finish.
+func awaitTeardown(ctx context.Context, done chan struct{}) error {
+	return awaitSignal(ctx, done, "an in-flight Mesh API shutdown")
+}
+
+// awaitSignal waits for ch to close, bounded by ctx. A nil channel has nothing
+// to wait for and succeeds immediately.
+//
+// One implementation on purpose. Every caller here needs the same recheck: when
+// ch closes at the same moment ctx expires, select picks at random, and
+// reporting a timeout for work that actually finished turns a clean shutdown
+// into a spurious error — and, for the bind, defers the teardown signal that
+// another caller is blocked on. Written once, the recheck cannot be present in
+// one copy and missing from the next.
+func awaitSignal(ctx context.Context, ch chan struct{}, what string) error {
+	if ch == nil {
+		return nil
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-ch:
+			return nil
+		default:
 		}
+		return fmt.Errorf("timed out waiting for %s: %w", what, ctx.Err())
+	}
+}
+
+// awaitBind waits for an in-flight startServer to finish releasing or
+// publishing its socket. Detaching the server first (takeServer) is what makes
+// that bind close its own listener, so waiting here is what lets Stop promise
+// the port is free by the time it returns rather than merely started closing.
+func awaitBind(ctx context.Context, bindDone chan struct{}) error {
+	return awaitSignal(ctx, bindDone, "the Mesh API listener bind to settle")
+}
+
+// shutdownServer drains in-flight requests, then closes the listening
+// socket. http.Server.Shutdown only closes listeners that Serve has
+// registered, and startServer registers ours from a goroutine it does
+// not wait for, so Shutdown on its own can return while the socket is
+// still accepting connections -- leaving the port bound after Stop
+// returns, which a capability restart on the same port (see
+// node_lifecycle.go) then fails to rebind. Closing the listener here
+// makes releasing the port part of what Stop waits for. Closing after
+// Shutdown, not before, keeps Serve's exit quiet: Shutdown marks the
+// server as shutting down first, so the resulting accept failure
+// surfaces as http.ErrServerClosed rather than an error log.
+func shutdownServer(
+	ctx context.Context,
+	srv *http.Server,
+	ln net.Listener,
+) error {
+	err := srv.Shutdown(ctx)
+	if ln != nil {
+		// Serve closes the listener on its own way out, so an
+		// already-closed listener is the expected case, not a failure.
+		if closeErr := ln.Close(); closeErr != nil &&
+			!errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, closeErr)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"failed to shutdown Mesh API server: %w",
+			err,
+		)
 	}
 	return nil
 }
@@ -288,7 +427,12 @@ func (s *Server) Stop(ctx context.Context) error {
 // error detection.
 func (s *Server) startServer(
 	server *http.Server,
+	bindDone chan struct{},
 ) error {
+	// Closed on every exit path -- bind failure, publication, or closing our
+	// own socket after losing the race to Stop -- so a waiting Stop is never
+	// left hanging on a bind that already finished.
+	defer close(bindDone)
 	useTLS := s.config.TLS.Enabled
 	if useTLS {
 		if err := tlsutil.ConfigureServerTLS(
@@ -308,6 +452,35 @@ func (s *Server) startServer(
 			"failed to listen for Mesh API server: %w",
 			err,
 		)
+	}
+	// Recorded so Stop can close the socket itself rather than relying on
+	// the Serve goroutine below having registered it (see shutdownServer),
+	// but only while this call's server is still the current one. Stop can
+	// detach it between Start publishing the server and this point; a bare
+	// assignment would then strand a bound socket no later Stop can reach,
+	// because takeServer hands back a nil server and shutdownServer never
+	// runs. The same guard stops an overlapping restart from overwriting the
+	// newer server's listener with this one.
+	s.mu.Lock()
+	current := s.httpServer == server
+	if current {
+		s.listener = ln
+	}
+	s.mu.Unlock()
+	if !current {
+		// Already stopped or replaced: close our own socket instead of
+		// leaving it bound, and never hand it to Serve. Reported by log
+		// rather than returned, because Start's error path nils
+		// s.httpServer and would clobber the newer server here.
+		if closeErr := ln.Close(); closeErr != nil &&
+			!errors.Is(closeErr, net.ErrClosed) {
+			s.logger.Error(
+				"failed to close the listener of a "+
+					"stopped Mesh API server",
+				"error", closeErr,
+			)
+		}
+		return nil
 	}
 	go func() {
 		var serveErr error

@@ -449,12 +449,10 @@ type LedgerStateConfig struct {
 	// reached from a preview/preprod/mainnet configuration.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
-	// validation rule set entirely. dingo already trusts (logs, does not reject)
-	// every Dijkstra tx-validation disagreement, because the block was admitted
-	// to the chain by its Leios certificate and the prototype does not itself
-	// validate endorser-block transactions. On the Haskell-conformant path
-	// (Musashi) certified closure and ranking-block transactions are trusted in
-	// the same way. Running dingo's rule set only to discard any disagreement is
+	// validation rule set entirely. On the Haskell-conformant Musashi path,
+	// certified closure and ranking-block transactions are trusted because the
+	// prototype does not validate endorser-block transactions. Running dingo's
+	// rule set only to discard any disagreement is
 	// wasted work that prevents the node from reaching tip under load. Set true
 	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
 	// requires an unambiguous Musashi identity so this can never be reached
@@ -4746,11 +4744,8 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
 //
-// Note what this flag does *not* decide: whether a Dijkstra validation failure
-// rejects the block. That is trustDijkstraTxValidationError, which is
-// profile-independent — so on the Dijkstra path the accept/reject outcome is
-// the same either way, and this flag only governs whether the rules are run at
-// all (CPU cost and disagreement logging).
+// The same prototype flag also scopes trustDijkstraTxValidationError. Standard
+// Dijkstra/Leios profiles run the rules and reject any disagreement.
 func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -4759,23 +4754,12 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //
-// This is deliberately *not* gated on the network profile or on
-// SkipDijkstraTxValidation: a Dijkstra block reaches here only because it was
-// admitted to the chain by its Leios certificate, an endorser block may be only
-// partially resolvable, and the certificate/validation surface is still
-// evolving — so rewinding a certified chain on a disagreement is not yet the
-// right response on any profile. Dijkstra is only in the active era table when
-// EnableDijkstra is set (Musashi, runMode "leios", or startEra "dijkstra"), so
-// a default preview/preprod/mainnet node never reaches this path.
-//
-// The consequence for the trust boundary is worth stating plainly:
-// SkipDijkstraTxValidation changes whether the rules run, not whether a bad
-// Dijkstra transaction is rejected. Tightening this to enforce was item 5 of
-// #2587, which was closed without that item being done; it needs its own
-// change, with DevNet/Leios validation, rather than riding along with a
-// configuration-boundary fix.
+// Trust is limited to the explicit Musashi prototype bypass. Standard
+// Dijkstra/Leios profiles have complete endorser-block fetch/apply support and
+// must reject invalid ranking-block transactions just like every other era.
 func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
-	return eraId == dijkstra.EraIdDijkstra
+	return eraId == dijkstra.EraIdDijkstra &&
+		ls.config.SkipDijkstraTxValidation
 }
 
 func (ls *LedgerState) ledgerProcessBlock(
@@ -5046,31 +5030,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 				delta.Release()
 				return nil, err
 			}
-			// Dijkstra/Leios: per-tx UTxO validation is run only when the
-			// ranking block's endorser block was applied above, so the
-			// endorser-resident inputs these txs spend are now present in the
-			// UTxO set and the rules can resolve them. When the endorser block
-			// was not applied — e.g. it has not been fetched, or the prototype
-			// does not diffuse it (historical endorser blocks) — validation is
-			// skipped: the rules could only fail (BadInputsUtxo /
-			// ValueNotConserved), the network already admitted the block via
-			// its Leios certificate, and running the full rule set per tx on
-			// dense near-tip blocks otherwise holds throughput down to the
-			// block-production rate and prevents convergence. A validation
-			// disagreement on an endorser-applied block is trusted (logged)
-			// below rather than rewinding, since the prototype's
-			// endorser-block availability and certificate surface are still
-			// evolving.
-			// Skip Dijkstra per-tx validation only on the Haskell-conformant
-			// prototype path (Musashi, SkipDijkstraTxValidation): there endorser
-			// txs are stored but never applied, so ranking-block txs that spend
-			// endorser-resident outputs are unresolvable and disagree on
-			// essentially every tx and are then trusted anyway (the prototype
-			// does not validate endorser txs either). Running that always-failing
-			// rule set per tx on dense Leios blocks pegs a core and holds
-			// throughput below the block-production rate, so skip it. The normal
-			// CIP-conformant / Dijkstra path applies endorser txs (complete UTxO)
-			// and validates normally — it is never skipped here.
+			// Standard Dijkstra/CIP profiles validate ranking-block transactions
+			// even when the referenced endorser block is unavailable; missing
+			// endorser-resident inputs then produce a validation error. Skip
+			// Dijkstra validation only on the Haskell-conformant prototype path
+			// (Musashi, SkipDijkstraTxValidation), where endorser transactions
+			// are stored but not applied and the Leios certificate is trusted.
 			skipDijkstraValidation := ls.skipDijkstraTxValidation(
 				validationEra.Id,
 			)
@@ -5096,12 +5061,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 					pp,
 				)
 				// When a TX has isValid=true, the block producer's
-				// Plutus evaluator verified the script passed. If our
-				// evaluator disagrees, the fault is in our VM (known
-				// gouroboros CEK machine limitations), not in the block.
-				// Log the disagreement but trust the block producer.
+				// Plutus evaluator verified the script passed. For
+				// pre-Dijkstra eras, log a local evaluator disagreement
+				// and trust the block producer. Standard Dijkstra keeps
+				// the validation error so invalid Leios blocks are rejected;
+				// the Musashi prototype retains its explicit trust bypass.
 				var plutusErr conway.PlutusScriptFailedError
-				if err != nil && errors.As(err, &plutusErr) {
+				if err != nil && errors.As(err, &plutusErr) &&
+					(validationEra.Id != dijkstra.EraIdDijkstra ||
+						ls.trustDijkstraTxValidationError(validationEra.Id)) {
 					ls.config.Logger.Warn(
 						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
 						"component",
@@ -5121,15 +5089,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 					)
 					err = nil
 				}
-				// Dijkstra/Leios: the block was admitted to the chain via its
-				// Leios certificate. An endorser block may be only partially
-				// resolvable (e.g. an endorser-resident input from an endorser
-				// block the prototype did not diffuse), and the prototype's
-				// certificate/validation surface is still evolving, so a
-				// remaining validation disagreement is logged and trusted
-				// rather than rewinding the certified chain. Tracked by #2587:
-				// tighten to enforce once endorser-block availability and
-				// Leios certificate validation are complete.
+				// The Musashi prototype trusts remaining Dijkstra validation
+				// disagreements because its certificate-driven closure is still
+				// evolving. Standard profiles leave the error intact and reject
+				// the block below.
 				if err != nil &&
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
 					ls.config.Logger.Warn(
