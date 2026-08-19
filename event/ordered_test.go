@@ -15,6 +15,7 @@
 package event
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -251,4 +252,37 @@ func TestPublishOrderedIsolatesEventTypes(t *testing.T) {
 		}
 	}
 	requireAscending(t, collectOrdered(t, fastCh, n))
+}
+
+// TestPublishOrderedContextRejectsCancelledContextWithRoomInLane covers the
+// common case: a cancelled context must be honoured even when the lane has
+// capacity. Checking ctx only in the full-lane wait let a publish on an
+// already-cancelled context be accepted and delivered whenever there happened
+// to be room, which is almost always.
+func TestPublishOrderedContextRejectsCancelledContextWithRoomInLane(
+	t *testing.T,
+) {
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	subId, ch := eb.SubscribeWithBuffer("ordered.cancelled", 16)
+	if subId == 0 {
+		t.Fatal("subscribe failed")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The lane is empty, so the enqueue would succeed on capacity alone.
+	if eb.PublishOrderedContext(
+		ctx, "ordered.cancelled", NewEvent("ordered.cancelled", 0),
+	) {
+		t.Fatal("PublishOrderedContext accepted a cancelled publish")
+	}
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("cancelled publish was delivered: %v", evt.Data)
+	case <-time.After(200 * time.Millisecond):
+	}
 }

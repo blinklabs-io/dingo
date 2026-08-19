@@ -76,6 +76,15 @@ func (e *EventBus) PublishOrderedContext(
 	eventType EventType,
 	evt Event,
 ) bool {
+	// Check cancellation before accepting anything. Deferring it to the
+	// full-lane wait below would let a publish on an already-cancelled
+	// context still be enqueued and delivered whenever the lane happens to
+	// have room, which is the common case.
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
 	e.stopMu.RLock()
 	if e.stopped || e.closed {
 		e.stopMu.RUnlock()

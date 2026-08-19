@@ -230,7 +230,11 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 	// events, but it would have missed them anyway -- it was not subscribed
 	// when the rollback began, and Publish to zero subscribers is already a
 	// no-op. So this weakens no guarantee that existed.
-	if !ls.config.EventBus.HasSubscribers(TransactionEventType) {
+	// LedgerErrorEventType counts too: a decode failure while building the
+	// undo events is reported there, and a consumer subscribed only to
+	// ledger.error would otherwise stop seeing rollback decode failures.
+	if !ls.config.EventBus.HasSubscribers(TransactionEventType) &&
+		!ls.config.EventBus.HasSubscribers(LedgerErrorEventType) {
 		return nil
 	}
 	var blocks []models.Block

@@ -45,10 +45,14 @@ var guardedMutexes = []string{
 // knownNilQueuePublishersUnderLock is intentionally empty. A guarded caller
 // must always pass its pending queue; a nil queue would publish inline.
 //
-// The ledger.tx undo emit reached from rollbackChainAndState is deliberately
-// not listed here: this scan is intra-procedural and that path holds neither
-// the lock nor the publish in the same function, so it is enumerated by
-// TestChainsyncResyncPublishPathsUnderLock instead.
+// The ledger.tx undo emit reached from rollbackChainAndState is covered by
+// neither test, and deliberately so. This scan is intra-procedural and that
+// path holds the lock and the publish in different functions, so it does not
+// match here; TestChainsyncResyncPublishPathsUnderLock does not match it
+// either, since that one parses only chainsync.go and only fires on
+// ChainsyncResyncEventType. The path is a documented exception rather than a
+// checked one -- see the ledger.tx section of ARCHITECTURE.md for why it has
+// to publish under chainsyncMutex and what that requires of subscribers.
 var knownNilQueuePublishersUnderLock []string
 
 // TestNoEventBusPublishWhileHoldingChainsyncMutex enforces that nothing in

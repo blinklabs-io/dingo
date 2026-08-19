@@ -354,3 +354,80 @@ func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
 		"undo events must cover the block the rollback discards",
 	)
 }
+
+// TestRejectedRollbackEmitsNoUndoEvents covers the corruption window: a
+// rollback the chain will reject must not tell subscribers to undo blocks that
+// stay applied. Emitting has to happen before the truncation for ordering, so
+// the rejection is checked first.
+func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// A point at the ancestor's slot but carrying a hash no block has:
+	// ValidateRollback rejects it, and crucially it sits *below* the tip,
+	// so blocksAboveSlot would find the block at the tip and emit undo
+	// events for it if the rejection were not checked first. A point above
+	// the tip would not exercise this at all -- there is nothing above it
+	// to emit for.
+	badPoint := ocommon.NewPoint(
+		fixture.ancestorTip.Point.Slot,
+		testHashBytes("no-such-block"),
+	)
+	require.Error(t, ls.rollbackChainAndState(badPoint))
+
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"a rejected rollback must not publish undo events",
+	)
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"a rejected rollback must not publish undo decode errors",
+	)
+
+	// The chain still holds the block the rollback would have discarded.
+	require.Equal(
+		t,
+		fixture.currentTip.Point.Slot,
+		ls.chain.Tip().Point.Slot,
+		"chain must be untouched by a rejected rollback",
+	)
+}
+
+// TestBlocksAboveSlotServesLedgerErrorOnlySubscribers guards the
+// no-subscriber fast path against suppressing decode failures: a consumer
+// watching only ledger.error still needs to see them.
+func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	// Deliberately no ledger.tx subscriber.
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	require.NoError(t, ls.rollbackChainAndState(fixture.ancestorTip.Point))
+
+	evt := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"decode error must reach a ledger.error-only subscriber",
+	)
+	le, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+}

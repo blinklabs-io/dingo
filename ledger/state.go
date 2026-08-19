@@ -2603,6 +2603,22 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
+	// Reject the rollback before emitting anything. The undo events have
+	// to be enqueued before the truncation (see below), so emitting first
+	// and having chain.Rollback then reject the point would tell every
+	// ledger.tx consumer to undo blocks that are still applied --
+	// corrupting exactly the derived state this ordering exists to
+	// protect. ValidateRollback runs the same deterministic checks
+	// rollbackLocked does (reconcile, security parameter, block lookup,
+	// fork depth) and returns the same errors, so this only moves the
+	// rejection earlier. It does not close the window completely: the
+	// chain can still grow between the two calls and push the rollback
+	// past the security parameter, and an I/O failure mid-truncation is
+	// not predictable at all. Both leave the chain needing recovery
+	// regardless.
+	if err := ls.chain.ValidateRollback(point); err != nil {
+		return err
+	}
 	// Emit the per-transaction undo events before the truncation, not
 	// after: the block-apply goroutine can start applying the
 	// post-rollback chain the moment chain.Rollback lands, and it
