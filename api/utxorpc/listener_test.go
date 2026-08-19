@@ -15,7 +15,6 @@
 package utxorpc
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -34,18 +33,6 @@ import (
 // keeps the promise its Stop makes, including on the force-close escalation
 // paths that are this listener's own.
 
-// stopNow shuts u down under a bounded context, matching the package's existing
-// convention (stopUtxorpc in tls_auth_test.go): a hang in the teardown path
-// should fail the test rather than stall the suite until go test's own timeout.
-func stopNow(t *testing.T, u *Utxorpc) error {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(
-		context.Background(), 5*time.Second,
-	)
-	defer cancel()
-	return u.Stop(ctx)
-}
-
 // TestServerStopReleasesPortBeforeServeRegisters covers the window between
 // net.Listen and Serve registering that listener with the http.Server.
 // http.Server.Shutdown closes only registered listeners, so a Stop landing
@@ -57,7 +44,7 @@ func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
 			apiconfig.EffectiveTLS{}, apiconfig.EffectiveAuth{},
 		)
 
-		require.NoError(t, stopNow(t, u))
+		stopUtxorpc(t, u)
 
 		require.False(
 			t, portAccepts(addr),
@@ -77,7 +64,7 @@ func TestServerRebindsAfterStop(t *testing.T) {
 		t, t.Context(),
 		apiconfig.EffectiveTLS{}, apiconfig.EffectiveAuth{},
 	)
-	require.NoError(t, stopNow(t, u))
+	stopUtxorpc(t, u)
 
 	host, port, err := net.SplitHostPort(addr)
 	require.NoError(t, err)
@@ -93,7 +80,7 @@ func TestServerRebindsAfterStop(t *testing.T) {
 		t, restarted.Start(t.Context()),
 		"a capability restart must rebind the port Stop released",
 	)
-	require.NoError(t, stopNow(t, restarted))
+	stopUtxorpc(t, restarted)
 }
 
 // portAccepts reports whether a TCP connection to addr succeeds.
