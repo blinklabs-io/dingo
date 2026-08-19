@@ -86,6 +86,7 @@ type Server struct {
 	genesisStartTimeSec int64
 	addrNetworkID       uint8
 	httpServer          *http.Server
+	listener            net.Listener
 	verifier            *apiauth.Verifier
 	mu                  sync.Mutex
 }
@@ -218,10 +219,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// goroutine not yet existing.
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
-		s.mu.Lock()
-		srv := s.httpServer
-		s.httpServer = nil
-		s.mu.Unlock()
+		srv, ln := s.takeServer()
 
 		if srv != nil {
 			s.logger.Debug(
@@ -235,8 +233,8 @@ func (s *Server) Start(ctx context.Context) error {
 			)
 			defer cancel()
 			//nolint:contextcheck
-			if err := srv.Shutdown(
-				shutdownCtx,
+			if err := shutdownServer(
+				shutdownCtx, srv, ln,
 			); err != nil {
 				s.logger.Error(
 					"failed to shutdown Mesh API "+
@@ -267,19 +265,56 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the HTTP server.
 func (s *Server) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	srv := s.httpServer
-	s.httpServer = nil
-	s.mu.Unlock()
+	srv, ln := s.takeServer()
 
 	if srv != nil {
 		s.logger.Debug("shutting down Mesh API server")
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf(
-				"failed to shutdown Mesh API server: %w",
-				err,
-			)
+		return shutdownServer(ctx, srv, ln)
+	}
+	return nil
+}
+
+// takeServer detaches the running HTTP server and its listener so
+// exactly one caller shuts them down: Stop and the context monitor
+// started by Start both race for them.
+func (s *Server) takeServer() (*http.Server, net.Listener) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	srv, ln := s.httpServer, s.listener
+	s.httpServer, s.listener = nil, nil
+	return srv, ln
+}
+
+// shutdownServer drains in-flight requests, then closes the listening
+// socket. http.Server.Shutdown only closes listeners that Serve has
+// registered, and startServer registers ours from a goroutine it does
+// not wait for, so Shutdown on its own can return while the socket is
+// still accepting connections -- leaving the port bound after Stop
+// returns, which a capability restart on the same port (see
+// node_lifecycle.go) then fails to rebind. Closing the listener here
+// makes releasing the port part of what Stop waits for. Closing after
+// Shutdown, not before, keeps Serve's exit quiet: Shutdown marks the
+// server as shutting down first, so the resulting accept failure
+// surfaces as http.ErrServerClosed rather than an error log.
+func shutdownServer(
+	ctx context.Context,
+	srv *http.Server,
+	ln net.Listener,
+) error {
+	err := srv.Shutdown(ctx)
+	if ln != nil {
+		// Serve closes the listener on its own way out, so an
+		// already-closed listener is the expected case, not a failure.
+		if closeErr := ln.Close(); closeErr != nil &&
+			!errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, closeErr)
 		}
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"failed to shutdown Mesh API server: %w",
+			err,
+		)
 	}
 	return nil
 }
@@ -309,6 +344,11 @@ func (s *Server) startServer(
 			err,
 		)
 	}
+	// Recorded so Stop can close the socket itself rather than relying on
+	// the Serve goroutine below having registered it (see shutdownServer).
+	s.mu.Lock()
+	s.listener = ln
+	s.mu.Unlock()
 	go func() {
 		var serveErr error
 		if useTLS {

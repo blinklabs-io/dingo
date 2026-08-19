@@ -258,7 +258,8 @@ func TestServerStopIsIdempotent(t *testing.T) {
 }
 
 // TestServerGracefulShutdown asserts Stop closes the listener so the
-// port stops accepting connections.
+// port stops accepting connections, and that it has done so by the time
+// Stop returns rather than some time afterwards.
 func TestServerGracefulShutdown(t *testing.T) {
 	srv, addr := startOnFreePort(
 		t, t.Context(), newTestDeps(),
@@ -270,12 +271,33 @@ func TestServerGracefulShutdown(t *testing.T) {
 	defer cancel()
 	require.NoError(t, srv.Stop(stopCtx))
 
-	testutil.WaitForCondition(
-		t,
-		func() bool { return !portAccepts(addr) },
-		5*time.Second,
+	require.False(
+		t, portAccepts(addr),
 		"listener still accepting after Stop",
 	)
+}
+
+// TestServerStopReleasesPortBeforeServeRegisters covers the window
+// between startServer binding the socket and the goroutine it launches
+// reaching http.Server.Serve: Shutdown closes only the listeners Serve
+// registered, so in that window Stop used to return with the port still
+// bound -- which the capability restart in node_lifecycle.go then fails
+// to rebind. Stopping straight after Start lands in the window often
+// but not every time, so the assertion is repeated.
+func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
+	for i := range 100 {
+		srv, addr := startOnFreePort(
+			t, t.Context(), newTestDeps(),
+		)
+
+		require.NoError(t, srv.Stop(t.Context()))
+
+		require.False(
+			t, portAccepts(addr),
+			"listener still accepting when Stop returned "+
+				"(iteration %d)", i,
+		)
+	}
 }
 
 // TestServerShutdownOnContextCancel asserts cancelling the context
