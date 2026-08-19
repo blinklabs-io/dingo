@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -428,6 +430,144 @@ func TestStopWaitsForATeardownItLost(t *testing.T) {
 
 	close(teardown)
 	require.NoError(t, srv.Stop(t.Context()))
+}
+
+// TestAwaitTeardownPrefersACompletedTeardown asserts a finished teardown is
+// never reported as a timeout. When the completion channel and the context are
+// both ready, select picks at random, so the loop is what makes the absence of
+// a recheck fail rather than flake.
+func TestAwaitTeardownPrefersACompletedTeardown(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for i := range 200 {
+		require.NoError(
+			t, awaitTeardown(ctx, done),
+			"a completed teardown must not be reported as a timeout "+
+				"(iteration %d)", i,
+		)
+	}
+}
+
+// TestTimedOutTeardownDoesNotSignalCompletionEarly asserts a Stop whose bind
+// wait times out does not mark the teardown complete. startServer still owns a
+// socket that Stop cannot close, so a second caller waiting on the teardown has
+// to keep waiting rather than read it as "the port is free".
+func TestTimedOutTeardownDoesNotSignalCompletionEarly(t *testing.T) {
+	srv := newTestServer(t, newTestDeps())
+	bindDone := make(chan struct{})
+
+	srv.mu.Lock()
+	srv.httpServer = &http.Server{Addr: testutil.FreePort(t)}
+	srv.bindDone = bindDone
+	srv.mu.Unlock()
+
+	// First caller detaches and times out waiting for the bind.
+	stopCtx, cancelStop := context.WithTimeout(
+		context.Background(),
+		100*time.Millisecond,
+	)
+	defer cancelStop()
+	require.ErrorIs(t, srv.Stop(stopCtx), context.DeadlineExceeded)
+
+	// Second caller lost the detach and must not be told the teardown is done.
+	loserCtx, cancelLoser := context.WithTimeout(
+		context.Background(),
+		100*time.Millisecond,
+	)
+	defer cancelLoser()
+	require.ErrorIs(
+		t, srv.Stop(loserCtx), context.DeadlineExceeded,
+		"a teardown blocked on an in-flight bind must not report completion",
+	)
+
+	// Once the bind settles the teardown is genuinely complete.
+	close(bindDone)
+	require.NoError(t, srv.Stop(t.Context()))
+}
+
+// TestConcurrentStartStopNeverLeavesThePortBound hammers the interleavings the
+// individual lifecycle tests each pin one of: Start racing Stop, Stop racing the
+// context monitor, and a restart on the same address immediately after.
+//
+// The invariant is the one every caller relies on: once Stop returns without an
+// error, the address is free, so the next Start on it must succeed.
+//
+// What this does NOT cover, verified by running it against the earlier buggy
+// revisions, where it passed: the paths that need a bind still in flight when a
+// wait expires. A real bind settles far too quickly for that, so a stalled bind
+// has to be constructed. Those live in
+// TestStopTearsDownEvenWhenTheBindWaitTimesOut,
+// TestStopWaitsForATeardownItLost, and
+// TestTimedOutTeardownDoesNotSignalCompletionEarly, each checked against the
+// defect it names. Do not read a pass here as covering them.
+func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
+	addr := testutil.FreePort(t)
+
+	for i := range 60 {
+		srv := newTestServer(
+			t, newTestDeps(),
+			func(c *ServerConfig) { c.ListenAddress = addr },
+		)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Four-way contention on purpose: Start, two Stops, and the context
+		// monitor. Two Stops matter — one of them loses takeServer and has to
+		// wait on the winner's teardown, which is the path where a premature
+		// completion signal turns into a false "the port is free".
+		var wg sync.WaitGroup
+		stopErrs := make([]error, 2)
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			_ = srv.Start(ctx)
+		}()
+		for slot := range stopErrs {
+			go func() {
+				defer wg.Done()
+				stopErrs[slot] = srv.Stop(t.Context())
+			}()
+		}
+		go func() {
+			defer wg.Done()
+			cancel()
+		}()
+		wg.Wait()
+
+		// Every Stop that returned nil made the same promise, so the strictest
+		// reading applies: if any of them reported clean, the port must be free.
+		stopErr := errors.Join(stopErrs...)
+		if stopErr != nil && stopErrs[0] != nil && stopErrs[1] != nil {
+			// A reported timeout is honest: the caller was told the port may
+			// still be held, so it is not licensed to rebind.
+			continue
+		}
+		require.NoError(
+			t, srv.Stop(t.Context()),
+			"a second Stop must stay clean (iteration %d)", i,
+		)
+		require.False(
+			t, portAccepts(addr),
+			"Stop returned nil but the port is still accepting "+
+				"(iteration %d)", i,
+		)
+
+		// The contract Stop's nil return promises: the address is rebindable.
+		next := newTestServer(
+			t, newTestDeps(),
+			func(c *ServerConfig) { c.ListenAddress = addr },
+		)
+		nextCtx, cancelNext := context.WithCancel(context.Background())
+		require.NoError(
+			t, next.Start(nextCtx),
+			"rebinding after a clean Stop must succeed (iteration %d)", i,
+		)
+		require.NoError(t, next.Stop(t.Context()))
+		cancelNext()
+		_ = stopErr
+	}
 }
 
 // TestServerShutdownOnContextCancel asserts cancelling the context

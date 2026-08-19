@@ -262,10 +262,12 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.startServer(server, bindDone); err != nil {
 		s.mu.Lock()
 		// Guarded: an overlapping Stop or restart may already have
-		// detached or replaced this server, and clearing the field
-		// unconditionally would discard the newer one.
+		// detached or replaced this server, and clearing the fields
+		// unconditionally would discard the newer one. Cleared as a set,
+		// matching takeServer, so "no server present" never leaves a
+		// listener or bind channel behind for the next caller to find.
 		if s.httpServer == server {
-			s.httpServer = nil
+			s.httpServer, s.listener, s.bindDone = nil, nil, nil
 		}
 		s.mu.Unlock()
 		return err
@@ -306,7 +308,7 @@ type shutdownJob struct {
 // the winner's completion channel, which it must wait on — returning early
 // would report the server down while the port was still bound, and an immediate
 // restart on the same port would then fail to bind.
-func (s *Server) takeServer() (*shutdownJob, <-chan struct{}) {
+func (s *Server) takeServer() (*shutdownJob, chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.httpServer == nil {
@@ -329,25 +331,53 @@ func (s *Server) takeServer() (*shutdownJob, <-chan struct{}) {
 // expires mid-wait still holds the only reference to a bound socket, so
 // returning early would leave the port bound with nothing left to close it.
 func (s *Server) shutdown(ctx context.Context, job *shutdownJob) error {
-	defer close(job.done)
 	waitErr := awaitBind(ctx, job.bindDone)
 	stopErr := shutdownServer(ctx, job.srv, job.ln)
+	if waitErr == nil {
+		close(job.done)
+		return stopErr
+	}
+	// The bind is still in flight, so startServer still owns a socket this
+	// call cannot close. Closing job.done now would let a waiting Stop report
+	// the server down while that socket was still bound. startServer always
+	// closes bindDone on its way out -- and closes its own listener once it
+	// sees the detach -- so hand the signalling off until then, which also
+	// bounds this goroutine.
+	go func() {
+		<-job.bindDone
+		close(job.done)
+	}()
 	return errors.Join(waitErr, stopErr)
 }
 
 // awaitTeardown waits for another caller's in-flight shutdown to finish.
-func awaitTeardown(ctx context.Context, done <-chan struct{}) error {
-	if done == nil {
+func awaitTeardown(ctx context.Context, done chan struct{}) error {
+	return awaitSignal(ctx, done, "an in-flight Mesh API shutdown")
+}
+
+// awaitSignal waits for ch to close, bounded by ctx. A nil channel has nothing
+// to wait for and succeeds immediately.
+//
+// One implementation on purpose. Every caller here needs the same recheck: when
+// ch closes at the same moment ctx expires, select picks at random, and
+// reporting a timeout for work that actually finished turns a clean shutdown
+// into a spurious error — and, for the bind, defers the teardown signal that
+// another caller is blocked on. Written once, the recheck cannot be present in
+// one copy and missing from the next.
+func awaitSignal(ctx context.Context, ch chan struct{}, what string) error {
+	if ch == nil {
 		return nil
 	}
 	select {
-	case <-done:
+	case <-ch:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf(
-			"timed out waiting for an in-flight Mesh API shutdown: %w",
-			ctx.Err(),
-		)
+		select {
+		case <-ch:
+			return nil
+		default:
+		}
+		return fmt.Errorf("timed out waiting for %s: %w", what, ctx.Err())
 	}
 }
 
@@ -356,18 +386,7 @@ func awaitTeardown(ctx context.Context, done <-chan struct{}) error {
 // that bind close its own listener, so waiting here is what lets Stop promise
 // the port is free by the time it returns rather than merely started closing.
 func awaitBind(ctx context.Context, bindDone chan struct{}) error {
-	if bindDone == nil {
-		return nil
-	}
-	select {
-	case <-bindDone:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf(
-			"timed out waiting for the Mesh API listener bind to settle: %w",
-			ctx.Err(),
-		)
-	}
+	return awaitSignal(ctx, bindDone, "the Mesh API listener bind to settle")
 }
 
 // shutdownServer drains in-flight requests, then closes the listening
