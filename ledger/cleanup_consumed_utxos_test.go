@@ -145,6 +145,44 @@ func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
 	assert.NotNil(t, post, "cleanup must defer while the ledger is catching up")
 }
 
+// TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip covers the
+// distinction the catch-up deferral has to make: an upstream tip of 0 means
+// unknown, not "infinitely far behind". A node that has never connected to a
+// peer -- or that lost its last active connection, which zeroes the value in
+// chainsync.go -- would otherwise defer cleanup for as long as it stays
+// peerless, growing the utxo table without bound in core mode, and silently:
+// no error, no crash. Cleanup ran off the local tip alone before the deferral
+// existed, so that is the behavior an unknown upstream tip falls back to.
+func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	txId := bytes.Repeat([]byte{0xB4}, 32)
+	const (
+		addedSlot   uint64 = 1_000
+		deletedSlot uint64 = 5_000
+		// Far past the 50_000 default stability window, so the only
+		// reason to retain the row would be the deferral itself.
+		tipSlot uint64 = 10_000_000
+	)
+	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
+
+	pre, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pre, "seed must succeed before cleanup")
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+	// No peer has ever reported a tip.
+	ls.syncUpstreamTipSlot.Store(0)
+	ls.cleanupConsumedUtxos()
+
+	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	assert.Nil(
+		t, post,
+		"an unknown upstream tip must not defer cleanup: the local tip "+
+			"is already far past the stability window",
+	)
+}
+
 // TestCleanupConsumedUtxos_APIModeRetains is the regression fix for
 // issue #2350: in API storage mode the periodic cleanup must leave
 // spent UTxO metadata rows in place so historical transaction queries

@@ -2231,6 +2231,15 @@ func (ls *LedgerState) isNearTipWithStabilityWindow(
 	if upstreamTip == 0 {
 		return false
 	}
+	return nearUpstreamTip(slot, upstreamTip, stabilityWindow)
+}
+
+// nearUpstreamTip reports whether slot is within stabilityWindow of a KNOWN
+// upstreamTip. Callers that must tell "upstream tip unknown" apart from
+// "known, and we are far behind it" read syncUpstreamTipSlot themselves and
+// call this directly; isNearTipWithStabilityWindow folds unknown into
+// not-near, which is the safe answer for its callers but not for all of them.
+func nearUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 	if slot >= upstreamTip {
 		return true
 	}
@@ -2280,12 +2289,21 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	eraId := ls.currentEra.Id
 	ls.RUnlock()
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
-	if !ls.isNearTipWithStabilityWindow(tipSlot, stabilityWindow) {
+	// Read once and gate on a KNOWN upstream tip only. An unknown one is not
+	// evidence of catching up: no peer has ever connected, or the last active
+	// connection dropped and zeroed it (see handleEventChainsyncBlockfetch's
+	// active-connection handling in chainsync.go). Deferring on that would
+	// retain consumed rows forever on a node without peers, where cleanup
+	// previously ran off the local tip alone -- an unbounded utxo table in
+	// exactly the mode documented as minimal storage.
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip != 0 &&
+		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow) {
 		ls.config.Logger.Debug(
 			"deferring consumed UTxO cleanup while catching up",
 			"component", "ledger",
 			"tip_slot", tipSlot,
-			"upstream_tip_slot", ls.syncUpstreamTipSlot.Load(),
+			"upstream_tip_slot", upstreamTip,
 		)
 		return
 	}
