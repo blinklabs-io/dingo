@@ -639,6 +639,7 @@ type LedgerState struct {
 	rewardInputRollbackActive          atomic.Int64               // non-zero while rollback can mutate reward calculation inputs
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
+	cleanupConsumedUtxosRunning        atomic.Bool
 	Scheduler                          *Scheduler
 	chain                              *chain.Chain
 	db                                 *database.Database
@@ -2247,6 +2248,15 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) cleanupConsumedUtxos() {
+	// Cleanup is advisory pruning. Never let the periodic timer and the epoch
+	// transition trigger occupy SQLite's single write connection at the same
+	// time; a second invocation has no additional work to do after the first
+	// one drains the eligible rows.
+	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer ls.cleanupConsumedUtxosRunning.Store(false)
+
 	// In API storage mode we retain spent UTxO metadata rows past the
 	// stability window so historical transaction queries can resolve
 	// input/collateral/reference-input details via spent_at_tx_id,
@@ -2263,6 +2273,15 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	tipSlot := ls.currentTip.Point.Slot
 	eraId := ls.currentEra.Id
 	ls.RUnlock()
+	if !ls.isNearTip(tipSlot) {
+		ls.config.Logger.Debug(
+			"deferring consumed UTxO cleanup while catching up",
+			"component", "ledger",
+			"tip_slot", tipSlot,
+			"upstream_tip_slot", ls.syncUpstreamTipSlot.Load(),
+		)
+		return
+	}
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
 
 	// Delete UTxOs that are marked as deleted and older than our slot window

@@ -74,12 +74,13 @@ func seedSpentUtxoForCleanup(
 // calculateStabilityWindowForEra returns the default
 // (blockfetchBatchSlotThresholdDefault = 50000); the tip slot is then
 // chosen well past that window so consumed-UTxO cleanup is eligible to
-// run in core mode.
+// run in core mode. The upstream tip is initialized to the local tip so the
+// test represents a node that is near the network tip.
 func newLedgerStateForCleanup(
 	db *database.Database,
 	tipSlot uint64,
 ) *LedgerState {
-	return &LedgerState{
+	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ConwayEraDesc,
 		currentTip: ochainsync.Tip{
@@ -89,6 +90,8 @@ func newLedgerStateForCleanup(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.syncUpstreamTipSlot.Store(tipSlot)
+	return ls
 }
 
 // TestCleanupConsumedUtxos_CoreModePrunes asserts the pre-existing
@@ -120,6 +123,26 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 		"core mode must hard-delete consumed UTxO rows after stability "+
 			"window",
 	)
+}
+
+func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	txId := bytes.Repeat([]byte{0xA3}, 32)
+	const (
+		addedSlot   uint64 = 1_000
+		deletedSlot uint64 = 5_000
+		tipSlot     uint64 = 100_000
+		upstreamTip uint64 = 200_000
+	)
+	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls.syncUpstreamTipSlot.Store(upstreamTip)
+	ls.cleanupConsumedUtxos()
+
+	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, post, "cleanup must defer while the ledger is catching up")
 }
 
 // TestCleanupConsumedUtxos_APIModeRetains is the regression fix for
