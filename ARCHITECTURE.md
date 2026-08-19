@@ -6712,7 +6712,7 @@ On chain rollback past an epoch boundary:
   treasury/reserves/fees) are frozen at or before the retained pot's slot, so the
   recomputed value is numerically identical
 
-### Block Processing Pipeline (Parallel Decode)
+### Block Processing Pipeline (Parallel Decode and Validate)
 
 `ledgerReadChainIterator` (`ledger/state.go`) reads raw blocks back from the
 primary chain (`chain.Chain`) and decodes them into
@@ -6795,9 +6795,92 @@ by the other Musashi-only checks), so this can only be reached by an
 embedder that builds a `LedgerStateConfig` directly and skips validation.
 
 This is phase 1 of issue #1894 (decode parallelism only, no ledger
-validation change). Later phases enable VRF/KES validation workers (via an
-`Eta0Provider` for the epoch nonce), pipeline metrics integration, and
-rollback-aware draining of in-flight blocks before a rollback proceeds.
+validation change).
+
+**Phase 3: parallel VRF/KES validation.** `LedgerStateConfig.BlockPipelineValidateEnabled`
+(config `blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED`
+/ `--block-pipeline-validate-enabled`; default off; requires
+`BlockPipelineEnabled` too — `configValidate` rejects the combination
+otherwise) turns on the pipeline's validate stage
+(`gouroboros/pipeline.WithValidateWorkers`) alongside decode, using
+`blockPipelineValidateWorkers` (2) parallel workers. Each block
+`decodeReadChainBatch` decodes is independently re-verified — VRF proof and
+KES signature only, via `gouroboros/ledger.VerifyBlock`'s block-local
+checks — before being handed to `ledgerProcessBlocksFromSource`, exactly as
+decode-only phase 1 already did for CBOR decode.
+
+Wiring, in `NewLedgerState`:
+
+- `pipeline.WithEta0Provider(ls.blockPipelineEta0Provider)`:
+  `blockPipelineEta0Provider` (`ledger/verify_header.go`) looks up the epoch
+  nonce for a block's slot using the same epoch-cache machinery as the
+  serial header-crypto path (`headerVerificationEpoch`, `epochNonceHex`),
+  but with `allowEpochCacheAdvance=false` — unlike the chainsync-header
+  path, which must forecast ahead of ledger apply for freshly-arriving live
+  headers, the pipeline only ever validates blocks already committed to
+  `ls.chain`, so the epoch cache should already cover them, and not
+  advancing it avoids mutating shared epoch-cache state concurrently from
+  multiple validate-stage worker goroutines (none of which are otherwise
+  synchronized with each other).
+- `pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod())` and
+  `pipeline.WithVerifyConfig(lcommon.VerifyConfig{SkipBodyHashValidation:
+  true, SkipTransactionValidation: true, SkipStakePoolValidation: true})` —
+  matching the scope of the existing serial header-only check
+  (`verifyBlockHeaderHex`): VRF/KES only, not body hash, transaction, or
+  stake-pool validation, which dingo performs separately elsewhere
+  (`ledgerProcessBlock`'s tx/UTxO validation; the registered-VRF-key and
+  leader-eligibility checks in `verifyBlockHeaderState` that stand in for
+  gouroboros' generic stake-pool check).
+- gouroboros' `ApplyStage.SetRequireValidation` is wired automatically by
+  `pipeline.BlockPipeline.Start` whenever `ValidateWorkers > 0` — dingo does
+  not call it directly.
+
+Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
+(`blockPipelineEta0Provider` always fails the nonce lookup for them, and
+gouroboros' generic `ValidateStage` has no Byron short-circuit of its own —
+unlike the serial path's `verifyBlockHeaderHex`, which explicitly skips
+Byron blocks). `decodeReadChainBatch` therefore ignores the pipeline's
+validation outcome specifically (and only) for blocks whose decoded
+`Era().Id == byron.EraIdByron`, mirroring `verifyBlockHeaderHex`'s own
+skip. For every other era, a validation failure (crypto rejection, or the
+Eta0Provider erroring because the epoch cache does not yet cover the
+block's slot) is treated exactly like a decode failure: the whole batch is
+discarded and `decodeReadChainBatch` returns `ok=false`, letting the
+existing `ledgerProcessBlocks` retry-with-backoff loop (see below) recover
+once the epoch cache catches up, or surface as a stuck pipeline if the
+rejection is deterministic.
+
+**This phase deliberately does not touch chain admission.** The existing
+serial VRF/KES checks that gate what is admitted to `ls.chain`
+(`handleEventChainsyncBlockHeaderWithPending` for headers,
+`handleEventBlockfetchBlock` for bodies, in `chainsync.go`, both gated on
+`validationEnabled`/`ValidateHistorical`) are entirely unchanged by this
+flag. A block reaching the pipeline has therefore already passed (or, with
+`ValidateHistorical=false`, deliberately skipped) that admission-time
+check; enabling `BlockPipelineValidateEnabled` adds a second, parallel
+VRF/KES check immediately before ledger apply, not a replacement for the
+first one. Concretely: with `ValidateHistorical=false` (blocks admitted
+without any crypto check until near the tip), this closes a real coverage
+gap for the historical backlog, in parallel, cheaply. With
+`ValidateHistorical=true` (the default), blocks were already verified
+serially at admission, so the pipeline's check is a harmless but redundant
+defense-in-depth pass — not (yet) a throughput win for that configuration.
+Removing the admission-time duplicate for that case would mean moving (or
+conditionally skipping) the stateless VRF/KES half of the admission check
+in favor of the pipeline's, which changes the trust-timing model for what
+enters `ls.chain` (chain-selection and peer-relay would act on a block
+before the pipeline confirms it, rather than after admission already has),
+a security-relevant design decision phase 3 does not make.
+
+**Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
+gauges — `dingo_ledger_block_pipeline_blocks_decoded`,
+`_blocks_validated`, `_decode_errors`, `_validation_errors`,
+`_queue_depth` — from `pipeline.BlockPipeline.Stats()` after every batch,
+success or failure, via `stateMetrics.updateBlockPipelineStats`. These
+mirror the gouroboros-side cumulative `PipelineStats` counters as gauges
+(rather than true Prometheus counters) because the pipeline itself owns
+the cumulative totals, which can only be `Set` from a periodic snapshot,
+not incremented in place from dingo's side.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 

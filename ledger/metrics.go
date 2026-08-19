@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -89,6 +90,17 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
+	// block-processing pipeline (issue #1894), refreshed after every batch
+	// decodeReadChainBatch submits to it. These are gauges rather than
+	// counters because the pipeline itself owns the cumulative totals
+	// (they can only be Set from a periodic snapshot, not incremented
+	// in-place from here); nil when BlockPipelineEnabled is off.
+	blockPipelineBlocksDecoded    prometheus.Gauge
+	blockPipelineBlocksValidated  prometheus.Gauge
+	blockPipelineDecodeErrors     prometheus.Gauge
+	blockPipelineValidationErrors prometheus.Gauge
+	blockPipelineQueueDepth       prometheus.Gauge
 }
 
 // The accessors below tolerate an uninitialised stateMetrics. A LedgerState
@@ -130,6 +142,30 @@ func (m *stateMetrics) setPipelineNoProgress(restarts int, stuck bool) {
 			stuckValue = 1
 		}
 		m.pipelineStuck.Set(stuckValue)
+	}
+}
+
+// updateBlockPipelineStats refreshes the block-processing pipeline gauges
+// from a PipelineStats snapshot. Safe to call on an uninitialised
+// stateMetrics (tests that build a LedgerState without calling init).
+func (m *stateMetrics) updateBlockPipelineStats(stats pipeline.PipelineStats) {
+	if m == nil {
+		return
+	}
+	if m.blockPipelineBlocksDecoded != nil {
+		m.blockPipelineBlocksDecoded.Set(float64(stats.BlocksDecoded))
+	}
+	if m.blockPipelineBlocksValidated != nil {
+		m.blockPipelineBlocksValidated.Set(float64(stats.BlocksValidated))
+	}
+	if m.blockPipelineDecodeErrors != nil {
+		m.blockPipelineDecodeErrors.Set(float64(stats.DecodeErrors))
+	}
+	if m.blockPipelineValidationErrors != nil {
+		m.blockPipelineValidationErrors.Set(float64(stats.ValidationErrors))
+	}
+	if m.blockPipelineQueueDepth != nil {
+		m.blockPipelineQueueDepth.Set(float64(stats.CurrentQueueDepth))
 	}
 }
 
@@ -284,6 +320,36 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_pipeline_stuck",
 			Help: "1 while the ledger pipeline has restarted without tip progress often enough to be treated as stuck on a deterministic failure (operator intervention required), 0 otherwise",
+		},
+	)
+	m.blockPipelineBlocksDecoded = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_blocks_decoded",
+			Help: "cumulative blocks successfully decoded by the block-processing pipeline (issue #1894); 0 unless blockPipelineEnabled is set",
+		},
+	)
+	m.blockPipelineBlocksValidated = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_blocks_validated",
+			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES validate stage; 0 unless blockPipelineValidateEnabled is set",
+		},
+	)
+	m.blockPipelineDecodeErrors = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_decode_errors",
+			Help: "cumulative block-processing pipeline decode failures",
+		},
+	)
+	m.blockPipelineValidationErrors = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_validation_errors",
+			Help: "cumulative block-processing pipeline VRF/KES validation failures, including expected Byron-era non-validation",
+		},
+	)
+	m.blockPipelineQueueDepth = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_queue_depth",
+			Help: "current number of blocks buffered inside the block-processing pipeline's inter-stage channels",
 		},
 	)
 }

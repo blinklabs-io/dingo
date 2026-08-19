@@ -50,6 +50,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -69,8 +70,17 @@ const (
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
 	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
 	// of the block-processing pipeline (issue #1894). Validation workers stay
-	// at 0 (disabled) until a later phase wires an Eta0Provider.
+	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
+	// turns them on (phase 3).
 	blockPipelineDecodeWorkers = 2
+	// blockPipelineValidateWorkers is the fixed VRF/KES validate worker count
+	// for phase 3 of the block-processing pipeline (issue #1894). VRF and KES
+	// verification are each substantially more expensive than a CBOR decode,
+	// so validation is the pipeline's throughput bottleneck; this is kept
+	// equal to blockPipelineDecodeWorkers for now rather than scaled
+	// differently, matching phase 1's fixed-worker-count approach until
+	// there's a throughput profile to size it against.
+	blockPipelineValidateWorkers = 2
 )
 
 // DatabaseOperation represents an asynchronous database operation
@@ -510,6 +520,35 @@ type LedgerStateConfig struct {
 	// stability are still being proven (issue #1894 phase 1). See
 	// ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool
+	// BlockPipelineValidateEnabled turns on the pipeline's VRF/KES validate
+	// stage (issue #1894 phase 3), in addition to decode. It has no effect
+	// unless BlockPipelineEnabled is also set. Each block decoded by
+	// decodeReadChainBatch is independently re-verified (VRF proof + KES
+	// signature, via gouroboros' pipeline.ValidateStage) by a small worker
+	// pool before being handed to ledgerProcessBlocksFromSource, exactly as
+	// with decode-only phase 1.
+	//
+	// This is intentionally additive, not a replacement: it does not change
+	// (and this phase does not touch) the existing serial VRF/KES checks
+	// that already run before a block is admitted to the primary chain
+	// (handleEventChainsyncBlockHeaderWithPending, handleEventBlockfetchBlock
+	// in chainsync.go) -- those remain the sole gate on what enters
+	// ls.chain, unchanged, regardless of this flag. A block that reaches
+	// the pipeline has therefore already passed (or, with
+	// ValidateHistorical=false, deliberately skipped) that admission-time
+	// check; enabling this flag adds a second, parallel VRF/KES check
+	// immediately before ledger apply. For historical sync with
+	// ValidateHistorical=false (blocks admitted without a crypto check
+	// until near the tip), this closes a real coverage gap in parallel,
+	// cheaply. For ValidateHistorical=true (the default), it re-checks
+	// blocks that were already verified serially at admission -- a
+	// harmless but redundant defense-in-depth check, not (yet) a
+	// throughput win for that configuration; removing the admission-time
+	// duplicate would require moving where VRF/KES verification gates
+	// chain admission, which is a separate, security-relevant design
+	// decision this phase deliberately does not make. See ARCHITECTURE.md
+	// ("Block Processing Pipeline").
+	BlockPipelineValidateEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the slot and the complete set of standalone
@@ -928,15 +967,47 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// altogether, so no pipeline is constructed for that mode -- leaving
 	// blockPipeline non-nil but permanently unstarted otherwise.
 	if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing {
-		// Validation stays disabled (ValidateWorkers defaults to 0) for
-		// phase 1: only decode is parallelized. ApplyFunc is left nil --
-		// actual ledger apply continues to happen downstream in
-		// ledgerProcessBlocksFromSource exactly as it does today; the
-		// pipeline's apply stage here only re-sequences decoded results
-		// back into submission order.
-		ls.blockPipeline = pipeline.NewBlockPipeline(
+		// ApplyFunc is left nil in every case -- actual ledger apply
+		// continues to happen downstream in ledgerProcessBlocksFromSource
+		// exactly as it does today; the pipeline's apply stage here only
+		// re-sequences decoded (and, if enabled, validated) results back
+		// into submission order.
+		pipelineOpts := []pipeline.PipelineOption{
 			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
-		)
+		}
+		if cfg.BlockPipelineValidateEnabled {
+			// Wire VRF/KES validation (phase 3). Eta0Provider looks up the
+			// epoch nonce for a block's slot using the same epoch-cache
+			// machinery as the serial header-crypto path
+			// (headerVerificationEpoch/epochNonceHex), but never advances
+			// the epoch cache itself (allowEpochCacheAdvance=false):
+			// unlike the chainsync-header path, which must forecast ahead
+			// of ledger apply for freshly-arriving live headers, this
+			// pipeline only ever validates blocks already committed to
+			// ls.chain, so the epoch cache should already cover them. Not
+			// advancing it here also avoids mutating shared epoch-cache
+			// state concurrently from multiple validate workers.
+			//
+			// VerifyConfig matches the scope of the existing serial
+			// header-only check (verifyBlockHeaderHex): VRF/KES only, not
+			// body hash, transaction, or stake-pool validation, which
+			// dingo performs separately (body/tx validation in
+			// ledgerProcessBlock; the registered-VRF-key and leader-
+			// eligibility checks that stand in for gouroboros' generic
+			// stake-pool check in verifyBlockHeaderState).
+			pipelineOpts = append(
+				pipelineOpts,
+				pipeline.WithValidateWorkers(blockPipelineValidateWorkers),
+				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
+				pipeline.WithVerifyConfig(lcommon.VerifyConfig{
+					SkipBodyHashValidation:    true,
+					SkipTransactionValidation: true,
+					SkipStakePoolValidation:   true,
+				}),
+			)
+		}
+		ls.blockPipeline = pipeline.NewBlockPipeline(pipelineOpts...)
 	}
 	return ls, nil
 }
@@ -1664,7 +1735,10 @@ func (ls *LedgerState) Close() error {
 		select {
 		case stopErr := <-blockPipelineStopDone:
 			if stopErr != nil {
-				err = errors.Join(err, fmt.Errorf("block-decode pipeline shutdown: %w", stopErr))
+				err = errors.Join(
+					err,
+					fmt.Errorf("block-decode pipeline shutdown: %w", stopErr),
+				)
 			}
 		case <-time.After(CloseBlockPipelineDrainTimeout):
 			err = errors.Join(
@@ -3406,6 +3480,12 @@ func (ls *LedgerState) decodeReadChainBatch(
 		return nil, false
 	default:
 	}
+	// Refresh the block-pipeline gauges on every exit from here on,
+	// success or failure, so a batch that aborts partway through (decode or
+	// validation error) still reports the errors it accumulated.
+	defer func() {
+		ls.metrics.updateBlockPipelineStats(ls.blockPipeline.Stats())
+	}()
 	// submitCtx is deliberately not ctx (attemptCtx) -- see the doc comment
 	// above.
 	submitCtx := context.Background()
@@ -3442,7 +3522,32 @@ func (ls *LedgerState) decodeReadChainBatch(
 			)
 			return nil, false
 		}
-		decoded = append(decoded, item.Block())
+		block := item.Block()
+		// Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
+		// to validate against (blockPipelineEta0Provider always fails the
+		// nonce lookup for them), matching the serial path's
+		// verifyBlockHeaderHex, which explicitly skips Byron blocks rather
+		// than trying to validate them. Ignore any validation outcome for
+		// them here for the same reason.
+		if ls.config.BlockPipelineValidateEnabled &&
+			block.Era().Id != byron.EraIdByron {
+			if valErr := item.ValidationError(); valErr != nil {
+				ls.config.Logger.Error(
+					"failed to validate block",
+					"error", valErr,
+					"slot", block.SlotNumber(),
+				)
+				return nil, false
+			}
+			if !item.IsValid() {
+				ls.config.Logger.Error(
+					"block failed pipeline VRF/KES validation",
+					"slot", block.SlotNumber(),
+				)
+				return nil, false
+			}
+		}
+		decoded = append(decoded, block)
 	}
 	return decoded, true
 }
@@ -3683,7 +3788,8 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			// deterministic failure is not going to clear on its own, so it
 			// is an operator-actionable condition rather than another line
 			// in a repeating WARN.
-			if stuck && progress.consecutiveNoProgress == noProgressStuckThreshold {
+			if stuck &&
+				progress.consecutiveNoProgress == noProgressStuckThreshold {
 				ls.config.Logger.Error(
 					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
 					"component",
@@ -7614,7 +7720,10 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 		return 0, errors.New("byron protocol magic is negative")
 	}
 	if protocolMagic > math.MaxUint32 {
-		return 0, fmt.Errorf("byron protocol magic exceeds uint32: %d", protocolMagic)
+		return 0, fmt.Errorf(
+			"byron protocol magic exceeds uint32: %d",
+			protocolMagic,
+		)
 	}
 	// #nosec G115 -- the protocol magic is checked against the uint32 range above.
 	return uint32(protocolMagic), nil

@@ -431,6 +431,20 @@ validateHistorical: true
 # CLI: --block-pipeline-enabled
 blockPipelineEnabled: false
 
+# Also VRF/KES-validate blocks in the block-pipeline replay loop with a
+# parallel worker pool (default: false). Requires blockPipelineEnabled to
+# also be set. This adds a second, parallel VRF/KES check immediately before
+# ledger apply; it does not change the existing serial VRF/KES checks that
+# already gate what is admitted to the primary chain, so with
+# validateHistorical: true (the default) blocks are checked twice
+# (redundant but harmless). See ARCHITECTURE.md ("Block Processing
+# Pipeline").
+#
+# Can be overridden with the DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED
+# environment variable
+# CLI: --block-pipeline-validate-enabled
+blockPipelineValidateEnabled: false
+
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # A non-genesis chainsync intersection without a Mithril snapshot may set this

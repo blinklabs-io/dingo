@@ -1327,6 +1327,32 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 	return nonceHex
 }
 
+// blockPipelineEta0Provider implements gouroboros' pipeline.Eta0Provider for
+// the block-processing pipeline's validate stage (issue #1894 phase 3). It
+// looks up the epoch nonce for a block's slot using the same epoch-cache
+// machinery as the serial header-crypto path (headerVerificationEpoch,
+// epochNonceHex), but never advances the epoch cache
+// (allowEpochCacheAdvance=false): the pipeline only ever validates blocks
+// already committed to ls.chain (read back by ledgerReadChainIterator), so
+// unlike the chainsync-header path -- which must forecast ahead of ledger
+// apply for freshly-arriving live headers -- the epoch cache should already
+// cover them. Not advancing it also avoids mutating shared epoch-cache state
+// concurrently from multiple validate-stage worker goroutines, which all
+// call this function without any external synchronization between them.
+//
+// Byron-era slots have no Praos epoch nonce and always fail this lookup
+// (headerVerificationEpoch rejects an epoch with an empty nonce); callers
+// must treat a validation failure on a Byron-era block as expected, exactly
+// as the serial path's verifyBlockHeaderHex explicitly skips Byron blocks
+// rather than trying to validate them.
+func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
+	epoch, err := ls.headerVerificationEpoch(slot, false)
+	if err != nil {
+		return "", err
+	}
+	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
+}
+
 // epochForSlot searches an immutable epoch-cache snapshot for the epoch
 // containing the given slot.
 //
