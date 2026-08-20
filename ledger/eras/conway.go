@@ -301,10 +301,10 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 	return ret
 }
 
-// validateConwayInlineDatumsWithPlutusV1 rejects inline datums only when a
-// PlutusV1 script is actually selected by a transaction script purpose. The
-// gouroboros rule this replaces reports a false positive for an unrelated
-// PlutusV1 reference script attached to a key-locked input.
+// validateConwayInlineDatumsWithPlutusV1 rejects inline datums only when the
+// datum-bearing input is locked by a PlutusV1 script. The gouroboros rule this
+// replaces reports a false positive for an unrelated PlutusV1 reference script
+// attached to a key-locked input.
 func validateConwayInlineDatumsWithPlutusV1(
 	tx lcommon.Transaction,
 	_ uint64,
@@ -329,32 +329,24 @@ func validateConwayInlineDatumsWithPlutusV1(
 		return nil
 	}
 	ctx, err := newConwayPlutusValidationContext(tx, ls)
-	if err != nil || ctx.redeemers == nil {
+	if err != nil {
 		return nil
 	}
-	for redeemerKey := range ctx.redeemers.Iter() {
-		purpose, ok := buildConwayScriptPurpose(
-			redeemerKey,
-			ctx.scriptInputs.resolvedInputsMap,
-			ctx.inputs,
-			ctx.assetMint,
-			tx.Certificates(),
-			tx.Withdrawals(),
-			tx.VotingProcedures(),
-			tx.ProposalProcedures(),
-			ctx.witnessDatums,
-		)
-		if !ok {
+	for _, input := range tx.Inputs() {
+		utxo, ok := ctx.scriptInputs.resolvedInputsMap[input.String()]
+		if !ok || utxo.Output == nil || utxo.Output.Datum() == nil {
 			continue
 		}
-		script, ok := ctx.scriptInputs.scripts[purpose.ScriptHash()]
+		addr := utxo.Output.Address()
+		if addr.Type()&lcommon.AddressTypeScriptBit == 0 {
+			continue
+		}
+		script, ok := ctx.scriptInputs.scripts[lcommon.ScriptHash(addr.PaymentKeyHash())]
 		if !ok {
 			continue
 		}
 		if _, ok := script.(lcommon.PlutusV1Script); ok {
-			return lcommon.InlineDatumsNotSupportedError{
-				PlutusVersion: "PlutusV1",
-			}
+			return lcommon.InlineDatumsNotSupportedError{PlutusVersion: "PlutusV1"}
 		}
 	}
 	return nil
