@@ -4986,11 +4986,16 @@ every one of #3097's own tests passes unmodified.
   pre-existing `complete = true` coverage row from before the refresh attempt
   is untouched (`CommitAccountRewardsForEpoch` is never reached on a partial
   failure), so nothing would otherwise signal that this mixed state shouldn't
-  be trusted. `fetchAccountRewardsForEpoch` closes this by calling
-  `Cache.MarkAccountCoverageIncomplete` — a single-column
-  `complete = false` downgrade that touches neither `koios_account_rewards`
-  nor the checkpoint tables — whenever a `forceRefresh` call is about to
-  return an error (chunk failure or `ctx` cancellation). This is sufficient
+  be trusted. `fetchAccountRewardsForEpoch` closes this via a shared
+  `wrapForceRefreshFailure` closure that calls `Cache.MarkAccountCoverageIncomplete`
+  — a single-column `complete = false` downgrade that touches neither
+  `koios_account_rewards` nor the checkpoint tables — wrapping *every* error
+  return once dispatch begins: a chunk failure, `ctx` cancellation, reading
+  staged rows back, the final per-chunk hash re-check, or
+  `Cache.CommitAccountRewardsForEpoch` itself. Every one of these can follow
+  chunks that already succeeded and replaced their old rows during dispatch,
+  so the same mixed-snapshot risk applies regardless of which specific step
+  fails afterward — not just an in-flight chunk error. This is sufficient
   on its own: `compareEpochAccounts`'s existing `!coverage.Complete` gate
   already refuses to run `CompareAccountEpoch`/`accountLifecycleMismatches`
   against an incomplete epoch, and `GetEpochsMissingAccountCoverage`'s

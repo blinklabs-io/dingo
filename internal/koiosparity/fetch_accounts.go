@@ -499,46 +499,51 @@ outer:
 
 	wg.Wait()
 
-	if ctx.Err() != nil {
-		if forceRefresh {
-			if markErr := cache.MarkAccountCoverageIncomplete(network, epoch); markErr != nil {
-				return 0, fmt.Errorf(
-					"mark account coverage incomplete after canceled force-refresh: %w (original error: %w)",
-					markErr,
-					ctx.Err(),
-				)
-			}
+	// wrapForceRefreshFailure downgrades this epoch's koios_account_coverage
+	// row to complete=false (Cache.MarkAccountCoverageIncomplete) before
+	// returning origErr, but only for forceRefresh — every failure exit from
+	// this point on (chunk dispatch, ctx cancellation, reading staged rows
+	// back, the final hash re-check, or the commit itself) can follow chunks
+	// that already succeeded and replaced their old rows via
+	// SaveAccountFetchChunkProgress during dispatch, so koios_account_checked
+	// may already hold a mix of freshly-refreshed and untouched pre-refresh
+	// chunks — two Koios snapshots that were never actually valid together.
+	// The pre-existing complete=true coverage row from before this attempt
+	// must not be left as-is in that case, or compareEpochAccounts/
+	// accountLifecycleMismatches would trust that mixed state as genuinely
+	// complete. A non-forceRefresh call never risks this (no chunk it didn't
+	// already trust as done gets touched), so it always returns origErr
+	// unchanged.
+	wrapForceRefreshFailure := func(origErr error) error {
+		if !forceRefresh {
+			return origErr
 		}
-		return 0, ctx.Err()
+		if markErr := cache.MarkAccountCoverageIncomplete(network, epoch); markErr != nil {
+			return fmt.Errorf(
+				"mark account coverage incomplete after failed force-refresh: %w (original error: %w)",
+				markErr,
+				origErr,
+			)
+		}
+		return origErr
+	}
+
+	if ctx.Err() != nil {
+		return 0, wrapForceRefreshFailure(ctx.Err())
 	}
 
 	errMu.Lock()
 	err = firstErr
 	errMu.Unlock()
 	if err != nil {
-		if forceRefresh {
-			// A partial force-refresh failure can leave koios_account_checked
-			// holding a mix of freshly-refreshed and untouched pre-refresh
-			// chunks (see MarkAccountCoverageIncomplete's doc comment for why
-			// forceRefresh never pre-invalidates checkpoint data). The
-			// pre-existing complete=true coverage row from before this
-			// attempt must be downgraded so nothing downstream trusts that
-			// mixed state as a valid snapshot until a later attempt completes
-			// fully and re-commits a fresh, consistent one.
-			if markErr := cache.MarkAccountCoverageIncomplete(network, epoch); markErr != nil {
-				return 0, fmt.Errorf(
-					"mark account coverage incomplete after failed force-refresh: %w (original error: %w)",
-					markErr,
-					err,
-				)
-			}
-		}
-		return 0, classifyFetchErr(err)
+		return 0, wrapForceRefreshFailure(classifyFetchErr(err))
 	}
 
 	stagedRows, err := cache.GetStagedAccountRows(network, epoch)
 	if err != nil {
-		return 0, fmt.Errorf("get staged account rows: %w", err)
+		return 0, wrapForceRefreshFailure(
+			fmt.Errorf("get staged account rows: %w", err),
+		)
 	}
 
 	// A zero-row result, for an epoch that closed within the grace window,
@@ -558,10 +563,10 @@ outer:
 		epoch,
 	)
 	if err != nil {
-		return 0, fmt.Errorf(
+		return 0, wrapForceRefreshFailure(fmt.Errorf(
 			"get chunk hashes with staged rows (final): %w",
 			err,
-		)
+		))
 	}
 	allChunksHaveRows := true
 	for _, p := range plans {
@@ -575,7 +580,9 @@ outer:
 		now.Sub(epochEndTime) >= time.Duration(graceHours)*time.Hour
 
 	if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, stagedRows, len(addressUniverse), complete, now); commitErr != nil {
-		return 0, fmt.Errorf("commit account rewards: %w", commitErr)
+		return 0, wrapForceRefreshFailure(
+			fmt.Errorf("commit account rewards: %w", commitErr),
+		)
 	}
 	// koios_account_fetch_staged_rows/koios_account_checked are deliberately
 	// NOT cleared here, even once complete=true: koios_account_checked is

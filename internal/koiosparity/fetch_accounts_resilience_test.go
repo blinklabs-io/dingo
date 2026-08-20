@@ -817,6 +817,73 @@ func TestFetchAccountRewardsForEpochIncompleteCoverageAfterForceRefreshSelfHeals
 	)
 }
 
+// TestFetchAccountRewardsForEpochForceRefreshDowngradesCoverageOnPostDispatchFailure
+// proves the coverage downgrade (wrapForceRefreshFailure) isn't limited to a
+// chunk-dispatch failure: every chunk can succeed during dispatch (so
+// koios_account_checked/koios_account_fetch_staged_rows are already fully
+// refreshed) and the failure can instead happen afterward — reading staged
+// rows back, the final hash re-check, or CommitAccountRewardsForEpoch itself.
+// Simulated here by breaking koios_account_rewards (dropped) so
+// CommitAccountRewardsForEpoch's own DELETE fails and its transaction rolls
+// back, while koios_account_coverage stays intact and queryable — isolating
+// a failure specifically at the commit step, after a fully successful
+// dispatch, from the chunk-dispatch failure the other tests already cover.
+func TestFetchAccountRewardsForEpochForceRefreshDowngradesCoverageOnPostDispatchFailure(
+	t *testing.T,
+) {
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			addrs, _ := decodeAccountRewardHistoryRequest(t, r)
+			writeAccountRewardHistoryRows(w, addrs)
+		}),
+	)
+	defer srv.Close()
+
+	k := &KoiosClient{
+		baseURL: srv.URL,
+		http:    &http.Client{Timeout: 2 * time.Second},
+		limiter: newBurstLimiter(0, koiosBurstWindow),
+	}
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addrs := []string{"stake1addrPD0", "stake1addrPD1"}
+
+	// First, normal run: succeeds and commits a complete epoch.
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 980, addrs, time.Time{}, 0,
+		1, 0, false, nil,
+	)
+	require.NoError(t, err)
+	covBefore, err := cache.GetAccountCoverage("preview", 980)
+	require.NoError(t, err)
+	require.True(t, covBefore.Complete, "test setup sanity check")
+
+	// Break the commit step specifically: every chunk will still dispatch
+	// and succeed, but CommitAccountRewardsForEpoch's DELETE FROM
+	// koios_account_rewards now fails, rolling back the whole commit —
+	// koios_account_coverage itself is untouched by this and stays readable.
+	_, err = cache.db.Exec("DROP TABLE koios_account_rewards")
+	require.NoError(t, err)
+
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 980, addrs, time.Time{}, 0,
+		1, 0, true, nil,
+	)
+	require.Error(t, err, "the broken commit step must surface as a real failure")
+	require.ErrorContains(t, err, "commit account rewards")
+
+	covAfter, err := cache.GetAccountCoverage("preview", 980)
+	require.NoError(t, err)
+	require.False(
+		t,
+		covAfter.Complete,
+		"a post-dispatch commit failure must still downgrade coverage to "+
+			"incomplete, even though every chunk dispatched successfully",
+	)
+}
+
 // TestFetchAccountRewardsForEpochMegaScenario is the combined exercise the
 // issue asks for directly: large synthetic snapshot plus injected timeout,
 // rate-limit, truncated-response, duplicate-page, and restart failures, all
