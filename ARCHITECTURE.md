@@ -4966,18 +4966,39 @@ every one of #3097's own tests passes unmodified.
   crash partway through can never leave `koios_account_checked` pointing at
   a chunk whose staged rows are gone (which `GetDoneAccountChunkHashes` would
   otherwise still report as "done").
-- **A checkpointed empty chunk is not trusted during the grace window.**
-  A subtle interaction with the zero-row/grace-hours gate below: if Koios's
-  publishing lag means a chunk returns zero rows early in the grace window,
-  that chunk still checkpoints (a real HTTP success, just an empty result).
-  Naively treating it as "done" forever would mean a later retry — even
-  within the same still-open grace window — would never re-ask Koios and
-  could eventually commit a stale, empty result as `complete = true` once
-  `graceHours` elapses, silently losing rewards Koios published in the
-  meantime. `fetchAccountRewardsForEpoch` therefore only trusts a checkpointed
-  chunk as skippable when either it has genuinely non-empty staged rows
-  (`Cache.GetChunkHashesWithStagedRows`) or the grace window has already
-  closed by the time of the call — otherwise it's re-dispatched.
+- **A checkpointed empty chunk is not trusted during the grace window,
+  and neither is a mixed result.** A subtle interaction with the
+  zero-row/grace-hours gate below: if Koios's publishing lag means a chunk
+  returns zero rows early in the grace window, that chunk still checkpoints
+  (a real HTTP success, just an empty result). Naively treating it as
+  "done" forever would mean a later retry — even within the same still-open
+  grace window — would never re-ask Koios and could eventually commit a
+  stale, empty result as `complete = true` once `graceHours` elapses,
+  silently losing rewards Koios published in the meantime.
+  `fetchAccountRewardsForEpoch` therefore only trusts a checkpointed chunk as
+  skippable (not re-dispatched) when either it has genuinely non-empty
+  staged rows (`Cache.GetChunkHashesWithStagedRows`) or the grace window has
+  already closed by the time of the call. The same care applies to the
+  final `complete` decision itself: it is not "did the aggregate staged-row
+  total across all chunks end up non-zero" (one non-empty chunk would
+  trivially satisfy that even while a different chunk in the very same plan
+  is still empty-and-lagging) but "does *every* chunk in the current plan
+  have a currently-real result" — re-checked via
+  `Cache.GetChunkHashesWithStagedRows` after dispatch, not reused from
+  before it, so a chunk that resolved during this very call is counted.
+- **An empty universe invalidates, not just skips, prior checkpoint data.**
+  If the address universe shrinks to empty after a previous, non-empty
+  attempt already left checkpoint rows behind for this `(network, epoch)`
+  (e.g. Dingo's `reward_account_output` rows for this stake epoch were
+  pruned/rolled back between calls), `fetchAccountRewardsForEpoch`'s
+  empty-universe path calls `Cache.InvalidateStaleAccountChunks` with a nil
+  current-plan hash list — deleting every existing chunk's checkpoint data,
+  since content-addressed invalidation treats "not in the current plan" as
+  stale for any hash not present in the (empty) list. Skipping this would
+  leave the old universe's rows in `koios_account_checked` even though
+  `koios_account_rewards`/`koios_account_coverage` correctly read empty —
+  and `accountLifecycleMismatches` (below) would then read those stale rows
+  as if they belonged to this epoch's current, correctly-empty universe.
 - **Page-safety hardening.** `/account_reward_history` is not usably
   Range-paginated — confirmed live against preview: repeated requests with
   different `Range` values return the same first row window rather than
@@ -5027,9 +5048,22 @@ every one of #3097's own tests passes unmodified.
   informational: `DetermineStatus` has a dedicated no-op case for them, so
   none can ever turn an otherwise clean epoch into `FAIL` or `ERROR`. A
   genuine cache or Dingo DB error from either lookup is reported as
-  `CategoryDBError` rather than silently swallowed; only `stakeEpoch == 0`
-  (no valid previous stake epoch to diff against) disables the
-  newly-registered/deregistered half specifically.
+  `CategoryDBError` rather than silently swallowed, including a malformed
+  previous-epoch `reward_account_output` row (an unsupported credential
+  tag) — silently dropping such a row instead would make its address look
+  deregistered purely because it failed to decode, not because it actually
+  changed. The newly-registered/deregistered half is disabled entirely
+  (returning only the zero-reward half, which doesn't depend on any
+  historical epoch's data) in two cases: `stakeEpoch == 0` (no valid
+  previous stake epoch to diff against), and when `dingo` is a
+  `*DatabaseSource` — the in-process observer's reward source, which reads
+  `reward_account_output` through core-mode's rolling pruning window and
+  cannot distinguish "the previous stake epoch genuinely had no reward
+  accounts" from "its rows have since been pruned" (both surface as an
+  empty, error-free result); treating a pruned-empty result as a complete
+  previous-epoch universe would make every current account look newly
+  registered. Only `*DingoDB` (the standalone CLI's full, unpruned copy) is
+  trusted for this diff.
 - **Configuration.** `--account-chunk-size`/`--account-chunk-max-bytes`
   (standalone CLI: `fetch`/`run`/`watch`) thread through `FetchConfig`/
   `ObserverConfig` the same way `GraceHours` already does, down to

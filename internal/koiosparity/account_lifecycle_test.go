@@ -251,6 +251,112 @@ func TestAccountLifecycleMismatchesPropagatesDingoErrorAsDBError(t *testing.T) {
 	require.Equal(t, CategoryDBError, mismatches[0].Category)
 }
 
+// TestAccountLifecycleMismatchesReportsMalformedPreviousRowAsDBError proves
+// a previous-stake-epoch reward_account_output row with an unsupported
+// credential tag is reported as CategoryDBError rather than silently
+// dropped — silently dropping it would make that row's address look
+// deregistered (present last epoch, "gone" this epoch) purely because it
+// failed to decode, not because it actually changed.
+func TestAccountLifecycleMismatchesReportsMalformedPreviousRowAsDBError(
+	t *testing.T,
+) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	goodKey := testPoolKeyHash(t, 0x10)
+	badKey := testPoolKeyHash(t, 0x11)
+	poolKey := testPoolKeyHash(t, 0xAA)
+
+	// Previous stake epoch (498): one well-formed row, one with an
+	// unsupported credential tag (only 0 and 1 are valid — see
+	// StakeAddressFromCredential).
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 498, StakingKey: goodKey, PoolKeyHash: poolKey,
+		RewardType: "member", CredentialTag: 0,
+		Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 498, StakingKey: badKey, PoolKeyHash: poolKey,
+		RewardType: "member", CredentialTag: 9,
+		Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+
+	ctx := context.Background()
+	mismatches := accountLifecycleMismatches(
+		ctx, cache, dingo, "preview", 500, 499, nil, time.Now(),
+	)
+
+	var sawDecodeError bool
+	for _, m := range mismatches {
+		if m.Category == CategoryDBError &&
+			m.Field == "reward_account_output_address_decode" {
+			sawDecodeError = true
+			require.Contains(t, m.DingoValue, "1")
+		}
+	}
+	require.True(
+		t,
+		sawDecodeError,
+		"the malformed previous-epoch row must be reported, not silently dropped",
+	)
+}
+
+// TestAccountLifecycleMismatchesSkipsLifecycleDiffForPrunableSource proves
+// the newly-registered/deregistered diff is skipped entirely for a
+// *DatabaseSource — the in-process observer's reward source reads through
+// core-mode's rolling pruning window and cannot distinguish "the previous
+// stake epoch genuinely had no reward accounts" from "its rows have since
+// been pruned" (both surface as an empty, error-free result). Treating that
+// ambiguous empty result as a complete previous-epoch universe would make
+// every current account look newly registered — so the diff must not even
+// attempt it for this source type. Zero-reward reporting must still work,
+// since it doesn't depend on any historical epoch's data.
+func TestAccountLifecycleMismatchesSkipsLifecycleDiffForPrunableSource(
+	t *testing.T,
+) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// addr is confirmed checked with zero reward — zero-reward reporting
+	// should still fire even though the lifecycle diff below is skipped.
+	now := time.Now()
+	require.NoError(t, cache.SaveAccountFetchChunkProgress(
+		"preview", 500, "chunkA", nil, []string{"addr1"}, now,
+	))
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	mismatches := accountLifecycleMismatches(
+		context.Background(), cache, source, "preview", 500, 499, nil, now,
+	)
+
+	var sawZeroReward bool
+	for _, m := range mismatches {
+		require.NotEqual(
+			t,
+			CategoryAcctNewlyRegistered,
+			m.Category,
+			"the lifecycle diff must never run at all for a prunable source",
+		)
+		require.NotEqual(t, CategoryAcctDeregistered, m.Category)
+		if m.Category == CategoryAcctZeroReward {
+			sawZeroReward = true
+		}
+	}
+	require.True(
+		t,
+		sawZeroReward,
+		"zero-reward reporting must still work for a prunable source",
+	)
+}
+
 // TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError proves a
 // genuine cache failure while looking up zero-reward accounts is reported as
 // CategoryDBError, never silently swallowed.

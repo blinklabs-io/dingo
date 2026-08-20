@@ -1289,6 +1289,13 @@ func createCacheSchema(db *sql.DB) error {
 			stake_address TEXT NOT NULL, chunk_hash TEXT NOT NULL, reward_row_count INTEGER NOT NULL DEFAULT 0,
 			checked_at DATETIME NOT NULL)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kaced_net_epoch_addr ON koios_account_checked(network, epoch, stake_address)`,
+		// Every per-chunk delete (SaveAccountFetchChunkProgress,
+		// InvalidateStaleAccountChunks) filters on (network, epoch, chunk_hash);
+		// without this index that lookup falls back to scanning every checked
+		// row for the whole epoch instead of just the rows for one chunk,
+		// making stale-chunk cleanup cost scale with the epoch's total address
+		// count rather than the chunk being removed.
+		`CREATE INDEX IF NOT EXISTS idx_kaced_net_epoch_chunk ON koios_account_checked(network, epoch, chunk_hash)`,
 
 		`CREATE TABLE IF NOT EXISTS check_epoch_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,

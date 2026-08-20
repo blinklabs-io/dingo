@@ -28,11 +28,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // decodeAccountRewardHistoryRequest decodes one /account_reward_history POST
-// body the same way the production endpoint does.
+// body the same way the production endpoint does. Runs inside the
+// httptest.Server's own per-connection goroutine, never the test's own
+// goroutine, so it uses assert (records a failure, keeps going) rather than
+// require (which calls t.FailNow()/runtime.Goexit — only valid from the
+// goroutine that started the test; from here it would just exit this one
+// handler goroutine, potentially hiding the failure's real location). A
+// decode failure here also naturally surfaces to the caller anyway: the
+// handler goes on to build a response from a zero-value/partial body, which
+// the outer test-goroutine assertions (on FetchAccountRewardsForEpoch's own
+// return value) already catch.
 func decodeAccountRewardHistoryRequest(
 	t *testing.T,
 	r *http.Request,
@@ -42,7 +52,7 @@ func decodeAccountRewardHistoryRequest(
 		StakeAddresses []string `json:"_stake_addresses"`
 		EpochNo        uint64   `json:"_epoch_no"`
 	}
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+	assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 	return body.StakeAddresses, body.EpochNo
 }
 
@@ -83,7 +93,11 @@ func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requestCount.Add(1)
 			addrs, epoch := decodeAccountRewardHistoryRequest(t, r)
-			require.Equal(t, uint64(100), epoch)
+			assert.Equal(
+				t,
+				uint64(100),
+				epoch,
+			) // handler goroutine — see decodeAccountRewardHistoryRequest's doc comment
 
 			if slices.Contains(addrs, poisonAddr) && !recovered.Load() {
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -380,6 +394,153 @@ func TestFetchAccountRewardsForEpochDoesNotTrustEmptyCheckpointWithinGraceWindow
 	)
 }
 
+// TestFetchAccountRewardsForEpochRequiresEveryChunkCurrentBeforeComplete
+// proves the fix for a mixed-chunk variant of the grace-window trust bug:
+// one chunk has genuinely non-empty rows while another, in the very same
+// call, is still empty-and-lagging. Naively checking only "did the aggregate
+// staged-row total end up non-zero" would let the non-empty chunk alone
+// satisfy that check and mark the whole epoch complete=true — permanently
+// missing whatever the still-lagging chunk's real answer turns out to be
+// later, since a completed epoch is never re-fetched. complete must instead
+// require every planned chunk to have a currently-real result before
+// treating grace-window completion as valid.
+func TestFetchAccountRewardsForEpochRequiresEveryChunkCurrentBeforeComplete(
+	t *testing.T,
+) {
+	const hasDataAddr = "stake1has-data"
+	const noDataAddr = "stake1no-data"
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			addrs, _ := decodeAccountRewardHistoryRequest(t, r)
+			if slices.Contains(addrs, noDataAddr) {
+				// Koios hasn't published this address's reward yet — a
+				// legitimate empty response, not an error, and never recovers
+				// within this test.
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			writeAccountRewardHistoryRows(w, addrs)
+		}),
+	)
+	defer srv.Close()
+
+	k := &KoiosClient{
+		baseURL: srv.URL,
+		http:    &http.Client{Timeout: 2 * time.Second},
+		limiter: newBurstLimiter(0, koiosBurstWindow),
+	}
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// FetchEpochAccountsWithAddrs looks up EpochEndTime from koios_epoch_info
+	// (see its own doc comment) — commit one so the grace-hours gate is
+	// actually active rather than disabled by an unknown end time.
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        800,
+		ActiveStake:  "1",
+		EpochEndTime: time.Now().Add(-time.Hour), // just closed
+		FetchedAt:    time.Now(),
+	}, nil, nil))
+
+	// chunkSize=1 forces each address into its own chunk, so one chunk gets
+	// real rows and the other stays empty within the same call.
+	_, err = FetchEpochAccountsWithAddrs(
+		t.Context(), k, cache, "preview", 800, nil,
+		[]string{hasDataAddr, noDataAddr}, 24, 1, 0, nil,
+	)
+	require.NoError(t, err)
+
+	cov, err := cache.GetAccountCoverage("preview", 800)
+	require.NoError(t, err)
+	require.NotNil(t, cov)
+	require.False(
+		t,
+		cov.Complete,
+		"one chunk having real rows must not let the epoch look complete "+
+			"while another chunk is still empty-and-lagging within the grace window",
+	)
+
+	// Partial rows are still recorded (matching #3097's original "record
+	// progress, gate trust via the separate coverage flag" design) — what
+	// matters is that cov.Complete above stays false, so a future check
+	// never mistakes this for a fully verified reference set.
+	rewards, err := cache.GetAccountRewardsForEpoch("preview", 800)
+	require.NoError(t, err)
+	require.Len(t, rewards, 1)
+	require.Equal(t, hasDataAddr, rewards[0].StakeAddress)
+}
+
+// TestFetchAccountRewardsForEpochEmptyUniverseInvalidatesPriorCheckpointData
+// proves a universe that shrinks to empty (e.g. Dingo's reward_account_output
+// rows for this stake epoch were pruned/rolled back between attempts) does
+// not leave stale checkpoint data behind. Without invalidating it, a later
+// accountLifecycleMismatches call would read koios_account_checked as if
+// those addresses were still part of this epoch's current, correctly-empty
+// universe — reporting phantom zero-reward/lifecycle findings for addresses
+// that no longer belong to this epoch at all.
+func TestFetchAccountRewardsForEpochEmptyUniverseInvalidatesPriorCheckpointData(
+	t *testing.T,
+) {
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			addrs, _ := decodeAccountRewardHistoryRequest(t, r)
+			writeAccountRewardHistoryRows(w, addrs)
+		}),
+	)
+	defer srv.Close()
+
+	k := &KoiosClient{
+		baseURL: srv.URL,
+		http:    &http.Client{Timeout: 2 * time.Second},
+		limiter: newBurstLimiter(0, koiosBurstWindow),
+	}
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// First attempt: a real, non-empty universe fully succeeds and
+	// checkpoints.
+	_, err = FetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 850,
+		[]string{"stake1old1", "stake1old2"}, time.Time{}, 0, nil,
+	)
+	require.NoError(t, err)
+	done, err := cache.GetDoneAccountChunkHashes("preview", 850)
+	require.NoError(t, err)
+	require.NotEmpty(
+		t,
+		done,
+		"test setup sanity check: the first attempt must have checkpointed",
+	)
+
+	// Second attempt: the universe has shrunk to empty.
+	_, err = FetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 850, nil, time.Time{}, 0, nil,
+	)
+	require.NoError(t, err)
+
+	cov, err := cache.GetAccountCoverage("preview", 850)
+	require.NoError(t, err)
+	require.NotNil(t, cov)
+	require.True(t, cov.Complete)
+	require.Equal(t, 0, cov.RequestedCount)
+
+	universe, err := cache.GetAccountUniverseForEpoch("preview", 850)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		universe,
+		"the old universe's checked markers must not survive once the universe is empty",
+	)
+	zeroReward, err := cache.GetZeroRewardAccountsForEpoch("preview", 850)
+	require.NoError(t, err)
+	require.Empty(t, zeroReward)
+}
+
 // TestFetchAccountRewardsForEpochMegaScenario is the combined exercise the
 // issue asks for directly: large synthetic snapshot plus injected timeout,
 // rate-limit, truncated-response, duplicate-page, and restart failures, all
@@ -491,7 +652,10 @@ func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 					}
 				}
 				body, marshalErr := json.Marshal(items)
-				require.NoError(t, marshalErr)
+				assert.NoError(
+					t,
+					marshalErr,
+				) // handler goroutine — see decodeAccountRewardHistoryRequest's doc comment
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(body)
 				return
@@ -637,10 +801,17 @@ func TestFetchAccountRewardsForEpochRequestBodyNeverExceedsConfiguredMaxBytes(
 	// with a mutex rather than a plain int.
 	var mu sync.Mutex
 	var maxBodyLen int
+	// Both checks below run inside the httptest.Server's own per-connection
+	// goroutine (see decodeAccountRewardHistoryRequest's doc comment for why
+	// that means assert, not require: FailNow/Goexit is only valid from the
+	// goroutine that started the test). A failure here still surfaces via
+	// the outer FetchEpochAccountsWithAddrs assertion below, since a broken
+	// decode leaves decoded.StakeAddresses empty/zero-valued rather than
+	// panicking.
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
+			assert.NoError(t, err)
 			mu.Lock()
 			if len(body) > maxBodyLen {
 				maxBodyLen = len(body)
@@ -649,7 +820,7 @@ func TestFetchAccountRewardsForEpochRequestBodyNeverExceedsConfiguredMaxBytes(
 			var decoded struct {
 				StakeAddresses []string `json:"_stake_addresses"`
 			}
-			require.NoError(t, json.Unmarshal(body, &decoded))
+			assert.NoError(t, json.Unmarshal(body, &decoded))
 			writeAccountRewardHistoryRows(w, decoded.StakeAddresses)
 		}),
 	)
@@ -710,7 +881,10 @@ func TestGetAccountRewardHistoryRejectsSuspiciouslyFullResponse(t *testing.T) {
 				}
 			}
 			body, err := json.Marshal(items)
-			require.NoError(t, err)
+			assert.NoError(
+				t,
+				err,
+			) // handler goroutine — see decodeAccountRewardHistoryRequest's doc comment
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(body)
 		}),

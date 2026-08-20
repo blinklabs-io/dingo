@@ -866,6 +866,21 @@ func accountLifecycleMismatches(
 		// tests) pass nil rather than a throwaway source implementation.
 		return out
 	}
+	if _, prunable := dingo.(*DatabaseSource); prunable {
+		// DatabaseSource (the in-process observer's reward source) reads
+		// reward_account_output through core-mode's rolling pruning window
+		// (see DatabaseSource.GetRewardAccountOutputs) and cannot
+		// distinguish "the previous stake epoch genuinely had no reward
+		// accounts" from "its rows have since been pruned" — an empty,
+		// error-free result either way. Treating a pruned-empty result as a
+		// complete previous-epoch universe would make every account in the
+		// current epoch look newly registered. Only *DingoDB (the
+		// standalone CLI's full, unpruned copy) can be trusted for this
+		// diff; skip it entirely for a prunable source rather than report a
+		// false lifecycle signal. Zero-reward reporting above is unaffected
+		// — it doesn't depend on any historical epoch's data.
+		return out
+	}
 	previousOutputs, err := dingo.GetRewardAccountOutputs(ctx, stakeEpoch-1)
 	if err != nil {
 		return append(out, CheckMismatch{
@@ -878,8 +893,26 @@ func accountLifecycleMismatches(
 		})
 	}
 
-	prevSet := dingoRewardAddressSet(previousOutputs)
-	currSet := dingoRewardAddressSet(currentOutputs)
+	// currentOutputs' own decode failures are already reported by
+	// compareEpochAccounts's own dingoRows-building loop above (the same
+	// underlying rows) — only previousOutputs has no other reporting path,
+	// since nothing else in this package ever decodes the previous stake
+	// epoch's addresses.
+	prevSet, prevDecodeErrs := dingoRewardAddressSet(previousOutputs)
+	currSet, _ := dingoRewardAddressSet(currentOutputs)
+	if prevDecodeErrs > 0 {
+		out = append(out, CheckMismatch{
+			Network: network,
+			Epoch:   epoch,
+			Field:   "reward_account_output_address_decode",
+			DingoValue: fmt.Sprintf(
+				"%d previous-epoch reward_account_output row(s) failed to decode",
+				prevDecodeErrs,
+			),
+			Category:  CategoryDBError,
+			CheckedAt: now,
+		})
+	}
 
 	var newlyRegistered, deregistered []string
 	for addr := range currSet {
@@ -921,23 +954,27 @@ func accountLifecycleMismatches(
 // dingoRewardAddressSet decodes a set of RewardAccountOutput rows into a
 // deduplicated bech32 stake-address set, mirroring
 // BuildAccountAddressUniverse's own dedup approach. A row with an
-// unsupported credential tag is skipped rather than aborting the whole
-// diff — compareEpochAccounts's own per-account comparison pass already
-// reports that condition explicitly as a dingo_db_error mismatch, so it is
-// never silently lost, just not allowed to prevent every other row's
-// lifecycle comparison.
+// unsupported credential tag is skipped from the set (rather than aborting
+// the whole diff) but counted in decodeErrs — silently dropping such a row
+// would make that address look deregistered (if it was in the previous
+// epoch's set) or simply never newly-registered (if it's in the current
+// epoch's set), which is misleading, not a real lifecycle change. The
+// caller is responsible for reporting decodeErrs > 0 as a CategoryDBError
+// mismatch when there's no other reporting path for this specific input
+// (see accountLifecycleMismatches's call site).
 func dingoRewardAddressSet(
 	outputs []*models.RewardAccountOutput,
-) map[string]bool {
-	set := make(map[string]bool, len(outputs))
+) (set map[string]bool, decodeErrs int) {
+	set = make(map[string]bool, len(outputs))
 	for _, o := range outputs {
 		addr, err := StakeAddressFromCredential(o.StakingKey, o.CredentialTag)
 		if err != nil {
+			decodeErrs++
 			continue
 		}
 		set[addr] = true
 	}
-	return set
+	return set, decodeErrs
 }
 
 // aggregateAccountLifecycleMismatch builds one summary CheckMismatch row for

@@ -250,9 +250,27 @@ func fetchAccountRewardsForEpoch(
 	now := time.Now()
 
 	if len(addressUniverse) == 0 {
-		// Nothing to check — commit a complete, empty coverage record so this
-		// epoch is never perpetually treated as "not yet fetched" by
-		// checkEpoch's coverage gate.
+		// The universe can become empty after a previous, non-empty attempt
+		// already left checkpoint data behind for this (network, epoch) —
+		// e.g. Dingo's reward_account_output rows for this stake epoch were
+		// pruned/rolled back between calls. None of that old data belongs to
+		// the current (empty) plan; passing nil here invalidates every
+		// existing chunk (InvalidateStaleAccountChunks treats "not in the
+		// current plan" as stale for any hash not in currentChunkHashes,
+		// and nil means none are). Skipping this would leave stale rows in
+		// koios_account_checked/koios_account_fetch_staged_rows that
+		// GetZeroRewardAccountsForEpoch/GetAccountUniverseForEpoch (used by
+		// accountLifecycleMismatches) would then read as if they belonged to
+		// this epoch's current, correctly-empty universe.
+		if err := cache.InvalidateStaleAccountChunks(network, epoch, nil); err != nil {
+			return 0, fmt.Errorf(
+				"invalidate stale account chunks for empty universe: %w",
+				err,
+			)
+		}
+		// Commit a complete, empty coverage record so this epoch is never
+		// perpetually treated as "not yet fetched" by checkEpoch's coverage
+		// gate.
 		if commitErr := cache.CommitAccountRewardsForEpoch(network, epoch, nil, 0, true, now); commitErr != nil {
 			return 0, fmt.Errorf("commit empty account coverage: %w", commitErr)
 		}
@@ -468,13 +486,36 @@ outer:
 		return 0, fmt.Errorf("get staged account rows: %w", err)
 	}
 
-	// A zero-row result across the whole address universe, for an epoch that
-	// closed within the grace window, is far more likely to be Koios's own
-	// account_reward_history publishing lag than genuine "nobody earned a
-	// reward this epoch" — see this function's doc comment. Leave coverage
-	// incomplete so a later attempt retries it, rather than baking in an
-	// empty snapshot as permanent fact the moment complete=1 is committed.
-	complete := len(stagedRows) != 0 || graceHours <= 0 ||
+	// A zero-row result, for an epoch that closed within the grace window,
+	// is far more likely to be Koios's own account_reward_history publishing
+	// lag than genuine "nobody earned a reward this epoch" — see this
+	// function's doc comment. This must be judged per chunk, not on the
+	// aggregate stagedRows total: if one chunk has real rows while another
+	// is still empty-and-lagging, the aggregate total alone is non-zero even
+	// though the lagging chunk was never actually reconfirmed this call —
+	// committing complete=true here would let that chunk's later-published
+	// rewards be permanently missed, since a completed epoch is never
+	// re-fetched. Re-querying after dispatch (rather than reusing the
+	// pre-dispatch hashesWithRows) picks up whatever any chunk resolved to
+	// during this very call.
+	finalHashesWithRows, err := cache.GetChunkHashesWithStagedRows(
+		network,
+		epoch,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get chunk hashes with staged rows (final): %w",
+			err,
+		)
+	}
+	allChunksHaveRows := true
+	for _, p := range plans {
+		if !finalHashesWithRows[p.hash] {
+			allChunksHaveRows = false
+			break
+		}
+	}
+	complete := allChunksHaveRows || graceHours <= 0 ||
 		epochEndTime.IsZero() ||
 		now.Sub(epochEndTime) >= time.Duration(graceHours)*time.Hour
 
