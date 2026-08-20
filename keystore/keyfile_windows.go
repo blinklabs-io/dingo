@@ -154,10 +154,23 @@ func checkOpenDACL(path, owner, dacl string) error {
 	allowed := map[string]bool{
 		owner: true,
 		"BA":  true, // Built-in Administrators
+		"LA":  true, // Built-in Administrator account
 		"SY":  true, // Local System
 		"CO":  true, // Creator Owner
 		"OW":  true, // Owner Rights
 	}
+	// LA is allowed for the same reason BA is. It is the built-in
+	// Administrator account and a member of Built-in Administrators, so it
+	// reaches the file through BA whether or not its own ACE is present, and
+	// an administrator can take ownership of any file regardless of the DACL.
+	// Admitting BA while rejecting LA rejected a file no less protected than
+	// one the check already accepts.
+	//
+	// This is not hypothetical: where a file is owned by the Administrators
+	// group (S-1-5-32-544) and carries an ACE for the Administrator account,
+	// owner and trustee are different principals, so the owner comparison does
+	// not cover it. Windows hosts administered that way, and GitHub's Windows
+	// runners, both produce that combination.
 	for {
 		start := strings.IndexByte(dacl, '(')
 		if start < 0 {

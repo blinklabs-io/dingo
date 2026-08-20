@@ -195,6 +195,34 @@ func TestSecureFileModeWindows(t *testing.T) {
 	assert.NoError(t, checkOpenFilePermissions(file))
 }
 
+func TestAdministratorAccountACEAcceptedWindows(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.skey")
+	require.NoError(t, os.WriteFile(testFile, []byte("test"), 0o600))
+
+	// Owned by the Administrators group with an ACE for the Administrator
+	// account, which is the combination GitHub's Windows runners produce and
+	// which a host administered that way also produces. Owner and trustee are
+	// then different principals, so the owner comparison does not cover it.
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;;GA;;;LA)")
+	require.NoError(t, err)
+	dacl, _, err := sd.DACL()
+	require.NoError(t, err)
+	ownerSID, _, err := sd.Owner()
+	require.NoError(t, err)
+	require.NoError(t, windows.SetNamedSecurityInfo(
+		testFile,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+		ownerSID, nil, dacl, nil,
+	))
+
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	assert.NoError(t, checkOpenFilePermissions(file))
+}
+
 func TestNullDACLFileModeWindows(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.skey")
