@@ -26,14 +26,19 @@ import (
 // rebuilt from root.Name() lets it follow a reparse point substituted for any
 // component after extraction's symlink checks ran. Each component is instead
 // walked through its parent's handle and confirmed to be the entry the name
-// denotes (openVerifiedParent), and those handles are held across the move --
-// Windows refuses to rename a directory while handles are open on it, so the
-// verified parents cannot be swapped underneath the call.
+// denotes (openVerifiedParent), and those handles are held across the move.
 //
-// The residual limit is the one removeExtractedFile carries: Windows offers no
-// handle-relative rename, so the immediate parents' own names are resolved a
-// second time by MoveFile. Closing that needs NtSetInformationFile with
-// FileRenameInformation against the parent handle; see issue #3228.
+// What that does and does not buy is worth stating exactly, because an earlier
+// version of this comment overstated it. The walk rejects a symlink or reparse
+// point that is already in place when it runs, which is the planted-component
+// case. It does not make the parents unswappable: os.Root opens every handle
+// with FILE_SHARE_DELETE (see internal/syscall/windows/at_windows.go), so
+// holding them does not stop another process renaming or deleting a verified
+// directory, and MoveFile resolves the parents' own names a second time.
+//
+// The race between the walk and the call therefore remains. Closing it needs
+// NtSetInformationFile with FileRenameInformation against the parent handle,
+// which is genuinely handle-relative; see issue #3228.
 func renameExtractedDirectory(root *os.Root, oldname, newname string) error {
 	oldParent, oldBase, releaseOld, err := openVerifiedParent(root, oldname)
 	if err != nil {

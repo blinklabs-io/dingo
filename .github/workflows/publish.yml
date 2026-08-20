@@ -133,6 +133,11 @@ jobs:
   go-test-other:
     name: go-test (${{ matrix.platform }}) (${{ matrix.go-version }})
     needs: [ci, create-draft-release]
+    # The only job in this workflow without an explicit grant, so it inherited
+    # repository or organization defaults. It builds and runs tests and needs
+    # nothing else; matches build-image-manifest's read-only grant.
+    permissions:
+      contents: read
     if: always() && github.ref_type == 'tag' && needs.ci.result == 'success' && needs.create-draft-release.result == 'success'
     strategy:
       matrix:

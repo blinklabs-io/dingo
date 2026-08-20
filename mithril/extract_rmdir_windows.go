@@ -34,9 +34,13 @@ import (
 //
 // Unlike the Unix path this addresses the entry by name rather than through
 // the parent handle, because Windows has no handle-relative removal. A
-// substituted parent could therefore redirect it, which Windows makes hard by
-// refusing to move a directory while handles are open beneath it — the parent
-// is held open for the whole extraction.
+// substituted parent could therefore redirect it. The parent is held open for
+// the whole extraction, which does not prevent that: os.Root opens its handles
+// with FILE_SHARE_DELETE (see internal/syscall/windows/at_windows.go), so an
+// open handle does not stop another process renaming or deleting the
+// directory. The verified walk rejects a component already substituted when it
+// runs; the race against a concurrent substitution is open until the removal
+// is handle-relative. See issue #3228.
 func removeEmptyExtractDir(_ *os.Root, _, fullPath string) error {
 	path, err := windows.UTF16PtrFromString(fullPath)
 	if err != nil {
