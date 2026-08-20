@@ -133,6 +133,11 @@ jobs:
   go-test-other:
     name: go-test (${{ matrix.platform }}) (${{ matrix.go-version }})
     needs: [ci, create-draft-release]
+    # The only job in this workflow without an explicit grant, so it inherited
+    # repository or organization defaults. It builds and runs tests and needs
+    # nothing else; matches build-image-manifest's read-only grant.
+    permissions:
+      contents: read
     if: always() && github.ref_type == 'tag' && needs.ci.result == 'success' && needs.create-draft-release.result == 'success'
     strategy:
       matrix:
@@ -144,6 +149,14 @@ jobs:
           - platform: windows-latest
             cache_path: ~\AppData\Local\go-build
     runs-on: ${{ matrix.platform }}
+    # Generous on purpose. Hang protection comes from the per-package
+    # `-timeout 20m` below; this cap only has to exceed a legitimate full-suite
+    # run, which here means checkout, setup-go, a build, and `go test ./...`
+    # across 100+ packages on a slower runner. The equivalent Linux job sets no
+    # job cap at all, so a tight one here is the outlier and would fail
+    # `go-test-other` with no single stuck package, blocking build-binaries and
+    # finalize-release.
+    timeout-minutes: 90
     env:
       CGO_ENABLED: 0
     steps:
@@ -162,7 +175,11 @@ jobs:
       - name: go-build
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test ./...
+        # Windows runners are substantially slower for this suite. Keep the
+        # same link-size optimization and explicit package timeout used by the
+        # Linux release validation job, and cap the job so a stuck test cannot
+        # hold the release indefinitely.
+        run: go test -ldflags="-s -w" -timeout 20m ./...
 
   build-binaries:
     strategy:
