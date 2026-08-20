@@ -237,3 +237,10 @@ func TestUnsupportedACETypeFailsClosedWindows(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInsecureFileMode)
 	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
 }
+
+func TestOwnerAliasMatchesCanonicalOwnerWindows(t *testing.T) {
+	owner := "S-1-5-21-111111111-222222222-333333333-500"
+	assert.NoError(t, checkOpenDACL(
+		"test.skey", owner, "(A;;GR;;;LA)",
+	))
+}

@@ -131,8 +131,8 @@ func checkOpenSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) e
 	if sddl == "" {
 		return fmt.Errorf("failed to read security descriptor for %q", path)
 	}
-	owner := sddlSection(sddl, "O:")
-	if owner == "" {
+	ownerSID, _, err := sd.Owner()
+	if err != nil || ownerSID == nil {
 		return fmt.Errorf(
 			"key file %q has no owner in its security descriptor: %w",
 			path, ErrInsecureFileMode,
@@ -146,7 +146,7 @@ func checkOpenSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) e
 			path, ErrInsecureFileMode,
 		)
 	}
-	return checkOpenDACL(path, owner, dacl)
+	return checkOpenDACL(path, ownerSID.String(), dacl)
 }
 
 func checkOpenDACL(path, owner, dacl string) error {
@@ -187,7 +187,7 @@ func checkOpenDACL(path, owner, dacl string) error {
 				path, fields[0], ErrInsecureFileMode,
 			)
 		}
-		if allowed[fields[5]] {
+		if allowed[fields[5]] || trusteeIsOwner(fields[5], owner) {
 			continue
 		}
 		return fmt.Errorf(
@@ -196,6 +196,24 @@ func checkOpenDACL(path, owner, dacl string) error {
 		)
 	}
 	return nil
+}
+
+// trusteeIsOwner compares a DACL trustee with the descriptor owner. SDDL
+// renders some account SIDs as aliases, while the owner returned by the
+// security descriptor is a canonical SID. In particular, the local
+// administrator account (LA) is a domain-specific SID whose well-known RID
+// is 500, so comparing the SDDL strings directly rejects a valid owner-only
+// DACL on Windows runners that use that account.
+func trusteeIsOwner(trustee, owner string) bool {
+	if trustee == owner {
+		return true
+	}
+	trusteeSID, err := windows.StringToSid(trustee)
+	if err == nil {
+		ownerSID, ownerErr := windows.StringToSid(owner)
+		return ownerErr == nil && windows.EqualSid(trusteeSID, ownerSID)
+	}
+	return trustee == "LA" && strings.HasSuffix(owner, "-500")
 }
 
 func sddlSection(sddl, section string) string {

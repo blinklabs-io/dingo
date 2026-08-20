@@ -559,7 +559,9 @@ func prepareExtractDestination(
 		// Inspecting the destination first and then acting on it — which is
 		// what this used to do — can only be worse than that, however narrow
 		// the gap is made.
-		renameErr := parentRoot.Rename(stagingName, destName)
+		renameErr := renameExtractedDirectory(
+			parentRoot, stagingName, destName,
+		)
 		if renameErr != nil && !cfg.replace {
 			// The destination is occupied. Windows will not rename over an
 			// existing directory even when it is empty, so reaching here does
@@ -576,7 +578,9 @@ func prepareExtractDestination(
 			); err != nil {
 				return err
 			}
-			renameErr = parentRoot.Rename(stagingName, destName)
+			renameErr = renameExtractedDirectory(
+				parentRoot, stagingName, destName,
+			)
 		}
 		if renameErr != nil {
 			return fmt.Errorf("publishing extraction: %w", renameErr)

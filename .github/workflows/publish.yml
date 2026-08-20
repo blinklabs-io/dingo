@@ -144,6 +144,7 @@ jobs:
           - platform: windows-latest
             cache_path: ~\AppData\Local\go-build
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
     env:
       CGO_ENABLED: 0
     steps:
@@ -162,7 +163,11 @@ jobs:
       - name: go-build
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test ./...
+        # Windows runners are substantially slower for this suite. Keep the
+        # same link-size optimization and explicit package timeout used by the
+        # Linux release validation job, and cap the job so a stuck test cannot
+        # hold the release indefinitely.
+        run: go test -ldflags="-s -w" -timeout 20m ./...
 
   build-binaries:
     strategy:

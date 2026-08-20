@@ -18,9 +18,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -727,14 +729,20 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			parent := t.TempDir()
 			dir := filepath.Join(parent, "readonly")
 			require.NoError(t, os.Mkdir(dir, 0o555))
-			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			if runtime.GOOS == "windows" {
+				testutil.MakeDirectoryUnwritable(t, dir)
+			} else {
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			}
 			cfg := validTestConfig()
 			cfg.DatabaseLifecycle.SnapshotEnabled = true
 			cfg.DatabaseLifecycle.SnapshotDir = dir
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "snapshotDir")
-			assert.Contains(t, err.Error(), "1000:1000")
+			if runtime.GOOS != "windows" {
+				assert.Contains(t, err.Error(), "1000:1000")
+			}
 		},
 	)
 
@@ -769,7 +777,11 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			parent := t.TempDir()
 			dir := filepath.Join(parent, "readonly")
 			require.NoError(t, os.Mkdir(dir, 0o555))
-			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			if runtime.GOOS == "windows" {
+				testutil.MakeDirectoryUnwritable(t, dir)
+			} else {
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			}
 			cfg := validTestConfig()
 			cfg.DatabaseLifecycle.SnapshotEnabled = false
 			cfg.DatabaseLifecycle.SnapshotDir = dir
@@ -780,7 +792,9 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "snapshotDir")
-			assert.Contains(t, err.Error(), "1000:1000")
+			if runtime.GOOS != "windows" {
+				assert.Contains(t, err.Error(), "1000:1000")
+			}
 		},
 	)
 }
