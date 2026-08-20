@@ -144,7 +144,14 @@ jobs:
           - platform: windows-latest
             cache_path: ~\AppData\Local\go-build
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 30
+    # Generous on purpose. Hang protection comes from the per-package
+    # `-timeout 20m` below; this cap only has to exceed a legitimate full-suite
+    # run, which here means checkout, setup-go, a build, and `go test ./...`
+    # across 100+ packages on a slower runner. The equivalent Linux job sets no
+    # job cap at all, so a tight one here is the outlier and would fail
+    # `go-test-other` with no single stuck package, blocking build-binaries and
+    # finalize-release.
+    timeout-minutes: 90
     env:
       CGO_ENABLED: 0
     steps:

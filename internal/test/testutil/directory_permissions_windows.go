@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/windows"
 )
 
 // MakeDirectoryUnwritable denies the current user access to a test directory
@@ -24,39 +23,16 @@ import (
 func MakeDirectoryUnwritable(t testing.TB, path string) {
 	t.Helper()
 	userSID := currentUserSID(t)
-	setDirectoryDACL(t, path, fmt.Sprintf(
+	require.NoError(t, applyDACL(path, fmt.Sprintf(
 		"D:P(D;;FA;;;%s)(A;;FA;;;SY)", userSID,
-	))
+	)))
 	t.Cleanup(func() {
-		setDirectoryDACL(t, path, fmt.Sprintf(
+		// Logged rather than required: a failure here must not abort the
+		// cleanup loop, or the temporary directory's own removal never runs.
+		if err := applyDACL(path, fmt.Sprintf(
 			"D:P(A;;FA;;;%s)", userSID,
-		))
+		)); err != nil {
+			t.Logf("restoring DACL on %s: %v", path, err)
+		}
 	})
-}
-
-func currentUserSID(t testing.TB) string {
-	t.Helper()
-	var token windows.Token
-	require.NoError(t, windows.OpenProcessToken(
-		windows.CurrentProcess(), windows.TOKEN_QUERY, &token,
-	))
-	defer token.Close()
-	tokenUser, err := token.GetTokenUser()
-	require.NoError(t, err)
-	return tokenUser.User.Sid.String()
-}
-
-func setDirectoryDACL(t testing.TB, path, sddl string) {
-	t.Helper()
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	require.NoError(t, err)
-	dacl, _, err := sd.DACL()
-	require.NoError(t, err)
-	require.NoError(t, windows.SetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|
-			windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil,
-	))
 }

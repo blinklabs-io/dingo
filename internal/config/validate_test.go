@@ -740,9 +740,11 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "snapshotDir")
-			if runtime.GOOS != "windows" {
-				assert.Contains(t, err.Error(), "1000:1000")
-			}
+			// Asserted on every platform: the hint is a static string in
+			// validate.go's snapshotDir wrap, so if the error is produced at
+			// all it carries the hint, and that hint is the actionable half of
+			// the message.
+			assert.Contains(t, err.Error(), "1000:1000")
 		},
 	)
 
