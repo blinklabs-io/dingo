@@ -237,3 +237,32 @@ func TestUnsupportedACETypeFailsClosedWindows(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInsecureFileMode)
 	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
 }
+
+// TestOwnerAliasMatchesCanonicalOwnerWindows pins both halves of the alias
+// comparison: an alias ace must satisfy the owner it actually denotes on this
+// machine, and must not satisfy a different principal that merely shares its
+// RID.
+//
+// The owner is resolved here rather than written literally. An earlier version
+// asserted against a synthetic "...-500" SID, which passed only because the
+// comparison matched on the RID suffix — the hole this pins shut, since RID 500
+// is the built-in Administrator of every domain, so a domain Administrator
+// owner satisfied a local-administrator ace.
+func TestOwnerAliasMatchesCanonicalOwnerWindows(t *testing.T) {
+	sd, err := windows.SecurityDescriptorFromString("O:LA")
+	require.NoError(t, err)
+	localAdmin, _, err := sd.Owner()
+	require.NoError(t, err)
+
+	assert.NoError(t, checkOpenDACL(
+		"test.skey", localAdmin.String(), "(A;;GR;;;LA)",
+	))
+
+	// Same RID, different domain: not the same principal, so the ace must not
+	// be accepted as the owner's.
+	assert.ErrorIs(t, checkOpenDACL(
+		"test.skey",
+		"S-1-5-21-111111111-222222222-333333333-500",
+		"(A;;GR;;;LA)",
+	), ErrInsecureFileMode)
+}

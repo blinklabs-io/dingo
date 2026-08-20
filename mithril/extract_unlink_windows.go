@@ -41,8 +41,12 @@ import (
 // (openVerifiedParent), and those handles are held across the deletion, so a
 // reparse point substituted mid-extraction is refused during the walk rather
 // than followed by DeleteFile. Only the immediate parent's own name is
-// resolved a second time, and Windows makes substituting it hard by refusing
-// to move a directory while handles are open on it.
+// resolved a second time. Holding the parent handles does not prevent that
+// substitution: os.Root opens them with FILE_SHARE_DELETE (see
+// internal/syscall/windows/at_windows.go), so another process can still rename
+// or delete a verified directory. The walk rejects a component already
+// substituted when it runs; closing the remaining race needs a
+// handle-relative removal. See issue #3228.
 func removeExtractedFile(root *os.Root, name, fullPath string) error {
 	parent, base, release, err := openVerifiedParent(root, name)
 	if err != nil {

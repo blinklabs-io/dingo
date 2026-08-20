@@ -133,6 +133,20 @@ func TestOpenSnapshotAtOrBeforeSurvivesFileSwap(t *testing.T) {
 		); err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
+		if runtime.GOOS == "windows" {
+			// Windows refuses to replace an open file. That is the platform's
+			// equivalent protection: the selected name remains ours, and the
+			// writer cannot stage the substitution while discovery holds it.
+			if err := os.Rename(
+				replacement, filepath.Join(slotDir, name),
+			); err == nil {
+				t.Fatal("Windows replaced a file held open by discovery")
+			}
+			if err := os.Remove(replacement); err != nil {
+				t.Fatalf("unexpected error removing replacement: %s", err)
+			}
+			continue
+		}
 		if err := os.Rename(
 			replacement, filepath.Join(slotDir, name),
 		); err != nil {
@@ -140,16 +154,18 @@ func TestOpenSnapshotAtOrBeforeSurvivesFileSwap(t *testing.T) {
 		}
 	}
 
-	// The premise: the names denote the writer's files now.
+	// On POSIX the names now denote the writer's files. On Windows the open
+	// handles prevent the replacement, so the original names remain ours.
 	byName, err := os.ReadFile(filepath.Join(slotDir, "state"))
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if string(byName) != "theirs" {
-		t.Fatal(
-			"the substitution must be observable through the name, or " +
-				"this test proves nothing",
-		)
+	if runtime.GOOS == "windows" {
+		if string(byName) != "ours" {
+			t.Fatalf("open-file sharing must preserve the selected name: got %q", byName)
+		}
+	} else if string(byName) != "theirs" {
+		t.Fatal("the substitution must be observable through the name")
 	}
 
 	for _, tc := range []struct {

@@ -21,34 +21,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/windows"
 )
 
 // RestrictFileToCurrentUser applies a protected, owner-only DACL to a test
 // fixture so inherited temp-directory permissions cannot make it insecure.
 func RestrictFileToCurrentUser(t testing.TB, path string) {
 	t.Helper()
-
-	var token windows.Token
-	require.NoError(t, windows.OpenProcessToken(
-		windows.CurrentProcess(),
-		windows.TOKEN_QUERY,
-		&token,
-	))
-	defer token.Close()
-
-	tokenUser, err := token.GetTokenUser()
-	require.NoError(t, err)
-	sddl := fmt.Sprintf("D:P(A;;GA;;;%s)", tokenUser.User.Sid.String())
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	require.NoError(t, err)
-	dacl, _, err := sd.DACL()
-	require.NoError(t, err)
-	require.NoError(t, windows.SetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|
-			windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil,
-	))
+	require.NoError(t, applyDACL(path, fmt.Sprintf(
+		"D:P(A;;GA;;;%s)", currentUserSID(t),
+	)))
 }

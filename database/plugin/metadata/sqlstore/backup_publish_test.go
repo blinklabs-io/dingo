@@ -19,8 +19,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -141,9 +143,10 @@ func TestPublishBackupFileFailureDoesNotClobberConcurrentDestination(
 // making the staging directory itself undeletable (chmod 0o500, no write
 // permission) right after the file is written into it -- os.Link into
 // dstDir still succeeds since that's a different directory, but the later
-// os.RemoveAll(tmpDir) then fails.
+// os.RemoveAll(tmpDir) then fails. The test helper uses chmod on Unix and a
+// deny DACL on Windows.
 func TestPublishBackupFileCleansUpDestinationOnLateFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
+	if os.Geteuid() == 0 && runtime.GOOS != "windows" {
 		t.Skip("root ignores directory permission bits")
 	}
 	dst := filepath.Join(t.TempDir(), "backup.bin")
@@ -153,9 +156,9 @@ func TestPublishBackupFileCleansUpDestinationOnLateFailure(t *testing.T) {
 		if err := os.WriteFile(stagedPath, []byte("hello"), 0o600); err != nil {
 			return err
 		}
-		return os.Chmod(tmpDir, 0o500)
+		testutil.MakeDirectoryUnwritable(t, tmpDir)
+		return nil
 	})
-	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o700) })
 	require.Error(t, err)
 	_, statErr := os.Stat(dst)
 	require.True(
