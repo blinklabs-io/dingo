@@ -3387,7 +3387,12 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 
-	newLedger := func(t *testing.T, explicitShelleyHardFork bool) *LedgerState {
+	newLedger := func(
+		t *testing.T,
+		explicitShelleyHardFork bool,
+		experimentalHardForks bool,
+		shelleyHardForkEpoch uint64,
+	) *LedgerState {
 		t.Helper()
 		cfg := &cardano.CardanoNodeConfig{
 			ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
@@ -3399,8 +3404,13 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			strings.NewReader(shelleyGenesisJSON),
 		))
 		if explicitShelleyHardFork {
-			cfg.ExperimentalHardForksEnabled = new(true)
-			cfg.TestShelleyHardForkAtEpoch = new(uint64)
+			// ExperimentalHardForksEnabled is set independently: preview ships
+			// TestShelleyHardForkAtEpoch with the flag false, and
+			// CardanoNodeConfig.HardForkEpoch reports nothing in that case.
+			if experimentalHardForks {
+				cfg.ExperimentalHardForksEnabled = new(true)
+			}
+			cfg.TestShelleyHardForkAtEpoch = new(shelleyHardForkEpoch)
 		}
 
 		db := newTestDB(t)
@@ -3418,7 +3428,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	}
 
 	t.Run("real network retains Byron until its on-chain boundary", func(t *testing.T) {
-		ls := newLedger(t, false)
+		ls := newLedger(t, false, false, 0)
 		require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
 		assert.Nil(t, ls.currentPParams)
 		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
@@ -3427,12 +3437,46 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	})
 
 	t.Run("explicit test hard fork still starts in Shelley", func(t *testing.T) {
-		ls := newLedger(t, true)
+		ls := newLedger(t, true, true, 0)
 		require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
 		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
 		assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
 		assert.Equal(t, uint(1000), ls.currentEpoch.SlotLength)
 	})
+
+	// preview's shipped shape: TestShelleyHardForkAtEpoch: 0 with
+	// ExperimentalHardForksEnabled: False. Reading the declaration through
+	// CardanoNodeConfig.HardForkEpoch hides it, because that accessor returns
+	// (0, false) unless the experimental flag is set -- which forced a node
+	// back to Byron on a network with no Byron prefix and left currentPParams
+	// nil for every GetCurrentPParams consumer (api/utxorpc ReadParams
+	// returned "current protocol parameters empty").
+	t.Run(
+		"explicit hard fork without experimental flag starts in Shelley",
+		func(t *testing.T) {
+			ls := newLedger(t, true, false, 0)
+			require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
+			assert.NotNil(
+				t,
+				ls.currentPParams,
+				"a post-Byron start must expose protocol parameters",
+			)
+			assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+			assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
+		},
+	)
+
+	// A nonzero declaration means Shelley arrives some epochs in, so epochs
+	// 0..N-1 are Byron: that is a Byron prefix, not the absence of one. Only
+	// an explicit epoch 0 marks a network that never had one.
+	t.Run(
+		"nonzero hard-fork epoch keeps the Byron start",
+		func(t *testing.T) {
+			ls := newLedger(t, true, false, 5)
+			require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+			assert.Nil(t, ls.currentPParams)
+		},
+	)
 }
 
 func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
