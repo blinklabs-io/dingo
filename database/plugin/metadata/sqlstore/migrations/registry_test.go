@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 2)
+	require.Len(t, registry, 3)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -43,6 +43,31 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[1].SQL["sqlite"].Expand,
 		"ALTER TABLE `pool` ADD COLUMN `leios_key_public` blob",
 	)
+	require.Equal(t, 3, registry[2].Version)
+	require.Equal(t, "token-registry-metadata", registry[2].Name)
+	require.Contains(
+		t,
+		registry[2].SQL["sqlite"].Expand,
+		"CREATE UNIQUE INDEX IF NOT EXISTS `idx_token_registry_entry_subject`"+
+			" ON `token_registry_entry`(`subject`)",
+	)
+}
+
+// TestMySQLRegistryPrefixesTokenRegistrySubjectIndex guards the token registry
+// migration's one dialect hazard: `subject` is a TEXT column, and MySQL
+// rejects a unique index on TEXT without a prefix length. The translation
+// derives that prefix from the CREATE TABLE in the same migration, so this
+// breaks if v3 ever stops carrying its own table definition.
+func TestMySQLRegistryPrefixesTokenRegistrySubjectIndex(t *testing.T) {
+	t.Parallel()
+	registry, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		registry[2].SQL["mysql"].Expand,
+		"CREATE UNIQUE INDEX `idx_token_registry_entry_subject`"+
+			" ON `token_registry_entry`(`subject`(255))",
+	)
 }
 
 func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
@@ -50,7 +75,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 2)
+	require.Len(t, registry, 3)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

@@ -134,6 +134,23 @@ type OffchainMetadataConfig struct {
 	AllowPrivateAddresses bool
 }
 
+// TokenRegistryConfig controls the API-mode CIP-26 token registry sync, which
+// populates the `metadata` field of GET /assets/{asset}. Zero values use the
+// internal syncer defaults. Disabled unless Enabled is set: the mainnet
+// registry is a roughly 240MB download.
+type TokenRegistryConfig struct {
+	HTTPClient            *http.Client
+	SourceURL             string
+	UserAgent             string
+	Interval              time.Duration
+	RequestTimeout        time.Duration
+	MaxBytes              int64
+	MaxEntryBytes         int64
+	Enabled               bool
+	StoreLogos            bool
+	AllowPrivateAddresses bool
+}
+
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
 // Indexing is only active when Enabled is true AND Dingo is running in API
 // storage mode -- both are required, since the indexer depends on the
@@ -177,6 +194,8 @@ type Config struct {
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
 	offchainMetadata OffchainMetadataConfig
+	// Runtime-only, programmatic token registry config (preserves HTTPClient)
+	tokenRegistry TokenRegistryConfig
 	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
@@ -724,6 +743,23 @@ func (c *Config) syncCompatFields() {
 		Accounts:             &koiosParityAccounts,
 		AccountChunkSize:     c.cfg.KoiosParity.AccountChunkSize,
 		AccountChunkMaxBytes: c.cfg.KoiosParity.AccountChunkMaxBytes,
+	}
+	// The token registry syncer reads this runtime mirror, so YAML, env, and
+	// CLI values -- which only ever land on c.cfg -- have to be carried
+	// across here. HTTPClient is runtime-only and has no internal-config
+	// counterpart, so it is preserved rather than overwritten:
+	// syncCompatFields runs after WithTokenRegistryConfig has applied.
+	c.tokenRegistry = TokenRegistryConfig{
+		HTTPClient:            c.tokenRegistry.HTTPClient,
+		SourceURL:             c.cfg.TokenRegistry.SourceURL,
+		UserAgent:             c.cfg.TokenRegistry.UserAgent,
+		Interval:              c.cfg.TokenRegistry.Interval,
+		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
+		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
+		MaxEntryBytes:         c.cfg.TokenRegistry.MaxEntryBytes,
+		Enabled:               c.cfg.TokenRegistry.Enabled,
+		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
+		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
@@ -1528,6 +1564,26 @@ func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
 	}
 }
 
+// WithTokenRegistryConfig configures the API-mode CIP-26 token registry sync.
+// Zero values use the syncer's internal defaults.
+func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		// Preserve the programmatic runtime-only HTTPClient and full cfg
+		c.tokenRegistry = cfg
+		c.cfg.TokenRegistry = internalconfig.TokenRegistryConfig{
+			Enabled:               cfg.Enabled,
+			SourceURL:             cfg.SourceURL,
+			Interval:              cfg.Interval,
+			RequestTimeout:        cfg.RequestTimeout,
+			UserAgent:             cfg.UserAgent,
+			MaxBytes:              cfg.MaxBytes,
+			MaxEntryBytes:         cfg.MaxEntryBytes,
+			StoreLogos:            cfg.StoreLogos,
+			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+		}
+	}
+}
+
 // WithMidnightConfig configures the Midnight indexer and optional gRPC API.
 func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	return func(c *Config) {
@@ -2021,6 +2077,11 @@ func (c *Config) HistoryExpiry() internalconfig.HistoryExpiryConfig {
 // OffchainMetadata returns the off-chain metadata fetcher configuration.
 func (c *Config) OffchainMetadata() internalconfig.OffchainMetadataConfig {
 	return c.cfg.OffchainMetadata
+}
+
+// TokenRegistry returns the CIP-26 token registry sync configuration.
+func (c *Config) TokenRegistry() internalconfig.TokenRegistryConfig {
+	return c.cfg.TokenRegistry
 }
 
 // Logging returns the logging configuration.

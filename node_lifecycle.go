@@ -265,6 +265,19 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
+	if n.tokenRegistrySync != nil {
+		if stopErr := n.tokenRegistrySync.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("token registry sync shutdown: %w", stopErr),
+			)
+		}
+		// Stop does not return until the worker has exited (see its doc
+		// comment), so by here nothing can still reach the store being
+		// closed. Cleared so reinitializeStorage's gating rebuilds it
+		// rather than restarting an instance bound to the closed store.
+		n.tokenRegistrySync = nil
+	}
 	// midnightIndexer and chainManager/chainsyncState have no corresponding
 	// stop call in node_shutdown.go's shutdown() — production shutdown
 	// relies on process exit to clean them up. That's not available here
@@ -1260,6 +1273,16 @@ func (n *Node) reinitializeAPIServers() error {
 		n.offchainMetadataFetcher = fetcher
 		if err := n.offchainMetadataFetcher.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("restarting off-chain metadata fetcher: %w", err)
+		}
+		if n.config.tokenRegistry.Enabled {
+			sync, err := n.newTokenRegistrySync()
+			if err != nil {
+				return fmt.Errorf("recreate token registry sync: %w", err)
+			}
+			n.tokenRegistrySync = sync
+			if err := n.tokenRegistrySync.Start(n.ctx); err != nil { //nolint:contextcheck
+				return fmt.Errorf("restarting token registry sync: %w", err)
+			}
 		}
 		// startDeferredIndexMaintenance sets n.deferredIndexMaintenanceDone
 		// itself (nil already, since closeStorageForLiveLifecycleOp cleared

@@ -137,6 +137,7 @@ type Querier interface {
 	GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error)
 	GetSyncState(ctx context.Context, syncKey string) (string, error)
 	GetTip(ctx context.Context) (GetTipRow, error)
+	GetTokenRegistryEntry(ctx context.Context, subject string) (GetTokenRegistryEntryRow, error)
 	GetTransactionByHash(ctx context.Context, hash []byte) (Transaction, error)
 	GetTransactionHashesAfterSlot(ctx context.Context, slot sql.NullInt64) ([][]byte, error)
 	GetTransactionIDByHash(ctx context.Context, hash []byte) (int64, error)
@@ -159,6 +160,10 @@ type Querier interface {
 	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
 	InsertOffchainMetadataPointer(ctx context.Context, arg InsertOffchainMetadataPointerParams) (int64, error)
 	InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error)
+	// Reconciles the table against a completed snapshot: every row the snapshot
+	// carried was stamped with its timestamp, so anything older was not in the
+	// snapshot and is no longer published upstream.
+	PruneTokenRegistryEntriesStaleBefore(ctx context.Context, updatedAt sql.NullTime) (int64, error)
 	ReleaseFallbackRewardSnapshotGuard(ctx context.Context, id int64) (int64, error)
 	RestoreCommitteeMembersDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
 	RestoreConstitutionsDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
@@ -195,6 +200,10 @@ type Querier interface {
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
 	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error
+	// A later sync is authoritative for the whole subject: every property column
+	// is overwritten from the incoming row, so a property the registry has since
+	// dropped stops being served rather than lingering from an earlier sync.
+	UpsertTokenRegistryEntry(ctx context.Context, arg UpsertTokenRegistryEntryParams) error
 }
 
 var _ Querier = (*Queries)(nil)

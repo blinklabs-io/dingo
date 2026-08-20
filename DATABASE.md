@@ -73,6 +73,15 @@ adds `leios_key_public` and `leios_key_possession_proof` to `pool` and
 `expand.sql` is checked in; the shared migration registry translates it to
 PostgreSQL/MySQL DDL the same way it does for `v1alpha1`.
 
+Migration `v3` (`token-registry-metadata`, integer version 3) creates the
+`token_registry_entry` table and its unique `subject` index for the CIP-26
+off-chain token registry sync (see the Off-chain Metadata Cache section
+below). Like `v2` it ships only a SQLite `expand.sql`. `subject` is a `TEXT`
+column, which MySQL cannot index without a prefix length; the registry's
+translation derives that `(255)` prefix from the `CREATE TABLE` carried in the
+same migration, so the table definition and its index have to stay together in
+`v3`.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -261,7 +270,7 @@ flowchart LR
   row chosen by `certs.cert_type`.
 - Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution soft deletes use nullable `deleted_slot`; `NULL` means active.
 - Certificate history ordering must use `added_slot DESC`, the producing transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets per transaction.
-- Storage mode is persisted in `node_settings_gate` (the `storage_mode` gate; `node_settings.storage_mode` is a read-only compatibility fallback, see below). `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, metadata-label indexes, and the best-effort `offchain_metadata` cache. API-only tables are still migrated in `core` mode but may be empty.
+- Storage mode is persisted in `node_settings_gate` (the `storage_mode` gate; `node_settings.storage_mode` is a read-only compatibility fallback, see below). `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, metadata-label indexes, and the best-effort `offchain_metadata` and `token_registry_entry` caches. API-only tables are still migrated in `core` mode but may be empty.
 
 In core mode, consumed UTxO rows are hard-deleted only by the background
 ledger cleanup after they are outside the current era's stability window.
@@ -270,9 +279,10 @@ upstream tip and is single-flight across its timer and epoch-boundary
 triggers. The deferral needs a known upstream tip: a node with no connected
 peer has no catch-up distance to measure, so cleanup falls back to running
 off the local tip alone rather than deferring for as long as the node stays
-peerless. This keeps the potentially large `utxo`/stake-reference scan from
-holding SQLite's single write connection during historical catch-up; the
-rows remain eligible and are reclaimed once the node is near the upstream tip.
+peerless. Each eligible run deletes at most one bounded batch, so the
+potentially large `utxo`/stake-reference scan cannot hold SQLite's single
+write connection indefinitely; later timer or epoch-boundary runs reclaim the
+remaining rows once the node is near the upstream tip.
 API mode retains spent UTxO metadata for historical transaction queries.
 
 ## ER Diagrams
@@ -695,8 +705,23 @@ PostgreSQL/MySQL repeatable-read read-only transactions.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `offchain_metadata` | `id`, `source_type`, `url`, `hash`, `status`, `content_type`, `content`, `body_hash`, `last_error`, `last_http_status`, `fetch_attempts`, `fetched_at`, `next_fetch_after`, `created_at`, `updated_at` | PK `id`; unique `(source_type, url, hash)`; index `(status, next_fetch_after)` | Best-effort cache for documents referenced by pool metadata URLs and governance anchors. `url` keeps the original on-chain pointer, including HTTP(S) and `ipfs://` URLs; IPFS content is fetched through a gateway. `hash` is the on-chain Blake2b-256 hash. `body_hash` is the Blake2b-256 of the fetched bytes. Only rows with `status = 'fetched'` have hash-verified, schema-valid `content`; failed rows keep retry state and diagnostics. `content_type` is normalized to `application/json`, `application/ld+json`, or `text/plain`; any other response media type is stored as `application/octet-stream` (the header is not covered by the on-chain hash). |
+| `token_registry_entry` | `id`, `subject`, `name`, `ticker`, `description`, `url`, `logo`, `decimals`, `created_at`, `updated_at` | PK `id`; unique `subject`; index `updated_at` | Best-effort cache of the CIP-26 off-chain token registry, populated only in `api` storage mode with `tokenRegistry.enabled`. `subject` is the lower-case hex policy ID followed by the hex-encoded asset name, matching how registry mappings are keyed; the API builds the same string from on-chain bytes to look a row up. Backs the `metadata` field of `GET /assets/{asset}`, which is distinct from `onchain_metadata` (CIP-25/CIP-68 mint metadata read from the chain). Every property column is overwritten on each sync, so a property the upstream registry drops stops being served. `logo` is NULL unless `tokenRegistry.storeLogos` is set: base64 logos are roughly 90% of registry bytes. `decimals` is NULL when the registry declares none — 0 is a meaningful declared value and is stored as 0. `updated_at` doubles as the snapshot reconciliation stamp: it holds the timestamp of the last snapshot that carried the subject, not the last time its properties changed, and the index on it serves the post-snapshot prune. The stamp is truncated to a whole second so it round-trips identically through MySQL's fractionless `datetime`; an unrounded stamp would be stored rounded and the prune would then delete the snapshot that had just written it. Never consulted by consensus or ledger validation. |
 
 `source_type` values are `pool`, `drep`, `drep_registration`, `drep_update`, `gov_proposal`, `gov_vote`, `constitution`, and `committee_resign`. `status` values are `pending`, `fetched`, and `failed`.
+
+`token_registry_entry` is reached through three `MetadataStore` methods.
+`UpsertTokenRegistryEntries` writes a batch, stamping every row with the
+timestamp of the snapshot being applied; it is the only writer, called by
+`internal/offchainmetadata.TokenRegistrySync`.
+`PruneTokenRegistryEntriesBefore` then deletes rows older than that stamp,
+which is how a subject the upstream registry has dropped stops being served —
+an upsert-only sync could never retire one. It runs only after a snapshot has
+applied in full, since pruning against a partial snapshot would delete live
+subjects the failed run never reached. `GetTokenRegistryEntry` looks a subject
+up for the API and returns `nil` for an unknown subject rather than an error,
+so the endpoint serves a null `metadata` field. Subjects are lower-cased on
+both write and read, so a registry that publishes an upper-case subject still
+matches a lookup built from on-chain bytes.
 
 The API-mode off-chain metadata fetcher discovers pointers from `pool_registration.metadata_url`, DRep anchor rows, governance proposal/vote anchors, constitutions, and committee resignations. The cache is not consensus state: rollbacks may leave old cache rows behind, and APIs should join/cache-hit by the current on-chain `(source_type, url, hash)` pointer.
 
