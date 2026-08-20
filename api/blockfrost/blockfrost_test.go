@@ -563,9 +563,7 @@ func TestStartStop(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify server is running
-	b.mu.Lock()
-	assert.NotNil(t, b.httpServer)
-	b.mu.Unlock()
+	assert.NotNil(t, b.listener.Server())
 
 	// Stop the server
 	stopCtx, stopCancel := context.WithTimeout(
@@ -577,9 +575,7 @@ func TestStartStop(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify server is stopped
-	b.mu.Lock()
-	assert.Nil(t, b.httpServer)
-	b.mu.Unlock()
+	assert.Nil(t, b.listener.Server())
 }
 
 func TestStartAlreadyStarted(t *testing.T) {
@@ -3272,8 +3268,11 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 		)
 		require.True(t, strings.HasPrefix(err.Error(), prefix),
 			"unexpected wrapper shape: %s", err)
-		assert.NotEmpty(t, strings.TrimSpace(strings.TrimPrefix(err.Error(), prefix)),
-			"the underlying parse error is retained, not discarded")
+		assert.NotEmpty(
+			t,
+			strings.TrimSpace(strings.TrimPrefix(err.Error(), prefix)),
+			"the underlying parse error is retained, not discarded",
+		)
 	})
 
 	t.Run("this network resolves to not found", func(t *testing.T) {
