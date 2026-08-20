@@ -141,7 +141,10 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	}
 	if n.peerGov != nil {
 		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("peer governor shutdown: %w", stopErr))
+			err = errors.Join(
+				err,
+				fmt.Errorf("peer governor shutdown: %w", stopErr),
+			)
 		}
 	}
 	// reinitializeNetworkingCore constructs a fresh PoolRelayProvider on
@@ -564,13 +567,15 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 			// not network-derived, and must mirror Run()'s construction so a
 			// live restore/truncate doesn't silently drop back to serial
 			// decode after being explicitly enabled.
-			BlockPipelineEnabled: n.config.blockPipelineEnabled,
+			BlockPipelineEnabled:         n.config.blockPipelineEnabled,
+			BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
 			) error {
-				return n.ouroboros().BlockfetchClientRequestRange(connId, start, end)
+				return n.ouroboros().
+					BlockfetchClientRequestRange(connId, start, end)
 			},
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

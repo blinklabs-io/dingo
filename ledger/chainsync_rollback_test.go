@@ -1532,9 +1532,15 @@ func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 	}
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
-		Point:        ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
 		Tip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
 			BlockNumber: header.BlockNumber(),
 		},
 		BlockHeader: header,
@@ -2026,6 +2032,7 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.NoError(t, err)
@@ -2056,6 +2063,7 @@ func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
 	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
 
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.NoError(t, err)
@@ -2072,6 +2080,7 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 
 	currentNonce := append([]byte(nil), fixture.ls.currentTipBlockNonce...)
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
@@ -2114,6 +2123,7 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	require.NotEqual(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)

@@ -682,6 +682,9 @@ func (n *Node) Run(ctx context.Context) error {
 			// Parallel block-decode pipeline for the chainsync replay loop
 			// (issue #1894 phase 1). Not consensus-affecting; off by default.
 			BlockPipelineEnabled: n.config.blockPipelineEnabled,
+			// Parallel VRF/KES validate stage for the same pipeline (issue
+			// #1894 phase 3). Off by default; requires BlockPipelineEnabled.
+			BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
@@ -751,7 +754,8 @@ func (n *Node) Run(ctx context.Context) error {
 				start ocommon.Point,
 				end ocommon.Point,
 			) error {
-				return n.ouroboros().BlockfetchClientRequestRange(connId, start, end)
+				return n.ouroboros().
+					BlockfetchClientRequestRange(connId, start, end)
 			},
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

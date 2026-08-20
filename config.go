@@ -225,6 +225,7 @@ type Config struct {
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
+	blockPipelineValidateEnabled                                                        bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -555,6 +556,14 @@ func (n *Node) configValidate() error {
 				"sync Musashi",
 		)
 	}
+	if n.config.cfg.BlockPipelineValidateEnabled &&
+		!n.config.cfg.BlockPipelineEnabled {
+		return errors.New(
+			"block-pipeline-validate-enabled (blockPipelineValidateEnabled) " +
+				"requires block-pipeline-enabled (blockPipelineEnabled) to " +
+				"also be set",
+		)
+	}
 	if n.config.cfg.FullPotRewardsEnabled &&
 		!n.config.cfg.UnsafeFullPotRewardsOnStandardNetworks {
 		if network, ok := internalconfig.FullPotRewardsStandardNetwork(n.config.cfg.Network, n.config.cfg.NetworkMagic); ok {
@@ -754,6 +763,7 @@ func (c *Config) syncCompatFields() {
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
+	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
