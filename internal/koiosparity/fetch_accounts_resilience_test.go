@@ -622,13 +622,17 @@ func TestFetchAccountRewardsForEpochForceRefreshBypassesRetainedCheckpoints(
 // forceRefresh invalidated (deleted) every existing chunk's checkpoint data
 // up front, before dispatch, so an interrupted/partially-failing
 // --force-refresh attempt could leave koios_account_checked/
-// koios_account_fetch_staged_rows wiped or partial for an epoch whose
-// koios_account_coverage row still (correctly, since CommitAccountRewardsForEpoch
-// is never reached on a partial failure) reports complete=true from the last
-// successful run — a state accountLifecycleMismatches would then read as if
-// it belonged to a genuinely complete epoch. forceRefresh must instead leave
-// a chunk's existing checkpoint alone until that specific chunk's own
-// re-fetch actually succeeds.
+// koios_account_fetch_staged_rows wiped or partial. forceRefresh must instead
+// leave a chunk's existing checkpoint alone until that specific chunk's own
+// re-fetch actually succeeds — proved below by failAddr's untouched
+// checkpoint surviving. Separately, since a partial force-refresh failure
+// still leaves koios_account_checked holding a mix of freshly-refreshed and
+// untouched pre-refresh chunks (two snapshots that were never valid
+// together), the pre-existing complete=true coverage row from before this
+// attempt must be downgraded to complete=false (Cache.MarkAccountCoverageIncomplete)
+// rather than left as-is — otherwise compareEpochAccounts/
+// accountLifecycleMismatches would trust that mixed state as a genuinely
+// complete epoch.
 func TestFetchAccountRewardsForEpochFailedForceRefreshPreservesUntouchedCheckpoints(
 	t *testing.T,
 ) {
@@ -636,7 +640,6 @@ func TestFetchAccountRewardsForEpochFailedForceRefreshPreservesUntouchedCheckpoi
 	const failAddr = "stake1addrFAIL"
 
 	var refreshing atomic.Bool
-	var refreshAmount atomic.Bool // toggled once the refresh re-fetches goodAddr
 
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -646,23 +649,7 @@ func TestFetchAccountRewardsForEpochFailedForceRefreshPreservesUntouchedCheckpoi
 				_, _ = w.Write([]byte("unavailable"))
 				return
 			}
-			if slices.Contains(addrs, goodAddr) && refreshing.Load() {
-				refreshAmount.Store(true)
-			}
-			items := make([]KoiosAccountRewardHistoryItem, len(addrs))
-			amount := "1000"
-			if refreshAmount.Load() {
-				amount = "2000" // proves this chunk was genuinely re-fetched
-			}
-			for i, a := range addrs {
-				items[i] = KoiosAccountRewardHistoryItem{
-					StakeAddress: a, EarnedEpoch: 100, Amount: amount, Type: "member",
-				}
-			}
-			body, err := json.Marshal(items)
-			assert.NoError(t, err)
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(body)
+			writeAccountRewardHistoryRows(w, addrs)
 		}),
 	)
 	defer srv.Close()
@@ -692,9 +679,13 @@ func TestFetchAccountRewardsForEpochFailedForceRefreshPreservesUntouchedCheckpoi
 	require.NoError(t, err)
 	require.Len(t, doneBefore, 2, "test setup sanity check")
 
-	// Force-refresh: goodAddr's chunk re-fetches successfully (with a
-	// different amount, proving it was truly re-requested), failAddr's chunk
-	// fails outright.
+	// Force-refresh: goodAddr's chunk re-fetches successfully, failAddr's
+	// chunk fails outright. (goodAddr genuinely being re-requested is already
+	// covered by TestFetchAccountRewardsForEpochForceRefreshBypassesRetainedCheckpoints's
+	// request-count assertions — not repeated here via a response-value
+	// check, since both chunks dispatch concurrently and there is no
+	// ordering guarantee between goodAddr's checkpoint save and failAddr's
+	// cancellation.)
 	refreshing.Store(true)
 	_, err = fetchAccountRewardsForEpoch(
 		t.Context(), k, cache, "preview", 960, addrs, time.Time{}, 0,
@@ -702,13 +693,21 @@ func TestFetchAccountRewardsForEpochFailedForceRefreshPreservesUntouchedCheckpoi
 	)
 	require.Error(t, err, "failAddr's chunk must surface as a real failure")
 
-	// The epoch's coverage row must be exactly as it was before the failed
-	// refresh attempt — never wiped, never left inconsistent — since
-	// CommitAccountRewardsForEpoch is never reached on a partial failure.
+	// The epoch's coverage row must be downgraded to complete=false — the
+	// mixed post-refresh checkpoint state (goodAddr refreshed, failAddr
+	// untouched) is never a valid snapshot to trust, even though
+	// CommitAccountRewardsForEpoch itself was never reached on this partial
+	// failure. RequestedCount is otherwise unchanged (MarkAccountCoverageIncomplete
+	// only ever flips the complete flag).
 	covAfter, err := cache.GetAccountCoverage("preview", 960)
 	require.NoError(t, err)
 	require.NotNil(t, covAfter)
-	require.Equal(t, *covBefore, *covAfter)
+	require.False(
+		t,
+		covAfter.Complete,
+		"a partial force-refresh failure must downgrade coverage to incomplete",
+	)
+	require.Equal(t, covBefore.RequestedCount, covAfter.RequestedCount)
 
 	// failAddr's chunk never re-succeeded, so its prior, still-valid
 	// checkpoint must survive untouched rather than being deleted up front.
@@ -720,21 +719,102 @@ func TestFetchAccountRewardsForEpochFailedForceRefreshPreservesUntouchedCheckpoi
 		2,
 		"failAddr's untouched-by-the-refresh chunk checkpoint must still be present",
 	)
+}
 
-	// goodAddr's chunk, by contrast, really was re-fetched: its staged row
-	// now carries the refreshed amount, not the original one.
-	staged, err := cache.GetStagedAccountRows("preview", 960)
-	require.NoError(t, err)
-	for _, row := range staged {
-		if row.StakeAddress == goodAddr {
-			require.Equal(
-				t,
-				"2000",
-				row.Earned,
-				"goodAddr's chunk must reflect the force-refreshed value",
-			)
-		}
+// TestFetchAccountRewardsForEpochIncompleteCoverageAfterForceRefreshSelfHeals
+// proves the other half of Cache.MarkAccountCoverageIncomplete's contract:
+// once a partial --force-refresh failure downgrades an epoch's coverage to
+// complete=false, a subsequent plain (non-force-refresh) call restores
+// complete=true on its own — because failAddr's chunk from before the
+// refresh was left untouched (never deleted), it's still checkpointed with
+// real rows, so the normal doneHashes/hashesWithRows resume logic already
+// trusts it without needing to re-contact Koios for it at all. This is
+// exactly why forceRefresh never pre-invalidates existing checkpoint data:
+// doing so would have made this self-heal impossible without another
+// explicit --force-refresh, since failAddr's old, still-valid data would
+// have been destroyed rather than preserved.
+func TestFetchAccountRewardsForEpochIncompleteCoverageAfterForceRefreshSelfHeals(
+	t *testing.T,
+) {
+	const goodAddr = "stake1addrGOOD2"
+	const failAddr = "stake1addrFAIL2"
+
+	var failAddrRequests atomic.Int32
+	var failNextFailAddrRequest atomic.Bool
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			addrs, _ := decodeAccountRewardHistoryRequest(t, r)
+			if slices.Contains(addrs, failAddr) {
+				failAddrRequests.Add(1)
+				if failNextFailAddrRequest.Load() {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte("unavailable"))
+					return
+				}
+			}
+			writeAccountRewardHistoryRows(w, addrs)
+		}),
+	)
+	defer srv.Close()
+
+	k := &KoiosClient{
+		baseURL: srv.URL,
+		http:    &http.Client{Timeout: 100 * time.Millisecond},
+		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addrs := []string{goodAddr, failAddr}
+
+	// First, normal run: both chunks succeed and commit a complete epoch.
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 970, addrs, time.Time{}, 0,
+		1, 0, false, nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, failAddrRequests.Load())
+
+	// Force-refresh: failAddr's chunk fails (post()'s own internal retries on
+	// a 5xx mean this bumps the counter by more than one), downgrading
+	// coverage.
+	failNextFailAddrRequest.Store(true)
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 970, addrs, time.Time{}, 0,
+		1, 0, true, nil,
+	)
+	require.Error(t, err)
+	afterForceRefresh := failAddrRequests.Load()
+	require.Greater(t, afterForceRefresh, int32(1))
+	cov, err := cache.GetAccountCoverage("preview", 970)
+	require.NoError(t, err)
+	require.False(t, cov.Complete, "test setup sanity check")
+
+	// A subsequent plain (non-force-refresh) call must self-heal — restoring
+	// complete=true — without ever re-requesting failAddr's chunk, since its
+	// pre-refresh checkpoint was preserved, not deleted.
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 970, addrs, time.Time{}, 0,
+		1, 0, false, nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(
+		t,
+		afterForceRefresh,
+		failAddrRequests.Load(),
+		"the self-heal must trust failAddr's preserved checkpoint, not re-request it",
+	)
+
+	covHealed, err := cache.GetAccountCoverage("preview", 970)
+	require.NoError(t, err)
+	require.True(
+		t,
+		covHealed.Complete,
+		"a subsequent normal fetch must self-heal the incomplete coverage "+
+			"left behind by a failed force-refresh",
+	)
 }
 
 // TestFetchAccountRewardsForEpochMegaScenario is the combined exercise the

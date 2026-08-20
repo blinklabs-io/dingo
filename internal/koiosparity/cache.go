@@ -585,6 +585,35 @@ func (c *Cache) GetAccountCoverage(
 	return &cov, nil
 }
 
+// MarkAccountCoverageIncomplete downgrades an existing koios_account_coverage
+// row for (network, epoch) to complete = false, touching nothing else —
+// not koios_account_rewards, not koios_account_checked/
+// koios_account_fetch_staged_rows. Called when a --force-refresh attempt
+// (fetchAccountRewardsForEpoch's forceRefresh path) fails partway through:
+// because forceRefresh re-dispatches every chunk without pre-invalidating
+// existing checkpoint data (deleting it up front would risk losing valid
+// data before its replacement is confirmed fetched — see that function's
+// doc comment), a partial failure can leave koios_account_checked holding a
+// mix of freshly-refreshed chunks and untouched pre-refresh chunks: two
+// different Koios snapshots that were never actually valid together. The
+// stale complete = true row from the last successful (pre-refresh) commit
+// would otherwise still make compareEpochAccounts trust that mixed state —
+// its coverage.Complete gate is exactly what stops CompareAccountEpoch/
+// accountLifecycleMismatches from reading it once this flips to false, and
+// GetEpochsMissingAccountCoverage's `a.complete = 0` filter picks the epoch
+// back up for a normal (non-force-refresh) fetch attempt to resume and
+// eventually re-commit a fresh, fully consistent complete = true row —
+// no further explicit --force-refresh required. A no-op, not an error, if
+// no coverage row exists yet for this (network, epoch).
+func (c *Cache) MarkAccountCoverageIncomplete(network string, epoch uint64) error {
+	_, err := c.db.Exec(
+		`UPDATE koios_account_coverage SET complete = 0 WHERE network = ? AND epoch = ?`,
+		network,
+		epoch,
+	)
+	return err
+}
+
 // SaveAccountFetchChunkProgress durably records one successfully-fetched
 // chunk's rows and per-address "checked" markers for (network, epoch),
 // atomically — dingo #3099's resumable checkpoint: FetchAccountRewardsForEpoch

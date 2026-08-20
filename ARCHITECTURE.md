@@ -4978,6 +4978,27 @@ every one of #3097's own tests passes unmodified.
   reached by a failed refresh attempt simply keeps whatever valid data it
   already had — no data is ever destroyed before its replacement is confirmed
   fetched.
+- **A partial force-refresh downgrades coverage instead of leaving it stale.**
+  Preserving old data (above) still leaves one hazard: if one chunk succeeds
+  with fresh (repaired) data while another fails and keeps its untouched
+  pre-refresh data, `koios_account_checked` now holds two chunks from two
+  different Koios snapshots that were never actually valid together — and the
+  pre-existing `complete = true` coverage row from before the refresh attempt
+  is untouched (`CommitAccountRewardsForEpoch` is never reached on a partial
+  failure), so nothing would otherwise signal that this mixed state shouldn't
+  be trusted. `fetchAccountRewardsForEpoch` closes this by calling
+  `Cache.MarkAccountCoverageIncomplete` — a single-column
+  `complete = false` downgrade that touches neither `koios_account_rewards`
+  nor the checkpoint tables — whenever a `forceRefresh` call is about to
+  return an error (chunk failure or `ctx` cancellation). This is sufficient
+  on its own: `compareEpochAccounts`'s existing `!coverage.Complete` gate
+  already refuses to run `CompareAccountEpoch`/`accountLifecycleMismatches`
+  against an incomplete epoch, and `GetEpochsMissingAccountCoverage`'s
+  existing `a.complete = 0` filter already re-selects the epoch for a future
+  plain (non-force-refresh) fetch attempt — which, since the untouched
+  chunk's data was never deleted, can self-heal by simply re-confirming
+  `complete = true` from the preserved checkpoint state, without requiring
+  another explicit `--force-refresh`.
 - **Selective invalidation on universe/chunk-plan change.**
   `Cache.InvalidateStaleAccountChunks` prunes staged rows/checked markers for
   any chunk hash no longer present in the current plan before dispatch —

@@ -500,6 +500,15 @@ outer:
 	wg.Wait()
 
 	if ctx.Err() != nil {
+		if forceRefresh {
+			if markErr := cache.MarkAccountCoverageIncomplete(network, epoch); markErr != nil {
+				return 0, fmt.Errorf(
+					"mark account coverage incomplete after canceled force-refresh: %w (original error: %w)",
+					markErr,
+					ctx.Err(),
+				)
+			}
+		}
 		return 0, ctx.Err()
 	}
 
@@ -507,6 +516,23 @@ outer:
 	err = firstErr
 	errMu.Unlock()
 	if err != nil {
+		if forceRefresh {
+			// A partial force-refresh failure can leave koios_account_checked
+			// holding a mix of freshly-refreshed and untouched pre-refresh
+			// chunks (see MarkAccountCoverageIncomplete's doc comment for why
+			// forceRefresh never pre-invalidates checkpoint data). The
+			// pre-existing complete=true coverage row from before this
+			// attempt must be downgraded so nothing downstream trusts that
+			// mixed state as a valid snapshot until a later attempt completes
+			// fully and re-commits a fresh, consistent one.
+			if markErr := cache.MarkAccountCoverageIncomplete(network, epoch); markErr != nil {
+				return 0, fmt.Errorf(
+					"mark account coverage incomplete after failed force-refresh: %w (original error: %w)",
+					markErr,
+					err,
+				)
+			}
+		}
 		return 0, classifyFetchErr(err)
 	}
 
