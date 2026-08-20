@@ -17,6 +17,8 @@ package devnet
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +107,13 @@ func PlanFailureCapture(
 // renders a subtest as parent/child, which would otherwise scatter a
 // scenario's evidence across nested directories, and a name carrying ..
 // would write outside the artifact root.
+//
+// That flattening is lossy — TestX/a-b and TestX/a/b both reduce to
+// TestX-a-b — so a rewritten name carries a digest of what it came from
+// and two failures cannot land in one directory. A name that needed no
+// rewriting keeps its exact test name, which is every scenario in the
+// canonical suite and is what makes the directory findable from the
+// failure output.
 func ArtifactName(testName string) string {
 	name := strings.Map(func(r rune) rune {
 		switch r {
@@ -118,7 +127,12 @@ func ArtifactName(testName string) string {
 	if name == "" {
 		return "scenario"
 	}
-	return name
+	if name == testName {
+		return name
+	}
+	digest := fnv.New32a()
+	_, _ = digest.Write([]byte(testName))
+	return name + "-" + fmt.Sprintf("%08x", digest.Sum32())
 }
 
 // WriteFailureArtifacts writes the evidence a failed scenario needs to be

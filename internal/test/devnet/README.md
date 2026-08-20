@@ -374,12 +374,19 @@ which captures explicitly through `NodeControl.CaptureFailureArtifacts`,
 and the Go test name for every canonical scenario, which
 `NewTestHarness` wires up on its own.
 
-Each scenario captures the moment it fails, rather than at teardown. The
-`network/` entries are collected once, after the whole run, by which
-point a chain that stalled and then recovered looks healthy again;
-`observed-chains.json` records what each node's chain actually did while
-the scenario was failing, which is what separates a stall nobody forged
-through from one nobody propagated.
+Observation and writing happen at different times. Chain observers run
+for the whole of a scenario, so `observed-chains.json` is a continuous
+record of what every node's chain did while that scenario was failing.
+The files themselves are written from the scenario's `t.Cleanup`, which
+runs once that test finishes and before the network is torn down, so
+container status and the service logs describe the network as it stood
+at the end of the failing scenario rather than at the instant of the
+failure.
+
+The `network/` entries, by contrast, are collected once after the whole
+run, by which point a chain that stalled and then recovered looks
+healthy again. That is the difference that separates a stall nobody
+forged through from one nobody propagated.
 
 The per-scenario service logs are capped, because a DevNet node logs at
 debug level and emits tens of megabytes a minute; `network/compose.log`

@@ -288,3 +288,22 @@ func TestWriteFailureArtifactsBoundsCapturedLogs(t *testing.T) {
 		"an unbounded tail is what this guards against",
 	)
 }
+
+func TestArtifactNameDisambiguatesFlattenedNames(t *testing.T) {
+	// Flattening the subtest separator is lossy: TestX/a-b and
+	// TestX/a/b both reduce to TestX-a-b, so two failing subtests would
+	// write their evidence into one directory and mix it.
+	require.NotEqual(t,
+		ArtifactName("TestX/a-b"), ArtifactName("TestX/a/b"),
+		"two distinct test names must not share an artifact directory",
+	)
+}
+
+func TestArtifactNameLeavesPlainScenarioNamesAlone(t *testing.T) {
+	// Every scenario in the canonical suite is a top-level test, and
+	// the directory is found by the name in the failure output, so a
+	// name that needs no rewriting must come back untouched.
+	require.Equal(t, "TestSustainedConsensus",
+		ArtifactName("TestSustainedConsensus"),
+	)
+}
