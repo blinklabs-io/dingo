@@ -18,6 +18,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -30,11 +31,16 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"golang.org/x/crypto/blake2b"
 )
 
 const (
-	// TokenRegistrySyncStateKey is the sync_state key holding the HTTP
-	// entity tag of the last successfully applied registry snapshot.
+	// TokenRegistrySyncStateKey is the sync_state key prefix holding the
+	// HTTP entity tag of the last successfully applied registry snapshot.
+	// The resolved source URL is appended (see tokenRegistrySyncStateKey):
+	// a validator is only meaningful to the source that issued it, so
+	// repointing sourceUrl -- or switching network -- must not let the old
+	// source's tag short-circuit the new one into a 304.
 	TokenRegistrySyncStateKey = "token_registry_etag"
 
 	// MainnetTokenRegistryURL and TestnetTokenRegistryURL are the CIP-26
@@ -85,7 +91,7 @@ type TokenRegistryStore interface {
 		ctx context.Context,
 		cutoff time.Time,
 		txn types.Txn,
-	) (int64, error)
+	) (int, error)
 	GetSyncState(key string, txn types.Txn) (string, error)
 	SetSyncState(key, value string, txn types.Txn) error
 }
@@ -219,6 +225,15 @@ func defaultTokenRegistryURL(network string) string {
 	return TestnetTokenRegistryURL
 }
 
+// tokenRegistrySyncStateKey namespaces the stored entity tag by source, so a
+// tag is only ever replayed to the source that issued it. The URL is hashed
+// rather than embedded to keep the key bounded and free of credentials that
+// a mirror URL might carry.
+func tokenRegistrySyncStateKey(sourceURL string) string {
+	sum := blake2b.Sum256([]byte(sourceURL))
+	return TokenRegistrySyncStateKey + ":" + hex.EncodeToString(sum[:8])
+}
+
 // SourceURL returns the resolved registry source.
 func (s *TokenRegistrySync) SourceURL() string {
 	return s.sourceURL
@@ -324,7 +339,8 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 // whole snapshot has been applied, so an interrupted sync retries in full
 // rather than recording progress it did not make.
 func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
-	previousETag, err := s.store.GetSyncState(TokenRegistrySyncStateKey, nil)
+	stateKey := tokenRegistrySyncStateKey(s.sourceURL)
+	previousETag, err := s.store.GetSyncState(stateKey, nil)
 	if err != nil {
 		return 0, fmt.Errorf("read token registry sync state: %w", err)
 	}
@@ -376,12 +392,55 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	// One stamp for the whole snapshot: every row it carries gets this
 	// value, so anything older afterwards is a subject the snapshot did not
 	// carry. Taken before the first write so no row can predate it.
-	syncedAt := s.now().UTC()
-	written, err := s.applySnapshot(ctx, resp.Body, syncedAt)
+	// Truncated to a whole second because MySQL's `datetime` column holds
+	// no fractional seconds. A sub-second stamp would be stored rounded
+	// while the prune below compared against the unrounded value, so every
+	// row the snapshot had just written would look older than the cutoff
+	// and be deleted. Truncating at the source makes the written value and
+	// the cutoff identical on SQLite, PostgreSQL, and MySQL alike.
+	syncedAt := s.now().UTC().Truncate(time.Second)
+	written, mappings, skipped, err := s.applySnapshot(
+		ctx,
+		resp.Body,
+		syncedAt,
+	)
 	if err != nil {
 		return written, err
 	}
-	// The snapshot applied in full, so it is authoritative: retire subjects
+	// An archive carrying no mapping files at all is not evidence that the
+	// registry is empty -- it is what an upstream layout change, a
+	// truncated artifact, or a mirror serving the wrong repository looks
+	// like. Pruning against it would reconcile the whole table to nothing,
+	// and recording its ETag would make that stick until the artifact
+	// changed again. Keep what we have, retry next interval, and say so.
+	//
+	// The discriminator is the mapping-file count, not the entry count: an
+	// archive that does carry mappings which all turn out to be unusable is
+	// a real (if odd) empty registry, and must still reconcile.
+	if mappings == 0 {
+		s.logger.Warn(
+			"token registry snapshot contained no usable mappings; keeping existing entries and retrying next interval",
+			"url", s.sourceURL,
+		)
+		return 0, nil
+	}
+	// A skipped mapping is indistinguishable from an absent one at prune
+	// time: neither re-stamps its row. Reconciling anyway would let a
+	// mapping that was valid yesterday and is malformed or oversized today
+	// delete the good metadata still being served for it. Defer instead --
+	// skips are rare (all 7,970 mainnet mappings parse), so a later clean
+	// snapshot reconciles, and the warning makes a persistent one visible
+	// rather than silently destructive.
+	if skipped > 0 {
+		s.logger.Warn(
+			"token registry snapshot had unusable mappings; deferring reconciliation so their stored metadata is not retired",
+			"skipped", skipped,
+			"url", s.sourceURL,
+		)
+		return written, nil
+	}
+	// The snapshot applied in full and carried something, so it is
+	// authoritative: retire subjects
 	// it did not carry. An upsert-only sync would keep serving a token the
 	// registry has delisted, or one that lost every property, forever. This
 	// is deliberately after the error return above -- pruning against a
@@ -406,7 +465,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	etag := strings.TrimSpace(resp.Header.Get("ETag"))
 	if etag != "" && etag != previousETag {
 		if err := s.store.SetSyncState(
-			TokenRegistrySyncStateKey,
+			stateKey,
 			etag,
 			nil,
 		); err != nil {
@@ -447,25 +506,23 @@ func (s *TokenRegistrySync) applySnapshot(
 	ctx context.Context,
 	body io.Reader,
 	syncedAt time.Time,
-) (int, error) {
+) (written int, mappings int, skipped int, err error) {
 	limited := io.LimitReader(body, s.maxBytes+1)
 	counter := &countingReader{reader: limited}
 	gzipReader, err := gzip.NewReader(counter)
 	if err != nil {
 		if counter.read > s.maxBytes {
-			return 0, fmt.Errorf(
+			return 0, mappings, skipped, fmt.Errorf(
 				"token registry snapshot exceeds %d bytes",
 				s.maxBytes,
 			)
 		}
-		return 0, fmt.Errorf("open token registry snapshot: %w", err)
+		return 0, mappings, skipped, fmt.Errorf("open token registry snapshot: %w", err)
 	}
 	defer func() { _ = gzipReader.Close() }()
 
 	tarReader := tar.NewReader(gzipReader)
 	batch := make([]models.TokenRegistryEntry, 0, tokenRegistryBatchSize)
-	written := 0
-	skipped := 0
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -485,7 +542,7 @@ func (s *TokenRegistrySync) applySnapshot(
 	}
 	for {
 		if ctx.Err() != nil {
-			return written, ctx.Err()
+			return written, mappings, skipped, ctx.Err()
 		}
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -493,16 +550,19 @@ func (s *TokenRegistrySync) applySnapshot(
 		}
 		if err != nil {
 			if counter.read > s.maxBytes {
-				return written, fmt.Errorf(
+				return written, mappings, skipped, fmt.Errorf(
 					"token registry snapshot exceeds %d bytes",
 					s.maxBytes,
 				)
 			}
-			return written, fmt.Errorf("read token registry snapshot: %w", err)
+			return written, mappings, skipped, fmt.Errorf("read token registry snapshot: %w", err)
 		}
 		if !isTokenRegistryMapping(header) {
 			continue
 		}
+		// Counted before any per-entry filtering, so this reflects the
+		// archive's shape rather than the data's usefulness.
+		mappings++
 		if header.Size > s.maxEntryBytes {
 			skipped++
 			s.logger.Debug(
@@ -541,15 +601,15 @@ func (s *TokenRegistrySync) applySnapshot(
 		batch = append(batch, *entry)
 		if len(batch) >= tokenRegistryBatchSize {
 			if err := flush(); err != nil {
-				return written, err
+				return written, mappings, skipped, err
 			}
 		}
 	}
 	if err := flush(); err != nil {
-		return written, err
+		return written, mappings, skipped, err
 	}
 	if counter.read > s.maxBytes {
-		return written, fmt.Errorf(
+		return written, mappings, skipped, fmt.Errorf(
 			"token registry snapshot exceeds %d bytes",
 			s.maxBytes,
 		)
@@ -560,7 +620,7 @@ func (s *TokenRegistrySync) applySnapshot(
 			"count", skipped,
 		)
 	}
-	return written, nil
+	return written, mappings, skipped, nil
 }
 
 // isTokenRegistryMapping reports whether a tar entry is a registry mapping.

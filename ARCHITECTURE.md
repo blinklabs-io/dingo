@@ -1435,7 +1435,21 @@ retires a subject the registry has delisted, and a subject that remains in the
 archive but has lost every property (which the parser yields as an empty entry
 the sync skips). The prune runs only on a fully applied snapshot — never on a
 `304`, which applies none, and never after a failed one, where it would delete
-live subjects the failed run had not reached yet. Turning `storeLogos` off
+live subjects the failed run had not reached yet. Two further cases defer it:
+an archive carrying no `mappings/*.json` files at all (what an upstream layout
+change or a mirror serving the wrong repository looks like, as opposed to a
+genuinely empty registry, which does carry mapping files), and a snapshot in
+which any mapping was skipped as malformed or oversized — a skipped mapping
+does not re-stamp its row, so reconciling would delete metadata that is still
+good. Both log a warning rather than failing.
+
+The stored entity tag is namespaced by a hash of the resolved source URL. A
+validator only means anything to the source that issued it, so repointing
+`sourceUrl` or switching network must not let the previous source's tag
+short-circuit the new one into a `304`. The snapshot stamp is truncated to a
+whole second, because MySQL's `datetime` column carries no fractional seconds:
+an unrounded stamp would be stored rounded while the prune compared against
+the original, deleting the very snapshot just written. Turning `storeLogos` off
 needs no special handling: the upsert overwrites every property column, so the
 next snapshot clears previously stored logos.
 

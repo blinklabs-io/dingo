@@ -42,14 +42,15 @@ const (
 
 // fakeTokenRegistryStore records what the syncer writes without a database.
 type fakeTokenRegistryStore struct {
-	mu             sync.Mutex
-	entries        map[string]models.TokenRegistryEntry
-	syncState      map[string]string
-	upserts        int
-	prunes         int
-	upsertErr      error
-	upsertFailFrom int
-	upsertHook     func()
+	mu              sync.Mutex
+	entries         map[string]models.TokenRegistryEntry
+	syncState       map[string]string
+	upserts         int
+	prunes          int
+	lastPruneCutoff time.Time
+	upsertErr       error
+	upsertFailFrom  int
+	upsertHook      func()
 }
 
 func newFakeTokenRegistryStore() *fakeTokenRegistryStore {
@@ -91,11 +92,12 @@ func (f *fakeTokenRegistryStore) PruneTokenRegistryEntriesBefore(
 	_ context.Context,
 	cutoff time.Time,
 	_ types.Txn,
-) (int64, error) {
+) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prunes++
-	var removed int64
+	f.lastPruneCutoff = cutoff
+	removed := 0
 	for subject, entry := range f.entries {
 		if entry.UpdatedAt.Before(cutoff) {
 			delete(f.entries, subject)
@@ -277,6 +279,20 @@ func newTestSync(
 	return sync
 }
 
+// steppedClock gives a sync a deterministic clock that advances one second
+// per call. Snapshot stamps are truncated to whole seconds (see SyncOnce), so
+// back-to-back syncs in a test would otherwise share a stamp and skip
+// reconciliation -- an artifact of test speed, not of the design, since real
+// syncs are hours apart.
+func steppedClock(sync *TokenRegistrySync) {
+	base := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	calls := 0
+	sync.now = func() time.Time {
+		calls++
+		return base.Add(time.Duration(calls) * time.Second)
+	}
+}
+
 func TestTokenRegistrySyncStoresMappings(t *testing.T) {
 	body := tarballOf(t, map[string]string{
 		"README.md": "not a mapping",
@@ -325,7 +341,11 @@ func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
 	written, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, written)
-	require.Equal(t, `"abc123"`, store.state(TokenRegistrySyncStateKey))
+	require.Equal(
+		t,
+		`"abc123"`,
+		store.state(tokenRegistrySyncStateKey(server.URL)),
+	)
 
 	// The registry is ~240MB for mainnet; a second sync against an unchanged
 	// registry must cost one conditional request, not another full download.
@@ -450,7 +470,7 @@ func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 	_, err := sync.SyncOnce(t.Context())
 
 	require.Error(t, err)
-	require.Empty(t, store.state(TokenRegistrySyncStateKey),
+	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL)),
 		"a failed sync must not record the ETag")
 }
 
@@ -493,7 +513,7 @@ func TestTokenRegistrySyncErrorsOnBadStatus(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "500")
-	require.Empty(t, store.state(TokenRegistrySyncStateKey))
+	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL)))
 }
 
 func TestTokenRegistrySyncErrorsOnNonGzipBody(t *testing.T) {
@@ -711,6 +731,7 @@ func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
+	steppedClock(sync)
 
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
@@ -749,6 +770,7 @@ func TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties(t *testing.T) {
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
+	steppedClock(sync)
 
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
@@ -851,6 +873,11 @@ func TestTokenRegistrySyncClearsLogosWhenDisabled(t *testing.T) {
 
 	// Operator restarts with logo storage turned off.
 	withoutLogos := newTestSync(t, store, server.URL, nil)
+	steppedClock(withoutLogos)
+	// second sync must land in a later second than the first
+	withoutLogos.now = func() time.Time {
+		return time.Date(2026, 8, 20, 12, 1, 0, 0, time.UTC)
+	}
 	_, err = withoutLogos.SyncOnce(t.Context())
 
 	require.NoError(t, err)
@@ -888,11 +915,12 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	server := newRegistryServer(t, established)
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
+	steppedClock(sync)
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "DJED", store.snapshot()[syncSubjectDjed].Ticker)
 	prunesBefore := store.prunes
-	etagBefore := store.state(TokenRegistrySyncStateKey)
+	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL))
 
 	// The next snapshot spans more than one batch, and the store fails on
 	// the second write -- after the first has already been committed.
@@ -935,7 +963,7 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	require.Equal(
 		t,
 		etagBefore,
-		store.state(TokenRegistrySyncStateKey),
+		store.state(tokenRegistrySyncStateKey(server.URL)),
 		"a partial snapshot must not advance the ETag, so the next run retries it in full",
 	)
 }
@@ -958,6 +986,7 @@ func TestTokenRegistrySyncRecoversAfterPartialSnapshot(t *testing.T) {
 	store := newFakeTokenRegistryStore()
 	store.upsertFailFrom = 2
 	sync := newTestSync(t, store, server.URL, nil)
+	steppedClock(sync)
 
 	_, err := sync.SyncOnce(t.Context())
 	require.Error(t, err)
@@ -973,4 +1002,176 @@ func TestTokenRegistrySyncRecoversAfterPartialSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(subjects), written)
 	require.Len(t, store.snapshot(), len(subjects))
+}
+
+// TestTokenRegistrySyncDoesNotPruneEmptySnapshot guards the worst failure
+// this design can produce. A 200 carrying a well-formed archive with no
+// usable mappings -- an upstream layout change that moves or renames
+// mappings/, a truncated-but-valid artifact, a mirror serving the wrong
+// repository -- would otherwise reconcile the whole table to nothing and
+// record the ETag, leaving the node serving no registry metadata at all
+// until the archive changes again.
+func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	steppedClock(sync)
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 1)
+	prunesBefore := store.prunes
+	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL))
+
+	// Same repository, but nothing the sync recognizes as a mapping.
+	server.setBody(tarballOf(t, map[string]string{
+		"README.md":           "the layout changed",
+		"registry/moved.json": mappingJSON(syncSubjectDjed, "Djed", "", ""),
+	}), `"etag-empty"`)
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Zero(t, written)
+	require.Equal(
+		t,
+		prunesBefore,
+		store.prunes,
+		"an empty snapshot must not reconcile the table to nothing",
+	)
+	require.Contains(t, store.snapshot(), syncSubjectNut)
+	require.Equal(
+		t,
+		etagBefore,
+		store.state(tokenRegistrySyncStateKey(server.URL)),
+		"an empty snapshot must not be recorded, so the next run retries it",
+	)
+}
+
+// TestTokenRegistrySyncEmptyFirstSnapshotIsNotAnError covers a node whose
+// very first sync sees nothing usable: there is nothing to protect, so this
+// is a quiet no-op rather than a failure.
+func TestTokenRegistrySyncEmptyFirstSnapshotIsNotAnError(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"README.md": "no mappings here",
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Zero(t, written)
+	require.Empty(t, store.snapshot())
+}
+
+// TestTokenRegistrySyncStampsWholeSeconds pins the stamp the prune compares
+// against to second resolution. MySQL's `datetime` column carries no
+// fractional seconds, so a sub-second stamp would be stored rounded while the
+// prune compared against the unrounded value -- deleting the very snapshot
+// just written. Truncating at the source keeps written value and cutoff
+// identical on every backend.
+func TestTokenRegistrySyncStampsWholeSeconds(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	sync.now = func() time.Time {
+		return time.Date(2026, 8, 20, 12, 0, 0, 123456789, time.UTC)
+	}
+
+	_, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	stamp := store.snapshot()[syncSubjectNut].UpdatedAt
+	require.Equal(t, stamp.Truncate(time.Second), stamp)
+	require.Equal(t, store.lastPruneCutoff, stamp)
+}
+
+// TestTokenRegistrySyncIgnoresETagFromADifferentSource covers an operator
+// repointing sourceUrl, or a network change. The stored validator belongs to
+// the old source; sending it to a new one risks accepting a 304 that means
+// "your copy of the *other* registry is current", leaving this node serving
+// the wrong network's metadata forever.
+func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	first := newRegistryServer(t, body)
+	first.notModifiedOnTag = true
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, first.URL, nil)
+	steppedClock(sync)
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+
+	// A different source that happens to use the same validator value.
+	second := newRegistryServer(t, body)
+	second.notModifiedOnTag = true
+	moved := newTestSync(t, store, second.URL, nil)
+	steppedClock(moved)
+
+	written, err := moved.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		1,
+		written,
+		"a new source must be fetched in full, not short-circuited by the previous source's ETag",
+	)
+	require.Empty(
+		t,
+		second.ifNoneMatch(),
+		"the previous source's ETag must not be sent to a new source",
+	)
+}
+
+// TestTokenRegistrySyncDefersPruneWhenMappingsSkipped protects metadata that
+// is already being served from a transient parse problem. A mapping that was
+// valid yesterday and is malformed or oversized today is skipped, so it is
+// not re-stamped -- and an unconditional prune would then delete the good row
+// it still has.
+func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	steppedClock(sync)
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 2)
+	prunesBefore := store.prunes
+
+	// DJED's mapping goes bad; NUT's is unchanged.
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectDjed + ".json": `{"subject": `,
+	}), `"etag2"`)
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		prunesBefore,
+		store.prunes,
+		"a snapshot with skipped mappings must not reconcile",
+	)
+	require.Contains(
+		t,
+		store.snapshot(),
+		syncSubjectDjed,
+		"a subject whose mapping failed to parse must keep its stored metadata",
+	)
 }

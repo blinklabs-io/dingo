@@ -212,7 +212,7 @@ type tokenRegistryPruneStore interface {
 		context.Context,
 		time.Time,
 		types.Txn,
-	) (int64, error)
+	) (int, error)
 }
 
 // TestSharedSQLStoreTokenRegistryPrune covers the reconciliation half of a
@@ -252,7 +252,7 @@ func TestSharedSQLStoreTokenRegistryPrune(t *testing.T) {
 	pruned, err := store.PruneTokenRegistryEntriesBefore(ctx, secondSync, nil)
 
 	require.NoError(t, err)
-	require.Equal(t, int64(1), pruned)
+	require.Equal(t, 1, pruned)
 	survivor, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
 	require.NoError(t, err)
 	require.NotNil(t, survivor)

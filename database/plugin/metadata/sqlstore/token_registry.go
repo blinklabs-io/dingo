@@ -133,7 +133,7 @@ func (s *Store) PruneTokenRegistryEntriesBefore(
 	ctx context.Context,
 	cutoff time.Time,
 	txn types.Txn,
-) (int64, error) {
+) (int, error) {
 	ctx = nonNilContext(ctx)
 	db, err := s.dbFromTxn(txn)
 	if err != nil {
@@ -147,7 +147,9 @@ func (s *Store) PruneTokenRegistryEntriesBefore(
 	if err != nil {
 		return 0, fmt.Errorf("prune token registry entries: %w", err)
 	}
-	return pruned, nil
+	// Bounded by the table, which holds one row per registry subject
+	// (roughly 8,000 on mainnet), so this cannot overflow int.
+	return int(pruned), nil
 }
 
 // normalizeTokenRegistrySubject lower-cases and trims a subject so that a

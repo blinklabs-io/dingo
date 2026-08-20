@@ -15,6 +15,7 @@
 package offchainmetadata
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,12 +33,12 @@ const (
 	// tokenRegistrySubjectMaxLen is the hex length of a policy ID plus the
 	// maximum 32-byte asset name.
 	tokenRegistrySubjectMaxLen = tokenRegistrySubjectMinLen + 64
-	// tokenRegistryMaxDecimals bounds the decimals property. CIP-26 does not
-	// cap it, but a value past this is a data error rather than a token
-	// denomination, and passing it through would let a bad mapping shift a
-	// wallet's displayed balance by an arbitrary number of orders of
-	// magnitude.
-	tokenRegistryMaxDecimals = 30
+	// tokenRegistryMaxDecimals is CIP-26's own bound on the decimals
+	// property, whose schema declares {"minimum": 0, "maximum": 19}. A value
+	// outside it is a data error rather than a token denomination, and
+	// passing one through would let a bad mapping shift a wallet's displayed
+	// balance by an arbitrary number of orders of magnitude.
+	tokenRegistryMaxDecimals = 19
 )
 
 // tokenRegistryProperty is the CIP-26 property envelope. Every property in a
@@ -146,6 +147,13 @@ func tokenRegistryDecimalsProperty(raw json.RawMessage) *int {
 	}
 	var prop tokenRegistryProperty
 	if err := json.Unmarshal(raw, &prop); err != nil {
+		return nil
+	}
+	// encoding/json treats a null as a no-op for a non-pointer target: it
+	// leaves the variable at its zero value and reports no error. Without
+	// this guard a declared null would be published as decimals 0, which a
+	// wallet would use to render balances unscaled. Absent means absent.
+	if string(bytes.TrimSpace(prop.Value)) == "null" {
 		return nil
 	}
 	// Decoding into int rejects both a fractional number and a quoted

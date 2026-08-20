@@ -15,6 +15,7 @@
 package offchainmetadata
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -176,10 +177,11 @@ func TestParseTokenRegistryEntrySkipsBlankValues(t *testing.T) {
 
 func TestParseTokenRegistryEntrySkipsOutOfRangeDecimals(t *testing.T) {
 	for name, value := range map[string]string{
-		"negative":   "-1",
-		"absurd":     "1000",
-		"fractional": "2.5",
-		"wrong type": `"6"`,
+		"negative":         "-1",
+		"absurd":           "1000",
+		"above CIP-26 max": "20",
+		"fractional":       "2.5",
+		"wrong type":       `"6"`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			raw := []byte(`{
@@ -223,4 +225,73 @@ func TestParseTokenRegistryEntryIsNotEmptyWithDecimalsOnly(t *testing.T) {
 
 	require.NoError(t, err)
 	require.False(t, entry.IsEmpty())
+}
+
+// TestParseTokenRegistryEntryRejectsNullDecimals covers an explicit JSON null.
+// encoding/json accepts null into an int as a no-op, leaving the zero value
+// and returning no error, so a null decimals would otherwise be published as
+// a declared 0 -- which a wallet would use to render balances unscaled.
+func TestParseTokenRegistryEntryRejectsNullDecimals(t *testing.T) {
+	raw := []byte(`{
+		"subject": "` + nutcoinSubject + `",
+		"name": {"sequenceNumber": 0, "value": "nutcoin", "signatures": []},
+		"decimals": {"sequenceNumber": 0, "value": null, "signatures": []}
+	}`)
+
+	entry, err := ParseTokenRegistryEntry(raw)
+
+	require.NoError(t, err)
+	require.Equal(t, "nutcoin", entry.Name)
+	require.Nil(t, entry.Decimals, "a null decimals is absent, not zero")
+}
+
+// TestParseTokenRegistryEntryRejectsNullStringProperties is the same hazard
+// for the string properties: null must read as absent.
+func TestParseTokenRegistryEntryRejectsNullStringProperties(t *testing.T) {
+	raw := []byte(`{
+		"subject": "` + nutcoinSubject + `",
+		"name": {"sequenceNumber": 0, "value": null, "signatures": []},
+		"ticker": {"sequenceNumber": 0, "value": "NUT", "signatures": []}
+	}`)
+
+	entry, err := ParseTokenRegistryEntry(raw)
+
+	require.NoError(t, err)
+	require.Empty(t, entry.Name)
+	require.Equal(t, "NUT", entry.Ticker)
+}
+
+// TestParseTokenRegistryEntryRejectsNullPropertyEnvelope covers a null in
+// place of the whole envelope.
+func TestParseTokenRegistryEntryRejectsNullPropertyEnvelope(t *testing.T) {
+	raw := []byte(`{
+		"subject": "` + nutcoinSubject + `",
+		"name": null,
+		"decimals": null
+	}`)
+
+	entry, err := ParseTokenRegistryEntry(raw)
+
+	require.NoError(t, err)
+	require.Empty(t, entry.Name)
+	require.Nil(t, entry.Decimals)
+	require.True(t, entry.IsEmpty())
+}
+
+// TestParseTokenRegistryEntryAcceptsDecimalsBounds pins both ends of CIP-26's
+// declared range ({"minimum": 0, "maximum": 19}) so the cap cannot drift.
+func TestParseTokenRegistryEntryAcceptsDecimalsBounds(t *testing.T) {
+	for _, value := range []int{0, 19} {
+		raw := []byte(`{
+			"subject": "` + nutcoinSubject + `",
+			"decimals": {"sequenceNumber": 0, "value": ` +
+			strconv.Itoa(value) + `, "signatures": []}
+		}`)
+
+		entry, err := ParseTokenRegistryEntry(raw)
+
+		require.NoError(t, err)
+		require.NotNil(t, entry.Decimals, "decimals %d is in range", value)
+		require.Equal(t, value, *entry.Decimals)
+	}
 }

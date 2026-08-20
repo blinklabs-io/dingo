@@ -1551,7 +1551,7 @@ type MetadataStore interface {
 		ctx context.Context,
 		cutoff time.Time,
 		txn types.Txn,
-	) (int64, error)
+	) (int, error)
 
 	// GetTokenRegistryEntry returns the registry properties for a
 	// subject, or nil when the registry has nothing for it. Backs the
