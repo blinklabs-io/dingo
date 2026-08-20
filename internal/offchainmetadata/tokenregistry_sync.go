@@ -392,7 +392,10 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 		nil,
 	)
 	if err != nil {
-		return written, fmt.Errorf("prune stale token registry entries: %w", err)
+		return written, fmt.Errorf(
+			"prune stale token registry entries: %w",
+			err,
+		)
 	}
 	if pruned > 0 {
 		s.logger.Info(
@@ -425,6 +428,21 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 //
 // A mapping that fails to parse is skipped rather than failing the snapshot:
 // one bad file out of thousands should not cost the whole sync.
+//
+// Batches are committed as they fill rather than as one transaction, so a
+// failure partway through leaves earlier batches applied. That is deliberate.
+// Wrapping ~8,000 upserts in a single transaction would hold the metadata
+// store's write lock for the whole download and parse, stalling block
+// indexing on a node that is also following the chain -- a real cost, to buy
+// atomicity for a best-effort cache that consensus never reads.
+//
+// The partial state is safe and transient. Every row written is the registry's
+// current published value for that subject, so a half-applied snapshot leaves
+// some subjects fresher than others but none wrong. Nothing already served is
+// lost: the prune runs only on a completed snapshot, and the ETag advances
+// only then, so the next run re-applies the whole snapshot and reconciles.
+// TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries and
+// TestTokenRegistrySyncRecoversAfterPartialSnapshot pin both halves.
 func (s *TokenRegistrySync) applySnapshot(
 	ctx context.Context,
 	body io.Reader,

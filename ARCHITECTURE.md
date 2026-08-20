@@ -1439,6 +1439,17 @@ live subjects the failed run had not reached yet. Turning `storeLogos` off
 needs no special handling: the upsert overwrites every property column, so the
 next snapshot clears previously stored logos.
 
+Batches are committed as they fill rather than as one transaction, so a
+failure partway through a snapshot leaves earlier batches applied. That is a
+deliberate trade: wrapping roughly 8,000 upserts in a single transaction would
+hold the metadata store's write lock across the whole download and parse,
+stalling block indexing on a node that is also following the chain, to buy
+atomicity for a best-effort cache consensus never reads. The partial state is
+safe and transient — every row written is the registry's current value for
+that subject, so some subjects are fresher than others but none are wrong, and
+because neither the prune nor the ETag advances on a failed snapshot, the next
+run re-applies the whole thing and reconciles.
+
 `Stop` waits for the worker to exit and does not abandon that wait when its
 context expires — it downgrades to a warning and keeps waiting, the same
 guarantee `koiosparity.Observer.Stop` makes for the same reason. Both teardown

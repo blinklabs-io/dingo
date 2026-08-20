@@ -19,6 +19,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -40,13 +42,14 @@ const (
 
 // fakeTokenRegistryStore records what the syncer writes without a database.
 type fakeTokenRegistryStore struct {
-	mu         sync.Mutex
-	entries    map[string]models.TokenRegistryEntry
-	syncState  map[string]string
-	upserts    int
-	prunes     int
-	upsertErr  error
-	upsertHook func()
+	mu             sync.Mutex
+	entries        map[string]models.TokenRegistryEntry
+	syncState      map[string]string
+	upserts        int
+	prunes         int
+	upsertErr      error
+	upsertFailFrom int
+	upsertHook     func()
 }
 
 func newFakeTokenRegistryStore() *fakeTokenRegistryStore {
@@ -74,6 +77,9 @@ func (f *fakeTokenRegistryStore) UpsertTokenRegistryEntries(
 		return 0, f.upsertErr
 	}
 	f.upserts++
+	if f.upsertFailFrom > 0 && f.upserts >= f.upsertFailFrom {
+		return 0, errors.New("simulated store failure mid-snapshot")
+	}
 	for _, entry := range entries {
 		entry.UpdatedAt = syncedAt
 		f.entries[entry.Subject] = entry
@@ -273,9 +279,19 @@ func newTestSync(
 
 func TestTokenRegistrySyncStoresMappings(t *testing.T) {
 	body := tarballOf(t, map[string]string{
-		"README.md":                             "not a mapping",
-		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
-		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+		"README.md": "not a mapping",
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"Djed USD",
+			"DJED",
+			"",
+		),
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
@@ -294,7 +310,12 @@ func TestTokenRegistrySyncStoresMappings(t *testing.T) {
 
 func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
 	body := tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	})
 	server := newRegistryServer(t, body)
 	server.notModifiedOnTag = true
@@ -354,10 +375,15 @@ func TestTokenRegistrySyncStoresLogosWhenEnabled(t *testing.T) {
 
 func TestTokenRegistrySyncIgnoresNonMappingFiles(t *testing.T) {
 	body := tarballOf(t, map[string]string{
-		"README.md":                            "hello",
-		"mappings/notes.txt":                   "not json",
-		"nix/default.nix":                      "{}",
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "", ""),
+		"README.md":          "hello",
+		"mappings/notes.txt": "not json",
+		"nix/default.nix":    "{}",
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"",
+			"",
+		),
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
@@ -372,9 +398,14 @@ func TestTokenRegistrySyncIgnoresNonMappingFiles(t *testing.T) {
 func TestTokenRegistrySyncSkipsMalformedMappings(t *testing.T) {
 	// One unparsable file in a 7,900-file registry must not cost the sync.
 	body := tarballOf(t, map[string]string{
-		"mappings/broken.json":                 `{"subject": `,
-		"mappings/nosubject.json":              `{"name":{"value":"x"}}`,
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "", ""),
+		"mappings/broken.json":    `{"subject": `,
+		"mappings/nosubject.json": `{"name":{"value":"x"}}`,
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"",
+			"",
+		),
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
@@ -403,7 +434,12 @@ func TestTokenRegistrySyncSkipsSubjectOnlyMappings(t *testing.T) {
 
 func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 	body := tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"",
+			"",
+		),
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
@@ -421,8 +457,18 @@ func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 func TestTokenRegistrySyncSkipsOversizedMapping(t *testing.T) {
 	huge := strings.Repeat("A", 4096)
 	body := tarballOf(t, map[string]string{
-		"mappings/huge.json":                   mappingJSON(syncSubjectDjed, huge, "", ""),
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "", ""),
+		"mappings/huge.json": mappingJSON(
+			syncSubjectDjed,
+			huge,
+			"",
+			"",
+		),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"",
+			"",
+		),
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
@@ -510,12 +556,21 @@ func TestNewTokenRegistrySyncPrefersExplicitSourceURL(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, "https://mirror.example.test/registry.tar.gz", sync.SourceURL())
+	require.Equal(
+		t,
+		"https://mirror.example.test/registry.tar.gz",
+		sync.SourceURL(),
+	)
 }
 
 func TestTokenRegistrySyncStartStop(t *testing.T) {
 	body := tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"",
+			"",
+		),
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
@@ -641,8 +696,18 @@ func TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry(t *testing.T) {
 // forever, because nothing in a later snapshot mentions it.
 func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
-		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"Djed USD",
+			"DJED",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
@@ -653,7 +718,12 @@ func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
 
 	// The next snapshot no longer carries DJED.
 	server.setBody(tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	}), `"etag2"`)
 
 	_, err = sync.SyncOnce(t.Context())
@@ -670,7 +740,12 @@ func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
 // alone would leave the old row serving stale metadata.
 func TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
@@ -694,7 +769,12 @@ func TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties(t *testing.T) {
 // the failed run simply had not reached yet.
 func TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
@@ -724,7 +804,12 @@ func TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot(t *testing.T) {
 // so there is nothing to reconcile against.
 func TestTokenRegistrySyncDoesNotPruneOnNotModified(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	}))
 	server.notModifiedOnTag = true
 	store := newFakeTokenRegistryStore()
@@ -752,9 +837,14 @@ func TestTokenRegistrySyncClearsLogosWhenDisabled(t *testing.T) {
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
-	withLogos := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
-		c.StoreLogos = true
-	})
+	withLogos := newTestSync(
+		t,
+		store,
+		server.URL,
+		func(c *TokenRegistryConfig) {
+			c.StoreLogos = true
+		},
+	)
 	_, err := withLogos.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.NotEmpty(t, store.snapshot()[syncSubjectNut].Logo)
@@ -765,4 +855,122 @@ func TestTokenRegistrySyncClearsLogosWhenDisabled(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Empty(t, store.snapshot()[syncSubjectNut].Logo)
+}
+
+// manySubjects builds n distinct, valid registry subjects.
+func manySubjects(n int) []string {
+	out := make([]string, 0, n)
+	for i := range n {
+		// 56 hex characters: a policy ID with the index encoded in the tail.
+		out = append(out, fmt.Sprintf("%048x%08x", i, i))
+	}
+	return out
+}
+
+// TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries covers a
+// snapshot that fails *after* at least one batch has already been written,
+// which the HTTP-error test does not reach.
+//
+// Snapshot application is deliberately not atomic -- see the syncer's
+// applySnapshot doc comment -- so earlier batches do persist. What must hold
+// is that the failure costs nothing already being served: no entry is lost,
+// no properties are cleared, nothing is pruned, and the ETag is not advanced,
+// so the next run re-applies the snapshot in full.
+func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
+	t *testing.T,
+) {
+	// A subject already served from an earlier, successful snapshot.
+	established := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed, "Djed USD", "DJED", "",
+		),
+	})
+	server := newRegistryServer(t, established)
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "DJED", store.snapshot()[syncSubjectDjed].Ticker)
+	prunesBefore := store.prunes
+	etagBefore := store.state(TokenRegistrySyncStateKey)
+
+	// The next snapshot spans more than one batch, and the store fails on
+	// the second write -- after the first has already been committed.
+	files := map[string]string{}
+	for i, subject := range manySubjects(tokenRegistryBatchSize + 50) {
+		files["mappings/"+subject+".json"] = mappingJSON(
+			subject,
+			fmt.Sprintf("token %d", i),
+			"",
+			"",
+		)
+	}
+	server.setBody(tarballOf(t, files), `"etag2"`)
+	store.mu.Lock()
+	store.upsertFailFrom = store.upserts + 2
+	store.mu.Unlock()
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.Error(t, err)
+	entries := store.snapshot()
+	require.Contains(
+		t,
+		entries,
+		syncSubjectDjed,
+		"a mid-snapshot failure must not drop an already-served subject",
+	)
+	require.Equal(
+		t,
+		"DJED",
+		entries[syncSubjectDjed].Ticker,
+		"an already-served subject must keep its properties",
+	)
+	require.Equal(
+		t,
+		prunesBefore,
+		store.prunes,
+		"a partial snapshot must not prune",
+	)
+	require.Equal(
+		t,
+		etagBefore,
+		store.state(TokenRegistrySyncStateKey),
+		"a partial snapshot must not advance the ETag, so the next run retries it in full",
+	)
+}
+
+// TestTokenRegistrySyncRecoversAfterPartialSnapshot completes the story: the
+// run following a partial snapshot applies the whole thing and reconciles, so
+// the partial state is transient rather than sticky.
+func TestTokenRegistrySyncRecoversAfterPartialSnapshot(t *testing.T) {
+	subjects := manySubjects(tokenRegistryBatchSize + 50)
+	files := map[string]string{}
+	for i, subject := range subjects {
+		files["mappings/"+subject+".json"] = mappingJSON(
+			subject,
+			fmt.Sprintf("token %d", i),
+			"",
+			"",
+		)
+	}
+	server := newRegistryServer(t, tarballOf(t, files))
+	store := newFakeTokenRegistryStore()
+	store.upsertFailFrom = 2
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.Error(t, err)
+	require.Len(t, store.snapshot(), tokenRegistryBatchSize)
+
+	// Clear the fault; the retry sees the same registry.
+	store.mu.Lock()
+	store.upsertFailFrom = 0
+	store.mu.Unlock()
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, len(subjects), written)
+	require.Len(t, store.snapshot(), len(subjects))
 }
