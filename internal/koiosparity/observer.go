@@ -698,6 +698,7 @@ func (o *Observer) fetchAccountsIfNeeded(
 			o.cfg.GraceHours,
 			o.cfg.AccountChunkSize,
 			o.cfg.AccountChunkMaxBytes,
+			false,
 			o.cfg.Logger,
 		)
 		if err == nil {

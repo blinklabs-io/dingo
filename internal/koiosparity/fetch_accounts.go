@@ -196,7 +196,7 @@ func FetchAccountRewardsForEpoch(
 ) (fetched int, err error) {
 	return fetchAccountRewardsForEpoch(
 		ctx, koios, cache, network, epoch, addressUniverse,
-		epochEndTime, graceHours, 0, 0, logger,
+		epochEndTime, graceHours, 0, 0, false, logger,
 	)
 }
 
@@ -232,6 +232,14 @@ func FetchAccountRewardsForEpoch(
 // plan before dispatch, so a changed universe or a --account-chunk-size/
 // --account-chunk-max-bytes tuning change only re-fetches the affected
 // chunks, never silently reuses stale progress from a different plan.
+//
+// forceRefresh (threaded from FetchConfig.ForceRefresh) bypasses that same
+// content-addressed resume logic entirely: an unchanged address universe
+// produces the exact same chunk hashes as a prior run, so without this an
+// operator re-running with --force-refresh to repair suspected stale/corrupt
+// cached data would find every chunk already "done" and skip re-dispatching
+// any of them, silently re-committing the same old staged rows instead of
+// actually going back to Koios.
 func fetchAccountRewardsForEpoch(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -242,6 +250,7 @@ func fetchAccountRewardsForEpoch(
 	epochEndTime time.Time,
 	graceHours int,
 	chunkSize, chunkMaxBytes int,
+	forceRefresh bool,
 	logger *slog.Logger,
 ) (fetched int, err error) {
 	if logger == nil {
@@ -324,7 +333,17 @@ func fetchAccountRewardsForEpoch(
 		hashes[i] = h
 	}
 
-	if err := cache.InvalidateStaleAccountChunks(network, epoch, hashes); err != nil {
+	invalidateHashes := hashes
+	if forceRefresh {
+		// nil treats every existing checkpointed chunk as stale regardless
+		// of whether its hash still matches the current plan (see
+		// InvalidateStaleAccountChunks: a chunk hash absent from the
+		// "current" set is stale), so doneHashes below comes back empty and
+		// every chunk in this call is re-dispatched to Koios even when the
+		// address universe/chunking plan hasn't changed since the last run.
+		invalidateHashes = nil
+	}
+	if err := cache.InvalidateStaleAccountChunks(network, epoch, invalidateHashes); err != nil {
 		return 0, fmt.Errorf("invalidate stale account chunks: %w", err)
 	}
 	doneHashes, err := cache.GetDoneAccountChunkHashes(network, epoch)
@@ -527,10 +546,13 @@ outer:
 	// the durable ledger accountLifecycleMismatches (check.go) reads later
 	// to report zero-reward/newly-registered/deregistered accounts, and
 	// koios_account_fetch_staged_rows must survive so a later idempotent
-	// re-run of this same, already-complete epoch (e.g. --force-refresh
-	// with an unchanged universe) finds every chunk already done AND still
-	// has real staged rows to re-commit — clearing either table here would
-	// make that re-run commit an empty reward set over the correct one.
+	// re-run of this same, already-complete epoch with an unchanged universe
+	// finds every chunk already done AND still has real staged rows to
+	// re-commit — clearing either table here would make that re-run commit
+	// an empty reward set over the correct one. --force-refresh instead goes
+	// through the forceRefresh path above, which unconditionally invalidates
+	// every existing chunk before dispatch so it always re-fetches from
+	// Koios rather than relying on this retained state.
 
 	logger.Info("koiosparity: epoch account rewards fetched",
 		"network", network,
@@ -570,6 +592,14 @@ outer:
 // --account-chunk-size/--account-chunk-max-bytes through to
 // fetchAccountRewardsForEpoch's dual-bounded chunking; 0 for either means
 // "use the package default" (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault).
+//
+// forceRefresh (threaded from FetchConfig.ForceRefresh; always false for the
+// Observer, which has no force-refresh concept) forces
+// fetchAccountRewardsForEpoch to invalidate every retained checkpoint for
+// this epoch before dispatch, so an operator-requested --force-refresh
+// actually repairs suspected stale/corrupt cached data by going back to
+// Koios, rather than finding every chunk already checkpointed "done" and
+// silently re-committing the same old rows.
 func FetchEpochAccountsWithAddrs(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -580,6 +610,7 @@ func FetchEpochAccountsWithAddrs(
 	koiosAddrs []string,
 	graceHours int,
 	chunkSize, chunkMaxBytes int,
+	forceRefresh bool,
 	logger *slog.Logger,
 ) (int, error) {
 	stakeEpoch, ok := koiosStakeEpoch(epoch)
@@ -630,6 +661,7 @@ func FetchEpochAccountsWithAddrs(
 		graceHours,
 		chunkSize,
 		chunkMaxBytes,
+		forceRefresh,
 		logger,
 	)
 }

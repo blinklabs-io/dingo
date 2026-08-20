@@ -386,6 +386,7 @@ func TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache(t *testing.T) {
 		24, // graceHours
 		0,  // chunkSize (default)
 		0,  // chunkMaxBytes (default)
+		false,
 		nil,
 	)
 	require.NoError(t, err)

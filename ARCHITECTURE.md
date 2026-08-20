@@ -4950,10 +4950,21 @@ every one of #3097's own tests passes unmodified.
   must persist indefinitely since the zero-reward/lifecycle reporting below
   reads it long after the fetch completes, and `koios_account_fetch_staged_rows`
   must persist too so a later idempotent re-run of an already-complete epoch
-  (e.g. `--force-refresh` with an unchanged universe) finds real rows to
-  re-commit instead of committing an empty set over the correct one; the two
-  tables grow at the same rate `koios_account_rewards` itself already does,
-  which is an accepted characteristic of this cache, not a new problem.
+  with an unchanged universe finds real rows to re-commit instead of
+  committing an empty set over the correct one; the two tables grow at the
+  same rate `koios_account_rewards` itself already does, which is an accepted
+  characteristic of this cache, not a new problem. `--force-refresh`
+  (`FetchConfig.ForceRefresh`, threaded to `fetchAccountRewardsForEpoch` as
+  `forceRefresh`) is the one caller that deliberately bypasses all of this: it
+  invalidates every existing chunk for the epoch unconditionally before
+  dispatch (passing a nil current-plan hash list to
+  `Cache.InvalidateStaleAccountChunks`, the same "invalidate everything"
+  mechanism the empty-universe path below uses), so a forced re-run always
+  goes back to Koios and can actually repair suspected stale/corrupt cached
+  data — without it, an unchanged address universe would produce the exact
+  same content-addressed chunk hashes as before, every chunk would look
+  already "done," and `--force-refresh` would silently just re-commit the old
+  rows instead of refetching anything.
 - **Selective invalidation on universe/chunk-plan change.**
   `Cache.InvalidateStaleAccountChunks` prunes staged rows/checked markers for
   any chunk hash no longer present in the current plan before dispatch —
@@ -5049,10 +5060,17 @@ every one of #3097's own tests passes unmodified.
   none can ever turn an otherwise clean epoch into `FAIL` or `ERROR`. A
   genuine cache or Dingo DB error from either lookup is reported as
   `CategoryDBError` rather than silently swallowed, including a malformed
-  previous-epoch `reward_account_output` row (an unsupported credential
-  tag) — silently dropping such a row instead would make its address look
-  deregistered purely because it failed to decode, not because it actually
-  changed. The newly-registered/deregistered half is disabled entirely
+  previous- or current-epoch `reward_account_output` row (an unsupported
+  credential tag, counted by `dingoRewardAddressSet`'s `decodeErrs` return) —
+  silently dropping such a row instead would make its address look
+  deregistered or never-newly-registered purely because it failed to decode,
+  not because it actually changed. A decode failure on *either* side does not
+  just get reported alongside an otherwise-computed diff: the diff itself is
+  skipped entirely (only the zero-reward half above still runs) whenever
+  `prevDecodeErrs > 0 || currDecodeErrs > 0`, since an incomplete address set
+  on either side would make every other unaffected address in that set look
+  like a false lifecycle change too. The newly-registered/deregistered half is
+  also disabled entirely
   (returning only the zero-reward half, which doesn't depend on any
   historical epoch's data) in two cases: `stakeEpoch == 0` (no valid
   previous stake epoch to diff against), and when `dingo` is a

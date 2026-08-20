@@ -450,7 +450,7 @@ func TestFetchAccountRewardsForEpochRequiresEveryChunkCurrentBeforeComplete(
 	// real rows and the other stays empty within the same call.
 	_, err = FetchEpochAccountsWithAddrs(
 		t.Context(), k, cache, "preview", 800, nil,
-		[]string{hasDataAddr, noDataAddr}, 24, 1, 0, nil,
+		[]string{hasDataAddr, noDataAddr}, 24, 1, 0, false, nil,
 	)
 	require.NoError(t, err)
 
@@ -539,6 +539,83 @@ func TestFetchAccountRewardsForEpochEmptyUniverseInvalidatesPriorCheckpointData(
 	zeroReward, err := cache.GetZeroRewardAccountsForEpoch("preview", 850)
 	require.NoError(t, err)
 	require.Empty(t, zeroReward)
+}
+
+// TestFetchAccountRewardsForEpochForceRefreshBypassesRetainedCheckpoints
+// proves --force-refresh (forceRefresh=true) actually goes back to Koios
+// instead of silently reusing retained checkpoint state: rerunning with an
+// unchanged address universe and forceRefresh=false must not re-request any
+// already-done chunk (the existing resume behavior), but the same rerun with
+// forceRefresh=true must re-request every chunk, since an operator running
+// --force-refresh is explicitly trying to repair suspected stale/corrupt
+// cached data.
+func TestFetchAccountRewardsForEpochForceRefreshBypassesRetainedCheckpoints(
+	t *testing.T,
+) {
+	var requestCount atomic.Int32
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount.Add(1)
+			addrs, _ := decodeAccountRewardHistoryRequest(t, r)
+			writeAccountRewardHistoryRows(w, addrs)
+		}),
+	)
+	defer srv.Close()
+
+	k := &KoiosClient{
+		baseURL: srv.URL,
+		http:    &http.Client{Timeout: 2 * time.Second},
+		limiter: newBurstLimiter(0, koiosBurstWindow),
+	}
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addrs := []string{"stake1addr000", "stake1addr001", "stake1addr002"}
+
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 950, addrs, time.Time{}, 0,
+		1, 0, false, nil, // chunkSize 1 -> 3 chunks, 3 requests
+	)
+	require.NoError(t, err)
+	afterFirstRun := requestCount.Load()
+	require.EqualValues(t, 3, afterFirstRun)
+
+	// Rerun, unchanged universe, forceRefresh=false: every chunk is already
+	// checkpointed "done", so no new requests are made.
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 950, addrs, time.Time{}, 0,
+		1, 0, false, nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(
+		t,
+		afterFirstRun,
+		requestCount.Load(),
+		"an unchanged universe without forceRefresh must reuse every checkpointed chunk",
+	)
+
+	// Rerun again, unchanged universe, forceRefresh=true: every chunk must be
+	// invalidated and re-requested despite matching the retained checkpoints
+	// exactly.
+	_, err = fetchAccountRewardsForEpoch(
+		t.Context(), k, cache, "preview", 950, addrs, time.Time{}, 0,
+		1, 0, true, nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(
+		t,
+		afterFirstRun+3,
+		requestCount.Load(),
+		"forceRefresh=true must re-request every chunk even when the universe is unchanged",
+	)
+
+	cov, err := cache.GetAccountCoverage("preview", 950)
+	require.NoError(t, err)
+	require.NotNil(t, cov)
+	require.True(t, cov.Complete)
+	require.Equal(t, len(addrs), cov.RequestedCount)
 }
 
 // TestFetchAccountRewardsForEpochMegaScenario is the combined exercise the
@@ -691,6 +768,7 @@ func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 		0,
 		10,
 		0,
+		false,
 		nil,
 	)
 	require.Error(
@@ -741,6 +819,7 @@ func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 		0,
 		10,
 		0,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -842,7 +921,7 @@ func TestFetchAccountRewardsForEpochRequestBodyNeverExceedsConfiguredMaxBytes(
 
 	_, err = FetchEpochAccountsWithAddrs(
 		t.Context(), k, cache, "preview", 900, nil, addrs, 0,
-		1_000_000, chunkMaxBytes, nil,
+		1_000_000, chunkMaxBytes, false, nil,
 	)
 	require.NoError(t, err)
 	mu.Lock()

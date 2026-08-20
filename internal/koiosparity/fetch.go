@@ -406,7 +406,8 @@ loop:
 				if _, acctErr := FetchEpochAccountsWithAddrs(
 					fetchCtx, koios, cache, cfg.Network, epoch,
 					cfg.AccountsSource, koiosAccountAddrs, cfg.GraceHours,
-					cfg.AccountChunkSize, cfg.AccountChunkMaxBytes, logger,
+					cfg.AccountChunkSize, cfg.AccountChunkMaxBytes,
+					cfg.ForceRefresh, logger,
 				); acctErr != nil {
 					handleEpochFetchErr("accounts", acctErr)
 					return

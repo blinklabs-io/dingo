@@ -305,6 +305,75 @@ func TestAccountLifecycleMismatchesReportsMalformedPreviousRowAsDBError(
 	)
 }
 
+// TestAccountLifecycleMismatchesSkipsLifecycleDiffWhenCurrentRowsFailToDecode
+// proves the diff itself is skipped — not just reported alongside — when the
+// *current* stake epoch has a malformed reward_account_output row. Before
+// this fix, dingoRewardAddressSet's decodeErrs return value was discarded
+// for currentOutputs, so a decode failure there silently produced an
+// incomplete currSet: a well-formed address present in both epochs would
+// then look deregistered purely because a different, unrelated row failed
+// to decode, not because it actually changed.
+func TestAccountLifecycleMismatchesSkipsLifecycleDiffWhenCurrentRowsFailToDecode(
+	t *testing.T,
+) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	goodKey := testPoolKeyHash(t, 0x20)
+	badKey := testPoolKeyHash(t, 0x21)
+	poolKey := testPoolKeyHash(t, 0xAA)
+
+	// Previous stake epoch (498): the well-formed address only.
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 498, StakingKey: goodKey, PoolKeyHash: poolKey,
+		RewardType: "member", CredentialTag: 0,
+		Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+
+	// Current stake epoch (499): the same well-formed address (still
+	// registered) plus one row with an unsupported credential tag.
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 499, StakingKey: goodKey, PoolKeyHash: poolKey,
+		RewardType: "member", CredentialTag: 0,
+		Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 499, StakingKey: badKey, PoolKeyHash: poolKey,
+		RewardType: "member", CredentialTag: 9,
+		Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
+
+	ctx := context.Background()
+	currentOutputs, err := dingo.GetRewardAccountOutputs(ctx, 499)
+	require.NoError(t, err)
+	require.Len(t, currentOutputs, 2)
+
+	now := time.Now()
+	mismatches := accountLifecycleMismatches(
+		ctx, cache, dingo, "preview", 500, 499, currentOutputs, now,
+	)
+
+	for _, m := range mismatches {
+		require.NotEqual(
+			t,
+			CategoryAcctNewlyRegistered,
+			m.Category,
+			"the lifecycle diff must be skipped entirely, not just under-reported",
+		)
+		require.NotEqual(
+			t,
+			CategoryAcctDeregistered,
+			m.Category,
+			"the still-registered address must never be misreported as deregistered "+
+				"just because an unrelated current-epoch row failed to decode",
+		)
+	}
+}
+
 // TestAccountLifecycleMismatchesSkipsLifecycleDiffForPrunableSource proves
 // the newly-registered/deregistered diff is skipped entirely for a
 // *DatabaseSource — the in-process observer's reward source reads through

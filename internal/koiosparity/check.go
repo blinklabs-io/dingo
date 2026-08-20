@@ -899,7 +899,7 @@ func accountLifecycleMismatches(
 	// since nothing else in this package ever decodes the previous stake
 	// epoch's addresses.
 	prevSet, prevDecodeErrs := dingoRewardAddressSet(previousOutputs)
-	currSet, _ := dingoRewardAddressSet(currentOutputs)
+	currSet, currDecodeErrs := dingoRewardAddressSet(currentOutputs)
 	if prevDecodeErrs > 0 {
 		out = append(out, CheckMismatch{
 			Network: network,
@@ -912,6 +912,16 @@ func accountLifecycleMismatches(
 			Category:  CategoryDBError,
 			CheckedAt: now,
 		})
+	}
+	if prevDecodeErrs > 0 || currDecodeErrs > 0 {
+		// Either side's set is now missing an address purely because a row
+		// failed to decode, not because it actually registered/deregistered
+		// — diffing incomplete sets would misreport that row's address as
+		// newly-registered or deregistered. The decode failure itself is
+		// already reported (previous-epoch above; current-epoch by
+		// compareEpochAccounts's own dingoRows-building loop), so skip the
+		// diff rather than emit a misleading one.
+		return out
 	}
 
 	var newlyRegistered, deregistered []string
