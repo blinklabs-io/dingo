@@ -555,6 +555,23 @@ type LedgerStateConfig struct {
 	// same class of trust window already accepted, unconditionally, for
 	// ValidateHistorical=false. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
+	//
+	// This flag's extra CPU cost (two dedicated VRF/KES workers) can make
+	// block-apply throughput fall behind header arrival during bursty
+	// near-tip conditions more easily than decode-only phase 1 or the
+	// pre-pipeline baseline hit in practice; if that happens for long
+	// enough, the chain's queued-header backlog can reach capacity while a
+	// fork is being resolved. tryResolveFork's failure handling used to
+	// silently strand that backlog in exactly that case, stalling sync
+	// with no error logged above WARN until chainsyncrecycler's
+	// local-tip-plateau watchdog eventually forced a resync (~20 minutes
+	// with default config) -- this was a general, pre-existing gap in
+	// tryResolveFork, not specific to this flag (reproduced live under
+	// this flag, under decode-only, and under the pre-pipeline baseline
+	// alike); the flag's throughput cost just makes it easier to reach.
+	// See ensureBlockfetchDrainingAfterForkQueueFailure and
+	// ARCHITECTURE.md ("Fork-resolution header-queue overflow must still
+	// restart blockfetch") for the fix and the full explanation.
 	BlockPipelineValidateEnabled bool
 }
 

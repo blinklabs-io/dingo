@@ -6931,6 +6931,59 @@ changes: admission was already skipping this check before
 `BlockPipelineValidateEnabled` existed, and the pipeline continues to close
 that coverage gap as described above.
 
+**Fork-resolution header-queue overflow must still restart blockfetch.**
+Bursty near-tip conditions (many peers racing small competing forks in quick
+succession, or an idle-then-recovered upstream that suddenly hands over a
+multi-thousand-header fork path) can make header arrival outrun block-apply
+throughput for long enough that the chain's queued-header backlog
+(`chain.Chain.headers`, capacity `MaxQueuedHeaders` —
+`max(2*securityParam, DefaultMaxQueuedHeaders)`, floor 10,000) reaches
+capacity. `tryResolveFork` (`ledger/chainsync.go`) resolves a fork by
+appending a reconstructed peer fork-path onto the chain one header at a time
+via `chain.AddBlockHeader`, in both its "ancestor is the local tip, extend
+without rollback" branch and its "roll back to common ancestor, then re-add
+the fork path" branch. A fork path longer than the remaining queue capacity
+fails partway through with `chain.ErrHeaderQueueFull`. Before this fix, both
+branches returned immediately on that failure without ever restarting
+blockfetch for whatever they (or an earlier event) had already queued — and
+because `chain.AddBlockHeader`'s capacity check runs before any "should a
+fetch be running" decision, once the queue is completely full no later
+header event, from any peer, fork-related or not, can ever add a header
+again, so no code path would schedule a new blockfetch and the backlog would
+not drain on its own. This is what the block-pipeline live-preview-sync
+freeze (issue #1894 phase 3 follow-up) turned out to be: not a validate-stage
+correctness bug, but a pre-existing, general gap in `tryResolveFork`'s
+failure handling — reproduced live, with the identical log signature
+(`"fork extends from current tip, adding headers without rollback"` /
+`"failed to queue header from fork extension"` /
+`"header queue at maximum capacity"`), under `BlockPipelineValidateEnabled`,
+under decode-only phase 1, and under the pre-pipeline baseline alike during
+the same investigation; the validate stage's extra CPU cost (two dedicated
+VRF/KES workers) makes the underlying throughput mismatch easier to hit in
+practice, but is not what causes it. The outage is bounded, not permanent:
+`internal/chainsyncrecycler`'s local-tip-plateau watchdog
+(`shouldRecycleLocalTipPlateau`, threshold `max(2*StallTimeout, 4m)`, ~20
+minutes with default config) eventually detects the stalled local tip and
+forces a chainsync resync (`ChainsyncResyncReasonLocalTipPlateau`), which
+re-selects a peer and re-runs `FindIntersect`, incidentally recovering the
+node — this is exactly what happened in all three live-preview instances
+during this investigation, each recovering ~20 minutes after its freeze with
+no operator intervention. But a ~20-minute total-sync stall per occurrence,
+with nothing logged above `WARN` in the interim, is still a real liveness
+defect worth fixing directly rather than relying on that fallback.
+`ensureBlockfetchDrainingAfterForkQueueFailure` (`ledger/chainsync.go`)
+closes the gap at its source: called from both branches' failure paths, it
+restarts blockfetch for the already-queued backlog immediately, but only
+when nothing is currently fetching (`chainsyncBlockfetchReadyChan == nil &&
+!blockfetchContinuationPending`) — deliberately not unconditionally, unlike
+`restartQueuedBlockfetchAfterForkLocked` on the success paths, since the same
+queue-full failure fires once per rejected header while a healthy batch is
+already draining the backlog, and tearing that batch down every time would
+thrash forever instead of ever completing one. Regression tests:
+`TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow` and
+`TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch`
+(`ledger/chainsync_fork_queue_full_test.go`).
+
 **Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
 gauges — `dingo_ledger_block_pipeline_blocks_decoded`,
 `_blocks_validated`, `_decode_errors`, `_validation_errors`,
