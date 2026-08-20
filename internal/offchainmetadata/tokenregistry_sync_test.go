@@ -51,6 +51,8 @@ type fakeTokenRegistryStore struct {
 	upsertErr       error
 	upsertFailFrom  int
 	upsertHook      func()
+	ops             []string
+	syncStateErr    map[string]error
 }
 
 func newFakeTokenRegistryStore() *fakeTokenRegistryStore {
@@ -78,6 +80,7 @@ func (f *fakeTokenRegistryStore) UpsertTokenRegistryEntries(
 		return 0, f.upsertErr
 	}
 	f.upserts++
+	f.ops = append(f.ops, "upsert")
 	if f.upsertFailFrom > 0 && f.upserts >= f.upsertFailFrom {
 		return 0, errors.New("simulated store failure mid-snapshot")
 	}
@@ -122,8 +125,27 @@ func (f *fakeTokenRegistryStore) SetSyncState(
 ) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ops = append(f.ops, "set:"+key)
+	if err, ok := f.syncStateErr[key]; ok && err != nil {
+		return err
+	}
 	f.syncState[key] = value
 	return nil
+}
+
+func (f *fakeTokenRegistryStore) opLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ops...)
+}
+
+func (f *fakeTokenRegistryStore) failSyncState(key string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.syncStateErr == nil {
+		f.syncStateErr = make(map[string]error)
+	}
+	f.syncStateErr[key] = err
 }
 
 func (f *fakeTokenRegistryStore) snapshot() map[string]models.TokenRegistryEntry {
@@ -1545,4 +1567,118 @@ func TestTokenRegistrySyncStampSurvivesRestart(t *testing.T) {
 		"a restart within the same second must still retire a dropped subject",
 	)
 	require.Contains(t, store.snapshot(), syncSubjectNut)
+}
+
+// indexOfOp returns the position of the first op equal to want, or -1.
+func indexOfOp(ops []string, want string) int {
+	for i, op := range ops {
+		if op == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestTokenRegistrySyncPersistsStampBeforeApplying pins the ordering that
+// makes the state crash-safe without a transaction spanning it.
+//
+// The three state values are written with separate calls, so a crash can land
+// between them. Writing the stamp *before* the rows it stamps keeps the
+// invariant "persisted stamp >= the table's highest stamp" true at every
+// instant: a crash mid-apply then leaves the stamp ahead of the table, which
+// is the safe direction, because the next snapshot is guaranteed a strictly
+// greater stamp and will prune what this one left behind.
+func TestTokenRegistrySyncPersistsStampBeforeApplying(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+
+	ops := store.opLog()
+	stampAt := indexOfOp(ops, "set:"+tokenRegistryStampKey)
+	upsertAt := indexOfOp(ops, "upsert")
+	require.NotEqual(t, -1, stampAt, "stamp must be persisted: %v", ops)
+	require.NotEqual(t, -1, upsertAt, "rows must be written: %v", ops)
+	require.Less(
+		t,
+		stampAt,
+		upsertAt,
+		"the stamp must be persisted before the rows it stamps: %v",
+		ops,
+	)
+}
+
+// TestTokenRegistrySyncPersistsETagBeforeIdentity pins the other half of the
+// ordering. The identity is the gate that authorizes replaying the tag, so it
+// must be written last: a crash between the two then leaves the gate shut and
+// the next run re-applies in full, rather than leaving the gate open over a
+// tag that was never updated.
+func TestTokenRegistrySyncPersistsETagBeforeIdentity(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+
+	ops := store.opLog()
+	etagAt := indexOfOp(ops, "set:"+TokenRegistrySyncStateKey)
+	identityAt := indexOfOp(ops, "set:"+tokenRegistrySnapshotIDKey)
+	require.NotEqual(t, -1, etagAt, "etag must be persisted: %v", ops)
+	require.NotEqual(t, -1, identityAt, "identity must be persisted: %v", ops)
+	require.Less(
+		t,
+		etagAt,
+		identityAt,
+		"the identity gate must be written after the tag it authorizes: %v",
+		ops,
+	)
+}
+
+// TestTokenRegistrySyncCrashAfterApplyStillRetires is the behavioral end of
+// the same property. A crash that loses the tag and identity writes must not
+// also cost the stamp, or a restart inside the same second would reuse it and
+// spare the subjects the interrupted snapshot dropped.
+func TestTokenRegistrySyncCrashAfterApplyStillRetires(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+	}))
+	store := newFakeTokenRegistryStore()
+	frozen := time.Date(2026, 8, 20, 12, 0, 0, 400000000, time.UTC)
+
+	first := newTestSync(t, store, server.URL, nil)
+	first.now = func() time.Time { return frozen }
+	_, err := first.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 2)
+
+	// The tag and identity writes fail, as a crash between them would look.
+	store.failSyncState(TokenRegistrySyncStateKey, errors.New("crash"))
+	store.failSyncState(tokenRegistrySnapshotIDKey, errors.New("crash"))
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+	}), `"etag2"`)
+
+	restarted := newTestSync(t, store, server.URL, nil)
+	restarted.now = func() time.Time { return frozen }
+	_, err = restarted.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.NotContains(
+		t,
+		store.snapshot(),
+		syncSubjectDjed,
+		"a snapshot whose state writes failed must still have retired the dropped subject",
+	)
 }

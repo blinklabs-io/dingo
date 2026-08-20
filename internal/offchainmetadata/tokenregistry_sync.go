@@ -475,6 +475,24 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	// and be deleted. Truncating at the source makes the written value and
 	// the cutoff identical on SQLite, PostgreSQL, and MySQL alike.
 	syncedAt := s.nextSyncStamp(persistedStamp)
+	// Persisted before the rows it stamps, so that "recorded stamp >= the
+	// table's highest stamp" holds at every instant. The three state values
+	// are written with separate calls and a crash can land between them;
+	// this ordering makes the surviving state err in the safe direction,
+	// because the next snapshot is then guaranteed a strictly greater stamp
+	// and prunes whatever an interrupted one left behind. Recording it after
+	// the apply would leave the table ahead of the stamp, and a restart
+	// inside the same second would reuse it.
+	if err := s.store.SetSyncState(
+		tokenRegistryStampKey,
+		syncedAt.UTC().Format(time.RFC3339Nano),
+		nil,
+	); err != nil {
+		// Advancing the stamp is what keeps reconciliation correct, so
+		// unlike the tag and identity this failure aborts before any row is
+		// written rather than proceeding with a stamp nothing recorded.
+		return 0, fmt.Errorf("record token registry sync stamp: %w", err)
+	}
 	written, mappings, skipped, err := s.applySnapshot(
 		ctx,
 		resp.Body,
@@ -543,11 +561,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	// would let a later switch-back replay it against the wrong contents.
 	// Failures here are logged rather than returned -- the data is already
 	// correct, and the cost is a redundant download next interval.
-	s.recordSyncState(
-		strings.TrimSpace(resp.Header.Get("ETag")),
-		identity,
-		syncedAt,
-	)
+	s.recordSyncState(strings.TrimSpace(resp.Header.Get("ETag")), identity)
 	return written, nil
 }
 
@@ -579,29 +593,46 @@ func (s *TokenRegistrySync) readPersistedStamp() (time.Time, error) {
 	return stamp.UTC(), nil
 }
 
-// recordSyncState persists what the table now holds.
-func (s *TokenRegistrySync) recordSyncState(
-	etag string,
-	identity string,
-	syncedAt time.Time,
-) {
-	for key, value := range map[string]string{
-		TokenRegistrySyncStateKey:  etag,
-		tokenRegistrySnapshotIDKey: identity,
-		tokenRegistryStampKey:      syncedAt.UTC().Format(time.RFC3339Nano),
-	} {
-		if key == TokenRegistrySyncStateKey && value == "" {
-			// A source that serves no validator simply gets no conditional
-			// request next time; do not clobber a usable stored tag with "".
-			continue
-		}
-		if err := s.store.SetSyncState(key, value, nil); err != nil {
+// recordSyncState persists what the table now holds, tag first and identity
+// last.
+//
+// The order is load-bearing. The identity is the gate: the tag is only ever
+// replayed when the recorded identity matches the current one. Writing the
+// gate first would mean a crash between the two left it open over a tag that
+// was never updated, authorizing a 304 against contents the tag does not
+// describe. Writing it last means such a crash leaves the gate shut and the
+// next run re-applies in full, which is merely wasteful.
+//
+// The stamp is not written here; it is recorded before the apply. Failures are
+// logged rather than returned -- the rows are already correct, and the cost is
+// a redundant download next interval.
+func (s *TokenRegistrySync) recordSyncState(etag string, identity string) {
+	// A source that serves no validator simply gets no conditional request
+	// next time; do not clobber a usable stored tag with "".
+	if etag != "" {
+		if err := s.store.SetSyncState(
+			TokenRegistrySyncStateKey,
+			etag,
+			nil,
+		); err != nil {
 			s.logger.Warn(
-				"recording token registry sync state failed",
-				"key", key,
+				"recording token registry entity tag failed",
 				"error", err,
 			)
+			// Without the tag recorded, opening the gate would authorize
+			// replaying a stale one. Leave it shut.
+			return
 		}
+	}
+	if err := s.store.SetSyncState(
+		tokenRegistrySnapshotIDKey,
+		identity,
+		nil,
+	); err != nil {
+		s.logger.Warn(
+			"recording token registry snapshot identity failed",
+			"error", err,
+		)
 	}
 }
 

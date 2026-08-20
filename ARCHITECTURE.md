@@ -1463,7 +1463,20 @@ restart, and a restart landing inside the same wall-clock second as the
 previous snapshot would otherwise reuse its stamp — making the prune spare
 exactly the subjects the new snapshot dropped. Each snapshot takes the later of
 the wall clock and the recorded stamp, so the sequence stays strictly
-increasing across process boundaries. The snapshot stamp is truncated to a
+increasing across process boundaries.
+
+The three values are written with separate calls, so a crash can land between
+them, and the write order is what makes the surviving state safe rather than a
+transaction spanning it. The stamp goes first, *before* the rows it stamps, so
+that "recorded stamp ≥ the table's highest stamp" holds at every instant: a
+crash mid-apply leaves the stamp ahead of the table, and the next snapshot is
+then guaranteed a strictly greater stamp and prunes what the interrupted one
+left behind. Recording it afterwards would leave the table ahead of the stamp,
+which is the unsafe direction. The tag then goes before the identity, because
+the identity is the gate — the tag is replayed only when the recorded identity
+matches — so a crash between them leaves the gate shut and the next run
+re-applies in full, rather than leaving it open over a tag that was never
+updated. The snapshot stamp is truncated to a
 whole second, because MySQL's `datetime` column carries no fractional seconds:
 an unrounded stamp would be stored rounded while the prune compared against
 the original, deleting the very snapshot just written. Stamps are also forced
