@@ -62,6 +62,19 @@ var (
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
 	)
+	// errBlockPipelineEta0Unavailable classifies every error
+	// blockPipelineEta0Provider can return: in the block-processing
+	// pipeline's validate stage, headerVerificationEpoch failing for a
+	// slot always means no Praos epoch nonce is available for it, which in
+	// practice only ever happens for Byron-era slots (see
+	// blockPipelineEta0Provider's doc comment) -- Byron has no Praos nonce
+	// at all, and the pipeline only validates blocks already committed to
+	// ls.chain, so a post-Byron slot's epoch/nonce data should already be
+	// present. drainBlockPipelineErrors uses this sentinel to log/count
+	// these as the expected case rather than at error level.
+	errBlockPipelineEta0Unavailable = errors.New(
+		"block-processing pipeline: epoch nonce unavailable",
+	)
 )
 
 // IsHeaderVerificationDeferred reports whether header-only verification could
@@ -1348,7 +1361,11 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
 	epoch, err := ls.headerVerificationEpoch(slot, false)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf(
+			"%w: %w",
+			errBlockPipelineEta0Unavailable,
+			err,
+		)
 	}
 	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
 }

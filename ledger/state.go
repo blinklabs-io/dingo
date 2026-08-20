@@ -852,6 +852,19 @@ type LedgerState struct {
 	// one attempt's reader goroutine ever submits to it at a time -- see the
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
+	// blockPipelineErrorsDone is closed once drainBlockPipelineErrors (the
+	// goroutine that continuously reads blockPipeline.Errors() for the
+	// pipeline's full lifetime) has returned. Set alongside blockPipeline.
+	// Start in Start; nil whenever blockPipeline is nil or was never
+	// started. See drainBlockPipelineErrors's doc comment for why this
+	// goroutine exists: gouroboros' pipeline pushes every stage error onto
+	// a fixed-size errorsChan before forwarding the item onward, and never
+	// drains it itself -- without a permanent reader, errorsChan fills
+	// (deterministically, on real chain sync, from expected per-block
+	// Byron-era validate-stage errors -- see blockPipelineEta0Provider) and
+	// every validate worker permanently blocks on `errors <- err`,
+	// cascading into an unrecoverable Submit deadlock.
+	blockPipelineErrorsDone chan struct{}
 
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
 	// to prevent Add-after-Wait panics from the TOCTOU race between
@@ -1320,6 +1333,13 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		if err := ls.blockPipeline.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start block-decode pipeline: %w", err)
 		}
+		// Launched immediately, before the goroutine below (or anything
+		// else) can submit a single block to the pipeline: see
+		// drainBlockPipelineErrors's doc comment on why an undrained
+		// errorsChan deadlocks the pipeline once enough validate-stage
+		// errors (e.g. Byron-era blocks) have flowed through it.
+		ls.blockPipelineErrorsDone = make(chan struct{})
+		go ls.drainBlockPipelineErrors()
 	}
 	// Start goroutine to process new blocks unless the caller will feed trusted
 	// batches directly into the replay loop. Uses its own child context
@@ -1726,7 +1746,17 @@ func (ls *LedgerState) Close() error {
 	if ls.blockPipeline != nil {
 		blockPipelineStopDone = make(chan error, 1)
 		go func() {
-			blockPipelineStopDone <- ls.blockPipeline.Stop()
+			stopErr := ls.blockPipeline.Stop()
+			// Stop closes errorsChan as one of its final steps, once every
+			// stage has fully drained -- see BlockPipeline.Stop. Waiting for
+			// drainBlockPipelineErrors here (it exits via range-over-channel
+			// as soon as that close is visible) adds no additional blocking
+			// beyond what Stop already guarantees, and ensures the drain
+			// goroutine cannot still be running once this reports done.
+			if ls.blockPipelineErrorsDone != nil {
+				<-ls.blockPipelineErrorsDone
+			}
+			blockPipelineStopDone <- stopErr
 		}()
 	}
 
@@ -3579,6 +3609,68 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		}
 		result = readChainResult{}
 	}
+}
+
+// drainBlockPipelineErrors continuously reads ls.blockPipeline.Errors() for
+// the pipeline's full lifetime, from just after Start() until the channel
+// closes (inside Stop(), once every stage has fully drained -- see
+// BlockPipeline.Stop). This is required for correctness, not just
+// observability: gouroboros' StageWorkerPool.worker pushes every non-nil
+// stage error onto errorsChan *before* forwarding the item onward to
+// Results(), unconditionally and regardless of whether the error is
+// "expected" for this item (e.g. blockPipelineEta0Provider always fails for
+// Byron-era slots, which decodeReadChainBatch deliberately ignores when it
+// later reads the same item back from Results() -- but by then the error has
+// already been pushed here). errorsChan's capacity is bounded
+// (PipelineConfig.PrefetchBufferSize, 1000 by default) with nothing else in
+// this codebase ever reading from it; on any real chain sync including
+// Byron-era blocks (i.e. every from-genesis or pre-Shelley-boundary sync),
+// it fills permanently after roughly that many blocks, and every validate
+// worker then blocks forever on `errors <- err` inside worker(), cascading
+// backpressure through validatedChan/decodedChan/submitChan into
+// ls.blockPipeline.Submit() -- which decodeReadChainBatch calls with
+// context.Background() deliberately, so it also blocks forever with no log
+// line, no error, and no timeout. This goroutine is what prevents that:
+// as long as it is running for the pipeline's entire lifetime, errorsChan
+// never fills regardless of how many expected-to-fail items flow through
+// the validate stage.
+func (ls *LedgerState) drainBlockPipelineErrors() {
+	defer close(ls.blockPipelineErrorsDone)
+	for err := range ls.blockPipeline.Errors() {
+		ls.recordBlockPipelineError(err)
+	}
+}
+
+// recordBlockPipelineError classifies and reports a single error read off
+// ls.blockPipeline.Errors(). Byron-era validate-stage failures are expected
+// on every real chain sync (see blockPipelineEta0Provider) and are logged at
+// debug level with their own counter so a full sync does not spam the logs
+// at error level; anything else reaching errorsChan indicates a genuine
+// decode/validate/apply problem the pipeline itself could not report any
+// other way (decodeReadChainBatch separately logs the same decode/validation
+// errors when it reads the corresponding item back from Results(), but that
+// only covers items that make it that far -- this is the only path that
+// also covers, e.g., apply-stage invariant violations such as
+// pipeline.ErrBlockNotValidated) and is logged at error level plus its own
+// counter for operator visibility.
+func (ls *LedgerState) recordBlockPipelineError(err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, errBlockPipelineEta0Unavailable) {
+		ls.metrics.incBlockPipelineExpectedEta0Error()
+		ls.config.Logger.Debug(
+			"block-processing pipeline: epoch nonce unavailable for validate stage (expected for Byron-era blocks)",
+			"error",
+			err,
+		)
+		return
+	}
+	ls.metrics.incBlockPipelineUnexpectedError()
+	ls.config.Logger.Error(
+		"block-processing pipeline reported an unexpected error",
+		"error", err,
+	)
 }
 
 // decodeReadChainBatch decodes a batch of raw blocks gathered from the chain

@@ -6876,6 +6876,51 @@ existing `ledgerProcessBlocks` retry-with-backoff loop (see below) recover
 once the epoch cache catches up, or surface as a stuck pipeline if the
 rejection is deterministic.
 
+**`errorsChan` must be continuously drained for the pipeline's whole
+lifetime, or every real chain sync deadlocks.** `gouroboros/pipeline`'s
+`StageWorkerPool.worker` pushes *every* non-nil stage error onto a
+fixed-capacity `errorsChan` (`PipelineConfig.PrefetchBufferSize`, 1000 by
+default) *before* forwarding the item onward to `Results()` —
+unconditionally, regardless of whether the error is one `decodeReadChainBatch`
+will later ignore when it reads the same item back (as it does for
+Byron-era blocks, above). Nothing else in gouroboros drains that channel.
+Since every from-genesis or pre-Shelley-boundary sync submits far more than
+1000 Byron-era blocks, `errorsChan` fills permanently after roughly that
+many, and every validate worker then blocks forever on `errors <- err`
+(its only escape is the pipeline's own long-lived `Start` context, not a
+per-block one) — cascading backpressure through
+`validatedChan`/`decodedChan`/`submitChan` into `decodeReadChainBatch`'s
+`Submit()` calls, which run on `context.Background()` by design (see
+above) and therefore hang forever with no log line, no error, and no
+timeout. `LedgerState.Start` closes this gap by launching
+`drainBlockPipelineErrors` immediately after `ls.blockPipeline.Start`
+succeeds: a goroutine that ranges over `ls.blockPipeline.Errors()` for the
+pipeline's entire lifetime, so `errorsChan` never fills regardless of how
+many validate/decode/apply errors flow through it. It exits once `Close`'s
+`ls.blockPipeline.Stop()` closes the channel (`Stop` closes `errorsChan`
+only after every stage has fully drained), and `Close` waits for that exit
+(`ls.blockPipelineErrorsDone`) as part of the same bounded
+`CloseBlockPipelineDrainTimeout` wait already used for `Stop` itself, so
+this goroutine cannot outlive the `LedgerState`.
+
+Each drained error is classified via `errBlockPipelineEta0Unavailable`
+(`ledger/verify_header.go`), the sentinel `blockPipelineEta0Provider` wraps
+every error it returns with: in this pipeline's context, a failure there
+always means no Praos epoch nonce is available for the slot, which in
+practice only happens for Byron-era blocks (Shelley+ slots already
+committed to `ls.chain` should always have epoch/nonce data by the time the
+pipeline validates them). Errors matching that sentinel are logged at debug
+level and counted in the `dingo_ledger_block_pipeline_expected_eta0_errors_total`
+counter; everything else reaching `errorsChan` (decode errors, non-Byron
+validation failures, `pipeline.ErrBlockNotValidated` and other apply-stage
+invariant violations) is logged at error level and counted in
+`dingo_ledger_block_pipeline_unexpected_errors_total` — a nonzero value
+there indicates a genuine decode/validate/apply problem worth investigating,
+distinct from the expected Byron-era volume. These are independent counters
+from the pre-existing `dingo_ledger_block_pipeline_decode_errors` /
+`_validation_errors` gauges (which snapshot `pipeline.PipelineStats` and
+already conflate expected and unexpected causes).
+
 **Admission-time crypto re-check is skipped once the pipeline will redo
 it.** Earlier revisions of this phase left the existing serial VRF/KES
 checks that gate what is admitted to `ls.chain`
