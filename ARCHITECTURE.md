@@ -6994,7 +6994,66 @@ mirror the gouroboros-side cumulative `PipelineStats` counters as gauges
 the cumulative totals, which can only be `Set` from a periodic snapshot,
 not incremented in place from dingo's side.
 
+**Phase 5: rollback coordination.** `ledgerReadChainIterator` — the
+pipeline's only submitter — runs on its own goroutine, entirely decoupled
+from the goroutine that decides a rollback. That matters because
+`rollbackChainAndState` (`ledger/state.go`), which physically removes
+blocks from `ls.chain` and truncates ledger metadata, is reached from
+chainsync per-connection event handling (`handleEventChainsyncRollback`,
+`tryResolveFork` in `ledger/chainsync.go`) — never from `ledgerProcessBlocks`
+itself. Chain-selection can decide to abandon a fork while the reader
+goroutine has already gathered and submitted a batch of blocks — from that
+very fork — to the pipeline's decode/validate workers and is blocked
+draining `Results()` for it. `drainBlockPipelineBeforeRollback`
+(`ledger/state.go`) closes part of that window: called at the top of
+`rollbackChainAndState`, before `ls.chain.Rollback`, it waits (via
+`pipeline.BlockPipeline.WaitForDrain`/`PendingCount`, bounded by
+`BlockPipelineRollbackDrainTimeout`, default 5s) for `ls.blockPipeline`'s
+decode/validate backlog to empty before the physical rollback proceeds. A
+timeout logs a warning and proceeds anyway rather than blocking a rollback
+indefinitely; a nil `blockPipeline` (pipeline disabled, or
+`ManualBlockProcessing`) makes the call a no-op, matching every other
+pipeline-conditional path in this file. The same call also runs at the top
+of `processChainIteratorRollback` (the reader iterator's own,
+same-goroutine rollback path) purely as a defensive invariant guard — by
+construction `decodeReadChainBatch` always submits and fully drains a
+batch synchronously before `ledgerReadChainIterator` ever emits a result,
+rollback or otherwise, so nothing from that goroutine's own current attempt
+is still in flight when this runs; the wait there is expected to return
+immediately in practice.
+
+What this does *not* close: `drainBlockPipelineBeforeRollback` only waits
+for `ls.blockPipeline`'s own decode/validate stages, not for
+`ledgerProcessBlocksFromSource`'s subsequent DB-apply of a batch already
+drained from the pipeline before the wait started — that step runs
+entirely outside `blockPipeline` (phase 2, wiring real ledger apply into
+`gouroboros/pipeline.ApplyFunc`, is deliberately deferred to #3227, as
+described above). A rollback landing exactly in that narrower window can
+still leave `ls.currentTip` transiently re-advanced onto an abandoned
+block. This is not a new failure mode introduced by the pipeline or by
+this phase: `processChainIteratorRollback`'s stale-tip detection (see
+below) already exists specifically to self-heal exactly this class of lag
+between chain-selection and ledger apply, independent of whether the
+pipeline is enabled, and remains the backstop here regardless of how the
+drain wait performs. Phase 5 exists to shrink that window and the
+resulting spurious `errRestartLedgerPipeline` churn (a full
+read-chain-attempt restart), not to eliminate the window outright.
+
+Tests: `TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp` and
+`TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork` (the latter
+proves the wait genuinely blocks until the pipeline's backlog clears, not
+merely that it checks `PendingCount()` once) and
+`TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline` (proves
+attaching an idle, started `blockPipeline` does not change
+`processChainIteratorRollback`'s rollback decision or resulting state
+versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`.
+
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
+
+See also "Phase 5: rollback coordination" above for how a rollback
+interacts with `ls.blockPipeline` specifically, when the block-processing
+pipeline is enabled; this section covers the pipeline-independent
+stale-tip detection that backstops it.
 
 `ledgerProcessBlocks` (`ledger/state.go`) reads batches from the primary
 chain iterator in a loop; when the iterator reports a rollback,

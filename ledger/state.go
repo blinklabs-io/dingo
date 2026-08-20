@@ -519,6 +519,13 @@ type LedgerStateConfig struct {
 	// CBOR decode work is scheduled. Off by default: throughput and
 	// stability are still being proven (issue #1894 phase 1). See
 	// ARCHITECTURE.md ("Block Processing Pipeline").
+	//
+	// A rollback drains blockPipeline's in-flight decode/validate backlog
+	// (drainBlockPipelineBeforeRollback, issue #1894 phase 5) before it
+	// proceeds, to shrink -- not eliminate -- the window in which an
+	// already-in-flight batch from an abandoned fork could otherwise be
+	// applied after the rollback. See ARCHITECTURE.md ("Phase 5: rollback
+	// coordination").
 	BlockPipelineEnabled bool
 	// BlockPipelineValidateEnabled turns on the pipeline's VRF/KES validate
 	// stage (issue #1894 phase 3), in addition to decode. It has no effect
@@ -1659,6 +1666,15 @@ var (
 	CloseProcessBlocksDrainTimeout = 20 * time.Second
 	CloseBlockPipelineDrainTimeout = 10 * time.Second
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
+	// BlockPipelineRollbackDrainTimeout bounds how long an asynchronous
+	// rollback (chainsync fork resolution or a peer-reported rollback --
+	// see rollbackChainAndState) waits for ls.blockPipeline to drain
+	// in-flight decode/validate work before proceeding. See
+	// drainBlockPipelineBeforeRollback's doc comment for what this
+	// protects against and, just as importantly, what it does not.
+	// Exported, like the Close* timeouts above, so tests can shrink it
+	// instead of running a real multi-second wait.
+	BlockPipelineRollbackDrainTimeout = 5 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
@@ -2751,6 +2767,96 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return nil
 }
 
+// drainBlockPipelineBeforeRollback waits, up to
+// BlockPipelineRollbackDrainTimeout, for ls.blockPipeline to finish any
+// decode/validate work already submitted before a rollback proceeds to
+// physically remove blocks from ls.chain and truncate ledger metadata. It
+// is a no-op when ls.blockPipeline is nil (pipeline disabled or
+// ManualBlockProcessing), matching every other pipeline-conditional code
+// path in this file.
+//
+// Why this matters (issue #1894 phase 5): ledgerReadChainIterator -- the
+// pipeline's only submitter -- runs on its own goroutine, entirely
+// decoupled from the goroutine that decides a rollback. rollbackChainAndState
+// in particular is reached from chainsync per-connection handling
+// (handleEventChainsyncRollback, tryResolveFork), never from
+// ledgerProcessBlocks itself. Chain-selection can decide to abandon a fork
+// while the reader goroutine has already gathered and submitted a batch of
+// blocks -- from that very fork -- to the pipeline's decode/validate
+// workers and is blocked draining Results() for it. Without this wait,
+// ls.chain.Rollback can delete those blocks' rows out from under a
+// validate-stage worker still processing them, and -- more importantly --
+// ledgerProcessBlocksFromSource can go on to apply that already-decoded
+// batch to ls.currentTip immediately afterward, momentarily re-advancing
+// the ledger tip onto a fork chain-selection has already discarded.
+//
+// What this does NOT do: it only waits for ls.blockPipeline's own decode/
+// validate stages (PendingCount) to empty, not for
+// ledgerProcessBlocksFromSource's subsequent DB-apply of a batch already
+// drained from the pipeline before this call started -- that step runs
+// entirely outside blockPipeline (issue #1894 phase 2, wiring real ledger
+// apply into gouroboros' pipeline.ApplyFunc, is deliberately deferred to
+// #3227; see this file's other doc comments on that decision). A rollback
+// landing exactly in that narrower window can still leave ls.currentTip
+// transiently re-advanced onto an abandoned block. This is not a new
+// failure mode introduced by the pipeline: processChainIteratorRollback's
+// stale-tip detection (a direct, uncached database.BlockByPoint lookup)
+// already exists specifically to self-heal exactly this class of lag
+// between chain-selection and ledger apply, and remains the backstop here
+// regardless of how this wait performs. This wait exists to shrink that
+// window and the resulting spurious errRestartLedgerPipeline churn (a full
+// read-chain-attempt restart), not to claim it eliminates the window
+// outright.
+//
+// ctx bounds the wait together with BlockPipelineRollbackDrainTimeout --
+// whichever fires first ends the wait -- so a caller with its own
+// cancellable context (e.g. processChainIteratorRollback, driven by
+// ledgerProcessBlocksFromSource's attempt context) does not block a
+// shutdown or restart on the fixed timeout. Callers with no context of
+// their own (rollbackChainAndState, reached from chainsync event handling
+// with no ctx threaded through) pass context.Background(), matching
+// decodeReadChainBatch's identical, already-established choice for the
+// same reason.
+//
+// reason is included in the log line on both the success and timeout
+// paths purely for operator diagnostics; it does not affect behavior.
+func (ls *LedgerState) drainBlockPipelineBeforeRollback(
+	ctx context.Context,
+	reason string,
+) {
+	if ls.blockPipeline == nil {
+		return
+	}
+	waitCtx, cancel := context.WithTimeout(
+		ctx,
+		BlockPipelineRollbackDrainTimeout,
+	)
+	defer cancel()
+	start := time.Now()
+	if err := ls.blockPipeline.WaitForDrain(waitCtx); err != nil {
+		ls.config.Logger.Warn(
+			"timed out waiting for block-processing pipeline to drain before rollback, proceeding anyway",
+			"component",
+			"ledger",
+			"reason",
+			reason,
+			"elapsed",
+			time.Since(start).Round(time.Millisecond),
+			"pending",
+			ls.blockPipeline.PendingCount(),
+			"error",
+			err,
+		)
+		return
+	}
+	ls.config.Logger.Debug(
+		"block-processing pipeline drained before rollback",
+		"component", "ledger",
+		"reason", reason,
+		"elapsed", time.Since(start).Round(time.Millisecond),
+	)
+}
+
 // rollbackChainAndState rewinds the primary chain and then synchronizes the
 // metadata-backed ledger state to the same point.
 func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
@@ -2760,6 +2866,19 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
+	// Drain in-flight pipeline work before the physical chain rollback --
+	// see drainBlockPipelineBeforeRollback's doc comment. No ctx is
+	// threaded through the chainsync event-handling call chain that
+	// reaches this method (handleEventChainsyncRollback, tryResolveFork),
+	// so this deliberately uses context.Background(), identical to
+	// decodeReadChainBatch's own Submit calls and for the same reason:
+	// this wait, like that submission, must not be cut short by an
+	// unrelated per-attempt cancellation.
+	//nolint:contextcheck // see comment above
+	ls.drainBlockPipelineBeforeRollback(
+		context.Background(),
+		"chainsync rollback",
+	)
 	if err := ls.chain.Rollback(point); err != nil {
 		return err
 	}
@@ -2818,9 +2937,23 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 // un-rolled-back ls.currentTip, so ledgerProcessBlock's prev-hash check
 // failed identically forever (errStaleChainIterator in a tight loop, no
 // forward progress, eventually exhausting the node).
+//
+// Also drains ls.blockPipeline (drainBlockPipelineBeforeRollback) before
+// either branch below runs. This is the reader iterator's own goroutine
+// reporting its own rollback, so by construction ls.blockPipeline is
+// already fully drained by the time this runs: decodeReadChainBatch
+// submits and drains a whole batch synchronously before
+// ledgerReadChainIterator ever emits a result, rollback or otherwise (see
+// its doc comment), so nothing from *this* attempt is still in flight
+// here. The call is kept anyway as a defensive invariant guard -- issue
+// #1894 phase 5's actual cross-goroutine race is closed in
+// rollbackChainAndState instead, which is reached from chainsync handling
+// on a different goroutine and has no equivalent synchronous guarantee.
 func (ls *LedgerState) processChainIteratorRollback(
+	ctx context.Context,
 	point ocommon.Point,
 ) error {
+	ls.drainBlockPipelineBeforeRollback(ctx, "chain iterator rollback")
 	chainTip := ls.chain.Tip()
 	stale := chainTip.Point.Slot != point.Slot ||
 		!bytes.Equal(chainTip.Point.Hash, point.Hash)
@@ -4355,6 +4488,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// method handles its own locking for in-memory state updates.
 				if result.rollback {
 					if err = ls.processChainIteratorRollback(
+						ctx,
 						result.rollbackPoint,
 					); err != nil {
 						completeReadResult()
