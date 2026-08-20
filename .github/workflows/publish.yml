@@ -261,17 +261,17 @@ jobs:
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          _binary_name=${{ env.APPLICATION_NAME }}
+          _binary_name="$APPLICATION_NAME"
           if [ "${{ matrix.os }}" = "windows" ]; then
-            _binary_name="${{ env.APPLICATION_NAME }}.exe"
+            _binary_name="${APPLICATION_NAME}.exe"
           fi
-          _filename=${{ env.APPLICATION_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-          tar czf ${_filename} ${_binary_name}
+          _filename="${APPLICATION_NAME}-${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          tar czf "$_filename" "$_binary_name"
           curl \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
-            --data-binary @${_filename} \
-            https://uploads.github.com/repos/${{ github.repository_owner }}/${{ env.APPLICATION_NAME }}/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}
+            --data-binary "@${_filename}" \
+            "https://uploads.github.com/repos/${{ github.repository_owner }}/${APPLICATION_NAME}/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}"
         shell: bash
       - name: Attest binary
         if: startsWith(github.ref, 'refs/tags/')
