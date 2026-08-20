@@ -28,6 +28,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPostRejectsOversizedResponseAsPermanentNeverRetried proves dingo
+// #3099's response-size bound (readBodyLimited/koiosMaxResponseBytes):
+// a response exceeding the cap must fail with an error that classifies as
+// ErrKoiosPermanent — never retried within the call (a response that big
+// won't get smaller on retry) and never automatically retried on a future
+// fetch run either.
+func TestPostRejectsOversizedResponseAsPermanentNeverRetried(t *testing.T) {
+	var requestCount atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount.Add(1)
+			w.WriteHeader(http.StatusOK)
+			// Stream just past the cap without holding it all in memory
+			// twice: koiosMaxResponseBytes+1 zero bytes is already a
+			// deliberately oversized response for this test's purposes.
+			chunk := make([]byte, 1<<20) // 1 MiB
+			written := 0
+			for written < koiosMaxResponseBytes+1 {
+				n, werr := w.Write(chunk)
+				written += n
+				if werr != nil {
+					return
+				}
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.GetAccountRewardHistory(
+		context.Background(), []string{"stake1x"}, 100,
+	)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.True(t, errors.Is(err, errKoiosResponseTooLarge))
+	require.EqualValues(
+		t,
+		1,
+		requestCount.Load(),
+		"an oversized response must never be retried",
+	)
+}
+
 // newTestKoiosClient builds a client pointed at a test server. The burst
 // limiter is disabled (limit 0) so retries are not slowed by the sliding window.
 func newTestKoiosClient(baseURL string) *KoiosClient {
@@ -272,7 +315,11 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 			name: "pool_history",
 			path: "/pool_history",
 			call: func(k *KoiosClient) error {
-				_, err := k.GetPoolEpochHistory(context.Background(), "pool1test", 10)
+				_, err := k.GetPoolEpochHistory(
+					context.Background(),
+					"pool1test",
+					10,
+				)
 				return err
 			},
 		},
@@ -280,11 +327,13 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, test.path, r.URL.Path)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`[{"epoch_no":11}]`))
-			}))
+			srv := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, test.path, r.URL.Path)
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`[{"epoch_no":11}]`))
+				}),
+			)
 			defer srv.Close()
 
 			err := test.call(newTestKoiosClient(srv.URL))
@@ -294,10 +343,12 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 }
 
 func TestFilteredKoiosResponsesRejectMultipleRows(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[{"epoch_no":10},{"epoch_no":10}]`))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":10},{"epoch_no":10}]`))
+		}),
+	)
 	defer srv.Close()
 
 	_, err := newTestKoiosClient(srv.URL).GetEpochInfo(context.Background(), 10)

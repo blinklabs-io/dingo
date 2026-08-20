@@ -384,6 +384,9 @@ func TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache(t *testing.T) {
 		nil,
 		[]string{"stake1a"},
 		24, // graceHours
+		0,  // chunkSize (default)
+		0,  // chunkMaxBytes (default)
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -448,15 +451,6 @@ func TestBuildAccountAddressUniverseNilSourceIsKoiosOnly(t *testing.T) {
 	require.Len(t, universe, 2)
 }
 
-func TestChunkAddresses(t *testing.T) {
-	chunks := chunkAddresses([]string{"a", "b", "c", "d", "e"}, 2)
-	require.Len(t, chunks, 3)
-	require.Equal(t, []string{"a", "b"}, chunks[0])
-	require.Equal(t, []string{"c", "d"}, chunks[1])
-	require.Equal(t, []string{"e"}, chunks[2])
-	require.Nil(t, chunkAddresses(nil, 2))
-}
-
 // TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError guards
 // against the dispatcher race flagged in review: `select { case
 // <-fetchCtx.Done(): ...; case sem <- struct{}{}: }` can nondeterministically
@@ -513,7 +507,12 @@ func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
 	t *testing.T,
 ) {
 	const totalChunks = 30
-	const poisonAddr = "stake1poison"
+	// "stake0poison" sorts before every "stake1addrN" address (dingo #3099's
+	// fetchAccountRewardsForEpoch sorts the address universe before chunking
+	// for content-addressed chunk-hash determinism — see its doc comment),
+	// guaranteeing this still lands in the first-dispatched chunk the way
+	// addrs[0] = poisonAddr used to under the old, order-preserving chunker.
+	const poisonAddr = "stake0poison"
 
 	// cancelled is closed exactly once, synchronously, from
 	// afterChunkCancelForTest — the production dispatch loop's own
