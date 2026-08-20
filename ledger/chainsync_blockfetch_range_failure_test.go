@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -142,6 +143,68 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+// TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown verifies
+// that a chainsync subscriber does not remain in the prior-request drain
+// while the node is shutting down. EventBus.Close waits for an in-flight
+// subscriber callback, so ignoring the ledger context here can leave node
+// shutdown blocked while the blockfetch connection is being torn down.
+func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
+	t *testing.T,
+) {
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("shutdown-header")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+	connId := testChainsyncConnId(6114, 3001)
+	ctx, cancel := context.WithCancel(t.Context())
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   ctx,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) error {
+				t.Fatal("blockfetch request started before shutdown wait was canceled")
+				return nil
+			},
+		},
+		blockfetchRequestsInFlight: map[string]chan struct{}{
+			connIdKey(connId): make(chan struct{}),
+		},
+	}
+
+	waitStarted := make(chan struct{})
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- startQueuedBlockfetchWithWaitSignalForTest(
+			ls,
+			connId,
+			nil,
+			waitStarted,
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		waitStarted,
+		time.Second,
+		"blockfetch request drain did not start",
+	)
+	cancel()
+
+	select {
+	case err := <-startDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("blockfetch request drain ignored shutdown cancellation")
+	}
 }
 
 // TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse verifies
