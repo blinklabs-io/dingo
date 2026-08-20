@@ -372,7 +372,9 @@ deleting it. On success the directory is removed.
 `<scenario>` is `accelerated-timeline` for the accelerated timeline,
 which captures explicitly through `NodeControl.CaptureFailureArtifacts`,
 and the Go test name for every canonical scenario, which
-`NewTestHarness` wires up on its own.
+`NewTestHarness` wires up on its own. A subtest renders as
+`parent/child`, so the separator is percent-escaped to keep the evidence
+in one directory per test; a name without one is used as written.
 
 Observation and writing happen at different times. Chain observers run
 for the whole of a scenario, so `observed-chains.json` is a continuous

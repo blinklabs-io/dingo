@@ -17,8 +17,6 @@ package devnet
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,36 +101,53 @@ func PlanFailureCapture(
 	}, true
 }
 
-// ArtifactName reduces a Go test name to one path segment. t.Name()
+// ArtifactName encodes a Go test name as one path segment. t.Name()
 // renders a subtest as parent/child, which would otherwise scatter a
-// scenario's evidence across nested directories, and a name carrying ..
-// would write outside the artifact root.
+// scenario's evidence across nested directories.
 //
-// That flattening is lossy — TestX/a-b and TestX/a/b both reduce to
-// TestX-a-b — so a rewritten name carries a digest of what it came from
-// and two failures cannot land in one directory. A name that needed no
-// rewriting keeps its exact test name, which is every scenario in the
-// canonical suite and is what makes the directory findable from the
-// failure output.
+// The separator is escaped rather than replaced, because replacing it is
+// lossy: with the separator rewritten to an ordinary character, TestX/a-b
+// and TestX/a/b both become TestX-a-b and two failing subtests write into
+// one directory. Escaping keeps the mapping one-to-one, so distinct test
+// names always get distinct directories -- a property of the encoding
+// rather than a probability, which is what a digest of the name would
+// give instead.
+//
+// Only what would break out of the segment is escaped, so a name with no
+// separator in it comes back exactly as written. That is every scenario
+// in the canonical suite, and it is what makes the directory findable
+// from the name in the failure output.
 func ArtifactName(testName string) string {
-	name := strings.Map(func(r rune) rune {
-		switch r {
-		case '/', '\\':
-			return '-'
-		}
-		return r
-	}, testName)
-	name = strings.ReplaceAll(name, "..", "-")
-	name = strings.Trim(name, ". ")
-	if name == "" {
+	// t.Name() is never empty; this only guards a caller-supplied name.
+	if testName == "" {
 		return "scenario"
 	}
-	if name == testName {
-		return name
+	var encoded strings.Builder
+	encoded.Grow(len(testName))
+	for _, r := range testName {
+		switch r {
+		case '%':
+			// First, so no escape below can be forged by an input that
+			// spells one out literally.
+			encoded.WriteString("%25")
+		case '/':
+			encoded.WriteString("%2F")
+		case '\\':
+			encoded.WriteString("%5C")
+		default:
+			encoded.WriteRune(r)
+		}
 	}
-	digest := fnv.New32a()
-	_, _ = digest.Write([]byte(testName))
-	return name + "-" + fmt.Sprintf("%08x", digest.Sum32())
+	name := encoded.String()
+	// A name made only of dots addresses a directory rather than naming
+	// one: "." and ".." would resolve to the artifact root and its
+	// parent. Escaping the leading dot keeps it a name, and stays
+	// distinct from every other encoding because a literal % is already
+	// escaped above.
+	if strings.Trim(name, ".") == "" {
+		return "%2E" + name[1:]
+	}
+	return name
 }
 
 // WriteFailureArtifacts writes the evidence a failed scenario needs to be

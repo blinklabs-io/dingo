@@ -114,7 +114,7 @@ func TestPlanFailureCaptureSkipsEndpointsWithoutContainers(t *testing.T) {
 	require.Len(t, plan.Services, 3)
 }
 
-func TestPlanFailureCaptureFlattensSubtestNames(t *testing.T) {
+func TestPlanFailureCaptureKeepsTheNameInsideTheRoot(t *testing.T) {
 	// t.Name() renders a subtest as parent/child. Left alone that
 	// scatters one scenario's evidence across nested directories, and a
 	// name that walked upward would escape the artifact root entirely.
@@ -123,11 +123,9 @@ func TestPlanFailureCaptureFlattensSubtestNames(t *testing.T) {
 	)
 
 	require.True(t, ok)
-	require.NotContains(t, plan.Name, "/",
-		"the artifact name has to stay a single path segment",
-	)
-	require.NotContains(t, plan.Name, "..",
-		"the artifact name must not walk out of the artifact root",
+	require.Equal(t, "/artifacts",
+		filepath.Dir(filepath.Join("/artifacts", plan.Name)),
+		"the artifact directory must be a direct child of the root",
 	)
 }
 
@@ -289,14 +287,56 @@ func TestWriteFailureArtifactsBoundsCapturedLogs(t *testing.T) {
 	)
 }
 
-func TestArtifactNameDisambiguatesFlattenedNames(t *testing.T) {
-	// Flattening the subtest separator is lossy: TestX/a-b and
-	// TestX/a/b both reduce to TestX-a-b, so two failing subtests would
-	// write their evidence into one directory and mix it.
-	require.NotEqual(t,
-		ArtifactName("TestX/a-b"), ArtifactName("TestX/a/b"),
-		"two distinct test names must not share an artifact directory",
-	)
+// artifactNameCorpus collects the test names that probe the ways an
+// encoding can lose information: the subtest separator against an
+// ordinary character, an escape sequence written literally, both
+// separators, and names made only of dots.
+var artifactNameCorpus = []string{
+	"TestSustainedConsensus",
+	"accelerated-timeline",
+	"TestX/a-b",
+	"TestX/a/b",
+	"TestX-a-b",
+	"TestX%2Fa",
+	"TestX/a",
+	"TestX%252Fa",
+	`TestX\a`,
+	"TestX/",
+	"/TestX",
+	"TestEpochBoundary/../../etc",
+	".",
+	"..",
+	"...",
+	"TestX/..",
+}
+
+func TestArtifactNameIsInjective(t *testing.T) {
+	// Replacing the separator with an ordinary character is lossy:
+	// TestX/a-b and TestX/a/b would both become TestX-a-b, and two
+	// failing subtests would mix their evidence in one directory.
+	// Escaping keeps the mapping one-to-one, so this is a property of
+	// the encoding rather than a probability.
+	seen := make(map[string]string, len(artifactNameCorpus))
+	for _, name := range artifactNameCorpus {
+		got := ArtifactName(name)
+		if prev, dup := seen[got]; dup {
+			t.Fatalf(
+				"%q and %q both encode to %q", prev, name, got,
+			)
+		}
+		seen[got] = name
+	}
+}
+
+func TestArtifactNameStaysASinglePathSegment(t *testing.T) {
+	for _, name := range artifactNameCorpus {
+		got := ArtifactName(name)
+		require.NotEmpty(t, got, "%q encoded to nothing", name)
+		require.Equal(t, "/root",
+			filepath.Dir(filepath.Join("/root", got)),
+			"%q encoded to %q, which leaves the root", name, got,
+		)
+	}
 }
 
 func TestArtifactNameLeavesPlainScenarioNamesAlone(t *testing.T) {
