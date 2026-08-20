@@ -6797,6 +6797,32 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
 This is phase 1 of issue #1894 (decode parallelism only, no ledger
 validation change).
 
+**Phase 2 (apply-stage wiring) is not implemented as literally described,
+by design, and is tracked separately.** The pipeline's own `ApplyStage`/
+`ApplyFunc` remains `nil` in every phase implemented so far (see "apply
+stage is a no-op" above) — real ledger apply (`chain.AddBlock`, error
+handling, event publishing, sync progress logging) continues to run
+entirely in `ledgerProcessBlocksFromSource`, fed by the pipeline's
+decoded/validated output, exactly as before the pipeline existed. This is
+not a throughput gap: decode and VRF/KES validation are the parallelizable,
+CPU-heavy work the pipeline targets; ledger-state application is inherently
+sequential regardless of which abstraction runs it, since each block's
+state depends on the one before it. Wiring the real apply logic into
+`gouroboros/pipeline.ApplyFunc`, as phase 2 literally asks, was investigated
+and found not safely achievable without a disproportionate redesign:
+`ApplyFunc` (`func(*BlockItem) error`) is called one block at a time by a
+single goroutine, with no batching and no mechanism to signal "restart the
+whole pipeline" back to a caller, while `ledgerProcessBlocksFromSource` is a
+stateful, whole-batch, multi-transaction loop (`SubmitAsyncDBTxn`,
+`deltaBatch` accumulation, mid-batch epoch-rollover handling) whose retry
+loop depends on sentinel restart errors (`errRestartLedgerPipeline`,
+`errStaleChainIterator`) propagating synchronously back to
+`ledgerProcessBlocks`. Closing this gap for real needs its own scoped
+design — either extending gouroboros' `pipeline` package with a
+batch-oriented apply contract or a restart-signal mechanism, or redesigning
+dingo's apply loop to be per-block and restart-tolerant — tracked
+separately in #3227, not folded into #1894's decode/validate phases.
+
 **Phase 3: parallel VRF/KES validation.** `LedgerStateConfig.BlockPipelineValidateEnabled`
 (config `blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED`
 / `--block-pipeline-validate-enabled`; default off; requires
