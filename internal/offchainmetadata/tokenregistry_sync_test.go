@@ -330,7 +330,7 @@ func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
 	require.Equal(
 		t,
 		`"abc123"`,
-		store.state(tokenRegistrySyncStateKey(server.URL, false)),
+		store.state(TokenRegistrySyncStateKey),
 	)
 
 	// The registry is ~240MB for mainnet; a second sync against an unchanged
@@ -456,7 +456,7 @@ func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 	_, err := sync.SyncOnce(t.Context())
 
 	require.Error(t, err)
-	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL, false)),
+	require.Empty(t, store.state(TokenRegistrySyncStateKey),
 		"a failed sync must not record the ETag")
 }
 
@@ -499,7 +499,7 @@ func TestTokenRegistrySyncErrorsOnBadStatus(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "500")
-	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL, false)))
+	require.Empty(t, store.state(TokenRegistrySyncStateKey))
 }
 
 func TestTokenRegistrySyncErrorsOnNonGzipBody(t *testing.T) {
@@ -907,7 +907,7 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	require.NoError(t, err)
 	require.Equal(t, "DJED", store.snapshot()[syncSubjectDjed].Ticker)
 	prunesBefore := store.prunes
-	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL, false))
+	etagBefore := store.state(TokenRegistrySyncStateKey)
 
 	// The next snapshot spans more than one batch, and the store fails on
 	// the second write -- after the first has already been committed.
@@ -950,7 +950,7 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	require.Equal(
 		t,
 		etagBefore,
-		store.state(tokenRegistrySyncStateKey(server.URL, false)),
+		store.state(TokenRegistrySyncStateKey),
 		"a partial snapshot must not advance the ETag, so the next run retries it in full",
 	)
 }
@@ -1009,7 +1009,7 @@ func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, store.snapshot(), 1)
 	prunesBefore := store.prunes
-	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL, false))
+	etagBefore := store.state(TokenRegistrySyncStateKey)
 
 	// Same repository, but nothing the sync recognizes as a mapping.
 	server.setBody(tarballOf(t, map[string]string{
@@ -1031,7 +1031,7 @@ func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
 	require.Equal(
 		t,
 		etagBefore,
-		store.state(tokenRegistrySyncStateKey(server.URL, false)),
+		store.state(TokenRegistrySyncStateKey),
 		"an empty snapshot must not be recorded, so the next run retries it",
 	)
 }
@@ -1400,4 +1400,149 @@ func TestNewTokenRegistrySyncKeepsIntervalAboveFloor(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, 90*time.Minute, sync.interval)
+}
+
+// TestTokenRegistrySyncForcesFullApplyWhenSwitchingBack covers a source the
+// node used before, moved away from, and later returned to. Per-source ETag
+// keys are not enough: the old source's validator is still stored, but the
+// table now holds the *other* source's snapshot, so a 304 would skip
+// reconciliation and leave the intervening source's metadata in place.
+func TestTokenRegistrySyncForcesFullApplyWhenSwitchingBack(t *testing.T) {
+	bodyA := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "from source A", "AAA", "",
+		),
+	})
+	bodyB := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed, "from source B", "BBB", "",
+		),
+	})
+	sourceA := newRegistryServer(t, bodyA)
+	sourceA.notModifiedOnTag = true
+	sourceB := newRegistryServer(t, bodyB)
+	sourceB.etag = `"b-etag"`
+	store := newFakeTokenRegistryStore()
+	clock := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+
+	// 1. Sync source A.
+	syncA := newTestSync(t, store, sourceA.URL, nil)
+	syncA.now = func() time.Time { return clock }
+	_, err := syncA.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Contains(t, store.snapshot(), syncSubjectNut)
+
+	// 2. Operator repoints at source B; its snapshot replaces A's.
+	syncB := newTestSync(t, store, sourceB.URL, nil)
+	syncB.now = func() time.Time { return clock.Add(time.Minute) }
+	_, err = syncB.SyncOnce(t.Context())
+	require.NoError(t, err)
+	entries := store.snapshot()
+	require.Contains(t, entries, syncSubjectDjed)
+	require.NotContains(t, entries, syncSubjectNut)
+
+	// 3. Operator repoints back at source A, whose content never changed.
+	syncBack := newTestSync(t, store, sourceA.URL, nil)
+	syncBack.now = func() time.Time { return clock.Add(2 * time.Minute) }
+	written, err := syncBack.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		1,
+		written,
+		"returning to a source must re-apply it in full, not accept a 304 for a snapshot the table no longer holds",
+	)
+	final := store.snapshot()
+	require.Contains(t, final, syncSubjectNut)
+	require.NotContains(
+		t,
+		final,
+		syncSubjectDjed,
+		"the intervening source's metadata must not survive",
+	)
+}
+
+// TestTokenRegistrySyncForcesFullApplyWhenLogoModeReturns is the same hazard
+// for the logo-storage mode: on, off, then on again against an unchanged
+// registry must actually restore logos.
+func TestTokenRegistrySyncForcesFullApplyWhenLogoModeReturns(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "iVBORw0KGgoAAAA=",
+		),
+	})
+	server := newRegistryServer(t, body)
+	server.notModifiedOnTag = true
+	store := newFakeTokenRegistryStore()
+	clock := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+
+	withLogos := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.StoreLogos = true
+	})
+	withLogos.now = func() time.Time { return clock }
+	_, err := withLogos.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, store.snapshot()[syncSubjectNut].Logo)
+
+	withoutLogos := newTestSync(t, store, server.URL, nil)
+	withoutLogos.now = func() time.Time { return clock.Add(time.Minute) }
+	_, err = withoutLogos.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, store.snapshot()[syncSubjectNut].Logo)
+
+	// Back on, same registry bytes.
+	logosAgain := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.StoreLogos = true
+	})
+	logosAgain.now = func() time.Time { return clock.Add(2 * time.Minute) }
+
+	_, err = logosAgain.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.NotEmpty(
+		t,
+		store.snapshot()[syncSubjectNut].Logo,
+		"re-enabling logos must re-apply the snapshot rather than accept a 304",
+	)
+}
+
+// TestTokenRegistrySyncStampSurvivesRestart covers a process or lifecycle
+// restart landing in the same wall-clock second as the previous snapshot. The
+// stamp sequence lives in memory, so a restart resets it; a fresh snapshot
+// could then reuse the previous stamp and the prune's `updated_at < cutoff`
+// would spare exactly the subjects the new snapshot dropped.
+func TestTokenRegistrySyncStampSurvivesRestart(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+	}))
+	store := newFakeTokenRegistryStore()
+	// One frozen instant shared by both runs: the restart lands inside the
+	// same second as the sync before it.
+	frozen := time.Date(2026, 8, 20, 12, 0, 0, 400000000, time.UTC)
+
+	before := newTestSync(t, store, server.URL, nil)
+	before.now = func() time.Time { return frozen }
+	_, err := before.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 2)
+
+	// Restart: a brand-new instance over the same store, no in-memory state.
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+	}), `"etag2"`)
+	afterRestart := newTestSync(t, store, server.URL, nil)
+	afterRestart.now = func() time.Time { return frozen }
+
+	_, err = afterRestart.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.NotContains(
+		t,
+		store.snapshot(),
+		syncSubjectDjed,
+		"a restart within the same second must still retire a dropped subject",
+	)
+	require.Contains(t, store.snapshot(), syncSubjectNut)
 }

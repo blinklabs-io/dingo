@@ -1443,20 +1443,34 @@ which any mapping was skipped as malformed or oversized — a skipped mapping
 does not re-stamp its row, so reconciling would delete metadata that is still
 good. Both log a warning rather than failing.
 
-The stored entity tag is namespaced by a hash of the resolved source URL and
-the logo-storage mode — everything that changes what a snapshot would produce.
-A validator only means anything to the source that issued it, so repointing
-`sourceUrl` or switching network must not let the previous source's tag
-short-circuit the new one into a `304`; and because flipping `storeLogos`
-changes what gets persisted from identical bytes, it has to invalidate the tag
-too, or enabling logos would never backfill them and disabling them would
-leave them stored. The snapshot stamp is truncated to a
+The recorded `sync_state` describes the snapshot **the table currently holds**,
+not a per-source cache — there is one `token_registry_entry` table, so there is
+one set of state, and all of it moves together on a successful apply. Three
+keys: the entity tag, a fingerprint of the `(source URL, logo mode)` pair that
+produced it, and the high-water snapshot stamp.
+
+The fingerprint is what makes the tag safe to replay. A validator only
+describes the table while the table still holds what that source served under
+that logo mode, so the tag is sent only when the recorded fingerprint matches
+the current one. That covers repointing `sourceUrl` or switching network, and
+also the subtler case of switching *away and back*: the old tag would still
+match upstream, but the table holds the intervening snapshot, so accepting a
+`304` would leave the wrong metadata in place. The same applies to toggling
+`storeLogos` off and on again.
+
+The stamp is persisted for the same reason. The in-memory sequence resets on
+restart, and a restart landing inside the same wall-clock second as the
+previous snapshot would otherwise reuse its stamp — making the prune spare
+exactly the subjects the new snapshot dropped. Each snapshot takes the later of
+the wall clock and the recorded stamp, so the sequence stays strictly
+increasing across process boundaries. The snapshot stamp is truncated to a
 whole second, because MySQL's `datetime` column carries no fractional seconds:
 an unrounded stamp would be stored rounded while the prune compared against
 the original, deleting the very snapshot just written. Stamps are also forced
 strictly upward, since two snapshots inside one wall-clock second — reachable
-with a sub-second configured interval — would otherwise share a stamp and the
-prune would preserve exactly the subjects the newer snapshot dropped. Turning `storeLogos` off
+with a sub-second configured interval, or with a restart — would otherwise
+share a stamp and the prune would preserve exactly the subjects the newer
+snapshot dropped. Turning `storeLogos` off
 needs no special handling: the upsert overwrites every property column, so the
 next snapshot clears previously stored logos.
 

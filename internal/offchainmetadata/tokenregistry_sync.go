@@ -36,13 +36,26 @@ import (
 )
 
 const (
-	// TokenRegistrySyncStateKey is the sync_state key prefix holding the
-	// HTTP entity tag of the last successfully applied registry snapshot.
-	// The resolved source URL is appended (see tokenRegistrySyncStateKey):
-	// a validator is only meaningful to the source that issued it, so
-	// repointing sourceUrl -- or switching network -- must not let the old
-	// source's tag short-circuit the new one into a 304.
+	// The sync_state keys below describe the snapshot currently *in the
+	// table*, not a per-source cache. There is one token_registry_entry
+	// table, so there is one set of state, and all three move together on a
+	// successful apply.
+	//
+	// TokenRegistrySyncStateKey holds that snapshot's HTTP entity tag.
 	TokenRegistrySyncStateKey = "token_registry_etag"
+	// tokenRegistrySnapshotIDKey records which (source, logo mode) pair
+	// produced the snapshot the table holds. A validator is only meaningful
+	// while the table still holds what that source served: moving to another
+	// source and back would otherwise replay the old tag, take a 304, and
+	// leave the intervening source's metadata in place. Same for toggling
+	// logo storage off and on again.
+	tokenRegistrySnapshotIDKey = "token_registry_snapshot_id"
+	// tokenRegistryStampKey holds the high-water snapshot stamp. It is
+	// persisted because the in-memory sequence resets on restart, and a
+	// restart landing in the same wall-clock second as the previous snapshot
+	// would otherwise reuse its stamp -- making the prune spare exactly the
+	// subjects the new snapshot dropped.
+	tokenRegistryStampKey = "token_registry_synced_at"
 
 	// MainnetTokenRegistryURL and TestnetTokenRegistryURL are the CIP-26
 	// registries the Cardano Foundation and IOG publish. Both are served as
@@ -245,20 +258,17 @@ func defaultTokenRegistryURL(network string) string {
 	return TestnetTokenRegistryURL
 }
 
-// tokenRegistrySyncStateKey namespaces the stored entity tag by everything
-// that changes what a snapshot would produce: the source, so a tag is only
-// replayed to the source that issued it, and the logo-storage mode, because
-// flipping that changes what gets persisted from identical bytes. Without the
-// latter, enabling logos would never backfill them and disabling them would
-// leave them stored, since an unchanged registry answers 304 and
-// applySnapshot never runs.
+// tokenRegistrySnapshotIdentity fingerprints everything that changes what a
+// snapshot would produce: the source it came from and whether logos were
+// stored. Comparing it against the recorded identity is what tells us whether
+// a stored entity tag still describes the table's contents.
 //
-// Hashed rather than embedded to keep the key bounded and free of any
+// Hashed rather than embedded to keep the value bounded and free of any
 // credentials a mirror URL might carry.
-func tokenRegistrySyncStateKey(sourceURL string, storeLogos bool) string {
+func tokenRegistrySnapshotIdentity(sourceURL string, storeLogos bool) string {
 	material := sourceURL + "|logos=" + strconv.FormatBool(storeLogos)
 	sum := blake2b.Sum256([]byte(material))
-	return TokenRegistrySyncStateKey + ":" + hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:8])
 }
 
 // SourceURL returns the resolved registry source.
@@ -383,10 +393,32 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	stateKey := tokenRegistrySyncStateKey(s.sourceURL, s.storeLogos)
-	previousETag, err := s.store.GetSyncState(stateKey, nil)
+	identity := tokenRegistrySnapshotIdentity(s.sourceURL, s.storeLogos)
+	storedIdentity, err := s.store.GetSyncState(
+		tokenRegistrySnapshotIDKey,
+		nil,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("read token registry sync state: %w", err)
+	}
+	// A stored validator only describes the table while the table still
+	// holds what that source served under that logo mode. After a switch
+	// away and back, the tag would still match upstream but the table holds
+	// the intervening snapshot, so a 304 would leave the wrong metadata in
+	// place. Ask unconditionally in that case.
+	previousETag := ""
+	if storedIdentity == identity {
+		previousETag, err = s.store.GetSyncState(
+			TokenRegistrySyncStateKey,
+			nil,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("read token registry sync state: %w", err)
+		}
+	}
+	persistedStamp, err := s.readPersistedStamp()
+	if err != nil {
+		return 0, err
 	}
 	if err := validateURL(s.sourceURL, s.allowPrivate); err != nil {
 		return 0, fmt.Errorf("token registry source URL: %w", err)
@@ -442,7 +474,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	// row the snapshot had just written would look older than the cutoff
 	// and be deleted. Truncating at the source makes the written value and
 	// the cutoff identical on SQLite, PostgreSQL, and MySQL alike.
-	syncedAt := s.nextSyncStamp()
+	syncedAt := s.nextSyncStamp(persistedStamp)
 	written, mappings, skipped, err := s.applySnapshot(
 		ctx,
 		resp.Body,
@@ -506,22 +538,71 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 			"count", pruned,
 		)
 	}
-	etag := strings.TrimSpace(resp.Header.Get("ETag"))
-	if etag != "" && etag != previousETag {
-		if err := s.store.SetSyncState(
-			stateKey,
-			etag,
-			nil,
-		); err != nil {
-			// The snapshot is already applied; failing to record the tag only
-			// costs a redundant download next interval.
+	// The snapshot is applied, so the recorded state now describes the
+	// table. All three move together: recording the tag without the identity
+	// would let a later switch-back replay it against the wrong contents.
+	// Failures here are logged rather than returned -- the data is already
+	// correct, and the cost is a redundant download next interval.
+	s.recordSyncState(
+		strings.TrimSpace(resp.Header.Get("ETag")),
+		identity,
+		syncedAt,
+	)
+	return written, nil
+}
+
+// readPersistedStamp returns the recorded high-water snapshot stamp, or the
+// zero time when none has been recorded or the stored value is unparsable --
+// in which case the wall clock alone governs, exactly as before any snapshot
+// had been applied.
+func (s *TokenRegistrySync) readPersistedStamp() (time.Time, error) {
+	raw, err := s.store.GetSyncState(tokenRegistryStampKey, nil)
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"read token registry sync stamp: %w",
+			err,
+		)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	stamp, parseErr := time.Parse(time.RFC3339Nano, raw)
+	if parseErr != nil {
+		s.logger.Warn(
+			"stored token registry sync stamp is unparsable; falling back to the wall clock",
+			"value", raw,
+			"error", parseErr,
+		)
+		return time.Time{}, nil
+	}
+	return stamp.UTC(), nil
+}
+
+// recordSyncState persists what the table now holds.
+func (s *TokenRegistrySync) recordSyncState(
+	etag string,
+	identity string,
+	syncedAt time.Time,
+) {
+	for key, value := range map[string]string{
+		TokenRegistrySyncStateKey:  etag,
+		tokenRegistrySnapshotIDKey: identity,
+		tokenRegistryStampKey:      syncedAt.UTC().Format(time.RFC3339Nano),
+	} {
+		if key == TokenRegistrySyncStateKey && value == "" {
+			// A source that serves no validator simply gets no conditional
+			// request next time; do not clobber a usable stored tag with "".
+			continue
+		}
+		if err := s.store.SetSyncState(key, value, nil); err != nil {
 			s.logger.Warn(
 				"recording token registry sync state failed",
+				"key", key,
 				"error", err,
 			)
 		}
 	}
-	return written, nil
 }
 
 // nextSyncStamp returns the stamp for a snapshot: truncated to a whole second
@@ -539,10 +620,17 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 // every row the snapshot had just written look stale.
 // Called only from SyncOnce, which holds the sync slot, so the stamp
 // sequence needs no lock of its own.
-func (s *TokenRegistrySync) nextSyncStamp() time.Time {
+func (s *TokenRegistrySync) nextSyncStamp(persisted time.Time) time.Time {
 	stamp := s.now().UTC().Truncate(time.Second)
-	if !s.lastSyncedAt.IsZero() && !stamp.After(s.lastSyncedAt) {
-		stamp = s.lastSyncedAt.Add(time.Second)
+	// The floor is the later of what this process last used and what the
+	// store recorded, so the sequence stays strictly increasing across a
+	// restart that resets the in-memory half.
+	floor := s.lastSyncedAt
+	if persisted.After(floor) {
+		floor = persisted
+	}
+	if !floor.IsZero() && !stamp.After(floor) {
+		stamp = floor.Add(time.Second)
 	}
 	s.lastSyncedAt = stamp
 	return stamp
