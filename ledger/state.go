@@ -6371,6 +6371,26 @@ func (ls *LedgerState) PrepareEpochCacheForStartup() error {
 	})
 }
 
+// shelleyDeclaredAtGenesis reports whether the configuration declares that
+// Shelley is already active at epoch 0, which is what distinguishes a network
+// with no Byron prefix from one that reaches Shelley on chain.
+//
+// The declaration is read directly rather than through
+// CardanoNodeConfig.HardForkEpoch, which returns (0, false) unless
+// ExperimentalHardForksEnabled is true: preview ships
+// TestShelleyHardForkAtEpoch: 0 with ExperimentalHardForksEnabled: False, and
+// through the gated accessor its declaration is invisible.
+//
+// Only epoch 0 counts. A nonzero value declares a Shelley hard fork some
+// epochs in, which means epochs 0..N-1 are Byron -- a Byron prefix, not the
+// absence of one -- so those configurations keep the Byron start.
+func shelleyDeclaredAtGenesis(cfg *cardano.CardanoNodeConfig) bool {
+	if cfg == nil || cfg.TestShelleyHardForkAtEpoch == nil {
+		return false
+	}
+	return *cfg.TestShelleyHardForkAtEpoch == 0
+}
+
 func (ls *LedgerState) setEpochCache(
 	txn *database.Txn,
 	epochs []models.Epoch,
@@ -6441,7 +6461,7 @@ func (ls *LedgerState) setEpochCache(
 	if startEraId > eras.ByronEraDesc.Id &&
 		ls.config.CardanoNodeConfig.ByronGenesis() != nil &&
 		!ls.config.StartInDijkstra &&
-		ls.config.CardanoNodeConfig.TestShelleyHardForkAtEpoch == nil {
+		!shelleyDeclaredAtGenesis(ls.config.CardanoNodeConfig) {
 		startEraId = eras.ByronEraDesc.Id
 	}
 	if ls.config.StartInDijkstra {

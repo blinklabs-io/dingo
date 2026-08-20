@@ -3391,6 +3391,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		t *testing.T,
 		explicitShelleyHardFork bool,
 		experimentalHardForks bool,
+		shelleyHardForkEpoch uint64,
 	) *LedgerState {
 		t.Helper()
 		cfg := &cardano.CardanoNodeConfig{
@@ -3409,7 +3410,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			if experimentalHardForks {
 				cfg.ExperimentalHardForksEnabled = new(true)
 			}
-			cfg.TestShelleyHardForkAtEpoch = new(uint64)
+			cfg.TestShelleyHardForkAtEpoch = new(shelleyHardForkEpoch)
 		}
 
 		db := newTestDB(t)
@@ -3427,7 +3428,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	}
 
 	t.Run("real network retains Byron until its on-chain boundary", func(t *testing.T) {
-		ls := newLedger(t, false, false)
+		ls := newLedger(t, false, false, 0)
 		require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
 		assert.Nil(t, ls.currentPParams)
 		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
@@ -3436,7 +3437,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	})
 
 	t.Run("explicit test hard fork still starts in Shelley", func(t *testing.T) {
-		ls := newLedger(t, true, true)
+		ls := newLedger(t, true, true, 0)
 		require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
 		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
 		assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
@@ -3453,7 +3454,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	t.Run(
 		"explicit hard fork without experimental flag starts in Shelley",
 		func(t *testing.T) {
-			ls := newLedger(t, true, false)
+			ls := newLedger(t, true, false, 0)
 			require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
 			assert.NotNil(
 				t,
@@ -3462,6 +3463,18 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			)
 			assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
 			assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
+		},
+	)
+
+	// A nonzero declaration means Shelley arrives some epochs in, so epochs
+	// 0..N-1 are Byron: that is a Byron prefix, not the absence of one. Only
+	// an explicit epoch 0 marks a network that never had one.
+	t.Run(
+		"nonzero hard-fork epoch keeps the Byron start",
+		func(t *testing.T) {
+			ls := newLedger(t, true, false, 5)
+			require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+			assert.Nil(t, ls.currentPParams)
 		},
 	)
 }
