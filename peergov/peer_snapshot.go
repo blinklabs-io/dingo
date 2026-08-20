@@ -101,6 +101,7 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 	extraAdds int,
 ) int {
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
+	//nolint:gosec // relay spread, not security-sensitive
 	rand.Shuffle(len(candidates), func(i, j int) {
 		candidates[i], candidates[j] = candidates[j], candidates[i]
 	})
