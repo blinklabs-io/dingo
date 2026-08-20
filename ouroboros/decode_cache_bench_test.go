@@ -181,12 +181,12 @@ func BenchmarkBlockDecodeConcurrentCacheAllUnique(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	var counter int64
+	var counter atomic.Int64
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			// atomic: RunParallel's callback runs concurrently across
 			// goroutines, so a plain counter++ here is a data race.
-			n := atomic.AddInt64(&counter, 1)
+			n := counter.Add(1)
 			key := hashDecodeInput(blockType, raw)
 			key[0] ^= byte(n)
 			key[1] ^= byte(n >> 8)
@@ -276,11 +276,11 @@ func BenchmarkHeaderDecodeConcurrentCacheAllUnique(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	var counter int64
+	var counter atomic.Int64
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			// atomic: see BenchmarkBlockDecodeConcurrentCacheAllUnique.
-			n := atomic.AddInt64(&counter, 1)
+			n := counter.Add(1)
 			key := hashDecodeInput(headerType, raw)
 			key[0] ^= byte(n)
 			key[1] ^= byte(n >> 8)

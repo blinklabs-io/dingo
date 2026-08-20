@@ -86,9 +86,13 @@ func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 			"round will be skipped and its rewards never credited"
 	)
 	messages := recorder.snapshot()
+	if len(messages) == 0 {
+		t.Fatal("the seeding did not run at all, so this test proves nothing")
+	}
 	seedIdx := firstIndexContaining(messages, seededMsg, droppedMsg)
-	require.GreaterOrEqual(t, seedIdx, 0,
-		"the seeding did not run at all, so this test proves nothing")
+	if seedIdx < 0 {
+		t.Fatal("the seeding did not run at all, so this test proves nothing")
+	}
 	// Which one fires is a claim worth pinning: the snapshots carry their own
 	// pool parameters, so the basis must actually be seeded here. If that
 	// ever regresses to a drop, this says so rather than leaving the
