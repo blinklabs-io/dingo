@@ -19,6 +19,7 @@ package keystore
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -187,22 +188,44 @@ func checkOpenDACL(path, owner, dacl string) error {
 				path, fields[0], ErrInsecureFileMode,
 			)
 		}
-		if allowed[fields[5]] || trusteeIsOwner(fields[5], owner) {
+		if allowed[fields[5]] {
 			continue
 		}
+		isOwner, resolveErr := trusteeOwnerMatch(fields[5], owner)
+		if isOwner {
+			continue
+		}
+		if resolveErr != nil {
+			// The trustee could not be resolved to a SID, so we cannot tell
+			// an owner alias from a third party. Say so rather than
+			// reporting it as an unexpected trustee: the two need different
+			// fixes and the message is the only signal available when the
+			// failure only reproduces on another platform.
+			return fmt.Errorf(
+				"key file %q has DACL trustee %s that could not be resolved "+
+					"to a SID (owner %s): %v: %w",
+				path, fields[5], owner, resolveErr, ErrInsecureFileMode,
+			)
+		}
 		return fmt.Errorf(
-			"key file %q grants access to unexpected trustee %s: %w",
-			path, fields[5], ErrInsecureFileMode,
+			"key file %q grants access to unexpected trustee %s, "+
+				"which is not the owner %s: %w",
+			path, fields[5], owner, ErrInsecureFileMode,
 		)
 	}
 	return nil
 }
 
-// trusteeIsOwner compares a DACL trustee with the descriptor owner. SDDL
+// trusteeOwnerMatch compares a DACL trustee with the descriptor owner. SDDL
 // renders some account SIDs as two-letter aliases, while the owner returned by
 // the security descriptor is a canonical SID, so the strings differ for the
 // same principal — which would reject a valid owner-only DACL on a runner
 // using such an account.
+//
+// A failed resolution is returned as an error rather than folded into a false
+// result, because "could not resolve this alias" and "this trustee is not the
+// owner" need different fixes and the caller's message is the only diagnostic
+// available when the failure reproduces on Windows CI and nowhere else.
 //
 // An alias is resolved by asking Windows, not by matching its well-known RID.
 // The local administrator alias (LA) and a domain Administrator share RID 500
@@ -210,37 +233,49 @@ func checkOpenDACL(path, owner, dacl string) error {
 // domain Administrator owner as satisfying an LA ace and admits a trustee who
 // is not the owner. Round-tripping the alias through a minimal descriptor
 // resolves it against this machine and covers every other alias for free.
-func trusteeIsOwner(trustee, owner string) bool {
+func trusteeOwnerMatch(trustee, owner string) (bool, error) {
 	if trustee == owner {
-		return true
+		return true, nil
 	}
 	ownerSID, err := windows.StringToSid(owner)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("parse owner SID %q: %w", owner, err)
 	}
-	trusteeSID, err := resolveTrusteeSID(trustee)
+	trusteeSID, keepAlive, err := resolveTrusteeSID(trustee)
 	if err != nil {
-		return false
+		return false, err
 	}
-	return windows.EqualSid(trusteeSID, ownerSID)
+	equal := windows.EqualSid(trusteeSID, ownerSID)
+	// trusteeSID may point into keepAlive's allocation; see go.dev/issue/73199.
+	runtime.KeepAlive(keepAlive)
+	runtime.KeepAlive(ownerSID)
+	return equal, nil
 }
 
 // resolveTrusteeSID converts an SDDL trustee to a SID, accepting either a SID
 // string or an alias such as LA. Aliases are machine-relative, so they are
 // resolved by Windows rather than reconstructed here.
-func resolveTrusteeSID(trustee string) (*windows.SID, error) {
+func resolveTrusteeSID(
+	trustee string,
+) (*windows.SID, *windows.SECURITY_DESCRIPTOR, error) {
 	if sid, err := windows.StringToSid(trustee); err == nil {
-		return sid, nil
+		return sid, nil, nil
 	}
 	sd, err := windows.SecurityDescriptorFromString("O:" + trustee)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf(
+			"resolve trustee alias %q via security descriptor: %w",
+			trustee, err,
+		)
 	}
 	sid, _, err := sd.Owner()
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf(
+			"read owner from resolved trustee alias %q: %w", trustee, err,
+		)
 	}
-	return sid, nil
+	// The caller must keep sd alive for as long as sid is used.
+	return sid, sd, nil
 }
 
 func sddlSection(sddl, section string) string {
