@@ -3306,6 +3306,11 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	if err := ls.waitForBlockfetchRequestLockedWithSignal(connId, waitStarted); err != nil {
 		return err
 	}
+	if ls.ctx != nil {
+		if err := ls.ctx.Err(); err != nil {
+			return fmt.Errorf("blockfetch request canceled: %w", err)
+		}
+	}
 	if ls.chain.HeaderCount() == 0 {
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return nil
@@ -5205,7 +5210,19 @@ func (ls *LedgerState) waitForBlockfetchRequestLockedWithSignal(
 	if key == "" {
 		return nil
 	}
+	var shutdownDone <-chan struct{}
+	if ls.ctx != nil {
+		if err := ls.ctx.Err(); err != nil {
+			return fmt.Errorf("blockfetch request canceled: %w", err)
+		}
+		shutdownDone = ls.ctx.Done()
+	}
 	for {
+		if ls.ctx != nil {
+			if err := ls.ctx.Err(); err != nil {
+				return fmt.Errorf("blockfetch request canceled: %w", err)
+			}
+		}
 		requestDone, ok := ls.blockfetchRequestsInFlight[key]
 		if !ok {
 			return nil
@@ -5224,6 +5241,15 @@ func (ls *LedgerState) waitForBlockfetchRequestLockedWithSignal(
 				default:
 				}
 			}
+		case <-shutdownDone:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			ls.chainsyncBlockfetchMutex.Lock()
+			return fmt.Errorf("blockfetch request canceled: %w", ls.ctx.Err())
 		case <-timer.C:
 			ls.chainsyncBlockfetchMutex.Lock()
 			return fmt.Errorf(
