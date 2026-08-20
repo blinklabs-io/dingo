@@ -4518,11 +4518,9 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	// does not touch the mutex: the point is what Close holds, not what the
 	// worker can acquire.
 	proceed := make(chan struct{})
-	ls.blockfetchContinuationWG.Add(1)
-	go func() {
-		defer ls.blockfetchContinuationWG.Done()
+	ls.blockfetchContinuationWG.Go(func() {
 		<-proceed
-	}()
+	})
 
 	ls.blockfetchContinuationMu.Lock()
 	closeDone := make(chan error, 1)
@@ -4619,12 +4617,10 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 	}
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	ls.processBlocksCancel = func() {}
-	ls.processBlocksWG.Add(1)
-	go func() {
-		defer ls.processBlocksWG.Done()
+	ls.processBlocksWG.Go(func() {
 		for range ls.blockPipeline.Results() {
 		}
-	}()
+	})
 
 	require.NoError(t, ls.Close())
 }

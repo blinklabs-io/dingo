@@ -1158,7 +1158,10 @@ All event types follow the `subsystem.snake_case_name` convention.
   batch and arms its timer under the mutex, releases the mutex for the primary
   and shadow requests, then reacquires it before inspecting state. If a
   callback completed or replaced the batch while the request was outside the
-  lock, the stale request result is ignored.
+  lock, the stale request result is ignored. A prior-request drain also
+  observes `LedgerState`'s shutdown context, so a chainsync subscriber already
+  waiting for a reused connection can return before the terminal EventBus close
+  waits for in-flight handlers.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into
@@ -7090,7 +7093,7 @@ On chain rollback past an epoch boundary:
   treasury/reserves/fees) are frozen at or before the retained pot's slot, so the
   recomputed value is numerically identical
 
-### Block Processing Pipeline (Parallel Decode)
+### Block Processing Pipeline (Parallel Decode and Validate)
 
 `ledgerReadChainIterator` (`ledger/state.go`) reads raw blocks back from the
 primary chain (`chain.Chain`) and decodes them into
@@ -7173,11 +7176,391 @@ by the other Musashi-only checks), so this can only be reached by an
 embedder that builds a `LedgerStateConfig` directly and skips validation.
 
 This is phase 1 of issue #1894 (decode parallelism only, no ledger
-validation change). Later phases enable VRF/KES validation workers (via an
-`Eta0Provider` for the epoch nonce), pipeline metrics integration, and
-rollback-aware draining of in-flight blocks before a rollback proceeds.
+validation change).
+
+**Phase 2 (apply-stage wiring) is not implemented as literally described,
+by design, and is tracked separately.** The pipeline's own `ApplyStage`/
+`ApplyFunc` remains `nil` in every phase implemented so far (see "apply
+stage is a no-op" above) — real ledger apply (`chain.AddBlock`, error
+handling, event publishing, sync progress logging) continues to run
+entirely in `ledgerProcessBlocksFromSource`, fed by the pipeline's
+decoded/validated output, exactly as before the pipeline existed. This is
+not a throughput gap: decode and VRF/KES validation are the parallelizable,
+CPU-heavy work the pipeline targets; ledger-state application is inherently
+sequential regardless of which abstraction runs it, since each block's
+state depends on the one before it. Wiring the real apply logic into
+`gouroboros/pipeline.ApplyFunc`, as phase 2 literally asks, was investigated
+and found not safely achievable without a disproportionate redesign:
+`ApplyFunc` (`func(*BlockItem) error`) is called one block at a time by a
+single goroutine, with no batching and no mechanism to signal "restart the
+whole pipeline" back to a caller, while `ledgerProcessBlocksFromSource` is a
+stateful, whole-batch, multi-transaction loop (`SubmitAsyncDBTxn`,
+`deltaBatch` accumulation, mid-batch epoch-rollover handling) whose retry
+loop depends on sentinel restart errors (`errRestartLedgerPipeline`,
+`errStaleChainIterator`) propagating synchronously back to
+`ledgerProcessBlocks`. Closing this gap for real needs its own scoped
+design — either extending gouroboros' `pipeline` package with a
+batch-oriented apply contract or a restart-signal mechanism, or redesigning
+dingo's apply loop to be per-block and restart-tolerant — tracked
+separately in #3227, not folded into #1894's decode/validate phases.
+
+**Phase 3: parallel VRF/KES validation.** `LedgerStateConfig.BlockPipelineValidateEnabled`
+(config `blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED`
+/ `--block-pipeline-validate-enabled`; default off; requires
+`BlockPipelineEnabled` too — `configValidate` rejects the combination
+otherwise) turns on the pipeline's validate stage
+(`gouroboros/pipeline.WithValidateWorkers`) alongside decode, using
+`blockPipelineValidateWorkers` (2) parallel workers. Each block
+`decodeReadChainBatch` decodes is independently re-verified — VRF proof and
+KES signature only, via `gouroboros/ledger.VerifyBlock`'s block-local
+checks — before being handed to `ledgerProcessBlocksFromSource`, exactly as
+decode-only phase 1 already did for CBOR decode.
+
+Wiring, in `NewLedgerState`:
+
+- `pipeline.WithEta0Provider(ls.blockPipelineEta0Provider)`:
+  `blockPipelineEta0Provider` (`ledger/verify_header.go`) looks up the epoch
+  nonce for a block's slot using the same epoch-cache machinery as the
+  serial header-crypto path (`headerVerificationEpoch`, `epochNonceHex`),
+  but with `allowEpochCacheAdvance=false` — unlike the chainsync-header
+  path, which must forecast ahead of ledger apply for freshly-arriving live
+  headers, the pipeline only ever validates blocks already committed to
+  `ls.chain`, so the epoch cache should already cover them, and not
+  advancing it avoids mutating shared epoch-cache state concurrently from
+  multiple validate-stage worker goroutines (none of which are otherwise
+  synchronized with each other).
+- `pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod())` and
+  `pipeline.WithVerifyConfig(lcommon.VerifyConfig{SkipBodyHashValidation:
+  true, SkipTransactionValidation: true, SkipStakePoolValidation: true})` —
+  matching the scope of the existing serial header-only check
+  (`verifyBlockHeaderHex`): VRF/KES only, not body hash, transaction, or
+  stake-pool validation, which dingo performs separately elsewhere
+  (`ledgerProcessBlock`'s tx/UTxO validation; the registered-VRF-key and
+  leader-eligibility checks in `verifyBlockHeaderState` that stand in for
+  gouroboros' generic stake-pool check).
+- gouroboros' `ApplyStage.SetRequireValidation` is wired automatically by
+  `pipeline.BlockPipeline.Start` whenever `ValidateWorkers > 0` — dingo does
+  not call it directly.
+
+Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
+(`blockPipelineEta0Provider` always fails the nonce lookup for them, and
+gouroboros' generic `ValidateStage` has no Byron short-circuit of its own —
+unlike the serial path's `verifyBlockHeaderHex`, which explicitly skips
+Byron blocks). `decodeReadChainBatch` therefore ignores the pipeline's
+validation outcome specifically (and only) for blocks whose decoded
+`Era().Id == byron.EraIdByron`, mirroring `verifyBlockHeaderHex`'s own
+skip. For every other era, a validation failure (crypto rejection, or the
+Eta0Provider erroring because the epoch cache does not yet cover the
+block's slot) is treated exactly like a decode failure: the whole batch is
+discarded and `decodeReadChainBatch` returns `ok=false`, letting the
+existing `ledgerProcessBlocks` retry-with-backoff loop (see below) recover
+once the epoch cache catches up, or surface as a stuck pipeline if the
+rejection is deterministic.
+
+**`errorsChan` must be continuously drained for the pipeline's whole
+lifetime, or every real chain sync deadlocks.** `gouroboros/pipeline`'s
+`StageWorkerPool.worker` pushes *every* non-nil stage error onto a
+fixed-capacity `errorsChan` (`PipelineConfig.PrefetchBufferSize`, 1000 by
+default) *before* forwarding the item onward to `Results()` —
+unconditionally, regardless of whether the error is one `decodeReadChainBatch`
+will later ignore when it reads the same item back (as it does for
+Byron-era blocks, above). Nothing else in gouroboros drains that channel.
+Since every from-genesis or pre-Shelley-boundary sync submits far more than
+1000 Byron-era blocks, `errorsChan` fills permanently after roughly that
+many, and every validate worker then blocks forever on `errors <- err`
+(its only escape is the pipeline's own long-lived `Start` context, not a
+per-block one) — cascading backpressure through
+`validatedChan`/`decodedChan`/`submitChan` into `decodeReadChainBatch`'s
+`Submit()` calls, which run on `context.Background()` by design (see
+above) and therefore hang forever with no log line, no error, and no
+timeout. `LedgerState.Start` closes this gap by launching
+`drainBlockPipelineErrors` immediately after `ls.blockPipeline.Start`
+succeeds: a goroutine that ranges over `ls.blockPipeline.Errors()` for the
+pipeline's entire lifetime, so `errorsChan` never fills regardless of how
+many validate/decode/apply errors flow through it. It exits once `Close`'s
+`ls.blockPipeline.Stop()` closes the channel (`Stop` closes `errorsChan`
+only after every stage has fully drained), and `Close` waits for that exit
+(`ls.blockPipelineErrorsDone`) as part of the same bounded
+`CloseBlockPipelineDrainTimeout` wait already used for `Stop` itself, so
+this goroutine cannot outlive the `LedgerState`.
+
+Each drained error is classified by `recordBlockPipelineError`
+(`ledger/state.go`) on error identity, not era: `errorsChan` carries a bare
+`error` with no item context, so only `decodeReadChainBatch` — which holds
+the decoded block — can and does gate enforcement on `block.Era().Id`; this
+classification only affects operator visibility.
+
+- `errBlockPipelineEta0Unavailable` (`ledger/verify_header.go`):
+  `blockPipelineEta0Provider` wraps `headerVerificationEpoch`'s
+  `errEpochNonceUnavailable` in this sentinel — raised solely by that
+  function's empty-nonce branch (epoch data covers the slot, but that epoch
+  has no Praos nonce). This is how every Byron-era slot fails the lookup,
+  but the underlying condition (epoch rollover not yet processed) is not
+  verified to be Byron-specific here, so the debug log this produces does
+  not claim Byron specifically. It is counted in
+  `dingo_ledger_block_pipeline_expected_eta0_errors_total`.
+- `errHeaderVerificationDeferred` (past-horizon/missing-epoch-data): the
+  pipeline's epoch cache has not yet caught up with a block already
+  committed to `ls.chain`. This is the same transient, self-healing race
+  described above ("resolves once the epoch cache catches up"), so it is
+  logged at debug level and counted separately in
+  `dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total`, not
+  folded into the unexpected-error bucket below.
+- Everything else reaching `errorsChan` (decode errors, non-Byron validation
+  failures, hard-fork-summary lookup failures, forecast-build errors,
+  `pipeline.ErrBlockNotValidated` and other apply-stage invariant
+  violations) is logged at error level and counted in
+  `dingo_ledger_block_pipeline_unexpected_errors_total` — a nonzero value
+  there indicates a genuine decode/validate/apply problem worth
+  investigating, distinct from the two expected/transient counters above.
+
+These three are independent counters from the pre-existing
+`dingo_ledger_block_pipeline_decode_errors` / `_validation_errors` gauges
+(which snapshot `pipeline.PipelineStats` and already conflate expected and
+unexpected causes).
+
+**Admission-time crypto re-check is skipped once the pipeline will redo
+it.** Earlier revisions of this phase left the existing serial VRF/KES
+checks that gate what is admitted to `ls.chain`
+(`handleEventChainsyncBlockHeaderWithPending` for headers,
+`handleEventBlockfetchBlock` for bodies, in `chainsync.go`, both gated on
+`validationEnabled`/`ValidateHistorical`) completely unchanged, so with
+`ValidateHistorical=true` (the default) every block was cryptographically
+verified twice: once at admission, once more by the pipeline's validate
+stage before apply. `blockPipelineRevalidatesCrypto` (`ledger/chainsync.go`)
+now reports whether every block reaching admission will independently pass
+through the pipeline's validate stage before ledger apply
+(`ls.blockPipeline != nil && LedgerStateConfig.BlockPipelineValidateEnabled`
+— nil `blockPipeline` correctly keeps this false whenever
+`BlockPipelineEnabled` is off or `ManualBlockProcessing` bypasses the
+pipeline entirely, matching `NewLedgerState`'s construction rule). When
+true:
+
+- `shouldVerifyChainsyncHeaderCrypto` returns `false`, so
+  `handleEventChainsyncBlockHeaderWithPending` skips the chainsync-header-time
+  stateless crypto pre-check (`verifyBlockHeaderOnlyCrypto`) and queues the
+  header via `AddBlockHeader` (unverified) rather than
+  `AddVerifiedBlockHeader`.
+- `handleEventBlockfetchBlock` skips the crypto half of
+  `verifyBlockHeaderCryptoBeforeApply` and calls
+  `verifyBlockHeaderStateWithEpochAdvance(block, true, true)` directly
+  instead — the same function already used for the "header already
+  verified by chainsync" fast path. This still runs, unconditionally:
+  the registered-VRF-key and leader-eligibility state checks
+  (`verifyBlockHeaderState`, not performed by the pipeline's validate stage,
+  which is scoped to VRF/KES only) and the epoch-cache-advance side effect
+  (`headerVerificationEpoch`'s `ensureEpochForSlot`, `allowEpochCacheAdvance
+  = true`) that the pipeline's own `Eta0Provider` deliberately does not
+  perform (see below) — only the redundant stateless VRF/KES crypto
+  verification itself is skipped.
+
+The actual gate on ledger application is unchanged: `decodeReadChainBatch`
+still aborts the whole read batch if the pipeline's validate stage rejects
+any block in it (treated exactly like a decode failure), so a block that
+skips admission-time crypto re-verification is still cryptographically
+verified, exactly once, before it can ever be applied to the ledger.
+
+The trade-off this formalizes: for a brief window between header/body
+admission to `ls.chain` and that block being read back out for pipeline
+validation, a not-yet-crypto-verified block can influence in-memory
+chain-selection bookkeeping (fork/rollback resolution, header-queue
+ordering) — the same class of trust window already accepted, unconditionally,
+for `ValidateHistorical=false` historical sync. `ls.chain` is purely an
+internal candidate/queue structure feeding ledger apply (see
+`ledgerReadChainIterator`); it is not consulted by any downstream
+chainsync-server/relay path, so this window does not cause dingo to relay
+an unverified block to other peers. With `ValidateHistorical=false`, nothing
+changes: admission was already skipping this check before
+`BlockPipelineValidateEnabled` existed, and the pipeline continues to close
+that coverage gap as described above.
+
+**Fork-resolution header-queue overflow must still restart blockfetch.**
+Bursty near-tip conditions (many peers racing small competing forks in quick
+succession, or an idle-then-recovered upstream that suddenly hands over a
+multi-thousand-header fork path) can make header arrival outrun block-apply
+throughput for long enough that the chain's queued-header backlog
+(`chain.Chain.headers`, capacity `MaxQueuedHeaders` —
+`max(2*securityParam, DefaultMaxQueuedHeaders)`, floor 10,000) reaches
+capacity. `tryResolveFork` (`ledger/chainsync.go`) resolves a fork by
+appending a reconstructed peer fork-path onto the chain one header at a time
+via `chain.AddBlockHeader`, in both its "ancestor is the local tip, extend
+without rollback" branch and its "roll back to common ancestor, then re-add
+the fork path" branch. A fork path longer than the remaining queue capacity
+fails partway through with `chain.ErrHeaderQueueFull`. Before this fix, both
+branches returned immediately on that failure without ever restarting
+blockfetch for whatever they (or an earlier event) had already queued — and
+because `chain.AddBlockHeader`'s capacity check runs before any "should a
+fetch be running" decision, once the queue is completely full no later
+header event, from any peer, fork-related or not, can ever add a header
+again, so no code path would schedule a new blockfetch and the backlog would
+not drain on its own. This is what the block-pipeline live-preview-sync
+freeze (issue #1894 phase 3 follow-up) turned out to be: not a validate-stage
+correctness bug, but a pre-existing, general gap in `tryResolveFork`'s
+failure handling — reproduced live, with the identical log signature
+(`"fork extends from current tip, adding headers without rollback"` /
+`"failed to queue header from fork extension"` /
+`"header queue at maximum capacity"`), under `BlockPipelineValidateEnabled`,
+under decode-only phase 1, and under the pre-pipeline baseline alike during
+the same investigation; the validate stage's extra CPU cost (two dedicated
+VRF/KES workers) makes the underlying throughput mismatch easier to hit in
+practice, but is not what causes it. The outage is bounded, not permanent:
+`internal/chainsyncrecycler`'s local-tip-plateau watchdog
+(`shouldRecycleLocalTipPlateau`, threshold `max(2*StallTimeout, 4m)`, ~20
+minutes with default config) eventually detects the stalled local tip and
+forces a chainsync resync (`ChainsyncResyncReasonLocalTipPlateau`), which
+re-selects a peer and re-runs `FindIntersect`, incidentally recovering the
+node — this is exactly what happened in all three live-preview instances
+during this investigation, each recovering ~20 minutes after its freeze with
+no operator intervention. But a ~20-minute total-sync stall per occurrence,
+with nothing logged above `WARN` in the interim, is still a real liveness
+defect worth fixing directly rather than relying on that fallback.
+`ensureBlockfetchDrainingAfterForkQueueFailure` (`ledger/chainsync.go`)
+closes the gap at its source: called from both branches' failure paths, it
+restarts blockfetch for the already-queued backlog immediately, but only
+when nothing is currently fetching (`chainsyncBlockfetchReadyChan == nil &&
+!blockfetchContinuationPending`) — deliberately not unconditionally, unlike
+`restartQueuedBlockfetchAfterForkLocked` on the success paths, since the same
+queue-full failure fires once per rejected header while a healthy batch is
+already draining the backlog, and tearing that batch down every time would
+thrash forever instead of ever completing one. It restarts via
+`startQueuedBlockfetchOnLocked`, not `startQueuedBlockfetchLocked` directly,
+so a successful restart here retargets `selectedBlockfetchConnId` the same
+guarded way every other connection-switching path does (capture the
+selection before the call, which releases `chainsyncBlockfetchMutex` around
+the network request, and only move it to `connId` afterward if no
+concurrent path already moved it elsewhere) — calling
+`startQueuedBlockfetchLocked` directly left the selection unretargeted after
+a successful start, so the next batch's connection pick could still land on
+a stale peer. If the restart itself fails, it clears the queued headers
+(`clearQueuedHeaders`) and requests a chainsync re-sync
+(`ChainsyncResyncReasonForkQueueOverflowRestartFailed`) rather than only
+logging: with nothing else able to ever schedule a fetch once the queue is
+full (see above), leaving the headers queued after a failed restart attempt
+would strand them permanently, exactly the outage this function exists to
+prevent — merely logging and returning does not. Regression tests:
+`TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow`,
+`TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch`, and
+`TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails`
+(`ledger/chainsync_fork_queue_full_test.go`).
+
+**Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
+gauges — `dingo_ledger_block_pipeline_blocks_decoded`,
+`_blocks_validated`, `_decode_errors`, `_validation_errors`,
+`_queue_depth` — from `pipeline.BlockPipeline.Stats()` after every batch,
+success or failure, via `stateMetrics.updateBlockPipelineStats`. These
+mirror the gouroboros-side cumulative `PipelineStats` counters as gauges
+(rather than true Prometheus counters) because the pipeline itself owns
+the cumulative totals, which can only be `Set` from a periodic snapshot,
+not incremented in place from dingo's side.
+
+**Phase 5: rollback coordination.** `ledgerReadChainIterator` — the
+pipeline's only submitter — runs on its own goroutine, entirely decoupled
+from the goroutine that decides a rollback. That matters because
+`rollbackChainAndState` (`ledger/state.go`), which physically removes
+blocks from `ls.chain` and truncates ledger metadata, is reached from
+chainsync per-connection event handling (`handleEventChainsyncRollback`,
+`tryResolveFork` in `ledger/chainsync.go`) — never from `ledgerProcessBlocks`
+itself. Chain-selection can decide to abandon a fork while the reader
+goroutine has already gathered and submitted a batch of blocks — from that
+very fork — to the pipeline's decode/validate workers and is blocked
+draining `Results()` for it. `drainBlockPipelineBeforeRollback`
+(`ledger/state.go`) closes part of that window: called near the top of
+`rollbackChainAndState`, before `ls.chain.Rollback`, it waits (via
+`pipeline.BlockPipeline.WaitForDrain`/`PendingCount`, bounded by
+`BlockPipelineRollbackDrainTimeout`, default 5s) for `ls.blockPipeline`'s
+decode/validate backlog to empty before the physical rollback proceeds. A
+timeout logs a warning and proceeds anyway rather than blocking a rollback
+indefinitely; a nil `blockPipeline` (pipeline disabled, or
+`ManualBlockProcessing`) makes the call a no-op, matching every other
+pipeline-conditional path in this file. The same call also runs at the top
+of `processChainIteratorRollback` (the reader iterator's own,
+same-goroutine rollback path) purely as a defensive invariant guard — by
+construction `decodeReadChainBatch` always submits and fully drains a
+batch synchronously before `ledgerReadChainIterator` ever emits a result,
+rollback or otherwise, so nothing from that goroutine's own current attempt
+is still in flight when this runs; the wait there is expected to return
+immediately in practice.
+
+`rollbackChainAndState` sequences three steps in order, and the ordering is
+load-bearing in both directions: `drainBlockPipelineBeforeRollback` first,
+then `validateAndEmitRollbackUndo` (reject-then-emit-undo-events, from
+issue #2287/#3209's ordering fix, `ledger/block_event.go`), then
+`ls.chain.Rollback`. Draining before validating/emitting matters because
+`validateAndEmitRollbackUndo`'s emit reads what is already committed to the
+db (`blocksAboveSlot`) — a block the pipeline is still decoding/validating/
+applying for the fork about to be abandoned is not there yet, so emitting
+before it finishes would leave it with no undo event once it does finish
+applying, even though `ls.chain.Rollback` still physically deletes it.
+Emitting before truncating matters for the opposite reason (see
+`emitRollbackTransactionEvents`'s ordering contract): the block-apply
+goroutine can start applying the post-rollback chain, and publish forward
+events on the same `ledger.tx` lane, the moment `ls.chain.Rollback` lands.
+
+`blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
+gap in the same window: `drainBlockPipelineBeforeRollback` only accounts
+for work already *submitted* to `blockPipeline` (`PendingCount`) — raw
+blocks `ledgerReadChainIterator` has already pulled off the chain iterator
+into its local batch, but has not yet handed to `decodeReadChainBatch`
+(`Submit`), hold nothing in the pipeline's queues, so `WaitForDrain` can
+observe an empty pipeline and return immediately while the reader is about
+to submit and apply exactly those stale, about-to-be-abandoned blocks
+anyway. The reader holds `blockPipelineGatherMutex`'s read lock for the
+whole gather-then-submit span (acquired lazily, immediately before any
+non-blocking `iter.Next()` call and immediately after any blocking call
+that returns real data, so the lock is never held across a call that is
+purely waiting for the chain to grow — doing so would deadlock a
+concurrent rollback's write-lock attempt against the very
+`ls.chain.Rollback` call that would otherwise wake the reader);
+`rollbackChainAndState` holds the write lock from before
+`drainBlockPipelineBeforeRollback` through `ls.chain.Rollback`, so no
+gather-then-submit cycle can start, and none already in flight can reach
+`Submit`, while a rollback is physically truncating the chain. Once
+`ls.chain.Rollback` returns, `ChainIterator.needsRollback` bookkeeping
+(set under the chain package's own locks in `Chain.rollbackLocked`) makes
+any later `iter.Next()` call safe on its own, so the write lock does not
+need to extend past it. This does not replace
+`processChainIteratorRollback`'s stale-tip backstop for the DB-apply
+window described below — it closes the earlier, previously entirely
+unguarded window between gathering raw blocks and submitting them.
+
+What this still does *not* close: `drainBlockPipelineBeforeRollback` (even
+combined with `blockPipelineGatherMutex`) only waits for `ls.blockPipeline`'s
+own decode/validate stages plus the reader's own not-yet-submitted gather,
+not for `ledgerProcessBlocksFromSource`'s subsequent DB-apply of a batch
+already drained from the pipeline before the wait started — that step runs
+entirely outside `blockPipeline` (phase 2, wiring real ledger apply into
+`gouroboros/pipeline.ApplyFunc`, is deliberately deferred to #3227, as
+described above). A rollback landing exactly in that narrower window can
+still leave `ls.currentTip` transiently re-advanced onto an abandoned
+block. This is not a new failure mode introduced by the pipeline or by
+this phase: `processChainIteratorRollback`'s stale-tip detection (see
+below) already exists specifically to self-heal exactly this class of lag
+between chain-selection and ledger apply, independent of whether the
+pipeline is enabled, and remains the backstop here regardless of how the
+drain wait performs. Phase 5 exists to shrink that window and the
+resulting spurious `errRestartLedgerPipeline` churn (a full
+read-chain-attempt restart), not to eliminate the window outright.
+
+Tests: `TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp` and
+`TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork` (the latter
+proves the wait genuinely blocks until the pipeline's backlog clears, not
+merely that it checks `PendingCount()` once),
+`TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline` (proves
+attaching an idle, started `blockPipeline` does not change
+`processChainIteratorRollback`'s rollback decision or resulting state
+versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`; and
+`TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather`
+(`ledger/block_pipeline_gather_mutex_test.go`), which proves
+`blockPipelineGatherMutex`'s write lock cannot be obtained while the reader
+is mid-gather with a raw block already collected, and can be obtained again
+once the batch is delivered.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
+
+See also "Phase 5: rollback coordination" above for how a rollback
+interacts with `ls.blockPipeline` specifically, when the block-processing
+pipeline is enabled; this section covers the pipeline-independent
+stale-tip detection that backstops it.
 
 `ledgerProcessBlocks` (`ledger/state.go`) reads batches from the primary
 chain iterator in a loop; when the iterator reports a rollback,

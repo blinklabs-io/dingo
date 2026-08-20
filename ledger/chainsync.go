@@ -2631,7 +2631,40 @@ func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false
 	}
+	if ls.blockPipelineRevalidatesCrypto() {
+		return false
+	}
 	return ls.hasCachedEpochNonceForSlot(slot)
+}
+
+// blockPipelineRevalidatesCrypto reports whether every block admitted here
+// will independently pass through the block-decode pipeline's VRF/KES
+// validate stage (LedgerStateConfig.BlockPipelineValidateEnabled) before
+// ledger apply -- see decodeReadChainBatch, which aborts the whole read
+// batch on a pipeline validation failure exactly as it does on a decode
+// failure. When that is true, the serial admission-time stateless VRF/KES
+// crypto check (verifyBlockHeaderOnlyCrypto / the crypto half of
+// verifyBlockHeaderCryptoBeforeApply) is redundant: the same block would be
+// cryptographically re-verified a second time, uselessly, before every
+// sync's steady-state admission path even finishes. Callers must still run
+// the non-crypto parts of admission-time verification unconditionally --
+// the registered-VRF-key and leader-eligibility state checks
+// (verifyBlockHeaderState) and the epoch-cache-advance side effect
+// (headerVerificationEpoch's ensureEpochForSlot) -- neither of which the
+// pipeline's validate stage performs (it is scoped to VRF/KES only, per
+// NewLedgerState's VerifyConfig) or can perform (the pipeline validates
+// blocks already committed to ls.chain, well after any admission-time
+// epoch-cache forecast would need to happen for a live, arriving header).
+//
+// ls.blockPipeline is nil whenever BlockPipelineEnabled is off or
+// ManualBlockProcessing bypasses ledgerReadChainIterator entirely (see
+// NewLedgerState), so checking it directly -- rather than only the config
+// flag -- also correctly keeps this false in both of those cases. The
+// pointer itself is set once at construction and never reassigned, so
+// reading it without ls.RLock() here is safe, matching every other
+// unguarded ls.blockPipeline read (e.g. decodeReadChainBatch).
+func (ls *LedgerState) blockPipelineRevalidatesCrypto() bool {
+	return ls.blockPipeline != nil && ls.config.BlockPipelineValidateEnabled
 }
 
 func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
@@ -2784,6 +2817,16 @@ func (ls *LedgerState) tryResolveFork(
 					"slot", forkEvent.Point.Slot,
 					"connection_id", forkEvent.ConnectionId.String(),
 				)
+				// The failure (typically ErrHeaderQueueFull) leaves
+				// whatever was already queued -- from this loop's earlier
+				// iterations or from prior events -- exactly where it was.
+				// If nothing is currently fetching it, kick a fetch so the
+				// backlog still drains instead of stalling forever; see
+				// ensureBlockfetchDrainingAfterForkQueueFailure.
+				ls.ensureBlockfetchDrainingAfterForkQueueFailure(
+					e.ConnectionId,
+					pending,
+				)
 				return false, nil
 			}
 		}
@@ -2927,6 +2970,17 @@ func (ls *LedgerState) tryResolveFork(
 				"slot", forkEvent.Point.Slot,
 				"connection_id", forkEvent.ConnectionId.String(),
 			)
+			// The failure (typically ErrHeaderQueueFull) leaves whatever
+			// was already queued -- from this loop's earlier iterations,
+			// or from the rollback above having preserved existing queued
+			// headers -- exactly where it was. If nothing is currently
+			// fetching it, kick a fetch so the backlog still drains
+			// instead of stalling forever; see
+			// ensureBlockfetchDrainingAfterForkQueueFailure.
+			ls.ensureBlockfetchDrainingAfterForkQueueFailure(
+				e.ConnectionId,
+				pending,
+			)
 			// Do not reset mismatch state — let the caller know the
 			// resolution failed so subsequent mismatch tracking proceeds.
 			return false, nil
@@ -2990,32 +3044,50 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// historical blocks were already validated by the network.
 	validationEnabled, _ := ls.validationStateSnapshot()
 	if validationEnabled {
-		// Chainsync may already have verified the queued header before
-		// blockfetch started. When the fetched block matches that first
-		// verified queued header by point, a second VRF/KES verification is
-		// redundant. Chain insertion still checks that the block matches the
-		// queued header hash before accepting it.
-		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
-			e.Point,
-		)
-		if !headerAlreadyVerified &&
-			!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
-			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
-				return err
-			}
-			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
-				e.Point,
-			)
-		}
 		var verifyErr error
-		if !headerAlreadyVerified {
-			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
-		} else {
+		if ls.blockPipelineRevalidatesCrypto() {
+			// The block-decode pipeline's validate stage will
+			// independently re-verify VRF/KES for this block before
+			// ledger apply (decodeReadChainBatch aborts the batch on
+			// failure exactly as it would for a crypto failure here), so
+			// redoing the same stateless crypto check at admission would
+			// only verify it twice. Run the non-crypto half of admission
+			// verification unconditionally: registered-VRF-key and
+			// leader-eligibility state checks, and the epoch-cache-advance
+			// side effect the pipeline's own Eta0Provider deliberately
+			// does not perform (see blockPipelineRevalidatesCrypto).
 			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
 				e.Block,
 				true,
 				true,
 			)
+		} else {
+			// Chainsync may already have verified the queued header before
+			// blockfetch started. When the fetched block matches that first
+			// verified queued header by point, a second VRF/KES verification is
+			// redundant. Chain insertion still checks that the block matches the
+			// queued header hash before accepting it.
+			headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
+				e.Point,
+			)
+			if !headerAlreadyVerified &&
+				!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
+				if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+					return err
+				}
+				headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
+					e.Point,
+				)
+			}
+			if !headerAlreadyVerified {
+				verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+			} else {
+				verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
+					e.Block,
+					true,
+					true,
+				)
+			}
 		}
 		if verifyErr != nil {
 			if errors.Is(verifyErr, errHeaderVerificationDeferred) {
@@ -3112,6 +3184,75 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	}
 	ls.selectedBlockfetchConnId = connId
 	return ls.startQueuedBlockfetchLocked(connId, pending)
+}
+
+// ensureBlockfetchDrainingAfterForkQueueFailure restarts blockfetch for
+// already-queued headers when nothing is currently fetching them. It is
+// called after tryResolveFork fails to append a fork-resolution header path
+// onto the chain's header queue (most commonly because the queue is already
+// at ErrHeaderQueueFull capacity): the success paths in tryResolveFork
+// restart blockfetch via restartQueuedBlockfetchAfterForkLocked, but a
+// partial failure previously just returned without doing so. Once the queue
+// is completely full and no blockfetch is in flight, every later header --
+// from any peer, fork or not -- fails chain.AddBlockHeader's capacity check
+// before it can ever reach the "should I start a fetch" logic, so nothing
+// would ever schedule a new blockfetch again and the backlog would never
+// drain (found via issue #1894 phase 3 live-sync testing: the block-pipeline
+// validate stage's extra CPU cost makes the header queue reachable at
+// capacity more easily in practice, but this is a general, pre-existing gap
+// in tryResolveFork, not specific to that flag -- reproduced live under
+// BlockPipelineValidateEnabled, decode-only phase 1, and the pre-pipeline
+// baseline alike).
+//
+// Unlike restartQueuedBlockfetchAfterForkLocked, this must not unconditionally
+// interrupt an already-running batch: the same "queue full" outcome fires
+// repeatedly, once per rejected header, while a healthy batch is still
+// draining the existing backlog, and tearing that batch down every time
+// would thrash forever instead of ever completing one.
+func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) {
+	if ls.config.BlockfetchRequestRangeFunc == nil ||
+		ls.chain.HeaderCount() == 0 {
+		return
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	if ls.chainsyncBlockfetchReadyChan != nil ||
+		ls.blockfetchContinuationPending {
+		return
+	}
+	// Go through startQueuedBlockfetchOnLocked, not startQueuedBlockfetchLocked
+	// directly, so a successful start here retargets selectedBlockfetchConnId
+	// the same guarded way every other connection-switching path does: capture
+	// the selection before the call (which releases chainsyncBlockfetchMutex
+	// around the network request), and only move it to connId afterward if no
+	// concurrent path already moved it elsewhere. Calling
+	// startQueuedBlockfetchLocked directly here left selectedBlockfetchConnId
+	// unretargeted after a successful start, so the next batch's connection
+	// pick (nextBlockfetchConnId, which prefers selectedBlockfetchConnId) could
+	// still land on a stale peer instead of the one actually now fetching.
+	if err := ls.startQueuedBlockfetchOnLocked(connId, pending); err != nil {
+		ls.config.Logger.Warn(
+			"failed to start blockfetch after fork-resolution queue overflow, "+
+				"dropping queued headers and requesting chainsync re-sync",
+			"component", "ledger",
+			"error", err,
+			"connection_id", connId.String(),
+		)
+		// Nothing else schedules a fetch for these headers once the queue
+		// is full and no blockfetch is in flight (see doc comment above):
+		// leaving them queued after this failure would strand them
+		// permanently. Clear them and ask for a fresh intersect instead,
+		// matching noteBlockfetchRangeUnavailable's equivalent recovery.
+		ls.clearQueuedHeaders()
+		ls.requestChainsyncResync(
+			connId,
+			event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
+			pending,
+		)
+	}
 }
 
 // blockfetchNoBlocksErrorText is the error text emitted by the gouroboros
@@ -3306,6 +3447,11 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	if err := ls.waitForBlockfetchRequestLockedWithSignal(connId, waitStarted); err != nil {
 		return err
 	}
+	if ls.ctx != nil {
+		if err := ls.ctx.Err(); err != nil {
+			return fmt.Errorf("blockfetch request canceled: %w", err)
+		}
+	}
 	if ls.chain.HeaderCount() == 0 {
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return nil
@@ -3450,7 +3596,9 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 				// handler. Restore it if the request itself fails.
 				ls.shadowBlockfetchConnId = shadowConn
 				if ls.blockfetchShadowRequestsInFlight == nil {
-					ls.blockfetchShadowRequestsInFlight = make(map[string]struct{})
+					ls.blockfetchShadowRequestsInFlight = make(
+						map[string]struct{},
+					)
 				}
 				shadowConnKey := connIdKey(shadowConn)
 				ls.blockfetchShadowRequestsInFlight[shadowConnKey] = struct{}{}
@@ -5205,7 +5353,19 @@ func (ls *LedgerState) waitForBlockfetchRequestLockedWithSignal(
 	if key == "" {
 		return nil
 	}
+	var shutdownDone <-chan struct{}
+	if ls.ctx != nil {
+		if err := ls.ctx.Err(); err != nil {
+			return fmt.Errorf("blockfetch request canceled: %w", err)
+		}
+		shutdownDone = ls.ctx.Done()
+	}
 	for {
+		if ls.ctx != nil {
+			if err := ls.ctx.Err(); err != nil {
+				return fmt.Errorf("blockfetch request canceled: %w", err)
+			}
+		}
 		requestDone, ok := ls.blockfetchRequestsInFlight[key]
 		if !ok {
 			return nil
@@ -5224,6 +5384,15 @@ func (ls *LedgerState) waitForBlockfetchRequestLockedWithSignal(
 				default:
 				}
 			}
+		case <-shutdownDone:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			ls.chainsyncBlockfetchMutex.Lock()
+			return fmt.Errorf("blockfetch request canceled: %w", ls.ctx.Err())
 		case <-timer.C:
 			ls.chainsyncBlockfetchMutex.Lock()
 			return fmt.Errorf(
@@ -5256,7 +5425,8 @@ func (ls *LedgerState) endBlockfetchRequestLocked(
 	done chan struct{},
 ) {
 	key := connIdKey(connId)
-	if current, ok := ls.blockfetchRequestsInFlight[key]; ok && current == done {
+	if current, ok := ls.blockfetchRequestsInFlight[key]; ok &&
+		current == done {
 		delete(ls.blockfetchRequestsInFlight, key)
 		close(done)
 	}
@@ -5337,11 +5507,16 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		}
 		logFn(
 			"blockfetch request still in flight at timeout; waiting for it to return",
-			"component", "ledger",
-			"connection_id", currentConnId.String(),
-			"request_generation", ls.blockfetchPrimaryRequestGeneration,
-			"in_flight_timeout_count", ls.blockfetchInFlightTimeoutCount,
-			"in_flight_elapsed", time.Since(ls.activeBlockfetchStart),
+			"component",
+			"ledger",
+			"connection_id",
+			currentConnId.String(),
+			"request_generation",
+			ls.blockfetchPrimaryRequestGeneration,
+			"in_flight_timeout_count",
+			ls.blockfetchInFlightTimeoutCount,
+			"in_flight_elapsed",
+			time.Since(ls.activeBlockfetchStart),
 		)
 		ls.armBlockfetchTimeoutLocked(currentConnId)
 		return

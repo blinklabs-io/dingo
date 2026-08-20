@@ -64,7 +64,7 @@ Dingo from this checkout, so it has both.
 
 ### Kubernetes
 
-The example Helm values use `ghcr.io/blinklabs-io/dingo:0.69.0`, enable all
+The example Helm values use `ghcr.io/blinklabs-io/dingo:0.70.0`, enable all
 API ports, and keep the chart-created Dingo Service internal to the cluster.
 Apply the separate API Service when the frontend proxy needs a Kubernetes
 LoadBalancer:

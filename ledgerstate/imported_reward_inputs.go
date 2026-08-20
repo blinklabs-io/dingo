@@ -93,13 +93,13 @@ func deriveRewardInputs(
 		ownerStake uint64
 		delegators uint64
 	}
-	aggs := make(map[string]*poolAgg, len(params))
+	aggs := make(map[string]poolAgg, len(params))
 	owners := make(map[string]map[string]struct{}, len(params))
 	for poolHex, pool := range params {
 		if pool == nil {
 			continue
 		}
-		aggs[poolHex] = &poolAgg{}
+		aggs[poolHex] = poolAgg{}
 		set := make(map[string]struct{}, len(pool.Owners))
 		for _, owner := range pool.Owners {
 			set[hex.EncodeToString(owner)] = struct{}{}
@@ -169,6 +169,7 @@ func deriveRewardInputs(
 		if isOwner {
 			agg.ownerStake += stake
 		}
+		aggs[poolHex] = agg
 	}
 
 	poolInputs := make([]*models.RewardPoolInput, 0, len(aggs))
