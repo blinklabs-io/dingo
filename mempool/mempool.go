@@ -1291,8 +1291,8 @@ func (m *Mempool) revalidateAppliedTx(
 		candidate.overlay.created,
 	); err != nil {
 		candidate.reject(at, tx)
-		m.logger.Debug(
-			"transaction failed re-validation",
+		m.logger.Warn(
+			"transaction failed re-validation and was dropped from the mempool",
 			"component", "mempool",
 			"tx_hash", at.hash,
 			"error", err,
