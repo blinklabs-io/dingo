@@ -330,7 +330,7 @@ func validateConwayInlineDatumsWithPlutusV1(
 	}
 	ctx, err := newConwayPlutusValidationContext(tx, ls)
 	if err != nil {
-		return nil
+		return err
 	}
 	for _, input := range tx.Inputs() {
 		utxo, ok := ctx.scriptInputs.resolvedInputsMap[input.String()]
