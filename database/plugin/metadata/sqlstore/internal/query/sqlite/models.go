@@ -431,6 +431,19 @@ type Tip struct {
 	BlockNumber sql.NullInt64
 }
 
+type TokenRegistryEntry struct {
+	CreatedAt   sql.NullTime
+	UpdatedAt   sql.NullTime
+	Subject     string
+	Name        sql.NullString
+	Ticker      sql.NullString
+	Description sql.NullString
+	Url         sql.NullString
+	Logo        sql.NullString
+	ID          int64
+	Decimals    sql.NullInt64
+}
+
 type Transaction struct {
 	Hash          []byte
 	BlockHash     []byte

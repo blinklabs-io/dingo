@@ -828,6 +828,7 @@ type Node struct {
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
     offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
+    tokenRegistrySync *offchainmetadata.TokenRegistrySync // CIP-26 token registry
     midnightIndexer *midnightindexer.Indexer      // Midnight cNIGHT/registration/governance/candidate scanner
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
@@ -918,8 +919,9 @@ When `Node.Run()` is called, components are initialized in this order:
 22. Blockfrost API (if API storage mode and port configured)
 23. Mesh API (if API storage mode and port configured)
 24. Off-chain metadata fetcher (if API storage mode)
-25. Block forger + leader election (if block producer mode)
-26. Wait for shutdown signal
+25. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
+26. Block forger + leader election (if block producer mode)
+27. Wait for shutdown signal
 ```
 
 Mempool revalidation uses a private candidate overlay while admissions and
@@ -1002,7 +1004,8 @@ Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, database lifecycle manager, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
-  Blockfrost API, Mesh API, off-chain metadata fetcher
+  Blockfrost API, Mesh API, off-chain metadata fetcher,
+  CIP-26 token registry sync
 
 Phase 2: Drain and close connections
   Mempool, terminal EventBus close (concurrent with ConnectionManager),
@@ -1391,6 +1394,151 @@ node-side network access.
 The worker is intentionally composed at the node boundary. Ledger and database
 indexing code persist the URL/hash pointers; APIs read the local cache through
 the metadata store when they need off-chain documents.
+
+### CIP-26 Token Registry Sync
+
+`internal/offchainmetadata.TokenRegistrySync` is a second, separately gated
+API-mode worker in the same package. It shares the fetcher's hardened HTTP
+client (`secureHTTPClient`, `validateURL`, and the restricted dialer), which is
+why it lives beside the fetcher rather than in its own package: an
+operator-supplied registry URL is exactly the kind of input the SSRF guard
+exists for, and a second copy of that guard would be free to rot.
+
+The two workers differ in shape. The fetcher resolves many small per-URL
+documents discovered from on-chain pointers; the registry sync pulls one bulk
+artifact that is identical for every node. That difference is what makes it
+privacy-preserving: because a node downloads the whole registry rather than
+querying per asset, the sync reveals nothing about which assets its users hold,
+unlike a remote metadata server lookup.
+
+The sync streams a gzipped tarball of the registry repository, parses each
+`mappings/*.json` document with `ParseTokenRegistryEntry`, and upserts entries
+into `token_registry_entry` in batches of 500. Nothing is written to disk and
+no more than one mapping plus one batch is held at a time, so peak memory is
+independent of registry size: the roughly 240MB compressed / 316MB uncompressed
+mainnet registry, about 8,000 mappings, syncs within single-digit MB of heap
+growth. A mapping that fails to parse is skipped and counted rather than
+failing the snapshot, since one bad file out of thousands should not cost the
+whole sync.
+
+Re-downloading that artifact on every interval would be indefensible, so the
+sync records the HTTP entity tag of the last successfully applied snapshot in
+`sync_state` under `token_registry_etag` and sends it as `If-None-Match`. An
+unchanged registry answers `304` and costs one request with no body. The tag is
+written only after the whole snapshot has been applied, so an interrupted sync
+retries in full rather than recording progress it did not make.
+
+Upserting alone cannot retire anything, so each snapshot is also reconciled
+against the table. Every row a snapshot carries is stamped with that snapshot's
+timestamp in `updated_at`; once the snapshot has applied in full, rows older
+than the stamp are deleted, because the snapshot did not carry them. That
+retires a subject the registry has delisted, and a subject that remains in the
+archive but has lost every property (which the parser yields as an empty entry
+the sync skips). The prune runs only on a fully applied snapshot — never on a
+`304`, which applies none, and never after a failed one, where it would delete
+live subjects the failed run had not reached yet. Two further cases defer it:
+an archive carrying no `mappings/*.json` files at all (what an upstream layout
+change or a mirror serving the wrong repository looks like, as opposed to a
+genuinely empty registry, which does carry mapping files), and a snapshot in
+which any mapping was skipped as malformed or oversized — a skipped mapping
+does not re-stamp its row, so reconciling would delete metadata that is still
+good. Both log a warning rather than failing.
+
+The recorded `sync_state` describes the snapshot **the table currently holds**,
+not a per-source cache — there is one `token_registry_entry` table, so there is
+one set of state, and all of it moves together on a successful apply. Three
+keys: the entity tag, a fingerprint of the `(source URL, logo mode)` pair that
+produced it, and the high-water snapshot stamp.
+
+The fingerprint is what makes the tag safe to replay. A validator only
+describes the table while the table still holds what that source served under
+that logo mode, so the tag is sent only when the recorded fingerprint matches
+the current one. That covers repointing `sourceUrl` or switching network, and
+also the subtler case of switching *away and back*: the old tag would still
+match upstream, but the table holds the intervening snapshot, so accepting a
+`304` would leave the wrong metadata in place. The same applies to toggling
+`storeLogos` off and on again.
+
+The stamp is persisted for the same reason. The in-memory sequence resets on
+restart, and a restart landing inside the same wall-clock second as the
+previous snapshot would otherwise reuse its stamp — making the prune spare
+exactly the subjects the new snapshot dropped. Each snapshot takes the later of
+the wall clock and the recorded stamp, so the sequence stays strictly
+increasing across process boundaries.
+
+The three values are written with separate calls, so a crash can land between
+them, and the write order is what makes the surviving state safe rather than a
+transaction spanning it. The stamp goes first, *before* the rows it stamps, so
+that "recorded stamp ≥ the table's highest stamp" holds at every instant: a
+crash mid-apply leaves the stamp ahead of the table, and the next snapshot is
+then guaranteed a strictly greater stamp and prunes what the interrupted one
+left behind. Recording it afterwards would leave the table ahead of the stamp,
+which is the unsafe direction. The tag then goes before the identity, because
+the identity is the gate — the tag is replayed only when the recorded identity
+matches — so a crash between them leaves the gate shut and the next run
+re-applies in full, rather than leaving it open over a tag that was never
+updated. The snapshot stamp is truncated to a
+whole second, because MySQL's `datetime` column carries no fractional seconds:
+an unrounded stamp would be stored rounded while the prune compared against
+the original, deleting the very snapshot just written. Stamps are also forced
+strictly upward, since two snapshots inside one wall-clock second — reachable
+with a sub-second configured interval, or with a restart — would otherwise
+share a stamp and the prune would preserve exactly the subjects the newer
+snapshot dropped. Turning `storeLogos` off
+needs no special handling: the upsert overwrites every property column, so the
+next snapshot clears previously stored logos.
+
+Batches are committed as they fill rather than as one transaction, so a
+failure partway through a snapshot leaves earlier batches applied. That is a
+deliberate trade: wrapping roughly 8,000 upserts in a single transaction would
+hold the metadata store's write lock across the whole download and parse,
+stalling block indexing on a node that is also following the chain, to buy
+atomicity for a best-effort cache consensus never reads. The partial state is
+safe and transient — every row written is the registry's current value for
+that subject, so some subjects are fresher than others but none are wrong, and
+because neither the prune nor the ETag advances on a failed snapshot, the next
+run re-applies the whole thing and reconciles.
+
+Snapshot application is serialized end to end. `SyncOnce` is exported and the
+worker loop calls it, so two applications can overlap; interleaved snapshots
+would let an older one finish last, overwrite the newer one's properties,
+reintroduce subjects the newer registry dropped, and record its own stale ETag
+as current. The slot is a buffered channel rather than a mutex so the wait
+honors the caller's context: an external `SyncOnce` holds a context the node
+cannot cancel, and a plain mutex would block the worker — and therefore `Stop`,
+which waits for the worker — until that call's whole download finished.
+
+The configured interval is floored at one minute. Polling a source that serves
+a roughly 240MB artifact faster than that is abusive rather than useful, and a
+sub-second interval is also the only way two snapshots can land in the same
+wall-clock second — which is what would push stamps ahead of real time and let
+rows outlive the stamp sequence's reset across a restart.
+
+`Stop` waits for the worker to exit and does not abandon that wait when its
+context expires — it downgrades to a warning and keeps waiting, the same
+guarantee `koiosparity.Observer.Stop` makes for the same reason. Both teardown
+paths release the metadata store immediately afterwards
+(`node_shutdown.go` phase 3, `node_lifecycle.go`'s live storage swap), so a
+context-bounded stop would hand the worker a closed database. Cancelling the
+worker aborts any in-flight download, so the remaining wait is bounded by one
+store write rather than by the registry transfer.
+
+Logos are dropped before persisting unless `tokenRegistry.storeLogos` is set:
+base64 logo payloads are roughly 90% of registry bytes and most consumers only
+need name, ticker, and decimals. The whole sync is disabled by default, since
+enabling it commits the node to that download.
+
+Operators configure source URL, interval, request timeout, user agent, max
+bytes, max entry bytes, logo storage, and private-address allowance through the
+`tokenRegistry` YAML block, matching `DINGO_TOKEN_REGISTRY_*` environment
+variables, or `--token-registry-*` CLI flags. An empty source URL selects by
+network: the Cardano Foundation registry for mainnet, the IOG testnet registry
+otherwise.
+
+`node.go` composes the sync at the node boundary the same way it composes the
+fetcher, through the shared `newTokenRegistrySync` helper that both the startup
+path and the live storage-restart path in `node_lifecycle.go` call, so the two
+cannot drift.
 
 Pool-sourced (`source_type = "pool"`) documents get source-specific
 enforcement inside the fetcher, ahead of every other source type: `fetchOne`
@@ -4290,8 +4438,12 @@ oldest-first sequence against the same fixture.
 metadata (`onchain_metadata`/`onchain_metadata_standard`) is resolved lazily in
 the adapter by loading the initial mint transaction's stored metadata and
 parsing its CIP-25 (label 721) entry for the policy/asset; no dedicated
-metadata table is kept. Off-chain `metadata` (token registry) and CIP-68
-datum metadata are not yet sourced and return `null`.
+metadata table is kept. Off-chain `metadata` comes from the CIP-26 token
+registry: the adapter builds the registry subject from the policy ID and asset
+name and reads `token_registry_entry` through
+`MetadataStore.GetTokenRegistryEntry`, returning `null` when the registry has
+no entry or the sync is disabled. See the CIP-26 Token Registry Sync section
+above. CIP-68 datum metadata is not yet sourced and returns `null`.
 
 ### Mesh API (`api/mesh/`)
 
