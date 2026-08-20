@@ -6850,27 +6850,60 @@ existing `ledgerProcessBlocks` retry-with-backoff loop (see below) recover
 once the epoch cache catches up, or surface as a stuck pipeline if the
 rejection is deterministic.
 
-**This phase deliberately does not touch chain admission.** The existing
-serial VRF/KES checks that gate what is admitted to `ls.chain`
+**Admission-time crypto re-check is skipped once the pipeline will redo
+it.** Earlier revisions of this phase left the existing serial VRF/KES
+checks that gate what is admitted to `ls.chain`
 (`handleEventChainsyncBlockHeaderWithPending` for headers,
 `handleEventBlockfetchBlock` for bodies, in `chainsync.go`, both gated on
-`validationEnabled`/`ValidateHistorical`) are entirely unchanged by this
-flag. A block reaching the pipeline has therefore already passed (or, with
-`ValidateHistorical=false`, deliberately skipped) that admission-time
-check; enabling `BlockPipelineValidateEnabled` adds a second, parallel
-VRF/KES check immediately before ledger apply, not a replacement for the
-first one. Concretely: with `ValidateHistorical=false` (blocks admitted
-without any crypto check until near the tip), this closes a real coverage
-gap for the historical backlog, in parallel, cheaply. With
-`ValidateHistorical=true` (the default), blocks were already verified
-serially at admission, so the pipeline's check is a harmless but redundant
-defense-in-depth pass — not (yet) a throughput win for that configuration.
-Removing the admission-time duplicate for that case would mean moving (or
-conditionally skipping) the stateless VRF/KES half of the admission check
-in favor of the pipeline's, which changes the trust-timing model for what
-enters `ls.chain` (chain-selection and peer-relay would act on a block
-before the pipeline confirms it, rather than after admission already has),
-a security-relevant design decision phase 3 does not make.
+`validationEnabled`/`ValidateHistorical`) completely unchanged, so with
+`ValidateHistorical=true` (the default) every block was cryptographically
+verified twice: once at admission, once more by the pipeline's validate
+stage before apply. `blockPipelineRevalidatesCrypto` (`ledger/chainsync.go`)
+now reports whether every block reaching admission will independently pass
+through the pipeline's validate stage before ledger apply
+(`ls.blockPipeline != nil && LedgerStateConfig.BlockPipelineValidateEnabled`
+— nil `blockPipeline` correctly keeps this false whenever
+`BlockPipelineEnabled` is off or `ManualBlockProcessing` bypasses the
+pipeline entirely, matching `NewLedgerState`'s construction rule). When
+true:
+
+- `shouldVerifyChainsyncHeaderCrypto` returns `false`, so
+  `handleEventChainsyncBlockHeaderWithPending` skips the chainsync-header-time
+  stateless crypto pre-check (`verifyBlockHeaderOnlyCrypto`) and queues the
+  header via `AddBlockHeader` (unverified) rather than
+  `AddVerifiedBlockHeader`.
+- `handleEventBlockfetchBlock` skips the crypto half of
+  `verifyBlockHeaderCryptoBeforeApply` and calls
+  `verifyBlockHeaderStateWithEpochAdvance(block, true, true)` directly
+  instead — the same function already used for the "header already
+  verified by chainsync" fast path. This still runs, unconditionally:
+  the registered-VRF-key and leader-eligibility state checks
+  (`verifyBlockHeaderState`, not performed by the pipeline's validate stage,
+  which is scoped to VRF/KES only) and the epoch-cache-advance side effect
+  (`headerVerificationEpoch`'s `ensureEpochForSlot`, `allowEpochCacheAdvance
+  = true`) that the pipeline's own `Eta0Provider` deliberately does not
+  perform (see below) — only the redundant stateless VRF/KES crypto
+  verification itself is skipped.
+
+The actual gate on ledger application is unchanged: `decodeReadChainBatch`
+still aborts the whole read batch if the pipeline's validate stage rejects
+any block in it (treated exactly like a decode failure), so a block that
+skips admission-time crypto re-verification is still cryptographically
+verified, exactly once, before it can ever be applied to the ledger.
+
+The trade-off this formalizes: for a brief window between header/body
+admission to `ls.chain` and that block being read back out for pipeline
+validation, a not-yet-crypto-verified block can influence in-memory
+chain-selection bookkeeping (fork/rollback resolution, header-queue
+ordering) — the same class of trust window already accepted, unconditionally,
+for `ValidateHistorical=false` historical sync. `ls.chain` is purely an
+internal candidate/queue structure feeding ledger apply (see
+`ledgerReadChainIterator`); it is not consulted by any downstream
+chainsync-server/relay path, so this window does not cause dingo to relay
+an unverified block to other peers. With `ValidateHistorical=false`, nothing
+changes: admission was already skipping this check before
+`BlockPipelineValidateEnabled` existed, and the pipeline continues to close
+that coverage gap as described above.
 
 **Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
 gauges — `dingo_ledger_block_pipeline_blocks_decoded`,

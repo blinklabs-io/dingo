@@ -528,26 +528,33 @@ type LedgerStateConfig struct {
 	// pool before being handed to ledgerProcessBlocksFromSource, exactly as
 	// with decode-only phase 1.
 	//
-	// This is intentionally additive, not a replacement: it does not change
-	// (and this phase does not touch) the existing serial VRF/KES checks
-	// that already run before a block is admitted to the primary chain
-	// (handleEventChainsyncBlockHeaderWithPending, handleEventBlockfetchBlock
-	// in chainsync.go) -- those remain the sole gate on what enters
-	// ls.chain, unchanged, regardless of this flag. A block that reaches
-	// the pipeline has therefore already passed (or, with
-	// ValidateHistorical=false, deliberately skipped) that admission-time
-	// check; enabling this flag adds a second, parallel VRF/KES check
-	// immediately before ledger apply. For historical sync with
-	// ValidateHistorical=false (blocks admitted without a crypto check
-	// until near the tip), this closes a real coverage gap in parallel,
-	// cheaply. For ValidateHistorical=true (the default), it re-checks
-	// blocks that were already verified serially at admission -- a
-	// harmless but redundant defense-in-depth check, not (yet) a
-	// throughput win for that configuration; removing the admission-time
-	// duplicate would require moving where VRF/KES verification gates
-	// chain admission, which is a separate, security-relevant design
-	// decision this phase deliberately does not make. See ARCHITECTURE.md
-	// ("Block Processing Pipeline").
+	// When this is enabled, the serial admission-time checks that run
+	// before a block is admitted to the primary chain
+	// (handleEventChainsyncBlockHeaderWithPending,
+	// handleEventBlockfetchBlock in chainsync.go) skip only their
+	// stateless VRF/KES crypto re-check (blockPipelineRevalidatesCrypto),
+	// since the pipeline will independently re-verify the same block
+	// before ledger apply and decodeReadChainBatch aborts the whole read
+	// batch on a pipeline validation failure exactly as it would on a
+	// decode failure. Those admission paths still run their non-crypto
+	// checks unconditionally: the registered-VRF-key and
+	// leader-eligibility state checks (verifyBlockHeaderState, which the
+	// pipeline's validate stage does not perform -- it is scoped to
+	// VRF/KES only) and the epoch-cache-advance side effect
+	// (headerVerificationEpoch's ensureEpochForSlot) that the pipeline's
+	// own Eta0Provider deliberately does not perform. For historical sync
+	// with ValidateHistorical=false (blocks admitted without any crypto
+	// check until near the tip, unaffected by this flag), enabling this
+	// closes a real coverage gap for the historical backlog, in parallel,
+	// cheaply. For ValidateHistorical=true (the default), enabling this
+	// flag removes the double crypto check a naive additive wiring would
+	// otherwise leave in place, at the cost of a brief window where a
+	// not-yet-crypto-verified block can influence in-memory chain-selection
+	// bookkeeping in ls.chain (an internal candidate queue, not consulted
+	// by any downstream relay path) before the pipeline verifies it -- the
+	// same class of trust window already accepted, unconditionally, for
+	// ValidateHistorical=false. See ARCHITECTURE.md ("Block Processing
+	// Pipeline").
 	BlockPipelineValidateEnabled bool
 }
 
