@@ -1268,8 +1268,9 @@ In core mode, the ledger's background consumed-UTxO pruner is advisory: it
 defers while the local tip is materially behind the known upstream tip, so its
 potentially large SQLite write transaction cannot compete with blockfetch
 state persistence during historical catch-up. The timer and epoch-boundary
-triggers are single-flight; once the node is near the upstream tip, one run
-drains eligible rows using the era's stability window.
+triggers are single-flight; once the node is near the upstream tip, each run
+deletes at most one bounded batch of eligible rows using the era's stability
+window. Later runs continue the cleanup, keeping SQLite occupancy bounded.
 
 ### Midnight gRPC Server
 
