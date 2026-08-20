@@ -136,11 +136,12 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// Return value intentionally ignored: decodeReadChainBatch aborts
-		// (ok=false) as soon as it reads the first validation-failed item
-		// back off Results(), but by then the interesting part -- every one
-		// of numBlocks Submit() calls completing without blocking forever --
-		// has already happened, since decodeReadChainBatch submits the
+		// Return value intentionally ignored: decodeReadChainBatch always
+		// returns ok=false here (it fully drains every remaining expected
+		// Results() entry once it sees the first validation failure rather
+		// than stopping early -- see its doc comment), but the interesting
+		// part is that every one of numBlocks Submit() calls completed
+		// without blocking forever, since decodeReadChainBatch submits the
 		// entire batch before it starts draining Results().
 		_, _ = ls.decodeReadChainBatch(t.Context(), rawBatch)
 	}()
@@ -154,9 +155,19 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 			"(issue #1894 regression)",
 	)
 
-	require.Positive(
+	// decodeReadChainBatch returning only proves drainBlockPipelineErrors
+	// (a separate goroutine) received every error off errorsChan, not that
+	// it has finished classifying and counting all of them yet -- so poll
+	// rather than asserting immediately.
+	require.Eventually(
 		t,
-		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),
+		func() bool {
+			return promtestutil.ToFloat64(
+				ls.metrics.blockPipelineExpectedEta0Errors,
+			) > 0
+		},
+		5*time.Second,
+		10*time.Millisecond,
 		"expected eta0-unavailable errors should have been drained and counted",
 	)
 	require.Zero(

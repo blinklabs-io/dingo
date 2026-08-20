@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -99,6 +100,64 @@ func TestDecodeReadChainBatchValidatesBlocksWhenEnabled(t *testing.T) {
 	assert.Equal(t, block2.Slot, decoded[1].SlotNumber())
 }
 
+// TestDecodeReadChainBatchValidatesBlockAcrossKesPeriodBoundary is a
+// regression test for BuildValidatedConwayBlockBytes signing every block at
+// hardcoded KES period 0 regardless of which slot in its search window
+// actually won leadership. A slotRangeStart at or after slotsPerKesPeriod
+// (129600) forces every candidate slot in the 200-slot search window into
+// KES period 1 or later, so whichever slot is chosen requires the signing
+// key to have been evolved past period 0 -- did not happen before the fix,
+// and made every such block fail KES verification.
+//
+// slotRangeStart is set to exactly one full KES period rather than a range
+// straddling the boundary: with the 99% active slot coefficient used
+// throughout this helper, the very first slot tried is overwhelmingly
+// likely to already be eligible, so a window starting *before* the
+// boundary would almost never actually reach a post-boundary slot and
+// would not reliably exercise the bug at all.
+func TestDecodeReadChainBatchValidatesBlockAcrossKesPeriodBoundary(
+	t *testing.T,
+) {
+	var seed [32]byte
+	seed[0] = 9
+	const nonceSeed = 11
+	const slotsPerKesPeriod = 129600
+
+	block, vb := buildValidatedTestModelsBlock(
+		t, seed, nonceSeed, slotsPerKesPeriod, 1,
+	)
+	require.GreaterOrEqual(t, vb.Slot, uint64(slotsPerKesPeriod))
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger:                       testLogger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(1),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0(vb.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	defer func() {
+		require.NoError(t, ls.blockPipeline.Stop())
+	}()
+
+	decoded, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+	require.True(
+		t,
+		ok,
+		"block at slot %d (KES period %d) failed VRF/KES validation",
+		vb.Slot,
+		vb.Slot/slotsPerKesPeriod,
+	)
+	require.Len(t, decoded, 1)
+	assert.Equal(t, block.Slot, decoded[0].SlotNumber())
+}
+
 func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 	var seed [32]byte
 	seed[0] = 3
@@ -132,6 +191,90 @@ func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 
 	_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
 	assert.False(t, ok, "batch with a VRF-invalid block must be rejected")
+}
+
+// TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure is a
+// regression test for a batch failure leaking unread pipeline results into
+// a later, unrelated call. decodeReadChainBatch submits an entire batch up
+// front and only afterwards reads that many entries back off the shared
+// blockPipeline.Results() channel; if it stops reading as soon as it sees
+// the first failure, the remaining entries it already Submitted for this
+// batch are left sitting on that channel. blockPipeline has no notion of
+// "whose submission is whose" beyond result order, so the very next call --
+// here, a second batch with its own, unrelated block -- would then read
+// those stale leftovers instead of its own submission's result.
+//
+// The first batch here has a VRF-invalid block ahead of two otherwise-valid
+// ones, so a regression that returns as soon as it sees the invalid block
+// leaves the two valid ones' results unread. The second call must still
+// see its own block's result, not one of those leftovers.
+func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
+	t *testing.T,
+) {
+	const correctNonceSeed = 20
+	const wrongNonceSeed = 21
+
+	var badSeed, seed2, seed3, seed4 [32]byte
+	badSeed[0], seed2[0], seed3[0], seed4[0] = 1, 2, 3, 4
+
+	// invalidBlock is proven against a different epoch nonce than the one
+	// the pipeline below is configured with, so it genuinely fails VRF
+	// verification (not merely a decode error).
+	invalidBlock, _ := buildValidatedTestModelsBlock(
+		t, badSeed, wrongNonceSeed, 100, 1,
+	)
+	validBlock2, vb2 := buildValidatedTestModelsBlock(
+		t, seed2, correctNonceSeed, 300, 2,
+	)
+	validBlock3, _ := buildValidatedTestModelsBlock(
+		t, seed3, correctNonceSeed, 500, 3,
+	)
+	secondBatchBlock, _ := buildValidatedTestModelsBlock(
+		t, seed4, correctNonceSeed, 700, 4,
+	)
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger:                       testLogger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(2),
+		pipeline.WithValidateWorkers(2),
+		pipeline.WithEta0(vb2.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb2.SlotsPerKesPeriod),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	defer func() {
+		require.NoError(t, ls.blockPipeline.Stop())
+	}()
+
+	_, ok := ls.decodeReadChainBatch(
+		t.Context(),
+		[]models.Block{invalidBlock, validBlock2, validBlock3},
+	)
+	require.False(t, ok, "batch with a VRF-invalid block must be rejected")
+
+	decoded, ok := ls.decodeReadChainBatch(
+		t.Context(),
+		[]models.Block{secondBatchBlock},
+	)
+	require.True(
+		t,
+		ok,
+		"second batch's own valid block must not be rejected by a "+
+			"leftover result from the first batch",
+	)
+	require.Len(t, decoded, 1)
+	assert.Equal(
+		t,
+		secondBatchBlock.Slot,
+		decoded[0].SlotNumber(),
+		"second batch received a leftover result from the first batch "+
+			"instead of its own submission",
+	)
 }
 
 // TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled verifies that
@@ -288,6 +431,14 @@ func TestBlockPipelineEta0Provider_ReturnsNonceHex(t *testing.T) {
 	assert.Equal(t, "010203", nonceHex)
 }
 
+// TestBlockPipelineEta0Provider_EmptyCache is a regression test for
+// blockPipelineEta0Provider previously wrapping *every* error
+// headerVerificationEpoch can return in errBlockPipelineEta0Unavailable.
+// An empty epoch cache makes epochForSlot fail to find any epoch at all --
+// errHeaderVerificationDeferred, not the Byron-only "epoch found but has no
+// nonce" case (errEpochNonceUnavailable) -- so drainBlockPipelineErrors must
+// classify it as an unexpected error, not silently as the harmless Byron
+// case.
 func TestBlockPipelineEta0Provider_EmptyCache(t *testing.T) {
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -298,14 +449,23 @@ func TestBlockPipelineEta0Provider_EmptyCache(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	_, err := ls.blockPipelineEta0Provider(1000)
-	assert.Error(t, err)
+	require.Error(t, err)
+	assert.False(
+		t,
+		errors.Is(err, errBlockPipelineEta0Unavailable),
+		"a missing-epoch-data error must not be classified as the "+
+			"expected Byron-only eta0-unavailable case",
+	)
 }
 
 // TestBlockPipelineEta0Provider_NoNonceForEpoch simulates a Byron-era epoch
 // (present in the cache but with no Praos nonce yet) and confirms the
 // provider fails rather than returning a bogus nonce -- decodeReadChainBatch
 // relies on this to ignore validation failures specifically (and only) for
-// Byron-era blocks.
+// Byron-era blocks. It also confirms drainBlockPipelineErrors' classifying
+// sentinel is present on the error, since only this specific "epoch has no
+// nonce" case is meant to be wrapped in it (see
+// TestBlockPipelineEta0Provider_EmptyCache for the contrasting case).
 func TestBlockPipelineEta0Provider_NoNonceForEpoch(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
@@ -324,5 +484,11 @@ func TestBlockPipelineEta0Provider_NoNonceForEpoch(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	_, err := ls.blockPipelineEta0Provider(1000)
-	assert.Error(t, err)
+	require.Error(t, err)
+	assert.True(
+		t,
+		errors.Is(err, errBlockPipelineEta0Unavailable),
+		"the Byron-only epoch-has-no-nonce case must be classified as "+
+			"the expected eta0-unavailable error",
+	)
 }

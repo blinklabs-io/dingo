@@ -713,14 +713,10 @@ func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
 		defer close(done)
 		ls.drainBlockPipelineBeforeRollback(t.Context(), "test")
 	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal(
-			"drainBlockPipelineBeforeRollback blocked with a nil " +
-				"block pipeline",
-		)
-	}
+	testutil.RequireReceive(
+		t, done, time.Second,
+		"drainBlockPipelineBeforeRollback blocked with a nil block pipeline",
+	)
 }
 
 // TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork is a regression

@@ -131,8 +131,8 @@ func checkOpenSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) e
 	if sddl == "" {
 		return fmt.Errorf("failed to read security descriptor for %q", path)
 	}
-	owner := sddlSection(sddl, "O:")
-	if owner == "" {
+	ownerSID, _, err := sd.Owner()
+	if err != nil || ownerSID == nil {
 		return fmt.Errorf(
 			"key file %q has no owner in its security descriptor: %w",
 			path, ErrInsecureFileMode,
@@ -146,7 +146,7 @@ func checkOpenSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) e
 			path, ErrInsecureFileMode,
 		)
 	}
-	return checkOpenDACL(path, owner, dacl)
+	return checkOpenDACL(path, ownerSID.String(), dacl)
 }
 
 func checkOpenDACL(path, owner, dacl string) error {
@@ -187,7 +187,7 @@ func checkOpenDACL(path, owner, dacl string) error {
 				path, fields[0], ErrInsecureFileMode,
 			)
 		}
-		if allowed[fields[5]] {
+		if allowed[fields[5]] || trusteeIsOwner(fields[5], owner) {
 			continue
 		}
 		return fmt.Errorf(
@@ -196,6 +196,51 @@ func checkOpenDACL(path, owner, dacl string) error {
 		)
 	}
 	return nil
+}
+
+// trusteeIsOwner compares a DACL trustee with the descriptor owner. SDDL
+// renders some account SIDs as two-letter aliases, while the owner returned by
+// the security descriptor is a canonical SID, so the strings differ for the
+// same principal — which would reject a valid owner-only DACL on a runner
+// using such an account.
+//
+// An alias is resolved by asking Windows, not by matching its well-known RID.
+// The local administrator alias (LA) and a domain Administrator share RID 500
+// and differ only in the domain part, so a suffix match on "-500" treats a
+// domain Administrator owner as satisfying an LA ace and admits a trustee who
+// is not the owner. Round-tripping the alias through a minimal descriptor
+// resolves it against this machine and covers every other alias for free.
+func trusteeIsOwner(trustee, owner string) bool {
+	if trustee == owner {
+		return true
+	}
+	ownerSID, err := windows.StringToSid(owner)
+	if err != nil {
+		return false
+	}
+	trusteeSID, err := resolveTrusteeSID(trustee)
+	if err != nil {
+		return false
+	}
+	return windows.EqualSid(trusteeSID, ownerSID)
+}
+
+// resolveTrusteeSID converts an SDDL trustee to a SID, accepting either a SID
+// string or an alias such as LA. Aliases are machine-relative, so they are
+// resolved by Windows rather than reconstructed here.
+func resolveTrusteeSID(trustee string) (*windows.SID, error) {
+	if sid, err := windows.StringToSid(trustee); err == nil {
+		return sid, nil
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:" + trustee)
+	if err != nil {
+		return nil, err
+	}
+	sid, _, err := sd.Owner()
+	if err != nil {
+		return nil, err
+	}
+	return sid, nil
 }
 
 func sddlSection(sddl, section string) string {

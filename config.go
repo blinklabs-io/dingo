@@ -113,6 +113,12 @@ type KoiosParityConfig struct {
 	// value (false) can't be distinguished from an explicit opt-out. Pass a
 	// pointer to false to disable account-level checking explicitly.
 	Accounts *bool
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request issued by the Accounts phase above, by
+	// both address count and encoded body size. 0 for either selects the
+	// package default. Unused when Accounts resolves to false.
+	AccountChunkSize     int
+	AccountChunkMaxBytes int
 }
 
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
@@ -709,13 +715,15 @@ func (c *Config) syncCompatFields() {
 	// so the mirror always carries a non-nil pointer.
 	koiosParityAccounts := c.cfg.KoiosParity.Accounts
 	c.koiosParity = KoiosParityConfig{
-		Enabled:    c.cfg.KoiosParity.Enabled,
-		Network:    c.cfg.KoiosParity.Network,
-		CachePath:  c.cfg.KoiosParity.CachePath,
-		APIKey:     c.cfg.KoiosParity.APIKey,
-		Strict:     c.cfg.KoiosParity.Strict,
-		GraceHours: c.cfg.KoiosParity.GraceHours,
-		Accounts:   &koiosParityAccounts,
+		Enabled:              c.cfg.KoiosParity.Enabled,
+		Network:              c.cfg.KoiosParity.Network,
+		CachePath:            c.cfg.KoiosParity.CachePath,
+		APIKey:               c.cfg.KoiosParity.APIKey,
+		Strict:               c.cfg.KoiosParity.Strict,
+		GraceHours:           c.cfg.KoiosParity.GraceHours,
+		Accounts:             &koiosParityAccounts,
+		AccountChunkSize:     c.cfg.KoiosParity.AccountChunkSize,
+		AccountChunkMaxBytes: c.cfg.KoiosParity.AccountChunkMaxBytes,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
@@ -1480,13 +1488,15 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			accounts = *cfg.Accounts
 		}
 		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
-			Enabled:    cfg.Enabled,
-			Network:    cfg.Network,
-			CachePath:  cfg.CachePath,
-			APIKey:     cfg.APIKey,
-			Strict:     cfg.Strict,
-			GraceHours: cfg.GraceHours,
-			Accounts:   accounts,
+			Enabled:              cfg.Enabled,
+			Network:              cfg.Network,
+			CachePath:            cfg.CachePath,
+			APIKey:               cfg.APIKey,
+			Strict:               cfg.Strict,
+			GraceHours:           cfg.GraceHours,
+			Accounts:             accounts,
+			AccountChunkSize:     cfg.AccountChunkSize,
+			AccountChunkMaxBytes: cfg.AccountChunkMaxBytes,
 		}
 	}
 }

@@ -282,25 +282,25 @@ type HistoryExpiryConfig struct {
 // subsystem — leave it disabled for normal node operation.
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
-	Enabled bool `yaml:"enabled"    envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
+	Enabled bool `yaml:"enabled"              envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
 	// Network is the Koios network to validate against: "preview" or
 	// "preprod". Empty defaults to the node's own configured Network.
-	Network string `yaml:"network"    envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
+	Network string `yaml:"network"              envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
 	// default cache location.
-	CachePath string `yaml:"cachePath"  envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
+	CachePath string `yaml:"cachePath"            envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
-	APIKey string `yaml:"apiKey"     envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	APIKey string `yaml:"apiKey"               envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
 	// Strict stops/cancels the node on the first Koios/tool error or exact
 	// parity mismatch, rather than logging it and continuing normal node
 	// operation.
-	Strict bool `yaml:"strict"     envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
-	GraceHours int `yaml:"graceHours" envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
+	GraceHours int `yaml:"graceHours"           envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
 	// Accounts additionally runs #3097's per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. Defaults to true (see
@@ -311,7 +311,14 @@ type KoiosParityConfig struct {
 	// cmd/koios-parity's addAccountsFlag). Set false explicitly to keep the
 	// observer pool-level-only, e.g. to bound Koios request volume on a
 	// resource-constrained deployment.
-	Accounts bool `yaml:"accounts"   envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
+	Accounts bool `yaml:"accounts"             envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request issued by the Accounts phase above, by
+	// both address count and encoded body size. 0 for either selects the
+	// package default (koiosparity.koiosAccountChunkSize/
+	// koiosAccountChunkMaxBytesDefault). Unused when Accounts is false.
+	AccountChunkSize     int `yaml:"accountChunkSize"     envconfig:"DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_SIZE"`
+	AccountChunkMaxBytes int `yaml:"accountChunkMaxBytes" envconfig:"DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_MAX_BYTES"`
 }
 
 // DefaultKoiosParityConfig returns the default (disabled) Koios parity
@@ -533,12 +540,16 @@ type Config struct {
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"         envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 	// BlockPipelineValidateEnabled turns on the block pipeline's VRF/KES
 	// validate stage (issue #1894 phase 3), in addition to decode. Has no
-	// effect unless BlockPipelineEnabled is also set. This adds a second,
-	// parallel VRF/KES check immediately before ledger apply; it does not
-	// change the existing serial VRF/KES checks that already gate what is
-	// admitted to the primary chain, so blocks validated under
-	// ValidateHistorical=true are checked twice (redundant but harmless).
-	// See ARCHITECTURE.md ("Block Processing Pipeline").
+	// effect unless BlockPipelineEnabled is also set. This moves the
+	// VRF/KES crypto check to run in parallel, immediately before ledger
+	// apply, instead of serially at admission: once every admitted block is
+	// guaranteed to pass through this check, the existing serial
+	// admission-time VRF/KES crypto check is skipped as redundant (see
+	// blockPipelineRevalidatesCrypto). Admission-time checks the pipeline's
+	// validate stage does not perform -- the registered-VRF-key/
+	// leader-eligibility state checks and the epoch-cache-advance side
+	// effect -- still run unconditionally. See ARCHITECTURE.md ("Block
+	// Processing Pipeline").
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled" envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)

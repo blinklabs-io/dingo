@@ -82,7 +82,7 @@ func (a *archiveServiceHandler) FetchBlock(
 			Url:       signedURL.URL.String(),
 			ExpiresAt: timestamppb.New(signedURL.Expires),
 			Meta: &archive.BlockMeta{
-				Type:     (archive.BlockType)(blockType).Enum(),
+				Type:     archive.BlockType(blockType).Enum(),
 				PrevHash: new(hex.EncodeToString(metadata.PrevHash)),
 			},
 		})

@@ -1227,6 +1227,16 @@ func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
 	t.Cleanup(func() { _ = theirs.Close() })
 
 	file, err := createExtractedFile(root, "00000.chunk")
+	if runtime.GOOS == "windows" {
+		require.Error(t, err,
+			"Windows refuses to unlink a file held open by another process")
+		assert.ErrorIs(t, err, ErrExtractUnsafePath)
+		contents, readErr := os.ReadFile(planted)
+		require.NoError(t, readErr)
+		assert.Equal(t, "theirs", string(contents),
+			"a locked pre-existing file must remain untouched")
+		return
+	}
 	require.NoError(t, err)
 	_, writeErr := file.WriteString("ours")
 	require.NoError(t, writeErr)

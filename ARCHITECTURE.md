@@ -392,6 +392,60 @@ sequenceDiagram
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
 
+`ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
+subscriber deriving state from it sees a block's transactions in index order
+and sees a rollback's undo events (`Rollback: true`) before any transaction
+event the ledger emits afterwards.
+
+Two producers feed that lane, on different goroutines: `LedgerDelta.apply`
+(`ledger/delta.go`) publishes forward events from the `ledgerProcessBlocks`
+goroutine, and the rollback path publishes undo events from whichever
+goroutine performs the rollback. Nothing serializes those two, so the ordering
+comes from a happens-before rather than from a lock:
+`rollbackChainAndState` calls `emitRollbackTransactionEvents` **before**
+`chain.Rollback` truncates. The apply goroutine can only apply a
+post-rollback block after it observes that truncation, so an undo enqueued
+ahead of the truncation is necessarily ahead of any forward event for a block
+applied after it.
+
+Getting this wrong is subtle, so the constraint is worth stating plainly:
+**the undo events must be emitted before the truncation, by the rollback
+path.** `handleEventChainUpdate` deliberately does *not* emit them, even
+though it receives `ChainRollbackEvent` with the rolled-back blocks. It is a
+`SubscribeFunc` dispatch reached only after `chain.Rollback` has published and
+returned, by which point the apply goroutine is already free to publish
+forward events — emitting there loses the race reproducibly. It still emits
+the `ledger.block` undo events, which are a different event type and so a
+different lane. Before #2287 the undo events were emitted from a `go`
+statement onto the reordering shared pool, which lost the same race twice
+over.
+
+The forward path keeps async semantics deliberately: it publishes from inside
+the block-apply database transaction, so a synchronous publish would hold that
+transaction open under subscriber backpressure. `ledger.block` remains
+`PublishBlocking` on the handler's own goroutine.
+
+Because a publisher parked on a full lane is released only by the EventBus
+stopping, and a live restore/truncate closes the `LedgerState` while keeping
+the bus running, ledger publishes go through `PublishOrderedContext` with a
+context `LedgerState.Close` cancels first thing. Without it `Close` waits
+unbounded on a `ledger.tx` subscriber that stopped draining.
+
+This is also the one deliberate exception to the publish-under-lock rule
+above. `rollbackChainAndState` runs under `chainsyncMutex` — it is reached
+through the `pendingPublishes` call chain — and emits undo events from there,
+because the ordering requires them to be enqueued before the truncation and
+the truncation happens under that same lock; deferring them to
+`pendingPublishes`' post-unlock flush would put them after it and lose the
+guarantee. What makes it safe is narrower than the general rule: the emit only
+*enqueues* onto a 10000-entry lane and never runs a subscriber callback
+inline, so it can block only if a `ledger.tx` subscriber stops draining long
+enough to fill the lane. **A `ledger.tx` subscriber must therefore not call
+back into `LedgerState` methods that take `chainsyncMutex`** (in practice
+`RecoverAfterLocalRollback` and anything reaching it). Subscribers that need
+to do real work should hand off to their own goroutine, which
+`event/doc.go` already requires of every subscriber callback.
+
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
 when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
 opens a chain iterator at the requested start point, sends `StartBatch`, then
@@ -1025,7 +1079,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
 | `ledger.block` | LedgerState | Block applied or rolled back |
-| `ledger.tx` | LedgerState | Transaction processed |
+| `ledger.tx` | LedgerState | Transaction processed (ordered lane — see below) |
 | `ledger.error` | LedgerState | Ledger error occurred |
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
 | `ledger.chainsync` | Ouroboros | Chainsync event received |
@@ -1049,6 +1103,17 @@ All event types follow the `subsystem.snake_case_name` convention.
 ### EventBus Features
 
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
+- **Ordering.** `Publish` and `PublishBlocking` deliver on the caller's
+  goroutine, so one publisher's events reach a subscriber in call order.
+  `PublishAsync` does **not** preserve order: the shared queue is drained by
+  4 workers that race each other into `Publish`, so events enqueued in order
+  can be delivered in either order. `PublishOrdered` (`event/ordered.go`) is
+  the order-preserving async path — one FIFO per event type
+  (`OrderedQueueSize`, 10000 entries) drained by exactly one worker, created
+  lazily on first publish and torn down by `Stop`/`Close`. Its guarantee is
+  per event type and covers only publishes that are themselves sequenced;
+  concurrent publishers still race to enqueue. Per-type lanes also isolate a
+  slow subscriber to its own event type, unlike the shared pool
 - Default subscriber buffers of 1024 events, with opt-in 100000-entry burst
   buffers for high-volume ledger chainsync and chain-update paths. The
   payload-heavy ledger blockfetch path uses an eight-entry buffer and relies
@@ -1065,8 +1130,8 @@ All event types follow the `subsystem.snake_case_name` convention.
   per subscriber, not per delivery, and reports how many publishers are parked
   on it — every parked publisher observes the same stall, so a per-delivery
   limit made the log volume scale with publisher count rather than with time
-- **Never `Publish`, `PublishAsync`, or `PublishBlocking` while holding a lock
-  that a subscriber of that event acquires.** Because all three wait for
+- **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
+  while holding a lock that a subscriber of that event acquires.** Because all four wait for
   capacity rather than dropping, this is a deadlock, not merely a slow path:
   once the subscriber's buffer fills, the subscriber waits for the lock the
   publisher holds while the publisher waits for the capacity the subscriber
@@ -1510,7 +1575,12 @@ not to the caller actually calling `cancel()` ahead of it — so `Stop`'s
 the same hard `Close` immediately if the caller gives up before either the
 timer or a graceful `Shutdown` completes; a live database restore/truncate
 quiesce cancelling its own `ctx` to abandon a slow shutdown no longer
-stalls for the rest of `ShutdownTimeout`.
+stalls for the rest of `ShutdownTimeout`. That escalation is now supplied to
+the shared listener lifecycle as `api/utxorpc`'s own `ShutdownFunc` rather
+than being `Stop`'s whole body — the surrounding protocol, including
+releasing the listening socket before `Stop` returns so this same
+reinitialization can rebind the port, is `internal/apilistener`'s; see "API
+listener lifecycle" below.
 
 A caller-supplied `connmanager.ListenerConfig.Listener` (a test harness binding an OS-assigned port up front and handing the listener object itself to the node, rather than an address string, so a peer can be told the exact port with no discovery race — see `node_lifecycle_multinode_test.go`'s `newLoopbackListener`) needs its own handling across this quiesce/reinit cycle: `ConnectionManager.Stop`'s `stopListeners` closes every listener it is tracking unconditionally, with no way to distinguish one it created itself from one a caller handed it, and a closed `net.Listener` can never be reused. `reinitializeNetworkingCore` rebuilds `connManager` from `n.config.listeners` via `ouroboros.ConfigureListeners`, which only appends connection options and never touches `.Listener` — so without further handling, the same now-closed listener object would be fed straight back in, `connmanager.startListener` would skip rebinding (it only binds fresh when `.Listener == nil`), and the accept loop launched on it would exit immediately on `net.ErrClosed` while `connManager.Start` still returned successfully, silently leaving that listener permanently deaf to new inbound connections after the very first live Restore/Truncate. `ConnectionManager.ResolvedListeners` (called right after every successful `connManager.Start`, both at initial startup in `node.go` and after every reinit in `node_lifecycle.go`) closes this gap: for any listener config entry that came in with a caller-supplied `Listener`, it replaces that field with the concrete `ListenNetwork`/`ListenAddress` the listener actually resolved to (nil-ing `Listener` out), so the next reinit rebinds a fresh listener at that same address instead of trying to reuse the dead object — exactly the self-healing behavior an address-configured entry already had. Entries that started address-configured are left untouched entirely. A caller-supplied Windows named-pipe listener is a special case even though it does get its `Listener` field cleared here: `ListenNetwork` is deliberately *not* overwritten with the resolved listener's own `Addr().Network()` when it is already `"unix"`, because on Windows that value is a cross-platform sentinel meaning "reconstruct via `createPipeListener`" (checked by `startListener`'s pipe-creation branch), while the real `go-winio` pipe listener's `Addr().Network()` reports `"pipe"` — copying that raw value in would silently break the sentinel and make the next reinit's rebind fail.
 
@@ -4011,6 +4081,88 @@ without one.
   `"disabled"` everywhere, so existing reverse-proxy/no-auth deployments
   are unaffected regardless.
 
+### API listener lifecycle (`internal/apilistener`)
+
+All three API servers (`api/blockfrost`, `api/mesh`, `api/utxorpc`) share one
+start/stop protocol rather than each implementing its own, because the way they
+bind makes a correct `Stop` genuinely subtle and the subtlety is identical in
+all three.
+
+The problem is that `http.Server.Shutdown` closes only the listeners `Serve`
+has already registered, and each server opens its socket synchronously — so a
+port conflict surfaces as an error from `Start` rather than a log line from a
+goroutine nobody is watching — then hands it to `Serve` in a goroutine it does
+not wait for. A `Stop` landing inside that window finds a server with nothing
+registered and returns with the port still bound. This is not a test-only
+concern: `quiesceForLiveLifecycleOp` stops these capabilities and
+`reinitializeAPIServers` re-resolves them on the same configured port
+(`node_lifecycle.go`), so any live Restore or Truncate could fail to rebind
+with `EADDRINUSE`. An instrumented 500-iteration probe left the port accepting
+in roughly 9% of runs before the fix.
+
+Releasing the port is therefore something `Stop` has to do itself, and doing
+that safely needs three pieces that only make sense together:
+
+- **`Take` — exactly one caller tears a server down.** A server's `Stop` and
+  the context monitor its `Start` launched both race to detach the running
+  server and its listener. The winner gets a `Job` and owns completing it; the
+  loser gets the winner's completion channel and waits on it (`AwaitTeardown`)
+  rather than reporting the server down while the port is still bound. A
+  monitor uses `TakeIf`, which detaches only while the server it published is
+  still the current one: a monitor sits on `ctx.Done()` until its caller's
+  context ends, which can be long after its own server was stopped and a
+  restart published another on the same `Listener`, and an unconditional
+  detach there would tear down a replacement it never published. Today every
+  production caller passes the node's `n.ctx` to both the initial start and
+  every restart (`node.go`, `node_lifecycle.go`), so the two contexts are the
+  same one and the cross-detach is not reachable; `TakeIf` closes it at the
+  protocol level rather than relying on that continuing to hold.
+- **`bindDone` — `Stop` cannot outrun a bind still in flight.** `Bind` closes
+  this channel on every exit path, including the one where it finds its server
+  already detached and closes its own socket instead of serving it. `Shutdown`
+  waits on it, which is what lets `Stop` promise the port is free when it
+  returns rather than merely that closing has started. A bind wait that times
+  out still tears down what it detached — the detach made this caller the only
+  remaining reference to that socket — but deliberately does *not* signal
+  completion to a waiting second caller, because `Bind` still owns a socket it
+  could not close.
+- **`teardown` — the loser's wait is honest.** Only a genuinely finished
+  teardown closes it, so a caller that reads it as "the port is free" is right.
+
+`ShutdownFunc` is the one axis the three servers differ on. `apilistener.Graceful`
+(plain `http.Server.Shutdown`) covers Blockfrost and Mesh. `api/utxorpc` supplies
+its own, keeping the escalation described under "Live database lifecycle
+operations" above: `WatchTx`/`WatchMempool` are unbounded streaming RPCs, so a
+connected client can keep `Shutdown` blocked indefinitely, and a `ShutdownTimeout`
+timer (or the caller `ctx`'s own deadline, or its cancellation) escalates to a
+hard `Close`. The socket close runs after whichever path that function takes, so
+the escalation paths release the port too — `server.Close()` reaches only the
+listeners `Serve` registered, which is exactly the set that may be missing ours.
+
+Two consequences worth noting. `Publish` takes a build callback that runs under
+the listener's lock once the already-started check has passed, so each server
+installs its credential verifier atomically with the server it belongs to and a
+rejected second `Start` cannot replace a running server's. `Bind` reports
+whether it handed the socket to `Serve` rather than closing it, so a `Start`
+whose server was detached mid-bind returns without logging that a listener
+came up when none did. One window stays open by construction: a `Stop` landing
+between the ownership check and `Serve` being entered leaves `Serve` an
+already-closed socket. It is inert — `Serve` reports `ErrServerClosed`, which
+the error filter drops, and the port is released by the `Stop` that closed it —
+so the only trace is the log line. Closing it would require `Serve` to signal
+that it registered the listener, which `net/http` does not expose, and any such
+signal would still lose to a `Stop` landing an instant later. And because
+`api/utxorpc`'s context monitor now detaches rather than holding its mutex
+across the shutdown it runs, a concurrent `Stop` is answered by the teardown
+wait instead of blocking on that mutex for as long as a stuck stream keeps
+`Shutdown` busy.
+
+The protocol's own tests live with it in `internal/apilistener`, including the
+paths that need a bind still in flight when a wait expires — a real bind settles
+far too quickly to race, so those windows are constructed. Each API package
+keeps the black-box checks that it is wired to the protocol: the port is free
+when `Stop` returns, and the address is rebindable afterwards.
+
 ### Blockfrost API (`api/blockfrost/`)
 
 TLS and token authentication (including the `project_id` header alias) are
@@ -4197,8 +4349,9 @@ internal/koiosparity/      # shared library
   dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
-  fetch_accounts.go        # #3097 per-account Koios fetch (chunked, address-universe union)
-  check.go                 # parity check orchestration (pool-level + #3097 per-account comparison)
+  fetch_accounts.go        # #3097 per-account Koios fetch (address-universe union), #3099 checkpointed resume
+  account_chunk.go         # #3099 count+size bounded, content-addressed address chunking
+  check.go                 # parity check orchestration (pool-level + #3097 per-account comparison + #3099 zero-reward/lifecycle)
   report.go                # human-readable status + JSON report generation
 
 cmd/koios-parity/          # thin Cobra CLI wrapper
@@ -4905,24 +5058,22 @@ never the reverse.
   `result.Status != StatusPass` check the same way a pool-level mismatch
   already does — no separate code path, so strict mode stops the node on an
   account-level mismatch exactly as it does on a pool/aggregate one.
-- **Out of scope for #3097, left for #3099**: fully paginated/resumable/
-  rate-shaped account fetching at arbitrary scale, mid-epoch chunk-level
-  resume-from-checkpoint after a process restart, and duplicate-page
-  detection from Koios's own pagination (not applicable to
-  `/account_reward_history`, which isn't Range-paginated). #3097's chunking
-  is correct and never silently marks a partially-fetched epoch complete
-  (the coverage-gate + atomic-commit invariants above already guarantee
-  that), but does not need to survive a restart mid-epoch-fetch with a
-  resumed cursor — redoing the whole epoch's account fetch from scratch is
-  an acceptable (if not maximally efficient) fallback. Known limitation:
-  a *fully successful* fetch that happens to run before Koios has actually
-  published `/account_reward_history` for a just-closed epoch (as opposed to
-  a partial/failed fetch) can legitimately return zero rows and still be
-  recorded `complete = true` — the grace-window `reference_lag` treatment
-  above absorbs this for the duration of `--grace-hours`, but nothing
-  currently re-triggers a refetch of that epoch's account coverage once
-  Koios's real data appears after the window closes; #3099's chunking work
-  should address this alongside its other coverage-staleness invariants.
+- **Delivered by #3099** (was: "out of scope for #3097, left for #3099"):
+  byte-size-aware chunking, mid-epoch chunk-level resume-from-checkpoint
+  across a process restart, and page-safety hardening for
+  `/account_reward_history` — see the "Chunked, checkpointed account-reward
+  fetch (dingo #3099)" subsection immediately below for the design.
+  **Correction to this section's earlier assumption:** `/account_reward_history`
+  is *not* usably Range-paginated — confirmed by live testing against
+  preview: repeated requests with different `Range` values return the same
+  first row window rather than paging further, so a response landing at that
+  ceiling is indistinguishable from a silently truncated one (see #3099's
+  page-safety guard in `GetAccountRewardHistory`, which hard-errors instead
+  of accepting such a response as complete). The known zero-row/grace-window
+  limitation described above (nothing re-triggers a refetch once Koios's
+  real data appears after `--grace-hours` closes) remains open; #3099's
+  scope was fetch reliability, not coverage staleness beyond what the grace
+  window already covers.
 - **Network validation.** `Check`/`CheckEpoch` never construct a
   `KoiosClient` (they work entirely from the cache), so unlike `Fetch` they
   don't get `NewKoiosClient`'s network-allow-list check for free — both call
@@ -4932,6 +5083,233 @@ never the reverse.
   the only networks this tool ever validates against: an unvalidated
   `network` value reaching `compareEpochAccounts` could otherwise silently
   generate wrong-network-tagged stake addresses instead of erroring.
+
+#### Chunked, checkpointed account-reward fetch (dingo #3099)
+
+Extends #3097's account-fetch layer (`fetch_accounts.go`) with the
+reliability-at-scale properties its own doc comments explicitly deferred:
+byte-size-aware chunking, durable mid-epoch resume across a process restart,
+and page-safety hardening for `/account_reward_history`'s real (not
+Range-paginated) behavior. Wired directly into #3097's existing functions
+and schema rather than as a parallel implementation — `FetchEpochAccountsWithAddrs`,
+`Cache.CommitAccountRewardsForEpoch`, `koios_account_coverage`, and
+`compareEpochAccounts`'s coverage gate are all unchanged in contract and
+every one of #3097's own tests passes unmodified.
+
+- **Byte+count-bounded chunking.** `chunkAddressesByCountAndSize`
+  (`account_chunk.go`) replaces `chunkAddresses`' count-only chunking inside
+  `fetchAccountRewardsForEpoch` (the unexported implementation
+  `FetchAccountRewardsForEpoch`/`FetchEpochAccountsWithAddrs` both now call),
+  bounding each `/account_reward_history` request by both address count
+  (`--account-chunk-size`, default `koiosAccountChunkSize` = 100) and encoded
+  body size (`--account-chunk-max-bytes`, default `koiosAccountChunkMaxBytesDefault`
+  = 32 KiB). The address universe is sorted before chunking — required so the
+  same underlying address set always produces the same chunk boundaries
+  (and therefore the same content-addressed chunk hash) regardless of
+  `addressUniverse`'s incoming order, which `BuildAccountAddressUniverse`
+  does not itself guarantee is stable across calls.
+- **Durable per-chunk checkpoint, resumable across a restart.** Two new
+  tables, purely additive alongside #3097's `koios_account_rewards`/
+  `koios_account_coverage`: `koios_account_fetch_staged_rows` (a chunk's
+  fetched rows, staged — not yet the authoritative reference set) and
+  `koios_account_checked` (per-address "Koios answered for this address"
+  markers, keyed by `chunk_hash`, doubling as the done-chunk signal via
+  `Cache.GetDoneAccountChunkHashes`). Each chunk that succeeds calls
+  `Cache.SaveAccountFetchChunkProgress` immediately rather than only
+  accumulating rows in memory the way #3097's original implementation did.
+  On any chunk error, `fetchAccountRewardsForEpoch` returns early exactly as
+  #3097's version did (nothing committed to `koios_account_rewards`/
+  `koios_account_coverage`) — but the checkpointed chunks' progress survives,
+  so a subsequent call (after a process restart or a retried `fetch`) skips
+  them and only re-fetches whatever never completed, instead of redoing the
+  whole epoch from scratch. Once every chunk in the current plan is
+  checkpointed, `Cache.GetStagedAccountRows` reads them all back and calls
+  the existing, unmodified `Cache.CommitAccountRewardsForEpoch` exactly
+  once — the same atomic replace-and-gate #3097 always used, now fed from
+  durable staging instead of an in-memory slice. **Neither staging table is
+  ever bulk-cleared after a successful commit** — `koios_account_checked`
+  must persist indefinitely since the zero-reward/lifecycle reporting below
+  reads it long after the fetch completes, and `koios_account_fetch_staged_rows`
+  must persist too so a later idempotent re-run of an already-complete epoch
+  with an unchanged universe finds real rows to re-commit instead of
+  committing an empty set over the correct one; the two tables grow at the
+  same rate `koios_account_rewards` itself already does, which is an accepted
+  characteristic of this cache, not a new problem. `--force-refresh`
+  (`FetchConfig.ForceRefresh`, threaded to `fetchAccountRewardsForEpoch` as
+  `forceRefresh`) is the one caller that deliberately bypasses the "trust an
+  already-checkpointed chunk" behavior — without it, an unchanged address
+  universe would produce the exact same content-addressed chunk hashes as
+  before, every chunk would look already "done," and `--force-refresh` would
+  silently just re-commit the old rows instead of refetching anything.
+  Critically, this bypass is done by ignoring `doneHashes` in the
+  pending-chunk filter, **never** by pre-invalidating (deleting) the existing
+  checkpoint data before dispatch: an earlier version of this fix called
+  `Cache.InvalidateStaleAccountChunks` with a nil current-plan hash list up
+  front, which — if the forced refresh then failed partway (e.g. a Koios
+  outage mid-refresh) — left `koios_account_checked`/
+  `koios_account_fetch_staged_rows` wiped or partial for an epoch whose
+  `koios_account_coverage` row still (correctly) reported `complete = true`
+  from the last successful run, since `CommitAccountRewardsForEpoch` is never
+  reached on a partial failure. That mismatch would make a later
+  Observer/Fetch attempt never retry (coverage already looks complete) while
+  `accountLifecycleMismatches` read the wiped/partial state as if it belonged
+  to a genuinely complete epoch. Each chunk's own `SaveAccountFetchChunkProgress`
+  call already replaces just that chunk's rows atomically once its re-fetch
+  succeeds, so leaving old data in place until then means a chunk never
+  reached by a failed refresh attempt simply keeps whatever valid data it
+  already had — no data is ever destroyed before its replacement is confirmed
+  fetched.
+- **A partial force-refresh downgrades coverage instead of leaving it stale.**
+  Preserving old data (above) still leaves one hazard: if one chunk succeeds
+  with fresh (repaired) data while another fails and keeps its untouched
+  pre-refresh data, `koios_account_checked` now holds two chunks from two
+  different Koios snapshots that were never actually valid together — and the
+  pre-existing `complete = true` coverage row from before the refresh attempt
+  is untouched (`CommitAccountRewardsForEpoch` is never reached on a partial
+  failure), so nothing would otherwise signal that this mixed state shouldn't
+  be trusted. `fetchAccountRewardsForEpoch` closes this via a shared
+  `wrapForceRefreshFailure` closure that calls `Cache.MarkAccountCoverageIncomplete`
+  — a single-column `complete = false` downgrade that touches neither
+  `koios_account_rewards` nor the checkpoint tables — wrapping *every* error
+  return once dispatch begins: a chunk failure, `ctx` cancellation, reading
+  staged rows back, the final per-chunk hash re-check, or
+  `Cache.CommitAccountRewardsForEpoch` itself. Every one of these can follow
+  chunks that already succeeded and replaced their old rows during dispatch,
+  so the same mixed-snapshot risk applies regardless of which specific step
+  fails afterward — not just an in-flight chunk error. This is sufficient
+  on its own: `compareEpochAccounts`'s existing `!coverage.Complete` gate
+  already refuses to run `CompareAccountEpoch`/`accountLifecycleMismatches`
+  against an incomplete epoch, and `GetEpochsMissingAccountCoverage`'s
+  existing `a.complete = 0` filter already re-selects the epoch for a future
+  plain (non-force-refresh) fetch attempt — which, since the untouched
+  chunk's data was never deleted, can self-heal by simply re-confirming
+  `complete = true` from the preserved checkpoint state, without requiring
+  another explicit `--force-refresh`.
+- **Selective invalidation on universe/chunk-plan change.**
+  `Cache.InvalidateStaleAccountChunks` prunes staged rows/checked markers for
+  any chunk hash no longer present in the current plan before dispatch —
+  because chunk hashes are content-addressed, only chunks whose address
+  grouping actually changed (a changed address universe, or an operator
+  tuning `--account-chunk-size`/`--account-chunk-max-bytes` between runs) are
+  invalidated; an unaffected chunk keeps its checkpointed progress and still
+  counts as done. Both this and `Cache.SaveAccountFetchChunkProgress` run
+  their multi-table deletes/inserts inside a single transaction each, so a
+  crash partway through can never leave `koios_account_checked` pointing at
+  a chunk whose staged rows are gone (which `GetDoneAccountChunkHashes` would
+  otherwise still report as "done").
+- **A checkpointed empty chunk is not trusted during the grace window,
+  and neither is a mixed result.** A subtle interaction with the
+  zero-row/grace-hours gate below: if Koios's publishing lag means a chunk
+  returns zero rows early in the grace window, that chunk still checkpoints
+  (a real HTTP success, just an empty result). Naively treating it as
+  "done" forever would mean a later retry — even within the same still-open
+  grace window — would never re-ask Koios and could eventually commit a
+  stale, empty result as `complete = true` once `graceHours` elapses,
+  silently losing rewards Koios published in the meantime.
+  `fetchAccountRewardsForEpoch` therefore only trusts a checkpointed chunk as
+  skippable (not re-dispatched) when either it has genuinely non-empty
+  staged rows (`Cache.GetChunkHashesWithStagedRows`) or the grace window has
+  already closed by the time of the call. The same care applies to the
+  final `complete` decision itself: it is not "did the aggregate staged-row
+  total across all chunks end up non-zero" (one non-empty chunk would
+  trivially satisfy that even while a different chunk in the very same plan
+  is still empty-and-lagging) but "does *every* chunk in the current plan
+  have a currently-real result" — re-checked via
+  `Cache.GetChunkHashesWithStagedRows` after dispatch, not reused from
+  before it, so a chunk that resolved during this very call is counted.
+- **An empty universe invalidates, not just skips, prior checkpoint data.**
+  If the address universe shrinks to empty after a previous, non-empty
+  attempt already left checkpoint rows behind for this `(network, epoch)`
+  (e.g. Dingo's `reward_account_output` rows for this stake epoch were
+  pruned/rolled back between calls), `fetchAccountRewardsForEpoch`'s
+  empty-universe path calls `Cache.InvalidateStaleAccountChunks` with a nil
+  current-plan hash list — deleting every existing chunk's checkpoint data,
+  since content-addressed invalidation treats "not in the current plan" as
+  stale for any hash not present in the (empty) list. Skipping this would
+  leave the old universe's rows in `koios_account_checked` even though
+  `koios_account_rewards`/`koios_account_coverage` correctly read empty —
+  and `accountLifecycleMismatches` (below) would then read those stale rows
+  as if they belonged to this epoch's current, correctly-empty universe.
+- **Page-safety hardening.** `/account_reward_history` is not usably
+  Range-paginated — confirmed live against preview: repeated requests with
+  different `Range` values return the same first row window rather than
+  paging further. `GetAccountRewardHistory` therefore hard-errors
+  (`ErrKoiosPermanent`) whenever a response reaches `koiosPageSize` (1000)
+  rows rather than accepting a response that size as a complete, trustworthy
+  answer — there is no reliable way to fetch "the rest," so the only safe
+  response is to refuse and require a smaller `--account-chunk-size`, never
+  silently truncate. `get()`/`post()` also now bound every response body
+  read at `koiosMaxResponseBytes` (32 MiB) via `readBodyLimited`, a
+  defensive ceiling neither had before; `errKoiosResponseTooLarge` wraps
+  `ErrKoiosPermanent` so an oversized response is never blindly retried,
+  either within one call or automatically on a later `fetch` run (the fix is
+  a smaller configured chunk size, not a retry). Chunking also reserves a
+  fixed `koiosAccountRequestEnvelopeOverhead` (64 bytes) from the configured
+  `--account-chunk-max-bytes` budget before chunking, since
+  `chunkAddressesByCountAndSize` only bounds the address array's own encoded
+  size, not the `{"_stake_addresses":[...],"_epoch_no":N}` wrapper around
+  it — without this, the true request body could exceed a small configured
+  budget by that fixed amount on every chunk.
+- **Zero-reward and lifecycle reporting.** `accountLifecycleMismatches`
+  (`check.go`), appended to `compareEpochAccounts`'s result, answers two
+  dimensions #3097's `CompareAccountEpoch` structurally cannot: it only ever
+  compares keys present in at least one side's row map, so a
+  confirmed-zero-reward address (Koios answered, no reward, so no row is
+  ever emitted for it) never enters that comparison at all — this half is
+  read from `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`).
+  Newly-registered/deregistered accounts are diffed from **Dingo's own
+  epoch-scoped `reward_account_output` rows** at the current and previous
+  stake epoch (`dingo.GetRewardAccountOutputs`, decoded via
+  `dingoRewardAddressSet`) — deliberately *not* from
+  `koios_account_checked`'s persisted "requested universe": that set unions
+  in Koios's own all-time historical account list
+  (`BuildAccountAddressUniverse`), resolved once per `Fetch` run and reused
+  across every epoch, so it stays essentially static regardless of whether
+  an account is genuinely active/delegated in a given epoch — diffing
+  against it would make the lifecycle categories reflect almost nothing for
+  a Koios-known account, since it never leaves the union. Every row from
+  either dimension is reported as one aggregate `CheckMismatch` per category
+  (`aggregateAccountLifecycleMismatch`) — a total count plus a sample capped
+  at `maxAccountLifecycleSample` (20) addresses — rather than one row per
+  address: zero-reward accounts in particular can be the majority of a whole
+  network's address universe, and one-row-per-address would scale cache
+  growth, insert time, and JSON report size with the size of that universe.
+  All three categories — `CategoryAcctZeroReward`,
+  `CategoryAcctNewlyRegistered`, `CategoryAcctDeregistered` — are purely
+  informational: `DetermineStatus` has a dedicated no-op case for them, so
+  none can ever turn an otherwise clean epoch into `FAIL` or `ERROR`. A
+  genuine cache or Dingo DB error from either lookup is reported as
+  `CategoryDBError` rather than silently swallowed, including a malformed
+  previous- or current-epoch `reward_account_output` row (an unsupported
+  credential tag, counted by `dingoRewardAddressSet`'s `decodeErrs` return) —
+  silently dropping such a row instead would make its address look
+  deregistered or never-newly-registered purely because it failed to decode,
+  not because it actually changed. A decode failure on *either* side does not
+  just get reported alongside an otherwise-computed diff: the diff itself is
+  skipped entirely (only the zero-reward half above still runs) whenever
+  `prevDecodeErrs > 0 || currDecodeErrs > 0`, since an incomplete address set
+  on either side would make every other unaffected address in that set look
+  like a false lifecycle change too. The newly-registered/deregistered half is
+  also disabled entirely
+  (returning only the zero-reward half, which doesn't depend on any
+  historical epoch's data) in two cases: `stakeEpoch == 0` (no valid
+  previous stake epoch to diff against), and when `dingo` is a
+  `*DatabaseSource` — the in-process observer's reward source, which reads
+  `reward_account_output` through core-mode's rolling pruning window and
+  cannot distinguish "the previous stake epoch genuinely had no reward
+  accounts" from "its rows have since been pruned" (both surface as an
+  empty, error-free result); treating a pruned-empty result as a complete
+  previous-epoch universe would make every current account look newly
+  registered. Only `*DingoDB` (the standalone CLI's full, unpruned copy) is
+  trusted for this diff.
+- **Configuration.** `--account-chunk-size`/`--account-chunk-max-bytes`
+  (standalone CLI: `fetch`/`run`/`watch`) thread through `FetchConfig`/
+  `ObserverConfig` the same way `GraceHours` already does, down to
+  `dingo.KoiosParityConfig.AccountChunkSize`/`AccountChunkMaxBytes` and
+  `internal/config.KoiosParityConfig`'s matching YAML/env fields
+  (`DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_SIZE`/`_MAX_BYTES`) for the in-process
+  observer. 0 for either (the default) selects the package default —
+  existing `--accounts` behavior is unchanged unless explicitly tuned.
 
 ### Bark (`bark/`)
 
@@ -6904,16 +7282,24 @@ only after every stage has fully drained), and `Close` waits for that exit
 this goroutine cannot outlive the `LedgerState`.
 
 Each drained error is classified via `errBlockPipelineEta0Unavailable`
-(`ledger/verify_header.go`), the sentinel `blockPipelineEta0Provider` wraps
-every error it returns with: in this pipeline's context, a failure there
-always means no Praos epoch nonce is available for the slot, which in
-practice only happens for Byron-era blocks (Shelley+ slots already
-committed to `ls.chain` should always have epoch/nonce data by the time the
-pipeline validates them). Errors matching that sentinel are logged at debug
-level and counted in the `dingo_ledger_block_pipeline_expected_eta0_errors_total`
-counter; everything else reaching `errorsChan` (decode errors, non-Byron
-validation failures, `pipeline.ErrBlockNotValidated` and other apply-stage
-invariant violations) is logged at error level and counted in
+(`ledger/verify_header.go`). `blockPipelineEta0Provider` wraps in that
+sentinel only the one error `headerVerificationEpoch` can return that is
+genuinely Byron-specific: `errEpochNonceUnavailable`, raised solely by
+`headerVerificationEpoch`'s empty-nonce branch (epoch data covers the slot,
+but that epoch has no Praos nonce — in practice only Byron-era slots, since
+Shelley+ slots already committed to `ls.chain` should always have
+epoch/nonce data by the time the pipeline validates them). Every other error
+`headerVerificationEpoch` can return — `errHeaderVerificationDeferred`
+(past-horizon/missing-epoch-data), hard-fork-summary lookup failures,
+forecast-build errors — is returned by `blockPipelineEta0Provider`
+unchanged, not wrapped in the sentinel, so a genuine failure on a non-Byron
+block is never misclassified as the harmless Byron case. Errors matching
+`errBlockPipelineEta0Unavailable` are logged at debug level and counted in
+the `dingo_ledger_block_pipeline_expected_eta0_errors_total` counter;
+everything else reaching `errorsChan` (decode errors, non-Byron validation
+failures, the other `headerVerificationEpoch` errors above,
+`pipeline.ErrBlockNotValidated` and other apply-stage invariant violations)
+is logged at error level and counted in
 `dingo_ledger_block_pipeline_unexpected_errors_total` — a nonzero value
 there indicates a genuine decode/validate/apply problem worth investigating,
 distinct from the expected Byron-era volume. These are independent counters
@@ -7024,9 +7410,25 @@ when nothing is currently fetching (`chainsyncBlockfetchReadyChan == nil &&
 `restartQueuedBlockfetchAfterForkLocked` on the success paths, since the same
 queue-full failure fires once per rejected header while a healthy batch is
 already draining the backlog, and tearing that batch down every time would
-thrash forever instead of ever completing one. Regression tests:
-`TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow` and
-`TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch`
+thrash forever instead of ever completing one. It restarts via
+`startQueuedBlockfetchOnLocked`, not `startQueuedBlockfetchLocked` directly,
+so a successful restart here retargets `selectedBlockfetchConnId` the same
+guarded way every other connection-switching path does (capture the
+selection before the call, which releases `chainsyncBlockfetchMutex` around
+the network request, and only move it to `connId` afterward if no
+concurrent path already moved it elsewhere) — calling
+`startQueuedBlockfetchLocked` directly left the selection unretargeted after
+a successful start, so the next batch's connection pick could still land on
+a stale peer. If the restart itself fails, it clears the queued headers
+(`clearQueuedHeaders`) and requests a chainsync re-sync
+(`ChainsyncResyncReasonForkQueueOverflowRestartFailed`) rather than only
+logging: with nothing else able to ever schedule a fetch once the queue is
+full (see above), leaving the headers queued after a failed restart attempt
+would strand them permanently, exactly the outage this function exists to
+prevent — merely logging and returning does not. Regression tests:
+`TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow`,
+`TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch`, and
+`TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails`
 (`ledger/chainsync_fork_queue_full_test.go`).
 
 **Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
@@ -7050,7 +7452,7 @@ itself. Chain-selection can decide to abandon a fork while the reader
 goroutine has already gathered and submitted a batch of blocks — from that
 very fork — to the pipeline's decode/validate workers and is blocked
 draining `Results()` for it. `drainBlockPipelineBeforeRollback`
-(`ledger/state.go`) closes part of that window: called at the top of
+(`ledger/state.go`) closes part of that window: called near the top of
 `rollbackChainAndState`, before `ls.chain.Rollback`, it waits (via
 `pipeline.BlockPipeline.WaitForDrain`/`PendingCount`, bounded by
 `BlockPipelineRollbackDrainTimeout`, default 5s) for `ls.blockPipeline`'s
@@ -7067,10 +7469,53 @@ rollback or otherwise, so nothing from that goroutine's own current attempt
 is still in flight when this runs; the wait there is expected to return
 immediately in practice.
 
-What this does *not* close: `drainBlockPipelineBeforeRollback` only waits
-for `ls.blockPipeline`'s own decode/validate stages, not for
-`ledgerProcessBlocksFromSource`'s subsequent DB-apply of a batch already
-drained from the pipeline before the wait started — that step runs
+`rollbackChainAndState` sequences three steps in order, and the ordering is
+load-bearing in both directions: `drainBlockPipelineBeforeRollback` first,
+then `validateAndEmitRollbackUndo` (reject-then-emit-undo-events, from
+issue #2287/#3209's ordering fix, `ledger/block_event.go`), then
+`ls.chain.Rollback`. Draining before validating/emitting matters because
+`validateAndEmitRollbackUndo`'s emit reads what is already committed to the
+db (`blocksAboveSlot`) — a block the pipeline is still decoding/validating/
+applying for the fork about to be abandoned is not there yet, so emitting
+before it finishes would leave it with no undo event once it does finish
+applying, even though `ls.chain.Rollback` still physically deletes it.
+Emitting before truncating matters for the opposite reason (see
+`emitRollbackTransactionEvents`'s ordering contract): the block-apply
+goroutine can start applying the post-rollback chain, and publish forward
+events on the same `ledger.tx` lane, the moment `ls.chain.Rollback` lands.
+
+`blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
+gap in the same window: `drainBlockPipelineBeforeRollback` only accounts
+for work already *submitted* to `blockPipeline` (`PendingCount`) — raw
+blocks `ledgerReadChainIterator` has already pulled off the chain iterator
+into its local batch, but has not yet handed to `decodeReadChainBatch`
+(`Submit`), hold nothing in the pipeline's queues, so `WaitForDrain` can
+observe an empty pipeline and return immediately while the reader is about
+to submit and apply exactly those stale, about-to-be-abandoned blocks
+anyway. The reader holds `blockPipelineGatherMutex`'s read lock for the
+whole gather-then-submit span (acquired lazily, immediately before any
+non-blocking `iter.Next()` call and immediately after any blocking call
+that returns real data, so the lock is never held across a call that is
+purely waiting for the chain to grow — doing so would deadlock a
+concurrent rollback's write-lock attempt against the very
+`ls.chain.Rollback` call that would otherwise wake the reader);
+`rollbackChainAndState` holds the write lock from before
+`drainBlockPipelineBeforeRollback` through `ls.chain.Rollback`, so no
+gather-then-submit cycle can start, and none already in flight can reach
+`Submit`, while a rollback is physically truncating the chain. Once
+`ls.chain.Rollback` returns, `ChainIterator.needsRollback` bookkeeping
+(set under the chain package's own locks in `Chain.rollbackLocked`) makes
+any later `iter.Next()` call safe on its own, so the write lock does not
+need to extend past it. This does not replace
+`processChainIteratorRollback`'s stale-tip backstop for the DB-apply
+window described below — it closes the earlier, previously entirely
+unguarded window between gathering raw blocks and submitting them.
+
+What this still does *not* close: `drainBlockPipelineBeforeRollback` (even
+combined with `blockPipelineGatherMutex`) only waits for `ls.blockPipeline`'s
+own decode/validate stages plus the reader's own not-yet-submitted gather,
+not for `ledgerProcessBlocksFromSource`'s subsequent DB-apply of a batch
+already drained from the pipeline before the wait started — that step runs
 entirely outside `blockPipeline` (phase 2, wiring real ledger apply into
 `gouroboros/pipeline.ApplyFunc`, is deliberately deferred to #3227, as
 described above). A rollback landing exactly in that narrower window can
@@ -7087,11 +7532,16 @@ read-chain-attempt restart), not to eliminate the window outright.
 Tests: `TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp` and
 `TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork` (the latter
 proves the wait genuinely blocks until the pipeline's backlog clears, not
-merely that it checks `PendingCount()` once) and
+merely that it checks `PendingCount()` once),
 `TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline` (proves
 attaching an idle, started `blockPipeline` does not change
 `processChainIteratorRollback`'s rollback decision or resulting state
-versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`.
+versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`; and
+`TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather`
+(`ledger/block_pipeline_gather_mutex_test.go`), which proves
+`blockPipelineGatherMutex`'s write lock cannot be obtained while the reader
+is mid-gather with a raw block already collected, and can be obtained again
+once the batch is delivered.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 

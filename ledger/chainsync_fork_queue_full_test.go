@@ -15,10 +15,14 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -173,6 +177,97 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 	)
 }
 
+// TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails is
+// a regression test for ensureBlockfetchDrainingAfterForkQueueFailure
+// previously only logging a warning when the restart it attempts
+// (startQueuedBlockfetchLocked/startQueuedBlockfetchOnLocked) itself fails.
+// With nothing already fetching and the header queue full, that left the
+// queued headers permanently stranded: chain.AddBlockHeader's capacity check
+// rejects every later header, from any peer, before it can ever reach the
+// "should I start a fetch" logic, so nothing would ever retry. The fix
+// clears the queued headers and requests a chainsync re-sync instead of
+// just logging, matching noteBlockfetchRangeUnavailable's equivalent
+// recovery for the same "stuck queue" shape.
+func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	maxHeaders := fixture.ls.chain.MaxQueuedHeaders()
+	connId := testChainsyncConnId(6203, 3001)
+	trigger := buildOverflowForkPath(fixture, connId, maxHeaders+5)
+
+	err := fixture.ls.chain.AddBlockHeader(trigger)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	// Every restart attempt fails, exercising the failure branch this test
+	// targets rather than the already-covered success branch.
+	fixture.ls.config.BlockfetchRequestRangeFunc = func(
+		_ ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) error {
+		return errors.New("simulated blockfetch request failure")
+	}
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	fixture.ls.config.EventBus = bus
+	resyncSubID, resyncCh := bus.SubscribeWithBuffer(
+		event.ChainsyncResyncEventType,
+		4,
+	)
+	require.NotEqual(t, event.EventSubscriberId(0), resyncSubID)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+
+	evt := ChainsyncEvent{
+		ConnectionId: connId,
+		Point: ocommon.NewPoint(
+			trigger.SlotNumber(),
+			trigger.Hash().Bytes(),
+		),
+		BlockHeader: trigger,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				trigger.SlotNumber()+10,
+				testHashBytes("overflow-peer-tip-ahead-start-fails"),
+			),
+			BlockNumber: trigger.BlockNumber() + 1,
+		},
+	}
+
+	// nil pending: pendingPublishes.add publishes immediately on a nil
+	// receiver, which is what lets the subscription above observe the
+	// resync request synchronously.
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil)
+	require.NoError(t, err)
+	require.False(t, resolved)
+
+	assert.Equal(
+		t,
+		0,
+		fixture.ls.chain.HeaderCount(),
+		"a restart failure with nothing else able to ever retry must "+
+			"clear the stranded queued headers rather than leave them "+
+			"permanently stuck",
+	)
+
+	resyncEvt := testutil.RequireReceive(
+		t, resyncCh, 2*time.Second,
+		"a chainsync re-sync must be requested when the recovery "+
+			"restart itself fails",
+	)
+	data, ok := resyncEvt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok, "unexpected event payload %T", resyncEvt.Data)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
+		data.Reason,
+	)
+}
+
 // TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch guards
 // the other side of the same fix: the identical queue-full failure can fire
 // repeatedly (once per rejected header) while a healthy batch is already
@@ -203,6 +298,13 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 	}
 	// Simulate a blockfetch batch already in flight.
 	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	// Captured before tryResolveFork runs so the assertion below can prove
+	// the existing batch's channel specifically survived untouched, not
+	// merely that *a* non-nil channel exists afterward -- a regression
+	// that replaced it with a brand new channel (without ever calling
+	// BlockfetchRequestRangeFunc) would pass requestCount==0 but still be
+	// wrong.
+	preExistingReadyChan := fixture.ls.chainsyncBlockfetchReadyChan
 
 	evt := ChainsyncEvent{
 		ConnectionId: connId,
@@ -229,5 +331,13 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		requestCount,
 		"an already in-progress blockfetch batch must not be "+
 			"interrupted/restarted by a queue-full fork-extension failure",
+	)
+	assert.True(
+		t,
+		preExistingReadyChan == fixture.ls.chainsyncBlockfetchReadyChan,
+		"the existing batch's ready channel must be left untouched -- a "+
+			"regression that replaced it with a new channel without ever "+
+			"calling BlockfetchRequestRangeFunc would otherwise pass "+
+			"undetected",
 	)
 }

@@ -110,6 +110,15 @@ func BuildValidatedConwayBlockBytes(
 	}
 
 	const opCertSeqNum = uint32(0)
+	// opCertKesPeriod is the absolute Cardano KES period at which this
+	// synthetic operational certificate claims to have been issued -- i.e.
+	// the absolute period at which the KES key was fresh (its own internal
+	// period 0). It is fixed at genesis rather than tracking the chosen
+	// slot: consensus.HeaderValidator derives the KES primitive's own
+	// period argument as currentAbsolutePeriod - OpCert.KesPeriod (see
+	// validateKESSignature), not from OpCert.KesPeriod directly, so this
+	// only needs to stay within maxKESEvolutions of whatever slot ends up
+	// chosen, which a 200-slot search window comfortably satisfies.
 	const opCertKesPeriod = uint32(0)
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
@@ -119,6 +128,21 @@ func BuildValidatedConwayBlockBytes(
 
 	bodyHash := conwayEmptyBodyHash(t)
 	activeSlotCoeff := big.NewRat(99, 100)
+
+	// currentKesSk/currentKesPeriod track the KES key actually used to
+	// sign, evolved forward (never backward -- KES evolution is
+	// one-directional) to whatever internal period the candidate slot
+	// below requires: currentAbsolutePeriod - opCertKesPeriod (see
+	// validateKESSignature's evolutionPeriod). slot increases
+	// monotonically through the search range, so that required internal
+	// period is non-decreasing too, and lazily evolving here -- rather
+	// than fixing the signature to period 0 regardless of which slot in
+	// the range is ultimately chosen -- is what keeps the signature's KES
+	// period consistent with the slot it actually signs for, including
+	// when slotRangeStart sits near a period boundary and the search
+	// crosses into the next period.
+	currentKesSk := kesSk
+	currentKesPeriod := uint64(0)
 
 	for slot := slotRangeStart; slot < slotRangeStart+200; slot++ {
 		slotInt64 := int64(slot) //nolint:gosec // test slots are small
@@ -136,6 +160,25 @@ func BuildValidatedConwayBlockBytes(
 			activeSlotCoeff,
 		)
 		if !consensus.IsVRFOutputBelowThreshold(vrfOutput, threshold) {
+			continue
+		}
+
+		// requiredKesPeriod here is the KES primitive's own internal
+		// period -- how many times the key must have been evolved since
+		// it was fresh at opCertKesPeriod -- not the absolute Cardano
+		// period. See validateKESSignature's evolutionPeriod.
+		requiredKesPeriod := slot/slotsPerKesPeriod - uint64(opCertKesPeriod)
+		evolveFailed := false
+		for currentKesPeriod < requiredKesPeriod {
+			evolved, updateErr := kes.Update(currentKesSk)
+			if updateErr != nil {
+				evolveFailed = true
+				break
+			}
+			currentKesSk = evolved
+			currentKesPeriod++
+		}
+		if evolveFailed {
 			continue
 		}
 
@@ -171,7 +214,11 @@ func BuildValidatedConwayBlockBytes(
 		// extractOriginalBodyCbor can retrieve it for KES verification.
 		headerBody.SetCbor(headerBodyCbor)
 
-		kesSig, signErr := kes.Sign(kesSk, 0, headerBodyCbor)
+		kesSig, signErr := kes.Sign(
+			currentKesSk,
+			requiredKesPeriod,
+			headerBodyCbor,
+		)
 		if signErr != nil {
 			continue
 		}

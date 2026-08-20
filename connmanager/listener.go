@@ -61,10 +61,17 @@ func (c *ConnectionManager) startListener(
 		// On Windows, the "unix" network type is repurposed to create named pipes
 		// for compatibility with configurations that specify "unix" network on Unix systems.
 		if runtime.GOOS == "windows" && l.ListenNetwork == "unix" {
+			// staticcheck sees only the non-Windows build, where
+			// createPipeListener is a stub that always returns an error, so it
+			// calls the comparison always true. It is a real check on Windows,
+			// where the call can succeed. SA4023 is reported against the call
+			// and the comparison separately, so both carry the directive.
+			//nolint:staticcheck // SA4023: always true on the stub build only
 			listener, err := createPipeListener(
 				l.ListenNetwork,
 				l.ListenAddress,
 			)
+			//nolint:staticcheck // SA4023: always true on the stub build only
 			if err != nil {
 				return fmt.Errorf("failed to open listening pipe: %w", err)
 			}
