@@ -355,6 +355,43 @@ type OffchainMetadataConfig struct {
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_OFFCHAIN_METADATA_ALLOW_PRIVATE_ADDRESSES"`
 }
 
+// TokenRegistryConfig holds API-mode CIP-26 token registry sync settings.
+// The sync populates the `metadata` field of GET /assets/{asset} from the
+// off-chain token registry, so wallets can show a token's name, ticker, and
+// decimals without a per-asset lookup against a remote metadata server --
+// which would reveal which assets the user holds. Zero values fall back to
+// the syncer's internal defaults.
+//
+// Disabled by default: the mainnet registry is a roughly 240MB download, so
+// enabling it is an explicit operator decision rather than something a node
+// starts doing on upgrade.
+type TokenRegistryConfig struct {
+	// Enabled turns the sync on. Only effective in API storage mode.
+	Enabled bool `yaml:"enabled"               envconfig:"DINGO_TOKEN_REGISTRY_ENABLED"`
+	// SourceURL overrides the network-derived registry tarball URL, for
+	// operators running a mirror. Empty selects by network: the Cardano
+	// Foundation registry for mainnet, the IOG testnet registry otherwise.
+	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
+	// Interval controls how often the registry is re-checked. Each check
+	// is a conditional request, so an unchanged registry costs no download.
+	// Values below one minute are raised to it.
+	Interval time.Duration `yaml:"interval"              envconfig:"DINGO_TOKEN_REGISTRY_INTERVAL"`
+	// RequestTimeout bounds the whole download, not one request round trip.
+	RequestTimeout time.Duration `yaml:"requestTimeout"        envconfig:"DINGO_TOKEN_REGISTRY_REQUEST_TIMEOUT"`
+	// UserAgent is sent with the registry request.
+	UserAgent string `yaml:"userAgent"             envconfig:"DINGO_TOKEN_REGISTRY_USER_AGENT"`
+	// MaxBytes bounds the compressed registry download.
+	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
+	// MaxEntryBytes bounds a single registry mapping document.
+	MaxEntryBytes int64 `yaml:"maxEntryBytes"         envconfig:"DINGO_TOKEN_REGISTRY_MAX_ENTRY_BYTES"`
+	// StoreLogos persists base64 logo payloads, which are roughly 90% of
+	// registry bytes. Off by default; text properties are what wallets need.
+	StoreLogos bool `yaml:"storeLogos"            envconfig:"DINGO_TOKEN_REGISTRY_STORE_LOGOS"`
+	// AllowPrivateAddresses permits syncing from private, loopback, and
+	// link-local addresses. Leave false for the default SSRF guard.
+	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES"`
+}
+
 // DefaultChainsyncConfig returns the default chainsync configuration.
 // StallTimeout must match chainsync.DefaultStallTimeout and the
 // fallback in internal/node/node.go.
@@ -594,6 +631,9 @@ type Config struct {
 
 	// Off-chain metadata fetcher configuration.
 	OffchainMetadata OffchainMetadataConfig `yaml:"offchainMetadata"`
+
+	// CIP-26 off-chain token registry sync (API mode).
+	TokenRegistry TokenRegistryConfig `yaml:"tokenRegistry"`
 
 	// Logging configuration (output format and level)
 	Logging LoggingConfig `yaml:"logging"`

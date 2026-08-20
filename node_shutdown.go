@@ -197,6 +197,18 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	// The token registry sync holds a background goroutine and reads n.db
+	// through its store, so it has to stop here, before phase 3 tears the
+	// store down. Run()'s rollback stack only covers startup failure.
+	if n.tokenRegistrySync != nil {
+		if stopErr := n.tokenRegistrySync.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("token registry sync shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	// Stop the Koios parity observer before phase 3 tears down n.db/
 	// n.pluginHost: the observer's background goroutine reads Dingo's
 	// committed reward state through its RewardParitySource, which is backed

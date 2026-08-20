@@ -3104,6 +3104,53 @@ func (q *Queries) GetTip(ctx context.Context) (GetTipRow, error) {
 	return i, err
 }
 
+const getTokenRegistryEntry = `-- name: GetTokenRegistryEntry :one
+SELECT
+    id,
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+FROM token_registry_entry
+WHERE subject = ?
+`
+
+type GetTokenRegistryEntryRow struct {
+	ID          int64
+	Subject     string
+	Name        sql.NullString
+	Ticker      sql.NullString
+	Description sql.NullString
+	Url         sql.NullString
+	Logo        sql.NullString
+	Decimals    sql.NullInt64
+	CreatedAt   sql.NullTime
+	UpdatedAt   sql.NullTime
+}
+
+func (q *Queries) GetTokenRegistryEntry(ctx context.Context, subject string) (GetTokenRegistryEntryRow, error) {
+	row := q.db.QueryRowContext(ctx, getTokenRegistryEntry, subject)
+	var i GetTokenRegistryEntryRow
+	err := row.Scan(
+		&i.ID,
+		&i.Subject,
+		&i.Name,
+		&i.Ticker,
+		&i.Description,
+		&i.Url,
+		&i.Logo,
+		&i.Decimals,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getTransactionByHash = `-- name: GetTransactionByHash :one
 SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
        ttl, block_index, valid
@@ -3738,6 +3785,22 @@ func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnap
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const pruneTokenRegistryEntriesStaleBefore = `-- name: PruneTokenRegistryEntriesStaleBefore :execrows
+DELETE FROM token_registry_entry
+WHERE updated_at < ?
+`
+
+// Reconciles the table against a completed snapshot: every row the snapshot
+// carried was stamped with its timestamp, so anything older was not in the
+// snapshot and is no longer published upstream.
+func (q *Queries) PruneTokenRegistryEntriesStaleBefore(ctx context.Context, updatedAt sql.NullTime) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneTokenRegistryEntriesStaleBefore, updatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const releaseFallbackRewardSnapshotGuard = `-- name: ReleaseFallbackRewardSnapshotGuard :execrows
@@ -4753,4 +4816,56 @@ func (q *Queries) UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertM
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const upsertTokenRegistryEntry = `-- name: UpsertTokenRegistryEntry :exec
+INSERT INTO token_registry_entry (
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject) DO UPDATE SET
+    name = excluded.name,
+    ticker = excluded.ticker,
+    description = excluded.description,
+    url = excluded.url,
+    logo = excluded.logo,
+    decimals = excluded.decimals,
+    updated_at = excluded.updated_at
+`
+
+type UpsertTokenRegistryEntryParams struct {
+	Subject     string
+	Name        sql.NullString
+	Ticker      sql.NullString
+	Description sql.NullString
+	Url         sql.NullString
+	Logo        sql.NullString
+	Decimals    sql.NullInt64
+	CreatedAt   sql.NullTime
+	UpdatedAt   sql.NullTime
+}
+
+// A later sync is authoritative for the whole subject: every property column
+// is overwritten from the incoming row, so a property the registry has since
+// dropped stops being served rather than lingering from an earlier sync.
+func (q *Queries) UpsertTokenRegistryEntry(ctx context.Context, arg UpsertTokenRegistryEntryParams) error {
+	_, err := q.db.ExecContext(ctx, upsertTokenRegistryEntry,
+		arg.Subject,
+		arg.Name,
+		arg.Ticker,
+		arg.Description,
+		arg.Url,
+		arg.Logo,
+		arg.Decimals,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
 }

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"testing"
@@ -123,6 +124,47 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 		"core mode must hard-delete consumed UTxO rows after stability "+
 			"window",
 	)
+}
+
+func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	mdTxn := db.MetadataTxn(true)
+	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
+		for idx := 0; idx <= cleanupConsumedUtxoBatchSize; idx++ {
+			txID := bytes.Repeat([]byte{0}, 32)
+			binary.BigEndian.PutUint32(txID[:4], uint32(idx+1))
+			if err := db.CreateUtxo(txn, &models.Utxo{
+				TxId:        txID,
+				OutputIdx:   0,
+				AddedSlot:   1_000,
+				DeletedSlot: 5_000,
+				Amount:      types.Uint64(1),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	ls := newLedgerStateForCleanup(db, 100_000)
+	ls.cleanupConsumedUtxos()
+
+	remaining, err := db.Metadata().GetUtxosDeletedBeforeSlot(
+		50_000,
+		cleanupConsumedUtxoBatchSize+1,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Len(t, remaining, 1, "one eligible row must remain for a later run")
+
+	ls.cleanupConsumedUtxos()
+	remaining, err = db.Metadata().GetUtxosDeletedBeforeSlot(
+		50_000,
+		cleanupConsumedUtxoBatchSize+1,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "the next run must resume the bounded cleanup")
 }
 
 func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
