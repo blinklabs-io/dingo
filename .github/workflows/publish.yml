@@ -260,18 +260,24 @@ jobs:
         shell: bash
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_OS: ${{ matrix.os }}
+          RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           _binary_name="$APPLICATION_NAME"
-          if [ "${{ matrix.os }}" = "windows" ]; then
+          if [ "$MATRIX_OS" = "windows" ]; then
             _binary_name="${APPLICATION_NAME}.exe"
           fi
-          _filename="${APPLICATION_NAME}-${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          _filename="${APPLICATION_NAME}-${RELEASE_TAG}-${MATRIX_OS}-${MATRIX_ARCH}.tar.gz"
           tar czf "$_filename" "$_binary_name"
           curl \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: token $RELEASE_UPLOAD_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@${_filename}" \
-            "https://uploads.github.com/repos/${{ github.repository_owner }}/${APPLICATION_NAME}/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}"
+            "https://uploads.github.com/repos/${REPOSITORY_OWNER}/${APPLICATION_NAME}/releases/${RELEASE_ID}/assets?name=${_filename}"
         shell: bash
       - name: Attest binary
         if: startsWith(github.ref, 'refs/tags/')
