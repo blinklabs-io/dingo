@@ -357,6 +357,16 @@ var flagSpecs = []flagSpec{
 		"koios-parity-accounts",
 		"also validate #3097 per-account exact reward parity for every epoch (default: true)",
 	),
+	intFlag(
+		"KoiosParity.AccountChunkSize",
+		"koios-parity-account-chunk-size",
+		"max stake addresses per /account_reward_history request (0 = package default, 100)",
+	),
+	intFlag(
+		"KoiosParity.AccountChunkMaxBytes",
+		"koios-parity-account-chunk-max-bytes",
+		"max encoded body size per /account_reward_history request (0 = package default, 32KiB)",
+	),
 
 	// Peer governance
 	intFlag(

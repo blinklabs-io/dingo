@@ -38,8 +38,18 @@ func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
 		key := field.Endpoint + "." + field.Field
 		require.NotEmpty(t, field.Endpoint)
 		require.NotEmpty(t, field.Field)
-		require.True(t, validClasses[field.Class], "invalid coverage class for %s", key)
-		require.NotEmpty(t, field.Reason, "coverage reason is required for %s", key)
+		require.True(
+			t,
+			validClasses[field.Class],
+			"invalid coverage class for %s",
+			key,
+		)
+		require.NotEmpty(
+			t,
+			field.Reason,
+			"coverage reason is required for %s",
+			key,
+		)
 		_, duplicate := byKey[key]
 		require.False(t, duplicate, "duplicate coverage entry for %s", key)
 		byKey[key] = field
@@ -48,7 +58,22 @@ func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
 	requireResponseFieldsCovered(t, byKey, "/tip", KoiosTipResp{})
 	requireResponseFieldsCovered(t, byKey, "/epoch_info", KoiosEpochInfoResp{})
 	requireResponseFieldsCovered(t, byKey, "/totals", KoiosTotalsResp{})
-	requireResponseFieldsCovered(t, byKey, "/pool_history", KoiosPoolHistoryItem{})
+	requireResponseFieldsCovered(
+		t,
+		byKey,
+		"/pool_history",
+		KoiosPoolHistoryItem{},
+	)
+	// dingo #3099: KoiosAccountRewardHistoryItem was not previously enforced
+	// here, so a future field added to it would go unclassified without any
+	// test failing — close that gap the same way every other response
+	// struct is already guarded.
+	requireResponseFieldsCovered(
+		t,
+		byKey,
+		"/account_reward_history",
+		KoiosAccountRewardHistoryItem{},
+	)
 
 	// Fields selected by the pool-discovery helpers use function-local response
 	// structs, and documented fields omitted from preview/preprod responses are

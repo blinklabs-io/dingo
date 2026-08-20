@@ -41,6 +41,7 @@ func addRunFlags(cmd *cobra.Command) {
 	cmd.Flags().
 		Bool("all", false, "re-check all cached epochs (not just unchecked/stale)")
 	addAccountsFlag(cmd)
+	addAccountChunkFlags(cmd)
 }
 
 func runCommand(cmd *cobra.Command, _ []string) error {
@@ -56,6 +57,10 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	workers, _ := cmd.Flags().GetInt("workers")
 	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
+	accountChunkSize, accountChunkMaxBytes, err := resolveAccountChunkFlags(cmd)
 	if err != nil {
 		return err
 	}
@@ -87,13 +92,15 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 
 		slog.Info("koios-parity: fetch phase starting", "network", network)
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-			Network:         network,
-			APIKey:          koiosAPIKey(cmd),
-			CachePath:       cachePath,
-			Concurrency:     concurrency,
-			AccountsEnabled: accounts,
-			AccountsSource:  accountsSource,
-			GraceHours:      graceHours,
+			Network:              network,
+			APIKey:               koiosAPIKey(cmd),
+			CachePath:            cachePath,
+			Concurrency:          concurrency,
+			AccountsEnabled:      accounts,
+			AccountsSource:       accountsSource,
+			GraceHours:           graceHours,
+			AccountChunkSize:     accountChunkSize,
+			AccountChunkMaxBytes: accountChunkMaxBytes,
 		}, logger)
 		if fetchErr != nil {
 			return fmt.Errorf("fetch: %w", fetchErr)
