@@ -270,9 +270,10 @@ upstream tip and is single-flight across its timer and epoch-boundary
 triggers. The deferral needs a known upstream tip: a node with no connected
 peer has no catch-up distance to measure, so cleanup falls back to running
 off the local tip alone rather than deferring for as long as the node stays
-peerless. This keeps the potentially large `utxo`/stake-reference scan from
-holding SQLite's single write connection during historical catch-up; the
-rows remain eligible and are reclaimed once the node is near the upstream tip.
+peerless. Each eligible run deletes at most one bounded batch, so the
+potentially large `utxo`/stake-reference scan cannot hold SQLite's single
+write connection indefinitely; later timer or epoch-boundary runs reclaim the
+remaining rows once the node is near the upstream tip.
 API mode retains spent UTxO metadata for historical transaction queries.
 
 ## ER Diagrams
