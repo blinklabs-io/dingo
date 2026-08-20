@@ -109,12 +109,13 @@ const (
 	// Positions in gouroboros v0.193.3 UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// their runtime function names before filtering by index.
-	alonzoUtxoValidatePlutusScriptsRuleIndex   = 27
-	babbageUtxoValidatePlutusScriptsRuleIndex  = 31
-	conwayUtxoValidateFeeTooSmallRuleIndex     = 24
-	conwayUtxoValidateExUnitsTooBigRuleIndex   = 39
-	conwayUtxoValidatePlutusScriptsRuleIndex   = 43
-	dijkstraUtxoValidatePlutusScriptsRuleIndex = 38
+	alonzoUtxoValidatePlutusScriptsRuleIndex            = 27
+	babbageUtxoValidatePlutusScriptsRuleIndex           = 31
+	conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex = 18
+	conwayUtxoValidateFeeTooSmallRuleIndex              = 24
+	conwayUtxoValidateExUnitsTooBigRuleIndex            = 39
+	conwayUtxoValidatePlutusScriptsRuleIndex            = 43
+	dijkstraUtxoValidatePlutusScriptsRuleIndex          = 38
 
 	conwayRefScriptCostStride = 25_600
 )

@@ -925,6 +925,143 @@ func TestValidateTxPlutusConwayUnusedReferenceScriptWithoutRedeemerPasses(
 	))
 }
 
+func TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript(
+	t *testing.T,
+) {
+	inlineInput := newTestInput(0x01, 0)
+	scriptInput := newTestInput(0x02, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x01, 0x02})
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType:    txTypeAlonzo,
+			witnesses: &mockWitnessSet{},
+		},
+		inputs: []lcommon.TransactionInput{inlineInput, scriptInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		inlineInput,
+		newBabbageInlineDatumOutput(t, addr),
+	)
+	ls.addUtxo(
+		scriptInput,
+		testAddressScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       addr,
+			scriptRef:  plutusScript,
+		},
+	)
+
+	// The pinned gouroboros rule reports this as a PlutusV1/inline-datum
+	// conflict because it treats every input script reference as used.
+	err = conway.UtxoValidateInlineDatumsWithPlutusV1(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	)
+	var inlineDatumErr lcommon.InlineDatumsNotSupportedError
+	require.ErrorAs(t, err, &inlineDatumErr)
+
+	for _, rule := range conwayUtxoValidationRules {
+		if rule.index != conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex {
+			continue
+		}
+		require.NoError(t, rule.validationFunc(
+			tx,
+			0,
+			ls,
+			&conway.ConwayProtocolParameters{},
+		))
+		return
+	}
+	t.Fatal("Conway inline-datum rule was not installed")
+}
+
+func TestConwayInlineDatumRuleRejectsUsedPlutusV1Script(t *testing.T) {
+	input := newTestInput(0x03, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x01, 0x02})
+	scriptAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		plutusScript.Hash().Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagSpend,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
+			},
+		},
+		inputs: []lcommon.TransactionInput{input},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(input, newBabbageInlineDatumOutput(t, scriptAddr))
+
+	for _, rule := range conwayUtxoValidationRules {
+		if rule.index != conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex {
+			continue
+		}
+		var inlineDatumErr lcommon.InlineDatumsNotSupportedError
+		require.ErrorAs(t, rule.validationFunc(
+			tx,
+			0,
+			ls,
+			&conway.ConwayProtocolParameters{},
+		), &inlineDatumErr)
+		return
+	}
+	t.Fatal("Conway inline-datum rule was not installed")
+}
+
+func newBabbageInlineDatumOutput(
+	t *testing.T,
+	addr lcommon.Address,
+) lcommon.TransactionOutput {
+	datumCbor, err := cbor.Encode(data.NewConstr(0))
+	require.NoError(t, err)
+	datumOptionCbor, err := cbor.Encode([]any{
+		babbage.DatumOptionTypeData,
+		cbor.Tag{Number: 24, Content: datumCbor},
+	})
+	require.NoError(t, err)
+	addressCbor, err := cbor.Encode(addr)
+	require.NoError(t, err)
+	amountCbor, err := cbor.Encode(uint64(1_000_000))
+	require.NoError(t, err)
+	outputCbor, err := cbor.Encode(map[uint]cbor.RawMessage{
+		0: addressCbor,
+		1: amountCbor,
+		2: datumOptionCbor,
+	})
+	require.NoError(t, err)
+	var output babbage.BabbageTransactionOutput
+	_, err = cbor.Decode(outputCbor, &output)
+	require.NoError(t, err)
+	return &output
+}
+
 // TestTxInfoV2ContextSortsInputs guards the canonical Plutus requirement that
 // the script context lists transaction inputs sorted by TxOutRef, not in
 // transaction-body order. Building the context in body order (as the reverted

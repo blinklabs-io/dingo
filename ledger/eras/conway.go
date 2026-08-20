@@ -269,6 +269,11 @@ func conwayValidationRules(
 func buildConwayValidationRules() []indexedUtxoValidationRule {
 	skips := []utxoValidationRuleSkip{
 		{
+			index:          conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex,
+			validationFunc: conway.UtxoValidateInlineDatumsWithPlutusV1,
+			name:           "conway.UtxoValidateInlineDatumsWithPlutusV1",
+		},
+		{
 			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
 			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
 			name:           "conway.UtxoValidateFeeTooSmallUtxo",
@@ -279,10 +284,80 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 			name:           "conway.UtxoValidatePlutusScripts",
 		},
 	}
-	return buildIndexedUtxoValidationRulesWithSkips(
+	ret := buildIndexedUtxoValidationRulesWithSkips(
 		conway.UtxoValidationRules,
 		skips,
 	)
+	// Replace gouroboros' rule 18 with the local implementation. The upstream
+	// rule treats every PlutusV1 reference script on an input as used, even if
+	// the input is key-locked and no redeemer selects that script.
+	ret = append(ret, indexedUtxoValidationRule{
+		index:          conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex,
+		validationFunc: validateConwayInlineDatumsWithPlutusV1,
+	})
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
+	return ret
+}
+
+// validateConwayInlineDatumsWithPlutusV1 rejects inline datums only when a
+// PlutusV1 script is actually selected by a transaction script purpose. The
+// gouroboros rule this replaces reports a false positive for an unrelated
+// PlutusV1 reference script attached to a key-locked input.
+func validateConwayInlineDatumsWithPlutusV1(
+	tx lcommon.Transaction,
+	_ uint64,
+	ls lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	if ls == nil {
+		return nil
+	}
+	hasInlineDatums := false
+	for _, input := range tx.Inputs() {
+		utxo, err := ls.UtxoById(input)
+		if err != nil || utxo.Output == nil {
+			continue
+		}
+		if utxo.Output.Datum() != nil {
+			hasInlineDatums = true
+			break
+		}
+	}
+	if !hasInlineDatums {
+		return nil
+	}
+	ctx, err := newConwayPlutusValidationContext(tx, ls)
+	if err != nil || ctx.redeemers == nil {
+		return nil
+	}
+	for redeemerKey := range ctx.redeemers.Iter() {
+		purpose, ok := buildConwayScriptPurpose(
+			redeemerKey,
+			ctx.scriptInputs.resolvedInputsMap,
+			ctx.inputs,
+			ctx.assetMint,
+			tx.Certificates(),
+			tx.Withdrawals(),
+			tx.VotingProcedures(),
+			tx.ProposalProcedures(),
+			ctx.witnessDatums,
+		)
+		if !ok {
+			continue
+		}
+		script, ok := ctx.scriptInputs.scripts[purpose.ScriptHash()]
+		if !ok {
+			continue
+		}
+		if _, ok := script.(lcommon.PlutusV1Script); ok {
+			return lcommon.InlineDatumsNotSupportedError{
+				PlutusVersion: "PlutusV1",
+			}
+		}
+	}
+	return nil
 }
 
 func isInputResolutionError(err error) bool {
