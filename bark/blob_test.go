@@ -358,12 +358,12 @@ func serveArchiveBlock(
 	hash := block.Hash()
 	prevHash := block.PrevHash()
 	return map[string][]byte{
-			hex.EncodeToString(hash[:]): block.Cbor(),
-		}, func(a *fakeArchive) {
-			a.height = block.BlockNumber()
-			a.prevHash = prevHash[:]
-			a.blockType = archive.BlockType_BLOCK_TYPE_CONWAY
-		}
+		hex.EncodeToString(hash[:]): block.Cbor(),
+	}, func(a *fakeArchive) {
+		a.height = block.BlockNumber()
+		a.prevHash = prevHash[:]
+		a.blockType = archive.BlockType_BLOCK_TYPE_CONWAY
+	}
 }
 
 // TestGetBlock_AcceptsVerifiedArchiveBlock is the happy path: an archive that

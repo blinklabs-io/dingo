@@ -1552,6 +1552,11 @@ func precomputedMissingPrefilterLeaderOutput(
 		if output == nil || output.LeaderReward == 0 {
 			continue
 		}
+		// SA6001 suggests indexing with string(output.PoolKeyHash) directly,
+		// which would convert twice instead of once: poolKey is the key for
+		// both actualLeaderByPool and rewardAccountByPool below. The directive
+		// sits on the conversion because that is the line SA6001 reports.
+		//nolint:staticcheck // SA6001: one conversion serves two lookups
 		poolKey := string(output.PoolKeyHash)
 		if actualLeaderByPool[poolKey] != 0 {
 			continue
