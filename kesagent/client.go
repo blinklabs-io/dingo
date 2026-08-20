@@ -315,13 +315,13 @@ func (c *Client) runServeKey(ctx context.Context) {
 			continue
 		}
 		c.logger.Info("connected to KES agent (serve-key)")
-		backoff = c.cfg.MinReconnect
 		// Recorded atomically with the lifecycle state so cancellation racing
 		// this dial cannot leave the connection untracked.
 		if err := c.registerConn(ctx, conn); err != nil {
 			_ = conn.Close()
 			return
 		}
+		delivered := false
 		for {
 			var kp KeyPush
 			if err := readFrame(conn, &kp); err != nil {
@@ -333,6 +333,27 @@ func (c *Client) runServeKey(ctx context.Context) {
 				break
 			}
 			c.applyKeyPush(kp)
+			delivered = true
+		}
+		// A session that ended must back off too. Previously only a failed
+		// dial slept, so an agent that completed the handshake and then closed
+		// -- a shutdown window, or any listener that answers and hangs up --
+		// sent this loop straight back to dial with no delay: measured at
+		// thousands of reconnects per second, each emitting the Warn above.
+		// MinReconnect/MaxReconnect are documented as bounding reconnect, and
+		// on this path they bounded nothing.
+		//
+		// A session that delivered a key is treated as productive, so a
+		// long-lived connection that drops reconnects promptly; only sessions
+		// that keep ending with nothing delivered escalate.
+		if delivered {
+			backoff = c.cfg.MinReconnect
+		}
+		if !sleepCtx(ctx, backoff) {
+			return
+		}
+		if !delivered {
+			backoff = nextBackoff(backoff, c.cfg.MaxReconnect)
 		}
 	}
 }
@@ -425,6 +446,37 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 	if !bytes.Equal(derived, c.kesVKey) {
 		c.logger.Error(
 			"ignoring KES key push: signing key does not derive the operational certificate's KES vkey",
+		)
+		wipe(candidate.Data)
+		wipe(kp.KESSignKey)
+		return
+	}
+	// The comparison above is necessary but nowhere near sufficient. For any
+	// depth above 0, kes.PublicKey with no cached public key falls through to
+	// publicKeyInternal, which returns HashPair of the two root public keys
+	// *stored in the buffer* rather than deriving them from the child secret.
+	// At depth 6 that validates 64 of 608 bytes -- and those 64 bytes are
+	// public: they appear verbatim as sig[384:448] of every KES signature this
+	// pool has ever published. A key assembled from random material plus those
+	// bytes copied out of any past block header passes the check above.
+	//
+	// Signing a probe and verifying it against the operational certificate's
+	// vkey is what actually exercises the secret material. kes.Sign requires
+	// period == candidate.Period and does not mutate the key.
+	probe := []byte("dingo kes-agent pushed-key verification")
+	probeSig, err := kes.Sign(candidate, candidate.Period, probe)
+	if err != nil {
+		c.logger.Error(
+			"ignoring KES key push: pushed key could not sign a verification probe",
+			"error", err,
+		)
+		wipe(candidate.Data)
+		wipe(kp.KESSignKey)
+		return
+	}
+	if !kes.VerifySignedKES(c.kesVKey, candidate.Period, probe, probeSig) {
+		c.logger.Error(
+			"ignoring KES key push: pushed key does not sign for the operational certificate's KES vkey",
 		)
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)

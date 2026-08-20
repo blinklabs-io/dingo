@@ -835,3 +835,137 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	defer s.mu.Unlock()
 	return s.w.Write(p)
 }
+
+// TestServeKeyRejectsKeyForgedFromPublicRootHashes covers the gap the vkey
+// derivation check leaves open.
+//
+// For any depth above 0, kes.PublicKey with no cached public key falls through
+// to publicKeyInternal, which returns HashPair of the two root public keys
+// *read out of the buffer* rather than deriving them from the child secret. At
+// depth 6 that inspects 64 of 608 bytes. Those 64 bytes are not secret: they
+// are sig[384:448] of every KES signature the pool publishes, so anyone with
+// one past block header can splice them onto random material and satisfy the
+// derivation check.
+//
+// The push must be refused. Without the sign-and-verify probe in applyKeyPush
+// the forged key installs, and every header the node then signs is rejected by
+// its peers.
+func TestServeKeyRejectsKeyForgedFromPublicRootHashes(t *testing.T) {
+	const start = uint64(0)
+	vkey, master, opcert := newTestKES(t, start)
+
+	// Take the two root public keys from a legitimate key, exactly as they
+	// would be lifted out of a published signature, and graft them onto
+	// otherwise meaningless bytes.
+	legit, err := evolveClone(master, 0)
+	if err != nil {
+		t.Fatalf("clone master: %v", err)
+	}
+	forged := make([]byte, len(legit.Data))
+	for i := range forged {
+		forged[i] = 0xab
+	}
+	const rootHashOffset = 544
+	copy(forged[rootHashOffset:], legit.Data[rootHashOffset:])
+
+	// Confirm the premise: this forgery does satisfy the derivation check.
+	if !bytes.Equal(
+		kes.PublicKey(&kes.SecretKey{
+			Depth:  kes.CardanoKesDepth,
+			Period: 0,
+			Data:   bytes.Clone(forged),
+		}),
+		vkey,
+	) {
+		t.Fatal(
+			"premise broken: the forged key no longer derives the opcert vkey, so this test would pass for the wrong reason",
+		)
+	}
+
+	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     3,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: forged,
+			KESVKey:    vkey,
+		})
+		good, err := evolveClone(master, 1)
+		if err != nil {
+			return
+		}
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: good.Data,
+			KESVKey:    vkey,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	})
+
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert},
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	// The forged push claims the later period, so if it were accepted the
+	// legitimate push behind it would be refused as moving backward.
+	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+
+	msg := []byte("after forged push")
+	sig, err := client.KESSign(1, msg)
+	if err != nil {
+		t.Fatalf("sign with the accepted key: %v", err)
+	}
+	if !kes.VerifySignedKES(vkey, 1, msg, sig) {
+		t.Fatal("a forged key was installed and used to sign")
+	}
+}
+
+// TestServeKeyBacksOffWhenSessionsEndImmediately covers the reconnect path for
+// a session that ends rather than a dial that fails.
+//
+// An agent that completes the handshake and then closes is ordinary -- it is
+// the shutdown window of a legitimate agent -- and previously sent runServeKey
+// straight back to dial with no delay, measured at thousands of reconnects per
+// second with a Warn line each. MinReconnect and MaxReconnect are documented
+// as bounding reconnect; this pins that they do on this path too.
+func TestServeKeyBacksOffWhenSessionsEndImmediately(t *testing.T) {
+	const start = uint64(0)
+	_, _, opcert := newTestKES(t, start)
+
+	var connections atomic.Int64
+	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
+		connections.Add(1)
+		// Handshake completes inside startFakeAgent; drop immediately after.
+		_ = conn.Close()
+	})
+
+	client, err := New(Config{
+		SocketPath:   agent.socket(),
+		Mode:         ModeServeKey,
+		OpCert:       opcert,
+		MinReconnect: 200 * time.Millisecond,
+		MaxReconnect: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	time.Sleep(time.Second)
+
+	// With a 200ms floor, one second of reconnecting cannot legitimately
+	// exceed a handful of attempts. The pre-fix loop reached four figures.
+	if got := connections.Load(); got > 12 {
+		t.Fatalf(
+			"reconnect loop is not backing off: %d connections in 1s (expected a handful)",
+			got,
+		)
+	}
+}
