@@ -6428,13 +6428,21 @@ func (ls *LedgerState) setEpochCache(
 	// canonical first Shelley block. Test networks may explicitly opt into a
 	// Shelley-at-epoch override; preserve that behavior. Shelley-only configs
 	// without Byron genesis also retain the existing immediate transition.
+	// Read the Shelley hard-fork declaration directly rather than through
+	// CardanoNodeConfig.HardForkEpoch, which reports nothing at all unless
+	// ExperimentalHardForksEnabled is true. preview sets
+	// TestShelleyHardForkAtEpoch: 0 with ExperimentalHardForksEnabled: False,
+	// so the gated accessor hides its declaration and this would force a node
+	// back to Byron on a network that has no Byron prefix -- leaving
+	// currentPParams nil for every consumer of GetCurrentPParams. Across the
+	// shipped configs the declaration alone is the discriminator: mainnet and
+	// preprod omit it and do have a Byron prefix; devnet, musashi and preview
+	// declare epoch 0 and start post-Byron.
 	if startEraId > eras.ByronEraDesc.Id &&
 		ls.config.CardanoNodeConfig.ByronGenesis() != nil &&
-		!ls.config.StartInDijkstra {
-		if _, explicitShelleyHardFork :=
-			ls.config.CardanoNodeConfig.HardForkEpoch("shelley"); !explicitShelleyHardFork {
-			startEraId = eras.ByronEraDesc.Id
-		}
+		!ls.config.StartInDijkstra &&
+		ls.config.CardanoNodeConfig.TestShelleyHardForkAtEpoch == nil {
+		startEraId = eras.ByronEraDesc.Id
 	}
 	if ls.config.StartInDijkstra {
 		startEraId = eras.DijkstraEraDesc.Id
