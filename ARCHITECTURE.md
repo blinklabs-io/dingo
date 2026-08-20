@@ -1471,6 +1471,14 @@ that subject, so some subjects are fresher than others but none are wrong, and
 because neither the prune nor the ETag advances on a failed snapshot, the next
 run re-applies the whole thing and reconciles.
 
+Snapshot application is serialized end to end by a mutex separate from the
+lifecycle lock. `SyncOnce` is exported and the worker loop calls it, so two
+applications can overlap; interleaved snapshots would let an older one finish
+last, overwrite the newer one's properties, reintroduce subjects the newer
+registry dropped, and record its own stale ETag as current. The lock is
+separate from the one `Stop` takes, so a multi-minute download cannot make
+shutdown wait for the transfer.
+
 `Stop` waits for the worker to exit and does not abandon that wait when its
 context expires — it downgrades to a warning and keeps waiting, the same
 guarantee `koiosparity.Observer.Stop` makes for the same reason. Both teardown

@@ -147,8 +147,12 @@ type TokenRegistrySync struct {
 	now           func() time.Time
 	lastSyncedAt  time.Time
 	mu            sync.Mutex
-	cancel        context.CancelFunc
-	done          chan struct{}
+	// syncMu serializes whole snapshot applications. It is deliberately
+	// separate from mu: Stop takes mu, and holding one lock across a
+	// multi-minute download would make shutdown wait for the transfer.
+	syncMu sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // NewTokenRegistrySync validates cfg and returns a sync that is not yet
@@ -348,6 +352,14 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 // whole snapshot has been applied, so an interrupted sync retries in full
 // rather than recording progress it did not make.
 func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
+	// Serialized end to end. SyncOnce is exported and the worker loop calls
+	// it, so two applications can overlap; interleaved snapshots let an
+	// older one finish last and overwrite the newer one's properties,
+	// reintroduce subjects the newer registry dropped, and record its own
+	// stale ETag as current. Queuing is the right behavior here -- a
+	// registry sync is a slow background pass nobody waits on.
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
 	stateKey := tokenRegistrySyncStateKey(s.sourceURL, s.storeLogos)
 	previousETag, err := s.store.GetSyncState(stateKey, nil)
 	if err != nil {
@@ -502,11 +514,9 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 // MySQL's `datetime` column carries no fractional seconds, so an unrounded
 // stamp would be stored rounded while the prune compared the original, making
 // every row the snapshot had just written look stale.
-// SyncOnce is exported, so it can run concurrently with the worker loop;
-// the stamp sequence is shared state and is guarded accordingly.
+// Called only from SyncOnce, which holds syncMu, so the stamp sequence needs
+// no lock of its own.
 func (s *TokenRegistrySync) nextSyncStamp() time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	stamp := s.now().UTC().Truncate(time.Second)
 	if !s.lastSyncedAt.IsZero() && !stamp.After(s.lastSyncedAt) {
 		stamp = s.lastSyncedAt.Add(time.Second)

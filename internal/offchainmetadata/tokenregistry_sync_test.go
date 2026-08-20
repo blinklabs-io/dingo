@@ -279,20 +279,6 @@ func newTestSync(
 	return sync
 }
 
-// steppedClock gives a sync a deterministic clock that advances one second
-// per call. Snapshot stamps are truncated to whole seconds (see SyncOnce), so
-// back-to-back syncs in a test would otherwise share a stamp and skip
-// reconciliation -- an artifact of test speed, not of the design, since real
-// syncs are hours apart.
-func steppedClock(sync *TokenRegistrySync) {
-	base := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
-	calls := 0
-	sync.now = func() time.Time {
-		calls++
-		return base.Add(time.Duration(calls) * time.Second)
-	}
-}
-
 func TestTokenRegistrySyncStoresMappings(t *testing.T) {
 	body := tarballOf(t, map[string]string{
 		"README.md": "not a mapping",
@@ -731,7 +717,6 @@ func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
-	steppedClock(sync)
 
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
@@ -770,7 +755,6 @@ func TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties(t *testing.T) {
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
-	steppedClock(sync)
 
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
@@ -873,7 +857,6 @@ func TestTokenRegistrySyncClearsLogosWhenDisabled(t *testing.T) {
 
 	// Operator restarts with logo storage turned off.
 	withoutLogos := newTestSync(t, store, server.URL, nil)
-	steppedClock(withoutLogos)
 	// second sync must land in a later second than the first
 	withoutLogos.now = func() time.Time {
 		return time.Date(2026, 8, 20, 12, 1, 0, 0, time.UTC)
@@ -920,7 +903,6 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	server := newRegistryServer(t, established)
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
-	steppedClock(sync)
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "DJED", store.snapshot()[syncSubjectDjed].Ticker)
@@ -991,7 +973,6 @@ func TestTokenRegistrySyncRecoversAfterPartialSnapshot(t *testing.T) {
 	store := newFakeTokenRegistryStore()
 	store.upsertFailFrom = 2
 	sync := newTestSync(t, store, server.URL, nil)
-	steppedClock(sync)
 
 	_, err := sync.SyncOnce(t.Context())
 	require.Error(t, err)
@@ -1024,7 +1005,6 @@ func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
-	steppedClock(sync)
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.Len(t, store.snapshot(), 1)
@@ -1114,7 +1094,6 @@ func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
 	first.notModifiedOnTag = true
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, first.URL, nil)
-	steppedClock(sync)
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
 
@@ -1122,7 +1101,6 @@ func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
 	second := newRegistryServer(t, body)
 	second.notModifiedOnTag = true
 	moved := newTestSync(t, store, second.URL, nil)
-	steppedClock(moved)
 
 	written, err := moved.SyncOnce(t.Context())
 
@@ -1152,7 +1130,6 @@ func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
-	steppedClock(sync)
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.Len(t, store.snapshot(), 2)
@@ -1199,7 +1176,6 @@ func TestTokenRegistrySyncKeysETagByLogoMode(t *testing.T) {
 	withLogos := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
 		c.StoreLogos = true
 	})
-	steppedClock(withLogos)
 	_, err := withLogos.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.NotEmpty(t, store.snapshot()[syncSubjectNut].Logo)
@@ -1264,4 +1240,67 @@ func TestTokenRegistrySyncStampsAreStrictlyIncreasing(t *testing.T) {
 		syncSubjectDjed,
 		"reconciliation must still retire a dropped subject within the same second",
 	)
+}
+
+// TestTokenRegistrySyncSerializesConcurrentCalls covers two SyncOnce calls
+// overlapping. Interleaved snapshots let an older one finish last and
+// overwrite the newer one's properties, reintroduce subjects the newer
+// registry dropped, and record its own stale ETag as current.
+//
+// SyncOnce is exported, and the previous change already conceded that it can
+// run alongside the worker loop by guarding the stamp sequence; serializing
+// the whole operation is what that concession actually requires.
+func TestTokenRegistrySyncSerializesConcurrentCalls(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	// Park the first call inside its store write and hold it there.
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	store.upsertHook = func() {
+		once.Do(func() {
+			entered <- struct{}{}
+			<-release
+		})
+	}
+	sync := newTestSync(t, store, server.URL, nil)
+
+	firstDone := make(chan error, 1)
+	go func() { _, err := sync.SyncOnce(t.Context()); firstDone <- err }()
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"first sync did not reach the store write",
+	)
+	requestsDuringFirst := server.requestCount()
+
+	secondDone := make(chan error, 1)
+	go func() { _, err := sync.SyncOnce(t.Context()); secondDone <- err }()
+
+	// The second call must not begin fetching while the first holds the sync.
+	select {
+	case <-secondDone:
+		t.Fatal("second SyncOnce completed while the first was still running")
+	case <-time.After(150 * time.Millisecond):
+	}
+	require.Equal(
+		t,
+		requestsDuringFirst,
+		server.requestCount(),
+		"an overlapping SyncOnce must not issue its own fetch until the first finishes",
+	)
+
+	close(release)
+	require.NoError(t, testutil.RequireReceive(
+		t, firstDone, 5*time.Second, "first sync did not finish",
+	))
+	require.NoError(t, testutil.RequireReceive(
+		t, secondDone, 5*time.Second, "second sync did not finish",
+	))
+	require.Contains(t, store.snapshot(), syncSubjectNut)
 }
