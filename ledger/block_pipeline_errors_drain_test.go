@@ -177,6 +177,63 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	)
 }
 
+// TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected is a
+// regression test for the observability gap flagged on PR #3232:
+// errHeaderVerificationDeferred (the pipeline's epoch cache has not yet
+// caught up with an already-committed block -- ARCHITECTURE.md's
+// "resolves once the epoch cache catches up" case) must be counted
+// separately from genuine decode/validate/apply problems, not folded into
+// blockPipelineUnexpectedErrors alongside them.
+func TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected(
+	t *testing.T,
+) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{Logger: testLogger()},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+
+	ls.recordBlockPipelineError(
+		fmt.Errorf(
+			"%w: no cached epoch data for slot 42: %w",
+			errHeaderVerificationDeferred,
+			errors.New("epoch not found"),
+		),
+	)
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			ls.metrics.blockPipelineDeferredEpochCacheErrors,
+		),
+		"a deferred epoch-cache lookup must count as its own transient case",
+	)
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
+		"a deferred epoch-cache lookup must not count as unexpected",
+	)
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),
+	)
+
+	// A genuine decode failure must still land in the unexpected bucket,
+	// not the new deferred one.
+	ls.recordBlockPipelineError(errors.New("failed to decode block: bad cbor"))
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
+	)
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			ls.metrics.blockPipelineDeferredEpochCacheErrors,
+		),
+	)
+}
+
 // TestRecordBlockPipelineErrorClassification confirms
 // recordBlockPipelineError distinguishes the expected Byron-era
 // eta0-unavailable case (errBlockPipelineEta0Unavailable) from every other

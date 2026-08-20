@@ -7281,31 +7281,40 @@ only after every stage has fully drained), and `Close` waits for that exit
 `CloseBlockPipelineDrainTimeout` wait already used for `Stop` itself, so
 this goroutine cannot outlive the `LedgerState`.
 
-Each drained error is classified via `errBlockPipelineEta0Unavailable`
-(`ledger/verify_header.go`). `blockPipelineEta0Provider` wraps in that
-sentinel only the one error `headerVerificationEpoch` can return that is
-genuinely Byron-specific: `errEpochNonceUnavailable`, raised solely by
-`headerVerificationEpoch`'s empty-nonce branch (epoch data covers the slot,
-but that epoch has no Praos nonce — in practice only Byron-era slots, since
-Shelley+ slots already committed to `ls.chain` should always have
-epoch/nonce data by the time the pipeline validates them). Every other error
-`headerVerificationEpoch` can return — `errHeaderVerificationDeferred`
-(past-horizon/missing-epoch-data), hard-fork-summary lookup failures,
-forecast-build errors — is returned by `blockPipelineEta0Provider`
-unchanged, not wrapped in the sentinel, so a genuine failure on a non-Byron
-block is never misclassified as the harmless Byron case. Errors matching
-`errBlockPipelineEta0Unavailable` are logged at debug level and counted in
-the `dingo_ledger_block_pipeline_expected_eta0_errors_total` counter;
-everything else reaching `errorsChan` (decode errors, non-Byron validation
-failures, the other `headerVerificationEpoch` errors above,
-`pipeline.ErrBlockNotValidated` and other apply-stage invariant violations)
-is logged at error level and counted in
-`dingo_ledger_block_pipeline_unexpected_errors_total` — a nonzero value
-there indicates a genuine decode/validate/apply problem worth investigating,
-distinct from the expected Byron-era volume. These are independent counters
-from the pre-existing `dingo_ledger_block_pipeline_decode_errors` /
-`_validation_errors` gauges (which snapshot `pipeline.PipelineStats` and
-already conflate expected and unexpected causes).
+Each drained error is classified by `recordBlockPipelineError`
+(`ledger/state.go`) on error identity, not era: `errorsChan` carries a bare
+`error` with no item context, so only `decodeReadChainBatch` — which holds
+the decoded block — can and does gate enforcement on `block.Era().Id`; this
+classification only affects operator visibility.
+
+- `errBlockPipelineEta0Unavailable` (`ledger/verify_header.go`):
+  `blockPipelineEta0Provider` wraps `headerVerificationEpoch`'s
+  `errEpochNonceUnavailable` in this sentinel — raised solely by that
+  function's empty-nonce branch (epoch data covers the slot, but that epoch
+  has no Praos nonce). This is how every Byron-era slot fails the lookup,
+  but the underlying condition (epoch rollover not yet processed) is not
+  verified to be Byron-specific here, so the debug log this produces does
+  not claim Byron specifically. It is counted in
+  `dingo_ledger_block_pipeline_expected_eta0_errors_total`.
+- `errHeaderVerificationDeferred` (past-horizon/missing-epoch-data): the
+  pipeline's epoch cache has not yet caught up with a block already
+  committed to `ls.chain`. This is the same transient, self-healing race
+  described above ("resolves once the epoch cache catches up"), so it is
+  logged at debug level and counted separately in
+  `dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total`, not
+  folded into the unexpected-error bucket below.
+- Everything else reaching `errorsChan` (decode errors, non-Byron validation
+  failures, hard-fork-summary lookup failures, forecast-build errors,
+  `pipeline.ErrBlockNotValidated` and other apply-stage invariant
+  violations) is logged at error level and counted in
+  `dingo_ledger_block_pipeline_unexpected_errors_total` — a nonzero value
+  there indicates a genuine decode/validate/apply problem worth
+  investigating, distinct from the two expected/transient counters above.
+
+These three are independent counters from the pre-existing
+`dingo_ledger_block_pipeline_decode_errors` / `_validation_errors` gauges
+(which snapshot `pipeline.PipelineStats` and already conflate expected and
+unexpected causes).
 
 **Admission-time crypto re-check is skipped once the pipeline will redo
 it.** Earlier revisions of this phase left the existing serial VRF/KES

@@ -3736,35 +3736,62 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 }
 
 // recordBlockPipelineError classifies and reports a single error read off
-// ls.blockPipeline.Errors(). Byron-era validate-stage failures are expected
-// on every real chain sync (see blockPipelineEta0Provider) and are logged at
-// debug level with their own counter so a full sync does not spam the logs
-// at error level; anything else reaching errorsChan indicates a genuine
-// decode/validate/apply problem the pipeline itself could not report any
-// other way (decodeReadChainBatch separately logs the same decode/validation
-// errors when it reads the corresponding item back from Results(), but that
-// only covers items that make it that far -- this is the only path that
-// also covers, e.g., apply-stage invariant violations such as
+// ls.blockPipeline.Errors(). errorsChan carries a bare error with no item or
+// era context (see drainBlockPipelineErrors), so classification here keys on
+// error identity rather than era -- decodeReadChainBatch is the path with
+// access to the decoded block, and it independently gates enforcement on
+// block.Era().Id, so this function's classification only affects operator
+// visibility, never whether a block is accepted.
+//
+// Two cases are expected/transient and logged at debug level under their
+// own counters so a full sync does not spam the logs at error level:
+//   - errBlockPipelineEta0Unavailable (blockPipelineEta0Provider's wrapping
+//     of errEpochNonceUnavailable): no cached Praos epoch nonce yet. This is
+//     how every Byron-era slot fails the lookup, but headerVerificationEpoch's
+//     own doc comment describes the underlying condition -- epoch rollover
+//     not yet processed -- as one that is not exclusively Byron-specific;
+//     this function cannot verify the block's era, so the log message does
+//     not claim Byron specifically.
+//   - errHeaderVerificationDeferred: the pipeline's epoch cache has not yet
+//     caught up with a block already committed to ls.chain. ARCHITECTURE.md
+//     ("Block Processing Pipeline") documents this as a transient race that
+//     resolves once the epoch cache catches up, so it is not lumped in with
+//     genuine decode/validate/apply problems below.
+//
+// Anything else reaching errorsChan indicates a genuine decode/validate/apply
+// problem the pipeline itself could not report any other way
+// (decodeReadChainBatch separately logs the same decode/validation errors
+// when it reads the corresponding item back from Results(), but that only
+// covers items that make it that far -- this is the only path that also
+// covers, e.g., apply-stage invariant violations such as
 // pipeline.ErrBlockNotValidated) and is logged at error level plus its own
 // counter for operator visibility.
 func (ls *LedgerState) recordBlockPipelineError(err error) {
 	if err == nil {
 		return
 	}
-	if errors.Is(err, errBlockPipelineEta0Unavailable) {
+	switch {
+	case errors.Is(err, errBlockPipelineEta0Unavailable):
 		ls.metrics.incBlockPipelineExpectedEta0Error()
 		ls.config.Logger.Debug(
-			"block-processing pipeline: epoch nonce unavailable for validate stage (expected for Byron-era blocks)",
+			"block-processing pipeline: no cached epoch nonce yet for validate stage (epoch rollover not complete)",
 			"error",
 			err,
 		)
-		return
+	case errors.Is(err, errHeaderVerificationDeferred):
+		ls.metrics.incBlockPipelineDeferredEpochCacheError()
+		ls.config.Logger.Debug(
+			"block-processing pipeline: epoch cache does not yet cover validate-stage slot (expected transient, resolves once the epoch cache catches up)",
+			"error",
+			err,
+		)
+	default:
+		ls.metrics.incBlockPipelineUnexpectedError()
+		ls.config.Logger.Error(
+			"block-processing pipeline reported an unexpected error",
+			"error", err,
+		)
 	}
-	ls.metrics.incBlockPipelineUnexpectedError()
-	ls.config.Logger.Error(
-		"block-processing pipeline reported an unexpected error",
-		"error", err,
-	)
 }
 
 // decodeReadChainBatch decodes a batch of raw blocks gathered from the chain

@@ -101,18 +101,25 @@ type stateMetrics struct {
 	blockPipelineDecodeErrors     prometheus.Gauge
 	blockPipelineValidationErrors prometheus.Gauge
 	blockPipelineQueueDepth       prometheus.Gauge
-	// blockPipelineExpectedEta0Errors/blockPipelineUnexpectedErrors count
-	// errors drained from blockPipeline.Errors() by drainBlockPipelineErrors
-	// (issue #1894 deadlock fix), classified via errBlockPipelineEta0Unavailable:
-	// the expected counter tracks Byron-era (no Praos nonce) validate-stage
-	// failures, which are normal on every from-genesis sync; the unexpected
+	// blockPipelineExpectedEta0Errors/blockPipelineDeferredEpochCacheErrors/
+	// blockPipelineUnexpectedErrors count errors drained from
+	// blockPipeline.Errors() by drainBlockPipelineErrors (issue #1894
+	// deadlock fix): the eta0 counter tracks errBlockPipelineEta0Unavailable
+	// (no cached Praos nonce yet -- normal on every from-genesis sync, since
+	// it is how Byron-era slots always fail this lookup, but the same
+	// rollover-not-complete condition is not verified to be Byron-specific
+	// here); the deferred counter tracks errHeaderVerificationDeferred (the
+	// pipeline's epoch cache has not yet caught up with a block already
+	// committed to ls.chain -- a transient race, self-healing once the
+	// cache advances, per this section's own doc comment); the unexpected
 	// counter tracks everything else reaching errorsChan (decode errors,
 	// non-Byron validation failures, apply-stage invariant violations),
 	// which should stay at 0 in healthy operation. Unlike the *Errors gauges
 	// above (owned by the pipeline's own snapshot), these are counters
 	// incremented directly as each error is drained.
-	blockPipelineExpectedEta0Errors prometheus.Counter
-	blockPipelineUnexpectedErrors   prometheus.Counter
+	blockPipelineExpectedEta0Errors       prometheus.Counter
+	blockPipelineDeferredEpochCacheErrors prometheus.Counter
+	blockPipelineUnexpectedErrors         prometheus.Counter
 }
 
 // The accessors below tolerate an uninitialised stateMetrics. A LedgerState
@@ -152,10 +159,22 @@ func (m *stateMetrics) incBlockPipelineExpectedEta0Error() {
 	m.blockPipelineExpectedEta0Errors.Inc()
 }
 
+// incBlockPipelineDeferredEpochCacheError records a block-processing
+// pipeline validate-stage error drained from errorsChan that was classified
+// as the pipeline's epoch cache not yet covering an already-committed
+// block's slot (errHeaderVerificationDeferred) -- a transient condition
+// that resolves once the epoch cache catches up, not a validation problem.
+func (m *stateMetrics) incBlockPipelineDeferredEpochCacheError() {
+	if m == nil || m.blockPipelineDeferredEpochCacheErrors == nil {
+		return
+	}
+	m.blockPipelineDeferredEpochCacheErrors.Inc()
+}
+
 // incBlockPipelineUnexpectedError records a block-processing pipeline error
-// drained from errorsChan that was not the expected Byron-era eta0 case
-// (e.g. a decode error, a non-Byron validation failure, or an apply-stage
-// invariant violation).
+// drained from errorsChan that was not one of the expected/transient cases
+// above (e.g. a decode error, a non-Byron validation failure, or an
+// apply-stage invariant violation).
 func (m *stateMetrics) incBlockPipelineUnexpectedError() {
 	if m == nil || m.blockPipelineUnexpectedErrors == nil {
 		return
@@ -389,13 +408,19 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineExpectedEta0Errors = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_block_pipeline_expected_eta0_errors_total",
-			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as expected (Byron-era blocks with no Praos epoch nonce)",
+			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as expected (no cached Praos epoch nonce yet; always true for Byron-era blocks, but not verified to be Byron-specific here)",
+		},
+	)
+	m.blockPipelineDeferredEpochCacheErrors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total",
+			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as a transient epoch-cache lag behind an already-committed block; expected to resolve once the epoch cache catches up",
 		},
 	)
 	m.blockPipelineUnexpectedErrors = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_block_pipeline_unexpected_errors_total",
-			Help: "block-processing pipeline errors drained from errorsChan that are not the expected Byron-era eta0 case; a nonzero value indicates a decode, validation, or apply-stage problem worth investigating",
+			Help: "block-processing pipeline errors drained from errorsChan that are not one of the expected/transient cases above; a nonzero value indicates a decode, validation, or apply-stage problem worth investigating",
 		},
 	)
 }
