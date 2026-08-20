@@ -374,6 +374,7 @@ type TokenRegistryConfig struct {
 	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
 	// Interval controls how often the registry is re-checked. Each check
 	// is a conditional request, so an unchanged registry costs no download.
+	// Values below one minute are raised to it.
 	Interval time.Duration `yaml:"interval"              envconfig:"DINGO_TOKEN_REGISTRY_INTERVAL"`
 	// RequestTimeout bounds the whole download, not one request round trip.
 	RequestTimeout time.Duration `yaml:"requestTimeout"        envconfig:"DINGO_TOKEN_REGISTRY_REQUEST_TIMEOUT"`

@@ -57,6 +57,13 @@ const (
 	// on the order of days, and an unchanged one costs only a conditional
 	// request at this cadence.
 	defaultTokenRegistryInterval = 6 * time.Hour
+	// minTokenRegistryInterval floors the configured interval. Polling a
+	// source that serves a roughly 240MB artifact faster than this is
+	// abusive rather than useful, and a sub-second interval is also the
+	// only way two snapshots can land in the same wall-clock second --
+	// which is what would push stamps ahead of real time and let rows
+	// outlive a restart's reset stamp sequence.
+	minTokenRegistryInterval = time.Minute
 	// defaultTokenRegistryTimeout bounds the whole download. The mainnet
 	// tarball is roughly 240MB, so this is a transfer budget rather than the
 	// per-request latency budget the per-URL fetcher uses.
@@ -147,12 +154,15 @@ type TokenRegistrySync struct {
 	now           func() time.Time
 	lastSyncedAt  time.Time
 	mu            sync.Mutex
-	// syncMu serializes whole snapshot applications. It is deliberately
-	// separate from mu: Stop takes mu, and holding one lock across a
-	// multi-minute download would make shutdown wait for the transfer.
-	syncMu sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+	// syncSlot serializes whole snapshot applications. It is a buffered
+	// channel rather than a mutex so the wait can be abandoned on context
+	// cancellation: an external SyncOnce call holds its own uncancelled
+	// context, and a plain mutex would make the worker -- and therefore
+	// Stop, which waits for the worker -- block until that call finished.
+	// It is also separate from mu, which Stop itself takes.
+	syncSlot chan struct{}
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 // NewTokenRegistrySync validates cfg and returns a sync that is not yet
@@ -175,6 +185,9 @@ func NewTokenRegistrySync(
 	interval := cfg.Interval
 	if interval <= 0 {
 		interval = defaultTokenRegistryInterval
+	}
+	if interval < minTokenRegistryInterval {
+		interval = minTokenRegistryInterval
 	}
 	timeout := cfg.RequestTimeout
 	if timeout <= 0 {
@@ -219,6 +232,7 @@ func NewTokenRegistrySync(
 		storeLogos:    cfg.StoreLogos,
 		allowPrivate:  cfg.AllowPrivateAddresses,
 		now:           time.Now,
+		syncSlot:      make(chan struct{}, 1),
 	}, nil
 }
 
@@ -352,14 +366,23 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 // whole snapshot has been applied, so an interrupted sync retries in full
 // rather than recording progress it did not make.
 func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
-	// Serialized end to end. SyncOnce is exported and the worker loop calls
-	// it, so two applications can overlap; interleaved snapshots let an
-	// older one finish last and overwrite the newer one's properties,
-	// reintroduce subjects the newer registry dropped, and record its own
-	// stale ETag as current. Queuing is the right behavior here -- a
-	// registry sync is a slow background pass nobody waits on.
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
+	// Serialized end to end, and abandonable. SyncOnce is exported and the
+	// worker loop calls it, so two applications can overlap; interleaved
+	// snapshots would let an older one finish last, overwrite the newer
+	// one's properties, reintroduce subjects the newer registry dropped,
+	// and record its own stale ETag as current. Queuing is the right
+	// behavior for a slow background pass nobody waits on.
+	//
+	// The wait honors ctx so it cannot outlive a shutdown: an external
+	// caller holds its own context, which the node cannot cancel, and a
+	// plain mutex would make the worker -- and Stop, which waits for the
+	// worker -- block until that caller's whole download finished.
+	select {
+	case s.syncSlot <- struct{}{}:
+		defer func() { <-s.syncSlot }()
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 	stateKey := tokenRegistrySyncStateKey(s.sourceURL, s.storeLogos)
 	previousETag, err := s.store.GetSyncState(stateKey, nil)
 	if err != nil {
@@ -514,8 +537,8 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 // MySQL's `datetime` column carries no fractional seconds, so an unrounded
 // stamp would be stored rounded while the prune compared the original, making
 // every row the snapshot had just written look stale.
-// Called only from SyncOnce, which holds syncMu, so the stamp sequence needs
-// no lock of its own.
+// Called only from SyncOnce, which holds the sync slot, so the stamp
+// sequence needs no lock of its own.
 func (s *TokenRegistrySync) nextSyncStamp() time.Time {
 	stamp := s.now().UTC().Truncate(time.Second)
 	if !s.lastSyncedAt.IsZero() && !stamp.After(s.lastSyncedAt) {

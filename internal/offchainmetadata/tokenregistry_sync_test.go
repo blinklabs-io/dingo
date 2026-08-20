@@ -1304,3 +1304,100 @@ func TestTokenRegistrySyncSerializesConcurrentCalls(t *testing.T) {
 	))
 	require.Contains(t, store.snapshot(), syncSubjectNut)
 }
+
+// TestTokenRegistrySyncStopNotBlockedByExternalSync covers a regression the
+// serialization in the previous round introduced. An external SyncOnce call
+// with its own uncancelled context holds the sync slot; the worker then
+// blocks waiting for it. If that wait is not cancellation-aware, Stop -- which
+// deliberately waits for the worker to exit -- is held for as long as the
+// external sync runs, up to the whole-download timeout.
+func TestTokenRegistrySyncStopNotBlockedByExternalSync(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	store.upsertHook = func() {
+		once.Do(func() {
+			entered <- struct{}{}
+			<-release
+		})
+	}
+	registrySync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.Interval = time.Hour
+	})
+
+	// An external caller, with a context the node's shutdown cannot cancel.
+	external := make(chan error, 1)
+	go func() {
+		_, err := registrySync.SyncOnce(context.Background())
+		external <- err
+	}()
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"external sync did not reach the store write",
+	)
+
+	// The worker starts and immediately queues behind the external call.
+	require.NoError(t, registrySync.Start(t.Context()))
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- registrySync.Stop(context.Background()) }()
+
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop blocked behind an external SyncOnce")
+	}
+
+	close(release)
+	require.NoError(t, testutil.RequireReceive(
+		t, external, 5*time.Second, "external sync did not finish",
+	))
+}
+
+// TestNewTokenRegistrySyncClampsInterval keeps the configured interval at a
+// sane floor. A sub-second interval would hammer a source that serves a
+// roughly 240MB artifact, and it is also what makes same-second snapshots --
+// and therefore stamps forced ahead of wall clock -- reachable at all.
+func TestNewTokenRegistrySyncClampsInterval(t *testing.T) {
+	for name, configured := range map[string]time.Duration{
+		"sub-second": 500 * time.Millisecond,
+		"one second": time.Second,
+		"negative":   -time.Hour,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+				Store:    newFakeTokenRegistryStore(),
+				Network:  "mainnet",
+				Interval: configured,
+			})
+
+			require.NoError(t, err)
+			require.GreaterOrEqual(
+				t,
+				sync.interval,
+				minTokenRegistryInterval,
+				"interval must be clamped to the floor",
+			)
+		})
+	}
+}
+
+func TestNewTokenRegistrySyncKeepsIntervalAboveFloor(t *testing.T) {
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:    newFakeTokenRegistryStore(),
+		Network:  "mainnet",
+		Interval: 90 * time.Minute,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 90*time.Minute, sync.interval)
+}

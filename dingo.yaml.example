@@ -274,7 +274,9 @@ tokenRegistry:
   # CLI: --token-registry-source-url
   sourceUrl: ""
   # How often the registry is re-checked. Each check is a conditional
-  # request, so an unchanged registry costs no download.
+  # request, so an unchanged registry costs no download. Values below one
+  # minute are raised to it: polling a source that serves a roughly 240MB
+  # artifact faster than that is abusive rather than useful.
   # Can be overridden with DINGO_TOKEN_REGISTRY_INTERVAL
   # CLI: --token-registry-interval
   interval: 6h

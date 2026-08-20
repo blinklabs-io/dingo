@@ -1471,13 +1471,20 @@ that subject, so some subjects are fresher than others but none are wrong, and
 because neither the prune nor the ETag advances on a failed snapshot, the next
 run re-applies the whole thing and reconciles.
 
-Snapshot application is serialized end to end by a mutex separate from the
-lifecycle lock. `SyncOnce` is exported and the worker loop calls it, so two
-applications can overlap; interleaved snapshots would let an older one finish
-last, overwrite the newer one's properties, reintroduce subjects the newer
-registry dropped, and record its own stale ETag as current. The lock is
-separate from the one `Stop` takes, so a multi-minute download cannot make
-shutdown wait for the transfer.
+Snapshot application is serialized end to end. `SyncOnce` is exported and the
+worker loop calls it, so two applications can overlap; interleaved snapshots
+would let an older one finish last, overwrite the newer one's properties,
+reintroduce subjects the newer registry dropped, and record its own stale ETag
+as current. The slot is a buffered channel rather than a mutex so the wait
+honors the caller's context: an external `SyncOnce` holds a context the node
+cannot cancel, and a plain mutex would block the worker — and therefore `Stop`,
+which waits for the worker — until that call's whole download finished.
+
+The configured interval is floored at one minute. Polling a source that serves
+a roughly 240MB artifact faster than that is abusive rather than useful, and a
+sub-second interval is also the only way two snapshots can land in the same
+wall-clock second — which is what would push stamps ahead of real time and let
+rows outlive the stamp sequence's reset across a restart.
 
 `Stop` waits for the worker to exit and does not abandon that wait when its
 context expires — it downgrades to a warning and keeps waiting, the same
