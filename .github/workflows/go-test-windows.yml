@@ -32,11 +32,12 @@ jobs:
       matrix:
         go-version: [1.26.x]
     runs-on: windows-latest
-    # Outermost backstop. The observed full Windows suite runs about 22 minutes,
-    # so this is roughly double a legitimate run. Its real job is replacing
-    # GitHub's 360-minute default: a wedged run costs 45 minutes of a shared
-    # Windows runner instead of six hours.
-    timeout-minutes: 45
+    # Only backstop, and deliberately generous. It matches the Windows job in
+    # publish.yml, which is the same command on the same runner, so this job
+    # cannot false-fail on timing where the release job passes. Its purpose is
+    # replacing GitHub's 360-minute default: a wedged run holds a shared Windows
+    # runner for 90 minutes rather than six hours.
+    timeout-minutes: 90
     env:
       CGO_ENABLED: 0
     steps:
@@ -55,18 +56,14 @@ jobs:
       - name: go-build
         run: go build ./...
       - name: go-test
-        # Three nested bounds, innermost first, so the most informative one
-        # fires soonest:
+        # -timeout is the diagnostic: it panics with a goroutine dump naming the
+        # stuck test, which a runner-level kill does not produce. 20m matches
+        # both the Linux PR job and the Windows job in publish.yml.
         #
-        #   go -timeout 20m  per test binary; panics with a goroutine dump that
-        #                    names the stuck test. A runner-level kill gives no
-        #                    such diagnostic, which is why a stuck Windows job
-        #                    was previously hard to attribute.
-        #   step 35m         bounds the whole suite if several packages are slow
-        #                    without any single one exceeding its own timeout.
-        #   job  45m         above, covers checkout, setup-go and the build too.
-        #
-        # 20m matches the Linux PR job. It is not tight on Windows: the root
-        # dingo package alone took 937s in the v0.70.0 tag run.
-        timeout-minutes: 35
+        # There is deliberately no step-level cap. A step or job kill reports no
+        # stuck test, so an intermediate bound tight enough to be useful is also
+        # tight enough to kill a slow-but-healthy run and destroy the
+        # attribution this workflow exists to provide. The slowest package took
+        # 937s in the v0.70.0 tag run, on a run that was failing, so the margin
+        # on a shared runner is thinner than it looks.
         run: go test -ldflags="-s -w" -timeout 20m ./...
