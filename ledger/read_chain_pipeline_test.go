@@ -34,6 +34,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// decodeReadChainBatch retains the former boolean test surface while
+// production uses decodeReadChainBatchWithError to route persisted validation
+// failures into chain recovery.
+func (ls *LedgerState) decodeReadChainBatch(
+	ctx context.Context,
+	rawBatch []models.Block,
+) (decoded []gledger.Block, ok bool) {
+	decoded, err := ls.decodeReadChainBatchWithError(ctx, rawBatch)
+	return decoded, err == nil
+}
+
 // buildDecodableTestBlock returns a models.Block wrapping a real, decodable
 // Conway block at the given slot/block number, along with its canonical
 // point. The block bytes themselves come from the shared

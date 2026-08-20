@@ -7357,175 +7357,60 @@ batch-oriented apply contract or a restart-signal mechanism, or redesigning
 dingo's apply loop to be per-block and restart-tolerant — tracked
 separately in #3227, not folded into #1894's decode/validate phases.
 
-**Phase 3: parallel VRF/KES validation.** `LedgerStateConfig.BlockPipelineValidateEnabled`
-(config `blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED`
-/ `--block-pipeline-validate-enabled`; default off; requires
-`BlockPipelineEnabled` too — `configValidate` rejects the combination
-otherwise) turns on the pipeline's validate stage
-(`gouroboros/pipeline.WithValidateWorkers`) alongside decode, using
-`blockPipelineValidateWorkers` (2) parallel workers. Each block
-`decodeReadChainBatch` decodes is independently re-verified — VRF proof and
-KES signature only, via `gouroboros/ledger.VerifyBlock`'s block-local
-checks — before being handed to `ledgerProcessBlocksFromSource`, exactly as
-decode-only phase 1 already did for CBOR decode.
+**Phase 3: parallel header-crypto validation.**
+`LedgerStateConfig.BlockPipelineValidateEnabled` (config
+`blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED` /
+`--block-pipeline-validate-enabled`; default off) requires
+`BlockPipelineEnabled` and adds two checks to replay:
 
-Wiring, in `NewLedgerState`:
+- gouroboros validate workers verify the block-local VRF proof and KES
+  signature with `ledger.VerifyBlock`;
+- after an item passes that stage, `decodeReadChainBatch` verifies Dingo's
+  remaining stateless OpCert contract: the cold-key Ed25519 signature and
+  `MaxKESEvolutions` expiry. OpCert counter monotonicity remains a stateful
+  read-before-write check in `ledgerProcessBlock`.
 
-- `pipeline.WithEta0Provider(ls.blockPipelineEta0Provider)`:
-  `blockPipelineEta0Provider` (`ledger/verify_header.go`) looks up the epoch
-  nonce for a block's slot using the same epoch-cache machinery as the
-  serial header-crypto path (`headerVerificationEpoch`, `epochNonceHex`),
-  but with `allowEpochCacheAdvance=false` — unlike the chainsync-header
-  path, which must forecast ahead of ledger apply for freshly-arriving live
-  headers, the pipeline only ever validates blocks already committed to
-  `ls.chain`, so the epoch cache should already cover them, and not
-  advancing it avoids mutating shared epoch-cache state concurrently from
-  multiple validate-stage worker goroutines (none of which are otherwise
-  synchronized with each other).
-- `pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod())` and
-  `pipeline.WithVerifyConfig(lcommon.VerifyConfig{SkipBodyHashValidation:
-  true, SkipTransactionValidation: true, SkipStakePoolValidation: true})` —
-  matching the scope of the existing serial header-only check
-  (`verifyBlockHeaderHex`): VRF/KES only, not body hash, transaction, or
-  stake-pool validation, which dingo performs separately elsewhere
-  (`ledgerProcessBlock`'s tx/UTxO validation; the registered-VRF-key and
-  leader-eligibility checks in `verifyBlockHeaderState` that stand in for
-  gouroboros' generic stake-pool check).
-- gouroboros' `ApplyStage.SetRequireValidation` is wired automatically by
-  `pipeline.BlockPipeline.Start` whenever `ValidateWorkers > 0` — dingo does
-  not call it directly.
+`NewLedgerState` fails startup when this stage is enabled without a nonzero
+Shelley `slotsPerKESPeriod`; otherwise the generic stage would reject every
+Praos block with a captured zero value.
 
-Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
-(`blockPipelineEta0Provider` always fails the nonce lookup for them, and
-gouroboros' generic `ValidateStage` has no Byron short-circuit of its own —
-unlike the serial path's `verifyBlockHeaderHex`, which explicitly skips
-Byron blocks). `decodeReadChainBatch` therefore ignores the pipeline's
-validation outcome specifically (and only) for blocks whose decoded
-`Era().Id == byron.EraIdByron`, mirroring `verifyBlockHeaderHex`'s own
-skip. For every other era, a validation failure (crypto rejection, or the
-Eta0Provider erroring because the epoch cache does not yet cover the
-block's slot) is treated exactly like a decode failure: the whole batch is
-discarded and `decodeReadChainBatch` returns `ok=false`, letting the
-existing `ledgerProcessBlocks` retry-with-backoff loop (see below) recover
-once the epoch cache catches up, or surface as a stuck pipeline if the
-rejection is deterministic.
+This replay check is defense in depth, not a substitute for admission-time
+validation. `handleEventChainsyncBlockHeaderWithPending` and
+`handleEventBlockfetchBlock` retain the serial header gate. This ordering is
+required because blockfetch persistence advances `ls.chain` before the
+ledger reader reaches the validate stage, and `ls.chain` is consumed by the
+downstream blockfetch server and UTxO RPC sync/watch readers. A block that has
+not passed admission crypto must therefore never enter that chain.
 
-**`errorsChan` must be continuously drained for the pipeline's whole
-lifetime, or every real chain sync deadlocks.** `gouroboros/pipeline`'s
-`StageWorkerPool.worker` pushes *every* non-nil stage error onto a
-fixed-capacity `errorsChan` (`PipelineConfig.PrefetchBufferSize`, 1000 by
-default) *before* forwarding the item onward to `Results()` —
-unconditionally, regardless of whether the error is one `decodeReadChainBatch`
-will later ignore when it reads the same item back (as it does for
-Byron-era blocks, above). Nothing else in gouroboros drains that channel.
-Since every from-genesis or pre-Shelley-boundary sync submits far more than
-1000 Byron-era blocks, `errorsChan` fills permanently after roughly that
-many, and every validate worker then blocks forever on `errors <- err`
-(its only escape is the pipeline's own long-lived `Start` context, not a
-per-block one) — cascading backpressure through
-`validatedChan`/`decodedChan`/`submitChan` into `decodeReadChainBatch`'s
-`Submit()` calls, which run on `context.Background()` by design (see
-above) and therefore hang forever with no log line, no error, and no
-timeout. `LedgerState.Start` closes this gap by launching
-`drainBlockPipelineErrors` immediately after `ls.blockPipeline.Start`
-succeeds: a goroutine that ranges over `ls.blockPipeline.Errors()` for the
-pipeline's entire lifetime, so `errorsChan` never fills regardless of how
-many validate/decode/apply errors flow through it. It exits once `Close`'s
-`ls.blockPipeline.Stop()` closes the channel (`Stop` closes `errorsChan`
-only after every stage has fully drained), and `Close` waits for that exit
-(`ls.blockPipelineErrorsDone`) as part of the same bounded
-`CloseBlockPipelineDrainTimeout` wait already used for `Stop` itself, so
-this goroutine cannot outlive the `LedgerState`.
+`blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
+it does not forecast, mutate the cache, or rebuild `HardForkSummary` per
+block. `decodeReadChainBatch` enforces pipeline results only when the serial
+path has enough state to make the same decision: validation is enabled, the
+slot is above the Mithril trust boundary, and the published epoch cache has a
+nonce for the slot. Byron, trusted historical replay, Mithril-covered blocks,
+and missing/deferred nonce states ignore the generic stage's validation
+outcome and continue through their existing trust/deferred-validation paths.
+This keeps pipeline mode acceptance-equivalent to serial mode instead of
+turning an unavailable nonce into a rejected chain.
 
-Each drained error is classified by `recordBlockPipelineError`
-(`ledger/state.go`) on error identity, not era: `errorsChan` carries a bare
-`error` with no item context, so only `decodeReadChainBatch` — which holds
-the decoded block — can and does gate enforcement on `block.Era().Id`; this
-classification only affects operator visibility.
+The pipeline's bounded `errorsChan` is continuously drained by
+`drainBlockPipelineErrors` for the lifetime of `LedgerState`; otherwise the
+workers would deadlock after enough deferred nonce-state errors. The drain
+classifies `errBlockPipelineEta0Unavailable` and
+`errHeaderVerificationDeferred` at debug level and reports other stage errors
+at error level. Enforcement happens from each `BlockItem`, where the decoded
+era and slot are available; the bare errors channel is observability only.
 
-- `errBlockPipelineEta0Unavailable` (`ledger/verify_header.go`):
-  `blockPipelineEta0Provider` wraps `headerVerificationEpoch`'s
-  `errEpochNonceUnavailable` in this sentinel — raised solely by that
-  function's empty-nonce branch (epoch data covers the slot, but that epoch
-  has no Praos nonce). This is how every Byron-era slot fails the lookup,
-  but the underlying condition (epoch rollover not yet processed) is not
-  verified to be Byron-specific here, so the debug log this produces does
-  not claim Byron specifically. It is counted in
-  `dingo_ledger_block_pipeline_expected_eta0_errors_total`.
-- `errHeaderVerificationDeferred` (past-horizon/missing-epoch-data): the
-  pipeline's epoch cache has not yet caught up with a block already
-  committed to `ls.chain`. This is the same transient, self-healing race
-  described above ("resolves once the epoch cache catches up"), so it is
-  logged at debug level and counted separately in
-  `dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total`, not
-  folded into the unexpected-error bucket below.
-- Everything else reaching `errorsChan` (decode errors, non-Byron validation
-  failures, hard-fork-summary lookup failures, forecast-build errors,
-  `pipeline.ErrBlockNotValidated` and other apply-stage invariant
-  violations) is logged at error level and counted in
-  `dingo_ledger_block_pipeline_unexpected_errors_total` — a nonzero value
-  there indicates a genuine decode/validate/apply problem worth
-  investigating, distinct from the two expected/transient counters above.
-
-These three are independent counters from the pre-existing
-`dingo_ledger_block_pipeline_decode_errors` / `_validation_errors` gauges
-(which snapshot `pipeline.PipelineStats` and already conflate expected and
-unexpected causes).
-
-**Admission-time crypto re-check is skipped once the pipeline will redo
-it.** Earlier revisions of this phase left the existing serial VRF/KES
-checks that gate what is admitted to `ls.chain`
-(`handleEventChainsyncBlockHeaderWithPending` for headers,
-`handleEventBlockfetchBlock` for bodies, in `chainsync.go`, both gated on
-`validationEnabled`/`ValidateHistorical`) completely unchanged, so with
-`ValidateHistorical=true` (the default) every block was cryptographically
-verified twice: once at admission, once more by the pipeline's validate
-stage before apply. `blockPipelineRevalidatesCrypto` (`ledger/chainsync.go`)
-now reports whether every block reaching admission will independently pass
-through the pipeline's validate stage before ledger apply
-(`ls.blockPipeline != nil && LedgerStateConfig.BlockPipelineValidateEnabled`
-— nil `blockPipeline` correctly keeps this false whenever
-`BlockPipelineEnabled` is off or `ManualBlockProcessing` bypasses the
-pipeline entirely, matching `NewLedgerState`'s construction rule). When
-true:
-
-- `shouldVerifyChainsyncHeaderCrypto` returns `false`, so
-  `handleEventChainsyncBlockHeaderWithPending` skips the chainsync-header-time
-  stateless crypto pre-check (`verifyBlockHeaderOnlyCrypto`) and queues the
-  header via `AddBlockHeader` (unverified) rather than
-  `AddVerifiedBlockHeader`.
-- `handleEventBlockfetchBlock` skips the crypto half of
-  `verifyBlockHeaderCryptoBeforeApply` and calls
-  `verifyBlockHeaderStateWithEpochAdvance(block, true, true)` directly
-  instead — the same function already used for the "header already
-  verified by chainsync" fast path. This still runs, unconditionally:
-  the registered-VRF-key and leader-eligibility state checks
-  (`verifyBlockHeaderState`, not performed by the pipeline's validate stage,
-  which is scoped to VRF/KES only) and the epoch-cache-advance side effect
-  (`headerVerificationEpoch`'s `ensureEpochForSlot`, `allowEpochCacheAdvance
-  = true`) that the pipeline's own `Eta0Provider` deliberately does not
-  perform (see below) — only the redundant stateless VRF/KES crypto
-  verification itself is skipped.
-
-The actual gate on ledger application is unchanged: `decodeReadChainBatch`
-still aborts the whole read batch if the pipeline's validate stage rejects
-any block in it (treated exactly like a decode failure), so a block that
-skips admission-time crypto re-verification is still cryptographically
-verified, exactly once, before it can ever be applied to the ledger.
-
-The trade-off this formalizes: for a brief window between header/body
-admission to `ls.chain` and that block being read back out for pipeline
-validation, a not-yet-crypto-verified block can influence in-memory
-chain-selection bookkeeping (fork/rollback resolution, header-queue
-ordering) — the same class of trust window already accepted, unconditionally,
-for `ValidateHistorical=false` historical sync. `ls.chain` is purely an
-internal candidate/queue structure feeding ledger apply (see
-`ledgerReadChainIterator`); it is not consulted by any downstream
-chainsync-server/relay path, so this window does not cause dingo to relay
-an unverified block to other peers. With `ValidateHistorical=false`, nothing
-changes: admission was already skipping this check before
-`BlockPipelineValidateEnabled` existed, and the pipeline continues to close
-that coverage gap as described above.
+A genuine VRF/KES/OpCert rejection after persistence is returned as a
+`headerValidationError` carrying the rejected block point.
+`ledgerReadChainIterator` forwards it in `readChainResult.err`, and
+`ledgerProcessBlocksFromSource` calls
+`tryRecoverFromHeaderValidationError`: the primary chain and ledger rewind to
+the last applied tip, chainsync receives a resync event, and the pipeline
+restarts on a chain that no longer contains the rejected block. The reader
+still drains every result from a submitted batch before reporting the first
+failure, so the shared ordered pipeline cannot leak stale results into the
+next attempt.
 
 **Fork-resolution header-queue overflow must still restart blockfetch.**
 Bursty near-tip conditions (many peers racing small competing forks in quick
