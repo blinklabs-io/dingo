@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -183,6 +184,15 @@ func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 	header lcommon.BlockHeader,
 	pparams lcommon.ProtocolParameters,
 ) error {
+	// Byron has no protocol parameters. During from-genesis sync the first
+	// Shelley block is validated while the current epoch is still Byron, so
+	// defer this BBODY check until the era transition has been observed.
+	if ls.currentEra.Id == eras.ByronEraDesc.Id &&
+		pparams == nil &&
+		ls.config.CardanoNodeConfig != nil &&
+		ls.config.CardanoNodeConfig.ByronGenesis() != nil {
+		return nil
+	}
 	pv, err := GetProtocolVersion(pparams)
 	if err != nil {
 		return fmt.Errorf(

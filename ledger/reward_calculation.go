@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -50,6 +51,29 @@ func (ls *LedgerState) applyStakeRewards(
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
+	// Byron has no Shelley-era reward parameters. During the Byron prefix,
+	// the delayed reward round reaches a boundary before its performance epoch
+	// can have pparams; the first Shelley boundary has the same shape because
+	// its performance epoch is still Byron. There are no stake rewards to
+	// apply for that epoch, so continue the rollover without entering the
+	// Shelley reward calculation path.
+	if rewardEpochs, ok := stakeRewardEpochsForNewEpoch(newEpoch); ok {
+		performanceEpoch, err := ls.db.Metadata().GetEpoch(
+			rewardEpochs.performance,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"get reward performance epoch %d: %w",
+				rewardEpochs.performance,
+				err,
+			)
+		}
+		if performanceEpoch != nil &&
+			performanceEpoch.EraId == eras.ByronEraDesc.Id {
+			return nil
+		}
+	}
 	app, ok, err := ls.precomputedStakeRewardApplication(
 		txn,
 		newEpoch,

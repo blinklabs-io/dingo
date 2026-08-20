@@ -3356,6 +3356,85 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 	}
 }
 
+func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {"k": 432, "protocolMagic": 2},
+		"blockVersionData": {"slotDuration": "20000"}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	newLedger := func(t *testing.T, explicitShelleyHardFork bool) *LedgerState {
+		t.Helper()
+		cfg := &cardano.CardanoNodeConfig{
+			ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+		}
+		require.NoError(t, cfg.LoadByronGenesisFromReader(
+			strings.NewReader(byronGenesisJSON),
+		))
+		require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+			strings.NewReader(shelleyGenesisJSON),
+		))
+		if explicitShelleyHardFork {
+			cfg.ExperimentalHardForksEnabled = new(true)
+			cfg.TestShelleyHardForkAtEpoch = new(uint64)
+		}
+
+		db := newTestDB(t)
+		cm, err := chain.NewManager(db, nil)
+		require.NoError(t, err)
+		ls, err := NewLedgerState(LedgerStateConfig{
+			Database:          db,
+			ChainManager:      cm,
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		})
+		require.NoError(t, err)
+		require.NoError(t, ls.PrepareEpochCacheForStartup())
+		return ls
+	}
+
+	t.Run("real network retains Byron until its on-chain boundary", func(t *testing.T) {
+		ls := newLedger(t, false)
+		require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+		assert.Nil(t, ls.currentPParams)
+		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+		assert.Equal(t, uint(4320), ls.currentEpoch.LengthInSlots)
+		assert.Equal(t, uint(20000), ls.currentEpoch.SlotLength)
+	})
+
+	t.Run("explicit test hard fork still starts in Shelley", func(t *testing.T) {
+		ls := newLedger(t, true)
+		require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
+		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+		assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
+		assert.Equal(t, uint(1000), ls.currentEpoch.SlotLength)
+	})
+}
+
 // newTestEpoch is a convenience builder for models.Epoch.
 func newTestEpoch(
 	id, startSlot uint64,

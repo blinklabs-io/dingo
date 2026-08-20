@@ -4448,6 +4448,12 @@ func cloneProtocolParametersForEra(
 	if pparams == nil {
 		return nil, nil
 	}
+	// Byron does not persist or decode protocol parameters. A Shelley-shaped
+	// fallback can still be present during startup/recovery, but it must not be
+	// carried through a Byron rollover or treated as a Byron-owned snapshot.
+	if era.Id == eras.ByronEraDesc.Id {
+		return nil, nil
+	}
 	if era.DecodePParamsFunc == nil {
 		return nil, fmt.Errorf(
 			"era %d has no protocol parameter decoder",

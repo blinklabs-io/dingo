@@ -888,6 +888,11 @@ When `Node.Run()` is called, components are initialized in this order:
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.
+    For networks with a real Byron genesis, an empty database retains a Byron
+    epoch cache until the on-chain Shelley boundary is observed. A configured
+    experimental Shelley hard-fork epoch is the explicit exception used by
+    Shelley-at-slot-zero test profiles; this keeps absolute slots aligned for
+    genesis-overlay delegation on networks with a Byron prefix.
 10. Snapshot manager creation, then `LedgerState.SetEpochBoundarySnapshotHook`
     wiring (authoritative epoch-boundary capture), then genesis snapshot capture
     (or reuse of an existing post-Mithril Mark snapshot window), then manager
@@ -1693,6 +1698,15 @@ because prior pot transitions cannot be repaired safely without replay.
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
+
+An empty from-genesis database therefore does not infer a hard-fork epoch from
+the Shelley protocol version alone. The version identifies the target era, but
+the absolute Byron-to-Shelley boundary is part of the observed chain unless a
+test profile explicitly configures it.
+
+Byron epochs carry no protocol-parameter CBOR or Shelley reward schedule;
+their rollovers preserve timing and nonce state, and delayed rewards skip a
+Byron performance epoch until Shelley parameters exist.
 
 The Musashi prototype (prototype-2026w29) tags its early chain as Conway (NtN block type 7) but its block headers carry a Leios-extended header body — the 10 standard Babbage fields plus `leios_certified` and `leios_announcement` — that gouroboros' strict Conway decoder rejects. Rather than loosen the shared gouroboros Conway decoder that every real Conway network relies on, dingo decodes these blocks itself, scoped to the Musashi network magic (164) and block type 7, at three entry points:
 

@@ -5369,6 +5369,12 @@ func (ls *LedgerState) loadPParams() error {
 // the OLD era, but currentPParams carries the bumped version.  If those
 // pparams map to a later era than currentEra, we restore TransitionKnown.
 func (ls *LedgerState) reconstructTransitionInfo() {
+	if ls.currentEra.Id == eras.ByronEraDesc.Id {
+		// Byron has no protocol-version pparams. A Shelley fallback loaded
+		// during startup must not fabricate a transition at epoch zero; the
+		// first Shelley block establishes the real on-chain boundary.
+		return
+	}
 	if ls.currentPParams == nil {
 		return
 	}
@@ -5775,8 +5781,15 @@ func (ls *LedgerState) computePParams(
 func (ls *LedgerState) computeGenesisProtocolParameters(
 	era eras.EraDesc,
 ) (lcommon.ProtocolParameters, error) {
+	// Byron has no protocol-parameter CBOR representation in the ledger
+	// state. Its genesis config supplies the era timing and security values;
+	// returning Shelley parameters here would make startup falsely infer a
+	// pending Shelley transition and would leave epoch rollovers with a
+	// parameter value that cannot be cloned using a Byron decoder.
+	if era.Id == eras.ByronEraDesc.Id {
+		return nil, nil
+	}
 	// Start with Shelley parameters as the base for all eras
-	// (Byron also uses Shelley as base)
 	pparams, err := eras.HardForkShelley(
 		ls.config.CardanoNodeConfig,
 		nil,
@@ -5894,6 +5907,23 @@ func (ls *LedgerState) setEpochCache(
 	startEraId := uint(0)
 	if startEraOk {
 		startEraId = startEra.Id
+	}
+	// A real Cardano network with Byron genesis starts in Byron and reaches
+	// Shelley when the first Shelley boundary is observed on chain. The
+	// Shelley protocol version identifies the first post-Byron era, but does
+	// not identify its absolute hard-fork epoch. Starting Shelley at slot 0
+	// shifts all Shelley-relative slots on networks with a Byron prefix (for
+	// example preprod), which makes genesis-overlay delegation reject the
+	// canonical first Shelley block. Test networks may explicitly opt into a
+	// Shelley-at-epoch override; preserve that behavior. Shelley-only configs
+	// without Byron genesis also retain the existing immediate transition.
+	if startEraId > eras.ByronEraDesc.Id &&
+		ls.config.CardanoNodeConfig.ByronGenesis() != nil &&
+		!ls.config.StartInDijkstra {
+		if _, explicitShelleyHardFork :=
+			ls.config.CardanoNodeConfig.HardForkEpoch("shelley"); !explicitShelleyHardFork {
+			startEraId = eras.ByronEraDesc.Id
+		}
 	}
 	if ls.config.StartInDijkstra {
 		startEraId = eras.DijkstraEraDesc.Id
