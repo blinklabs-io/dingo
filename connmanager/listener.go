@@ -65,6 +65,11 @@ func (c *ConnectionManager) startListener(
 				l.ListenNetwork,
 				l.ListenAddress,
 			)
+			// staticcheck sees only the non-Windows build, where
+			// createPipeListener is a stub that always returns an error, and
+			// calls the comparison always true. It is a real check on Windows,
+			// where the call can succeed.
+			//nolint:staticcheck // SA4023: always true on the stub build only
 			if err != nil {
 				return fmt.Errorf("failed to open listening pipe: %w", err)
 			}
