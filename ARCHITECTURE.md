@@ -1158,7 +1158,10 @@ All event types follow the `subsystem.snake_case_name` convention.
   batch and arms its timer under the mutex, releases the mutex for the primary
   and shadow requests, then reacquires it before inspecting state. If a
   callback completed or replaced the batch while the request was outside the
-  lock, the stale request result is ignored.
+  lock, the stale request result is ignored. A prior-request drain also
+  observes `LedgerState`'s shutdown context, so a chainsync subscriber already
+  waiting for a reused connection can return before the terminal EventBus close
+  waits for in-flight handlers.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into
