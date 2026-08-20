@@ -222,7 +222,11 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 	))
 	require.NoError(t, txn.Commit())
 
-	wantCost := snapshots.Mark.PoolParams[targetKey].Cost
+	snapshotPool, ok := snapshots.Mark.PoolParams[targetKey]
+	if !ok || snapshotPool == nil {
+		t.Fatalf("mark snapshot has no parameters for pool %s", targetKey)
+	}
+	wantCost := snapshotPool.Cost
 	require.NotEqual(t, uint64(registrationCost), wantCost,
 		"the two sources must disagree, or this test cannot tell which one "+
 			"was used")
