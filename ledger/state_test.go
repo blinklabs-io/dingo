@@ -3435,6 +3435,35 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	})
 }
 
+func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
+	cardanoConfig, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"mainnet/config.json",
+		"mainnet",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, cardanoConfig.ByronGenesis())
+	require.NotNil(t, cardanoConfig.ShelleyGenesis())
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cardanoConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, ls.PrepareEpochCacheForStartup())
+
+	require.Len(t, ls.epochCache, 1)
+	assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
+	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+	assert.Equal(t, uint(20000), ls.currentEpoch.SlotLength)
+	assert.Equal(t, uint(21600), ls.currentEpoch.LengthInSlots)
+}
+
 // newTestEpoch is a convenience builder for models.Epoch.
 func newTestEpoch(
 	id, startSlot uint64,
