@@ -333,17 +333,22 @@ func fetchAccountRewardsForEpoch(
 		hashes[i] = h
 	}
 
-	invalidateHashes := hashes
-	if forceRefresh {
-		// nil treats every existing checkpointed chunk as stale regardless
-		// of whether its hash still matches the current plan (see
-		// InvalidateStaleAccountChunks: a chunk hash absent from the
-		// "current" set is stale), so doneHashes below comes back empty and
-		// every chunk in this call is re-dispatched to Koios even when the
-		// address universe/chunking plan hasn't changed since the last run.
-		invalidateHashes = nil
-	}
-	if err := cache.InvalidateStaleAccountChunks(network, epoch, invalidateHashes); err != nil {
+	// Only chunks whose hash actually changed are invalidated here — never
+	// nil, even for forceRefresh: deleting every existing chunk's checkpoint
+	// data up front, before any replacement data has actually been fetched,
+	// would leave koios_account_checked/koios_account_fetch_staged_rows
+	// wiped or partial if this call then fails partway (e.g. a mid-refresh
+	// Koios outage), while the untouched koios_account_coverage row from the
+	// last successful commit still reports complete=true — so a later
+	// Observer/Fetch attempt would never retry, and accountLifecycleMismatches
+	// would read that partial/wiped state as if it belonged to a genuinely
+	// complete epoch. forceRefresh instead bypasses the doneHashes skip below,
+	// so every chunk is re-dispatched regardless — each one's own
+	// SaveAccountFetchChunkProgress call safely replaces just that chunk's
+	// rows in one transaction once its re-fetch actually succeeds, so a
+	// chunk never re-reached by a failed refresh attempt simply keeps
+	// whatever valid data it already had.
+	if err := cache.InvalidateStaleAccountChunks(network, epoch, hashes); err != nil {
 		return 0, fmt.Errorf("invalidate stale account chunks: %w", err)
 	}
 	doneHashes, err := cache.GetDoneAccountChunkHashes(network, epoch)
@@ -374,7 +379,12 @@ func fetchAccountRewardsForEpoch(
 
 	var pending []chunkPlan
 	for _, p := range plans {
-		if doneHashes[p.hash] && (!withinGrace || hashesWithRows[p.hash]) {
+		// forceRefresh (--force-refresh) never trusts an existing checkpoint
+		// as done, regardless of doneHashes/hashesWithRows — see the
+		// invalidation comment above for why this bypasses the skip instead
+		// of deleting the old data up front.
+		if !forceRefresh && doneHashes[p.hash] &&
+			(!withinGrace || hashesWithRows[p.hash]) {
 			continue
 		}
 		pending = append(pending, p)
@@ -595,11 +605,15 @@ outer:
 //
 // forceRefresh (threaded from FetchConfig.ForceRefresh; always false for the
 // Observer, which has no force-refresh concept) forces
-// fetchAccountRewardsForEpoch to invalidate every retained checkpoint for
-// this epoch before dispatch, so an operator-requested --force-refresh
-// actually repairs suspected stale/corrupt cached data by going back to
-// Koios, rather than finding every chunk already checkpointed "done" and
-// silently re-committing the same old rows.
+// fetchAccountRewardsForEpoch to re-dispatch every chunk in the current plan
+// regardless of existing checkpoint state, so an operator-requested
+// --force-refresh actually repairs suspected stale/corrupt cached data by
+// going back to Koios, rather than finding every chunk already checkpointed
+// "done" and silently re-committing the same old rows. It never deletes
+// existing checkpoint data up front — each chunk's own successful re-fetch
+// safely replaces just that chunk's rows, so a failed/interrupted refresh
+// attempt never leaves an already-covered epoch with wiped or partial
+// checkpoint state.
 func FetchEpochAccountsWithAddrs(
 	ctx context.Context,
 	koios *KoiosClient,

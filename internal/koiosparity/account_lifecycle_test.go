@@ -327,15 +327,27 @@ func TestAccountLifecycleMismatchesSkipsLifecycleDiffWhenCurrentRowsFailToDecode
 	badKey := testPoolKeyHash(t, 0x21)
 	poolKey := testPoolKeyHash(t, 0xAA)
 
-	// Previous stake epoch (498): the well-formed address only.
+	// Previous stake epoch (498): the well-formed address, plus badKey —
+	// well-formed here (tag 0) so it decodes fine into prevSet. Without this,
+	// badKey (only ever present in currentOutputs) would be absent from both
+	// sets regardless of whether currDecodeErrs is honored, and the test
+	// would pass even with the pre-fix code that silently discarded it — see
+	// this test's own history for why that made it a non-regression-test.
 	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
 		Epoch: 498, StakingKey: goodKey, PoolKeyHash: poolKey,
 		RewardType: "member", CredentialTag: 0,
 		Amount: types.Uint64(1000), Spendable: true,
 	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: 498, StakingKey: badKey, PoolKeyHash: poolKey,
+		RewardType: "member", CredentialTag: 0,
+		Amount: types.Uint64(1000), Spendable: true,
+	}).Error)
 
 	// Current stake epoch (499): the same well-formed address (still
-	// registered) plus one row with an unsupported credential tag.
+	// registered) plus badKey's row now with an unsupported credential tag —
+	// so pre-fix, badKey would be dropped from currSet, found in prevSet, and
+	// falsely reported as CategoryAcctDeregistered.
 	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
 		Epoch: 499, StakingKey: goodKey, PoolKeyHash: poolKey,
 		RewardType: "member", CredentialTag: 0,

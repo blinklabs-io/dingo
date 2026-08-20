@@ -4955,16 +4955,29 @@ every one of #3097's own tests passes unmodified.
   same rate `koios_account_rewards` itself already does, which is an accepted
   characteristic of this cache, not a new problem. `--force-refresh`
   (`FetchConfig.ForceRefresh`, threaded to `fetchAccountRewardsForEpoch` as
-  `forceRefresh`) is the one caller that deliberately bypasses all of this: it
-  invalidates every existing chunk for the epoch unconditionally before
-  dispatch (passing a nil current-plan hash list to
-  `Cache.InvalidateStaleAccountChunks`, the same "invalidate everything"
-  mechanism the empty-universe path below uses), so a forced re-run always
-  goes back to Koios and can actually repair suspected stale/corrupt cached
-  data — without it, an unchanged address universe would produce the exact
-  same content-addressed chunk hashes as before, every chunk would look
-  already "done," and `--force-refresh` would silently just re-commit the old
-  rows instead of refetching anything.
+  `forceRefresh`) is the one caller that deliberately bypasses the "trust an
+  already-checkpointed chunk" behavior — without it, an unchanged address
+  universe would produce the exact same content-addressed chunk hashes as
+  before, every chunk would look already "done," and `--force-refresh` would
+  silently just re-commit the old rows instead of refetching anything.
+  Critically, this bypass is done by ignoring `doneHashes` in the
+  pending-chunk filter, **never** by pre-invalidating (deleting) the existing
+  checkpoint data before dispatch: an earlier version of this fix called
+  `Cache.InvalidateStaleAccountChunks` with a nil current-plan hash list up
+  front, which — if the forced refresh then failed partway (e.g. a Koios
+  outage mid-refresh) — left `koios_account_checked`/
+  `koios_account_fetch_staged_rows` wiped or partial for an epoch whose
+  `koios_account_coverage` row still (correctly) reported `complete = true`
+  from the last successful run, since `CommitAccountRewardsForEpoch` is never
+  reached on a partial failure. That mismatch would make a later
+  Observer/Fetch attempt never retry (coverage already looks complete) while
+  `accountLifecycleMismatches` read the wiped/partial state as if it belonged
+  to a genuinely complete epoch. Each chunk's own `SaveAccountFetchChunkProgress`
+  call already replaces just that chunk's rows atomically once its re-fetch
+  succeeds, so leaving old data in place until then means a chunk never
+  reached by a failed refresh attempt simply keeps whatever valid data it
+  already had — no data is ever destroyed before its replacement is confirmed
+  fetched.
 - **Selective invalidation on universe/chunk-plan change.**
   `Cache.InvalidateStaleAccountChunks` prunes staged rows/checked markers for
   any chunk hash no longer present in the current plan before dispatch —
