@@ -94,6 +94,7 @@ type Node struct {
 	koiosParityObserver     *koiosparity.Observer
 	midnightServer          *midnightserver.Server
 	offchainMetadataFetcher *offchainmetadata.Fetcher
+	tokenRegistrySync       *offchainmetadata.TokenRegistrySync
 	midnightIndexer         *midnightindexer.Indexer
 	// ouroborosRef holds the current Ouroboros. It is atomic because a live
 	// snapshot/restore replaces the instance while EventBus handlers and
@@ -1756,6 +1757,25 @@ func (n *Node) Run(ctx context.Context) error {
 				)
 			}
 		})
+		if n.config.tokenRegistry.Enabled {
+			sync, err := n.newTokenRegistrySync()
+			if err != nil {
+				return fmt.Errorf("creating token registry sync: %w", err)
+			}
+			n.tokenRegistrySync = sync
+			if err := n.tokenRegistrySync.Start(n.ctx); err != nil { //nolint:contextcheck
+				return fmt.Errorf("starting token registry sync: %w", err)
+			}
+			started = append(started, func() { //nolint:contextcheck
+				if err := n.tokenRegistrySync.Stop(context.Background()); err != nil {
+					n.config.logger.Error(
+						"failed to stop token registry sync during cleanup",
+						"error",
+						err,
+					)
+				}
+			})
+		}
 		started = append(started, n.startDeferredIndexMaintenance())
 	}
 
@@ -2166,4 +2186,29 @@ func (n *Node) startDeferredIndexMaintenance() func() {
 			)
 		}
 	}
+}
+
+// newTokenRegistrySync builds the API-mode CIP-26 token registry sync from
+// node config. Both the startup path and the live storage-restart path use it
+// so the two cannot drift in how they map configuration onto the syncer.
+func (n *Node) newTokenRegistrySync() (
+	*offchainmetadata.TokenRegistrySync,
+	error,
+) {
+	return offchainmetadata.NewTokenRegistrySync(
+		offchainmetadata.TokenRegistryConfig{
+			Logger:                n.config.logger,
+			Store:                 n.db.Metadata(),
+			HTTPClient:            n.config.tokenRegistry.HTTPClient,
+			SourceURL:             n.config.tokenRegistry.SourceURL,
+			Network:               n.config.network,
+			UserAgent:             n.config.tokenRegistry.UserAgent,
+			Interval:              n.config.tokenRegistry.Interval,
+			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
+			MaxBytes:              n.config.tokenRegistry.MaxBytes,
+			MaxEntryBytes:         n.config.tokenRegistry.MaxEntryBytes,
+			StoreLogos:            n.config.tokenRegistry.StoreLogos,
+			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
+		},
+	)
 }

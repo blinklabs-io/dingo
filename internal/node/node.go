@@ -546,6 +546,22 @@ func buildDingoConfig(
 					AllowPrivateAddresses,
 			},
 		),
+		dingo.WithTokenRegistryConfig(
+			dingo.TokenRegistryConfig{
+				Enabled:   cfg.TokenRegistry.Enabled,
+				SourceURL: cfg.TokenRegistry.SourceURL,
+				Interval:  cfg.TokenRegistry.Interval,
+				RequestTimeout: cfg.TokenRegistry.
+					RequestTimeout,
+				UserAgent: cfg.TokenRegistry.UserAgent,
+				MaxBytes:  cfg.TokenRegistry.MaxBytes,
+				MaxEntryBytes: cfg.TokenRegistry.
+					MaxEntryBytes,
+				StoreLogos: cfg.TokenRegistry.StoreLogos,
+				AllowPrivateAddresses: cfg.TokenRegistry.
+					AllowPrivateAddresses,
+			},
+		),
 		dingo.WithMidnightConfig(dingo.MidnightConfig{
 			Enabled:                     cfg.Midnight.Enabled,
 			Port:                        cfg.Midnight.Port,

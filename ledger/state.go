@@ -62,6 +62,10 @@ import (
 
 const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
+	// Keep each cleanup transaction short enough that it cannot monopolize
+	// SQLite while blockfetch handlers persist sync state during shutdown or
+	// catch-up. Later timer or epoch-boundary runs continue the cleanup.
+	cleanupConsumedUtxoBatchSize = 1_000
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 	ledgerIntersectDenseCount    = 32
 	ledgerAncestorSearchWindow   = 10_000
@@ -2429,12 +2433,19 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 func (ls *LedgerState) cleanupConsumedUtxos() {
 	// Cleanup is advisory pruning. Never let the periodic timer and the epoch
 	// transition trigger occupy SQLite's single write connection at the same
-	// time; a second invocation has no additional work to do after the first
-	// one drains the eligible rows.
+	// time. Each invocation handles one bounded batch so cleanup remains
+	// resumable and cannot hold the connection for an unbounded drain.
 	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
 		return
 	}
 	defer ls.cleanupConsumedUtxosRunning.Store(false)
+	if ls.ctx != nil {
+		select {
+		case <-ls.ctx.Done():
+			return
+		default:
+		}
+	}
 
 	// In API storage mode we retain spent UTxO metadata rows past the
 	// stability window so historical transaction queries can resolve
@@ -2481,26 +2492,20 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	if tipSlot > stabilityWindow {
-		for {
-			// No lock needed here - the database handles its own consistency
-			// and we're not accessing any in-memory LedgerState fields.
-			// The tipSlot was captured above with a read lock.
-			count, err := ls.db.UtxosDeleteConsumed(
-				tipSlot-stabilityWindow,
-				10000,
-				nil,
+		// No lock needed here - the database handles its own consistency
+		// and we're not accessing any in-memory LedgerState fields.
+		// The tipSlot was captured above with a read lock.
+		_, err := ls.db.UtxosDeleteConsumed(
+			tipSlot-stabilityWindow,
+			cleanupConsumedUtxoBatchSize,
+			nil,
+		)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to cleanup consumed UTxOs",
+				"component", "ledger",
+				"error", err,
 			)
-			if count == 0 {
-				break
-			}
-			if err != nil {
-				ls.config.Logger.Error(
-					"failed to cleanup consumed UTxOs",
-					"component", "ledger",
-					"error", err,
-				)
-				break
-			}
 		}
 	}
 }
