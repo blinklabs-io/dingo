@@ -89,6 +89,7 @@ type mockConwayFeeTx struct {
 	certificates       []lcommon.Certificate
 	withdrawals        map[*lcommon.Address]*big.Int
 	assetMint          *lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
+	outputs            []lcommon.TransactionOutput
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
 }
@@ -110,7 +111,7 @@ func (m *mockConwayFeeTx) Produced() []lcommon.Utxo {
 }
 
 func (m *mockConwayFeeTx) Outputs() []lcommon.TransactionOutput {
-	return nil
+	return m.outputs
 }
 
 func (m *mockConwayFeeTx) TTL() uint64 {
@@ -3094,4 +3095,211 @@ func TestConwayPlutusRejectsNilPparams(t *testing.T) {
 		nilPparams,
 	)
 	assert.ErrorIs(t, certErr, ErrIncompatibleProtocolParams)
+}
+
+// conwayInlineDatumRule returns the installed Conway inline-datum rule.
+func conwayInlineDatumRule(t *testing.T) func(
+	lcommon.Transaction,
+	uint64,
+	lcommon.LedgerState,
+	lcommon.ProtocolParameters,
+) error {
+	t.Helper()
+	for _, rule := range conwayUtxoValidationRules {
+		if rule.index == conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex {
+			return rule.validationFunc
+		}
+	}
+	t.Fatal("Conway inline-datum rule was not installed")
+	return nil
+}
+
+func newTestPlutusV1ScriptAddr(
+	t *testing.T,
+	s lcommon.PlutusV1Script,
+) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		s.Hash().Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+	return addr
+}
+
+func newTestKeyAddr(t *testing.T) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	return addr
+}
+
+// TestConwayInlineDatumRuleAcceptsUnusedPlutusV1WithLiveRedeemer is the
+// accept-path case the purpose scan must actually run for.
+//
+// The spending input is a PlutusV2 script address, so the transaction has a
+// real script purpose and the scan is entered. A PlutusV1 script is also
+// available -- present in the witness set and as a reference script -- but no
+// purpose needs it. An inline datum is present. A correct implementation
+// accepts, because the only *needed* script is PlutusV2.
+//
+// This is what distinguishes purpose-aware logic from "reject whenever a
+// redeemer, an inline datum and any PlutusV1 script coexist". Verified: an
+// implementation that scans every available script instead of the needed ones
+// fails here, while the two pre-existing inline-datum tests still pass.
+func TestConwayInlineDatumRuleAcceptsUnusedPlutusV1WithLiveRedeemer(
+	t *testing.T,
+) {
+	v2Input := newTestInput(0x11, 0)
+	refInput := newTestInput(0x12, 0)
+	v2Script := lcommon.PlutusV2Script([]byte{0x0a, 0x0b})
+	unusedV1 := lcommon.PlutusV1Script([]byte{0x01, 0x02})
+	v2Addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		v2Script.Hash().Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagSpend,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{unusedV1},
+				plutusV2Scripts: []lcommon.PlutusV2Script{v2Script},
+			},
+		},
+		inputs:          []lcommon.TransactionInput{v2Input},
+		referenceInputs: []lcommon.TransactionInput{refInput},
+	}
+	ls := newMockLedgerState()
+	// The spent UTxO carries the inline datum and is guarded by PlutusV2.
+	ls.addUtxo(v2Input, newBabbageInlineDatumOutput(t, v2Addr))
+	// The unused PlutusV1 script is only available, never required.
+	ls.addUtxo(refInput, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       newTestKeyAddr(t),
+		scriptRef:  unusedV1,
+	})
+
+	require.NoError(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	))
+}
+
+// TestConwayInlineDatumRuleRejectsDatumOnOutput covers an inline datum on one
+// of the transaction's own outputs rather than on a consumed input. The
+// PlutusV1 script context has to represent that output too, so scanning only
+// the consumed inputs misses it.
+func TestConwayInlineDatumRuleRejectsDatumOnOutput(t *testing.T) {
+	scriptInput := newTestInput(0x21, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x03, 0x04})
+	scriptAddr := newTestPlutusV1ScriptAddr(t, plutusScript)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagSpend,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
+			},
+		},
+		inputs: []lcommon.TransactionInput{scriptInput},
+		outputs: []lcommon.TransactionOutput{
+			newBabbageInlineDatumOutput(t, newTestKeyAddr(t)),
+		},
+	}
+	ls := newMockLedgerState()
+	// The spent UTxO carries no datum; only the new output does.
+	ls.addUtxo(scriptInput, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       scriptAddr,
+		scriptRef:  plutusScript,
+	})
+
+	var inlineDatumErr lcommon.InlineDatumsNotSupportedError
+	require.ErrorAs(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	), &inlineDatumErr)
+}
+
+// TestConwayInlineDatumRuleRejectsDatumOnReferenceInput covers an inline datum
+// reachable only through a reference input.
+func TestConwayInlineDatumRuleRejectsDatumOnReferenceInput(t *testing.T) {
+	scriptInput := newTestInput(0x31, 0)
+	refInput := newTestInput(0x32, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x05, 0x06})
+	scriptAddr := newTestPlutusV1ScriptAddr(t, plutusScript)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagSpend,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
+			},
+		},
+		inputs:          []lcommon.TransactionInput{scriptInput},
+		referenceInputs: []lcommon.TransactionInput{refInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(scriptInput, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       scriptAddr,
+		scriptRef:  plutusScript,
+	})
+	ls.addUtxo(refInput, newBabbageInlineDatumOutput(t, newTestKeyAddr(t)))
+
+	var inlineDatumErr lcommon.InlineDatumsNotSupportedError
+	require.ErrorAs(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	), &inlineDatumErr)
 }

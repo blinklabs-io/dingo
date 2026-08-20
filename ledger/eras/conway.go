@@ -305,6 +305,24 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 // datum-bearing input is locked by a PlutusV1 script. The gouroboros rule this
 // replaces reports a false positive for an unrelated PlutusV1 reference script
 // attached to a key-locked input.
+// validateConwayInlineDatumsWithPlutusV1 rejects a transaction that needs a
+// PlutusV1 script while carrying an inline datum anywhere the PlutusV1 script
+// context would have to represent it. PlutusV1 predates inline datums, so the
+// context translation cannot express one and the transaction is invalid.
+//
+// The rule is transaction-wide in two directions, and both matter:
+//
+//   - An inline datum disqualifies the transaction wherever it sits: on a
+//     consumed input, on a reference input, or on one of this transaction's
+//     own outputs. Scanning only the consumed inputs misses the other two.
+//   - The PlutusV1 script need not be the one being spent. A PlutusV1 script
+//     required for minting, certifying, rewarding, voting or proposing counts
+//     just as much, and a script can enter the transaction through a
+//     reference input's script ref rather than an input address.
+//
+// Only *needed* scripts count, which is what preserves the unused-reference-
+// script case: a PlutusV1 script that happens to be available but is not
+// required by any purpose does not make the transaction invalid.
 func validateConwayInlineDatumsWithPlutusV1(
 	tx lcommon.Transaction,
 	_ uint64,
@@ -314,42 +332,68 @@ func validateConwayInlineDatumsWithPlutusV1(
 	if ls == nil {
 		return nil
 	}
-	hasInlineDatums := false
-	for _, input := range tx.Inputs() {
-		utxo, err := ls.UtxoById(input)
-		if err != nil || utxo.Output == nil {
-			continue
-		}
-		if utxo.Output.Datum() != nil {
-			hasInlineDatums = true
-			break
-		}
-	}
-	if !hasInlineDatums {
-		return nil
-	}
 	ctx, err := newConwayPlutusValidationContext(tx, ls)
 	if err != nil {
 		return err
 	}
-	for _, input := range tx.Inputs() {
-		utxo, ok := ctx.scriptInputs.resolvedInputsMap[input.String()]
-		if !ok || utxo.Output == nil || utxo.Output.Datum() == nil {
-			continue
-		}
-		addr := utxo.Output.Address()
-		if addr.Type()&lcommon.AddressTypeScriptBit == 0 {
-			continue
-		}
-		script, ok := ctx.scriptInputs.scripts[lcommon.ScriptHash(addr.PaymentKeyHash())]
-		if !ok {
-			continue
-		}
-		if _, ok := script.(lcommon.PlutusV1Script); ok {
-			return lcommon.InlineDatumsNotSupportedError{PlutusVersion: "PlutusV1"}
+	if !conwayTxHasInlineDatum(tx, ctx.scriptInputs) {
+		return nil
+	}
+	needsPlutusV1 := false
+	// The walk's own errors -- a missing script witness, an absent redeemer --
+	// belong to validateConwayRequiredPlutusRedeemers, which reports them with
+	// the right message. Returning them from here would mask that rule's
+	// finding behind this one, so they are discarded deliberately; everything
+	// this rule establishes is carried in found.
+	_ = forEachConwayScriptPurpose(
+		tx,
+		ctx.scriptInputs,
+		ctx.inputs,
+		ctx.assetMint,
+		func(_ lcommon.RedeemerKey, purpose script.ScriptPurpose) error {
+			if needsPlutusV1 || purpose == nil {
+				return nil
+			}
+			scriptHash := purpose.ScriptHash()
+			if scriptHash == (lcommon.ScriptHash{}) {
+				return nil
+			}
+			needed, ok := ctx.scriptInputs.scripts[scriptHash]
+			if !ok {
+				return nil
+			}
+			if _, isV1 := needed.(lcommon.PlutusV1Script); isV1 {
+				needsPlutusV1 = true
+			}
+			return nil
+		},
+	)
+	if needsPlutusV1 {
+		return lcommon.InlineDatumsNotSupportedError{
+			PlutusVersion: "PlutusV1",
 		}
 	}
 	return nil
+}
+
+// conwayTxHasInlineDatum reports whether an inline datum appears anywhere the
+// PlutusV1 script context would have to represent it: on a resolved consumed
+// or reference input, or on one of this transaction's own outputs.
+func conwayTxHasInlineDatum(
+	tx lcommon.Transaction,
+	scriptInputs conwayScriptInputs,
+) bool {
+	for _, utxo := range scriptInputs.resolvedAllInputs {
+		if utxo.Output != nil && utxo.Output.Datum() != nil {
+			return true
+		}
+	}
+	for _, output := range tx.Outputs() {
+		if output != nil && output.Datum() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func isInputResolutionError(err error) bool {
@@ -610,6 +654,33 @@ func validateConwayRequiredPlutusRedeemers(
 			Index:      key.Index,
 		}
 	}
+	return forEachConwayScriptPurpose(
+		tx,
+		scriptInputs,
+		inputs,
+		assetMint,
+		checkRequired,
+	)
+}
+
+// forEachConwayScriptPurpose invokes fn once for every script purpose the
+// transaction requires, in the canonical redeemer order for each tag:
+// spending inputs, minting policies (sorted), certificates, withdrawals
+// (sorted), voters (sorted), and proposal procedures.
+//
+// This is the single enumeration of "which scripts does this transaction
+// actually need to run". validateConwayRequiredPlutusRedeemers uses it to
+// demand a redeemer for each; validateConwayInlineDatumsWithPlutusV1 uses it
+// to collect the needed script hashes. Keeping one walk is deliberate: two
+// copies would drift, and a purpose missing from either one is a silent
+// validation gap rather than a visible failure.
+func forEachConwayScriptPurpose(
+	tx lcommon.Transaction,
+	scriptInputs conwayScriptInputs,
+	inputs []lcommon.TransactionInput,
+	assetMint lcommon.MultiAsset[lcommon.MultiAssetTypeMint],
+	fn func(lcommon.RedeemerKey, script.ScriptPurpose) error,
+) error {
 	for idx, input := range inputs {
 		utxo, ok := scriptInputs.resolvedInputsMap[input.String()]
 		if !ok || utxo.Output == nil {
@@ -623,7 +694,7 @@ func validateConwayRequiredPlutusRedeemers(
 			Tag:   lcommon.RedeemerTagSpend,
 			Index: uint32(idx),
 		}
-		if err := checkRequired(
+		if err := fn(
 			key,
 			script.ScriptPurposeSpending{Input: utxo},
 		); err != nil {
@@ -639,7 +710,7 @@ func validateConwayRequiredPlutusRedeemers(
 			Tag:   lcommon.RedeemerTagMint,
 			Index: uint32(idx),
 		}
-		if err := checkRequired(
+		if err := fn(
 			key,
 			script.ScriptPurposeMinting{PolicyId: policy},
 		); err != nil {
@@ -654,7 +725,7 @@ func validateConwayRequiredPlutusRedeemers(
 			Tag:   lcommon.RedeemerTagCert,
 			Index: uint32(idx),
 		}
-		if err := checkRequired(
+		if err := fn(
 			key,
 			script.ScriptPurposeCertifying{
 				Index:       uint32(idx),
@@ -673,7 +744,7 @@ func validateConwayRequiredPlutusRedeemers(
 			Tag:   lcommon.RedeemerTagReward,
 			Index: uint32(idx),
 		}
-		if err := checkRequired(
+		if err := fn(
 			key,
 			script.ScriptPurposeRewarding{
 				StakeCredential: lcommon.Credential{
@@ -694,7 +765,7 @@ func validateConwayRequiredPlutusRedeemers(
 			Tag:   lcommon.RedeemerTagVoting,
 			Index: uint32(idx),
 		}
-		if err := checkRequired(
+		if err := fn(
 			key,
 			script.ScriptPurposeVoting{Voter: *voter},
 		); err != nil {
@@ -709,7 +780,7 @@ func validateConwayRequiredPlutusRedeemers(
 			Tag:   lcommon.RedeemerTagProposing,
 			Index: uint32(idx),
 		}
-		if err := checkRequired(
+		if err := fn(
 			key,
 			script.ScriptPurposeProposing{
 				Index:             uint32(idx),
