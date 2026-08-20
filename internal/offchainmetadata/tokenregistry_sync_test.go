@@ -344,7 +344,7 @@ func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
 	require.Equal(
 		t,
 		`"abc123"`,
-		store.state(tokenRegistrySyncStateKey(server.URL)),
+		store.state(tokenRegistrySyncStateKey(server.URL, false)),
 	)
 
 	// The registry is ~240MB for mainnet; a second sync against an unchanged
@@ -470,7 +470,7 @@ func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 	_, err := sync.SyncOnce(t.Context())
 
 	require.Error(t, err)
-	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL)),
+	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL, false)),
 		"a failed sync must not record the ETag")
 }
 
@@ -513,7 +513,7 @@ func TestTokenRegistrySyncErrorsOnBadStatus(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "500")
-	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL)))
+	require.Empty(t, store.state(tokenRegistrySyncStateKey(server.URL, false)))
 }
 
 func TestTokenRegistrySyncErrorsOnNonGzipBody(t *testing.T) {
@@ -881,7 +881,12 @@ func TestTokenRegistrySyncClearsLogosWhenDisabled(t *testing.T) {
 	_, err = withoutLogos.SyncOnce(t.Context())
 
 	require.NoError(t, err)
-	require.Empty(t, store.snapshot()[syncSubjectNut].Logo)
+	// Assert presence first: indexing a map with a missing key yields the
+	// zero-value entry, whose Logo is also empty, so an Empty check alone
+	// would pass if the subject had been deleted outright.
+	entries := store.snapshot()
+	require.Contains(t, entries, syncSubjectNut)
+	require.Empty(t, entries[syncSubjectNut].Logo)
 }
 
 // manySubjects builds n distinct, valid registry subjects.
@@ -920,7 +925,7 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	require.NoError(t, err)
 	require.Equal(t, "DJED", store.snapshot()[syncSubjectDjed].Ticker)
 	prunesBefore := store.prunes
-	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL))
+	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL, false))
 
 	// The next snapshot spans more than one batch, and the store fails on
 	// the second write -- after the first has already been committed.
@@ -963,7 +968,7 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	require.Equal(
 		t,
 		etagBefore,
-		store.state(tokenRegistrySyncStateKey(server.URL)),
+		store.state(tokenRegistrySyncStateKey(server.URL, false)),
 		"a partial snapshot must not advance the ETag, so the next run retries it in full",
 	)
 }
@@ -1024,7 +1029,7 @@ func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, store.snapshot(), 1)
 	prunesBefore := store.prunes
-	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL))
+	etagBefore := store.state(tokenRegistrySyncStateKey(server.URL, false))
 
 	// Same repository, but nothing the sync recognizes as a mapping.
 	server.setBody(tarballOf(t, map[string]string{
@@ -1046,7 +1051,7 @@ func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
 	require.Equal(
 		t,
 		etagBefore,
-		store.state(tokenRegistrySyncStateKey(server.URL)),
+		store.state(tokenRegistrySyncStateKey(server.URL, false)),
 		"an empty snapshot must not be recorded, so the next run retries it",
 	)
 }
@@ -1173,5 +1178,90 @@ func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
 		store.snapshot(),
 		syncSubjectDjed,
 		"a subject whose mapping failed to parse must keep its stored metadata",
+	)
+}
+
+// TestTokenRegistrySyncKeysETagByLogoMode covers flipping storeLogos on an
+// otherwise unchanged registry. The stored validator would otherwise produce
+// a 304, applySnapshot would never run, and the new logo setting would never
+// take effect: enabling would never backfill logos, and disabling would leave
+// them stored indefinitely.
+func TestTokenRegistrySyncKeysETagByLogoMode(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "iVBORw0KGgoAAAA=",
+		),
+	})
+	server := newRegistryServer(t, body)
+	server.notModifiedOnTag = true
+	store := newFakeTokenRegistryStore()
+
+	withLogos := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.StoreLogos = true
+	})
+	steppedClock(withLogos)
+	_, err := withLogos.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, store.snapshot()[syncSubjectNut].Logo)
+
+	// Same source, same registry content, logos now off.
+	withoutLogos := newTestSync(t, store, server.URL, nil)
+	withoutLogos.now = func() time.Time {
+		return time.Date(2026, 8, 20, 12, 5, 0, 0, time.UTC)
+	}
+
+	written, err := withoutLogos.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		1,
+		written,
+		"a logo-mode change must force a full fetch, not be short-circuited by a 304",
+	)
+	entries := store.snapshot()
+	require.Contains(t, entries, syncSubjectNut)
+	require.Empty(t, entries[syncSubjectNut].Logo)
+}
+
+// TestTokenRegistrySyncStampsAreStrictlyIncreasing keeps reconciliation
+// correct when two snapshots land inside the same wall-clock second, which a
+// sub-second configured interval makes reachable. Equal stamps would make the
+// prune's `updated_at < cutoff` preserve subjects the newer snapshot dropped.
+func TestTokenRegistrySyncStampsAreStrictlyIncreasing(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	// A clock frozen inside one second: both snapshots would share a stamp.
+	frozen := time.Date(2026, 8, 20, 12, 0, 0, 250000000, time.UTC)
+	sync.now = func() time.Time { return frozen }
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, store.snapshot(), 2)
+	first := store.snapshot()[syncSubjectNut].UpdatedAt
+
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+	}), `"etag2"`)
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	second := store.snapshot()[syncSubjectNut].UpdatedAt
+	require.True(
+		t,
+		second.After(first),
+		"a later snapshot must carry a strictly greater stamp (%s vs %s)",
+		second, first,
+	)
+	require.NotContains(
+		t,
+		store.snapshot(),
+		syncSubjectDjed,
+		"reconciliation must still retire a dropped subject within the same second",
 	)
 }

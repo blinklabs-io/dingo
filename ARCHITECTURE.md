@@ -1443,13 +1443,20 @@ which any mapping was skipped as malformed or oversized — a skipped mapping
 does not re-stamp its row, so reconciling would delete metadata that is still
 good. Both log a warning rather than failing.
 
-The stored entity tag is namespaced by a hash of the resolved source URL. A
-validator only means anything to the source that issued it, so repointing
+The stored entity tag is namespaced by a hash of the resolved source URL and
+the logo-storage mode — everything that changes what a snapshot would produce.
+A validator only means anything to the source that issued it, so repointing
 `sourceUrl` or switching network must not let the previous source's tag
-short-circuit the new one into a `304`. The snapshot stamp is truncated to a
+short-circuit the new one into a `304`; and because flipping `storeLogos`
+changes what gets persisted from identical bytes, it has to invalidate the tag
+too, or enabling logos would never backfill them and disabling them would
+leave them stored. The snapshot stamp is truncated to a
 whole second, because MySQL's `datetime` column carries no fractional seconds:
 an unrounded stamp would be stored rounded while the prune compared against
-the original, deleting the very snapshot just written. Turning `storeLogos` off
+the original, deleting the very snapshot just written. Stamps are also forced
+strictly upward, since two snapshots inside one wall-clock second — reachable
+with a sub-second configured interval — would otherwise share a stamp and the
+prune would preserve exactly the subjects the newer snapshot dropped. Turning `storeLogos` off
 needs no special handling: the upsert overwrites every property column, so the
 next snapshot clears previously stored logos.
 

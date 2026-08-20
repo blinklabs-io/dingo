@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -144,6 +145,7 @@ type TokenRegistrySync struct {
 	storeLogos    bool
 	allowPrivate  bool
 	now           func() time.Time
+	lastSyncedAt  time.Time
 	mu            sync.Mutex
 	cancel        context.CancelFunc
 	done          chan struct{}
@@ -225,12 +227,19 @@ func defaultTokenRegistryURL(network string) string {
 	return TestnetTokenRegistryURL
 }
 
-// tokenRegistrySyncStateKey namespaces the stored entity tag by source, so a
-// tag is only ever replayed to the source that issued it. The URL is hashed
-// rather than embedded to keep the key bounded and free of credentials that
-// a mirror URL might carry.
-func tokenRegistrySyncStateKey(sourceURL string) string {
-	sum := blake2b.Sum256([]byte(sourceURL))
+// tokenRegistrySyncStateKey namespaces the stored entity tag by everything
+// that changes what a snapshot would produce: the source, so a tag is only
+// replayed to the source that issued it, and the logo-storage mode, because
+// flipping that changes what gets persisted from identical bytes. Without the
+// latter, enabling logos would never backfill them and disabling them would
+// leave them stored, since an unchanged registry answers 304 and
+// applySnapshot never runs.
+//
+// Hashed rather than embedded to keep the key bounded and free of any
+// credentials a mirror URL might carry.
+func tokenRegistrySyncStateKey(sourceURL string, storeLogos bool) string {
+	material := sourceURL + "|logos=" + strconv.FormatBool(storeLogos)
+	sum := blake2b.Sum256([]byte(material))
 	return TokenRegistrySyncStateKey + ":" + hex.EncodeToString(sum[:8])
 }
 
@@ -339,7 +348,7 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 // whole snapshot has been applied, so an interrupted sync retries in full
 // rather than recording progress it did not make.
 func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
-	stateKey := tokenRegistrySyncStateKey(s.sourceURL)
+	stateKey := tokenRegistrySyncStateKey(s.sourceURL, s.storeLogos)
 	previousETag, err := s.store.GetSyncState(stateKey, nil)
 	if err != nil {
 		return 0, fmt.Errorf("read token registry sync state: %w", err)
@@ -398,7 +407,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	// row the snapshot had just written would look older than the cutoff
 	// and be deleted. Truncating at the source makes the written value and
 	// the cutoff identical on SQLite, PostgreSQL, and MySQL alike.
-	syncedAt := s.now().UTC().Truncate(time.Second)
+	syncedAt := s.nextSyncStamp()
 	written, mappings, skipped, err := s.applySnapshot(
 		ctx,
 		resp.Body,
@@ -478,6 +487,32 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 		}
 	}
 	return written, nil
+}
+
+// nextSyncStamp returns the stamp for a snapshot: truncated to a whole second
+// (see the note on MySQL's fractionless `datetime` below) and strictly
+// greater than the previous snapshot's.
+//
+// Truncation alone is not enough. Two snapshots inside the same wall-clock
+// second -- reachable with a sub-second configured interval -- would share a
+// stamp, and the prune's `updated_at < cutoff` would then preserve exactly
+// the subjects the newer snapshot dropped. Forcing the sequence upward keeps
+// reconciliation correct at any interval.
+//
+// MySQL's `datetime` column carries no fractional seconds, so an unrounded
+// stamp would be stored rounded while the prune compared the original, making
+// every row the snapshot had just written look stale.
+// SyncOnce is exported, so it can run concurrently with the worker loop;
+// the stamp sequence is shared state and is guarded accordingly.
+func (s *TokenRegistrySync) nextSyncStamp() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stamp := s.now().UTC().Truncate(time.Second)
+	if !s.lastSyncedAt.IsZero() && !stamp.After(s.lastSyncedAt) {
+		stamp = s.lastSyncedAt.Add(time.Second)
+	}
+	s.lastSyncedAt = stamp
+	return stamp
 }
 
 // applySnapshot streams a gzipped tar of the registry, parsing mappings/*.json
