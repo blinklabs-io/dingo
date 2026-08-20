@@ -128,8 +128,15 @@ type EventBus struct {
 	// Async publishing infrastructure
 	asyncQueue chan asyncEvent
 	asyncWg    sync.WaitGroup
-	stopCh     chan struct{}
-	closed     bool
+	// orderedLanes holds the per-event-type FIFOs behind PublishOrdered,
+	// created lazily on first use and torn down by shutdown. See
+	// ordered.go: they exist because the shared asyncQueue above is
+	// drained by AsyncWorkerPoolSize workers concurrently and so cannot
+	// preserve publisher order.
+	orderedLanes map[EventType]*orderedLane
+	orderedMu    sync.Mutex
+	stopCh       chan struct{}
+	closed       bool
 	// terminalClosing is set before Close begins quiescing the bus. Callback
 	// dispatchers use it to discard events already buffered in their channels;
 	// Stop remains reusable and does not discard buffered callback events.
@@ -1145,6 +1152,13 @@ func (e *EventBus) shutdown(restart bool) {
 	if e.metrics != nil {
 		e.metrics.subscribers.Reset()
 	}
+
+	// Every ordered-lane worker watched the stop channel closed above and
+	// has exited (asyncWg.Wait covered them alongside the shared pool), so
+	// the lanes are inert. Drop them: a restart swaps in a new stop channel
+	// and a lane still bound to the old, already-closed one would make its
+	// rebuilt worker exit immediately.
+	e.resetOrderedLanes()
 
 	if !restart {
 		return

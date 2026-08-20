@@ -386,7 +386,12 @@ func (p *PeerGovernor) createOutboundConnection(
 			if peerIdx == -1 {
 				p.mu.Unlock()
 				// Peer was removed while connecting, close connection
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"outbound: error closing connection for removed peer",
+					"address", peer.Address,
+				)
 				p.config.Logger.Debug(
 					"outbound: peer removed during connection, closing",
 					"address", peer.Address,
@@ -397,7 +402,12 @@ func (p *PeerGovernor) createOutboundConnection(
 			currentPeer := p.peers[peerIdx]
 			if p.isPeerDeniedLocked(currentPeer) {
 				p.mu.Unlock()
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"outbound: error closing connection for denied peer",
+					"address", peer.Address,
+				)
 				p.config.Logger.Debug(
 					"outbound: peer denied during connection, closing",
 					"address", peer.Address,
@@ -696,7 +706,13 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 					"address", address,
 					"connection_id", connId.String(),
 				)
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing denied inbound peer connection",
+					"address", address,
+					"connection_id", connId.String(),
+				)
 			}
 		}
 		return
@@ -1172,8 +1188,10 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 		if err != nil {
 			testErr = err
 		} else {
-			// Connection succeeded, close it since this is just a test
-			conn.Close()
+			// Connection succeeded, close it since this is just a test.
+			// Reachability is already established by the successful dial,
+			// so a close error here carries no diagnostic value.
+			_ = conn.Close()
 		}
 	} else {
 		testErr = errors.New("no test function or connection manager configured")

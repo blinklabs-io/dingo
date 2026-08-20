@@ -43,6 +43,7 @@ Does not replace manual 'run --all' after a ledger replay.`,
 		"pools absent from Koios in recently-fetched epochs → reference_lag (not FAIL)")
 	addDingoDBFlags(cmd)
 	addAccountsFlag(cmd)
+	addAccountChunkFlags(cmd)
 
 	return cmd
 }
@@ -62,6 +63,10 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	workers, _ := cmd.Flags().GetInt("workers")
 	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
+	accountChunkSize, accountChunkMaxBytes, err := resolveAccountChunkFlags(cmd)
 	if err != nil {
 		return err
 	}
@@ -121,14 +126,16 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 					"from", fromClosed, "through", toClosed)
 
 				fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-					Network:         network,
-					APIKey:          apiKey,
-					CachePath:       cachePath,
-					Concurrency:     concurrency,
-					FromEpoch:       fromClosed,
-					ThroughEpoch:    toClosed,
-					AccountsEnabled: accounts,
-					GraceHours:      graceHours,
+					Network:              network,
+					APIKey:               apiKey,
+					CachePath:            cachePath,
+					Concurrency:          concurrency,
+					FromEpoch:            fromClosed,
+					ThroughEpoch:         toClosed,
+					AccountsEnabled:      accounts,
+					GraceHours:           graceHours,
+					AccountChunkSize:     accountChunkSize,
+					AccountChunkMaxBytes: accountChunkMaxBytes,
 					// Reuse the already-open, long-lived Dingo connection
 					// above (unused when accounts is false) rather than
 					// opening a second one — watch already keeps dingo open

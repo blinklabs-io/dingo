@@ -15,11 +15,13 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -382,7 +384,9 @@ func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
 				case <-publishDone:
 					return nil
 				case <-time.After(time.Second):
-					return errors.New("event bus was not closed before final cleanup")
+					return errors.New(
+						"event bus was not closed before final cleanup",
+					)
 				}
 			},
 		},
@@ -535,4 +539,41 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 		5*time.Millisecond,
 		"higher-priority peer must win equal-tip selection after priority event",
 	)
+}
+
+// A close/stop failure surfaced during the startup-cleanup unwind must
+// actually reach the log, not just be swallowed by the caller's `_ =`.
+func TestLogErrIfNotNilLogsOnError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(
+		logger,
+		"failed to stop leader election during cleanup",
+		errors.New("epoch transition in flight"),
+	)
+
+	out := buf.String()
+	if !strings.Contains(out, "failed to stop leader election during cleanup") {
+		t.Fatalf("expected log message in output, got: %s", out)
+	}
+	if !strings.Contains(out, "epoch transition in flight") {
+		t.Fatalf("expected error detail in output, got: %s", out)
+	}
+}
+
+// The common case -- a clean stop -- must stay silent, or every successful
+// shutdown would log a spurious error line.
+func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(logger, "failed to stop leader election during cleanup", nil)
+
+	if buf.Len() != 0 {
+		t.Fatalf(
+			"expected no log output for a nil error, got: %s",
+			buf.String(),
+		)
+	}
 }

@@ -753,7 +753,7 @@ type LedgerState struct {
 	// node_lifecycle.go's package doc). Without a way to signal this
 	// goroutine specifically, it keeps applying incoming blocks with no
 	// awareness that Close is about to run — Close waited for every other
-	// background goroutine (rollbackWG, replayWG, rewardPrecomputeWG below)
+	// background goroutine (replayWG, rewardPrecomputeWG below)
 	// but not this one, the actual pipeline that writes blocks to the
 	// database. A block landing mid-write exactly as Close proceeds to
 	// shut down dbWorkerPool leaves the persisted block-ID index
@@ -763,7 +763,7 @@ type LedgerState struct {
 	// transient condition a retry can recover from.
 	processBlocksCancel context.CancelFunc
 	// processBlocksWG tracks that same goroutine so Close can wait for it
-	// to actually exit before proceeding, the same way rollbackWG/replayWG/
+	// to actually exit before proceeding, the same way replayWG/
 	// rewardPrecomputeWG already do for the others.
 	processBlocksWG sync.WaitGroup
 
@@ -783,12 +783,16 @@ type LedgerState struct {
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
 
-	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
-	// to prevent Add-after-Wait panics from the TOCTOU race between
-	// closed.Load() and Add(1) in handleEventChainUpdate.
-	rollbackMu sync.Mutex
-	// rollbackWG tracks in-flight rollback event emission goroutines
-	rollbackWG sync.WaitGroup
+	// publishCtx is cancelled at the top of Close so a ledger.tx publish
+	// parked on a full ordered lane cannot outlive shutdown. Only the
+	// EventBus stopping otherwise releases such a publisher, and a live
+	// restore/truncate closes the LedgerState while keeping the bus
+	// running, so without this the Close waits below are unbounded.
+	// Nil on a bare-struct LedgerState (tests), which reads as "no
+	// cancellation" and matches the pre-existing behaviour.
+	publishCtx    context.Context
+	publishCancel context.CancelFunc
+
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
 	// closed.Load() and Add(1) in replayBufferedHeadersAsync (#2107).
@@ -904,6 +908,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
 	ls.publishSnapshotsLocked()
 	// Cache configured chain checkpoints (keyed by block height) so the
@@ -1548,14 +1553,13 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
-// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout,
-// CloseProcessBlocksDrainTimeout, and CloseBlockfetchDrainTimeout bound the
-// corresponding waits in Close() below. Exported (not local consts) so tests — including cross-package
+// CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
+// CloseBlockfetchDrainTimeout bound the corresponding waits in Close()
+// below. Exported (not local consts) so tests — including cross-package
 // node-level tests exercising how a caller reacts to Close failing to
 // confirm drain — can shrink them instead of running real multi-second
 // timeouts.
 var (
-	CloseRollbackDrainTimeout        = 10 * time.Second
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
 	// A Leios block-processing transaction can include a large endorser
 	// closure and legitimately outlive the short blockfetch waits. Keep this
@@ -1567,6 +1571,11 @@ var (
 )
 
 func (ls *LedgerState) Close() error {
+	// Release any ledger.tx publish parked on a full ordered lane before
+	// waiting on the goroutines that might be doing the publishing.
+	if ls.publishCancel != nil {
+		ls.publishCancel()
+	}
 	if !ls.closed.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -1747,37 +1756,10 @@ func (ls *LedgerState) Close() error {
 		)
 	}
 
-	// Wait for in-flight rollback event emission goroutines.
-	// Hold rollbackMu so no new goroutine can Add(1) between our
-	// closed flag and this Wait.
-	ls.config.Logger.Info("waiting for in-flight rollback goroutines")
-	rollbackStart := time.Now()
-	ls.rollbackMu.Lock()
-	rollbackDone := make(chan struct{})
-	go func() {
-		ls.rollbackWG.Wait()
-		close(rollbackDone)
-	}()
-	select {
-	case <-rollbackDone:
-		ls.config.Logger.Info(
-			"rollback goroutines finished",
-			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
-		)
-	case <-time.After(CloseRollbackDrainTimeout):
-		ls.config.Logger.Warn(
-			"timed out waiting for rollback goroutines",
-			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
-		)
-		err = errors.Join(
-			err,
-			fmt.Errorf(
-				"timed out after %s waiting for in-flight rollback goroutines",
-				time.Since(rollbackStart).Round(time.Millisecond),
-			),
-		)
-	}
-	ls.rollbackMu.Unlock()
+	// Rollback transaction events no longer need a drain wait here.
+	// They are emitted inline by handleEventChainUpdate (see
+	// block_event.go), so the UnsubscribeAndWait on ChainUpdateEventType
+	// above already guarantees none is in flight by this point.
 
 	// Drain in-flight replayBufferedHeadersAsync goroutines so they
 	// finish issuing DB reads before the owner closes the database
@@ -2661,6 +2643,15 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	ls.RUnlock()
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
+	}
+	// Reject before emitting, then emit before truncating: the block-apply
+	// goroutine can start applying the post-rollback chain the moment
+	// chain.Rollback lands and publishes forward events on the same
+	// ledger.tx lane, so the undos have to be enqueued first -- but only
+	// once the rollback is known to be acceptable. See
+	// validateAndEmitRollbackUndo.
+	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+		return err
 	}
 	if err := ls.chain.Rollback(point); err != nil {
 		return err
@@ -4338,7 +4329,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// applied after commit to avoid mutating in-memory state on txn failure)
 			var wantEnableValidation bool
 
-			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+			// The transaction events this eventually publishes are
+			// bounded by ls.publishCtx, not by this loop's ctx, on
+			// purpose: that ctx is re-derived whenever the pipeline
+			// restarts (errRestartLedgerPipeline), and abandoning a
+			// publish on a restart would drop events subscribers
+			// derive state from. Only Close cancels publishCtx.
+			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error { //nolint:contextcheck
 				deltaBatch = NewLedgerDeltaBatch()
 				for offset, next := range nextBatch[i:end] {
 					tmpPoint := ocommon.Point{
@@ -4565,7 +4562,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				return nil
 			}, true)
 			if err != nil {
-				recovered, recoverErr := ls.tryRecoverFromTxValidationError(
+				// Undo events published down this recovery path are
+				// bounded by ls.publishCtx, not this loop's ctx, for the
+				// same reason as the apply path above.
+				recovered, recoverErr := ls.tryRecoverFromTxValidationError( //nolint:contextcheck
 					err,
 				)
 				if recoverErr != nil {
@@ -4584,7 +4584,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// the same block and fails identically. Rewind past it so
 				// chain selection can offer another candidate. The block is
 				// still rejected.
-				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError(
+				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
 					err,
 				)
 				if recoverErr != nil {

@@ -61,6 +61,13 @@ type FetchConfig struct {
 	// result is accepted as final immediately). Unused when AccountsEnabled
 	// is false.
 	GraceHours int
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request by both address count and encoded
+	// body size (see chunkAddressesByCountAndSize). <=0 means "use the
+	// package default" (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault).
+	// Unused when AccountsEnabled is false.
+	AccountChunkSize     int
+	AccountChunkMaxBytes int
 }
 
 // FetchResult summarises a completed fetch run.
@@ -398,7 +405,9 @@ loop:
 			if cfg.AccountsEnabled {
 				if _, acctErr := FetchEpochAccountsWithAddrs(
 					fetchCtx, koios, cache, cfg.Network, epoch,
-					cfg.AccountsSource, koiosAccountAddrs, cfg.GraceHours, logger,
+					cfg.AccountsSource, koiosAccountAddrs, cfg.GraceHours,
+					cfg.AccountChunkSize, cfg.AccountChunkMaxBytes,
+					cfg.ForceRefresh, logger,
 				); acctErr != nil {
 					handleEpochFetchErr("accounts", acctErr)
 					return

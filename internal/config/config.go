@@ -282,25 +282,25 @@ type HistoryExpiryConfig struct {
 // subsystem — leave it disabled for normal node operation.
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
-	Enabled bool `yaml:"enabled"    envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
+	Enabled bool `yaml:"enabled"              envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
 	// Network is the Koios network to validate against: "preview" or
 	// "preprod". Empty defaults to the node's own configured Network.
-	Network string `yaml:"network"    envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
+	Network string `yaml:"network"              envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
 	// default cache location.
-	CachePath string `yaml:"cachePath"  envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
+	CachePath string `yaml:"cachePath"            envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
-	APIKey string `yaml:"apiKey"     envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	APIKey string `yaml:"apiKey"               envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
 	// Strict stops/cancels the node on the first Koios/tool error or exact
 	// parity mismatch, rather than logging it and continuing normal node
 	// operation.
-	Strict bool `yaml:"strict"     envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
-	GraceHours int `yaml:"graceHours" envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
+	GraceHours int `yaml:"graceHours"           envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
 	// Accounts additionally runs #3097's per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. Defaults to true (see
@@ -311,7 +311,14 @@ type KoiosParityConfig struct {
 	// cmd/koios-parity's addAccountsFlag). Set false explicitly to keep the
 	// observer pool-level-only, e.g. to bound Koios request volume on a
 	// resource-constrained deployment.
-	Accounts bool `yaml:"accounts"   envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
+	Accounts bool `yaml:"accounts"             envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request issued by the Accounts phase above, by
+	// both address count and encoded body size. 0 for either selects the
+	// package default (koiosparity.koiosAccountChunkSize/
+	// koiosAccountChunkMaxBytesDefault). Unused when Accounts is false.
+	AccountChunkSize     int `yaml:"accountChunkSize"     envconfig:"DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_SIZE"`
+	AccountChunkMaxBytes int `yaml:"accountChunkMaxBytes" envconfig:"DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_MAX_BYTES"`
 }
 
 // DefaultKoiosParityConfig returns the default (disabled) Koios parity

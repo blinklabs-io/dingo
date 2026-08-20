@@ -66,7 +66,10 @@ func databaseSnapshotCommand() *cobra.Command {
 			if destDir == "" {
 				return errors.New("--dir is required")
 			}
-			logger := commonRun(cfg)
+			logger, err := commonRun(cfg)
+			if err != nil {
+				return err
+			}
 			svc := dblifecycle.NewService(
 				cfg,
 				newCLIDestinationRegistry(),
@@ -123,7 +126,10 @@ func databaseRestoreCommand() *cobra.Command {
 			if cfg == nil {
 				return errors.New("no config found in context")
 			}
-			logger := commonRun(cfg)
+			logger, err := commonRun(cfg)
+			if err != nil {
+				return err
+			}
 			svc := dblifecycle.NewService(
 				cfg,
 				newCLIDestinationRegistry(),
@@ -203,7 +209,10 @@ from the target point.`,
 			if cmd.Flags().Changed("block-number") {
 				target.BlockNumber = &blockNumber
 			}
-			logger := commonRun(cfg)
+			logger, err := commonRun(cfg)
+			if err != nil {
+				return err
+			}
 			// Truncate never resolves a cloud destination, so a nil
 			// registry here is fine — see DestinationRegistry's doc
 			// comment.

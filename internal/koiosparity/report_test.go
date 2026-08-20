@@ -57,5 +57,8 @@ func TestReportsMakeCoverageScopeExplicit(t *testing.T) {
 	output.Reset()
 	require.NoError(t, WriteJSONReport(&output, report))
 	require.True(t, strings.Contains(output.String(), `"coverage"`))
-	require.True(t, strings.Contains(output.String(), `"intentionally-incomparable"`))
+	require.True(
+		t,
+		strings.Contains(output.String(), `"intentionally-incomparable"`),
+	)
 }

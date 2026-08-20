@@ -12,26 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package peergov
 
 import (
-	"fmt"
-
-	"github.com/blinklabs-io/dingo/internal/version"
-	"github.com/spf13/cobra"
+	"io"
+	"log/slog"
 )
 
-func versionRun(_ *cobra.Command, _ []string) {
-	fmt.Println(version.GetVersionString())
-}
-
-func versionCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "version",
-		Short: "Print version and exit",
-		Run: func(cmd *cobra.Command, args []string) {
-			versionRun(cmd, args)
-		},
+// closeConnAndLog closes conn, logging at Debug level if it fails. Every
+// caller already logs the reason the connection is being torn down, so a
+// close failure here is a secondary diagnostic, not the primary event.
+func closeConnAndLog(
+	logger *slog.Logger,
+	conn io.Closer,
+	msg string,
+	attrs ...any,
+) {
+	if conn == nil {
+		return
 	}
-	return cmd
+	if err := conn.Close(); err != nil {
+		logger.Debug(msg, append(attrs, "error", err)...)
+	}
 }

@@ -299,8 +299,7 @@ func (d *BlobStoreGCS) writeObject(
 ) error {
 	w := d.object(key).NewWriter(ctx)
 	if _, err := w.Write(value); err != nil {
-		_ = w.Close()
-		return err
+		return joinCloseErr(err, w)
 	}
 	return w.Close()
 }
@@ -315,10 +314,19 @@ func (d *BlobStoreGCS) writeObjectStream(
 ) error {
 	w := d.object(key).NewWriter(ctx)
 	if _, err := io.Copy(w, body); err != nil {
-		_ = w.Close()
-		return err
+		return joinCloseErr(err, w)
 	}
 	return w.Close()
+}
+
+// joinCloseErr closes closer and folds any close error into err, so a
+// writer that fails to close on an already-failing write path isn't
+// silently lost.
+func joinCloseErr(err error, closer io.Closer) error {
+	if closeErr := closer.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
 }
 
 func (d *BlobStoreGCS) deleteObject(

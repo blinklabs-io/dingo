@@ -585,6 +585,346 @@ func (c *Cache) GetAccountCoverage(
 	return &cov, nil
 }
 
+// MarkAccountCoverageIncomplete downgrades an existing koios_account_coverage
+// row for (network, epoch) to complete = false, touching nothing else —
+// not koios_account_rewards, not koios_account_checked/
+// koios_account_fetch_staged_rows. Called when a --force-refresh attempt
+// (fetchAccountRewardsForEpoch's forceRefresh path) fails partway through:
+// because forceRefresh re-dispatches every chunk without pre-invalidating
+// existing checkpoint data (deleting it up front would risk losing valid
+// data before its replacement is confirmed fetched — see that function's
+// doc comment), a partial failure can leave koios_account_checked holding a
+// mix of freshly-refreshed chunks and untouched pre-refresh chunks: two
+// different Koios snapshots that were never actually valid together. The
+// stale complete = true row from the last successful (pre-refresh) commit
+// would otherwise still make compareEpochAccounts trust that mixed state —
+// its coverage.Complete gate is exactly what stops CompareAccountEpoch/
+// accountLifecycleMismatches from reading it once this flips to false, and
+// GetEpochsMissingAccountCoverage's `a.complete = 0` filter picks the epoch
+// back up for a normal (non-force-refresh) fetch attempt to resume and
+// eventually re-commit a fresh, fully consistent complete = true row —
+// no further explicit --force-refresh required. A no-op, not an error, if
+// no coverage row exists yet for this (network, epoch).
+func (c *Cache) MarkAccountCoverageIncomplete(network string, epoch uint64) error {
+	_, err := c.db.Exec(
+		`UPDATE koios_account_coverage SET complete = 0 WHERE network = ? AND epoch = ?`,
+		network,
+		epoch,
+	)
+	return err
+}
+
+// SaveAccountFetchChunkProgress durably records one successfully-fetched
+// chunk's rows and per-address "checked" markers for (network, epoch),
+// atomically — dingo #3099's resumable checkpoint: FetchAccountRewardsForEpoch
+// calls this once per chunk as it completes, instead of only accumulating
+// rows in memory, so a killed/restarted process resumes from whichever
+// chunks already committed here rather than redoing the whole epoch.
+//
+// Safe to call again for the same chunkHash (e.g. a resumed attempt that
+// re-fetches a chunk that was in flight but never confirmed committed): it
+// first deletes any prior staged rows/checked markers for this exact
+// (network, epoch, chunk_hash) before inserting the fresh ones, so a retry
+// can never duplicate rows.
+//
+// addressesInChunk is the full requested address list for the chunk — every
+// address gets a koios_account_checked row (reward_row_count counts how many
+// of rows belong to it) even if Koios returned zero reward rows for it,
+// which is exactly what distinguishes a confirmed zero-reward address from
+// one no chunk has ever covered.
+func (c *Cache) SaveAccountFetchChunkProgress(
+	network string,
+	epoch uint64,
+	chunkHash string,
+	rows []KoiosAccountRewards,
+	addressesInChunk []string,
+	now time.Time,
+) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(
+		`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
+		network, epoch, chunkHash,
+	); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(
+		`DELETE FROM koios_account_checked WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
+		network, epoch, chunkHash,
+	); err != nil {
+		return err
+	}
+
+	if len(rows) > 0 {
+		var stmt *sql.Stmt
+		stmt, err = tx.Prepare(`INSERT INTO koios_account_fetch_staged_rows
+			(network, epoch, chunk_hash, stake_address, reward_type, earned, spendable_epoch, pool_id_bech32, fetched_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close() //nolint:errcheck
+		for i := range rows {
+			if _, err = stmt.Exec(
+				network, epoch, chunkHash, rows[i].StakeAddress, rows[i].RewardType,
+				rows[i].Earned, rows[i].SpendableEpoch, rows[i].PoolIDBech32, rows[i].FetchedAt,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	rewardRowCount := make(map[string]int, len(addressesInChunk))
+	for _, r := range rows {
+		rewardRowCount[r.StakeAddress]++
+	}
+	var checkedStmt *sql.Stmt
+	checkedStmt, err = tx.Prepare(`INSERT INTO koios_account_checked
+		(network, epoch, stake_address, chunk_hash, reward_row_count, checked_at)
+		VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer checkedStmt.Close() //nolint:errcheck
+	for _, addr := range addressesInChunk {
+		if _, err = checkedStmt.Exec(
+			network, epoch, addr, chunkHash, rewardRowCount[addr], now,
+		); err != nil {
+			return err
+		}
+	}
+
+	err = tx.Commit()
+	return err
+}
+
+// GetDoneAccountChunkHashes returns the set of chunk hashes already
+// checkpointed for (network, epoch) — FetchAccountRewardsForEpoch skips
+// dispatching a chunk whose hash is present here on resume.
+func (c *Cache) GetDoneAccountChunkHashes(
+	network string,
+	epoch uint64,
+) (map[string]bool, error) {
+	rows, err := c.db.Query(
+		`SELECT DISTINCT chunk_hash FROM koios_account_checked WHERE network = ? AND epoch = ?`,
+		network,
+		epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	done := make(map[string]bool)
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		done[hash] = true
+	}
+	return done, rows.Err()
+}
+
+// GetChunkHashesWithStagedRows returns the set of chunk hashes for
+// (network, epoch) that have at least one row in
+// koios_account_fetch_staged_rows — i.e. chunks whose checkpointed result
+// was genuinely non-empty, as opposed to a chunk that checkpointed with zero
+// rows (see fetchAccountRewardsForEpoch's grace-window trust logic: an
+// empty-but-done chunk checkpointed while Koios's account_reward_history
+// publishing lag was still possible must not be blindly trusted as final
+// until that grace window has actually closed).
+func (c *Cache) GetChunkHashesWithStagedRows(
+	network string,
+	epoch uint64,
+) (map[string]bool, error) {
+	rows, err := c.db.Query(
+		`SELECT DISTINCT chunk_hash FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ?`,
+		network,
+		epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	withRows := make(map[string]bool)
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		withRows[hash] = true
+	}
+	return withRows, rows.Err()
+}
+
+// GetStagedAccountRows returns every checkpointed row for (network, epoch)
+// across all committed chunks — read back once every chunk in the current
+// plan is done, then passed as-is to the existing, unmodified
+// Cache.CommitAccountRewardsForEpoch to finalize the epoch exactly the way
+// #3097 already does.
+func (c *Cache) GetStagedAccountRows(
+	network string,
+	epoch uint64,
+) ([]KoiosAccountRewards, error) {
+	rows, err := c.db.Query(
+		`SELECT stake_address, reward_type, earned, spendable_epoch, pool_id_bech32, fetched_at
+		FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? ORDER BY id`,
+		network,
+		epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KoiosAccountRewards
+	for rows.Next() {
+		var r KoiosAccountRewards
+		if err := rows.Scan(
+			&r.StakeAddress, &r.RewardType, &r.Earned, &r.SpendableEpoch, &r.PoolIDBech32, &r.FetchedAt,
+		); err != nil {
+			return nil, err
+		}
+		r.Network, r.Epoch = network, epoch
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// InvalidateStaleAccountChunks deletes staged rows/checked markers for any
+// chunk hash not present in currentChunkHashes — dingo #3099's "invalidate/
+// re-fetch affected chunks when request parameters or reference data change"
+// requirement. Because chunk hashes are content-addressed (sha256 of a
+// chunk's own sorted address list), only chunks whose address grouping is no
+// longer part of the current plan are pruned; an unaffected chunk (same
+// address set under the new plan) keeps its checkpointed progress and still
+// counts as done.
+//
+// Every stale chunk's pair of deletes — and every stale chunk together —
+// runs in one transaction. Without this, a crash partway through (either
+// between a chunk's two deletes, or between two chunks) could delete a
+// chunk's staged rows but leave its koios_account_checked markers in place;
+// GetDoneAccountChunkHashes would then still report that chunk as done, so
+// fetchAccountRewardsForEpoch would skip it and GetStagedAccountRows would
+// return nothing for it — letting the epoch commit complete=true with a
+// silently incomplete reward set, exactly what #3099 must prevent.
+func (c *Cache) InvalidateStaleAccountChunks(
+	network string,
+	epoch uint64,
+	currentChunkHashes []string,
+) error {
+	done, err := c.GetDoneAccountChunkHashes(network, epoch)
+	if err != nil {
+		return err
+	}
+	if len(done) == 0 {
+		return nil
+	}
+	current := make(map[string]bool, len(currentChunkHashes))
+	for _, h := range currentChunkHashes {
+		current[h] = true
+	}
+	var stale []string
+	for hash := range done {
+		if !current[hash] {
+			stale = append(stale, hash)
+		}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, hash := range stale {
+		if _, err = tx.Exec(
+			`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
+			network, epoch, hash,
+		); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(
+			`DELETE FROM koios_account_checked WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
+			network, epoch, hash,
+		); err != nil {
+			return err
+		}
+	}
+	err = tx.Commit()
+	return err
+}
+
+// GetZeroRewardAccountsForEpoch returns addresses Koios confirmed it
+// answered for (network, epoch) with zero reward rows — a definitive "no
+// reward this epoch," proven checked rather than merely absent from
+// koios_account_rewards.
+func (c *Cache) GetZeroRewardAccountsForEpoch(
+	network string,
+	epoch uint64,
+) ([]string, error) {
+	rows, err := c.db.Query(
+		`SELECT stake_address FROM koios_account_checked
+		WHERE network = ? AND epoch = ? AND reward_row_count = 0
+		ORDER BY stake_address`,
+		network, epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var addrs []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return nil, err
+		}
+		addrs = append(addrs, addr)
+	}
+	return addrs, rows.Err()
+}
+
+// GetAccountUniverseForEpoch returns the persisted set of addresses actually
+// checked for (network, epoch) — used to diff adjacent epochs' universes for
+// newly-registered/deregistered reporting without re-deriving from Dingo's
+// own source or Koios's live /account_list.
+func (c *Cache) GetAccountUniverseForEpoch(
+	network string,
+	epoch uint64,
+) ([]string, error) {
+	rows, err := c.db.Query(
+		`SELECT stake_address FROM koios_account_checked
+		WHERE network = ? AND epoch = ? ORDER BY stake_address`,
+		network, epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var addrs []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return nil, err
+		}
+		addrs = append(addrs, addr)
+	}
+	return addrs, rows.Err()
+}
+
 // GetFetchedEpochRange returns the min and max fetched epoch numbers.
 func (c *Cache) GetFetchedEpochRange(
 	network string,
@@ -950,6 +1290,42 @@ func createCacheSchema(db *sql.DB) error {
 			requested_count INTEGER NOT NULL DEFAULT 0, fetched_count INTEGER NOT NULL DEFAULT 0,
 			complete INTEGER NOT NULL DEFAULT 0, fetched_at DATETIME NOT NULL)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kac_net_epoch ON koios_account_coverage(network, epoch)`,
+
+		// dingo #3099: durable per-chunk checkpoint staging so a killed/restarted
+		// FetchAccountRewardsForEpoch resumes from already-committed chunks
+		// instead of redoing the whole epoch (see fetch_accounts.go). Purely
+		// additive alongside #3097's koios_account_rewards/koios_account_coverage
+		// — CommitAccountRewardsForEpoch's contract and existing tests are
+		// untouched; these staged rows are only ever read back and passed to it
+		// once every chunk in the current plan has committed.
+		`CREATE TABLE IF NOT EXISTS koios_account_fetch_staged_rows (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+			chunk_hash TEXT NOT NULL, stake_address TEXT NOT NULL, reward_type TEXT NOT NULL,
+			earned TEXT NOT NULL, spendable_epoch INTEGER NOT NULL DEFAULT 0,
+			pool_id_bech32 TEXT NOT NULL DEFAULT '', fetched_at DATETIME NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_kafsr_net_epoch ON koios_account_fetch_staged_rows(network, epoch)`,
+		`CREATE INDEX IF NOT EXISTS idx_kafsr_net_epoch_chunk ON koios_account_fetch_staged_rows(network, epoch, chunk_hash)`,
+
+		// koios_account_checked doubles as: (a) the done-chunk marker enabling
+		// resume (DISTINCT chunk_hash for (network, epoch)), (b) zero-reward-
+		// confirmed detection (reward_row_count = 0 — Koios answered for this
+		// address and it earned nothing, distinct from never having been asked
+		// about at all), and (c) the persisted per-epoch address universe used
+		// to diff newly-registered/deregistered accounts between adjacent
+		// epochs.
+		`CREATE TABLE IF NOT EXISTS koios_account_checked (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+			stake_address TEXT NOT NULL, chunk_hash TEXT NOT NULL, reward_row_count INTEGER NOT NULL DEFAULT 0,
+			checked_at DATETIME NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kaced_net_epoch_addr ON koios_account_checked(network, epoch, stake_address)`,
+		// Every per-chunk delete (SaveAccountFetchChunkProgress,
+		// InvalidateStaleAccountChunks) filters on (network, epoch, chunk_hash);
+		// without this index that lookup falls back to scanning every checked
+		// row for the whole epoch instead of just the rows for one chunk,
+		// making stale-chunk cleanup cost scale with the epoch's total address
+		// count rather than the chunk being removed.
+		`CREATE INDEX IF NOT EXISTS idx_kaced_net_epoch_chunk ON koios_account_checked(network, epoch, chunk_hash)`,
+
 		`CREATE TABLE IF NOT EXISTS check_epoch_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			last_checked_at DATETIME NOT NULL, status TEXT NOT NULL, mismatch_count INTEGER NOT NULL,

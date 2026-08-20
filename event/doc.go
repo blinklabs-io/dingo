@@ -30,7 +30,48 @@
 //	)
 //
 // Use PublishAsync for events that do not need to be delivered
-// synchronously with the publisher's call stack.
+// synchronously with the publisher's call stack, and PublishOrdered
+// for those that additionally need to reach subscribers in the order
+// they were published.
+//
+// # Ordering guarantees
+//
+// Publish and PublishBlocking deliver on the caller's goroutine, so a
+// single publisher's events reach each subscriber in call order.
+//
+// PublishAsync does not preserve order. It hands the event to a shared
+// queue drained by AsyncWorkerPoolSize workers that race each other
+// into Publish, so two events enqueued in order can be delivered in
+// either order -- observed as several inversions per few hundred
+// events, even from one publishing goroutine. Use it only where
+// subscribers treat each event independently.
+//
+// PublishOrdered is the async path that does preserve order. Each event
+// type gets its own FIFO drained by exactly one worker, so events
+// published to one type arrive in publish order, and a slow subscriber
+// delays only its own event type rather than every async event. The
+// guarantee is per event type and only over publishes that are
+// themselves sequenced: concurrent publishers still race to enqueue,
+// and nothing is promised across different event types.
+//
+// ledger.tx uses PublishOrdered. A subscriber deriving state from it can
+// rely on a block's transactions arriving in index order, and on a
+// rollback's undo events (Rollback: true) arriving before any
+// transaction event the ledger emits afterwards. See
+// blinklabs-io/dingo#2287: while those undo events were emitted from a
+// detached goroutine, a subscriber could apply an undo after the redo
+// that followed it and stay wrong indefinitely.
+//
+// A lane orders what reaches it; it cannot order two publishers racing
+// to reach it. Where events for one stream come from more than one
+// goroutine, as ledger.tx does, the publishers need their own
+// happens-before -- see the ledger.tx section of ARCHITECTURE.md for how
+// the rollback and block-apply paths establish theirs.
+//
+// Only shutdown releases a publisher waiting on a full lane. A caller on
+// a goroutine something else waits for before the bus stops must use
+// PublishOrderedContext and cancel that context, or the wait is
+// unbounded.
 //
 // # Delivery guarantees
 //
@@ -68,6 +109,10 @@
 // A slow subscriber backpressures the bus and delays delivery of
 // unrelated events: the async workers are a shared pool, so a
 // subscriber that parks them holds up every async event type.
+// PublishOrdered's per-type lanes are exempt from that specific
+// coupling -- a parked lane worker holds up only its own event type --
+// but they are single workers, so a slow subscriber stalls that type
+// more readily than four shared workers would.
 //
 // Event type constants live alongside the package that owns the
 // event: ChainForkEventType in chain, ChainSwitchEventType in

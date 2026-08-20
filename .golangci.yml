@@ -54,6 +54,17 @@ linters:
       - third_party$
       - builtin$
       - examples$
+  settings:
+    recvcheck:
+      # UnmarshalJSON has to take a pointer to mutate the receiver, while
+      # MarshalJSON conventionally takes a value so both a value and a pointer
+      # satisfy json.Marshaler. Every type implementing the pair therefore
+      # mixes receivers by design. Changing MarshalJSON to a pointer receiver
+      # to satisfy the linter would mean a non-addressable value -- one in a
+      # map, or passed by value to json.Marshal -- silently stops using the
+      # custom marshaler and emits raw struct fields instead.
+      exclusions:
+        - "*.MarshalJSON"
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0

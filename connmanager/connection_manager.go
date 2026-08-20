@@ -677,7 +677,12 @@ func (c *ConnectionManager) addConnectionImpl(
 		// Shutting down - release IP slot and close connection
 		c.releaseIPSlot(ipKey)
 		if conn != nil {
-			conn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				conn,
+				"error closing connection rejected during shutdown",
+				"peer_addr", peerAddr,
+			)
 		}
 		return false
 	}
@@ -704,7 +709,12 @@ func (c *ConnectionManager) addConnectionImpl(
 				"peer_addr",
 				peerAddr,
 			)
-			conn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				conn,
+				"error closing colliding inbound connection",
+				"peer_addr", peerAddr,
+			)
 			c.releaseIPSlot(ipKey)
 			c.goroutineWg.Done()
 			return false
@@ -730,13 +740,19 @@ func (c *ConnectionManager) addConnectionImpl(
 			}
 			c.updateConnectionMetricsLocked(existing, false)
 			existingConn := existing.conn
+			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
 			// Remove the old entry so the evicted connection's
 			// error-watcher goroutine cannot double-decrement
 			// metrics via RemoveConnection.
 			delete(c.connections, connId)
 			c.connectionsMutex.Unlock()
-			existingConn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				existingConn,
+				"error closing evicted inbound connection",
+				"peer_addr", existingPeerAddr,
+			)
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
@@ -763,10 +779,16 @@ func (c *ConnectionManager) addConnectionImpl(
 			}
 			c.updateConnectionMetricsLocked(existing, false)
 			existingConn := existing.conn
+			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
 			delete(c.connections, connId)
 			c.connectionsMutex.Unlock()
-			existingConn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				existingConn,
+				"error closing replaced connection",
+				"peer_addr", existingPeerAddr,
+			)
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}

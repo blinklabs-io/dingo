@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -50,28 +49,24 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 			Logger:   logger,
 		},
 	}
-	ls.rollbackWG.Add(1)
-
-	rollbackEvt := chain.ChainRollbackEvent{
-		RolledBackBlocks: []models.Block{
-			{
-				Slot:   100,
-				Hash:   []byte{0x01, 0x02},
-				Number: 10,
-				Type:   0,
-				Cbor:   []byte{0xff},
-			},
-			{
-				Slot:   200,
-				Hash:   []byte{0x03, 0x04},
-				Number: 20,
-				Type:   0,
-				Cbor:   []byte{0xfe},
-			},
+	rolledBack := []models.Block{
+		{
+			Slot:   100,
+			Hash:   []byte{0x01, 0x02},
+			Number: 10,
+			Type:   0,
+			Cbor:   []byte{0xff},
+		},
+		{
+			Slot:   200,
+			Hash:   []byte{0x03, 0x04},
+			Number: 20,
+			Type:   0,
+			Cbor:   []byte{0xfe},
 		},
 	}
 
-	ls.emitTransactionRollbackEvents(rollbackEvt)
+	ls.emitRollbackTransactionEvents(rolledBack)
 
 	for i, wantSlot := range []uint64{100, 200} {
 		evt := testutil.RequireReceive(
