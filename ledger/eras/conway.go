@@ -323,6 +323,26 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 // Only *needed* scripts count, which is what preserves the unused-reference-
 // script case: a PlutusV1 script that happens to be available but is not
 // required by any purpose does not make the transaction invalid.
+//
+// Two of cardano-ledger's V1 restrictions are still not enforced here, both
+// concerning things the V1 TxInfo translation cannot represent at all:
+//
+//   - a reference script on a produced output
+//   - the presence of any reference input
+//
+// Upstream reports its V1 findings as InlineDatumsNotSupportedError regardless
+// of which restriction tripped, so these are expressible; they are simply not
+// implemented yet. A transaction whose only V1 violation is one of those is
+// accepted by this node and rejected by cardano-node. Do not read this rule as
+// complete V1 enforcement.
+//
+// Note what is deliberately *not* a gap: a PlutusV1 script that is merely
+// present -- in the witness set, on a spent input's script ref, or on a
+// reference input's script ref -- but required by no purpose does not
+// invalidate the transaction. Upstream rejects on presence, which is the false
+// positive this rule replaces; scripts reachable through a script ref are
+// still considered when a purpose actually needs them, because
+// collectConwayAvailableScripts gathers them from every resolved input.
 func validateConwayInlineDatumsWithPlutusV1(
 	tx lcommon.Transaction,
 	_ uint64,
@@ -332,24 +352,38 @@ func validateConwayInlineDatumsWithPlutusV1(
 	if ls == nil {
 		return nil
 	}
-	ctx, err := newConwayPlutusValidationContext(tx, ls)
+	// Resolved directly rather than through newConwayPlutusValidationContext:
+	// this rule never reads witnessDatums, and building that map hashes every
+	// PlutusData witness on a path that only needs the script set.
+	scriptInputs, err := resolveConwayScriptInputs(tx, ls, true)
 	if err != nil {
+		if isInputResolutionError(err) {
+			// UtxoValidateBadInputsUtxo reports an unresolvable input with the
+			// right error. Returning it here as well would make this rule a
+			// second, competing source of input-resolution failures, which is
+			// not what upstream's rule 18 does either.
+			return nil
+		}
 		return err
 	}
-	if !conwayTxHasInlineDatum(tx, ctx.scriptInputs) {
+	if !conwayTxHasInlineDatum(tx, scriptInputs) {
 		return nil
+	}
+	var assetMint lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
+	if mint := tx.AssetMint(); mint != nil {
+		assetMint = *mint
 	}
 	needsPlutusV1 := false
 	// The walk's own errors -- a missing script witness, an absent redeemer --
 	// belong to validateConwayRequiredPlutusRedeemers, which reports them with
 	// the right message. Returning them from here would mask that rule's
 	// finding behind this one, so they are discarded deliberately; everything
-	// this rule establishes is carried in found.
+	// this rule establishes is carried in needsPlutusV1.
 	_ = forEachConwayScriptPurpose(
 		tx,
-		ctx.scriptInputs,
-		ctx.inputs,
-		ctx.assetMint,
+		scriptInputs,
+		script.SortInputs(tx.Inputs()),
+		assetMint,
 		func(_ lcommon.RedeemerKey, purpose script.ScriptPurpose) error {
 			if needsPlutusV1 || purpose == nil {
 				return nil
@@ -358,7 +392,7 @@ func validateConwayInlineDatumsWithPlutusV1(
 			if scriptHash == (lcommon.ScriptHash{}) {
 				return nil
 			}
-			needed, ok := ctx.scriptInputs.scripts[scriptHash]
+			needed, ok := scriptInputs.scripts[scriptHash]
 			if !ok {
 				return nil
 			}

@@ -3303,3 +3303,87 @@ func TestConwayInlineDatumRuleRejectsDatumOnReferenceInput(t *testing.T) {
 		&conway.ConwayProtocolParameters{},
 	), &inlineDatumErr)
 }
+
+// TestConwayInlineDatumRuleRejectsNonSpendingPlutusV1 is the shape a per-input
+// scoped rule stops rejecting: the PlutusV1 script is required for *minting*,
+// not for spending, and the inline datum sits on an unrelated key-locked
+// input. cardano-ledger maps the V1 context over every spent input once any V1
+// script runs, so this transaction is invalid.
+//
+// This is the case both review findings named as the one most worth pinning.
+func TestConwayInlineDatumRuleRejectsNonSpendingPlutusV1(t *testing.T) {
+	keyInput := newTestInput(0x41, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x07, 0x08})
+	policy := plutusScript.Hash()
+
+	assetMint := lcommon.NewMultiAsset[lcommon.MultiAssetTypeMint](
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeMint{
+			lcommon.Blake2b224(policy): {
+				cbor.NewByteString([]byte("asset")): big.NewInt(1),
+			},
+		},
+	)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagMint,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
+			},
+		},
+		inputs:    []lcommon.TransactionInput{keyInput},
+		assetMint: &assetMint,
+	}
+	ls := newMockLedgerState()
+	// Key-locked input, so no spending purpose needs a script at all.
+	ls.addUtxo(keyInput, newBabbageInlineDatumOutput(t, newTestKeyAddr(t)))
+
+	var inlineDatumErr lcommon.InlineDatumsNotSupportedError
+	require.ErrorAs(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	), &inlineDatumErr)
+}
+
+// TestConwayUtxoValidationRulesStayIndexOrdered guards the merged rule list
+// that buildConwayValidationRules produces via append plus SortFunc. Nothing
+// otherwise asserts that the result stays ordered and complete, so a future
+// insertion that duplicates or skips an index would go unnoticed.
+func TestConwayUtxoValidationRulesStayIndexOrdered(t *testing.T) {
+	require.NotEmpty(t, conwayUtxoValidationRules)
+	seen := make(map[int]struct{}, len(conwayUtxoValidationRules))
+	prev := -1
+	for i, rule := range conwayUtxoValidationRules {
+		require.NotNil(t, rule.validationFunc, "rule %d has no func", i)
+		require.Greater(
+			t,
+			rule.index,
+			prev,
+			"rule indices must be strictly increasing; entry %d broke it",
+			i,
+		)
+		_, dup := seen[rule.index]
+		require.False(t, dup, "duplicate rule index %d", rule.index)
+		seen[rule.index] = struct{}{}
+		prev = rule.index
+	}
+	require.Contains(
+		t,
+		seen,
+		conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex,
+		"the patched inline-datum rule must be present in the merged list",
+	)
+}
