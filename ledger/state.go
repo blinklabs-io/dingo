@@ -802,13 +802,13 @@ type LedgerState struct {
 	replayRecoveryHighWaterSlot   uint64
 	replayRecoveryNoProgressCount int
 	replayRecoveryHolding         bool
-	// Deterministic transaction rejection gets one opportunity to find a
-	// different primary-chain branch. If the same applied tip sees another
-	// deterministic rejection after that resync, the network is serving a
-	// block this node cannot accept; stop the ledger pipeline instead of
-	// reconnecting to the same canonical block indefinitely.
-	deterministicTxRecoveryAttempted bool
-	deterministicTxRecoveryTipSlot   uint64
+	// Records the one fresh-intersection request already spent on a
+	// deterministic transaction rejection, keyed on the failing block and
+	// the applied tip. Chain selection gets one alternate-branch
+	// opportunity per failing block; after that the branch is still
+	// rejected, but peers are no longer rotated for it. See
+	// deterministicTxRecoveryLatch in ledger/replay_recovery.go.
+	deterministicTxRecoveryResync *deterministicTxRecoveryLatch
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
@@ -4141,9 +4141,6 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			return
 		}
 		ls.handleLedgerProcessBlocksError(err)
-		if errors.Is(err, errHaltLedgerPipeline) {
-			return
-		}
 		if errors.Is(err, errCertifiedEndorserBlockUnavailable) {
 			// This retry has its own delay and used to skip the no-progress
 			// accounting entirely, so an endorser block that never becomes
@@ -4246,7 +4243,7 @@ func (ls *LedgerState) handleLedgerProcessBlocksError(err error) {
 	}
 	if errors.Is(err, errHaltLedgerPipeline) {
 		ls.config.Logger.Warn(
-			"block processing hit persistent validation failure, halting ledger pipeline",
+			"block processing hit persistent validation failure, restarting pipeline",
 			"error",
 			err,
 		)
