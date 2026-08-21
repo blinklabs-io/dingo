@@ -90,6 +90,17 @@ func buildValidatedTestModelsBlock(
 	}, vb
 }
 
+func wrongNonceHexFor(t *testing.T, nonceHex string) string {
+	t.Helper()
+	require.GreaterOrEqual(t, len(nonceHex), 2)
+
+	wrongNonceHex := nonceHex[:len(nonceHex)-2] + "00"
+	if wrongNonceHex == nonceHex {
+		wrongNonceHex = nonceHex[:len(nonceHex)-2] + "11"
+	}
+	return wrongNonceHex
+}
+
 func newValidatedPipelineTestLedger(
 	t *testing.T,
 	vb testutil.ValidatedConwayBlock,
@@ -349,14 +360,10 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 			ls.publishSnapshotsLocked()
 
 			require.NoError(t, ls.blockPipeline.Stop())
-			wrongNonceHex := vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "00"
-			if wrongNonceHex == vb.EpochNonceHex {
-				wrongNonceHex = vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "11"
-			}
 			ls.blockPipeline = pipeline.NewBlockPipeline(
 				pipeline.WithDecodeWorkers(1),
 				pipeline.WithValidateWorkers(1),
-				pipeline.WithEta0(wrongNonceHex),
+				pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 				pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 				pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 			)
@@ -443,14 +450,10 @@ func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 	// block was actually proven against, so VRF verification genuinely
 	// fails (rather than tampering CBOR bytes, which risks failing decode
 	// instead of validation and testing the wrong thing).
-	wrongNonceHex := vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "00"
-	if wrongNonceHex == vb.EpochNonceHex {
-		wrongNonceHex = vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "11"
-	}
 	ls.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0(wrongNonceHex),
+		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
@@ -559,14 +562,10 @@ func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 	// Wire a nonce that will fail validation -- if decodeReadChainBatch
 	// incorrectly consulted the validation outcome anyway, this would flip
 	// the assertion below from ok=true to ok=false.
-	wrongNonceHex := vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "00"
-	if wrongNonceHex == vb.EpochNonceHex {
-		wrongNonceHex = vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "11"
-	}
 	ls.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0(wrongNonceHex),
+		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
