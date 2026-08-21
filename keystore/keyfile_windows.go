@@ -19,7 +19,6 @@ package keystore
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -64,9 +63,10 @@ func isKnownNonGrantACEType(aceType string) bool {
 // SDDL string and rejects files that grant access to Everyone,
 // the BUILTIN\Users group, or Authenticated Users.
 //
-// The implementation intentionally avoids the unsafe package to
-// prevent heap corruption caused by Go 1.24+ GC interacting with
-// uintptr-based SID handles (see https://go.dev/issue/73199).
+// The implementation stays inside golang.org/x/sys/windows and does not use
+// the unsafe package, so security descriptor and SID lifetimes stay owned by
+// that package. https://go.dev/issue/73199 was a dangling pointer inside
+// those helpers and was fixed there; hand-rolling them here would reopen it.
 func checkFilePermissions(path string) error {
 	sd, err := windows.GetNamedSecurityInfo(
 		path,
@@ -80,12 +80,8 @@ func checkFilePermissions(path string) error {
 			err,
 		)
 	}
-	// sd is Windows-allocated (LocalAlloc). Freeing it requires
-	// unsafe.Pointer, which we avoid due to Go 1.24+ heap
-	// corruption (go.dev/issue/73199). The ~200 B leak per call
-	// is acceptable: checkFilePermissions runs only at startup
-	// for a handful of key files.
-
+	// GetNamedSecurityInfo frees the Windows heap descriptor itself and
+	// returns a Go-heap copy, so sd needs no explicit free here.
 	return checkSecurityDescriptor(path, sd)
 }
 
@@ -207,20 +203,21 @@ func checkOpenDACL(path, owner, dacl string) error {
 			continue
 		}
 		isOwner, resolveErr := trusteeOwnerMatch(fields[5], owner)
-		if isOwner {
-			continue
-		}
 		if resolveErr != nil {
-			// The trustee could not be resolved to a SID, so we cannot tell
-			// an owner alias from a third party. Say so rather than
-			// reporting it as an unexpected trustee: the two need different
-			// fixes and the message is the only signal available when the
-			// failure only reproduces on another platform.
+			// One side did not resolve to a SID, so an owner alias cannot be
+			// told from a third party. Report that instead of an unexpected
+			// trustee: the two need different fixes, and the wrapped cause
+			// names which side failed, because an owner string that does not
+			// parse arrives here too. Checked before isOwner so that a
+			// future (true, err) return cannot turn a denial into a grant.
 			return fmt.Errorf(
-				"key file %q has DACL trustee %s that could not be resolved "+
-					"to a SID (owner %s): %v: %w",
+				"key file %q has DACL trustee %s that could not be compared "+
+					"with owner %s: %w: %w",
 				path, fields[5], owner, resolveErr, ErrInsecureFileMode,
 			)
+		}
+		if isOwner {
+			continue
 		}
 		return fmt.Errorf(
 			"key file %q grants access to unexpected trustee %s, "+
@@ -249,7 +246,8 @@ func ownerIsBuiltinAdministrators(owner string) bool {
 // A failed resolution is returned as an error rather than folded into a false
 // result, because "could not resolve this alias" and "this trustee is not the
 // owner" need different fixes and the caller's message is the only diagnostic
-// available when the failure reproduces on Windows CI and nowhere else.
+// available when the failure reproduces on Windows CI and nowhere else. It
+// never returns (true, non-nil), so a caller may treat any error as no match.
 //
 // An alias is resolved by asking Windows, not by matching its well-known RID.
 // The local administrator alias (LA) and a domain Administrator share RID 500
@@ -265,41 +263,53 @@ func trusteeOwnerMatch(trustee, owner string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse owner SID %q: %w", owner, err)
 	}
-	trusteeSID, keepAlive, err := resolveTrusteeSID(trustee)
+	trusteeSID, err := resolveTrusteeSID(trustee)
 	if err != nil {
 		return false, err
 	}
-	equal := windows.EqualSid(trusteeSID, ownerSID)
-	// trusteeSID may point into keepAlive's allocation; see go.dev/issue/73199.
-	runtime.KeepAlive(keepAlive)
-	runtime.KeepAlive(ownerSID)
-	return equal, nil
+	// No runtime.KeepAlive is needed for either SID. StringToSid returns
+	// (*SID).Copy, a pointer to the base of a Go []byte, and the alias path
+	// returns an interior pointer into a Go-heap descriptor copy; the GC
+	// tracks both. windows.EqualSid then passes both through
+	// syscall.SyscallN, which is //go:uintptrkeepalive, so the compiler
+	// retains both arguments for the duration of the call.
+	return windows.EqualSid(trusteeSID, ownerSID), nil
 }
 
 // resolveTrusteeSID converts an SDDL trustee to a SID, accepting either a SID
 // string or an alias such as LA. Aliases are machine-relative, so they are
 // resolved by Windows rather than reconstructed here.
-func resolveTrusteeSID(
-	trustee string,
-) (*windows.SID, *windows.SECURITY_DESCRIPTOR, error) {
+//
+// ConvertStringSidToSid, behind windows.StringToSid, already accepts the SID
+// string constants, so the first branch handles both canonical SIDs and every
+// alias Windows renders into SDDL. The descriptor round-trip is a fallback for
+// a token that only the SDDL parser accepts, and the error return is for a
+// token neither accepts, which the caller must not treat as a non-owner.
+func resolveTrusteeSID(trustee string) (*windows.SID, error) {
 	if sid, err := windows.StringToSid(trustee); err == nil {
-		return sid, nil, nil
+		return sid, nil
 	}
 	sd, err := windows.SecurityDescriptorFromString("O:" + trustee)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"resolve trustee alias %q via security descriptor: %w",
 			trustee, err,
 		)
 	}
 	sid, _, err := sd.Owner()
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"read owner from resolved trustee alias %q: %w", trustee, err,
 		)
 	}
-	// The caller must keep sd alive for as long as sid is used.
-	return sid, sd, nil
+	if sid == nil {
+		return nil, fmt.Errorf(
+			"resolved trustee alias %q has no owner SID", trustee,
+		)
+	}
+	// sid is an interior pointer into sd's Go-heap allocation, which keeps
+	// that allocation reachable, so sd need not be returned alongside it.
+	return sid, nil
 }
 
 func sddlSection(sddl, section string) string {
