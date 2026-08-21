@@ -490,6 +490,56 @@ func BlockBySlotTxn(txn *Txn, slot uint64) (models.Block, error) {
 	return ret, nil
 }
 
+func (d *Database) blockKeyByIndex(
+	blockIndex uint64,
+	txn *Txn,
+) ([]byte, error) {
+	indexKey := types.BlockBlobIndexKey(blockIndex)
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return nil, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return nil, types.ErrBlobStoreUnavailable
+	}
+	val, err := blob.Get(blobTxn, indexKey)
+	if err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return nil, models.ErrBlockNotFound
+		}
+		return nil, err
+	}
+	return val, nil
+}
+
+// BlockPointByIndex returns the point encoded in the current block-index
+// entry without loading the referenced block CBOR or metadata. It is intended
+// for primary-chain membership checks that need only the canonical slot and
+// hash at an internal block index.
+func (d *Database) BlockPointByIndex(
+	blockIndex uint64,
+	txn *Txn,
+) (ocommon.Point, error) {
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	blockKey, err := d.blockKeyByIndex(blockIndex, txn)
+	if err != nil {
+		return ocommon.Point{}, err
+	}
+	point, err := BlockBlobKeyToPoint(blockKey)
+	if err != nil {
+		return ocommon.Point{}, fmt.Errorf(
+			"parsing block index %d value: %w",
+			blockIndex,
+			err,
+		)
+	}
+	return point, nil
+}
+
 func (d *Database) BlockByIndex(
 	blockIndex uint64,
 	txn *Txn,
@@ -498,23 +548,11 @@ func (d *Database) BlockByIndex(
 		txn = d.BlobTxn(false)
 		defer txn.Rollback() //nolint:errcheck
 	}
-	indexKey := types.BlockBlobIndexKey(blockIndex)
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return models.Block{}, types.ErrNilTxn
-	}
-	blob := txn.DB().Blob()
-	if blob == nil {
-		return models.Block{}, types.ErrBlobStoreUnavailable
-	}
-	val, err := blob.Get(blobTxn, indexKey)
+	blockKey, err := d.blockKeyByIndex(blockIndex, txn)
 	if err != nil {
-		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return models.Block{}, models.ErrBlockNotFound
-		}
 		return models.Block{}, err
 	}
-	return blockByKey(txn, val)
+	return blockByKey(txn, blockKey)
 }
 
 // BlockAtOrAfterIndex returns the first block whose chain index is greater

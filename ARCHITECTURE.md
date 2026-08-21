@@ -2455,12 +2455,19 @@ replay can be behind that chain's tip while the applied ledger catches up after
 a restart; it is treated as a duplicate and does not contribute to mismatch or
 resync state. Only a point confirmed as present in the current primary-chain
 index bypasses fork resolution: a lookup failure is logged and treated as a
-non-match, so it proceeds through normal fork handling. That lookup reads the
-block store while `chainsyncMutex` is held, so it is skipped for the origin
-point and for any header beyond the primary-chain tip, neither of which can
-carry a primary-chain index entry. Fork resolution reconstructs the peer's
-fetched header path with `findPeerForkPath`, locates the exact common ancestor,
-and counts both the peer and primary-chain blocks in
+non-match, so it proceeds through normal fork handling. An O(1) local hash-index
+prefilter rejects an unknown fork header before a point lookup can fall through
+to a configured Bark archive. On a hit, the block ID's current `bi` value is
+parsed directly into its slot and hash, avoiding a second block-CBOR read. The
+lookup runs while `chainsyncMutex` is held, so it is skipped for the origin
+point and for a header beyond the `localTip` snapshot taken by the handler; the
+latter is not observed in that snapshot even though concurrent blockfetch may
+advance the primary-chain index afterward. A confirmed historical replay does
+not clear an existing queued-header fragment because it did not discover a
+competing chain; ordinary blockfetch completion or connection handoff retains
+ownership of that queue. Fork resolution reconstructs the peer's fetched
+header path with `findPeerForkPath`, locates the exact common ancestor, and
+counts both the peer and primary-chain blocks in
 `(intersectionSlot, intersectionSlot + genesisWindow]`. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison.
 Node composition injects an atomic Genesis-mode/window query from

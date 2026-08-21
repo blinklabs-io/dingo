@@ -19,9 +19,24 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
+
+type countingBlockReadStore struct {
+	blob.BlobStore
+	getBlockCalls int
+}
+
+func (s *countingBlockReadStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.getBlockCalls++
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
 
 func testIndexedBlock(slot, id uint64, hashByte byte) models.Block {
 	return models.Block{
@@ -71,6 +86,25 @@ func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, lowerIDBlock.ID, block.ID)
 	require.Equal(t, lowerIDBlock.Hash, block.Hash)
+}
+
+func TestBlockPointByIndexDoesNotReadBlockContent(t *testing.T) {
+	db := newTestDB(t)
+	block := testIndexedBlock(42, 7, 0x42)
+	require.NoError(t, db.BlockCreate(block, nil))
+
+	store := &countingBlockReadStore{BlobStore: db.blob}
+	db.blob = store
+
+	point, err := db.BlockPointByIndex(block.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, block.Slot, point.Slot)
+	require.Equal(t, block.Hash, point.Hash)
+	require.Zero(
+		t,
+		store.getBlockCalls,
+		"point-only lookup must not load block CBOR or trigger archive fallback",
+	)
 }
 
 func TestBlockAtOrAfterIndexSkipsSparseIndexes(t *testing.T) {

@@ -2230,6 +2230,18 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
 	)
 	genesisHash := testHashBytes("byron-boundary-slot-zero")
+	abandonedHash := testHashBytes("abandoned-slot-zero-fork")
+	// Persist the abandoned block first at ID 1. Adding the primary block
+	// below reuses ID 1 for the authoritative index while retaining this blob,
+	// matching the append-only fork shape primaryChainContainsBlock must reject.
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   0,
+		Hash:   abandonedHash,
+		Cbor:   []byte{0x80},
+		Type:   1,
+		Number: 0,
+	}, nil))
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
@@ -2261,6 +2273,12 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 		ChainsyncEvent{Point: ocommon.NewPoint(0, genesisHash)},
 		localTip,
 	))
+	// Blob presence is insufficient: the abandoned block is still retrievable
+	// by hash, but ID 1 now indexes the primary block above.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPoint(0, abandonedHash)},
+		localTip,
+	))
 	// The origin point is not a block and is not evidence of a duplicate.
 	assert.False(t, ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{Point: ocommon.NewPointOrigin()},
@@ -2276,6 +2294,48 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 		},
 		localTip,
 	))
+}
+
+func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+	lookupCalls := 0
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		lookupCalls++
+		return models.Block{}, models.ErrBlockNotFound
+	}
+
+	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				localTip.Point.Slot,
+				testHashBytes("unknown-fork-header"),
+			),
+		},
+		localTip,
+	))
+	assert.Equal(t, 1, lookupCalls)
+}
+
+func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+	lookupCalled := false
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		lookupCalled = true
+		return models.Block{}, errors.New("unexpected lookup")
+	}
+
+	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				localTip.Point.Slot+1,
+				testHashBytes("header-beyond-local-tip"),
+			),
+		},
+		localTip,
+	))
+	assert.False(t, lookupCalled)
 }
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {

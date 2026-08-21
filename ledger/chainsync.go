@@ -1065,11 +1065,13 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 // handling. A lookup failure is not evidence of a duplicate, so it is logged
 // and reported as a non-match.
 //
-// primaryChainContainsPoint reads the block store twice, and the caller holds
-// chainsyncMutex, so the two in-memory guards below keep those reads off the
-// paths that cannot need them: the origin point carries no hash, and the
-// block-index entries only cover blocks up to localTip, so a header beyond
-// that tip cannot already be on the primary chain.
+// The caller holds chainsyncMutex, so the guards below keep storage reads off
+// paths that cannot need them. The origin point carries no hash, and a header
+// beyond the localTip snapshot is not observed in the primary-chain index at
+// handler entry. The O(1) local hash index then rejects an unknown fork header
+// before a point lookup could fall through to a configured Bark archive. On a
+// hash-index hit, the returned block ID is checked through the point-only
+// primary-chain index path, avoiding a second block-CBOR read.
 func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
@@ -1080,7 +1082,21 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	if e.Point.Slot > localTip.Point.Slot {
 		return false
 	}
-	contains, err := ls.primaryChainContainsPoint(e.Point)
+	block, err := ls.blockByHash(e.Point.Hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false
+	}
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not prefilter historical header by hash index",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	contains, err := ls.primaryChainContainsBlock(block, e.Point)
 	if err != nil {
 		ls.config.Logger.Debug(
 			"could not check historical header against primary chain",
