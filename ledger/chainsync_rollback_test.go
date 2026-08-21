@@ -2208,7 +2208,74 @@ func TestHandleEventChainsyncBlockHeaderIgnoresHistoricalPrimaryHeader(
 	require.NoError(t, err)
 	assert.Zero(t, fixture.ls.headerMismatchCount)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
-	assert.Equal(t, uint64(40), fixture.ls.chain.Tip().Point.Slot)
+	assert.Equal(
+		t,
+		ochainsync.Tip{
+			Point:       ocommon.NewPoint(40, block4Hash),
+			BlockNumber: 4,
+		},
+		fixture.ls.chain.Tip(),
+	)
+}
+
+// A Byron epoch-boundary block sits at slot 0 with a real hash, so rejecting
+// every slot-zero point would classify a replay of that block as a fork.
+// Only the origin point, which carries no hash, is rejected outright.
+func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
+	)
+	genesisHash := testHashBytes("byron-boundary-slot-zero")
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+			{
+				Slot:        0,
+				Hash:        genesisHash,
+				BlockNumber: 0,
+				Type:        1,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
+	ls, err := NewLedgerState(
+		LedgerStateConfig{
+			Database:          db,
+			ChainManager:      cm,
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	)
+	require.NoError(t, err)
+	localTip := ls.chain.Tip()
+	require.Equal(t, uint64(0), localTip.Point.Slot)
+	require.Equal(t, genesisHash, localTip.Point.Hash)
+
+	assert.True(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPoint(0, genesisHash)},
+		localTip,
+	))
+	// The origin point is not a block and is not evidence of a duplicate.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPointOrigin()},
+		localTip,
+	))
+	// A competing slot-zero block is still a candidate fork.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				0,
+				testHashBytes("competing-slot-zero"),
+			),
+		},
+		localTip,
+	))
 }
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {

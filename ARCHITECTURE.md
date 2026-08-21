@@ -2448,14 +2448,19 @@ genesis params (`GenesisWindowSlotsForParams`) or overridden by
 `observedSlots` used for density), trimmed to the window and on rollback.
 That rolling frontier ranks peers before a fork is available locally; it is not
 the authoritative fork-choice measurement. When an incoming header conflicts
-with the primary chain, the handler first checks whether the header point is
-already on the authoritative primary chain. A historical replay can be behind
-that chain's tip while the applied ledger catches up after a restart; it is
-treated as a duplicate and does not contribute to mismatch or resync state.
-Only a point absent from the current primary-chain index enters fork
-resolution, which reconstructs the peer's fetched header path with
-`findPeerForkPath`, locates the exact common ancestor, and counts both the peer
-and primary-chain blocks in
+with the primary chain, the handler discards it through the in-memory duplicate
+and stale-header checks first, then asks whether the header point is still on
+the authoritative primary chain (`headerAlreadyOnPrimaryChain`). A historical
+replay can be behind that chain's tip while the applied ledger catches up after
+a restart; it is treated as a duplicate and does not contribute to mismatch or
+resync state. Only a point confirmed as present in the current primary-chain
+index bypasses fork resolution: a lookup failure is logged and treated as a
+non-match, so it proceeds through normal fork handling. That lookup reads the
+block store while `chainsyncMutex` is held, so it is skipped for the origin
+point and for any header beyond the primary-chain tip, neither of which can
+carry a primary-chain index entry. Fork resolution reconstructs the peer's
+fetched header path with `findPeerForkPath`, locates the exact common ancestor,
+and counts both the peer and primary-chain blocks in
 `(intersectionSlot, intersectionSlot + genesisWindow]`. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison.
 Node composition injects an atomic Genesis-mode/window query from

@@ -1060,8 +1060,24 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 // the block store can be far ahead of the applied ledger, and a peer may
 // replay a historical header while the local chain tip has already advanced.
 // It is not a fork and must not contribute to headerMismatchCount.
-func (ls *LedgerState) headerAlreadyOnPrimaryChain(e ChainsyncEvent) bool {
-	if ls.db == nil || e.Point.Slot == 0 || len(e.Point.Hash) == 0 {
+//
+// Only a point confirmed present in the primary-chain index suppresses fork
+// handling. A lookup failure is not evidence of a duplicate, so it is logged
+// and reported as a non-match.
+//
+// primaryChainContainsPoint reads the block store twice, and the caller holds
+// chainsyncMutex, so the two in-memory guards below keep those reads off the
+// paths that cannot need them: the origin point carries no hash, and the
+// block-index entries only cover blocks up to localTip, so a header beyond
+// that tip cannot already be on the primary chain.
+func (ls *LedgerState) headerAlreadyOnPrimaryChain(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) bool {
+	if ls.db == nil || len(e.Point.Hash) == 0 {
+		return false
+	}
+	if e.Point.Slot > localTip.Point.Slot {
 		return false
 	}
 	contains, err := ls.primaryChainContainsPoint(e.Point)
@@ -2416,10 +2432,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
-			if ls.headerAtOrImmediatelyBeforeTip(e) ||
-				ls.headerAlreadyOnPrimaryChain(e) {
+			if ls.headerAtOrImmediatelyBeforeTip(e) {
 				ls.config.Logger.Debug(
-					"ignoring duplicate, reordered, or historical primary-chain roll forward",
+					"ignoring duplicate or reordered roll forward",
 					"component", "ledger",
 					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
@@ -2449,6 +2464,20 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"local_tip_slot", localTip.Point.Slot,
 					"block_prev_hash", notFitErr.BlockPrevHash(),
 					"chain_tip_hash", notFitErr.TipHash(),
+					"connection_id", e.ConnectionId.String(),
+				)
+				return nil
+			}
+			// A header still on the authoritative primary chain is a
+			// historical replay, not a competing candidate. Checked after
+			// the in-memory discards above because it reads the block
+			// store while chainsyncMutex is held.
+			if ls.headerAlreadyOnPrimaryChain(e, localTip) {
+				ls.config.Logger.Debug(
+					"ignoring historical primary-chain roll forward",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"local_tip_slot", localTip.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
 				return nil
