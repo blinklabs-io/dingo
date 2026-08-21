@@ -2158,6 +2158,59 @@ func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 }
 
+func TestHandleEventChainsyncBlockHeaderIgnoresHistoricalPrimaryHeader(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		return true, 100
+	}
+
+	// Leave the applied ledger at currentTip while extending the authoritative
+	// primary chain two blocks farther. A replayed header for the first of those
+	// blocks is historical relative to the primary tip, but it is not a fork.
+	block3Hash := testHashBytes("historical-primary-block-3")
+	block4Hash := testHashBytes("historical-primary-block-4")
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        30,
+			Hash:        block3Hash,
+			BlockNumber: 3,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+		{
+			Slot:        40,
+			Hash:        block4Hash,
+			BlockNumber: 4,
+			Type:        1,
+			PrevHash:    block3Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        ocommon.NewPoint(30, block3Hash),
+		BlockHeader: mockHeader{
+			hash:        lcommon.NewBlake2b256(block3Hash),
+			prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+			blockNumber: 3,
+			slot:        30,
+		},
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(40, block4Hash),
+			BlockNumber: 4,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, uint64(40), fixture.ls.chain.Tip().Point.Slot)
+}
+
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	t.Helper()
 

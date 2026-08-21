@@ -1054,6 +1054,30 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 	return false
 }
 
+// headerAlreadyOnPrimaryChain identifies a replayed header that is already
+// present on the authoritative primary chain but is behind its current tip.
+// This shape is normal while a from-genesis ledger catches up after restart:
+// the block store can be far ahead of the applied ledger, and a peer may
+// replay a historical header while the local chain tip has already advanced.
+// It is not a fork and must not contribute to headerMismatchCount.
+func (ls *LedgerState) headerAlreadyOnPrimaryChain(e ChainsyncEvent) bool {
+	if ls.db == nil || e.Point.Slot == 0 || len(e.Point.Hash) == 0 {
+		return false
+	}
+	contains, err := ls.primaryChainContainsPoint(e.Point)
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not check historical header against primary chain",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	return contains
+}
+
 func (ls *LedgerState) findPeerForkPath(
 	e ChainsyncEvent,
 	initialPrevHash []byte,
@@ -2392,9 +2416,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
-			if ls.headerAtOrImmediatelyBeforeTip(e) {
+			if ls.headerAtOrImmediatelyBeforeTip(e) ||
+				ls.headerAlreadyOnPrimaryChain(e) {
 				ls.config.Logger.Debug(
-					"ignoring duplicate or reordered roll forward",
+					"ignoring duplicate, reordered, or historical primary-chain roll forward",
 					"component", "ledger",
 					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
