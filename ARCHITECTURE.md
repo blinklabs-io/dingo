@@ -1038,6 +1038,13 @@ already-closed bus as idempotent. `EventBus.Close` discards queued in-memory
 events after waiting for in-flight handlers; ordinary `Unsubscribe` and
 reusable `EventBus.Stop` preserve queued events.
 
+If `LedgerState.Close` cannot confirm that its block-processing and database
+workers have drained, normal shutdown does not close the database or storage
+providers afterward. The process may terminate with those resources still
+open, but closing them while an unconfirmed ledger worker can still access
+state risks a use-after-close and on-disk corruption. Live Restore/Truncate
+uses the same fail-closed rule and escalates to a supervised restart.
+
 ## Event-Driven Communication
 
 Components use the `EventBus` (`event/event.go`) for asynchronous
