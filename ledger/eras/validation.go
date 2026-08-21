@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 // ErrExUnitsOverflow is returned when ExUnits
@@ -320,6 +321,26 @@ const txTypeAlonzo = 4
 // not contain an IsValid byte, so their full CBOR length
 // is the fee-relevant size.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
+	// ShelleyBlock.Transactions reconstructs transactions from the raw body,
+	// witness, and metadata components. ShelleyTransaction.MarshalCBOR encodes
+	// the decoded body value rather than its preserved body CBOR, which expands
+	// protocol-update fields with explicit nulls. The fee size is based on the
+	// original three-element wire encoding, so use the preserved components
+	// when this transaction came from a block.
+	if shelleyTx, ok := tx.(*shelley.ShelleyTransaction); ok {
+		bodyCbor := shelleyTx.Body.Cbor()
+		witnessCbor := shelleyTx.WitnessSet.Cbor()
+		if len(bodyCbor) > 0 && len(witnessCbor) > 0 {
+			size := 1 + len(bodyCbor) + len(witnessCbor)
+			if auxData := shelleyTx.AuxiliaryData(); auxData != nil &&
+				len(auxData.Cbor()) > 0 {
+				size += len(auxData.Cbor())
+			} else {
+				size++ // CBOR null auxiliary data
+			}
+			return uint64(size)
+		}
+	}
 	fullSize := uint64(len(tx.Cbor()))
 	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
 		return fullSize - 1
