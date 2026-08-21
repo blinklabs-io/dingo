@@ -408,7 +408,8 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineExpectedEta0Errors = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_block_pipeline_expected_eta0_errors_total",
-			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as expected (no cached Praos epoch nonce yet; always true for Byron-era blocks, but not verified to be Byron-specific here)",
+			Help: "block-processing pipeline validate-stage errors drained " +
+				"from errorsChan because a cached epoch has no Praos nonce",
 		},
 	)
 	m.blockPipelineDeferredEpochCacheErrors = promautoFactory.NewCounter(

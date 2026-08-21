@@ -32,10 +32,9 @@ import (
 // buildNoNonceValidateBatch returns numBlocks decodable (but not
 // cryptographically valid) Conway blocks at distinct slots, all falling
 // inside a single epoch whose cached Nonce is empty. Every one of them
-// makes blockPipelineEta0Provider fail identically to how it always fails
-// for real Byron-era blocks (see its doc comment) -- Byron itself is not
-// needed to reproduce the bug; any slot range with no cached Praos nonce
-// triggers the same validate-stage error path.
+// makes blockPipelineEta0Provider fail for a covered slot whose cached Praos
+// nonce is unavailable. Byron epochs always have that shape, and a later-era
+// epoch can have it transiently while published state catches up.
 func buildNoNonceValidateBatch(t *testing.T, numBlocks int) []models.Block {
 	t.Helper()
 	batch := make([]models.Block, 0, numBlocks)
@@ -235,9 +234,9 @@ func TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected(
 }
 
 // TestRecordBlockPipelineErrorClassification confirms
-// recordBlockPipelineError distinguishes the expected Byron-era
-// eta0-unavailable case (errBlockPipelineEta0Unavailable) from every other
-// error, incrementing the matching counter for each.
+// recordBlockPipelineError distinguishes a covered epoch without a nonce
+// (errBlockPipelineEta0Unavailable) from every other error, incrementing the
+// matching counter for each.
 func TestRecordBlockPipelineErrorClassification(t *testing.T) {
 	ls := &LedgerState{
 		config: LedgerStateConfig{Logger: testLogger()},

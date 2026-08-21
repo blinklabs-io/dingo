@@ -88,6 +88,46 @@ func BuildValidatedConwayBlockBytes(
 	slotRangeStart uint64,
 	blockNumber uint64,
 ) ValidatedConwayBlock {
+	return buildValidatedConwayBlockBytes(
+		t,
+		seed,
+		nonceSeed,
+		slotRangeStart,
+		blockNumber,
+		false,
+	)
+}
+
+// BuildValidatedConwayBlockBytesWithInvalidOpCert generates a block whose
+// VRF proof and KES signature are genuine but whose operational certificate
+// was signed by an unrelated cold key. The KES signature is computed after
+// substituting the unrelated signature, so rejecting this block specifically
+// exercises the cold-key OpCert check rather than failing KES verification.
+func BuildValidatedConwayBlockBytesWithInvalidOpCert(
+	t *testing.T,
+	seed [32]byte,
+	nonceSeed byte,
+	slotRangeStart uint64,
+	blockNumber uint64,
+) ValidatedConwayBlock {
+	return buildValidatedConwayBlockBytes(
+		t,
+		seed,
+		nonceSeed,
+		slotRangeStart,
+		blockNumber,
+		true,
+	)
+}
+
+func buildValidatedConwayBlockBytes(
+	t *testing.T,
+	seed [32]byte,
+	nonceSeed byte,
+	slotRangeStart uint64,
+	blockNumber uint64,
+	invalidOpCert bool,
+) ValidatedConwayBlock {
 	t.Helper()
 
 	vrfPk, vrfSk, err := vrf.KeyGen(seed[:])
@@ -125,6 +165,12 @@ func BuildValidatedConwayBlockBytes(
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
 	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
 	opCertSig := ed25519.Sign(coldPrivKey, opCertBody[:])
+	if invalidOpCert {
+		unrelatedSeed := seed
+		unrelatedSeed[0] ^= 0xCC
+		unrelatedColdKey := ed25519.NewKeyFromSeed(unrelatedSeed[:])
+		opCertSig = ed25519.Sign(unrelatedColdKey, opCertBody[:])
+	}
 
 	bodyHash := conwayEmptyBodyHash(t)
 	activeSlotCoeff := big.NewRat(99, 100)

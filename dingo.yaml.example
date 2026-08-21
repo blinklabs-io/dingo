@@ -486,16 +486,12 @@ validateHistorical: true
 # CLI: --block-pipeline-enabled
 blockPipelineEnabled: false
 
-# Also VRF/KES-validate blocks in the block-pipeline replay loop with a
-# parallel worker pool (default: false). Requires blockPipelineEnabled to
-# also be set. This moves the VRF/KES crypto check to run in parallel,
-# immediately before ledger apply, instead of serially at admission: once
-# every admitted block is guaranteed to pass through this check, the
-# existing serial admission-time VRF/KES crypto check is skipped as
-# redundant. Admission-time checks that the pipeline's validate stage does
-# not perform -- the registered-VRF-key/leader-eligibility state checks and
-# the epoch-cache-advance side effect -- still run unconditionally. See
-# ARCHITECTURE.md ("Block Processing Pipeline").
+# Also validate VRF/KES and OpCert crypto during block-pipeline replay with a
+# parallel worker pool (default: false). Requires blockPipelineEnabled.
+# Admission-time crypto remains authoritative because persisted chain blocks
+# are available to downstream readers before replay reaches this stage. The
+# replay check follows the serial path's historical, Mithril, and epoch-nonce
+# availability gates. See ARCHITECTURE.md ("Block Processing Pipeline").
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED
 # environment variable

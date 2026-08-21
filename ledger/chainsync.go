@@ -2624,6 +2624,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 }
 
 func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
+	return ls.shouldEnforceBlockPipelineCrypto(slot)
+}
+
+// shouldEnforceBlockPipelineCrypto mirrors the serial header path's
+// validation-state gates for blocks read back from the primary chain. The
+// pipeline workers still run for every submitted block, but their result must
+// not reject trusted historical/Mithril data or a block whose epoch nonce is
+// intentionally unavailable until ledger apply catches up.
+func (ls *LedgerState) shouldEnforceBlockPipelineCrypto(slot uint64) bool {
 	validationEnabled, mithrilLedgerSlot := ls.validationStateSnapshot()
 	if !validationEnabled {
 		return false
@@ -2631,40 +2640,7 @@ func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false
 	}
-	if ls.blockPipelineRevalidatesCrypto() {
-		return false
-	}
 	return ls.hasCachedEpochNonceForSlot(slot)
-}
-
-// blockPipelineRevalidatesCrypto reports whether every block admitted here
-// will independently pass through the block-decode pipeline's VRF/KES
-// validate stage (LedgerStateConfig.BlockPipelineValidateEnabled) before
-// ledger apply -- see decodeReadChainBatch, which aborts the whole read
-// batch on a pipeline validation failure exactly as it does on a decode
-// failure. When that is true, the serial admission-time stateless VRF/KES
-// crypto check (verifyBlockHeaderOnlyCrypto / the crypto half of
-// verifyBlockHeaderCryptoBeforeApply) is redundant: the same block would be
-// cryptographically re-verified a second time, uselessly, before every
-// sync's steady-state admission path even finishes. Callers must still run
-// the non-crypto parts of admission-time verification unconditionally --
-// the registered-VRF-key and leader-eligibility state checks
-// (verifyBlockHeaderState) and the epoch-cache-advance side effect
-// (headerVerificationEpoch's ensureEpochForSlot) -- neither of which the
-// pipeline's validate stage performs (it is scoped to VRF/KES only, per
-// NewLedgerState's VerifyConfig) or can perform (the pipeline validates
-// blocks already committed to ls.chain, well after any admission-time
-// epoch-cache forecast would need to happen for a live, arriving header).
-//
-// ls.blockPipeline is nil whenever BlockPipelineEnabled is off or
-// ManualBlockProcessing bypasses ledgerReadChainIterator entirely (see
-// NewLedgerState), so checking it directly -- rather than only the config
-// flag -- also correctly keeps this false in both of those cases. The
-// pointer itself is set once at construction and never reassigned, so
-// reading it without ls.RLock() here is safe, matching every other
-// unguarded ls.blockPipeline read (e.g. decodeReadChainBatch).
-func (ls *LedgerState) blockPipelineRevalidatesCrypto() bool {
-	return ls.blockPipeline != nil && ls.config.BlockPipelineValidateEnabled
 }
 
 func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
@@ -3045,49 +3021,31 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	validationEnabled, _ := ls.validationStateSnapshot()
 	if validationEnabled {
 		var verifyErr error
-		if ls.blockPipelineRevalidatesCrypto() {
-			// The block-decode pipeline's validate stage will
-			// independently re-verify VRF/KES for this block before
-			// ledger apply (decodeReadChainBatch aborts the batch on
-			// failure exactly as it would for a crypto failure here), so
-			// redoing the same stateless crypto check at admission would
-			// only verify it twice. Run the non-crypto half of admission
-			// verification unconditionally: registered-VRF-key and
-			// leader-eligibility state checks, and the epoch-cache-advance
-			// side effect the pipeline's own Eta0Provider deliberately
-			// does not perform (see blockPipelineRevalidatesCrypto).
+		// Chainsync may already have verified the queued header before
+		// blockfetch started. When the fetched block matches that first
+		// verified queued header by point, a second verification is
+		// redundant. Chain insertion still checks that the block matches the
+		// queued header hash before accepting it.
+		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
+			e.Point,
+		)
+		if !headerAlreadyVerified &&
+			!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
+			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+				return err
+			}
+			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
+				e.Point,
+			)
+		}
+		if !headerAlreadyVerified {
+			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+		} else {
 			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
 				e.Block,
 				true,
 				true,
 			)
-		} else {
-			// Chainsync may already have verified the queued header before
-			// blockfetch started. When the fetched block matches that first
-			// verified queued header by point, a second VRF/KES verification is
-			// redundant. Chain insertion still checks that the block matches the
-			// queued header hash before accepting it.
-			headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
-				e.Point,
-			)
-			if !headerAlreadyVerified &&
-				!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
-				if err := ls.flushPendingBlockfetchBlocks(); err != nil {
-					return err
-				}
-				headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
-					e.Point,
-				)
-			}
-			if !headerAlreadyVerified {
-				verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
-			} else {
-				verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
-					e.Block,
-					true,
-					true,
-				)
-			}
 		}
 		if verifyErr != nil {
 			if errors.Is(verifyErr, errHeaderVerificationDeferred) {
