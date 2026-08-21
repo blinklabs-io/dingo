@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -266,6 +267,44 @@ func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
 		return err
 	})
 	return ret, err
+}
+
+// BlockIDByPointLocal returns the locally stored metadata ID for point without
+// allowing a blob-store wrapper to fall through to a remote archive. Retained
+// tombstones still carry the metadata needed for this lookup.
+func BlockIDByPointLocal(
+	db *Database,
+	point ocommon.Point,
+) (uint64, error) {
+	txn := db.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	if txn.Blob() == nil {
+		return 0, types.ErrNilTxn
+	}
+	store := db.Blob()
+	if store == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	var (
+		metadata types.BlockMetadata
+		err      error
+	)
+	if reader, ok := store.(blob.LocalBlockReader); ok {
+		_, metadata, err = reader.GetBlockLocal(
+			txn.Blob(), point.Slot, point.Hash,
+		)
+	} else {
+		_, metadata, err = store.GetBlock(
+			txn.Blob(), point.Slot, point.Hash,
+		)
+	}
+	if err != nil && !errors.Is(err, types.ErrHistoryExpired) {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return 0, models.ErrBlockNotFound
+		}
+		return 0, err
+	}
+	return metadata.ID, nil
 }
 
 func BlockByHash(db *Database, hash []byte) (models.Block, error) {

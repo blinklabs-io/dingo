@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,6 +36,28 @@ func (s *countingBlockReadStore) GetBlock(
 	hash []byte,
 ) ([]byte, types.BlockMetadata, error) {
 	s.getBlockCalls++
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+type localBlockReadStore struct {
+	blob.BlobStore
+	archiveFallbackCalls int
+}
+
+func (s *localBlockReadStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.archiveFallbackCalls++
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+func (s *localBlockReadStore) GetBlockLocal(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
 	return s.BlobStore.GetBlock(txn, slot, hash)
 }
 
@@ -105,6 +128,30 @@ func TestBlockPointByIndexDoesNotReadBlockContent(t *testing.T) {
 		store.getBlockCalls,
 		"point-only lookup must not load block CBOR or trigger archive fallback",
 	)
+}
+
+func TestBlockIDByPointLocalBypassesArchiveFallback(t *testing.T) {
+	db := newTestDB(t)
+	block := testIndexedBlock(42, 7, 0x42)
+	require.NoError(t, db.BlockCreate(block, nil))
+
+	store := &localBlockReadStore{BlobStore: db.blob}
+	db.blob = store
+
+	blockID, err := BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, block.Hash),
+	)
+	require.NoError(t, err)
+	require.Equal(t, block.ID, blockID)
+	require.Zero(t, store.archiveFallbackCalls)
+
+	_, err = BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xff}, 32)),
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(t, store.archiveFallbackCalls)
 }
 
 func TestBlockAtOrAfterIndexSkipsSparseIndexes(t *testing.T) {

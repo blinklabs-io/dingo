@@ -28,7 +28,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -2315,6 +2317,24 @@ func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
 		localTip,
 	))
 	assert.Equal(t, 1, lookupCalls)
+}
+
+func TestHeaderAlreadyOnPrimaryChainSupportsLegacyHashIndexMiss(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+
+	txn := fixture.ls.db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return fixture.ls.db.Blob().Delete(
+			txn.Blob(),
+			types.BlockHashIndexKey(localTip.Point.Hash),
+		)
+	}))
+
+	assert.True(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: localTip.Point},
+		localTip,
+	))
 }
 
 func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {

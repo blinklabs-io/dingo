@@ -7002,12 +7002,19 @@ func (ls *LedgerState) primaryChainContainsBlock(
 	if block.Slot != point.Slot || !bytes.Equal(block.Hash, point.Hash) {
 		return false, nil
 	}
+	return ls.primaryChainContainsBlockID(block.ID, point)
+}
+
+func (ls *LedgerState) primaryChainContainsBlockID(
+	blockID uint64,
+	point ocommon.Point,
+) (bool, error) {
 	// Blob presence by point is not authoritative: abandoned-fork blocks remain
 	// in the append-only blob store. The current primary chain is identified by
 	// its block-index entry, so compare the point encoded at this ID with the
 	// requested point. Reading only the index value avoids loading the indexed
 	// block's CBOR a second time while chainsyncMutex is held.
-	indexedPoint, err := ls.db.BlockPointByIndex(block.ID, nil)
+	indexedPoint, err := ls.db.BlockPointByIndex(blockID, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil

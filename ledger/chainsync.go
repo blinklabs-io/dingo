@@ -1071,7 +1071,9 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 // handler entry. The O(1) local hash index then rejects an unknown fork header
 // before a point lookup could fall through to a configured Bark archive. On a
 // hash-index hit, the returned block ID is checked through the point-only
-// primary-chain index path, avoiding a second block-CBOR read.
+// primary-chain index path, avoiding a second block-CBOR read. A hash-index
+// miss also probes the exact local point key for pre-index databases, but that
+// bounded compatibility lookup cannot fall through to Bark's archive.
 func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
@@ -1084,7 +1086,35 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	}
 	block, err := ls.blockByHash(e.Point.Hash)
 	if errors.Is(err, models.ErrBlockNotFound) {
-		return false
+		// Blocks written before the hash index was introduced still have an
+		// exact point key and metadata. Probe that local path without allowing
+		// Bark to fall through to its archive on an unknown fork hash.
+		blockID, localErr := database.BlockIDByPointLocal(ls.db, e.Point)
+		if errors.Is(localErr, models.ErrBlockNotFound) {
+			return false
+		}
+		if localErr != nil {
+			ls.config.Logger.Debug(
+				"could not check legacy historical header by local point",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", localErr,
+			)
+			return false
+		}
+		contains, localErr := ls.primaryChainContainsBlockID(blockID, e.Point)
+		if localErr != nil {
+			ls.config.Logger.Debug(
+				"could not check legacy historical header against primary chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", localErr,
+			)
+			return false
+		}
+		return contains
 	}
 	if err != nil {
 		ls.config.Logger.Debug(
