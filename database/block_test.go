@@ -152,6 +152,38 @@ func TestBlockIDByPointLocalBypassesArchiveFallback(t *testing.T) {
 	)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 	require.Zero(t, store.archiveFallbackCalls)
+
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return db.Blob().TombstoneBlock(
+			txn.Blob(), block.Slot, block.Hash,
+		)
+	}))
+	blockID, err = BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, block.Hash),
+	)
+	require.NoError(t, err)
+	require.Equal(t, block.ID, blockID)
+	require.Zero(t, store.archiveFallbackCalls)
+
+	// Older cloud tombstones did not retain metadata. They cannot recover a
+	// local ID and must remain a non-match instead of aliasing block ID zero.
+	txn = db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		)
+	}))
+	_, err = BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, block.Hash),
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(t, store.archiveFallbackCalls)
 }
 
 func TestBlockAtOrAfterIndexSkipsSparseIndexes(t *testing.T) {

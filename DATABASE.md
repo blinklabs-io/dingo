@@ -948,7 +948,9 @@ this point-only path after obtaining the candidate block ID.
 uses the optional `blob.LocalBlockReader` path when a wrapper provides it. Bark
 implements that extension by bypassing archive fallback, which lets ledger
 probe exact points from pre-hash-index databases without turning an unknown
-fork hash into a remote request.
+fork hash into a remote request. Tombstones retain `bp..._metadata` in every
+backend so the local ID remains available; a legacy cloud tombstone that has
+already lost that metadata is a non-match rather than block ID zero.
 
 `Database.CountBlocksAndOldestSlot` (`database/block.go`) is a full forward scan of the `bp` keyspace that answers "how many blocks are retained, and what's the oldest one" — there is no maintained counter for either, so this is a genuine scan, not a cheap lookup. It relies on two properties of the layout above: `bp` keys sort in ascending slot order (the big-endian slot encoding), so the oldest slot is whichever is seen first, no separate MIN pass needed; and a tombstoned entry (history-expiry pruned its content but kept the `bp` key alive per `TombstoneBlock`'s doc comment) surfaces as `types.ErrHistoryExpired` from `ValueCopy` rather than the raw `DBT1` marker bytes — the blob plugin's own read path already does that translation (matching `GetBlock`'s convention), so this checks for that error rather than re-parsing the magic itself, and excludes any such entry from both the count and the oldest-slot search. This backs bark's `GetDatabaseInfo` RPC (`block_count`/`oldest_slot`), which is exactly why it's a full scan: an operator-facing diagnostic called occasionally, not a hot path — a maintained counter would need touching every block insert/delete/prune path across the codebase for a query this infrequent.
 

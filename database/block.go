@@ -304,6 +304,13 @@ func BlockIDByPointLocal(
 		}
 		return 0, err
 	}
+	if metadata.ID == 0 && errors.Is(err, types.ErrHistoryExpired) {
+		return 0, fmt.Errorf(
+			"%w: expired block at slot %d has no local metadata ID",
+			models.ErrBlockNotFound,
+			point.Slot,
+		)
+	}
 	return metadata.ID, nil
 }
 
