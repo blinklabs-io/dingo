@@ -84,7 +84,20 @@ var (
 func drepInactivityFromPParams(
 	pparams lcommon.ProtocolParameters,
 ) (uint64, bool) {
-	return 0, false
+	// Dijkstra embeds ConwayProtocolParameters, but a type switch matches
+	// concrete types, so *Dijkstra never falls into the *Conway case and each
+	// era needs its own arm.
+	switch pp := pparams.(type) {
+	case *dijkstra.DijkstraProtocolParameters:
+		return pp.DRepInactivityPeriod, true
+	case *conway.ConwayProtocolParameters:
+		return pp.DRepInactivityPeriod, true
+	default:
+		// Byron has no protocol parameters at all, and every era before
+		// Conway has parameters but no DRep semantics. Neither can report a
+		// drep_activity value, and neither may borrow one.
+		return 0, false
+	}
 }
 
 // TransactionSubmitter accepts raw transaction CBOR for mempool admission.
@@ -623,9 +636,10 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 ) {
 	pparams := a.ledgerState.GetCurrentPParams()
 	if pparams == nil {
-		return ProtocolParamsInfo{}, errors.New(
-			"protocol parameters not available",
-		)
+		// A Byron prefix has no protocol-parameter CBOR to report. Surface
+		// the sentinel so the handler can answer "not found" rather than
+		// reporting a node fault for an expected stage of a genesis sync.
+		return ProtocolParamsInfo{}, ErrProtocolParamsUnavailable
 	}
 	info, err := protocolParamsInfoFromNative(
 		pparams,
@@ -1227,17 +1241,13 @@ func (a *NodeAdapter) predefinedDRep(
 }
 
 // drepInactivityPeriod returns the Conway-era drep_activity protocol
-// parameter (epochs of inactivity before a DRep expires), or 0 when it
-// is unavailable.
+// parameter (epochs of inactivity before a DRep expires) from the current
+// ledger state. The second return reports whether a value was available; see
+// drepInactivityFromPParams.
 func (a *NodeAdapter) drepInactivityPeriod() (uint64, bool) {
-	switch pp := a.ledgerState.GetCurrentPParams().(type) {
-	case *conway.ConwayProtocolParameters:
-		return pp.DRepInactivityPeriod, true
-	case *dijkstra.DijkstraProtocolParameters:
-		return pp.DRepInactivityPeriod, true
-	default:
-		return 0, false
-	}
+	return drepInactivityFromPParams(
+		a.ledgerState.GetCurrentPParams(),
+	)
 }
 
 // drepStatus derives the Blockfrost retirement/expiry view of a DRep
@@ -1251,6 +1261,7 @@ func drepStatus(
 	registrationEpoch uint64,
 	currentEpoch uint64,
 	inactivityPeriod uint64,
+	inactivityKnown bool,
 ) (retired bool, expired bool, lastActive uint64) {
 	retired = !active
 	lastActive = lastActivityEpoch
@@ -1258,7 +1269,11 @@ func drepStatus(
 		lastActive = registrationEpoch
 	}
 	expiry := expiryEpoch
-	if expiry == 0 && inactivityPeriod > 0 {
+	// Derive an expiry only when the era actually reports drep_activity.
+	// Gating on "inactivityPeriod > 0" instead would conflate an era with no
+	// DRep semantics against a chain that set drep_activity to 0, where a
+	// DRep expires the epoch it last acted.
+	if expiry == 0 && inactivityKnown {
 		expiry = lastActive + inactivityPeriod
 	}
 	expired = !retired && expiry > 0 && expiry <= currentEpoch
@@ -1328,7 +1343,7 @@ func (a *NodeAdapter) drepByCredentialTag(
 		)
 	}
 
-	inactivityPeriod, _ := a.drepInactivityPeriod()
+	inactivityPeriod, inactivityKnown := a.drepInactivityPeriod()
 	retired, expired, lastActive := drepStatus(
 		drep.Active,
 		drep.LastActivityEpoch,
@@ -1336,6 +1351,7 @@ func (a *NodeAdapter) drepByCredentialTag(
 		registrationEpoch.EpochId,
 		a.ledgerState.CurrentEpoch(),
 		inactivityPeriod,
+		inactivityKnown,
 	)
 
 	// Echo the identifier form the caller used: CIP-129 inputs carry
@@ -1423,7 +1439,7 @@ func (a *NodeAdapter) DReps(
 	}
 
 	currentEpoch := a.ledgerState.CurrentEpoch()
-	inactivity, _ := a.drepInactivityPeriod()
+	inactivity, inactivityKnown := a.drepInactivityPeriod()
 
 	type entry struct {
 		predefined *uint64
@@ -1455,6 +1471,7 @@ func (a *NodeAdapter) DReps(
 			epochForSlot(regSlot),
 			currentEpoch,
 			inactivity,
+			inactivityKnown,
 		)
 		entries = append(entries, entry{
 			credential: drep.Credential,
@@ -5012,7 +5029,7 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	if epoch == nil {
 		pparams := a.ledgerState.GetCurrentPParams()
 		if pparams == nil {
-			return nil, errors.New("protocol parameters not available")
+			return nil, ErrProtocolParamsUnavailable
 		}
 		return pparams, nil
 	}

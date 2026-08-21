@@ -258,7 +258,16 @@ func (s *queryServiceServer) ReadParams(
 
 	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParams()
 	if protoParams == nil {
-		return nil, errors.New("current protocol parameters empty")
+		// Byron carries no protocol-parameter CBOR, so a genuine Byron
+		// prefix reaches this during a from-genesis sync. FailedPrecondition
+		// tells the caller the chain is not yet in a state that can answer,
+		// which is the truth; Unavailable would invite a retry loop across
+		// what can be days of synchronization. Return before the tip lookup:
+		// there is no useful tip to pair with an absent parameter set.
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			ErrByronProtocolParams,
+		)
 	}
 
 	// Get chain point (slot, hash, and height)

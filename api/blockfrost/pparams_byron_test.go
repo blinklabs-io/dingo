@@ -184,3 +184,69 @@ func TestDrepInactivityFromPParams_DistinguishesUnavailableFromZero(
 		})
 	}
 }
+
+// TestDrepStatus_UsesAvailabilityNotZeroSentinel is the consequence of the
+// signature change. drepStatus previously guarded expiry derivation on
+// "inactivityPeriod > 0", which conflates two different chains: one whose era
+// defines no drep_activity, and one that set it to 0 so DReps expire the epoch
+// they last acted. Only the availability flag separates them.
+func TestDrepStatus_UsesAvailabilityNotZeroSentinel(t *testing.T) {
+	const (
+		lastActivity = uint64(10)
+		currentEpoch = uint64(12)
+	)
+
+	t.Run("unavailable does not derive expiry", func(t *testing.T) {
+		retired, expired, lastActive := drepStatus(
+			true,         // active
+			lastActivity, // lastActivityEpoch
+			0,            // expiryEpoch: none recorded
+			5,            // registrationEpoch
+			currentEpoch,
+			0,     // inactivityPeriod
+			false, // inactivityKnown
+		)
+
+		assert.False(t, retired)
+		assert.False(
+			t,
+			expired,
+			"no drep_activity parameter means no derived expiry",
+		)
+		assert.Equal(t, lastActivity, lastActive)
+	})
+
+	t.Run("configured zero expires at last activity", func(t *testing.T) {
+		retired, expired, lastActive := drepStatus(
+			true,
+			lastActivity,
+			0,
+			5,
+			currentEpoch,
+			0,    // drep_activity configured to 0
+			true, // available
+		)
+
+		assert.False(t, retired)
+		assert.True(
+			t,
+			expired,
+			"drep_activity of 0 expires a DRep at its last active epoch",
+		)
+		assert.Equal(t, lastActivity, lastActive)
+	})
+
+	t.Run("configured nonzero derives from last activity", func(t *testing.T) {
+		_, expired, _ := drepStatus(
+			true,
+			lastActivity,
+			0,
+			5,
+			currentEpoch,
+			20, // expiry 10+20=30, beyond currentEpoch 12
+			true,
+		)
+
+		assert.False(t, expired)
+	})
+}

@@ -257,6 +257,24 @@ func (b *Blockfrost) handleLatestEpochParams(
 ) {
 	info, err := b.node.CurrentProtocolParams()
 	if err != nil {
+		// A Byron prefix carries no protocol parameters, which is an
+		// expected stage of a from-genesis sync rather than a node fault.
+		// Reporting 500 here reads as an outage and trips alerting, so
+		// answer 404 as the absent-epoch path already does.
+		if errors.Is(err, ErrProtocolParamsUnavailable) {
+			b.logger.Debug(
+				"no protocol params for current era",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"Protocol parameters are not available for the "+
+					"current era.",
+			)
+			return
+		}
 		b.logger.Error(
 			"failed to get protocol params",
 			"error", err,
