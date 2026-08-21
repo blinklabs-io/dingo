@@ -693,15 +693,32 @@ func downloadImmutables(
 	downloadDir string,
 	extractDir string,
 ) error {
+	// Anchor the immutable/archive directory creation to downloadDir's
+	// filesystem identity via os.Root, so a symlink swapped into the tree
+	// after downloadDir was created (TOCTOU) cannot redirect MkdirAll
+	// outside it. Both directories live directly beneath downloadDir:
+	// extractDir was built by the caller as
+	// filepath.Join(downloadDir, ...).
+	root, err := os.OpenRoot(downloadDir)
+	if err != nil {
+		return fmt.Errorf("opening download root: %w", err)
+	}
+	defer root.Close()
+
+	relExtractDir, err := filepath.Rel(downloadDir, extractDir)
+	if err != nil {
+		return fmt.Errorf("resolving extract directory: %w", err)
+	}
 	immutableDir := filepath.Join(extractDir, "immutable")
-	if err := os.MkdirAll(immutableDir, 0o750); err != nil {
+	immutableRelDir := filepath.Join(relExtractDir, "immutable")
+	if err := root.MkdirAll(immutableRelDir, 0o750); err != nil {
 		return fmt.Errorf("creating immutable directory: %w", err)
 	}
-	archiveDir := filepath.Join(
-		downloadDir,
-		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
+	archiveRelDir := filepath.Base(
+		"immutable-archives-" + truncateDigest(artifact.Hash),
 	)
-	if err := os.MkdirAll(archiveDir, 0o750); err != nil {
+	archiveDir := filepath.Join(downloadDir, archiveRelDir)
+	if err := root.MkdirAll(archiveRelDir, 0o750); err != nil {
 		return fmt.Errorf("creating archive directory: %w", err)
 	}
 
@@ -905,7 +922,7 @@ func downloadImmutables(
 			return nil
 		})
 	}
-	err := g.Wait()
+	err = g.Wait()
 	if seq != nil {
 		// A download failure (or the copy-triggered cancel above) means the
 		// contiguous prefix can never advance, so unblock the consumer's Wait.

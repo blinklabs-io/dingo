@@ -357,16 +357,24 @@ func downloadIdleTimeoutCause(timeout time.Duration) error {
 	)
 }
 
-func downloadDestinationPath(cfg DownloadConfig) string {
+// downloadFilename returns the sanitized destination file name (relative
+// to DestDir) for cfg.
+func downloadFilename(cfg DownloadConfig) string {
 	filename := filepath.Base(cfg.Filename)
 	if filename == "." || filename == "/" {
 		filename = "snapshot.tar.zst"
 	}
-	return filepath.Join(cfg.DestDir, filename)
+	return filename
 }
 
-func downloadFileSize(filename string) int64 {
-	fi, err := os.Stat(filename)
+func downloadDestinationPath(cfg DownloadConfig) string {
+	return filepath.Join(cfg.DestDir, downloadFilename(cfg))
+}
+
+// rootFileSize returns the size of filename (relative to root), or 0 if
+// it cannot be stat'd.
+func rootFileSize(root *os.Root, filename string) int64 {
+	fi, err := root.Stat(filename)
 	if err != nil {
 		return 0
 	}
@@ -533,20 +541,37 @@ func DownloadSnapshot(
 	}
 	maxIdleRetries := cfg.maxIdleRetries()
 	maxTransientRetries := cfg.maxTransientRetries()
-	destPath := downloadDestinationPath(cfg)
-	lastObservedSize := downloadFileSize(destPath)
+
+	// Ensure the destination directory exists, then anchor every
+	// subsequent directory/file operation to its filesystem identity via
+	// os.Root. A plain absolute path re-resolves through the OS on every
+	// os.OpenFile/os.Stat call and would follow a symlink swapped into
+	// the tree after this point (TOCTOU); os.Root binds a handle to
+	// DestDir once and refuses to traverse a symlink that would escape
+	// it.
+	if err := os.MkdirAll(cfg.DestDir, 0o750); err != nil {
+		return "", fmt.Errorf("creating download directory: %w", err)
+	}
+	root, err := os.OpenRoot(cfg.DestDir)
+	if err != nil {
+		return "", fmt.Errorf("opening download root: %w", err)
+	}
+	defer root.Close()
+
+	filename := downloadFilename(cfg)
+	lastObservedSize := rootFileSize(root, filename)
 	consecutiveIdleRetries := 0
 	transientRetries := 0
 	for attempt := 1; ; attempt++ {
-		startSize := downloadFileSize(destPath)
-		path, err := downloadSnapshotOnce(ctx, cfg)
+		startSize := rootFileSize(root, filename)
+		path, err := downloadSnapshotOnce(ctx, cfg, root)
 		if err == nil {
 			return path, nil
 		}
 		if ctx.Err() != nil {
 			return "", err
 		}
-		currentSize := downloadFileSize(destPath)
+		currentSize := rootFileSize(root, filename)
 		madeProgress := currentSize > startSize ||
 			currentSize > lastObservedSize
 		// Progress resets both retry counters symmetrically: partial
@@ -608,6 +633,7 @@ func DownloadSnapshot(
 func downloadSnapshotOnce(
 	ctx context.Context,
 	cfg DownloadConfig,
+	root *os.Root,
 ) (string, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -619,19 +645,12 @@ func downloadSnapshotOnce(
 	downloadCtx, cancelDownload := context.WithCancelCause(ctx)
 	defer cancelDownload(nil)
 
-	// Ensure destination directory exists
-	if err := os.MkdirAll(cfg.DestDir, 0o750); err != nil {
-		return "", fmt.Errorf(
-			"creating download directory: %w",
-			err,
-		)
-	}
-
+	filename := downloadFilename(cfg)
 	destPath := downloadDestinationPath(cfg)
 
 	// Check for partial download to support resume
 	var existingSize int64
-	if fi, err := os.Stat(destPath); err == nil {
+	if fi, err := root.Stat(filename); err == nil {
 		existingSize = fi.Size()
 	}
 
@@ -705,8 +724,8 @@ func downloadSnapshotOnce(
 		if resp.ContentLength > 0 {
 			totalSize = resp.ContentLength
 		}
-		file, err = os.OpenFile(
-			destPath,
+		file, err = root.OpenFile(
+			filename,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o640,
 		)
@@ -740,8 +759,8 @@ func downloadSnapshotOnce(
 			)
 			// Discard partial file and restart from scratch
 			existingSize = 0
-			file, err = os.OpenFile(
-				destPath,
+			file, err = root.OpenFile(
+				filename,
 				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 				0o640,
 			)
@@ -820,8 +839,8 @@ func downloadSnapshotOnce(
 			if resp.ContentLength > 0 {
 				totalSize = existingSize + resp.ContentLength
 			}
-			file, err = os.OpenFile(
-				destPath,
+			file, err = root.OpenFile(
+				filename,
 				os.O_APPEND|os.O_WRONLY,
 				0o640,
 			)
@@ -850,7 +869,7 @@ func downloadSnapshotOnce(
 			)
 		}
 		if expectedSize > 0 {
-			fi, err := os.Stat(destPath)
+			fi, err := root.Stat(filename)
 			if err != nil {
 				return "", fmt.Errorf(
 					"verifying existing download: %w",
@@ -861,7 +880,7 @@ func downloadSnapshotOnce(
 				// Remove the corrupt/oversized file so
 				// the next attempt starts fresh instead
 				// of looping on the same 416 error.
-				os.Remove(destPath) //nolint:errcheck
+				root.Remove(filename) //nolint:errcheck
 				return "", fmt.Errorf(
 					"existing file size mismatch "+
 						"(removed): got %d, want %d",
@@ -972,7 +991,7 @@ func downloadSnapshotOnce(
 
 	// Verify file size if expected size was provided
 	if cfg.ExpectedSize > 0 {
-		fi, err := os.Stat(destPath)
+		fi, err := root.Stat(filename)
 		if err != nil {
 			return "", fmt.Errorf(
 				"verifying download size: %w", err,
@@ -981,7 +1000,7 @@ func downloadSnapshotOnce(
 		if fi.Size() != cfg.ExpectedSize {
 			// Remove so the next attempt starts fresh
 			// instead of resuming from a corrupt file.
-			os.Remove(destPath) //nolint:errcheck
+			root.Remove(filename) //nolint:errcheck
 			return "", fmt.Errorf(
 				"download size mismatch "+
 					"(removed): got %d bytes, "+
@@ -1036,6 +1055,21 @@ func ExtractArchive(
 			err,
 		)
 	}
+
+	// Anchor every subsequent directory/file operation to destDir's
+	// filesystem identity. A plain absolute path re-resolves through the
+	// OS on every os.MkdirAll/os.OpenFile call, so a symlink swapped into
+	// the tree after destDir is created (TOCTOU) could redirect a write
+	// outside it; os.Root binds a handle to destDir once and refuses to
+	// traverse a symlink that would escape it.
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return "", fmt.Errorf(
+			"opening extraction root: %w",
+			err,
+		)
+	}
+	defer root.Close()
 
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -1106,11 +1140,13 @@ func ExtractArchive(
 
 		// Zip Slip prevention: join the cleaned name to destDir,
 		// then verify the result stays within destDir using
-		// both HasPrefix and Rel checks.
+		// both HasPrefix and Rel checks. relTarget (relative to
+		// destDir) is what actually gets used for filesystem
+		// operations, routed through root below; target is kept
+		// only for error messages and logging.
 		cleanDest := filepath.Clean(destDir)
-		target := filepath.Join(
-			cleanDest, filepath.FromSlash(name),
-		)
+		relTarget := filepath.FromSlash(name)
+		target := filepath.Join(cleanDest, relTarget)
 		if !strings.HasPrefix(
 			target,
 			cleanDest+string(filepath.Separator),
@@ -1123,7 +1159,7 @@ func ExtractArchive(
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil { //nolint:gosec // target validated by validRelPath + HasPrefix above
+			if err := root.MkdirAll(relTarget, 0o750); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
 					target,
@@ -1143,17 +1179,18 @@ func ExtractArchive(
 			}
 
 			// Ensure parent directory exists
-			parent := filepath.Dir(target)
-			if err := os.MkdirAll(parent, 0o750); err != nil { //nolint:gosec // parent derived from validated target path
-				return "", fmt.Errorf(
-					"creating parent directory %s: %w",
-					parent,
-					err,
-				)
+			if parentRel := filepath.Dir(relTarget); parentRel != "." {
+				if err := root.MkdirAll(parentRel, 0o750); err != nil {
+					return "", fmt.Errorf(
+						"creating parent directory %s: %w",
+						filepath.Dir(target),
+						err,
+					)
+				}
 			}
 
-			outFile, err := os.OpenFile( //nolint:gosec // target validated by validRelPath + HasPrefix above
-				target,
+			outFile, err := root.OpenFile(
+				relTarget,
 				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 				0o640,
 			)
@@ -1173,7 +1210,7 @@ func ExtractArchive(
 			)
 			closeErr := outFile.Close()
 			if err != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = root.Remove(relTarget)
 				return "", fmt.Errorf(
 					"extracting file %s: %w",
 					target,
@@ -1181,7 +1218,7 @@ func ExtractArchive(
 				)
 			}
 			if closeErr != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = root.Remove(relTarget)
 				return "", fmt.Errorf(
 					"closing file %s: %w",
 					target,
@@ -1189,7 +1226,7 @@ func ExtractArchive(
 				)
 			}
 			if written > maxExtractFileSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = root.Remove(relTarget)
 				return "", fmt.Errorf(
 					"file %s decompressed beyond maximum size (%d > %d)",
 					header.Name, written, maxExtractFileSize,
@@ -1199,7 +1236,7 @@ func ExtractArchive(
 			// header.Size) for cumulative extraction limit.
 			totalExtracted += written
 			if totalExtracted > maxTotalExtractSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = root.Remove(relTarget)
 				return "", fmt.Errorf(
 					"archive extraction exceeds maximum total size (%d)",
 					maxTotalExtractSize,

@@ -29,6 +29,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1008,4 +1009,82 @@ func TestBootstrapUnsupportedBackend(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported Mithril backend")
+}
+
+// TestDownloadImmutablesRejectsPreexistingSymlinkEscape proves the
+// TOCTOU fix for issue #3147: a symlink placed where the immutable
+// directory should be created, pointing outside downloadDir, must not
+// be followed. Before routing this creation through os.Root,
+// os.MkdirAll would silently succeed by following the symlink (its
+// target already exists as a directory) instead of failing, so a
+// later write into "immutable" would land outside downloadDir.
+func TestDownloadImmutablesRejectsPreexistingSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires elevated privileges on windows")
+	}
+
+	downloadDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	artifact := &CardanoDatabaseSnapshot{Hash: "deadbeef"}
+	extractDir := filepath.Join(downloadDir, "immutable-"+artifact.Hash)
+	require.NoError(t, os.MkdirAll(extractDir, 0o750))
+	require.NoError(
+		t,
+		os.Symlink(outsideDir, filepath.Join(extractDir, "immutable")),
+	)
+
+	err := downloadImmutables(
+		context.Background(),
+		BootstrapConfig{},
+		artifact,
+		map[string]string{},
+		downloadDir,
+		extractDir,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "creating immutable directory")
+
+	entries, err := os.ReadDir(outsideDir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "must not write through the symlink")
+}
+
+// TestDownloadImmutablesRejectsPreexistingArchiveDirSymlinkEscape is the
+// archiveDir counterpart to
+// TestDownloadImmutablesRejectsPreexistingSymlinkEscape: a symlink
+// placed where the immutable-archives scratch directory should be
+// created, pointing outside downloadDir, must not be followed either.
+func TestDownloadImmutablesRejectsPreexistingArchiveDirSymlinkEscape(
+	t *testing.T,
+) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires elevated privileges on windows")
+	}
+
+	downloadDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	artifact := &CardanoDatabaseSnapshot{Hash: "deadbeef"}
+	extractDir := filepath.Join(downloadDir, "immutable-"+artifact.Hash)
+	archiveRelDir := "immutable-archives-" + truncateDigest(artifact.Hash)
+	require.NoError(
+		t,
+		os.Symlink(outsideDir, filepath.Join(downloadDir, archiveRelDir)),
+	)
+
+	err := downloadImmutables(
+		context.Background(),
+		BootstrapConfig{},
+		artifact,
+		map[string]string{},
+		downloadDir,
+		extractDir,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "creating archive directory")
+
+	entries, err := os.ReadDir(outsideDir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "must not write through the symlink")
 }
