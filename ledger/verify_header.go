@@ -602,9 +602,27 @@ func (ls *LedgerState) genesisOverlayDelegationForSlot(
 		)
 	}
 
+	overlayEpochStart, err := ls.genesisOverlayEpochStartSlot(epoch)
+	if err != nil {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"resolve genesis overlay epoch start: %w",
+			slot,
+			err,
+		)
+	}
+	if slot < overlayEpochStart {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"invalid genesis overlay epoch start slot %d",
+			slot,
+			overlayEpochStart,
+		)
+	}
+
 	decentralization := ls.decentralizationParamRatForSlot(slot)
 	overlayIndex, status := classifyGenesisOverlaySlot(
-		slot-epoch.StartSlot,
+		slot-overlayEpochStart,
 		decentralization,
 		shelleyGenesis.ActiveSlotsCoeff.Rat,
 		uint64(len(genesisDelegs)),
@@ -619,6 +637,79 @@ func (ls *LedgerState) genesisOverlayDelegationForSlot(
 		return genesisDelegation{}, genesisOverlayNone, err
 	}
 	return activeDeleg, genesisOverlayActive, nil
+}
+
+// genesisOverlayEpochStartSlot returns the absolute first slot for the epoch
+// used by the TPraos overlay schedule. Epoch rows created while a Byron prefix
+// is being replayed can temporarily retain a Shelley-era start derived from a
+// stale forecast. When the first epoch of a post-Byron era is present, the
+// preceding era's end is the authoritative absolute boundary; subsequent
+// epochs in that era are measured from that boundary using the era epoch size.
+// This keeps the first preprod Shelley epoch anchored at slot 86400 rather
+// than at a stale Byron-relative slot such as 21600, without adding a network
+// hard-fork value to configuration.
+func (ls *LedgerState) genesisOverlayEpochStartSlot(
+	epoch models.Epoch,
+) (uint64, error) {
+	cache := ls.loadConsensusSnapshot().epochCache
+	epochIndex := -1
+	for i := range cache {
+		if cache[i].EpochId == epoch.EpochId &&
+			cache[i].EraId == epoch.EraId {
+			epochIndex = i
+			break
+		}
+	}
+	if epochIndex <= 0 {
+		return epoch.StartSlot, nil
+	}
+
+	firstEraEpoch := epochIndex
+	for firstEraEpoch > 0 &&
+		cache[firstEraEpoch-1].EraId == epoch.EraId {
+		firstEraEpoch--
+	}
+	if firstEraEpoch == 0 {
+		return epoch.StartSlot, nil
+	}
+
+	previous := cache[firstEraEpoch-1]
+	if previous.LengthInSlots == 0 {
+		return 0, fmt.Errorf(
+			"previous era epoch %d has zero length",
+			previous.EpochId,
+		)
+	}
+	const maxUint64 = ^uint64(0)
+	previousLength := uint64(previous.LengthInSlots)
+	if previous.StartSlot > maxUint64-previousLength {
+		return 0, fmt.Errorf(
+			"previous era epoch %d end slot overflows uint64",
+			previous.EpochId,
+		)
+	}
+	boundarySlot := previous.StartSlot + previousLength
+	firstEpoch := cache[firstEraEpoch]
+	if boundarySlot <= firstEpoch.StartSlot {
+		return epoch.StartSlot, nil
+	}
+
+	epochOffset := epoch.EpochId - firstEpoch.EpochId
+	if epochOffset != 0 &&
+		uint64(epoch.LengthInSlots) > maxUint64/epochOffset {
+		return 0, fmt.Errorf(
+			"genesis overlay epoch %d slot offset overflows uint64",
+			epoch.EpochId,
+		)
+	}
+	slotOffset := epochOffset * uint64(epoch.LengthInSlots)
+	if boundarySlot > maxUint64-slotOffset {
+		return 0, fmt.Errorf(
+			"genesis overlay epoch %d start slot overflows uint64",
+			epoch.EpochId,
+		)
+	}
+	return boundarySlot + slotOffset, nil
 }
 
 func parseShelleyGenesisDelegations(
