@@ -2637,7 +2637,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		newCurrentEra     eras.EraDesc
 		newPParams        lcommon.ProtocolParameters
 		newPrevPParams    lcommon.ProtocolParameters
-		eraResolved       bool
+		// ppComputed distinguishes "computePParams succeeded and returned
+		// nil" from "computePParams was skipped or failed". Byron has no
+		// protocol-parameter representation, so a rollback into Byron
+		// legitimately computes nil, and a nil check alone cannot tell that
+		// apart from an error -- which would leave the pre-rollback Shelley
+		// value in place under a Byron currentEra.
+		ppComputed  bool
+		eraResolved bool
 	)
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
@@ -2707,6 +2714,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		} else {
 			newPParams = pp
 			newPrevPParams = prevPP
+			ppComputed = true
 		}
 	}
 	newTipDensity := ls.chainFragmentDensity(
@@ -2744,7 +2752,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			ls.prevEraPParams = nil
 		}
 	}
-	if newPParams != nil {
+	// Assign on "was computed", not on "is non-nil". Rolling back into Byron
+	// computes nil legitimately, and the previous nil check skipped the
+	// assignment there, leaving ls.currentPParams holding its Shelley value
+	// while ls.currentEra had already become Byron. That contradicted the
+	// era/parameter invariant this path maintains everywhere else, and
+	// GetCurrentPParams reported Shelley parameters for a Byron ledger until
+	// the next rollover healed it via cloneProtocolParametersForEra.
+	if ppComputed {
 		ls.currentPParams = newPParams
 		ls.prevEraPParams = newPrevPParams
 	}
@@ -5327,7 +5342,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			return nil, err
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
-			block.Header(), pparams,
+			block.Header(), pparams, currentEra,
 		); err != nil {
 			return nil, err
 		}
@@ -5886,9 +5901,18 @@ func (ls *LedgerState) loadPParams() error {
 // pparams map to a later era than currentEra, we restore TransitionKnown.
 func (ls *LedgerState) reconstructTransitionInfo() {
 	if ls.currentEra.Id == eras.ByronEraDesc.Id {
-		// Byron has no protocol-version pparams. A Shelley fallback loaded
-		// during startup must not fabricate a transition at epoch zero; the
-		// first Shelley block establishes the real on-chain boundary.
+		// Byron has no protocol-version pparams, so there is no transition to
+		// reconstruct and a Shelley-shaped value must not be read as one --
+		// that would fabricate a transition at epoch zero, when the first
+		// Shelley block on chain is what establishes the real boundary.
+		//
+		// This is not redundant with the currentPParams == nil check below.
+		// rollbackChainAndState calls this immediately after setting
+		// currentEra, and until ppComputed replaced the old nil test there a
+		// rollback into Byron left currentPParams holding its Shelley value
+		// under a Byron era -- exactly the shape this guard rejects. The guard
+		// stays as the invariant's backstop for any future caller that
+		// reaches here with the two out of step.
 		return
 	}
 	if ls.currentPParams == nil {

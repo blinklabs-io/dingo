@@ -416,7 +416,7 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 10),
 	}
-	err := ls.validateBlockHeaderProtocolVersion(header, pp)
+	err := ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra)
 	require.Error(t, err)
 }
 
@@ -436,7 +436,7 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_ByronGenesisBoundary(
 	// The first Shelley header arrives while the cached current era is still
 	// Byron. Byron has no pparams, so the era transition must be allowed to
 	// establish the Shelley pparams before the normal BBODY check runs.
-	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, nil))
+	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, nil, ls.currentEra))
 }
 
 func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
@@ -452,7 +452,7 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 12),
 	}
-	err := ls.validateBlockHeaderProtocolVersion(header, pp)
+	err := ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra)
 	require.Error(t, err)
 	var typed *HeaderProtocolVersionTooHighError
 	require.True(t, errors.As(err, &typed))
@@ -475,7 +475,7 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
 		},
 	}
 	header := dijkstraHeaderWithMajor(t, 99)
-	err := ls.validateBlockHeaderProtocolVersion(header, pp)
+	err := ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra)
 	require.Error(t, err)
 	var typed *HeaderProtocolVersionTooHighError
 	require.True(t, errors.As(err, &typed))
@@ -494,5 +494,5 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_TestnetAllows(
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 99),
 	}
-	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, pp))
+	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra))
 }

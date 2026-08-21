@@ -180,14 +180,21 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 // the Shelley genesis, then delegates the BBODY-rule check. If the
 // network cannot be identified, returns the underlying error so the
 // block is rejected rather than validated against a guessed network.
+// currentEra is passed in rather than read from ls.currentEra. That field is
+// writer-owned working state (see LedgerState's field comment); lock-free
+// readers use a snapshot. ledgerProcessBlock already holds the era captured
+// under RLock alongside the pparams handed to this function, and running this
+// check against a snapshot pparams while reading live era state would mix the
+// two.
 func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 	header lcommon.BlockHeader,
 	pparams lcommon.ProtocolParameters,
+	currentEra eras.EraDesc,
 ) error {
 	// Byron has no protocol parameters. During from-genesis sync the first
 	// Shelley block is validated while the current epoch is still Byron, so
 	// defer this BBODY check until the era transition has been observed.
-	if ls.currentEra.Id == eras.ByronEraDesc.Id &&
+	if currentEra.Id == eras.ByronEraDesc.Id &&
 		pparams == nil &&
 		ls.config.CardanoNodeConfig != nil &&
 		ls.config.CardanoNodeConfig.ByronGenesis() != nil {

@@ -53,6 +53,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 )
 
@@ -4775,4 +4776,44 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 	})
 
 	require.NoError(t, ls.Close())
+}
+
+// TestReconstructTransitionInfoIgnoresStaleShelleyPParamsUnderByron pins the
+// Byron guard as a backstop rather than a redundancy.
+//
+// It is not covered by the currentPParams == nil check that follows it. The
+// reachable shape is a rollback into Byron: rollbackChainAndState sets
+// currentEra to Byron and then calls this function, and before the ppComputed
+// change it skipped the currentPParams assignment whenever the recomputed
+// value was nil -- which is exactly what Byron computes. That left a Shelley
+// value in place under a Byron era, and without this guard
+// reconstructTransitionInfo would read the Shelley protocol version out of it
+// and fabricate a transition at epoch zero.
+//
+// The rollback path itself is not driven here; that needs a chain fixture
+// spanning the Byron-Shelley boundary. This asserts the guard holds for the
+// state that path can produce.
+func TestReconstructTransitionInfoIgnoresStaleShelleyPParamsUnderByron(
+	t *testing.T,
+) {
+	shelleyPParams := &shelley.ShelleyProtocolParameters{
+		ProtocolMajor: 2,
+		ProtocolMinor: 0,
+	}
+
+	ls := &LedgerState{
+		currentEra: eras.ByronEraDesc,
+		// The stale value a rollback into Byron used to leave behind.
+		currentPParams: shelleyPParams,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+	}
+
+	ls.reconstructTransitionInfo()
+
+	require.Equal(
+		t,
+		hardfork.NewTransitionUnknown(),
+		ls.transitionInfo,
+		"a Shelley pparams value under a Byron era must not be read as a transition",
+	)
 }
