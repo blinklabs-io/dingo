@@ -6404,20 +6404,23 @@ func (ls *LedgerState) PrepareEpochCacheForStartup() error {
 // Shelley is already active at epoch 0, which is what distinguishes a network
 // with no Byron prefix from one that reaches Shelley on chain.
 //
-// The declaration is read directly rather than through
-// CardanoNodeConfig.HardForkEpoch, which returns (0, false) unless
-// ExperimentalHardForksEnabled is true: preview ships
-// TestShelleyHardForkAtEpoch: 0 with ExperimentalHardForksEnabled: False, and
-// through the gated accessor its declaration is invisible.
+// Read through CardanoNodeConfig.DeclaredHardForkEpoch, which reports what the
+// file says regardless of ExperimentalHardForksEnabled. HardForkEpoch answers a
+// different question -- whether a fork is *scheduled* -- and returns
+// (0, false) when the flag is unset, which hides preview's declaration
+// (TestShelleyHardForkAtEpoch: 0 with ExperimentalHardForksEnabled: False).
+// Both accessors read the same field through the same switch, so there is one
+// interpreter of it rather than two.
 //
 // Only epoch 0 counts. A nonzero value declares a Shelley hard fork some
 // epochs in, which means epochs 0..N-1 are Byron -- a Byron prefix, not the
 // absence of one -- so those configurations keep the Byron start.
 func shelleyDeclaredAtGenesis(cfg *cardano.CardanoNodeConfig) bool {
-	if cfg == nil || cfg.TestShelleyHardForkAtEpoch == nil {
+	if cfg == nil {
 		return false
 	}
-	return *cfg.TestShelleyHardForkAtEpoch == 0
+	epoch, declared := cfg.DeclaredHardForkEpoch("shelley")
+	return declared && epoch == 0
 }
 
 func (ls *LedgerState) setEpochCache(
