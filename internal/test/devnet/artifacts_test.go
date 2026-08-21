@@ -311,6 +311,13 @@ func TestWriteFailureArtifactsBoundsCapturedLogs(t *testing.T) {
 // encoding can lose information: the subtest separator against an
 // ordinary character, an escape sequence written literally, both
 // separators, and names made only of dots.
+//
+// The last group is what a t.Run name can carry that Windows treats
+// specially. Go rewrites whitespace to '_' before t.Name() returns, so a
+// trailing space cannot reach here, but ':' '*' '?' '"' '<' '>' '|' and a
+// trailing dot all survive. They are here to hold the encoding to its
+// contract on every platform the untagged tests run on: distinct names
+// stay distinct, and each one stays a single path segment.
 var artifactNameCorpus = []string{
 	"TestSustainedConsensus",
 	"accelerated-timeline",
@@ -328,6 +335,14 @@ var artifactNameCorpus = []string{
 	"..",
 	"...",
 	"TestX/..",
+	"TestX/a:b",
+	"TestX/a*b",
+	"TestX/a?b",
+	`TestX/a"b`,
+	"TestX/a<b",
+	"TestX/a>b",
+	"TestX/a|b",
+	"TestX/a.",
 }
 
 func TestArtifactNameIsInjective(t *testing.T) {
