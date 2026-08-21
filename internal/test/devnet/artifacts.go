@@ -113,10 +113,18 @@ func PlanFailureCapture(
 // rather than a probability, which is what a digest of the name would
 // give instead.
 //
-// Only what would break out of the segment is escaped, so a name with no
-// separator in it comes back exactly as written. That is every scenario
-// in the canonical suite, and it is what makes the directory findable
-// from the name in the failure output.
+// String-level injectivity only delivers that guarantee if the
+// filesystem stores the name it is given. Windows does not: it rejects
+// : * ? " < > | outright, and it strips a trailing dot or space, which
+// would quietly land "." and ".." -- encoded here as %2E and %2E. -- in
+// one directory. Those are escaped for the same reason "." and ".." are:
+// not because they escape the segment, but because the filesystem reads
+// them as something other than the name asked for.
+//
+// Only what a filesystem would reject or rewrite is escaped, so a name
+// built from Go identifiers comes back exactly as written. That is every
+// scenario in the canonical suite, and it is what makes the directory
+// findable from the name in the failure output.
 func ArtifactName(testName string) string {
 	// t.Name() is never empty; this only guards a caller-supplied name.
 	if testName == "" {
@@ -130,10 +138,8 @@ func ArtifactName(testName string) string {
 			// First, so no escape below can be forged by an input that
 			// spells one out literally.
 			encoded.WriteString("%25")
-		case '/':
-			encoded.WriteString("%2F")
-		case '\\':
-			encoded.WriteString("%5C")
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
+			encoded.WriteString(escapeByte(byte(r)))
 		default:
 			encoded.WriteRune(r)
 		}
@@ -145,9 +151,26 @@ func ArtifactName(testName string) string {
 	// distinct from every other encoding because a literal % is already
 	// escaped above.
 	if strings.Trim(name, ".") == "" {
-		return "%2E" + name[1:]
+		name = "%2E" + name[1:]
+	}
+	// Windows strips a trailing dot or space, so ".." (encoded just
+	// above as "%2E.") would be stored as "%2E" and share a directory
+	// with ".". Escaping the last character alone is enough, because the
+	// result then ends in a hex digit and there is nothing left to
+	// strip. It stays injective: the escape can only have come from the
+	// character it encodes, since a literal % is already escaped.
+	if last := name[len(name)-1]; last == '.' || last == ' ' {
+		name = name[:len(name)-1] + escapeByte(last)
 	}
 	return name
+}
+
+// escapeByte renders one byte as the percent escape used throughout
+// ArtifactName. Upper-case hex, so the encoding has a single spelling
+// and two names cannot differ only by the case of an escape.
+func escapeByte(b byte) string {
+	const hex = "0123456789ABCDEF"
+	return string([]byte{'%', hex[b>>4], hex[b&0x0F]})
 }
 
 // WriteFailureArtifacts writes the evidence a failed scenario needs to be

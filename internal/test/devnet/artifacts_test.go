@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -312,12 +313,15 @@ func TestWriteFailureArtifactsBoundsCapturedLogs(t *testing.T) {
 // ordinary character, an escape sequence written literally, both
 // separators, and names made only of dots.
 //
-// The last group is what a t.Run name can carry that Windows treats
-// specially. Go rewrites whitespace to '_' before t.Name() returns, so a
-// trailing space cannot reach here, but ':' '*' '?' '"' '<' '>' '|' and a
-// trailing dot all survive. They are here to hold the encoding to its
-// contract on every platform the untagged tests run on: distinct names
-// stay distinct, and each one stays a single path segment.
+// The last group is what Windows treats specially. Go rewrites
+// whitespace to '_' before t.Name() returns, so a trailing space cannot
+// arrive that way, but ArtifactName is exported and NodeControl's
+// caller passes a name of its own, so it is covered too; ':' '*' '?' '"'
+// '<' '>' '|' and a trailing dot all survive t.Run untouched. They are
+// here to hold the encoding to its contract on every platform the
+// untagged tests run on: distinct names stay distinct, each one stays a
+// single path segment, and each one names a directory the filesystem
+// will actually create.
 var artifactNameCorpus = []string{
 	"TestSustainedConsensus",
 	"accelerated-timeline",
@@ -343,6 +347,7 @@ var artifactNameCorpus = []string{
 	"TestX/a>b",
 	"TestX/a|b",
 	"TestX/a.",
+	"TestX/a ",
 }
 
 func TestArtifactNameIsInjective(t *testing.T) {
@@ -380,4 +385,72 @@ func TestArtifactNameLeavesPlainScenarioNamesAlone(t *testing.T) {
 	require.Equal(t, "TestSustainedConsensus",
 		ArtifactName("TestSustainedConsensus"),
 	)
+}
+
+// TestArtifactNamesCreateDistinctDirectories checks the guarantee
+// ArtifactName actually makes -- distinct test names get distinct
+// directories -- against a filesystem instead of against string
+// equality. Lexical injectivity is not the same guarantee: a filesystem
+// that rewrites a name stores two distinct encodings in one directory,
+// and a filesystem that rejects one stores neither. Windows does both,
+// so this is where that shows up rather than in
+// TestArtifactNameIsInjective.
+func TestArtifactNamesCreateDistinctDirectories(t *testing.T) {
+	root := t.TempDir()
+	// Report every name rather than stopping at the first, because the
+	// two ways this breaks look nothing alike: a rejected name is a
+	// loud error, while a rewritten one silently joins another
+	// scenario's directory. Seeing both at once is the point.
+	encoded := make([]string, 0, len(artifactNameCorpus))
+	source := make([]string, 0, len(artifactNameCorpus))
+	for _, name := range artifactNameCorpus {
+		got := ArtifactName(name)
+		if err := os.MkdirAll(filepath.Join(root, got), 0o755); err != nil {
+			t.Errorf(
+				"%q encoded to %q, which the filesystem rejected: %v",
+				name, got, err,
+			)
+			continue
+		}
+		encoded = append(encoded, got)
+		source = append(source, name)
+	}
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	made := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		made[entry.Name()] = struct{}{}
+	}
+	for i, got := range encoded {
+		if _, ok := made[got]; !ok {
+			t.Errorf(
+				"%q encoded to %q, which the filesystem stored as "+
+					"something else",
+				source[i], got,
+			)
+		}
+	}
+	// The corpus encodes injectively, so one directory per entry is the
+	// only count that leaves every scenario's evidence separable.
+	require.Len(t, entries, len(encoded),
+		"%d names produced %d directories", len(encoded), len(entries),
+	)
+}
+
+// TestArtifactNameNeverEndsInAStrippedCharacter guards the trailing-dot
+// and trailing-space escapes directly. Windows removes both from the end
+// of a name, so an encoding that ended in either would be stored under a
+// shorter name -- and two encodings that differ only there would become
+// one directory. The filesystem test above only catches this when it runs
+// on Windows; this one holds everywhere.
+func TestArtifactNameNeverEndsInAStrippedCharacter(t *testing.T) {
+	for _, name := range artifactNameCorpus {
+		got := ArtifactName(name)
+		last := got[len(got)-1]
+		require.NotContains(t, ". ", string(last),
+			"%q encoded to %q, which Windows would store as %q",
+			name, got, strings.TrimRight(got, ". "),
+		)
+	}
 }
