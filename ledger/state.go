@@ -5342,7 +5342,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			return nil, err
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
-			block.Header(), pparams, currentEra,
+			block.Header(), pparams,
 		); err != nil {
 			return nil, err
 		}

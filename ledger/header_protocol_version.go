@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -180,26 +179,16 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 // the Shelley genesis, then delegates the BBODY-rule check. If the
 // network cannot be identified, returns the underlying error so the
 // block is rejected rather than validated against a guessed network.
-// currentEra is passed in rather than read from ls.currentEra. That field is
-// writer-owned working state (see LedgerState's field comment); lock-free
-// readers use a snapshot. ledgerProcessBlock already holds the era captured
-// under RLock alongside the pparams handed to this function, and running this
-// check against a snapshot pparams while reading live era state would mix the
-// two.
+//
+// pparams is never nil for a block that reaches here. ledgerProcessBlock runs
+// validateInboundBlockEnvelope first, which rejects a non-Byron block without
+// protocol parameters, and the era transition installs them at the epoch break
+// ahead of the first post-Byron block. See
+// TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters.
 func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 	header lcommon.BlockHeader,
 	pparams lcommon.ProtocolParameters,
-	currentEra eras.EraDesc,
 ) error {
-	// Byron has no protocol parameters. During from-genesis sync the first
-	// Shelley block is validated while the current epoch is still Byron, so
-	// defer this BBODY check until the era transition has been observed.
-	if currentEra.Id == eras.ByronEraDesc.Id &&
-		pparams == nil &&
-		ls.config.CardanoNodeConfig != nil &&
-		ls.config.CardanoNodeConfig.ByronGenesis() != nil {
-		return nil
-	}
 	pv, err := GetProtocolVersion(pparams)
 	if err != nil {
 		return fmt.Errorf(

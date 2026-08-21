@@ -1858,7 +1858,30 @@ test profile explicitly configures it.
 
 Byron epochs carry no protocol-parameter CBOR or Shelley reward schedule;
 their rollovers preserve timing and nonce state, and delayed rewards skip a
-Byron performance epoch until Shelley parameters exist.
+Byron performance epoch until Shelley parameters exist. So
+`GetCurrentPParams` returns nil for the whole Byron prefix: 4 epochs on
+preprod, 208 on mainnet. Any consumer that reads protocol parameters during a
+from-genesis replay must tolerate that, and the eras that follow are unaffected
+because the transition installs Shelley parameters before the first
+post-Byron block is validated.
+
+That ordering is what lets the block-size envelope check stay strict. The first
+block of the fork epoch is a Shelley block on both networks that have a Byron
+prefix, so `ledgerProcessBlocksFromSource` ends its batch at that block, reads
+Shelley from its era, and runs the transition before the block is processed. A
+Byron epoch boundary block would not do this — it carries the Byron era and its
+parent's block number — but no EBB sits at either fork boundary: preprod block
+45 at slot 84242 is followed directly by Shelley block 46 at slot 86400, and
+mainnet block 4490510 at slot 4492799 by Shelley block 4490511 at slot
+4492800. `TestByronShelleyBoundaryHasNoEpochBoundaryBlock` pins both from the
+on-chain bytes in `ledger/testdata/`.
+
+Consequently `validateInboundBlockEnvelope` requires protocol parameters for
+every non-Byron block, including the first Shelley one, and
+`validateBlockHeaderProtocolVersion` needs no Byron-era exemption. Exempting
+either would drop `maxBlockHeaderSize` and `maxBlockBodySize` for a real
+Shelley block, and the Haskell ledger has the Shelley ledger view available
+before that block is applied.
 
 The Musashi prototype (prototype-2026w29) tags its early chain as Conway (NtN block type 7) but its block headers carry a Leios-extended header body — the 10 standard Babbage fields plus `leios_certified` and `leios_announcement` — that gouroboros' strict Conway decoder rejects. Rather than loosen the shared gouroboros Conway decoder that every real Conway network relies on, dingo decodes these blocks itself, scoped to the Musashi network magic (164) and block type 7, at three entry points:
 

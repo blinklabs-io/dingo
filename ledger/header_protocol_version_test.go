@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -416,27 +415,8 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 10),
 	}
-	err := ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra)
+	err := ls.validateBlockHeaderProtocolVersion(header, pp)
 	require.Error(t, err)
-}
-
-func TestLedgerStateValidateBlockHeaderProtocolVersion_ByronGenesisBoundary(
-	t *testing.T,
-) {
-	ls := newLedgerStateForNetwork(t, "Testnet", 42)
-	ls.currentEra = eras.ByronEraDesc
-	require.NoError(t, ls.config.CardanoNodeConfig.LoadByronGenesisFromReader(
-		strings.NewReader(`{
-			"blockVersionData": {"slotDuration": "20000"},
-			"protocolConsts": {"k": 432}
-		}`),
-	))
-	header := shelleyHeaderWithMajor(t, 2)
-
-	// The first Shelley header arrives while the cached current era is still
-	// Byron. Byron has no pparams, so the era transition must be allowed to
-	// establish the Shelley pparams before the normal BBODY check runs.
-	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, nil, ls.currentEra))
 }
 
 func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
@@ -452,7 +432,7 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 12),
 	}
-	err := ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra)
+	err := ls.validateBlockHeaderProtocolVersion(header, pp)
 	require.Error(t, err)
 	var typed *HeaderProtocolVersionTooHighError
 	require.True(t, errors.As(err, &typed))
@@ -475,7 +455,7 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
 		},
 	}
 	header := dijkstraHeaderWithMajor(t, 99)
-	err := ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra)
+	err := ls.validateBlockHeaderProtocolVersion(header, pp)
 	require.Error(t, err)
 	var typed *HeaderProtocolVersionTooHighError
 	require.True(t, errors.As(err, &typed))
@@ -494,5 +474,5 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_TestnetAllows(
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 99),
 	}
-	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, pp, ls.currentEra))
+	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, pp))
 }
