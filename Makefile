@@ -37,7 +37,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check gorm-check test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint govulncheck import-boundaries docs-parity proto sql sql-check gorm-check test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -74,6 +74,12 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 	golangci-lint run ./...
 	nilaway $(GO_TAG_FLAGS) ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
+
+govulncheck: ## Report Go vulnerabilities this module actually calls
+	# Both the scanner and the toolchain float; a pin would park a new
+	# advisory behind a stale version. Exits non-zero only for reachable
+	# findings, which is what CI gates on.
+	go run golang.org/x/vuln/cmd/govulncheck@latest $(GO_TAG_FLAGS) ./...
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture

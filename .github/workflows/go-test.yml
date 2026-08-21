@@ -109,3 +109,31 @@ jobs:
         # Keep PR feedback fast by omitting race instrumentation. Release
         # validation runs in the publish workflow before draft creation.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 20m ./...
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: govulncheck
+        # Blocking, not advisory. govulncheck exits non-zero only for
+        # vulnerabilities this module actually calls, so the unreachable
+        # findings it also prints (currently GO-2026-5932, an unmaintained
+        # golang.org/x/crypto package with no fixed version) do not fail a PR.
+        # Both the toolchain and the scanner float on purpose: a pin on either
+        # one parks a new advisory behind a stale version instead of forcing it
+        # to be fixed. The stdlib version reported against is whatever go.mod's
+        # toolchain floor and this runner resolve to. Run through the Makefile
+        # so the gate and `make govulncheck` cannot drift apart.
+        run: make govulncheck
