@@ -301,48 +301,63 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 	return ret
 }
 
-// validateConwayInlineDatumsWithPlutusV1 rejects inline datums only when the
-// datum-bearing input is locked by a PlutusV1 script. The gouroboros rule this
-// replaces reports a false positive for an unrelated PlutusV1 reference script
-// attached to a key-locked input.
-// validateConwayInlineDatumsWithPlutusV1 rejects a transaction that needs a
-// PlutusV1 script while carrying an inline datum anywhere the PlutusV1 script
-// context would have to represent it. PlutusV1 predates inline datums, so the
-// context translation cannot express one and the transaction is invalid.
+// validateConwayInlineDatumsWithPlutusV1 rejects a transaction that requires a
+// PlutusV1 script while using a feature the PlutusV1 script context cannot
+// represent. PlutusV1 predates both inline datums and reference scripts, so a
+// transaction that needs a V1 script and carries either is invalid.
 //
-// The rule is transaction-wide in two directions, and both matter:
+// It replaces gouroboros' rule 18, which is wrong in both directions:
 //
-//   - An inline datum disqualifies the transaction wherever it sits: on a
-//     consumed input, on a reference input, or on one of this transaction's
-//     own outputs. Scanning only the consumed inputs misses the other two.
-//   - The PlutusV1 script need not be the one being spent. A PlutusV1 script
-//     required for minting, certifying, rewarding, voting or proposing counts
-//     just as much, and a script can enter the transaction through a
-//     reference input's script ref rather than an input address.
+//   - Too broad. Upstream rejects whenever a PlutusV1 script is merely
+//     reachable -- in the witness set, or as a reference script on any spent or
+//     reference input -- rather than when a script purpose actually requires
+//     one. That turns an ordinary transaction spending a UTxO that happens to
+//     carry an unrelated V1 reference script into a permanent failure, and it
+//     halted sync on a real Preview transaction.
+//   - Too narrow. Upstream scans for inline datums on consumed inputs only,
+//     missing a datum on a reference input or on one of the transaction's own
+//     outputs, and detects them through a *BabbageTransactionOutput type
+//     assertion that misses outputs wrapped by a later era.
 //
-// Only *needed* scripts count, which is what preserves the unused-reference-
-// script case: a PlutusV1 script that happens to be available but is not
-// required by any purpose does not make the transaction invalid.
+// What this rule enforces, once some purpose needs a V1 script:
 //
-// Two of cardano-ledger's V1 restrictions are still not enforced here, both
-// concerning things the V1 TxInfo translation cannot represent at all:
+//   - an inline datum on a consumed input, a reference input, or a produced
+//     output (cardano-ledger's InlineDatumsNotSupported, raised from
+//     transTxOutV1 for every translated output)
+//   - a reference script on a produced output (ReferenceScriptsNotSupported,
+//     from the same translation)
 //
-//   - a reference script on a produced output
-//   - the presence of any reference input
+// Datum presence is read through the TransactionOutput interface, so outputs
+// wrapped by a later era are still inspected, and datum-*hash* outputs stay
+// out of scope because Datum() reports nil for them.
 //
-// Upstream reports its V1 findings as InlineDatumsNotSupportedError regardless
-// of which restriction tripped, so these are expressible; they are simply not
-// implemented yet. A transaction whose only V1 violation is one of those is
-// accepted by this node and rejected by cardano-node. Do not read this rule as
-// complete V1 enforcement.
+// Deliberately not enforced, each a known divergence from cardano-ledger:
 //
-// Note what is deliberately *not* a gap: a PlutusV1 script that is merely
-// present -- in the witness set, on a spent input's script ref, or on a
-// reference input's script ref -- but required by no purpose does not
-// invalidate the transaction. Upstream rejects on presence, which is the false
-// positive this rule replaces; scripts reachable through a script ref are
-// still considered when a purpose actually needs them, because
-// collectConwayAvailableScripts gathers them from every resolved input.
+//   - The mere presence of a reference input. cardano-ledger's V1
+//     toPlutusTxInfo raises ReferenceInputsNotSupported for it, but gouroboros
+//     #1980 removed the same assertion after it failed that repository's
+//     Conway UTXOS vector "can use reference scripts".
+//   - A reference script on a *spent* input. transTxOutV1 raises
+//     ReferenceScriptsNotSupported for it.
+//
+// Neither is asserted here because this repository's conformance suite cannot
+// arbitrate them: its harness runs gouroboros' rule functions directly
+// (ouroboros-mock/conformance/validation_rules.go lists
+// conway.UtxoValidateInlineDatumsWithPlutusV1), so it never reaches this
+// override -- disabling this rule outright still leaves all 315 vectors
+// passing. Adding a rejection on reasoning alone risks re-introducing the
+// class of false positive this rule exists to remove. Both belong upstream,
+// where the vectors do exercise the rule.
+//
+// Not a gap: a V1 script that is merely present but required by no purpose.
+// An unused *explicit* script witness is separately rejected by
+// conway.UtxoValidateScriptWitnesses with ExtraneousScriptWitnessesError, and
+// an unused *reference* script is legal.
+//
+// Findings are reported as InlineDatumsNotSupportedError regardless of which
+// restriction tripped, matching both upstream rule 18 and gouroboros #1980, so
+// that dropping this override once #1980 lands does not change the error type
+// callers see.
 func validateConwayInlineDatumsWithPlutusV1(
 	tx lcommon.Transaction,
 	_ uint64,
@@ -366,9 +381,45 @@ func validateConwayInlineDatumsWithPlutusV1(
 		}
 		return err
 	}
-	if !conwayTxHasInlineDatum(tx, scriptInputs) {
+	if !conwayNeedsPlutusV1(tx, scriptInputs) {
 		return nil
 	}
+	notSupported := lcommon.InlineDatumsNotSupportedError{
+		PlutusVersion: "PlutusV1",
+	}
+	// Consumed and reference inputs alike: the V1 context has to represent
+	// both, so an inline datum on either disqualifies the transaction.
+	for _, utxo := range scriptInputs.resolvedAllInputs {
+		if utxo.Output != nil && utxo.Output.Datum() != nil {
+			return notSupported
+		}
+	}
+	for _, output := range tx.Outputs() {
+		if output == nil {
+			continue
+		}
+		if output.Datum() != nil {
+			return notSupported
+		}
+		// A reference script on a produced output is deliberately not
+		// disqualifying. Conway defines its own transTxOutV1 that shadows
+		// Babbage's and drops the ReferenceScriptsNotSupported branch, so it
+		// checks only the inline datum
+		// (IntersectMBO/cardano-ledger, eras/conway/impl/src/Cardano/Ledger/
+		// Conway/TxInfo.hs). Babbage's version does carry that branch, which is
+		// why reading the Babbage file alone suggests the opposite. This rule
+		// is registered for Conway, so Conway's semantics apply.
+	}
+	return nil
+}
+
+// conwayNeedsPlutusV1 reports whether any script purpose the transaction
+// requires resolves to a PlutusV1 script. Keying on *needed* scripts rather
+// than available ones is what preserves the unused-reference-script case.
+func conwayNeedsPlutusV1(
+	tx lcommon.Transaction,
+	scriptInputs conwayScriptInputs,
+) bool {
 	var assetMint lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
 	if mint := tx.AssetMint(); mint != nil {
 		assetMint = *mint
@@ -378,7 +429,7 @@ func validateConwayInlineDatumsWithPlutusV1(
 	// belong to validateConwayRequiredPlutusRedeemers, which reports them with
 	// the right message. Returning them from here would mask that rule's
 	// finding behind this one, so they are discarded deliberately; everything
-	// this rule establishes is carried in needsPlutusV1.
+	// this walk establishes is carried in needsPlutusV1.
 	_ = forEachConwayScriptPurpose(
 		tx,
 		scriptInputs,
@@ -402,32 +453,7 @@ func validateConwayInlineDatumsWithPlutusV1(
 			return nil
 		},
 	)
-	if needsPlutusV1 {
-		return lcommon.InlineDatumsNotSupportedError{
-			PlutusVersion: "PlutusV1",
-		}
-	}
-	return nil
-}
-
-// conwayTxHasInlineDatum reports whether an inline datum appears anywhere the
-// PlutusV1 script context would have to represent it: on a resolved consumed
-// or reference input, or on one of this transaction's own outputs.
-func conwayTxHasInlineDatum(
-	tx lcommon.Transaction,
-	scriptInputs conwayScriptInputs,
-) bool {
-	for _, utxo := range scriptInputs.resolvedAllInputs {
-		if utxo.Output != nil && utxo.Output.Datum() != nil {
-			return true
-		}
-	}
-	for _, output := range tx.Outputs() {
-		if output != nil && output.Datum() != nil {
-			return true
-		}
-	}
-	return false
+	return needsPlutusV1
 }
 
 func isInputResolutionError(err error) bool {

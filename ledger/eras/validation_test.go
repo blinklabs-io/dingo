@@ -932,13 +932,7 @@ func TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript(
 	inlineInput := newTestInput(0x01, 0)
 	scriptInput := newTestInput(0x02, 0)
 	plutusScript := lcommon.PlutusV1Script([]byte{0x01, 0x02})
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		make([]byte, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
+	addr := newTestKeyAddr(t)
 
 	tx := &mockConwayFeeTx{
 		mockFeeTx: mockFeeTx{
@@ -963,40 +957,26 @@ func TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript(
 
 	// The pinned gouroboros rule reports this as a PlutusV1/inline-datum
 	// conflict because it treats every input script reference as used.
-	err = conway.UtxoValidateInlineDatumsWithPlutusV1(
+	var inlineDatumErr lcommon.InlineDatumsNotSupportedError
+	require.ErrorAs(t, conway.UtxoValidateInlineDatumsWithPlutusV1(
 		tx,
 		0,
 		ls,
 		&conway.ConwayProtocolParameters{},
-	)
-	var inlineDatumErr lcommon.InlineDatumsNotSupportedError
-	require.ErrorAs(t, err, &inlineDatumErr)
+	), &inlineDatumErr)
 
-	for _, rule := range conwayUtxoValidationRules {
-		if rule.index != conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex {
-			continue
-		}
-		require.NoError(t, rule.validationFunc(
-			tx,
-			0,
-			ls,
-			&conway.ConwayProtocolParameters{},
-		))
-		return
-	}
-	t.Fatal("Conway inline-datum rule was not installed")
+	require.NoError(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	))
 }
 
 func TestConwayInlineDatumRuleRejectsUsedPlutusV1Script(t *testing.T) {
 	input := newTestInput(0x03, 0)
 	plutusScript := lcommon.PlutusV1Script([]byte{0x01, 0x02})
-	scriptAddr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeScriptNone,
-		lcommon.AddressNetworkTestnet,
-		plutusScript.Hash().Bytes(),
-		nil,
-	)
-	require.NoError(t, err)
+	scriptAddr := newTestPlutusV1ScriptAddr(t, plutusScript)
 	tx := &mockConwayFeeTx{
 		mockFeeTx: mockFeeTx{
 			txType: txTypeAlonzo,
@@ -1020,20 +1000,13 @@ func TestConwayInlineDatumRuleRejectsUsedPlutusV1Script(t *testing.T) {
 	ls := newMockLedgerState()
 	ls.addUtxo(input, newBabbageInlineDatumOutput(t, scriptAddr))
 
-	for _, rule := range conwayUtxoValidationRules {
-		if rule.index != conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex {
-			continue
-		}
-		var inlineDatumErr lcommon.InlineDatumsNotSupportedError
-		require.ErrorAs(t, rule.validationFunc(
-			tx,
-			0,
-			ls,
-			&conway.ConwayProtocolParameters{},
-		), &inlineDatumErr)
-		return
-	}
-	t.Fatal("Conway inline-datum rule was not installed")
+	var inlineDatumErr lcommon.InlineDatumsNotSupportedError
+	require.ErrorAs(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	), &inlineDatumErr)
 }
 
 func newBabbageInlineDatumOutput(
@@ -3386,4 +3359,160 @@ func TestConwayUtxoValidationRulesStayIndexOrdered(t *testing.T) {
 		conwayUtxoValidateInlineDatumsWithPlutusV1RuleIndex,
 		"the patched inline-datum rule must be present in the merged list",
 	)
+	// buildConwayValidationRules skips three upstream rules and re-adds one
+	// locally, so the merged list is two shorter than the upstream list. A
+	// rule dropped without a matching skip would keep the ordering assertions
+	// above happy, so pin the count too.
+	require.Len(
+		t,
+		conwayUtxoValidationRules,
+		len(conway.UtxoValidationRules)-2,
+		"merged rule list length must account for exactly the declared skips",
+	)
+}
+
+// A reference script on a produced output must NOT be rejected. Conway's
+// transTxOutV1 shadows Babbage's and drops the ReferenceScriptsNotSupported
+// branch, checking only the inline datum, so a needed PlutusV1 script coexists
+// legitimately with a produced output carrying a reference script.
+func TestConwayInlineDatumRuleAllowsReferenceScriptOnOutput(t *testing.T) {
+	input := newTestInput(0x51, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x0f, 0x10})
+	scriptAddr := newTestPlutusV1ScriptAddr(t, plutusScript)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagSpend,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
+			},
+		},
+		inputs: []lcommon.TransactionInput{input},
+		outputs: []lcommon.TransactionOutput{
+			testAddressScriptOutput{
+				testOutput: newTestOutput(1_000_000),
+				addr:       newTestKeyAddr(t),
+				scriptRef:  plutusScript,
+			},
+		},
+	}
+	ls := newMockLedgerState()
+	// No inline datum anywhere; the needed V1 script is the spending one.
+	ls.addUtxo(input, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       scriptAddr,
+		scriptRef:  plutusScript,
+	})
+
+	require.NoError(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	))
+}
+
+func TestConwayInlineDatumRuleAllowsReferenceInputsWithNeededPlutusV1(
+	t *testing.T,
+) {
+	scriptInput := newTestInput(0x61, 0)
+	refInput := newTestInput(0x62, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x0b, 0x0c})
+	scriptAddr := newTestPlutusV1ScriptAddr(t, plutusScript)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagSpend,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
+			},
+		},
+		inputs:          []lcommon.TransactionInput{scriptInput},
+		referenceInputs: []lcommon.TransactionInput{refInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(scriptInput, testAddressScriptOutput{
+		testOutput: newTestOutput(2_000_000),
+		addr:       scriptAddr,
+	})
+	ls.addUtxo(refInput, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       newTestKeyAddr(t),
+	})
+
+	require.NoError(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	))
+}
+
+// TestConwayInlineDatumRuleSkipsUnresolvableInput pins the rule's contract for
+// an input that is not in the ledger state: defer to
+// UtxoValidateBadInputsUtxo, which reports it with the right error, rather
+// than becoming a second source of input-resolution failures. This is upstream
+// rule 18's contract too ("Skip errors - BadInputsUtxo will catch this").
+//
+// The transaction would otherwise be rejected: its first input is a PlutusV1
+// script address carrying an inline datum, so a rule that resolved what it
+// could and carried on would return InlineDatumsNotSupportedError here.
+func TestConwayInlineDatumRuleSkipsUnresolvableInput(t *testing.T) {
+	scriptInput := newTestInput(0x71, 0)
+	missingInput := newTestInput(0x72, 0)
+	plutusScript := lcommon.PlutusV1Script([]byte{0x0d, 0x0e})
+	scriptAddr := newTestPlutusV1ScriptAddr(t, plutusScript)
+
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{key: lcommon.RedeemerKey{
+							Tag:   lcommon.RedeemerTagSpend,
+							Index: 0,
+						}},
+					},
+				},
+				plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
+			},
+		},
+		inputs: []lcommon.TransactionInput{scriptInput, missingInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(scriptInput, newBabbageInlineDatumOutput(t, scriptAddr))
+	// missingInput is deliberately absent from the ledger state.
+
+	require.NoError(t, conwayInlineDatumRule(t)(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	))
 }
