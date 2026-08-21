@@ -1877,11 +1877,26 @@ mainnet block 4490510 at slot 4492799 by Shelley block 4490511 at slot
 on-chain bytes in `ledger/testdata/`.
 
 Consequently `validateInboundBlockEnvelope` requires protocol parameters for
-every non-Byron block, including the first Shelley one, and
-`validateBlockHeaderProtocolVersion` needs no Byron-era exemption. Exempting
-either would drop `maxBlockHeaderSize` and `maxBlockBodySize` for a real
-Shelley block, and the Haskell ledger has the Shelley ledger view available
-before that block is applied.
+every non-Byron block, including the first Shelley one. Exempting it would drop
+`maxBlockHeaderSize` and `maxBlockBodySize` for a real Shelley block, and the
+Haskell ledger has the Shelley ledger view available before that block is
+applied.
+
+Both validation steps in `ledgerProcessBlock` key that decision on the block or
+header in hand rather than on the ledger's era plus a nil check, so the two stay
+consistent as the boundary is crossed:
+
+- `validateInboundBlockEnvelope` returns before the size checks when
+  `block.Era().Id` is Byron.
+- `validateBlockHeaderProtocolVersion` returns before reading pparams when
+  `HeaderProtocolMajor` reports no version, which is Byron -- headers there have
+  no `ProtVer` field. This matters because the Byron prefix is the one era
+  validated while pparams is legitimately nil; reading them first rejects every
+  block of the prefix under `ValidateHistorical`.
+
+Byron's own transaction rules need no parameters either: `eras.ValidateTxByron`
+runs `byronValidateBadInputs`, `byronValidateValueConserved` and
+`byronValidateWitnesses`, each of which discards the argument.
 
 The Musashi prototype (prototype-2026w29) tags its early chain as Conway (NtN block type 7) but its block headers carry a Leios-extended header body — the 10 standard Babbage fields plus `leios_certified` and `leios_announcement` — that gouroboros' strict Conway decoder rejects. Rather than loosen the shared gouroboros Conway decoder that every real Conway network relies on, dingo decodes these blocks itself, scoped to the Musashi network magic (164) and block type 7, at three entry points:
 

@@ -187,3 +187,54 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 		})
 	}
 }
+
+// TestByronBlockHeaderProtocolVersionSkippedWithoutPParams pins that a
+// validated Byron block does not require protocol parameters.
+//
+// Byron headers carry no ProtVer field, so HeaderProtocolMajor reports no
+// version for them and ValidateHeaderProtocolVersion already skips them. The
+// LedgerState wrapper must reach that skip rather than failing earlier on
+// GetProtocolVersion(nil): with ValidateHistorical enabled on a network that
+// has a Byron prefix, every block of the prefix is validated while
+// currentPParams is nil, so demanding parameters here rejects the entire
+// Byron era.
+//
+// The Shelley half of the test keeps the wrapper fail-closed for headers that
+// do carry a version, which is the case validateInboundBlockEnvelope also
+// rejects.
+func TestByronBlockHeaderProtocolVersionSkippedWithoutPParams(t *testing.T) {
+	for _, tc := range boundaryFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := newLedgerStateForNetwork(t, "Testnet", 42)
+
+			byronHeader := loadBoundaryBlock(
+				t, tc.byronFile, tc.byronType,
+			).Header()
+			_, hasVersion := HeaderProtocolMajor(byronHeader)
+			require.False(
+				t,
+				hasVersion,
+				"a Byron header carries no protocol major version",
+			)
+			assert.NoError(
+				t,
+				ls.validateBlockHeaderProtocolVersion(byronHeader, nil),
+			)
+
+			shelleyHeader := loadBoundaryBlock(
+				t, tc.shelleyFile, tc.shelleyType,
+			).Header()
+			_, hasVersion = HeaderProtocolMajor(shelleyHeader)
+			require.True(
+				t,
+				hasVersion,
+				"a Shelley header carries a protocol major version",
+			)
+			assert.ErrorContains(
+				t,
+				ls.validateBlockHeaderProtocolVersion(shelleyHeader, nil),
+				"protocol parameters are nil",
+			)
+		})
+	}
+}

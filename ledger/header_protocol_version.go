@@ -180,15 +180,33 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 // network cannot be identified, returns the underlying error so the
 // block is rejected rather than validated against a guessed network.
 //
-// pparams is never nil for a block that reaches here. ledgerProcessBlock runs
-// validateInboundBlockEnvelope first, which rejects a non-Byron block without
-// protocol parameters, and the era transition installs them at the epoch break
-// ahead of the first post-Byron block. See
-// TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters.
+// A header that carries no protocol major version has nothing to compare, so
+// it returns before reading pparams. That is Byron, which has no ProtVer field
+// -- and Byron is the one era validated while pparams is legitimately nil,
+// because a network with a Byron prefix has no protocol parameters until the
+// Shelley transition. Reading them first would reject every block of the
+// prefix under ValidateHistorical. ValidateHeaderProtocolVersion skips the
+// same headers for the same reason; this only moves the test ahead of the
+// pparams read. An unrecognized header type reports no version too, but it
+// reaches this return only with nil pparams, which the envelope check already
+// rejects for anything non-Byron -- and ValidateHeaderProtocolVersion skips it
+// regardless, so nothing is weakened. HeaderProtocolMajor carries the standing
+// note that a new Praos-family era needs an explicit case there.
+//
+// For every header that does carry a version, pparams is required and a nil
+// value is an error. Such a block cannot reach here with nil pparams anyway:
+// ledgerProcessBlock runs validateInboundBlockEnvelope first, which rejects a
+// non-Byron block without protocol parameters, and the era transition installs
+// them at the epoch break ahead of the first post-Byron block. See
+// TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters and
+// TestByronBlockHeaderProtocolVersionSkippedWithoutPParams.
 func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 	header lcommon.BlockHeader,
 	pparams lcommon.ProtocolParameters,
 ) error {
+	if _, ok := HeaderProtocolMajor(header); !ok {
+		return nil
+	}
 	pv, err := GetProtocolVersion(pparams)
 	if err != nil {
 		return fmt.Errorf(
