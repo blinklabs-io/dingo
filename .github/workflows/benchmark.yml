@@ -68,6 +68,17 @@ jobs:
           fi
           mkdir -p ../benchmark-data-branch/runs
 
+          # Checked here, unconditionally, rather than only in check-regression:
+          # run-bench-ci writes the new result into runs/ on every invocation
+          # (including bootstrap, where check-regression does not even run),
+          # so a tampered benchmark-data branch that replaced runs/ with a
+          # symlink would have its target written to by `tee` before any
+          # later guard could reject it.
+          if [[ -L ../benchmark-data-branch/runs ]]; then
+            echo "../benchmark-data-branch/runs is unexpectedly a symlink; refusing to continue" >&2
+            exit 1
+          fi
+
           if [ -f ../benchmark-data-branch/runs/latest.txt ]; then
             baseline=$(cat ../benchmark-data-branch/runs/latest.txt)
             echo "baseline_file=../benchmark-data-branch/runs/${baseline}" >> "$GITHUB_OUTPUT"
@@ -116,12 +127,11 @@ jobs:
           # was tampered with between runs. Validating only the basename is
           # not enough -- runs/latest.txt containing "../other/<valid-name>"
           # would still pass a basename-only check while resolving outside
-          # runs/, so the full path is matched here instead. A path that
-          # matches the pattern textually can still escape runs/ if the
-          # branch replaced the runs/ directory or the target file itself
-          # with a symlink, so both are rejected too.
+          # runs/, so the full path is matched here instead. runs/ itself
+          # being a symlink is already rejected in prepare-benchmark-data-branch
+          # (before run-bench-ci ever writes into it); this only needs to
+          # additionally reject the target file itself being a symlink.
           if [[ ! "${BASELINE_FILE}" =~ ^\.\./benchmark-data-branch/runs/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]+-[0-9]+-[0-9a-f]{4,40}\.txt$ ]] \
-            || [[ -L ../benchmark-data-branch/runs ]] \
             || [[ -L "${BASELINE_FILE}" ]]; then
             echo "baseline_file has an unexpected path: ${BASELINE_FILE}" >&2
             exit 1
