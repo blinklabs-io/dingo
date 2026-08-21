@@ -326,7 +326,9 @@ const txTypeAlonzo = 4
 // on-wire 4-element format is exactly the 1-byte IsValid
 // field. Pre-Alonzo transactions (Byron through Mary) do
 // not contain an IsValid byte, so their full CBOR length
-// is the fee-relevant size.
+// is the fee-relevant size — except when the transaction
+// was rebuilt from block components, which
+// preAlonzoRebuiltWireSize handles.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
 	if size, ok := preAlonzoRebuiltWireSize(tx); ok {
 		return size
