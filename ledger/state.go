@@ -3646,10 +3646,6 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		nextBatch, decodeErr := ls.decodeReadChainBatchWithError(ctx, rawBatch)
 		releaseGatherLock()
 		if decodeErr != nil {
-			var validationErr *headerValidationError
-			if !errors.As(decodeErr, &validationErr) {
-				return
-			}
 			result = readChainResult{
 				err:  decodeErr,
 				done: make(chan struct{}),
@@ -4777,7 +4773,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						return errRestartLedgerPipeline
 					}
 					return fmt.Errorf(
-						"read-chain validation: %w",
+						"read-chain decode or validation: %w",
 						result.err,
 					)
 				}

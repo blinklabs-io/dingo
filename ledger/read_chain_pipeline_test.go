@@ -154,6 +154,45 @@ func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestLedgerReadChainIteratorForwardsDecodeError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	badPoint := ocommon.Point{
+		Slot: 20,
+		Hash: []byte("bad-hash-bad-hash-bad-hash-32by"),
+	}
+	iter := &scriptedLedgerReadIterator{
+		ctx: ctx,
+		results: []*chain.ChainIteratorResult{{
+			Point: badPoint,
+			Block: models.Block{
+				Slot: badPoint.Slot,
+				Hash: badPoint.Hash,
+				Type: gledger.BlockTypeConway,
+				Cbor: []byte{0xff, 0xff, 0xff},
+			},
+		}},
+	}
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	resultCh := make(chan readChainResult)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	}()
+
+	select {
+	case result := <-resultCh:
+		require.Error(t, result.err)
+		assert.Contains(t, result.err.Error(), "decode block at slot 20")
+		close(result.done)
+	case <-readerDone:
+		t.Fatal("reader returned without forwarding the decode error")
+	}
+	cancel()
+	<-readerDone
+}
+
 // TestLedgerReadChainIteratorPipelineMatchesSerial exercises the full
 // ledgerReadChainIterator loop (gather -> decode -> rollback trim -> emit)
 // with a real chain iterator script, once with the block-decode pipeline

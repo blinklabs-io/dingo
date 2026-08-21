@@ -76,6 +76,31 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	require.NoError(t, err)
 }
 
+func TestLedgerProcessBlocksFromSourceReturnsReadChainError(t *testing.T) {
+	ls := &LedgerState{
+		validationEnabled: true,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	resultDone := make(chan struct{})
+	readChainResultCh := make(chan readChainResult, 1)
+	readChainResultCh <- readChainResult{
+		err:  errors.New("decode block at slot 20"),
+		done: resultDone,
+	}
+	close(readChainResultCh)
+
+	err := ls.ledgerProcessBlocksFromSource(t.Context(), readChainResultCh)
+	require.ErrorContains(t, err, "read-chain decode or validation")
+	select {
+	case <-resultDone:
+	default:
+		t.Fatal("reader result was not released after decode failure")
+	}
+}
+
 func TestHandleLedgerProcessBlocksErrorLogsPersistentValidationFailure(
 	t *testing.T,
 ) {
