@@ -47,6 +47,15 @@ type queryServiceServer struct {
 	utxorpc *Utxorpc
 }
 
+// ErrByronProtocolParams reports that the ledger holds no current protocol
+// parameters because the chain is still in its Byron prefix. Byron carries no
+// protocol-parameter CBOR, so this is an expected state during a from-genesis
+// synchronization rather than a node fault, and no Shelley-shaped parameters
+// may be substituted for it.
+var ErrByronProtocolParams = errors.New(
+	"protocol parameters unavailable in the Byron era",
+)
+
 func extractSearchPredicatePatterns(
 	predicate *query.UtxoPredicate,
 ) (*utxorpcCardano.AddressPattern, *utxorpcCardano.AssetPattern) {

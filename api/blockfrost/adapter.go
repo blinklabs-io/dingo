@@ -67,7 +67,25 @@ var (
 	ErrMempoolFull         = errors.New("mempool full")
 	ErrTransactionNotFound = errors.New("transaction not found")
 	ErrInvalidStakeAddress = errors.New("invalid stake address")
+	// ErrProtocolParamsUnavailable reports that no protocol parameters exist
+	// for the requested point. Byron carries no protocol-parameter CBOR, so a
+	// genuine Byron prefix reaches this during a from-genesis sync; it is an
+	// expected state rather than a node fault, and callers must not
+	// substitute Shelley-shaped defaults for it.
+	ErrProtocolParamsUnavailable = errors.New(
+		"protocol parameters not available",
+	)
 )
+
+// drepInactivityFromPParams reads the Conway-era drep_activity parameter from
+// pparams. The second return reports whether the era defines the parameter at
+// all, which a bare uint64 cannot express: a chain that genuinely configured
+// drep_activity to 0 and an era with no DRep semantics are different facts.
+func drepInactivityFromPParams(
+	pparams lcommon.ProtocolParameters,
+) (uint64, bool) {
+	return 0, false
+}
 
 // TransactionSubmitter accepts raw transaction CBOR for mempool admission.
 type TransactionSubmitter interface {
@@ -1211,14 +1229,14 @@ func (a *NodeAdapter) predefinedDRep(
 // drepInactivityPeriod returns the Conway-era drep_activity protocol
 // parameter (epochs of inactivity before a DRep expires), or 0 when it
 // is unavailable.
-func (a *NodeAdapter) drepInactivityPeriod() uint64 {
+func (a *NodeAdapter) drepInactivityPeriod() (uint64, bool) {
 	switch pp := a.ledgerState.GetCurrentPParams().(type) {
 	case *conway.ConwayProtocolParameters:
-		return pp.DRepInactivityPeriod
+		return pp.DRepInactivityPeriod, true
 	case *dijkstra.DijkstraProtocolParameters:
-		return pp.DRepInactivityPeriod
+		return pp.DRepInactivityPeriod, true
 	default:
-		return 0
+		return 0, false
 	}
 }
 
@@ -1310,13 +1328,14 @@ func (a *NodeAdapter) drepByCredentialTag(
 		)
 	}
 
+	inactivityPeriod, _ := a.drepInactivityPeriod()
 	retired, expired, lastActive := drepStatus(
 		drep.Active,
 		drep.LastActivityEpoch,
 		drep.ExpiryEpoch,
 		registrationEpoch.EpochId,
 		a.ledgerState.CurrentEpoch(),
-		a.drepInactivityPeriod(),
+		inactivityPeriod,
 	)
 
 	// Echo the identifier form the caller used: CIP-129 inputs carry
@@ -1404,7 +1423,7 @@ func (a *NodeAdapter) DReps(
 	}
 
 	currentEpoch := a.ledgerState.CurrentEpoch()
-	inactivity := a.drepInactivityPeriod()
+	inactivity, _ := a.drepInactivityPeriod()
 
 	type entry struct {
 		predefined *uint64
