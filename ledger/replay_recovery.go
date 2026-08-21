@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -187,6 +188,9 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if !errors.As(err, &validationErr) {
 		return false, nil
 	}
+	if isDeterministicTxValidationError(validationErr.Cause) {
+		return ls.recoverFromDeterministicTxValidationError(validationErr)
+	}
 	if ls.IsAtTip() {
 		return ls.recoverAtTipFromTxValidationError(validationErr)
 	}
@@ -339,6 +343,108 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		pointMatches(ls.chain.Tip().Point, rewindPoint) &&
 		pointMatches(ls.Tip().Point, rewindPoint) {
 		ls.armContinuationAudit(rewindPoint, "replay recovery rewind")
+	}
+	return true, nil
+}
+
+// isDeterministicTxValidationError identifies transaction-structure failures
+// that cannot be repaired by replaying a different local UTxO history. A
+// duplicate input is invalid regardless of which chain produced the input,
+// so treating it as an unresolved producer sends recovery down the fallback
+// path and can repeatedly rediscover the same rejected block.
+func isDeterministicTxValidationError(err error) bool {
+	var duplicateInputErr shelley.DuplicateInputError
+	return errors.As(err, &duplicateInputErr)
+}
+
+// recoverFromDeterministicTxValidationError drops a primary-chain block that
+// contains a transaction with a deterministic structural error. The ledger
+// tip is the last applied good point; rewinding both stores to it rejects the
+// branch and lets ChainSync obtain a fresh intersection. This is deliberately
+// separate from unresolved-input recovery: the latter is state-dependent and
+// still needs producer resolution and the security-parameter fallback.
+func (ls *LedgerState) recoverFromDeterministicTxValidationError(
+	validationErr *txValidationError,
+) (bool, error) {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return false, nil
+	}
+
+	ls.RLock()
+	ledgerTip := ls.currentTip
+	ls.RUnlock()
+	rewindPoint := ledgerTip.Point
+	if rewindPoint.Slot >= validationErr.BlockPoint.Slot {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"deterministic transaction validation rejected a block at or behind the ledger tip; no rewind target precedes it",
+				"component", "ledger",
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"ledger_tip_slot", rewindPoint.Slot,
+				"error", validationErr.Cause,
+			)
+		}
+		return false, nil
+	}
+	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
+		return false, nil
+	}
+
+	// Chain selection can abandon the ledger tip between the snapshot above
+	// and the rewind. If the point is already gone, the rejected block was
+	// removed by that chain choice and the pipeline can safely restart.
+	if err := ls.chain.ValidateRollback(rewindPoint); err != nil &&
+		errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"chain selection moved the primary chain off the deterministic transaction recovery point; the rejected block is already gone",
+				"component", "ledger",
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"rewind_target_slot", rewindPoint.Slot,
+				"error", err,
+			)
+		}
+		return true, nil
+	}
+
+	if ls.config.Logger != nil {
+		ls.config.Logger.Warn(
+			"deterministic transaction validation rejected a block on the primary chain; rewinding so chain selection can offer another candidate",
+			"component", "ledger",
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot", validationErr.BlockPoint.Slot,
+			"rewind_target_slot", rewindPoint.Slot,
+			"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+			"error", validationErr.Cause,
+		)
+	}
+	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
+		if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+			return true, nil
+		}
+		return false, fmt.Errorf(
+			"rewind primary chain after deterministic transaction validation failure: %w",
+			err,
+		)
+	}
+	if err := ls.rollback(rewindPoint); err != nil {
+		return false, fmt.Errorf(
+			"rollback ledger state after deterministic transaction validation failure: %w",
+			err,
+		)
+	}
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					Reason: event.
+						ChainsyncResyncReasonDeterministicTxValidationRecovery,
+					Point: rewindPoint,
+				},
+			),
+		)
 	}
 	return true, nil
 }

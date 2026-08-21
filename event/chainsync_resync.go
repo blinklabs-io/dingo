@@ -24,6 +24,8 @@ import (
 // or rollback exceeds the security parameter).
 const ChainsyncResyncEventType = EventType("chainsync.resync")
 
+const ChainsyncResyncReasonDeterministicTxValidationRecovery = "deterministic tx validation recovery"
+
 const (
 	ChainsyncResyncReasonLocalTipPlateau                = "local_tip_plateau"
 	ChainsyncResyncReasonPostPlateauRealign             = "post_plateau_realign"

@@ -2964,6 +2964,14 @@ paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
 the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
+Transaction-structure failures are handled separately from state-dependent
+missing-input failures. In particular, a Conway `DuplicateInputError` (such as
+duplicate reference inputs) cannot be repaired by selecting a different UTxO
+producer history. Replay recovery therefore rejects the primary-chain branch
+and rolls both stores back to the last applied ledger tip, then publishes a
+`chainsync.resync` event with reason `deterministic tx validation recovery` so
+ChainSync obtains a fresh intersection. Other transaction-validation errors
+continue through producer resolution and the unresolved-producer fallback.
 The continuation audit is run only after a fetched body is accepted by the
 queued primary chain, so late bodies from an abandoned fetch cannot seed its
 producer window. Its diagnostic database probes are also capped per block

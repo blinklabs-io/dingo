@@ -34,6 +34,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pdata "github.com/blinklabs-io/plutigo/data"
@@ -1702,6 +1703,62 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	assert.Equal(t, ls.Tip().Point, window.forkPoint)
+}
+
+func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubID := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if ok && resync.Reason ==
+				event.ChainsyncResyncReasonDeterministicTxValidationRecovery {
+				resyncCh <- resync
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	ls.config.EventBus = bus
+	duplicate := shelley.DuplicateInputError{
+		Input: &replayRecoveryInput{
+			txId:  testHashBytes("duplicate-reference"),
+			index: 0,
+		},
+		InputType: "reference",
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: errors.Join(
+			fmt.Errorf("conway UTxO rule: %w", duplicate),
+			errors.New("unrelated joined validation detail"),
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	// The unresolved input would select the security-parameter fallback and
+	// rewind farther back. A deterministic duplicate must instead reject only
+	// the bad block and preserve the last applied ledger tip.
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.False(t, ls.replayRecoveryTipTracked)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"deterministic transaction recovery must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
