@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -42,9 +43,13 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	gouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -148,16 +153,43 @@ func newLiveLifecycleTestNodeWithGenesis(
 		cardanoNodeCfg = newNodeTestCardanoNodeCfg(t)
 	}
 
-	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:                 db,
-		ChainManager:             cm,
-		EventBus:                 eventBus,
-		CardanoNodeConfig:        cardanoNodeCfg,
-		Logger:                   logger,
-		ValidateHistorical:       false,
-		DatabaseWorkerPoolConfig: workerPoolCfg,
-	})
+	cfg := NewConfig(
+		WithDatabasePath(tmpDir),
+		WithLogger(logger),
+		WithNetwork("preview"),
+		WithCardanoNodeConfig(cardanoNodeCfg),
+		WithPluginSelection(
+			plugin.CapabilityStorageBlob,
+			storageSelections.Blob,
+		),
+		WithPluginSelection(
+			plugin.CapabilityStorageMetadata,
+			storageSelections.Metadata,
+		),
+		WithDatabaseWorkerPoolConfig(workerPoolCfg),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{
+		config:       cfg,
+		eventBus:     eventBus,
+		db:           db,
+		pluginHost:   pluginHost,
+		chainManager: cm,
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+
+	// Build the initial LedgerState through the node's own
+	// ledgerStateConfig(), the way Run() does, instead of a hand-written
+	// config literal. reinitializeCoreStorage rebuilds it from that same
+	// method, so a behavior asserted before and after a live
+	// restore/truncate is compared against identical production wiring on
+	// both sides rather than against a harness config that happens to omit
+	// the field under test.
+	ledgerState, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	require.NoError(t, err)
+	n.ledgerState = ledgerState
 	// Build the harness ouroboros the way Run() does: every dependency up
 	// front, through the validating constructor, so the live-restore
 	// reconstruction assertions below exercise the production path rather
@@ -188,39 +220,11 @@ func newLiveLifecycleTestNodeWithGenesis(
 	}
 	ouro, err := ouroborosPkg.NewOuroboros(ouroborosCfg)
 	require.NoError(t, err)
-	require.NoError(t, ledgerState.Start(context.Background()))
-
-	cfg := NewConfig(
-		WithDatabasePath(tmpDir),
-		WithLogger(logger),
-		WithNetwork("preview"),
-		WithCardanoNodeConfig(cardanoNodeCfg),
-		WithPluginSelection(
-			plugin.CapabilityStorageBlob,
-			storageSelections.Blob,
-		),
-		WithPluginSelection(
-			plugin.CapabilityStorageMetadata,
-			storageSelections.Metadata,
-		),
-		WithDatabaseWorkerPoolConfig(workerPoolCfg),
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	n := &Node{
-		config:       cfg,
-		eventBus:     eventBus,
-		db:           db,
-		pluginHost:   pluginHost,
-		chainManager: cm,
-		ledgerState:  ledgerState,
-		// Retained so reinitializeNetworkingCore can rebuild ouroboros the
-		// way Run() does.
-		ouroborosConfig: ouroborosCfg,
-		ctx:             ctx,
-		cancel:          cancel,
-	}
+	// Retained so reinitializeNetworkingCore can rebuild ouroboros the way
+	// Run() does.
+	n.ouroborosConfig = ouroborosCfg
 	n.ouroborosRef.Store(ouro)
+	require.NoError(t, ledgerState.Start(context.Background()))
 	t.Cleanup(func() {
 		cancel()
 		if n.pluginHost != nil {
@@ -579,6 +583,232 @@ func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivity
 		window,
 		"snapshot manager's DelegatorInactivity window must survive live truncate reinitialization",
 	)
+}
+
+// genesisSelectionTestWindowSlots is the Genesis density window the test
+// chain selector reports. The preview testdata blocks are 20 slots apart,
+// so a 25-slot window anchored at a fork intersection contains exactly one
+// local block: a competing fork with two headers packed into the slots
+// right after that intersection has density two against the local chain's
+// one, while still being SHORTER in block number. That is the only shape
+// where the Genesis density decision and the Praos length decision
+// disagree, which is what makes the fork tests fail if the injected
+// GenesisSelectionStateFunc goes missing.
+const genesisSelectionTestWindowSlots = 25
+
+// newGenesisSelectionTestNode is newLiveLifecycleTestNode plus the two
+// fields fork resolution needs before it will consult Genesis selection at
+// all: n.chainSelector, the source the injected GenesisSelectionStateFunc
+// resolves, parked in Genesis mode; and n.connManager, because the ledger
+// drops a chainsync event whose connection is not registered with it.
+func newGenesisSelectionTestNode(
+	t *testing.T,
+	numBlocks int,
+) (*Node, []ocommon.Point) {
+	t.Helper()
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	// Reuse the connection manager the harness ouroboros was built with, so
+	// the ledger's liveness gate and its blockfetch requests resolve the
+	// same instance -- exactly as they do after a live rebuild, where
+	// reinitializeNetworkingCore hands the rebuilt manager to both.
+	n.connManager = n.ouroboros().ConnManager()
+	// No EventBus: the selector must stay in Genesis mode for the whole
+	// test, and a live one would let peer-tip and rollback events drive its
+	// one-way transition to Praos.
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			Logger:             n.config.logger,
+			GenesisMode:        true,
+			GenesisWindowSlots: genesisSelectionTestWindowSlots,
+		},
+	)
+	active, window := n.chainSelector.GenesisSelectionState()
+	require.True(t, active, "test selector must start in Genesis mode")
+	require.Equal(t, uint64(genesisSelectionTestWindowSlots), window)
+	return n, points
+}
+
+// registerGenesisForkTestPeer registers a mock node-to-node connection with
+// the node's CURRENT connection manager and returns its connection ID.
+// ledger.LedgerState ignores a chainsync event whose connection is not
+// registered, so each phase of a lifecycle test needs its own peer: the
+// live rebuild replaces the connection manager along with everything else.
+func registerGenesisForkTestPeer(
+	t *testing.T,
+	n *Node,
+) gouroboros.ConnectionId {
+	t.Helper()
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		ouroboros_mock.ConversationKeepAlive,
+	)
+	oConn, err := gouroboros.New(
+		gouroboros.WithConnection(mockConn),
+		gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		gouroboros.WithNodeToNode(true),
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		n.connManager.AddConnection(oConn, false, "127.0.0.1:33273"),
+	)
+	t.Cleanup(func() { _ = oConn.Close() })
+	return oConn.Id()
+}
+
+// requireGenesisDeepForkWins drives a competing fork that only Ouroboros
+// Genesis density selection can win, and requires the ledger to switch to
+// it.
+//
+// The fork branches off the local chain at points[ancestorIdx] -- several
+// blocks behind the local tip, so resolving it is a deep rollback -- and
+// carries two headers packed into the first few slots after that
+// intersection. It is strictly SHORTER than the local chain in block
+// number and its headers sit at earlier slots than the local tip, so Praos
+// length comparison rejects it outright: without Genesis selection the
+// ledger discards both headers as stale roll-forwards and the tip never
+// moves. With Genesis selection active the same two headers are denser
+// inside the window anchored at the intersection than the local chain is
+// (two blocks versus one), so the ledger must roll back to the
+// intersection.
+//
+// The first header alone only ties the local density, which exercises the
+// documented equal-density fallback to Praos; the second header is what
+// makes the peer's branch win, and it can only be evaluated by walking the
+// peer's recorded header history back to the intersection.
+func requireGenesisDeepForkWins(
+	t *testing.T,
+	n *Node,
+	points []ocommon.Point,
+	ancestorIdx int,
+) {
+	t.Helper()
+	require.Greater(t, len(points), ancestorIdx+1)
+	ancestor := points[ancestorIdx]
+	localTipBefore := n.ledgerState.Tip()
+	require.Greater(
+		t,
+		localTipBefore.Point.Slot,
+		ancestor.Slot,
+		"the local tip must be ahead of the fork intersection for this to be a deep fork",
+	)
+
+	// Real Conway blocks from the shared ouroboros-mock fixtures rather than
+	// a locally defined header stub: their headers round-trip through CBOR,
+	// so the ledger sees the same hashes and prev-hashes a peer would send.
+	// Block numbers continue from the intersection, which keeps the branch
+	// shorter than the local chain.
+	forkBlocks, err := fixtures.GenerateConwayChain(
+		uint64(ancestorIdx)+1,
+		lcommon.NewBlake2b256(ancestor.Hash),
+		ancestor.Slot+2,
+		2,
+		2,
+	)
+	require.NoError(t, err)
+	forkTipBlock := forkBlocks[len(forkBlocks)-1]
+	require.Less(
+		t,
+		forkTipBlock.SlotNumber(),
+		localTipBefore.Point.Slot,
+		"the fork must stay behind the local tip so Praos alone rejects it",
+	)
+	require.Less(
+		t,
+		forkTipBlock.BlockNumber(),
+		localTipBefore.BlockNumber,
+		"the fork must be shorter than the local chain so Praos alone rejects it",
+	)
+	forkTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			forkTipBlock.SlotNumber(),
+			forkTipBlock.Hash().Bytes(),
+		),
+		BlockNumber: forkTipBlock.BlockNumber(),
+	}
+
+	connId := registerGenesisForkTestPeer(t, n)
+	for _, blk := range forkBlocks {
+		n.eventBus.Publish(
+			ledger.ChainsyncEventType,
+			event.NewEvent(ledger.ChainsyncEventType, ledger.ChainsyncEvent{
+				ConnectionId: connId,
+				Point: ocommon.NewPoint(
+					blk.SlotNumber(),
+					blk.Hash().Bytes(),
+				),
+				BlockHeader: blk.Header(),
+				Tip:         forkTip,
+				BlockNumber: blk.BlockNumber(),
+				Type:        uint(blk.Type()),
+			}),
+		)
+	}
+
+	require.Eventually(t, func() bool {
+		return n.ledgerState.Tip().Point.Slot == ancestor.Slot
+	}, 10*time.Second, 20*time.Millisecond,
+		"ledger did not roll back to the Genesis-selected fork intersection at slot %d (tip is %d)",
+		ancestor.Slot, n.ledgerState.Tip().Point.Slot,
+	)
+}
+
+// TestLiveTruncatePreservesGenesisForkSelection is the behavioral guard for
+// issue #3273: reinitializeCoreStorage rebuilt LedgerStateConfig without
+// GenesisSelectionStateFunc, so a node that had Ouroboros Genesis selection
+// active silently fell back to Praos-length-only fork resolution after a
+// live truncate and stayed there until the process restarted.
+//
+// Both halves drive the same deep fork that only Genesis density can win --
+// before the truncate against the ledger Run() would have built, and after
+// it against the one the lifecycle path rebuilt.
+func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
+	const numBlocks = 25
+	n, points := newGenesisSelectionTestNode(t, numBlocks)
+
+	// Before: Genesis density resolves a deep fork 4 blocks behind the tip.
+	requireGenesisDeepForkWins(t, n, points, numBlocks-5)
+
+	targetSlot := points[10].Slot
+	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: &targetSlot,
+	})
+	require.NoError(t, err)
+	require.Equal(t, targetSlot, n.ledgerState.Tip().Point.Slot)
+
+	// After: the rebuilt ledger must still consult the same selector. A
+	// different intersection is used because the truncate discarded the
+	// blocks the first half rolled back to.
+	requireGenesisDeepForkWins(t, n, points, 5)
+}
+
+// TestLiveRestorePreservesGenesisForkSelection is
+// TestLiveTruncatePreservesGenesisForkSelection for the Restore half of the
+// same live-lifecycle path, which rebuilds the ledger through the same
+// reinitializeCoreStorage call.
+func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
+	const numBlocks = 25
+	n, points := newGenesisSelectionTestNode(t, numBlocks)
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap-3273")
+	manifest, err := lifecycleSnapshot(t, n, snapshotDir)
+	require.NoError(t, err)
+	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
+
+	// Before: Genesis density resolves a deep fork 4 blocks behind the tip.
+	requireGenesisDeepForkWins(t, n, points, numBlocks-5)
+
+	_, err = n.Restore(context.Background(), snapshotDir)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		points[len(points)-1].Slot,
+		n.ledgerState.Tip().Point.Slot,
+		"restore must bring the pre-fork tip back",
+	)
+
+	// After: the rebuilt ledger must still consult the same selector.
+	requireGenesisDeepForkWins(t, n, points, numBlocks-10)
 }
 
 // TestLiveTruncateIsSerializedAgainstConcurrentCalls exercises
