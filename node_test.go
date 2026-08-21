@@ -15,11 +15,13 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -382,7 +385,9 @@ func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
 				case <-publishDone:
 					return nil
 				case <-time.After(time.Second):
-					return errors.New("event bus was not closed before final cleanup")
+					return errors.New(
+						"event bus was not closed before final cleanup",
+					)
 				}
 			},
 		},
@@ -425,6 +430,51 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 		time.Second,
 		"close function completion",
 	)
+}
+
+// TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed protects the
+// storage safety boundary shared with live Restore/Truncate. LedgerState.Close
+// can time out while a database worker is still using the database; normal
+// shutdown must not close the database or its provider-owned stores in that
+// state.
+func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(t *testing.T) {
+	n, _ := newLiveLifecycleTestNodeWithGenesis(
+		t,
+		1,
+		nil,
+		ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: 1, TaskQueueSize: 1},
+	)
+
+	origTimeout := ledger.CloseDBWorkerPoolShutdownTimeout
+	ledger.CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { ledger.CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	defer func() {
+		close(release)
+		testutil.RequireReceive(t, workerDone, time.Second, "database worker drain")
+	}()
+	go func() {
+		defer close(workerDone)
+		_ = n.ledgerState.SubmitAsyncDBOperation(func(*database.Database) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	shutdownErr := n.shutdown()
+	require.Error(t, shutdownErr)
+	require.ErrorContains(t, shutdownErr, "database worker pool")
+	require.ErrorContains(t, shutdownErr, "database close skipped")
+
+	// The ledger worker is still blocked, so the database must remain usable.
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, make([]byte, 32)),
+	}, nil))
 }
 
 // newChainSelectorSubscriptionTestNode builds the minimal node
@@ -535,4 +585,41 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 		5*time.Millisecond,
 		"higher-priority peer must win equal-tip selection after priority event",
 	)
+}
+
+// A close/stop failure surfaced during the startup-cleanup unwind must
+// actually reach the log, not just be swallowed by the caller's `_ =`.
+func TestLogErrIfNotNilLogsOnError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(
+		logger,
+		"failed to stop leader election during cleanup",
+		errors.New("epoch transition in flight"),
+	)
+
+	out := buf.String()
+	if !strings.Contains(out, "failed to stop leader election during cleanup") {
+		t.Fatalf("expected log message in output, got: %s", out)
+	}
+	if !strings.Contains(out, "epoch transition in flight") {
+		t.Fatalf("expected error detail in output, got: %s", out)
+	}
+}
+
+// The common case -- a clean stop -- must stay silent, or every successful
+// shutdown would log a spurious error line.
+func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(logger, "failed to stop leader election during cleanup", nil)
+
+	if buf.Len() != 0 {
+		t.Fatalf(
+			"expected no log output for a nil error, got: %s",
+			buf.String(),
+		)
+	}
 }

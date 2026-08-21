@@ -53,6 +53,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/pipeline"
 )
 
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
@@ -73,6 +74,31 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 		readChainResultCh,
 	)
 	require.NoError(t, err)
+}
+
+func TestLedgerProcessBlocksFromSourceReturnsReadChainError(t *testing.T) {
+	ls := &LedgerState{
+		validationEnabled: true,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	resultDone := make(chan struct{})
+	readChainResultCh := make(chan readChainResult, 1)
+	readChainResultCh <- readChainResult{
+		err:  errors.New("decode block at slot 20"),
+		done: resultDone,
+	}
+	close(readChainResultCh)
+
+	err := ls.ledgerProcessBlocksFromSource(t.Context(), readChainResultCh)
+	require.ErrorContains(t, err, "read-chain decode or validation")
+	select {
+	case <-resultDone:
+	default:
+		t.Fatal("reader result was not released after decode failure")
+	}
 }
 
 func TestHandleLedgerProcessBlocksErrorLogsPersistentValidationFailure(
@@ -1063,6 +1089,16 @@ func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
 	assert.False(t, ls.isNearTip(993), "gap above 3k/f should be catch-up")
 	assert.True(t, ls.isNearTip(994), "gap equal to 3k/f should be near tip")
 	assert.True(t, ls.isNearTip(1001), "local tip beyond upstream is near tip")
+	assert.False(
+		t,
+		ls.isNearTipWithStabilityWindow(989, 10),
+		"explicit window must reject a larger upstream gap",
+	)
+	assert.True(
+		t,
+		ls.isNearTipWithStabilityWindow(990, 10),
+		"explicit window must accept an equal upstream gap",
+	)
 }
 
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
@@ -2342,7 +2378,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 
 	// Start the epoch rollover goroutine
 	wg.Go(func() {
-
 		// Capture snapshot
 		ls.RLock()
 		snapshotEra := ls.currentEra
@@ -2388,7 +2423,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	// Start multiple reader goroutines that try to read during the transaction
 	for range 5 {
 		wg.Go(func() {
-
 			// Wait for transaction to start
 			<-txnStarted
 
@@ -4194,6 +4228,97 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
 }
 
+// TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure exercises
+// the full standard-profile apply path. The transaction is invalid only
+// because its fee is below the protocol minimum, so trusting the validation
+// error would record it in metadata; the rejection must return a
+// txValidationError and leave no transaction committed.
+func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	txCbor, err := cbor.Encode([]any{
+		map[uint]any{2: uint64(0)},
+		map[uint]any{},
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := dijkstra.NewDijkstraTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	pparams := dijkstraTestProtocolParameters()
+	pparams.MaxBlockBodySize = 100_000
+	pparams.MaxBlockHeaderSize = 100_000
+	pparams.MinFeeB = 1
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  10,
+				ByteLength: uint32(len(txCbor)),
+			},
+		},
+	}
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 1,
+					Slot:        10,
+					ProtoVersion: babbage.BabbageProtoVersion{
+						Major: 12,
+					},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*tx},
+		},
+	}
+	bodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: nodeConfig,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err = db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: 10, Hash: []byte("dijkstra-validation")},
+			block,
+			true,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			offsets,
+			eras.DijkstraEraDesc,
+			pparams,
+			nil,
+		)
+		return err
+	})
+	require.Error(t, err)
+	var validationErr *txValidationError
+	require.ErrorAs(t, err, &validationErr)
+	require.Contains(t, err.Error(), "fee")
+
+	stored, err := db.Metadata().GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "rejected Dijkstra transaction must not be committed")
+}
+
 // TestStrictConsumedInputsEnabled pins the #3005 guard condition, including the
 // P1 transition-batch case: the first batch whose blocks cross the tip cutoff is
 // processed while reachedTip is still false (it is stored true only after that
@@ -4319,34 +4444,11 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 	}
 }
 
-// TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime covers Close()'s
-// rollback-goroutine wait: previously this only logged a Warn on timeout and
-// let Close() return nil regardless, which live restore/truncate's caller
-// (closeStorageForLiveLifecycleOp) took as a green light to proceed to
-// physically close/reopen the data directory even though a rollback
-// goroutine might still be running against it.
-func TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime(t *testing.T) {
-	origTimeout := CloseRollbackDrainTimeout
-	CloseRollbackDrainTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { CloseRollbackDrainTimeout = origTimeout })
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-	// Simulate an in-flight rollback goroutine that outlives the timeout.
-	ls.rollbackWG.Add(1)
-	t.Cleanup(func() { ls.rollbackWG.Done() })
-
-	err := ls.Close()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "rollback")
-}
-
 // TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime covers Close()'s
-// database-worker-pool wait, which had the same silent-timeout gap as the
-// rollback wait above.
+// database-worker-pool wait: a timeout there used to be logged as a Warn while
+// Close() still returned nil, which let live restore/truncate's caller
+// (closeStorageForLiveLifecycleOp) treat an unconfirmed drain as a green light
+// to close and reopen the data directory.
 func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
 	origTimeout := CloseDBWorkerPoolShutdownTimeout
 	CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
@@ -4411,6 +4513,79 @@ func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
 	assert.Contains(t, err.Error(), "block-processing pipeline")
 }
 
+// TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting verifies that
+// Close releases the continuation scheduling mutex before waiting for the
+// continuation WaitGroup. A worker may need that mutex to complete the request
+// that lets it return, so holding it across the wait deadlocks shutdown.
+//
+// The invariant is asserted directly -- the mutex must be acquirable *while*
+// Close is parked in the wait -- rather than by having a queued worker finish,
+// which passes whether or not Close ever held the mutex.
+func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
+	origTimeout := CloseBlockfetchDrainTimeout
+	// Generous: the worker is released only after the assertion below, so this
+	// bounds the failure mode rather than the happy path.
+	CloseBlockfetchDrainTimeout = 30 * time.Second
+	t.Cleanup(func() { CloseBlockfetchDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	schedulingDone := make(chan struct{})
+	ls.blockfetchContinuationSchedulingHook = func() {
+		close(schedulingDone)
+	}
+
+	// A continuation worker that stays registered until the test releases it,
+	// so Close cannot leave its wait while the assertion runs. It deliberately
+	// does not touch the mutex: the point is what Close holds, not what the
+	// worker can acquire.
+	proceed := make(chan struct{})
+	ls.blockfetchContinuationWG.Go(func() {
+		<-proceed
+	})
+
+	ls.blockfetchContinuationMu.Lock()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ls.Close() }()
+	require.Eventually(
+		t,
+		ls.closed.Load,
+		time.Second,
+		time.Millisecond,
+		"Close did not begin before releasing the continuation mutex",
+	)
+	ls.blockfetchContinuationMu.Unlock()
+
+	// The hook fires only after Close has completed the scheduling lock/unlock
+	// pair. The worker remains registered, so Close must still be in its wait.
+	testutil.RequireReceive(
+		t,
+		schedulingDone,
+		time.Second,
+		"Close did not release blockfetchContinuationMu before waiting",
+	)
+	require.True(
+		t,
+		ls.blockfetchContinuationMu.TryLock(),
+		"Close held blockfetchContinuationMu while waiting for continuations",
+	)
+	ls.blockfetchContinuationMu.Unlock()
+
+	// Only now let the worker finish, proving Close was genuinely still waiting
+	// throughout the assertion above.
+	close(proceed)
+	err := testutil.RequireReceive(
+		t,
+		closeDone,
+		5*time.Second,
+		"Close did not finish after the continuation worker drained",
+	)
+	require.NoError(t, err)
+}
+
 // TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive
 // counterpart: a real Start/Close cycle (ledgerProcessBlocks genuinely
 // running, not simulated) must not report a timeout, and Close must
@@ -4445,4 +4620,32 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 	default:
 		t.Fatal("Close returned without processCtx actually being cancelled")
 	}
+}
+
+// TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the
+// shutdown ordering required when block processing is draining the decode
+// pipeline's Results channel. That drain has no context select after a batch
+// is submitted, so stopping the pipeline must close Results before Close
+// waits for the block-processing goroutine.
+func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
+	origTimeout := CloseProcessBlocksDrainTimeout
+	CloseProcessBlocksDrainTimeout = time.Second
+	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		blockPipeline: pipeline.NewBlockPipeline(
+			pipeline.WithDecodeWorkers(1),
+		),
+	}
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	ls.processBlocksCancel = func() {}
+	ls.processBlocksWG.Go(func() {
+		for range ls.blockPipeline.Results() {
+		}
+	})
+
+	require.NoError(t, ls.Close())
 }

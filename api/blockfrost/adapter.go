@@ -977,6 +977,15 @@ func (a *NodeAdapter) Asset(
 			return AssetInfo{}, err
 		}
 	}
+	// The CIP-26 off-chain registry is independent of the mint transaction,
+	// so this runs whether or not the asset has on-chain metadata.
+	if err := a.populateAssetRegistryMetadata(
+		&info,
+		policyID,
+		assetName,
+	); err != nil {
+		return AssetInfo{}, err
+	}
 	return info, nil
 }
 

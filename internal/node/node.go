@@ -529,6 +529,7 @@ func buildDingoConfig(
 			APIKey:     cfg.KoiosParity.APIKey,
 			Strict:     cfg.KoiosParity.Strict,
 			GraceHours: cfg.KoiosParity.GraceHours,
+			Accounts:   &cfg.KoiosParity.Accounts,
 		}),
 		dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 		dingo.WithOffchainMetadataConfig(
@@ -542,6 +543,22 @@ func buildDingoConfig(
 				BatchSize: cfg.OffchainMetadata.BatchSize,
 				MaxBytes:  cfg.OffchainMetadata.MaxBytes,
 				AllowPrivateAddresses: cfg.OffchainMetadata.
+					AllowPrivateAddresses,
+			},
+		),
+		dingo.WithTokenRegistryConfig(
+			dingo.TokenRegistryConfig{
+				Enabled:   cfg.TokenRegistry.Enabled,
+				SourceURL: cfg.TokenRegistry.SourceURL,
+				Interval:  cfg.TokenRegistry.Interval,
+				RequestTimeout: cfg.TokenRegistry.
+					RequestTimeout,
+				UserAgent: cfg.TokenRegistry.UserAgent,
+				MaxBytes:  cfg.TokenRegistry.MaxBytes,
+				MaxEntryBytes: cfg.TokenRegistry.
+					MaxEntryBytes,
+				StoreLogos: cfg.TokenRegistry.StoreLogos,
+				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,
 			},
 		),

@@ -15,6 +15,7 @@
 package event
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -127,12 +128,23 @@ type EventBus struct {
 	// Async publishing infrastructure
 	asyncQueue chan asyncEvent
 	asyncWg    sync.WaitGroup
-	stopCh     chan struct{}
-	closed     bool
-	stopped    bool
-	stopSeq    uint64
-	stopMu     sync.RWMutex
-	stopOpMu   sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
+	// orderedLanes holds the per-event-type FIFOs behind PublishOrdered,
+	// created lazily on first use and torn down by shutdown. See
+	// ordered.go: they exist because the shared asyncQueue above is
+	// drained by AsyncWorkerPoolSize workers concurrently and so cannot
+	// preserve publisher order.
+	orderedLanes map[EventType]*orderedLane
+	orderedMu    sync.Mutex
+	stopCh       chan struct{}
+	closed       bool
+	// terminalClosing is set before Close begins quiescing the bus. Callback
+	// dispatchers use it to discard events already buffered in their channels;
+	// Stop remains reusable and does not discard buffered callback events.
+	terminalClosing atomic.Bool
+	stopped         bool
+	stopSeq         uint64
+	stopMu          sync.RWMutex
+	stopOpMu        sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
 }
 
 // NewEventBus creates a new EventBus with async worker pool
@@ -208,8 +220,10 @@ type Subscriber interface {
 // channelSubscriber is the in-memory subscriber adapter that preserves the
 // existing channel-based API. Delivery waits for buffer capacity rather than
 // dropping: a subscriber that falls behind backpressures its publishers
-// instead of silently losing events (blinklabs-io/dingo#2932). Close closes
-// the channel so SubscribeFunc goroutines exit.
+// instead of silently losing events (blinklabs-io/dingo#2932). Terminal event
+// bus shutdown may discard queued events before closing the channel so
+// SubscribeFunc goroutines exit without replaying a potentially large backlog
+// into components that are closing; ordinary unsubscribe preserves them.
 type channelSubscriber struct {
 	ch     chan Event
 	logger *slog.Logger
@@ -315,6 +329,31 @@ func (c *channelSubscriber) waitDone() {
 	<-c.done
 }
 
+// waitDoneContext is waitDone bounded by ctx, returning ctx.Err() if the
+// dispatch goroutine is still running when ctx is done. A subscriber with no
+// dispatch goroutine has nothing to wait for and reports success even for an
+// already-canceled ctx.
+func (c *channelSubscriber) waitDoneContext(ctx context.Context) error {
+	if c.done == nil {
+		return nil
+	}
+	select {
+	case <-c.done:
+		return nil
+	case <-ctx.Done():
+		// Recheck: when the handler finishes concurrently with
+		// cancellation both cases are ready and select picks at random,
+		// so reporting ctx.Err() here without looking would turn a
+		// completed teardown into a spurious shutdown error.
+		select {
+		case <-c.done:
+			return nil
+		default:
+			return ctx.Err()
+		}
+	}
+}
+
 // deliverWait hands evt to the subscriber channel, waiting for buffer capacity
 // instead of dropping the event. It returns errChannelSubscriberClosed when
 // the subscriber is closed or the bus stops before the event can be handed
@@ -387,6 +426,10 @@ func (c *channelSubscriber) DeliverBlocking(evt Event) error {
 }
 
 func (c *channelSubscriber) Close() {
+	c.close(false)
+}
+
+func (c *channelSubscriber) close(discardQueued bool) {
 	// Release waiting sends before asking for the write lock; they hold the
 	// read lock, so the write lock would otherwise wait on a wait that only
 	// Close can end.
@@ -399,6 +442,16 @@ func (c *channelSubscriber) Close() {
 		return
 	}
 	c.closed = true
+	if discardQueued {
+		for {
+			select {
+			case <-c.ch:
+			default:
+				close(c.ch)
+				return
+			}
+		}
+	}
 	close(c.ch)
 }
 
@@ -552,6 +605,9 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 			if !ok {
 				return
 			}
+			if e.terminalClosing.Load() {
+				return
+			}
 			e.safeHandlerCall(handlerFunc, evt)
 		}
 	}(
@@ -586,7 +642,7 @@ func (e *EventBus) safeHandlerCall(
 
 // Unsubscribe stops delivery of events for a particular type for an existing subscriber
 func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
-	e.unsubscribe(eventType, subId, false)
+	e.unsubscribe(eventType, subId)
 }
 
 // UnsubscribeAndWait is like Unsubscribe, but for SubscribeFunc/
@@ -614,14 +670,43 @@ func (e *EventBus) UnsubscribeAndWait(
 	eventType EventType,
 	subId EventSubscriberId,
 ) {
-	e.unsubscribe(eventType, subId, true)
+	if chSub := e.unsubscribe(eventType, subId); chSub != nil {
+		chSub.waitDone()
+	}
 }
 
+// UnsubscribeAndWaitContext is UnsubscribeAndWait with the wait for an
+// in-flight handler bounded by ctx, returning ctx.Err() if the handler is
+// still running when ctx is done.
+//
+// The unsubscribe itself is never skipped or bounded: it is synchronous and
+// runs even for an already-canceled ctx, so future deliveries stop either
+// way and only the wait can be cut short. A caller that gets a non-nil error
+// therefore knows the handler may still be executing concurrently with
+// whatever it does next, which is the whole reason to wait -- prefer
+// UnsubscribeAndWait wherever there is no deadline to honor.
+//
+// Use this from a shutdown path that must respect a deadline: plain
+// UnsubscribeAndWait blocks for as long as the handler runs, which lets a
+// single stuck handler overrun a bounded shutdown.
+func (e *EventBus) UnsubscribeAndWaitContext(
+	ctx context.Context,
+	eventType EventType,
+	subId EventSubscriberId,
+) error {
+	if chSub := e.unsubscribe(eventType, subId); chSub != nil {
+		return chSub.waitDoneContext(ctx)
+	}
+	return nil
+}
+
+// unsubscribe removes the subscriber and, when it is a channelSubscriber,
+// closes it and returns it so a caller that needs to can wait for its
+// dispatch goroutine to exit. Returns nil when there is nothing to wait for.
 func (e *EventBus) unsubscribe(
 	eventType EventType,
 	subId EventSubscriberId,
-	wait bool,
-) {
+) *channelSubscriber {
 	e.mu.Lock()
 	var subToClose Subscriber
 	if evtTypeSubs, ok := e.subscribers[eventType]; ok {
@@ -678,11 +763,9 @@ func (e *EventBus) unsubscribe(
 	if chSub != nil {
 		// Close is idempotent, so this is safe even if a concurrent
 		// caller already closed the same subscriber via subToClose above.
-		chSub.Close()
-		if wait {
-			chSub.waitDone()
-		}
+		chSub.close(false)
 	}
+	return chSub
 }
 
 // deliverWithTimeout calls sub.Deliver with a timeout for non-channel
@@ -988,6 +1071,9 @@ func (e *EventBus) shutdown(restart bool) {
 	// duplicate worker pools when called concurrently
 	e.stopOpMu.Lock()
 	defer e.stopOpMu.Unlock()
+	if !restart {
+		e.terminalClosing.Store(true)
+	}
 
 	// Signal quiesce before taking stopMu for write. Publishers park on a
 	// full subscriber buffer or a full async queue while holding stopMu for
@@ -1027,9 +1113,14 @@ func (e *EventBus) shutdown(restart bool) {
 	e.mu.Unlock()
 
 	// Close subscribers outside of lock
+	discardQueued := !restart
 	for _, evtTypeSubs := range subsCopy {
 		for _, sub := range evtTypeSubs {
-			sub.Close()
+			if chSub, ok := sub.(*channelSubscriber); ok {
+				chSub.close(discardQueued)
+			} else {
+				sub.Close()
+			}
 		}
 	}
 
@@ -1061,6 +1152,13 @@ func (e *EventBus) shutdown(restart bool) {
 	if e.metrics != nil {
 		e.metrics.subscribers.Reset()
 	}
+
+	// Every ordered-lane worker watched the stop channel closed above and
+	// has exited (asyncWg.Wait covered them alongside the shared pool), so
+	// the lanes are inert. Drop them: a restart swaps in a new stop channel
+	// and a lane still bound to the old, already-closed one would make its
+	// rebuilt worker exit immediately.
+	e.resetOrderedLanes()
 
 	if !restart {
 		return

@@ -268,6 +268,53 @@ var flagSpecs = []flagSpec{
 		"allow off-chain metadata fetches to private, loopback, and link-local addresses",
 	),
 	boolFlag(
+		"TokenRegistry.Enabled",
+		"token-registry-enabled",
+		`enable the CIP-26 token registry sync (requires storageMode "api")`,
+	),
+	stringFlag(
+		"TokenRegistry.SourceURL",
+		"token-registry-source-url",
+		"",
+		"CIP-26 token registry tarball URL (empty = select by network)",
+	),
+	durationFlag(
+		"TokenRegistry.Interval",
+		"token-registry-interval",
+		"CIP-26 token registry sync interval (0 = default)",
+	),
+	durationFlag(
+		"TokenRegistry.RequestTimeout",
+		"token-registry-request-timeout",
+		"CIP-26 token registry download timeout (0 = default)",
+	),
+	stringFlag(
+		"TokenRegistry.UserAgent",
+		"token-registry-user-agent",
+		"",
+		"CIP-26 token registry HTTP user agent (empty = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxBytes",
+		"token-registry-max-bytes",
+		"CIP-26 token registry max compressed download bytes (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxEntryBytes",
+		"token-registry-max-entry-bytes",
+		"CIP-26 token registry max bytes per mapping (0 = default)",
+	),
+	boolFlag(
+		"TokenRegistry.StoreLogos",
+		"token-registry-store-logos",
+		"persist CIP-26 token registry logos (roughly 90% of registry bytes)",
+	),
+	boolFlag(
+		"TokenRegistry.AllowPrivateAddresses",
+		"token-registry-allow-private-addresses",
+		"allow token registry sync from private, loopback, and link-local addresses",
+	),
+	boolFlag(
 		"Midnight.Enabled",
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
@@ -351,6 +398,21 @@ var flagSpecs = []flagSpec{
 		"KoiosParity.GraceHours",
 		"koios-parity-grace-hours",
 		"hours after an epoch closes during which a missing Dingo-side row is treated as sync lag, not a failure",
+	),
+	boolFlag(
+		"KoiosParity.Accounts",
+		"koios-parity-accounts",
+		"also validate #3097 per-account exact reward parity for every epoch (default: true)",
+	),
+	intFlag(
+		"KoiosParity.AccountChunkSize",
+		"koios-parity-account-chunk-size",
+		"max stake addresses per /account_reward_history request (0 = package default, 100)",
+	),
+	intFlag(
+		"KoiosParity.AccountChunkMaxBytes",
+		"koios-parity-account-chunk-max-bytes",
+		"max encoded body size per /account_reward_history request (0 = package default, 32KiB)",
 	),
 
 	// Peer governance
@@ -540,6 +602,11 @@ var flagSpecs = []flagSpec{
 		"BlockPipelineEnabled",
 		"block-pipeline-enabled",
 		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default off)",
+	),
+	boolFlag(
+		"BlockPipelineValidateEnabled",
+		"block-pipeline-validate-enabled",
+		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
 	),
 
 	// Block production

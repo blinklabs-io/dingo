@@ -27,10 +27,10 @@ import (
 // participate in a wider unit of work.
 func (d *Database) CreateDrep(txn *Txn, drep *models.Drep) error {
 	if txn != nil {
-		return d.metadata.CreateDrep(txn.Metadata(), drep)
+		return d.governanceStore().CreateDrep(txn.Metadata(), drep)
 	}
 	return d.MetadataTxn(true).Do(func(t *Txn) error {
-		return d.metadata.CreateDrep(t.Metadata(), drep)
+		return d.governanceStore().CreateDrep(t.Metadata(), drep)
 	})
 }
 
@@ -51,7 +51,7 @@ func (d *Database) RestoreDrepStateAtSlot(
 			}
 		}()
 	}
-	if err := d.metadata.RestoreDrepStateAtSlot(
+	if err := d.governanceStore().RestoreDrepStateAtSlot(
 		slot,
 		txn.Metadata(),
 	); err != nil {
@@ -81,7 +81,7 @@ func (d *Database) GetDrep(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	ret, err := d.metadata.GetDrep(cred, includeInactive, txn.Metadata())
+	ret, err := d.governanceStore().GetDrep(cred, includeInactive, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (d *Database) GetDrepByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	ret, err := d.metadata.GetDrepByCredential(
+	ret, err := d.governanceStore().GetDrepByCredential(
 		credentialTag, cred, includeInactive, txn.Metadata(),
 	)
 	if err != nil {
@@ -122,7 +122,7 @@ func (d *Database) GetActiveDreps(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetActiveDreps(txn.Metadata())
+	return d.governanceStore().GetActiveDreps(txn.Metadata())
 }
 
 // InsertDrepIfAbsent inserts a minimal DRep row when no record exists
@@ -148,7 +148,7 @@ func (d *Database) InsertDrepIfAbsent(
 			}
 		}()
 	}
-	if err := d.metadata.InsertDrepIfAbsent(
+	if err := d.governanceStore().InsertDrepIfAbsent(
 		credentialTag,
 		cred,
 		slot,
@@ -185,7 +185,7 @@ func (d *Database) GetDRepVotingPower(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetDRepVotingPower(
+	return d.governanceStore().GetDRepVotingPower(
 		credentialTag,
 		drepCredential,
 		expiryEpoch,
@@ -206,7 +206,7 @@ func (d *Database) GetDRepDelegators(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetDRepDelegators(
+	return d.governanceStore().GetDRepDelegators(
 		credentialTag,
 		drepCredential,
 		txn.Metadata(),
@@ -225,7 +225,7 @@ func (d *Database) GetDRepVotingPowerBatch(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	result, err := d.metadata.GetDRepVotingPowerBatch(
+	result, err := d.governanceStore().GetDRepVotingPowerBatch(
 		drepCredentials,
 		expiryEpoch,
 		txn.Metadata(),
@@ -253,7 +253,7 @@ func (d *Database) GetDRepVotingPowerByType(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	result, err := d.metadata.GetDRepVotingPowerByType(
+	result, err := d.governanceStore().GetDRepVotingPowerByType(
 		drepTypes,
 		expiryEpoch,
 		txn.Metadata(),
@@ -288,7 +288,7 @@ func (d *Database) UpdateDRepActivity(
 			}
 		}()
 	}
-	if err := d.metadata.UpdateDRepActivity(
+	if err := d.governanceStore().UpdateDRepActivity(
 		credentialTag,
 		drepCredential,
 		activityEpoch,
@@ -319,5 +319,5 @@ func (d *Database) GetExpiredDReps(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetExpiredDReps(epoch, txn.Metadata())
+	return d.governanceStore().GetExpiredDReps(epoch, txn.Metadata())
 }

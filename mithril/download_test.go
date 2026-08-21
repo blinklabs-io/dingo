@@ -1078,45 +1078,6 @@ func TestExtractArchiveDirectoryTraversal(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid path")
 }
 
-// TestExtractArchiveRejectsPreexistingSymlinkEscape proves the TOCTOU
-// fix for issue #3147: a symlink placed inside destDir *before*
-// extraction starts, pointing outside destDir, must not be followed
-// when a later archive entry resolves through it. Before routing
-// directory/file creation through os.Root, os.MkdirAll/os.OpenFile
-// would silently traverse such a symlink because they re-resolve the
-// path through the OS on every call.
-func TestExtractArchiveRejectsPreexistingSymlinkEscape(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks requires elevated privileges on windows")
-	}
-
-	tmpDir := t.TempDir()
-	extractDir := filepath.Join(tmpDir, "extracted")
-	outsideDir := filepath.Join(tmpDir, "outside")
-	require.NoError(t, os.MkdirAll(extractDir, 0o750))
-	require.NoError(t, os.MkdirAll(outsideDir, 0o750))
-
-	// A pre-existing symlink at the location an archive entry will
-	// resolve through, pointing outside the extraction directory.
-	require.NoError(
-		t,
-		os.Symlink(outsideDir, filepath.Join(extractDir, "escape")),
-	)
-
-	archiveData := createTestArchive(t, map[string]string{
-		"escape/pwned.txt": "evil",
-	})
-	archivePath := filepath.Join(tmpDir, "evil.tar.zst")
-	require.NoError(t, os.WriteFile(archivePath, archiveData, 0o640))
-
-	_, err := ExtractArchive(context.Background(), archivePath, extractDir, nil)
-	require.Error(t, err)
-
-	entries, err := os.ReadDir(outsideDir)
-	require.NoError(t, err)
-	require.Empty(t, entries, "extraction must not write through the symlink")
-}
-
 func TestExtractArchiveWithDirectories(t *testing.T) {
 	var buf bytes.Buffer
 

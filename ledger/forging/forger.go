@@ -82,11 +82,12 @@ type BlockForger struct {
 	slotTracker *SlotTracker
 
 	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
-	leiosChecker  LeiosProduceChecker
-	leiosEBCaster EndorserBlockBroadcaster
-	leiosMempool  MempoolProvider
-	leiosCerts    LeiosCertificateProvider
-	leiosParent   LeiosParentAnnouncementProvider
+	leiosChecker   LeiosProduceChecker
+	leiosEBCaster  EndorserBlockBroadcaster
+	leiosMempool   MempoolProvider
+	leiosValidator TxValidator
+	leiosCerts     LeiosCertificateProvider
+	leiosParent    LeiosParentAnnouncementProvider
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -143,8 +144,8 @@ type ConfirmedTxRemover interface {
 	RemoveTxsByHash(hashes []string)
 }
 
-// BlockForgedObserver observes blocks after they are successfully built,
-// before chain adoption is attempted.
+// BlockForgedObserver observes blocks after they are successfully built and
+// chain adoption has been attempted.
 type BlockForgedObserver func(
 	block ledger.Block,
 	cbor []byte,
@@ -269,6 +270,10 @@ type ForgerConfig struct {
 	// LeiosMempool provides transactions for EB building. May reuse the
 	// same MempoolProvider as the RB builder.
 	LeiosMempool MempoolProvider
+	// LeiosTxValidator re-validates endorser-block transactions against one
+	// coherent ledger snapshot before the EB is broadcast. Production wiring
+	// supplies LedgerState; nil preserves compatibility for test embedders.
+	LeiosTxValidator TxValidator
 	// LeiosCertificateProvider supplies certified EBs for Dijkstra CertRBs.
 	LeiosCertificateProvider LeiosCertificateProvider
 	// LeiosParentAnnouncementProvider supplies the EB hash announced by the
@@ -317,6 +322,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosChecker:     cfg.LeiosProduceChecker,
 		leiosEBCaster:    cfg.LeiosEBBroadcaster,
 		leiosMempool:     cfg.LeiosMempool,
+		leiosValidator:   cfg.LeiosTxValidator,
 		leiosCerts:       cfg.LeiosCertificateProvider,
 		leiosParent:      cfg.LeiosParentAnnouncementProvider,
 		blockValidator:   cfg.BlockValidator,
@@ -347,6 +353,11 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		}
 		if cfg.SlotClock == nil {
 			return nil, errors.New("production mode requires slot clock")
+		}
+		if cfg.LeiosProduceChecker != nil && cfg.LeiosTxValidator == nil {
+			return nil, errors.New(
+				"production Leios forging requires transaction validator",
+			)
 		}
 	}
 	if cfg.LeiosProduceChecker != nil {
@@ -771,6 +782,11 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			float64(len(block.Transactions())),
 		)
 	}
+
+	// Attempt local adoption immediately after building and validation. Keep
+	// observability callbacks out of this critical path: subscribers may be
+	// slow, while the block's parent must still be the active chain tip.
+	addErr := f.blockBroadcaster.AddBlock(block, blockCbor)
 	if f.blockForged != nil {
 		func() {
 			defer func() {
@@ -785,13 +801,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
 		}()
 	}
-
-	// Add block to chain and broadcast
-	if err := f.blockBroadcaster.AddBlock(
-		block, blockCbor,
-	); err != nil {
+	if addErr != nil {
 		f.incCouldNotForge()
-		return fmt.Errorf("failed to add block: %w", err)
+		return fmt.Errorf("failed to add block: %w", addErr)
 	}
 
 	// AddBlock accepted the block, so its transactions are confirmed. Remove
@@ -1028,6 +1040,18 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		}
 		return nil, nil
 	}
+	validatedTxs, err := selectValidLeiosTransactions(txs, f.leiosValidator)
+	if err != nil {
+		return nil, fmt.Errorf("validate leios EB transactions: %w", err)
+	}
+	txs = validatedTxs
+	if len(txs) == 0 {
+		f.logger.Debug("leios EB skipped: no valid transactions", "slot", slot)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("no_valid_transactions").Inc()
+		}
+		return nil, nil
+	}
 
 	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
 	if err != nil {
@@ -1069,13 +1093,71 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	}, nil
 }
 
+// selectValidLeiosTransactions re-validates an ordered mempool snapshot with
+// the same UTxO overlay semantics used at admission. Parent outputs are exposed
+// only after the parent passes, so rejecting a parent also rejects descendants
+// that depend on it. LedgerState pins the whole pass to one publication through
+// TxValidationSessionProvider.
+func selectValidLeiosTransactions(
+	txs []MempoolTransaction,
+	validator TxValidator,
+) ([]MempoolTransaction, error) {
+	if validator == nil {
+		return txs, nil
+	}
+	selected := make([]MempoolTransaction, 0, len(txs))
+	err := withTxValidationSession(
+		validator,
+		func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+		) error {
+			consumed := make(map[string]struct{})
+			created := make(map[string]lcommon.Utxo)
+			for _, mempoolTx := range txs {
+				// The EB wire reference is the transaction's only representation
+				// in this slot. Do not expose outputs from a transaction that the
+				// manifest builder will later drop as unrepresentable.
+				if !validLeiosTransactionReference(mempoolTx) {
+					continue
+				}
+				tx, err := decodeMempoolTx(mempoolTx)
+				if err != nil || validate(tx, consumed, created) != nil {
+					continue
+				}
+				selected = append(selected, mempoolTx)
+				for _, input := range tx.Consumed() {
+					key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+					consumed[key] = struct{}{}
+				}
+				for _, utxo := range tx.Produced() {
+					key := fmt.Sprintf(
+						"%s:%d", utxo.Id.Id().String(), utxo.Id.Index(),
+					)
+					created[key] = utxo
+				}
+			}
+			if !stillCurrent() {
+				return errTxValidationSnapshotChanged
+			}
+			return nil
+		},
+	)
+	return selected, err
+}
+
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
 // Transactions with invalid hex hashes, non-32-byte hashes, zero sizes,
 // or sizes exceeding uint16 are silently dropped. Returns an error only
 // when no valid references remain after filtering.
 func buildLeiosEB(
 	txs []MempoolTransaction,
-) (cbor []byte, hash []byte, bodies [][]byte, err error) {
+) (
+	cbor []byte,
+	hash []byte,
+	bodies [][]byte,
+	err error,
+) {
 	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
 	// bodies holds each referenced transaction's raw CBOR, in the same order
 	// as refs, so the endorser block can serve them over leios-fetch. A
@@ -1083,17 +1165,13 @@ func buildLeiosEB(
 	// keeping body i aligned with reference i.
 	bodies = make([][]byte, 0, len(txs))
 	for _, tx := range txs {
-		raw, hexErr := hex.DecodeString(tx.Hash)
-		if hexErr != nil || len(raw) != 32 {
-			continue
-		}
-		sz := len(tx.Cbor)
-		if sz == 0 || sz > math.MaxUint16 {
+		raw, ok := validLeiosTransactionHash(tx.Hash)
+		if !ok || len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.NewBlake2b256(raw),
-			TransactionSize: uint16(sz), // #nosec G115 -- bounded above
+			TransactionSize: uint16(len(tx.Cbor)), // #nosec G115 -- bounded above
 		})
 		bodies = append(bodies, tx.Cbor)
 	}
@@ -1107,6 +1185,16 @@ func buildLeiosEB(
 	}
 	h := lcommon.Blake2b256Hash(ebCbor)
 	return ebCbor, h.Bytes(), bodies, nil
+}
+
+func validLeiosTransactionHash(hash string) ([]byte, bool) {
+	raw, err := hex.DecodeString(hash)
+	return raw, err == nil && len(raw) == 32
+}
+
+func validLeiosTransactionReference(tx MempoolTransaction) bool {
+	_, hashOK := validLeiosTransactionHash(tx.Hash)
+	return hashOK && len(tx.Cbor) > 0 && len(tx.Cbor) <= math.MaxUint16
 }
 
 // modeString returns a string representation of the forging mode.

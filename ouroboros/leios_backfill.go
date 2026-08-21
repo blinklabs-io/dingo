@@ -115,10 +115,10 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		data.completeTxCache() {
 		return nil
 	}
-	if o.ConnManager == nil {
+	if o.connManager == nil {
 		return errors.New("leios backfill: no connection manager")
 	}
-	connIds := o.ConnManager.LeiosFetchConnectionIds()
+	connIds := o.connManager.LeiosFetchConnectionIds()
 	if len(connIds) == 0 {
 		return errors.New("leios backfill: no leios-fetch connection available")
 	}
@@ -139,7 +139,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	)
 	var lastErr error
 	for _, connId := range order {
-		conn := o.ConnManager.GetConnectionById(connId)
+		conn := o.connManager.GetConnectionById(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue

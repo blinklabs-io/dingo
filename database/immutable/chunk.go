@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 )
@@ -28,7 +27,7 @@ const (
 )
 
 type chunk struct {
-	file         *os.File
+	file         entryReader
 	secondary    *secondaryIndex
 	currentEntry *secondaryIndexEntry
 	nextEntry    *secondaryIndexEntry
@@ -39,18 +38,17 @@ func newChunk() *chunk {
 	return &chunk{}
 }
 
-func (c *chunk) Open(path string, secondary *secondaryIndex) error {
-	f, err := os.Open(path)
+// Open takes an already-open chunk file rather than a path so the caller
+// decides how it was resolved — by name, or through a directory handle that
+// binds the read to a directory somebody else cannot repoint.
+func (c *chunk) Open(f entryReader, secondary *secondaryIndex) error {
+	c.file = f
+	c.secondary = secondary
+	size, err := f.Size()
 	if err != nil {
 		return err
 	}
-	c.file = f
-	c.secondary = secondary
-	if stat, err := f.Stat(); err != nil {
-		return err
-	} else {
-		c.fileSize = stat.Size()
-	}
+	c.fileSize = size
 	currentEntry, err := secondary.Next()
 	if err != nil {
 		return err

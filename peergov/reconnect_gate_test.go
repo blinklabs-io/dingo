@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -48,7 +49,7 @@ func newReconnectGateTestGovernor(t *testing.T, threshold int) *PeerGovernor {
 	pg.ctx = t.Context()
 	pg.stopCh = make(chan struct{})
 	pg.mu.Unlock()
-	t.Cleanup(pg.Stop)
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 	return pg
 }
 

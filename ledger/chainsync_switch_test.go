@@ -474,7 +474,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 		},
 	))
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -525,7 +525,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
 	}, nil)
@@ -1325,7 +1325,7 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		},
 	}
 
-	err := ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -1785,7 +1785,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -1833,7 +1833,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
 	}, nil)
@@ -1889,11 +1889,69 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1, nil)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	assert.Equal(t, connId2, requestedConn)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
 	assert.Equal(t, 1, testChain.HeaderCount())
+}
+
+// TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection asserts a timeout
+// retry moves the blockfetch selection to the connection it retries on.
+// nextBlockfetchConnId prefers selectedBlockfetchConnId, and the
+// batch-completion continuation uses it to choose the next batch's connection,
+// so a selection left on the timed-out peer recovers one batch from the working
+// peer and sends the next straight back to the one that just timed out.
+func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("hdr-retarget-1")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+
+	var requestedConn ouroboros.ConnectionId
+	ls := &LedgerState{
+		chain:                  testChain,
+		activeBlockfetchConnId: connId1,
+		// Starts on the connection that is about to time out, so the
+		// assertion below cannot pass without the retarget.
+		selectedBlockfetchConnId: connId1,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &connId2
+			},
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ ocommon.Point,
+			) error {
+				requestedConn = connId
+				return nil
+			},
+		},
+	}
+
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
+
+	require.Equal(t, connId2, requestedConn)
+	assert.Equal(
+		t, connId2, ls.selectedBlockfetchConnId,
+		"the selection must follow the retry, so the next batch does not "+
+			"return to the timed-out connection",
+	)
 }
 
 func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
@@ -1913,7 +1971,7 @@ func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId, nil)
+	handleBlockfetchTimeoutForTest(ls, connId, nil)
 
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
 	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
@@ -1972,7 +2030,7 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1, nil)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	require.Equal(
 		t,

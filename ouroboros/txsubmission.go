@@ -169,7 +169,7 @@ func (o *Ouroboros) instrumentTxsubmissionRequestTxs(
 func (o *Ouroboros) txsubmissionClientStart(
 	connId ouroboros.ConnectionId,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
@@ -182,7 +182,7 @@ func (o *Ouroboros) txsubmissionClientStart(
 	}
 	// Register only after all required connection state has been verified. This
 	// avoids leaving a stale consumer behind when startup cannot proceed.
-	if consumer := o.Mempool.NewConsumer(connId); consumer == nil {
+	if consumer := o.mempool.NewConsumer(connId); consumer == nil {
 		return mempool.ErrMempoolStopped
 	}
 	tx.Client.Init()
@@ -194,7 +194,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 ) error {
 	// Start async loop to request transactions from the peer's mempool
 	go func() {
-		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 		if conn == nil {
 			return
 		}
@@ -206,7 +206,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 		defer backoffTimer.Stop()
 
 		for {
-			headroom, limitAdmission := o.Mempool.(mempool.AdmissionHeadroom)
+			headroom, limitAdmission := o.mempool.(mempool.AdmissionHeadroom)
 			requestCount := txsubmissionRequestTxIdsCount
 			if limitAdmission {
 				if !headroom.WaitForAdmissionHeadroom(
@@ -416,7 +416,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					if limitAdmission {
 						err = retryTxsubmissionAdmission(
 							func() error {
-								return o.Mempool.AddTransaction(
+								return o.mempool.AddTransaction(
 									uint(txBody.EraId),
 									txBody.TxBody,
 								)
@@ -430,7 +430,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 							o.recordTxsubmissionAdmissionRetry,
 						)
 					} else {
-						err = o.Mempool.AddTransaction(
+						err = o.mempool.AddTransaction(
 							uint(txBody.EraId),
 							txBody.TxBody,
 						)
@@ -493,7 +493,7 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 ) ([]txsubmission.TxIdAndSize, error) {
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxIdAndSize{}
-	consumer := o.Mempool.FindConsumer(connId)
+	consumer := o.mempool.FindConsumer(connId)
 	if consumer == nil {
 		return nil, fmt.Errorf(
 			"no mempool consumer for connection: %s",
@@ -567,7 +567,7 @@ func (o *Ouroboros) txsubmissionClientRequestTxs(
 ) ([]txsubmission.TxBody, error) {
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxBody{}
-	consumer := o.Mempool.FindConsumer(connId)
+	consumer := o.mempool.FindConsumer(connId)
 	if consumer == nil {
 		return nil, fmt.Errorf(
 			"no mempool consumer for connection: %s",

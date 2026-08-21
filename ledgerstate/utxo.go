@@ -16,10 +16,12 @@ package ledgerstate
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -637,7 +639,55 @@ func parseUTxOsFromFileWithProgress(
 		return 0, fmt.Errorf("reading tvar file: %w", err)
 	}
 	defer cleanup()
+	return parseUTxOsFromMapped(data, callback, progress)
+}
 
+// parseUTxOsFromOpenFileWithProgress is parseUTxOsFromFileWithProgress reading
+// an already-open file, for callers that resolved it through a directory handle
+// and must not have the name resolved again here. The caller closes f.
+func parseUTxOsFromOpenFileWithProgress(
+	f *os.File,
+	expectedDigest string,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
+	data, cleanup, err := mmapFile(f)
+	if err != nil {
+		return 0, fmt.Errorf("reading tvar file: %w", err)
+	}
+	defer cleanup()
+	// Checked over the mapping, not over the descriptor beforehand. The table
+	// is gigabytes, so it cannot be read into a buffer the way the state file
+	// is; mapping it once and hashing what was mapped is the nearest thing —
+	// the decoder below walks these same bytes, so nothing re-reads the file
+	// between the check and the parse.
+	//
+	// An empty digest is the unsigned path: v1, and any tree nothing vouched
+	// for. Those have nothing to check against, not permission to skip a check
+	// they have.
+	if expectedDigest != "" {
+		sum := sha256.Sum256(data)
+		if got := hex.EncodeToString(sum[:]); got != expectedDigest {
+			return 0, fmt.Errorf(
+				"%w: computed %s, signed %s",
+				ErrTableDigestMismatch, got, expectedDigest,
+			)
+		}
+	}
+	return parseUTxOsFromMapped(data, callback, progress)
+}
+
+// ErrTableDigestMismatch reports a UTxO-HD table whose mapped contents are not
+// the contents the caller's digest covers.
+var ErrTableDigestMismatch = errors.New(
+	"UTxO table is not the file the digest covers",
+)
+
+func parseUTxOsFromMapped(
+	data []byte,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
 	// Parse outer array header using StreamDecoder
 	decoder, err := cbor.NewStreamDecoder(data)
 	if err != nil {

@@ -442,12 +442,12 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	}
 
 	decoded, err := verifyArchiveBlock(
-		(uint)(blockType), blockBody, slot, hash,
+		uint(blockType), blockBody, slot, hash,
 	)
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
-	era, err := blockEraFromHeader(decoded, (uint)(blockType))
+	era, err := blockEraFromHeader(decoded, uint(blockType))
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}

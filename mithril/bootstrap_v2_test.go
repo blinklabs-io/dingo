@@ -24,16 +24,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -971,6 +973,100 @@ func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {
 	assert.Equal(t, candidateArchive, result.AncillaryArchivePath)
 }
 
+// TestVerifyAncillaryExtractionIsAboutTheInspectedTree stages a substitution of
+// the ancillary cache directory after ledgerDir has read and bound it, and
+// covers every window after that: the verification that decides whether the
+// cache is reused, and the ledger-state read the import performs.
+//
+// One handle spans all of them. So a directory swapped in behind the name is
+// neither verified nor loaded — the manifest check still describes the tree
+// that was inspected, and so do the bytes the import reads. Re-resolving the
+// name at each step would instead leave each step describing a possibly
+// different tree, which is only safe for as long as every one of those steps
+// happens to re-check the signature.
+func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	cfg := BootstrapConfig{
+		VerifyCertificateChain:   true,
+		AncillaryVerificationKey: mithrilJSONHexKey(t, pub),
+		Logger:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	downloadDir := t.TempDir()
+	candidateDir := filepath.Join(downloadDir, "ancillary-abc123")
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(candidateDir, "ledger", "100"), 0o750,
+	))
+	state := []byte("ledger state data")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(candidateDir, "ledger", "100", "state"), state, 0o640,
+	))
+	digest := sha256.Sum256(state)
+	manifest := ancillaryManifest{
+		Data: map[string]string{
+			"ledger/100/state": hex.EncodeToString(digest[:]),
+		},
+	}
+	manifest.Signature = hex.EncodeToString(
+		ed25519.Sign(priv, manifest.computeHash()),
+	)
+	manifestJSON, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(candidateDir, ancillaryManifestFilename),
+		manifestJSON,
+		0o640,
+	))
+
+	cached := ledgerDir(candidateDir)
+	require.NotNil(t, cached, "the cached tree is reusable as it stands")
+	t.Cleanup(cached.Close)
+	require.Equal(t, candidateDir, cached.Path())
+	_, verifyErr := verifyAncillaryExtraction(cfg, cached)
+	require.NoError(t, verifyErr)
+
+	// A writer takes the name for ledger state of their own, after the cache
+	// check has run and while verification and the import are still to come.
+	theirs := filepath.Join(downloadDir, "theirs", "ledger", "100")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(theirs, "state"), []byte("theirs"), 0o640,
+	))
+	requireDirectorySwap(
+		t, candidateDir, filepath.Join(downloadDir, "moved-aside"),
+	)
+	requireDirectorySwap(
+		t, filepath.Join(downloadDir, "theirs"), candidateDir,
+	)
+
+	// The premise: the name denotes the writer's tree now, so anything that
+	// resolved it afresh would be reading theirs.
+	byName, err := os.ReadFile(
+		filepath.Join(candidateDir, "ledger", "100", "state"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("theirs"), byName,
+		"the substitution must be observable through the name, "+
+			"or this test proves nothing")
+
+	// Verification still describes the tree that was inspected.
+	_, verifyErr = verifyAncillaryExtraction(cfg, cached)
+	require.NoError(t, verifyErr,
+		"verification goes through the handle, so a tree swapped in behind "+
+			"the name is not what it is about")
+
+	// And so does the read the import performs: discovery opens the state file
+	// itself, from the verified tree, so what is parsed is what was signed.
+	files, err := ledgerstate.OpenSnapshotAtOrBefore(cached.Root(), ^uint64(0))
+	require.NoError(t, err)
+	defer files.Close()
+	loaded, err := io.ReadAll(files.State)
+	require.NoError(t, err)
+	assert.Equal(t, state, loaded,
+		"the import must read the tree the manifest was verified against")
+}
+
 func TestBootstrapV2Resume(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 2})
 	downloadDir := t.TempDir()
@@ -1011,66 +1107,123 @@ func TestBootstrapUnsupportedBackend(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported Mithril backend")
 }
 
-// TestDownloadImmutablesRejectsPreexistingSymlinkEscape proves the
-// TOCTOU fix for issue #3147: a symlink placed where the immutable
-// directory should be created, pointing outside downloadDir, must not
-// be followed. Before routing this creation through os.Root,
-// os.MkdirAll would silently succeed by following the symlink (its
-// target already exists as a directory) instead of failing, so a
-// later write into "immutable" would land outside downloadDir.
-func TestDownloadImmutablesRejectsPreexistingSymlinkEscape(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks requires elevated privileges on windows")
-	}
+// TestOpenImmutableRootRefusesSymlinkedDir covers the immutable directory
+// itself being a symlink planted before the download starts.
+//
+// Extraction refuses to write through it, but the retry path removes a failed
+// trio by name, and removing `<extract>/immutable/00000.chunk` resolves
+// `immutable` on the way to the file. Following it there would delete
+// somebody else's files as the cost of a failed download, so the symlink is
+// refused up front instead.
+func TestOpenImmutableRootRefusesSymlinkedDir(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	canary := filepath.Join(outside, "00000.chunk")
+	require.NoError(t, os.WriteFile(canary, []byte("original"), 0o640))
 
-	downloadDir := t.TempDir()
-	outsideDir := t.TempDir()
-
-	artifact := &CardanoDatabaseSnapshot{Hash: "deadbeef"}
-	extractDir := filepath.Join(downloadDir, "immutable-"+artifact.Hash)
+	extractDir := filepath.Join(root, "extract")
 	require.NoError(t, os.MkdirAll(extractDir, 0o750))
-	require.NoError(
-		t,
-		os.Symlink(outsideDir, filepath.Join(extractDir, "immutable")),
-	)
+	requireSymlinkSupport(t, outside, filepath.Join(extractDir, "immutable"))
 
-	err := downloadImmutables(
-		context.Background(),
-		BootstrapConfig{},
-		artifact,
-		map[string]string{},
-		downloadDir,
-		extractDir,
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "creating immutable directory")
+	_, _, err := openImmutableRoot(extractDir)
+	require.ErrorIs(t, err, ErrExtractUnsafePath)
 
-	entries, err := os.ReadDir(outsideDir)
-	require.NoError(t, err)
-	require.Empty(t, entries, "must not write through the symlink")
+	data, readErr := os.ReadFile(canary)
+	require.NoError(t, readErr)
+	assert.Equal(t, "original", string(data))
 }
 
-// TestDownloadImmutablesRejectsPreexistingArchiveDirSymlinkEscape is the
-// archiveDir counterpart to
-// TestDownloadImmutablesRejectsPreexistingSymlinkEscape: a symlink
-// placed where the immutable-archives scratch directory should be
-// created, pointing outside downloadDir, must not be followed either.
-func TestDownloadImmutablesRejectsPreexistingArchiveDirSymlinkEscape(
-	t *testing.T,
-) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks requires elevated privileges on windows")
-	}
+// TestRemoveImmutableTrioStaysInsideRoot pins the cleanup itself: removal
+// resolves through the immutable directory's handle, so it can only unlink
+// files in the directory the download wrote into.
+func TestRemoveImmutableTrioStaysInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	canary := filepath.Join(outside, "00000.chunk")
+	require.NoError(t, os.WriteFile(canary, []byte("original"), 0o640))
 
+	extractDir := filepath.Join(root, "extract")
+	immutableDir, immutableRoot, err := openImmutableRoot(extractDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = immutableRoot.Close() })
+	require.Equal(t, filepath.Join(extractDir, "immutable"), immutableDir)
+
+	for _, ext := range immutableFileExtensions {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(immutableDir, "00000."+ext),
+			[]byte("partial"),
+			0o640,
+		))
+	}
+	// A symlink appearing after the handle was opened cannot redirect the
+	// removal, because the handle refers to the directory rather than to a
+	// name that can be repointed.
+	requireDirectorySwap(t, immutableDir, filepath.Join(root, "moved"))
+	requireSymlinkSupport(t, outside, immutableDir)
+
+	removeImmutableTrio(immutableRoot, 0)
+
+	data, readErr := os.ReadFile(canary)
+	require.NoError(t, readErr)
+	assert.Equal(t, "original", string(data),
+		"cleanup must not follow a symlink at the immutable directory")
+
+	for _, ext := range immutableFileExtensions {
+		_, statErr := os.Stat(
+			filepath.Join(root, "moved", "00000."+ext),
+		)
+		assert.True(t, os.IsNotExist(statErr),
+			"the failed trio must be removed from the real directory")
+	}
+}
+
+// TestOpenImmutableRootRefusesSymlinkedExtractDir covers the extraction
+// directory itself being a symlink.
+//
+// Extraction refuses a symlinked destination, but the v2 download creates and
+// opens the immutable directory before ExtractArchive is ever called, so
+// nothing had checked the extraction directory by that point — the accumulation
+// root was created through the symlink first, and only the later extraction
+// noticed.
+func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+
+	extractDir := filepath.Join(root, "extract")
+	requireSymlinkSupport(t, outside, extractDir)
+
+	_, _, err := openImmutableRoot(extractDir)
+	require.ErrorIs(t, err, ErrExtractUnsafePath)
+
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries,
+		"nothing may be created through a symlinked extraction directory")
+}
+
+// TestDownloadImmutablesRefusesSymlinkedArchiveDir covers the immutable
+// archive scratch directory itself being a symlink planted before the
+// download starts.
+//
+// Unlike immutableDir (openImmutableRoot, above), archiveDir isn't kept
+// open as a handle for the rest of the function — every actual write
+// into it goes through DownloadSnapshot, which anchors its own Root at
+// DestDir. This pins that the initial creation step alone already
+// refuses to follow the symlink, rather than silently succeeding the
+// way a plain os.MkdirAll would (its target already exists as a
+// directory).
+func TestDownloadImmutablesRefusesSymlinkedArchiveDir(t *testing.T) {
 	downloadDir := t.TempDir()
-	outsideDir := t.TempDir()
+	outside := t.TempDir()
 
 	artifact := &CardanoDatabaseSnapshot{Hash: "deadbeef"}
 	extractDir := filepath.Join(downloadDir, "immutable-"+artifact.Hash)
 	archiveRelDir := "immutable-archives-" + truncateDigest(artifact.Hash)
-	require.NoError(
-		t,
-		os.Symlink(outsideDir, filepath.Join(downloadDir, archiveRelDir)),
+	requireSymlinkSupport(
+		t, outside, filepath.Join(downloadDir, archiveRelDir),
 	)
 
 	err := downloadImmutables(
@@ -1084,7 +1237,70 @@ func TestDownloadImmutablesRejectsPreexistingArchiveDirSymlinkEscape(
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "creating archive directory")
 
-	entries, err := os.ReadDir(outsideDir)
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "must not write through the symlink")
+}
+
+// TestBootstrapV2CarriesTheVerifiedAncillaryHandle pins that the handle a
+// verified result carries is the one the manifest was checked through.
+//
+// The manifest check happens inside downloadAncillaryV2. If that returned the
+// directory's name and the caller reopened it, a tree swapped in between would
+// be carried as AncillaryVerified while nothing had verified it — the flag
+// would be a claim about a directory the check never saw.
+func TestBootstrapV2CarriesTheVerifiedAncillaryHandle(t *testing.T) {
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	downloadDir := t.TempDir()
+
+	result, err := Bootstrap(
+		context.Background(), fixture.bootstrapConfig(downloadDir),
+	)
 	require.NoError(t, err)
-	require.Empty(t, entries, "must not write through the symlink")
+	t.Cleanup(result.CloseHandles)
+	require.True(t, result.AncillaryVerified,
+		"a verified bootstrap must report its ancillary tree as verified")
+	require.NotNil(t, result.AncillaryRoot)
+
+	verified, err := ledgerstate.OpenSnapshotAtOrBefore(
+		result.AncillaryRoot, ^uint64(0),
+	)
+	require.NoError(t, err)
+	want, err := io.ReadAll(verified.State)
+	verified.Close()
+	require.NoError(t, err)
+
+	// A writer takes the ancillary directory's name after the bootstrap
+	// returned, in the window before the import reads it.
+	theirs := filepath.Join(downloadDir, "theirs", "ledger", "100")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(theirs, "state"), []byte("theirs"), 0o640,
+	))
+	requireDirectorySwap(
+		t, result.AncillaryDir, filepath.Join(downloadDir, "moved-aside"),
+	)
+	requireDirectorySwap(
+		t, filepath.Join(downloadDir, "theirs"), result.AncillaryDir,
+	)
+
+	// The premise: the name denotes the writer's tree now.
+	byName, err := os.ReadFile(
+		filepath.Join(result.AncillaryDir, "ledger", "100", "state"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("theirs"), byName,
+		"the substitution must be observable through the name, or this "+
+			"test proves nothing")
+
+	// The carried handle still refers to the tree the manifest covered.
+	after, err := ledgerstate.OpenSnapshotAtOrBefore(
+		result.AncillaryRoot, ^uint64(0),
+	)
+	require.NoError(t, err)
+	defer after.Close()
+	got, err := io.ReadAll(after.State)
+	require.NoError(t, err)
+	assert.Equal(t, want, got,
+		"AncillaryVerified must describe the tree the handle refers to")
 }

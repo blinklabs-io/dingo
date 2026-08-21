@@ -393,12 +393,102 @@ func checkResultErr(result *koiosparity.CheckResult) error {
 	}
 }
 
+// resolveGraceHours reads the --grace-hours flag and rejects a negative
+// value, mirroring internal/config/validate.go's identical check on
+// koiosParity.graceHours ("must not be negative; 0 selects the default of
+// 24"). This matters beyond input hygiene: FetchAccountRewardsForEpoch's and
+// compare.go's zero-row/reference-lag gates only disable the grace check
+// when graceHours <= 0 — a negative value reaches that same "disabled" branch
+// as 0, but arrives silently instead of through the explicit, documented
+// opt-out. Left unvalidated, a just-closed epoch's empty --accounts response
+// could be committed complete and later read back as a valid, authoritative
+// empty reference set. Every subcommand exposing --grace-hours (fetch, check,
+// run, watch) must call this instead of a bare GetInt.
+func resolveGraceHours(cmd *cobra.Command) (int, error) {
+	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	if graceHours < 0 {
+		return 0, fmt.Errorf(
+			"--grace-hours must not be negative, got %d (0 disables the grace/reference-lag window)",
+			graceHours,
+		)
+	}
+	return graceHours, nil
+}
+
 // koiosAPIKey returns the Koios Bearer token from flag or environment.
 func koiosAPIKey(cmd *cobra.Command) string {
 	if key, _ := cmd.Flags().GetString("api-key"); key != "" {
 		return key
 	}
 	return os.Getenv("KOIOS_API_KEY")
+}
+
+// addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,
+// shared by fetch/check/run/watch. Per-account fetching/checking issues far
+// more Koios requests than pool-level work (a chunked request set covering
+// the full address universe per epoch, versus one request per pool), so this
+// stays opt-in for the standalone CLI even though the in-process observer
+// (ObserverConfig.AccountsEnabled, wired from
+// dingo.KoiosParityConfig/DefaultKoiosParityConfig) defaults it on.
+func addAccountsFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("accounts", false,
+		"also fetch/check #3097 per-account exact reward parity (opt-in: substantially more Koios requests; or KOIOS_PARITY_ACCOUNTS=true)")
+}
+
+// accountsEnabled resolves the --accounts flag, falling back to the
+// koios-parity-only KOIOS_PARITY_ACCOUNTS env var (no existing repo-standard
+// name applies to this tool-specific opt-in switch — see CLAUDE.md's env-var
+// naming guidance in this tool's own conventions).
+//
+// Per CLAUDE.md's config precedence (CLI > env > YAML > defaults), an
+// explicitly-set --accounts flag always wins, even --accounts=false — it
+// must not be overridden by KOIOS_PARITY_ACCOUNTS=true in the environment.
+func accountsEnabled(cmd *cobra.Command) bool {
+	if cmd.Flags().Changed("accounts") {
+		v, _ := cmd.Flags().GetBool("accounts")
+		return v
+	}
+	v := strings.TrimSpace(os.Getenv("KOIOS_PARITY_ACCOUNTS"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// addAccountChunkFlags registers dingo #3099's --account-chunk-size/
+// --account-chunk-max-bytes flags, shared by fetch/run/watch (the
+// subcommands that actually issue /account_reward_history requests — check
+// only reads the cache, so it has no use for these). 0 (the default for
+// both) means "use the package default"
+// (koiosparity.koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault) —
+// unset flags never change existing --accounts behavior.
+func addAccountChunkFlags(cmd *cobra.Command) {
+	cmd.Flags().Int("account-chunk-size", 0,
+		"max stake addresses per /account_reward_history request when --accounts is set (0 = package default, 100)")
+	cmd.Flags().Int("account-chunk-max-bytes", 0,
+		"max encoded body size per /account_reward_history request when --accounts is set (0 = package default, 32KiB)")
+}
+
+// resolveAccountChunkFlags reads --account-chunk-size/--account-chunk-max-bytes,
+// rejecting a negative value the same way resolveGraceHours does for
+// --grace-hours: a negative value would silently reach chunkAddressesByCountAndSize's
+// own "<=0 means use the default" branch instead of failing loudly on an
+// obviously-wrong operator input.
+func resolveAccountChunkFlags(
+	cmd *cobra.Command,
+) (size, maxBytes int, err error) {
+	size, _ = cmd.Flags().GetInt("account-chunk-size")
+	if size < 0 {
+		return 0, 0, fmt.Errorf(
+			"--account-chunk-size must not be negative, got %d (0 selects the package default)",
+			size,
+		)
+	}
+	maxBytes, _ = cmd.Flags().GetInt("account-chunk-max-bytes")
+	if maxBytes < 0 {
+		return 0, 0, fmt.Errorf(
+			"--account-chunk-max-bytes must not be negative, got %d (0 selects the package default)",
+			maxBytes,
+		)
+	}
+	return size, maxBytes, nil
 }
 
 // addDingoDB registers --metadata-plugin and --metadata-dsn on cmd and

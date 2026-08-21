@@ -90,6 +90,35 @@ type TxValidator interface {
 	) error
 }
 
+type TxValidationFunc = func(
+	tx ledger.Transaction,
+	consumedUtxos map[string]struct{},
+	createdUtxos map[string]lcommon.Utxo,
+) error
+
+// TxValidationSessionProvider pins an ordered validation pass to one ledger
+// publication and repeatable-read transaction. LedgerState implements it.
+type TxValidationSessionProvider interface {
+	WithTxValidationSession(func(
+		validate TxValidationFunc,
+		stillCurrent func() bool,
+	) error) error
+}
+
+var errTxValidationSnapshotChanged = errors.New(
+	"transaction validation snapshot changed",
+)
+
+func withTxValidationSession(
+	validator TxValidator,
+	fn func(TxValidationFunc, func() bool) error,
+) error {
+	if provider, ok := validator.(TxValidationSessionProvider); ok {
+		return provider.WithTxValidationSession(fn)
+	}
+	return fn(validator.ValidateTxWithOverlay, func() bool { return true })
+}
+
 // DefaultBlockBuilder implements BlockBuilder using LedgerState components.
 type DefaultBlockBuilder struct {
 	logger          *slog.Logger
@@ -248,6 +277,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 	if leiosCert != nil {
 		// A prototype CertRB carries the Leios certificate and no Dijkstra
 		// transactions; node-to-client later inlines the certified EB txs.
+		mempoolTxs = nil
+	} else if leios.Announcement != nil {
+		// An announcing slot carries either the endorser block or ranking-block
+		// transactions, never both. The endorser block is applied before its
+		// ranking block, so putting any mempool transaction in the RB would make
+		// both transaction sets apply at the same slot.
 		mempoolTxs = nil
 	}
 	b.logger.Debug(
