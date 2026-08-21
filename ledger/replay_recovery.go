@@ -464,18 +464,11 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 	ls.deterministicTxRecoveryAttempted = true
 	ls.deterministicTxRecoveryTipSlot = rewindPoint.Slot
 	if ls.config.EventBus != nil {
-		var activeConnId ouroboros.ConnectionId
-		if ls.config.GetActiveConnectionFunc != nil {
-			if connId := ls.config.GetActiveConnectionFunc(); connId != nil {
-				activeConnId = *connId
-			}
-		}
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
 			event.NewEvent(
 				event.ChainsyncResyncEventType,
 				event.ChainsyncResyncEvent{
-					ConnectionId: activeConnId,
 					Reason: event.
 						ChainsyncResyncReasonDeterministicTxValidationRecovery,
 					Point: rewindPoint,

@@ -1768,7 +1768,7 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 		"deterministic transaction recovery must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
-	assert.Equal(t, activeConnId.String(), resync.ConnectionId.String())
+	assert.Equal(t, ouroboros.ConnectionId{}, resync.ConnectionId)
 
 	// A canonical invalid block can be redelivered by every peer. Once the
 	// one alternate-branch opportunity has been used, recovery must stop the
