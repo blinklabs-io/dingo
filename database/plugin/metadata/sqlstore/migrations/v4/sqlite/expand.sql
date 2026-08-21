@@ -1,0 +1,25 @@
+-- The account state a Mithril snapshot import or a Shelley genesis stake
+-- delegation established, retained as the baseline `RestoreAccountStateAtSlot`
+-- restores to. These accounts have no certificate history in this database --
+-- the import deliberately writes none, because the snapshot cannot prove which
+-- slot the registration happened in -- so a rollback had nothing to re-derive
+-- `active`, `pool`, or `drep` from and kept whatever a rolled-away
+-- deregistration or delegation had last written (issue #3260). `added_slot` is
+-- the slot the baseline was established at; it orders the baseline against
+-- certificate positions, so a deregistration at or after it still supersedes
+-- it.
+CREATE TABLE IF NOT EXISTS `account_import_baseline` (`credential_tag` integer NOT NULL DEFAULT 0,`staking_key` blob,`pool` blob,`drep` blob,`drep_type` integer DEFAULT 0,`active` numeric NOT NULL DEFAULT true,`added_slot` integer NOT NULL DEFAULT 0,PRIMARY KEY (`credential_tag`,`staking_key`));
+-- Backfill for a database bootstrapped before this table existed, so an
+-- already-running Mithril node does not stay exposed to the bug until it
+-- re-bootstraps. `created_slot = 0` selects exactly the imported and genesis
+-- accounts; every other row was created by a certificate whose own history
+-- rebuilds its state. `active` is known to be true for those rows -- both
+-- writers only ever import a registered account -- while `pool` and `drep` can
+-- only be copied from the live row, which is the same value the pre-fix
+-- rollback already left in place, so the backfill is never worse than the
+-- behavior it replaces and is exact for any account with no post-snapshot
+-- delegation change. The LEFT JOIN, rather than a NOT EXISTS subquery, keeps
+-- the statement re-runnable after an interrupted upgrade on all three
+-- backends: MySQL rejects a subquery over an INSERT's own target table but
+-- permits that table in the SELECT's FROM clause.
+INSERT INTO `account_import_baseline` (`credential_tag`,`staking_key`,`pool`,`drep`,`drep_type`,`active`,`added_slot`) SELECT `account`.`credential_tag`,`account`.`staking_key`,`account`.`pool`,`account`.`drep`,`account`.`drep_type`,true,COALESCE(`account`.`added_slot`,0) FROM `account` LEFT JOIN `account_import_baseline` ON `account_import_baseline`.`credential_tag` = `account`.`credential_tag` AND `account_import_baseline`.`staking_key` = `account`.`staking_key` WHERE `account`.`created_slot` = 0 AND `account_import_baseline`.`staking_key` IS NULL;

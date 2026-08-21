@@ -93,6 +93,121 @@ func (s *Store) ImportAccount(
 		return fmt.Errorf("import account: %w", err)
 	}
 	account.ID = uint(id)
+	if err := writeAccountImportBaseline(db, account); err != nil {
+		return fmt.Errorf("import account: %w", err)
+	}
+	return nil
+}
+
+// accountImportBaseline is the account state a Mithril snapshot import or a
+// Shelley genesis stake delegation established. It stands in for the
+// registration certificate this database does not hold, so a rollback can
+// restore the pre-certificate state instead of keeping the state a rolled-away
+// certificate wrote.
+type accountImportBaseline struct {
+	position accountCertificatePosition
+	pool     []byte
+	drep     []byte
+	drepType uint64
+	active   bool
+}
+
+// writeAccountImportBaseline records the baseline for an imported account.
+// Re-importing an account (a second bootstrap into the same database) replaces
+// it, because the newer snapshot is then the earliest state this database can
+// reach.
+func writeAccountImportBaseline(
+	db queryer,
+	account *models.Account,
+) error {
+	addedSlot, err := checkedInt64(account.AddedSlot)
+	if err != nil {
+		return err
+	}
+	drepType, err := checkedInt64(account.DrepType)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO account_import_baseline (
+    credential_tag, staking_key, pool, drep, drep_type, active, added_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
+    pool = excluded.pool,
+    drep = excluded.drep,
+    drep_type = excluded.drep_type,
+    active = excluded.active,
+    added_slot = excluded.added_slot`,
+		account.CredentialTag,
+		account.StakingKey,
+		nullBytes(account.Pool),
+		nullBytes(account.Drep),
+		drepType,
+		account.Active,
+		addedSlot,
+	); err != nil {
+		return fmt.Errorf("write account import baseline: %w", err)
+	}
+	return nil
+}
+
+func readAccountImportBaseline(
+	db queryer,
+	credentialTag uint8,
+	stakingKey []byte,
+) (accountImportBaseline, bool, error) {
+	var (
+		baseline  accountImportBaseline
+		drepType  sql.NullInt64
+		addedSlot int64
+	)
+	err := db.QueryRowContext(context.Background(), `
+SELECT pool, drep, drep_type, active, added_slot
+FROM account_import_baseline
+WHERE credential_tag = ? AND staking_key = ?`,
+		credentialTag,
+		stakingKey,
+	).Scan(
+		&baseline.pool,
+		&baseline.drep,
+		&drepType,
+		&baseline.active,
+		&addedSlot,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return accountImportBaseline{}, false, nil
+	}
+	if err != nil {
+		return accountImportBaseline{}, false, fmt.Errorf(
+			"read account import baseline: %w",
+			err,
+		)
+	}
+	if addedSlot < 0 || drepType.Int64 < 0 {
+		return accountImportBaseline{}, false, fmt.Errorf(
+			"read account import baseline: negative added_slot %d or drep_type %d",
+			addedSlot,
+			drepType.Int64,
+		)
+	}
+	baseline.drepType = uint64(drepType.Int64)
+	baseline.position = accountCertificatePosition{slot: uint64(addedSlot)}
+	return baseline, true, nil
+}
+
+func deleteAccountImportBaseline(
+	db queryer,
+	credentialTag uint8,
+	stakingKey []byte,
+) error {
+	if _, err := db.ExecContext(context.Background(), `
+DELETE FROM account_import_baseline
+WHERE credential_tag = ? AND staking_key = ?`,
+		credentialTag,
+		stakingKey,
+	); err != nil {
+		return fmt.Errorf("delete account import baseline: %w", err)
+	}
 	return nil
 }
 
@@ -442,6 +557,21 @@ WHERE active = TRUE AND (`+strings.Join(predicates, " OR ")+")"),
 		); err != nil {
 			return fmt.Errorf("DeactivateAccounts: %w", err)
 		}
+		// Mithril reconciliation deactivates a credential precisely because
+		// the newer snapshot's live set does not hold it, which is a statement
+		// about the imported baseline and not about any certificate. Leaving
+		// the baseline active would let a later rollback restore the account
+		// this call just tombstoned.
+		if _, err := db.ExecContext(
+			context.Background(),
+			s.dialect.Rebind(`
+UPDATE account_import_baseline SET active = FALSE, pool = NULL, drep = NULL,
+    drep_type = 0
+WHERE active = TRUE AND (`+strings.Join(predicates, " OR ")+")"),
+			args...,
+		); err != nil {
+			return fmt.Errorf("DeactivateAccounts: baseline: %w", err)
+		}
 	}
 	return nil
 }
@@ -563,6 +693,8 @@ FROM account WHERE added_slot > ?`,
 				}
 				ref := models.NewStakeCredentialRef(account.tag, account.key)
 				refs = append(refs, ref)
+				var baseline accountImportBaseline
+				hasBaseline := false
 				if !hasRegistration {
 					if account.createdSlot > slot {
 						if _, err := db.ExecContext(context.Background(), `
@@ -573,18 +705,33 @@ WHERE credential_tag = ? AND staking_key = ?`,
 						); err != nil {
 							return err
 						}
-					} else {
-						if _, err := db.ExecContext(context.Background(), `
-UPDATE account SET added_slot = ?
-WHERE credential_tag = ? AND staking_key = ?`,
-							slot,
+						if err := deleteAccountImportBaseline(
+							db,
 							account.tag,
 							account.key,
 						); err != nil {
 							return err
 						}
+						continue
 					}
-					continue
+					// No registration certificate is reachable at or before
+					// the rollback slot, so the account predates every
+					// certificate this database holds: an imported or
+					// genesis-delegated account. Its import baseline stands in
+					// for the missing registration certificate, and the same
+					// derivation below then applies whichever certificates do
+					// survive the rollback.
+					baseline, hasBaseline, err = readAccountImportBaseline(
+						db,
+						account.tag,
+						account.key,
+					)
+					if err != nil {
+						return err
+					}
+					registration = accountRestoreEvent{
+						position: baseline.position,
+					}
 				}
 				deregistration, hasDeregistration, err := latestAccountEvent(
 					db,
@@ -629,11 +776,47 @@ WHERE credential_tag = ? AND staking_key = ?`,
 				if err != nil {
 					return err
 				}
-				active := !hasDeregistration ||
-					compareCertificatePosition(
-						registration.position,
-						deregistration.position,
-					) > 0
+				// An account with a baseline but no delegation certificate at
+				// or before the rollback slot delegates exactly as the
+				// snapshot recorded; without a baseline there is nothing to
+				// derive the pool or DRep from, and the live values are left
+				// alone.
+				if hasBaseline {
+					if !hasPool {
+						pool = accountRestoreEvent{
+							position: baseline.position,
+							value:    baseline.pool,
+						}
+						hasPool = len(pool.value) > 0
+					}
+					if !hasDrep {
+						drep = accountRestoreEvent{
+							position:  baseline.position,
+							value:     baseline.drep,
+							valueType: baseline.drepType,
+						}
+						hasDrep = len(drep.value) > 0 || drep.valueType != 0
+					}
+				}
+				// A registration certificate proves the account was registered
+				// at its position; a baseline carries whatever the snapshot
+				// recorded. Without either, absence of a surviving
+				// deregistration is the only evidence available.
+				priorActive := true
+				if hasBaseline {
+					priorActive = baseline.active
+				}
+				active := priorActive &&
+					(!hasDeregistration ||
+						compareCertificatePosition(
+							registration.position,
+							deregistration.position,
+						) > 0)
+				// Only rewrite pool/drep when their value at the rollback slot
+				// is actually known: from a certificate, from the baseline, or
+				// from the account being deregistered.
+				setPool := hasRegistration || hasBaseline || hasPool || !active
+				setDrep := hasRegistration || hasBaseline || hasDrep || !active
 				if !active || hasDeregistration &&
 					hasPool &&
 					compareCertificatePosition(
@@ -661,17 +844,35 @@ WHERE credential_tag = ? AND staking_key = ?`,
 						latestSlot = event.position.slot
 					}
 				}
-				if _, err := db.ExecContext(context.Background(), `
-UPDATE account
-SET pool = ?, drep = ?, drep_type = ?, active = ?, added_slot = ?
-WHERE credential_tag = ? AND staking_key = ?`,
-					nullBytes(pool.value),
-					nullBytes(drep.value),
-					drep.valueType,
-					active,
-					latestSlot,
-					account.tag,
-					account.key,
+				// A baseline established after the rollback target (a rollback
+				// to before the snapshot slot) must not leave the row claiming
+				// a modification slot ahead of the tip.
+				if latestSlot > slot {
+					latestSlot = slot
+				}
+				assignments := []string{"active = ?", "added_slot = ?"}
+				args := []any{active, latestSlot}
+				if setPool {
+					assignments = append(assignments, "pool = ?")
+					args = append(args, nullBytes(pool.value))
+				}
+				if setDrep {
+					assignments = append(
+						assignments,
+						"drep = ?",
+						"drep_type = ?",
+					)
+					args = append(
+						args,
+						nullBytes(drep.value),
+						drep.valueType,
+					)
+				}
+				args = append(args, account.tag, account.key)
+				if _, err := db.ExecContext(context.Background(),
+					"UPDATE account SET "+strings.Join(assignments, ", ")+
+						" WHERE credential_tag = ? AND staking_key = ?",
+					args...,
 				); err != nil {
 					return err
 				}
