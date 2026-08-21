@@ -387,14 +387,18 @@ func TestArtifactNameLeavesPlainScenarioNamesAlone(t *testing.T) {
 	)
 }
 
-// TestArtifactNamesCreateDistinctDirectories checks the guarantee
-// ArtifactName actually makes -- distinct test names get distinct
-// directories -- against a filesystem instead of against string
-// equality. Lexical injectivity is not the same guarantee: a filesystem
+// TestArtifactNamesCreateDistinctDirectories checks that every name in
+// artifactNameCorpus creates a directory of its own on the filesystem
+// under test, rather than checking that the encodings differ as
+// strings. Lexical injectivity is not the same guarantee: a filesystem
 // that rewrites a name stores two distinct encodings in one directory,
 // and a filesystem that rejects one stores neither. Windows does both,
 // so this is where that shows up rather than in
 // TestArtifactNameIsInjective.
+//
+// The corpus is the scope of the claim. It leaves out names differing
+// only in case, which do share a directory where the filesystem folds
+// case; TestArtifactNameKeepsCase carries that boundary.
 func TestArtifactNamesCreateDistinctDirectories(t *testing.T) {
 	root := t.TempDir()
 	// Report every name rather than stopping at the first, because the
