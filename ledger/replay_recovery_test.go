@@ -1759,6 +1759,23 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 		"deterministic transaction recovery must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
+
+	// A canonical invalid block can be redelivered by every peer. Once the
+	// one alternate-branch opportunity has been used, recovery must stop the
+	// ledger pipeline rather than rewind and request another identical peer.
+	recovered, err = ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause:      duplicate,
+	})
+	assert.False(t, recovered)
+	assert.ErrorIs(t, err, errHaltLedgerPipeline)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"canonical deterministic rejection must not request another fresh intersection",
+	)
 }
 
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {

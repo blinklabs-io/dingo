@@ -372,7 +372,23 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 
 	ls.RLock()
 	ledgerTip := ls.currentTip
+	deterministicRecoveryAttempted := ls.deterministicTxRecoveryAttempted &&
+		ledgerTip.Point.Slot <= ls.deterministicTxRecoveryTipSlot
 	ls.RUnlock()
+	if deterministicRecoveryAttempted {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Error(
+				"deterministic transaction validation failure persisted after a fresh ChainSync intersection; halting ledger pipeline",
+				"component", "ledger",
+				"tx_hash", hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"ledger_tip_slot", ledgerTip.Point.Slot,
+				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+				"hint", "network peers are serving a transaction this node rejects; operator intervention is required",
+			)
+		}
+		return false, errHaltLedgerPipeline
+	}
 	rewindPoint := ledgerTip.Point
 	if rewindPoint.Slot >= validationErr.BlockPoint.Slot {
 		if ls.config.Logger != nil {
@@ -433,6 +449,8 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			err,
 		)
 	}
+	ls.deterministicTxRecoveryAttempted = true
+	ls.deterministicTxRecoveryTipSlot = rewindPoint.Slot
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
@@ -447,6 +465,19 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		)
 	}
 	return true, nil
+}
+
+// resetDeterministicTxRecovery clears the one-resync latch only after the
+// ledger advances beyond the tip at which the deterministic rejection was
+// recorded. Replaying up to that same tip is not evidence that a valid branch
+// was found.
+func (ls *LedgerState) resetDeterministicTxRecovery(newTipSlot uint64) {
+	if !ls.deterministicTxRecoveryAttempted ||
+		newTipSlot <= ls.deterministicTxRecoveryTipSlot {
+		return
+	}
+	ls.deterministicTxRecoveryAttempted = false
+	ls.deterministicTxRecoveryTipSlot = 0
 }
 
 // observeReplayRecoveryTip records the applied tip seen immediately before an

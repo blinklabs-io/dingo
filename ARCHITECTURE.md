@@ -2971,7 +2971,11 @@ producer history. Replay recovery therefore rejects the primary-chain branch
 and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors
-continue through producer resolution and the unresolved-producer fallback.
+continue through producer resolution and the unresolved-producer fallback. If
+the same applied tip receives another deterministic rejection after that one
+fresh-intersection opportunity, the ledger pipeline halts with an operator
+actionable error instead of reconnecting to the same canonical invalid block
+indefinitely; forward progress clears this latch.
 The continuation audit is run only after a fetched body is accepted by the
 queued primary chain, so late bodies from an abandoned fetch cannot seed its
 producer window. Its diagnostic database probes are also capped per block
