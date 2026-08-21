@@ -1,0 +1,173 @@
+name: benchmark
+
+# Runs the curated CI benchmark suite (blinklabs-io/dingo#1895) weekly rather
+# than per-PR/per-merge: a statistically meaningful pass (`-count=10` for
+# benchstat) takes well over an hour, which would make every merge slow.
+# Because there is no PR to comment on, regression alerts go to a persistent
+# tracking issue instead (see the "report-regression" job below).
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Monday 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark
+  cancel-in-progress: false # never kill a multi-hour run partway through
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write # push results to the benchmark-data branch
+      issues: write # open/comment on the regression tracking issue
+    steps:
+      - name: checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+        with:
+          ref: main
+
+      - name: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+
+      - name: cache-go-modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+
+      # Prepares a linked worktree (sharing the main checkout's authenticated
+      # `origin` remote, so a plain `git push` later just works) checked out
+      # to the benchmark-data branch. First-run bootstrap: if the branch
+      # doesn't exist on origin yet, create it locally as an empty orphan
+      # branch instead of failing.
+      - name: prepare-benchmark-data-branch
+        id: benchmark-data
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin benchmark-data >/dev/null 2>&1; then
+            git fetch origin benchmark-data:refs/remotes/origin/benchmark-data
+            git worktree add ../benchmark-data-branch origin/benchmark-data
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+          else
+            git worktree add --detach ../benchmark-data-branch HEAD
+            git -C ../benchmark-data-branch checkout --orphan benchmark-data
+            git -C ../benchmark-data-branch rm -rf . >/dev/null 2>&1 || true
+            git -C ../benchmark-data-branch clean -fdx
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p ../benchmark-data-branch/runs
+
+          if [ -f ../benchmark-data-branch/runs/latest.txt ]; then
+            baseline=$(cat ../benchmark-data-branch/runs/latest.txt)
+            echo "baseline_file=../benchmark-data-branch/runs/${baseline}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: run-bench-ci
+        id: run-bench
+        shell: bash
+        run: |
+          set -euo pipefail
+          date_stamp=$(date -u +%Y-%m-%d)
+          short_sha=$(git rev-parse --short HEAD)
+          run_file="../benchmark-data-branch/runs/${date_stamp}-${short_sha}.txt"
+          echo "run_file=${run_file}" >> "$GITHUB_OUTPUT"
+          make bench-ci | tee "${run_file}"
+
+      - name: check-regression
+        id: benchcheck
+        # baseline_file is only unset when bootstrap=false but runs/latest.txt
+        # is missing from an existing benchmark-data branch (a state this
+        # workflow never produces itself, since it always writes the run file
+        # and latest.txt together, but tolerate it rather than hard-failing
+        # on a manually-tampered branch).
+        if: steps.benchmark-data.outputs.bootstrap == 'false' && steps.benchmark-data.outputs.baseline_file != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./internal/benchci/cmd/benchcheck \
+            "${{ steps.benchmark-data.outputs.baseline_file }}" \
+            "${{ steps.run-bench.outputs.run_file }}" \
+            report.md | tee -a "$GITHUB_OUTPUT"
+
+      - name: write-step-summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f report.md ]; then
+            {
+              echo "## Benchmark regression report"
+              echo
+              cat report.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Benchmark regression report"
+              echo
+              echo "No prior baseline available on the \`benchmark-data\` branch (first run, or a missing \`runs/latest.txt\`). This run was recorded as a new baseline; regression detection resumes next run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Commits and pushes the new run file (and updated runs/latest.txt,
+      # with entries older than 104 weeks pruned) in one commit, using the
+      # benchmark-data worktree created above (checked out one level above
+      # the main checkout, so Go tooling in earlier steps never scans it).
+      - name: publish-benchmark-data
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_file="${{ steps.run-bench.outputs.run_file }}"
+          basename "${run_file}" > ../benchmark-data-branch/runs/latest.txt
+
+          cutoff=$(date -u -d '104 weeks ago' +%Y-%m-%d)
+          for f in ../benchmark-data-branch/runs/*.txt; do
+            base=$(basename "${f}")
+            [ "${base}" = "latest.txt" ] && continue
+            file_date="${base:0:10}"
+            if [[ "${file_date}" < "${cutoff}" ]]; then
+              rm -f "${f}"
+            fi
+          done
+
+          cd ../benchmark-data-branch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add runs
+          if git diff --cached --quiet; then
+            echo "no benchmark-data changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(benchmark-data): add run $(basename "${run_file}")"
+          git push origin HEAD:benchmark-data
+
+      - name: report-regression
+        if: steps.benchcheck.outputs.regression == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list \
+            --search 'in:title "Benchmark regression tracker"' \
+            --label performance-regression \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body-file report.md
+          else
+            gh issue create \
+              --title "Benchmark regression tracker" \
+              --label performance-regression \
+              --body-file report.md
+          fi
