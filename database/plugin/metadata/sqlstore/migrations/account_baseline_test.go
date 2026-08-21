@@ -33,29 +33,9 @@ import (
 func TestAccountImportBaselineBackfill(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
+	db, runTo := baselineBackfillDB(t)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 4)
-
-	runTo := func(versions []migrations.Migration) {
-		runner := migrations.Runner{
-			DB:       db,
-			Dialect:  "sqlite",
-			Registry: versions,
-			Locker: migrations.NewFileLocker(
-				databasePath + ".migrate.lock",
-			),
-		}
-		require.NoError(t, runner.Run(ctx))
-	}
-
-	// Bring the database up to the schema that predates the baseline table.
-	runTo(registry[:3])
 
 	imported := []byte{0x11, 0x22}
 	certCreated := []byte{0x33, 0x44}
@@ -100,19 +80,179 @@ WHERE credential_tag = 0 AND staking_key = ?`,
 	require.True(t, active)
 	require.Equal(t, int64(200), addedSlot)
 
-	var rows int
-	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM account_import_baseline`).Scan(&rows))
-	require.Equal(t, 1, rows)
+	require.Equal(t, 1, baselineRowCount(t, db))
+	replayBaselineExpand(t, db)
+	require.Equal(t, 1, baselineRowCount(t, db))
+}
 
-	// An upgrade interrupted after the backfill committed but before its phase
-	// row advanced replays the same statements, so they have to be
-	// re-runnable.
+// baselineBackfillDB brings a database up to the schema that predates the
+// baseline table and returns it with a runner for the remaining versions, so a
+// test can seed the legacy rows the backfill reads.
+func baselineBackfillDB(
+	t *testing.T,
+) (*sql.DB, func(versions []migrations.Migration)) {
+	t.Helper()
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	db, err := sql.Open("sqlite", "file:"+databasePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	require.Len(t, registry, 4)
+	runTo := func(versions []migrations.Migration) {
+		runner := migrations.Runner{
+			DB:       db,
+			Dialect:  "sqlite",
+			Registry: versions,
+			Locker: migrations.NewFileLocker(
+				databasePath + ".migrate.lock",
+			),
+		}
+		require.NoError(t, runner.Run(ctx))
+	}
+	runTo(registry[:3])
+	return db, runTo
+}
+
+// replayBaselineExpand re-executes the v4 expand statements the way an upgrade
+// interrupted after the backfill committed but before its phase row advanced
+// would.
+func replayBaselineExpand(t *testing.T, db *sql.DB) {
+	t.Helper()
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
 	for _, statement := range registry[3].SQL["sqlite"].Expand {
-		_, err := db.ExecContext(ctx, statement)
+		_, err := db.ExecContext(context.Background(), statement)
 		require.NoError(t, err)
 	}
-	require.NoError(t, db.QueryRowContext(ctx, `
+}
+
+func baselineRowCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var rows int
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 SELECT COUNT(*) FROM account_import_baseline`).Scan(&rows))
-	require.Equal(t, 1, rows)
+	return rows
+}
+
+// A legacy account row with a NULL staking key is skipped rather than
+// backfilled. Its baseline could never be read back -- credential equality
+// matches no NULL -- and inserting it would break re-runnability, because the
+// LEFT JOIN that suppresses an already-backfilled row cannot match NULL
+// either, so every interrupted-upgrade retry would add another row.
+func TestAccountImportBaselineBackfillSkipsNullStakingKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, runTo := baselineBackfillDB(t)
+
+	_, err := db.ExecContext(ctx, `
+INSERT INTO account (
+    staking_key, credential_tag, added_slot, created_slot, active
+) VALUES (NULL, 0, 200, 0, 1)`)
+	require.NoError(t, err)
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	require.Equal(t, 0, baselineRowCount(t, db))
+	replayBaselineExpand(t, db)
+	require.Equal(t, 0, baselineRowCount(t, db))
+}
+
+// An imported account that already carried certificate history when the
+// baseline table arrived gets no baseline. Its live pool, DRep, and added_slot
+// describe that certificate rather than the import, so recording them would
+// claim a provenance the row does not have: a rollback to before the
+// certificate would restore its delegation, and a baseline slot bumped past an
+// earlier deregistration would outrank it and mark a deregistered credential
+// active. Leaving the row alone keeps the derivation from its real certificate
+// history.
+func TestAccountImportBaselineBackfillSkipsCertificateHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, runTo := baselineBackfillDB(t)
+
+	delegated := []byte{0x55, 0x66}
+	untouched := []byte{0x77, 0x88}
+	for _, key := range [][]byte{delegated, untouched} {
+		_, err := db.ExecContext(ctx, `
+INSERT INTO account (
+    staking_key, credential_tag, pool, added_slot, created_slot, active
+) VALUES (?, 0, ?, 400, 0, 1)`,
+			key,
+			[]byte{0xbb, 0xbb},
+		)
+		require.NoError(t, err)
+	}
+	// The delegation that moved the account off its imported pool, as block
+	// application recorded it.
+	_, err := db.ExecContext(ctx, `
+INSERT INTO stake_delegation (
+    staking_key, credential_tag, pool_key_hash, added_slot
+) VALUES (?, 0, ?, 400)`,
+		delegated,
+		[]byte{0xbb, 0xbb},
+	)
+	require.NoError(t, err)
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	require.Equal(t, 1, baselineRowCount(t, db))
+	var key []byte
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT staking_key FROM account_import_baseline`).Scan(&key))
+	require.Equal(t, untouched, key)
+
+	replayBaselineExpand(t, db)
+	require.Equal(t, 1, baselineRowCount(t, db))
+}
+
+// Every account certificate table the restore path reads has to suppress the
+// backfill, not just the delegation table: any of them proves the live row's
+// state came from a certificate rather than from the import.
+func TestAccountImportBaselineBackfillSkipsEveryCertificateTable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tables := []string{
+		"stake_registration",
+		"stake_registration_delegation",
+		"stake_vote_registration_delegation",
+		"vote_registration_delegation",
+		"registration",
+		"stake_deregistration",
+		"deregistration",
+		"stake_delegation",
+		"stake_vote_delegation",
+		"vote_delegation",
+	}
+	for _, table := range tables {
+		t.Run(table, func(t *testing.T) {
+			t.Parallel()
+			db, runTo := baselineBackfillDB(t)
+			key := []byte{0x99, 0xaa}
+			_, err := db.ExecContext(ctx, `
+INSERT INTO account (
+    staking_key, credential_tag, added_slot, created_slot, active
+) VALUES (?, 0, 400, 0, 1)`,
+				key,
+			)
+			require.NoError(t, err)
+			_, err = db.ExecContext(ctx, `
+INSERT INTO `+table+` (staking_key, credential_tag, added_slot)
+VALUES (?, 0, 400)`,
+				key,
+			)
+			require.NoError(t, err)
+
+			registry, err := migrations.SQLiteRegistry()
+			require.NoError(t, err)
+			runTo(registry)
+
+			require.Equal(t, 0, baselineRowCount(t, db))
+		})
+	}
 }

@@ -76,9 +76,15 @@ func TestMySQLRegistryPrefixesAccountBaselinePrimaryKey(t *testing.T) {
 	require.NoError(t, err)
 	expand := registry[3].SQL["mysql"].Expand
 	require.Len(t, expand, 2)
+	require.Contains(t, expand[0], "`staking_key` blob NOT NULL")
 	require.Contains(t, expand[0], "`staking_key`(255)")
 	require.NotContains(t, expand[1], "ON DUPLICATE KEY")
 	require.Contains(t, expand[1], "LEFT JOIN `account_import_baseline`")
+	// The certificate-history filters must survive as plain subqueries: they
+	// read tables other than the INSERT's target, which is what keeps MySQL
+	// from raising error 1093, and no key prefix belongs in a predicate.
+	require.Equal(t, 10, strings.Count(expand[1], "NOT EXISTS (SELECT 1 FROM"))
+	require.NotContains(t, expand[1], "cert.`staking_key`(255)")
 }
 
 // TestPostgresRegistryTypesAccountBaseline checks the v4 table picks up the
@@ -90,11 +96,13 @@ func TestPostgresRegistryTypesAccountBaseline(t *testing.T) {
 	require.NoError(t, err)
 	expand := registry[3].SQL["postgres"].Expand
 	require.Len(t, expand, 2)
-	require.Contains(t, expand[0], `"staking_key" BYTEA`)
+	require.Contains(t, expand[0], `"staking_key" BYTEA NOT NULL`)
 	require.Contains(t, expand[0], `"active" BOOLEAN NOT NULL DEFAULT true`)
 	require.NotContains(t, expand[0], "`")
 	require.NotContains(t, expand[1], "`")
 	require.Contains(t, expand[1], `LEFT JOIN "account_import_baseline"`)
+	require.Equal(t, 10, strings.Count(expand[1], "NOT EXISTS (SELECT 1 FROM"))
+	require.Contains(t, expand[1], `FROM "stake_vote_registration_delegation"`)
 }
 
 // TestMySQLRegistryPrefixesTokenRegistrySubjectIndex guards the token registry

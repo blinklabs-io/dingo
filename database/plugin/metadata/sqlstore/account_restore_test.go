@@ -324,7 +324,7 @@ func TestSnapshotAccountRollbackClampsAddedSlotBelowBaseline(t *testing.T) {
 func TestDeactivateAccountsClearsBaseline(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	key := snapshotStakingKey(0x74)
+	key := snapshotStakingKey(0x83)
 	poolA := []byte{0xaa, 0xaa}
 	importSnapshotAccount(t, store, key, poolA, nil, 0, 100)
 
@@ -342,4 +342,65 @@ WHERE credential_tag = 0 AND staking_key = ?`, key)
 	require.NotNil(t, got)
 	require.False(t, got.Active)
 	require.Empty(t, got.Pool)
+}
+
+// A failing baseline write must not leave the account row behind. The pair is
+// what RestoreAccountStateAtSlot reads, and an account row committed without
+// its baseline keeps deriving the pre-fix state for that credential, because
+// nothing rewrites the baseline unless the account is imported again.
+func TestImportAccountBaselineFailureRollsBackAccountRow(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x81)
+	// Removing the baseline table is the second write failing on a handle the
+	// account upsert already succeeded on.
+	execAccountSQL(t, store, `DROP TABLE account_import_baseline`)
+
+	require.Error(t, store.ImportAccount(&models.Account{
+		StakingKey:    key,
+		CredentialTag: 0,
+		AddedSlot:     100,
+		CreatedSlot:   0,
+		Active:        true,
+	}, nil))
+
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
+// The tombstone and the baseline it contradicts must fail or land together: an
+// account left inactive while its baseline stays active is exactly the state a
+// later rollback reads to restore the account reconciliation just removed.
+func TestDeactivateAccountsBaselineFailureKeepsAccountActive(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x82)
+	importSnapshotAccount(t, store, key, nil, nil, 0, 100)
+	execAccountSQL(t, store, `DROP TABLE account_import_baseline`)
+
+	require.Error(t, store.DeactivateAccounts(nil, []models.StakeCredentialRef{
+		models.NewStakeCredentialRef(0, key),
+	}))
+
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.Active)
+}
+
+// A baseline write on the autocommit handle can only be a split pair, so the
+// helper refuses it instead of committing one half.
+func TestWriteAccountImportBaselineRequiresTransaction(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	require.Error(t, writeAccountImportBaseline(
+		newDialectQueryer(store.writeDB, store.dialect.Name()),
+		&models.Account{
+			StakingKey:    snapshotStakingKey(0x74),
+			CredentialTag: 0,
+			AddedSlot:     100,
+			Active:        true,
+		},
+	))
 }

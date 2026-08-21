@@ -69,6 +69,12 @@ func (s *Store) CreateAccount(
 	)
 }
 
+// ImportAccount writes a snapshot-imported or genesis-delegated account row
+// together with the baseline a later rollback restores it to. Both writes share
+// one transaction: an account row committed without its baseline leaves
+// RestoreAccountStateAtSlot deriving the pre-fix state for that credential, and
+// nothing rewrites the baseline afterwards unless the account is imported
+// again.
 func (s *Store) ImportAccount(
 	account *models.Account,
 	txn types.Txn,
@@ -76,27 +82,28 @@ func (s *Store) ImportAccount(
 	if account == nil {
 		return errors.New("import account: account is nil")
 	}
-	db, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	q := s.operationalQueries(db)
-	params, err := accountParams(account)
-	if err != nil {
-		return err
-	}
-	id, err := q.ImportAccount(
+	return s.withWriteTransaction(
 		context.Background(),
-		sqlitequery.ImportAccountParams(params),
+		txn,
+		func(db queryer) error {
+			params, err := accountParams(account)
+			if err != nil {
+				return err
+			}
+			id, err := s.operationalQueries(db).ImportAccount(
+				context.Background(),
+				sqlitequery.ImportAccountParams(params),
+			)
+			if err != nil {
+				return fmt.Errorf("import account: %w", err)
+			}
+			if err := writeAccountImportBaseline(db, account); err != nil {
+				return fmt.Errorf("import account: %w", err)
+			}
+			account.ID = uint(id)
+			return nil
+		},
 	)
-	if err != nil {
-		return fmt.Errorf("import account: %w", err)
-	}
-	account.ID = uint(id)
-	if err := writeAccountImportBaseline(db, account); err != nil {
-		return fmt.Errorf("import account: %w", err)
-	}
-	return nil
 }
 
 // accountImportBaseline is the account state a Mithril snapshot import or a
@@ -112,6 +119,27 @@ type accountImportBaseline struct {
 	active   bool
 }
 
+// requireAccountBaselineTransaction refuses a baseline write issued on the
+// autocommit handle. A baseline is only meaningful in the same transaction as
+// the account row it describes, so a caller that resolved its handle through
+// dbFromTxn with a nil txn would commit the two independently and leave a
+// rollback deriving state that contradicts the account row. Failing here turns
+// that split into an error rather than silent divergence.
+func requireAccountBaselineTransaction(db queryer) error {
+	for {
+		if _, ok := db.(*sql.Tx); ok {
+			return nil
+		}
+		wrapped, ok := db.(dialectQueryer)
+		if !ok {
+			return errors.New(
+				"account import baseline write outside a write transaction",
+			)
+		}
+		db = wrapped.queryer
+	}
+}
+
 // writeAccountImportBaseline records the baseline for an imported account.
 // Re-importing an account (a second bootstrap into the same database) replaces
 // it, because the newer snapshot is then the earliest state this database can
@@ -120,6 +148,16 @@ func writeAccountImportBaseline(
 	db queryer,
 	account *models.Account,
 ) error {
+	if err := requireAccountBaselineTransaction(db); err != nil {
+		return err
+	}
+	// The baseline is read back by equality on the credential, which no NULL
+	// or empty key can match, and its primary key rejects NULL outright.
+	if len(account.StakingKey) == 0 {
+		return errors.New(
+			"write account import baseline: empty staking key",
+		)
+	}
 	addedSlot, err := checkedInt64(account.AddedSlot)
 	if err != nil {
 		return err
@@ -200,6 +238,9 @@ func deleteAccountImportBaseline(
 	credentialTag uint8,
 	stakingKey []byte,
 ) error {
+	if err := requireAccountBaselineTransaction(db); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(context.Background(), `
 DELETE FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -525,6 +566,37 @@ SELECT credential_tag, staking_key FROM account WHERE active = TRUE`)
 	return ret, rows.Err()
 }
 
+// clearAccountImportBaselines tombstones the baselines of the credentials the
+// predicate matches. Mithril reconciliation deactivates a credential precisely
+// because the newer snapshot's live set does not hold it, which is a statement
+// about the imported baseline and not about any certificate. Leaving the
+// baseline active would let a later rollback restore the account the caller
+// just tombstoned.
+func (s *Store) clearAccountImportBaselines(
+	db queryer,
+	predicate string,
+	args ...any,
+) error {
+	if err := requireAccountBaselineTransaction(db); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(
+		context.Background(),
+		s.dialect.Rebind(`
+UPDATE account_import_baseline SET active = FALSE, pool = NULL, drep = NULL,
+    drep_type = 0
+WHERE active = TRUE AND (`+predicate+")"),
+		args...,
+	); err != nil {
+		return fmt.Errorf("clear account import baselines: %w", err)
+	}
+	return nil
+}
+
+// DeactivateAccounts tombstones the given credentials and their import
+// baselines. The two writes and every chunk of them share one transaction: an
+// account tombstoned while its baseline stays active is contradictory state
+// that lets a later rollback restore exactly the account this call removed.
 func (s *Store) DeactivateAccounts(
 	txn types.Txn,
 	refs []models.StakeCredentialRef,
@@ -532,48 +604,43 @@ func (s *Store) DeactivateAccounts(
 	if len(refs) == 0 {
 		return nil
 	}
-	db, err := s.dbFromTxn(txn)
-	if err != nil {
-		return fmt.Errorf("DeactivateAccounts: resolve db: %w", err)
-	}
-	chunkSize := s.dialect.ParameterLimit() / 2
-	for start := 0; start < len(refs); start += chunkSize {
-		end := min(start+chunkSize, len(refs))
-		predicates := make([]string, 0, end-start)
-		args := make([]any, 0, (end-start)*2)
-		for _, ref := range refs[start:end] {
-			predicates = append(
-				predicates,
-				"(credential_tag = ? AND staking_key = ?)",
-			)
-			args = append(args, ref.Tag, ref.Key)
-		}
-		if _, err := db.ExecContext(
-			context.Background(),
-			s.dialect.Rebind(`
+	return s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			chunkSize := s.dialect.ParameterLimit() / 2
+			for start := 0; start < len(refs); start += chunkSize {
+				end := min(start+chunkSize, len(refs))
+				predicates := make([]string, 0, end-start)
+				args := make([]any, 0, (end-start)*2)
+				for _, ref := range refs[start:end] {
+					predicates = append(
+						predicates,
+						"(credential_tag = ? AND staking_key = ?)",
+					)
+					args = append(args, ref.Tag, ref.Key)
+				}
+				predicate := strings.Join(predicates, " OR ")
+				if _, err := db.ExecContext(
+					context.Background(),
+					s.dialect.Rebind(`
 UPDATE account SET active = FALSE
-WHERE active = TRUE AND (`+strings.Join(predicates, " OR ")+")"),
-			args...,
-		); err != nil {
-			return fmt.Errorf("DeactivateAccounts: %w", err)
-		}
-		// Mithril reconciliation deactivates a credential precisely because
-		// the newer snapshot's live set does not hold it, which is a statement
-		// about the imported baseline and not about any certificate. Leaving
-		// the baseline active would let a later rollback restore the account
-		// this call just tombstoned.
-		if _, err := db.ExecContext(
-			context.Background(),
-			s.dialect.Rebind(`
-UPDATE account_import_baseline SET active = FALSE, pool = NULL, drep = NULL,
-    drep_type = 0
-WHERE active = TRUE AND (`+strings.Join(predicates, " OR ")+")"),
-			args...,
-		); err != nil {
-			return fmt.Errorf("DeactivateAccounts: baseline: %w", err)
-		}
-	}
-	return nil
+WHERE active = TRUE AND (`+predicate+")"),
+					args...,
+				); err != nil {
+					return fmt.Errorf("DeactivateAccounts: %w", err)
+				}
+				if err := s.clearAccountImportBaselines(
+					db,
+					predicate,
+					args...,
+				); err != nil {
+					return fmt.Errorf("DeactivateAccounts: %w", err)
+				}
+			}
+			return nil
+		},
+	)
 }
 
 func (s *Store) GetAccountSumsByCredential(
