@@ -111,11 +111,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Belt-and-suspenders: reject anything that isn't a filename this
-          # workflow could have produced itself, in case benchmark-data was
-          # tampered with between runs.
-          if [[ ! "$(basename "${BASELINE_FILE}")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]+-[0-9]+-[0-9a-f]{4,40}\.txt$ ]]; then
-            echo "baseline_file has an unexpected name: ${BASELINE_FILE}" >&2
+          # Belt-and-suspenders: reject anything that isn't exactly the path
+          # this workflow could have produced itself, in case benchmark-data
+          # was tampered with between runs. Validating only the basename is
+          # not enough -- runs/latest.txt containing "../other/<valid-name>"
+          # would still pass a basename-only check while resolving outside
+          # runs/, so the full path is matched here instead.
+          if [[ ! "${BASELINE_FILE}" =~ ^\.\./benchmark-data-branch/runs/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]+-[0-9]+-[0-9a-f]{4,40}\.txt$ ]]; then
+            echo "baseline_file has an unexpected path: ${BASELINE_FILE}" >&2
             exit 1
           fi
           go run ./internal/benchci/cmd/benchcheck \
