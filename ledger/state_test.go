@@ -2152,6 +2152,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
+			false,
 		)
 		require.NoError(t, err)
 
@@ -2271,6 +2272,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
+				false,
 			)
 			return err
 		})
@@ -2400,6 +2402,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
+				false,
 			)
 			return err
 		})

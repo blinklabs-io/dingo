@@ -981,6 +981,14 @@ type EpochRolloverResult struct {
 	// HardFork is non-nil when a protocol version change
 	// in the updated pparams triggers an era transition.
 	HardFork *HardForkInfo
+	// BoundarySnapshotDeferred is true when the caller asked
+	// processEpochRollover to skip the authoritative mark-snapshot capture and
+	// the rollover reached the point where it would otherwise have captured it.
+	// The caller then owns exactly one capture, taken after the remaining
+	// boundary era transitions have rewritten NewCurrentEra and
+	// NewCurrentPParams. It stays false for the initial-epoch path, which never
+	// captures a mark snapshot.
+	BoundarySnapshotDeferred bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -3234,6 +3242,107 @@ func (ls *LedgerState) transitionToEraFrom(
 	return result, nil
 }
 
+// applyBoundaryEraTransitions applies the era transitions a multi-era boundary
+// block requires but the epoch rollover does not perform itself, then takes the
+// mark snapshot the rollover deferred.
+//
+// The rollover has to run first so pending protocol updates are enacted in the
+// source era; applying the transitions before it would let an old-era update
+// overwrite the successor era's parameters. The consequence is that when the
+// rollover would normally capture the mark snapshot, the final era and protocol
+// parameters do not exist yet. So the snapshot is captured here instead, after
+// the transitions and after the new epoch's era and parameters are made durable,
+// which is what makes the snapshot's recorded protocol major agree with the era
+// the epoch actually runs at and with the post-commit EpochTransitionEvent.
+//
+// rolloverResult is updated in place to describe the final era. The returned
+// transition results are in application order, for the caller's in-memory state
+// and hard-fork events.
+func (ls *LedgerState) applyBoundaryEraTransitions(
+	txn *database.Txn,
+	snapshotEpoch models.Epoch,
+	transitionPath []uint,
+	rolloverResult *EpochRolloverResult,
+) ([]*EraTransitionResult, error) {
+	workingPParams := rolloverResult.NewCurrentPParams
+	workingEraId := rolloverResult.NewCurrentEra.Id
+	transitionResults := make([]*EraTransitionResult, 0, len(transitionPath))
+	for _, transitionEraID := range transitionPath {
+		result, err := ls.transitionToEraFrom(
+			txn,
+			transitionEraID,
+			snapshotEpoch.EpochId,
+			snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+			workingPParams,
+			workingEraId,
+		)
+		if err != nil {
+			return nil, err
+		}
+		workingPParams = result.NewPParams
+		workingEraId = result.NewEra.Id
+		transitionResults = append(transitionResults, result)
+	}
+
+	newEpoch := rolloverResult.NewCurrentEpoch
+	newEpoch.EraId = workingEraId
+	if err := ls.db.SetEpoch(
+		newEpoch.StartSlot,
+		newEpoch.EpochId,
+		newEpoch.Nonce,
+		newEpoch.EvolvingNonce,
+		newEpoch.CandidateNonce,
+		newEpoch.LastEpochBlockNonce,
+		newEpoch.EraId,
+		newEpoch.SlotLength,
+		newEpoch.LengthInSlots,
+		txn,
+	); err != nil {
+		return nil, fmt.Errorf("update transitioned epoch: %w", err)
+	}
+	pparamsCbor, err := cbor.Encode(&workingPParams)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"encode transitioned protocol parameters: %w", err,
+		)
+	}
+	if err := ls.db.SetPParams(
+		pparamsCbor,
+		newEpoch.StartSlot,
+		newEpoch.EpochId,
+		workingEraId,
+		txn,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"persist transitioned protocol parameters: %w", err,
+		)
+	}
+	rolloverResult.NewCurrentEpoch = newEpoch
+	rolloverResult.NewCurrentPParams = workingPParams
+	finalEra, ok := ls.eraById(workingEraId)
+	if !ok || finalEra == nil {
+		return nil, fmt.Errorf(
+			"unknown transitioned era ID %d", workingEraId,
+		)
+	}
+	rolloverResult.NewCurrentEra = *finalEra
+	for i := range rolloverResult.NewEpochCache {
+		if rolloverResult.NewEpochCache[i].EpochId == newEpoch.EpochId {
+			rolloverResult.NewEpochCache[i].EraId = workingEraId
+		}
+	}
+
+	if rolloverResult.BoundarySnapshotDeferred {
+		if err := ls.captureEpochBoundarySnapshot(
+			txn, snapshotEpoch, rolloverResult,
+		); err != nil {
+			return nil, err
+		}
+		rolloverResult.BoundarySnapshotDeferred = false
+	}
+	return transitionResults, nil
+}
+
 // applyEraTransition applies a single era-transition result to the in-memory
 // LedgerState fields. Must be called while holding ls.Lock(), except during
 // single-threaded startup before LedgerState is visible to concurrent readers.
@@ -4509,11 +4618,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// let an old-era update overwrite the successor era's pparams
 				// (Prime's epoch-9 major-5 update otherwise regresses Babbage
 				// major 7).
-				transitionsBeforeRollover := len(transitionPath)
-				if transitionsBeforeRollover == 2 {
-					transitionsBeforeRollover = 0
+				transitionsBeforeRollover := transitionPath
+				var transitionsAfterRollover []uint
+				if len(transitionPath) == 2 {
+					transitionsBeforeRollover = nil
+					transitionsAfterRollover = transitionPath
 				}
-				for _, transitionEraID := range transitionPath[:transitionsBeforeRollover] {
+				for _, transitionEraID := range transitionsBeforeRollover {
 					result, err := ls.transitionToEraFrom(
 						txn,
 						transitionEraID,
@@ -4541,82 +4652,30 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					snapshotEpoch,
 					*workingEraPtr,
 					workingPParams,
+					len(transitionsAfterRollover) > 0,
 				)
 				if err != nil {
 					return err
 				}
 				rolloverResult = result
-				if transitionsBeforeRollover == 0 && len(transitionPath) == 2 {
-					// The rollover must enact source-era updates before the
-					// hard-fork path. Now that it has done so, apply both
-					// transitions using the resulting parameters and make the
-					// new epoch durable in the final era.
-					workingPParams = rolloverResult.NewCurrentPParams
-					workingEraId = rolloverResult.NewCurrentEra.Id
-					for _, transitionEraID := range transitionPath {
-						result, err := ls.transitionToEraFrom(
-							txn,
-							transitionEraID,
-							snapshotEpoch.EpochId,
-							snapshotEpoch.StartSlot+uint64(
-								snapshotEpoch.LengthInSlots,
-							),
-							workingPParams,
-							workingEraId,
-						)
-						if err != nil {
-							return err
-						}
-						workingPParams = result.NewPParams
-						workingEraId = result.NewEra.Id
-						eraTransitions = append(eraTransitions, result)
-					}
-
-					newEpoch := rolloverResult.NewCurrentEpoch
-					newEpoch.EraId = workingEraId
-					if err := ls.db.SetEpoch(
-						newEpoch.StartSlot,
-						newEpoch.EpochId,
-						newEpoch.Nonce,
-						newEpoch.EvolvingNonce,
-						newEpoch.CandidateNonce,
-						newEpoch.LastEpochBlockNonce,
-						newEpoch.EraId,
-						newEpoch.SlotLength,
-						newEpoch.LengthInSlots,
+				if len(transitionsAfterRollover) > 0 {
+					transitionResults, err := ls.applyBoundaryEraTransitions(
 						txn,
-					); err != nil {
-						return fmt.Errorf("update transitioned epoch: %w", err)
-					}
-					pparamsCbor, err := cbor.Encode(&workingPParams)
+						snapshotEpoch,
+						transitionsAfterRollover,
+						rolloverResult,
+					)
 					if err != nil {
-						return fmt.Errorf(
-							"encode transitioned protocol parameters: %w", err,
-						)
+						return err
 					}
-					if err := ls.db.SetPParams(
-						pparamsCbor,
-						newEpoch.StartSlot,
-						newEpoch.EpochId,
-						workingEraId,
-						txn,
-					); err != nil {
-						return fmt.Errorf(
-							"persist transitioned protocol parameters: %w", err,
-						)
-					}
-					rolloverResult.NewCurrentEpoch = newEpoch
-					rolloverResult.NewCurrentPParams = workingPParams
-					finalEra, ok := ls.eraById(workingEraId)
-					if !ok || finalEra == nil {
-						return fmt.Errorf("unknown transitioned era ID %d", workingEraId)
-					}
-					rolloverResult.NewCurrentEra = *finalEra
-					for i := range rolloverResult.NewEpochCache {
-						if rolloverResult.NewEpochCache[i].EpochId == newEpoch.EpochId {
-							rolloverResult.NewEpochCache[i].EraId = workingEraId
-						}
-					}
+					// applyBoundaryEraTransitions updated
+					// rolloverResult in place, so the era and
+					// pparams the caller applies after commit
+					// already describe the final era.
+					eraTransitions = append(
+						eraTransitions,
+						transitionResults...,
+					)
 				}
 				return nil
 			}, true)
@@ -6661,6 +6720,7 @@ func (ls *LedgerState) setEpochCache(
 		ls.currentEpoch,
 		ls.currentEra,
 		ls.currentPParams,
+		false,
 	)
 	if err != nil {
 		return err
