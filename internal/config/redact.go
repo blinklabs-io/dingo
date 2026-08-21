@@ -16,8 +16,8 @@ package config
 
 import (
 	"log/slog"
+	"net/url"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -263,36 +263,52 @@ var configLogClasses = sync.OnceValue(func() map[string]logClass {
 	return classes
 })
 
+// providerConfigPlainKeys are the lower-cased keys a compiled-in plugin
+// provider accepts in its free-form configuration map that carry no
+// secret. "auth" and "tls" are the nested sections of the API providers:
+// they are containers, so classifying them plain is what lets the walk
+// recurse and classify the keys inside them by name.
+var providerConfigPlainKeys = []string{
+	// database/plugin/metadata/sqlite
+	"datadir", "maxconnections",
+	// database/plugin/metadata/{mysql,postgres}
+	"host", "port", "user", "database", "sslmode", "timezone",
+	"poolmaxopenconns", "poolmaxidleconns", "poolconnmaxlifetime",
+	// database/plugin/blob/{aws,gcs}
+	"bucket", "region", "prefix", "timeout",
+	// database/plugin/blob/badger
+	"blockcachesize", "indexcachesize", "valuelogfilesize",
+	"memtablesize", "valuethreshold", "gc", "compression",
+	"compressionlevel",
+	// mempool
+	"capacity", "evictionwatermark", "rejectionwatermark",
+	"revalidationdeltacap",
+	// api/{blockfrost,mesh,utxorpc} tls and auth sections and the
+	// policy keys inside them
+	"auth", "tls",
+	"mode", "certfilepath", "keyfilepath", "tokenfilepath",
+}
+
+// providerConfigURIKeys are provider configuration keys holding a URI or
+// database DSN, rendered with only their credential components removed.
+var providerConfigURIKeys = []string{"dsn", "endpoint", "url"}
+
+// providerConfigSecretKeys are provider configuration keys whose value is
+// a secret in itself. isCredentialKeyName reaches the same verdict for
+// each of them, and TestProviderConfigKeyTableAgreesWithClassifier holds
+// the two together.
+var providerConfigSecretKeys = []string{"password", "token"}
+
 // providerConfigKeyClasses classifies the keys a compiled-in plugin
 // provider accepts in its free-form configuration map. A key absent from it
 // resolves to logSecret, so an out-of-tree or newly added provider key is
 // redacted until it is classified here.
 var providerConfigKeyClasses = sync.OnceValue(func() map[string]logClass {
 	classes := make(map[string]logClass)
-	plain := []string{
-		// database/plugin/metadata/sqlite
-		"datadir", "maxconnections",
-		// database/plugin/metadata/{mysql,postgres}
-		"host", "port", "user", "database", "sslmode", "timezone",
-		"poolmaxopenconns", "poolmaxidleconns", "poolconnmaxlifetime",
-		// database/plugin/blob/{aws,gcs}
-		"bucket", "region", "prefix", "timeout",
-		// database/plugin/blob/badger
-		"blockcachesize", "indexcachesize", "valuelogfilesize",
-		"memtablesize", "valuethreshold", "gc", "compression",
-		"compressionlevel",
-		// mempool
-		"capacity", "evictionwatermark", "rejectionwatermark",
-		"revalidationdeltacap",
-		// api/{blockfrost,mesh,utxorpc} tls and auth policies
-		"mode", "certfilepath", "keyfilepath", "tokenfilepath",
-	}
-	uri := []string{"dsn", "endpoint", "url"}
-	secret := []string{"password", "token"}
 	for class, keys := range map[logClass][]string{
-		logPlain:  plain,
-		logURI:    uri,
-		logSecret: secret,
+		logPlain:  providerConfigPlainKeys,
+		logURI:    providerConfigURIKeys,
+		logSecret: providerConfigSecretKeys,
 	} {
 		for _, key := range keys {
 			classes[key] = class
@@ -300,6 +316,19 @@ var providerConfigKeyClasses = sync.OnceValue(func() map[string]logClass {
 	}
 	return classes
 })
+
+// providerConfigKeyClass classifies one key of a provider configuration
+// map. isCredentialKeyName decides first, so a credential-shaped key can
+// never be rendered even if it were added to providerConfigPlainKeys by
+// mistake; the provider key set is open-world, which is why this path
+// carries a name-shape guard while the exhaustively enumerated Config
+// field paths do not.
+func providerConfigKeyClass(key string) logClass {
+	if isCredentialKeyName(key) {
+		return logSecret
+	}
+	return providerConfigKeyClasses()[strings.ToLower(key)]
+}
 
 // LogValue renders c for structured logging with every secret-bearing
 // value replaced by redactedPlaceholder, so `slog` never persists a Koios
@@ -442,7 +471,7 @@ func providerConfigValue(v reflect.Value) slog.Value {
 	attrs := make([]slog.Attr, 0, v.Len())
 	for _, key := range sortedStringKeys(v) {
 		entry := unwrapInterface(v.MapIndex(reflect.ValueOf(key)))
-		class := providerConfigKeyClasses()[strings.ToLower(key)]
+		class := providerConfigKeyClass(key)
 		attrs = append(attrs, slog.Attr{
 			Key:   key,
 			Value: providerConfigEntry(entry, class),
@@ -452,11 +481,21 @@ func providerConfigValue(v reflect.Value) slog.Value {
 }
 
 // providerConfigEntry renders one provider configuration entry. A nested
-// map is recursed into so its own keys are classified by name; anything
-// else is rendered according to its key's class.
+// map or slice under a non-secret key is walked so its own keys are
+// classified by name; anything else is rendered according to its key's
+// class.
+//
+// A logSecret class -- which is also the class of an unrecognized key --
+// covers the whole subtree and is applied before any recursion. Walking
+// into it would reclassify the inner keys by their own names, and an
+// inner key that happens to be classified plain ("host", "mode") would
+// then render part of a value whose enclosing key is a secret.
 func providerConfigEntry(v reflect.Value, class logClass) slog.Value {
 	if !v.IsValid() {
 		return slog.AnyValue(nil)
+	}
+	if class == logSecret {
+		return redactedValue(v)
 	}
 	if v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
 		return providerConfigValue(v)
@@ -504,29 +543,170 @@ func sortedStringKeys(v reflect.Value) []string {
 	return keys
 }
 
-// uriCredentialParam matches a credential-shaped parameter in a URI query
-// string or in a keyword-form database DSN
-// ("host=db user=dingo password=hunter2").
-var uriCredentialParam = regexp.MustCompile(
-	`(?i)\b(password|passwd|pwd|secret|token|api[-_]?key|` +
-		`access[-_]?key|secret[-_]?key|sig|signature)\s*=\s*[^\s;&]*`,
-)
-
 // redactURICredentials removes the credential components of a URI or
-// database DSN -- the userinfo password and any credential-shaped
-// parameter -- while keeping scheme, host, port, path, database name, and
-// every other parameter. A DSN redacted whole loses the operational value
-// of knowing which host and database the node was pointed at, which is
-// most of the reason the configuration is logged at all.
+// database DSN -- the userinfo password and the value of every
+// credential-named parameter -- while keeping scheme, host, port, path,
+// database name, and every other parameter. A DSN redacted whole loses the
+// operational value of knowing which host and database the node was
+// pointed at, which is most of the reason the configuration is logged at
+// all.
 func redactURICredentials(s string) string {
 	if s == "" {
 		return s
 	}
-	s = uriCredentialParam.ReplaceAllString(
-		s,
-		"${1}="+redactedPlaceholder,
-	)
-	return redactURIUserinfo(s)
+	return redactURIUserinfo(redactCredentialParams(s))
+}
+
+// redactCredentialParams redacts the value of every credential-named
+// "name=value" parameter in s. The decision is made per parameter name
+// through isCredentialKeyName, not by matching credential shapes against
+// the whole string.
+//
+// A URI's parameters live in its query string, where net/url decides
+// where the query begins and '&' or ';' separates the pairs. A
+// keyword-form database DSN ("host=db user=dingo password='hunter 2'")
+// has no query string: its pairs are whitespace separated, whitespace
+// around '=' is optional, and a value containing whitespace is quoted.
+func redactCredentialParams(s string) string {
+	if start, end, ok := uriQuerySpan(s); ok {
+		return s[:start] + redactParams(s[start:end], "&;") + s[end:]
+	}
+	return redactParams(s, " \t\r\n")
+}
+
+// uriQuerySpan returns the bounds of s's URI query string, if it has one.
+// net/url does the parsing, so a keyword DSN -- which is not a URI -- does
+// not get its whitespace-separated keywords treated as query parameters.
+// The span is verified against RawQuery before it is used, so a URI whose
+// '?' net/url located differently is left to the keyword scanner instead
+// of being spliced at the wrong offset.
+func uriQuerySpan(s string) (int, int, bool) {
+	parsed, err := url.Parse(s)
+	if err != nil || parsed.RawQuery == "" {
+		return 0, 0, false
+	}
+	mark := strings.IndexByte(s, '?')
+	if mark < 0 {
+		return 0, 0, false
+	}
+	start := mark + 1
+	end := start + len(parsed.RawQuery)
+	if end > len(s) || s[start:end] != parsed.RawQuery {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// redactParams replaces the value of every credential-named parameter in
+// s, whose parameters are separated by any byte in delims. Separators,
+// ordering, quoting, and every non-credential value are copied through
+// byte for byte, because a redacted DSN is only useful if the host,
+// database, and options it names survive.
+func redactParams(s, delims string) string {
+	var out strings.Builder
+	out.Grow(len(s))
+	for i := 0; i < len(s); {
+		skipped := i
+		for i < len(s) && !isKeyNameByte(s[i]) {
+			i++
+		}
+		out.WriteString(s[skipped:i])
+		nameEnd := i
+		for nameEnd < len(s) && isKeyNameByte(s[nameEnd]) {
+			nameEnd++
+		}
+		name := s[i:nameEnd]
+		if name == "" {
+			// i is at the end of s; the loop condition ends the walk.
+			continue
+		}
+		out.WriteString(name)
+		i = nameEnd
+		valueStart, ok := paramValueStart(s, nameEnd)
+		if !ok {
+			continue
+		}
+		valueEnd := paramValueEnd(s, valueStart, delims)
+		if valueEnd > valueStart && isCredentialKeyName(name) {
+			out.WriteString(s[nameEnd:valueStart])
+			out.WriteString(redactedPlaceholder)
+		} else {
+			out.WriteString(s[nameEnd:valueEnd])
+		}
+		i = valueEnd
+	}
+	return out.String()
+}
+
+// paramValueStart returns the index at which the value of the parameter
+// whose name ends at nameEnd begins, and whether the parameter has a
+// value at all.
+//
+// The keyword DSN form permits whitespace on both sides of '='. Trailing
+// whitespace followed by another "name=" pair instead means this
+// parameter's value is empty; consuming the next pair as the value would
+// hide a non-credential option behind the placeholder.
+func paramValueStart(s string, nameEnd int) (int, bool) {
+	i := skipParamSpace(s, nameEnd)
+	if i >= len(s) || s[i] != '=' {
+		return 0, false
+	}
+	i++
+	if spaced := skipParamSpace(s, i); spaced != i &&
+		!startsParam(s, spaced) {
+		i = spaced
+	}
+	return i, true
+}
+
+// paramValueEnd returns the index one past the value beginning at i. A
+// quoted value ends at its closing quote, so a keyword DSN password
+// containing whitespace is redacted whole rather than up to its first
+// space; an unquoted value ends at the first byte in delims.
+func paramValueEnd(s string, i int, delims string) int {
+	if i < len(s) && (s[i] == '\'' || s[i] == '"') {
+		quote := s[i]
+		for j := i + 1; j < len(s); {
+			switch s[j] {
+			case '\\':
+				j += 2
+			case quote:
+				return j + 1
+			default:
+				j++
+			}
+		}
+		return len(s)
+	}
+	for ; i < len(s); i++ {
+		if strings.IndexByte(delims, s[i]) >= 0 {
+			return i
+		}
+	}
+	return len(s)
+}
+
+// startsParam reports whether a new "name=" pair begins at i.
+func startsParam(s string, i int) bool {
+	end := i
+	for end < len(s) && isKeyNameByte(s[end]) {
+		end++
+	}
+	if end == i {
+		return false
+	}
+	end = skipParamSpace(s, end)
+	return end < len(s) && s[end] == '='
+}
+
+// skipParamSpace returns the index of the first byte at or after i that is
+// not whitespace.
+func skipParamSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' ||
+		s[i] == '\r' || s[i] == '\n') {
+		i++
+	}
+	return i
 }
 
 // redactURIUserinfo replaces the password half of a "user:password@"
@@ -553,3 +733,216 @@ func redactURIUserinfo(s string) string {
 	}
 	return s[:start+colon+1] + redactedPlaceholder + s[start+at:]
 }
+
+// A key name is classified per whole word, never per substring. A
+// \b-anchored regular expression over the raw name is the wrong shape for
+// this job twice over: '_' is a word character, so `\bsecret` cannot match
+// "client_secret" and `\btoken` cannot match "api_token"; and
+// `access[-_]?key` cannot reach the '=' of "accessKeyId=" past the "Id"
+// suffix. Both misses leak. Enumerating spellings instead --
+// accessKeyId, client_secret, api_token, x-api-key, authToken,
+// refreshToken, privateKey, sasToken, SharedAccessSignature -- only moves
+// the next miss one spelling further out.
+//
+// So a name is decomposed into words first: at separators
+// ("client_secret", "x-api-key", "auth.token"), at camelCase and acronym
+// boundaries ("accessKeyId", "IPFSGatewayURL"), and, for a run-together
+// spelling such as "apikey" or "accesskeyid", by segmenting the word
+// against the vocabulary below -- which succeeds only when known words
+// cover the word completely, so "monkey" and "keyspace" do not become
+// credentials. The decision is then set membership over those words, and
+// no prefix, suffix, or separator can move a term out of reach.
+
+// credentialWords name a credential themselves: one of them anywhere in a
+// key name means the value is a credential.
+var credentialWords = []string{
+	"credential", "credentials",
+	"pass", "passphrase", "passwd", "password", "passwords", "pwd",
+	// Azure shared access signature, spelled "sas" in its key names.
+	"sas",
+	"secret", "secrets",
+	"sig", "signature", "signatures",
+	"token", "tokens",
+}
+
+// keyWords name a key, which is a credential only when a qualifier says
+// which key it is: "privateKey" and "accessKeyId" are credentials,
+// "publicKeys" and "shelleyVrfKey" are not.
+var keyWords = []string{"key", "keys"}
+
+// credentialQualifierWords turn an accompanying key word into a
+// credential.
+var credentialQualifierWords = []string{
+	"access", "account", "api", "app", "application", "auth", "bearer",
+	"client", "consumer", "encryption", "master", "private", "refresh",
+	"secret", "service", "session", "shared", "sign", "signing",
+	"subscription",
+}
+
+// locationWords name where a credential is kept rather than the
+// credential itself: "tokenFilePath", "signingKeyFile", and "dataDir"
+// hold a path, and which path was configured is exactly what an operator
+// needs from a startup log. A name containing one of these is therefore
+// not a credential. The trade is that a secret written inline under a
+// "...File" name would be rendered; the alternative redacts every
+// configured path, including the ones this logging exists to show.
+var locationWords = []string{
+	"dir", "directory", "file", "folder", "path",
+}
+
+// keyNameFillerWords carry no classification of their own. They exist so
+// that a run-together spelling segments: "accesskeyid" is access+key+id.
+var keyNameFillerWords = []string{"id", "ids", "name", "names"}
+
+// keyNameVocabulary is every word the classifier knows, used to segment a
+// run-together key name.
+var keyNameVocabulary = sync.OnceValue(func() []string {
+	var vocabulary []string
+	for _, words := range [][]string{
+		credentialWords,
+		credentialQualifierWords,
+		keyNameFillerWords,
+		keyWords,
+		locationWords,
+	} {
+		vocabulary = append(vocabulary, words...)
+	}
+	slices.Sort(vocabulary)
+	return slices.Compact(vocabulary)
+})
+
+// isCredentialKeyName reports whether a value stored under the
+// configuration key or URI parameter name is a credential.
+func isCredentialKeyName(name string) bool {
+	words := keyNameWords(name)
+	switch {
+	case containsWord(words, locationWords):
+		return false
+	case containsWord(words, credentialWords):
+		return true
+	default:
+		return containsWord(words, keyWords) &&
+			containsWord(words, credentialQualifierWords)
+	}
+}
+
+// containsWord reports whether any of words appears in set.
+func containsWord(words, set []string) bool {
+	return slices.ContainsFunc(words, func(word string) bool {
+		return slices.Contains(set, word)
+	})
+}
+
+// keyNameWords is name split into lower-cased words, each then segmented
+// against the vocabulary.
+func keyNameWords(name string) []string {
+	parts := splitKeyName(name)
+	words := make([]string, 0, len(parts))
+	for _, part := range parts {
+		words = append(words, segmentKeyWord(part)...)
+	}
+	return words
+}
+
+// splitKeyName splits name into lower-cased words at every
+// non-alphanumeric byte and at every camelCase or acronym boundary, so
+// "accessKeyId", "access_key_id", "access-key-id", "ACCESS_KEY_ID", and
+// "access.key.id" all yield access, key, id.
+func splitKeyName(name string) []string {
+	var words []string
+	start := -1
+	for i := range len(name) {
+		if !isKeyWordByte(name[i]) {
+			if start >= 0 {
+				words = append(words, strings.ToLower(name[start:i]))
+				start = -1
+			}
+			continue
+		}
+		if start < 0 {
+			start = i
+			continue
+		}
+		if isKeyWordBoundary(name, i) {
+			words = append(words, strings.ToLower(name[start:i]))
+			start = i
+		}
+	}
+	if start >= 0 {
+		words = append(words, strings.ToLower(name[start:]))
+	}
+	return words
+}
+
+// isKeyWordBoundary reports whether the byte at i starts a new camelCase
+// or acronym word: an upper-case byte following a lower-case byte or a
+// digit ("accessKey", "sha256Key"), or the last upper-case byte of an
+// acronym run when a lower-case byte follows it ("APIKey" is api, key).
+func isKeyWordBoundary(name string, i int) bool {
+	if !isUpperByte(name[i]) {
+		return false
+	}
+	prev := name[i-1]
+	if isLowerByte(prev) || isDigitByte(prev) {
+		return true
+	}
+	return isUpperByte(prev) && i+1 < len(name) && isLowerByte(name[i+1])
+}
+
+// segmentKeyWord splits a run-together word into vocabulary words, and
+// only when those words cover it completely: "apikey" is api+key, while
+// "monkey", "keyspace", and "sslmode" do not segment and stay whole.
+// Requiring full coverage is what keeps a benign name from classifying on
+// an embedded substring.
+func segmentKeyWord(word string) []string {
+	if word == "" {
+		return nil
+	}
+	vocabulary := keyNameVocabulary()
+	if slices.Contains(vocabulary, word) {
+		return []string{word}
+	}
+	reachable := make([]bool, len(word)+1)
+	from := make([]int, len(word)+1)
+	reachable[0] = true
+	for end := 1; end <= len(word); end++ {
+		for start := range end {
+			if !reachable[start] {
+				continue
+			}
+			if slices.Contains(vocabulary, word[start:end]) {
+				reachable[end] = true
+				from[end] = start
+				break
+			}
+		}
+	}
+	if !reachable[len(word)] {
+		return []string{word}
+	}
+	var words []string
+	for end := len(word); end > 0; end = from[end] {
+		words = append(words, word[from[end]:end])
+	}
+	slices.Reverse(words)
+	return words
+}
+
+// isKeyNameByte reports whether b can appear in a configuration key or
+// URI parameter name: a word byte, or one of the separators an operator
+// spells a multi-word name with.
+func isKeyNameByte(b byte) bool {
+	return b == '-' || b == '.' || b == '_' || isKeyWordByte(b)
+}
+
+// isKeyWordByte reports whether b belongs to a single word within a key
+// name. Every other byte, including any non-ASCII byte, separates words.
+func isKeyWordByte(b byte) bool {
+	return isDigitByte(b) || isLowerByte(b) || isUpperByte(b)
+}
+
+func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
+
+func isLowerByte(b byte) bool { return b >= 'a' && b <= 'z' }
+
+func isUpperByte(b byte) bool { return b >= 'A' && b <= 'Z' }

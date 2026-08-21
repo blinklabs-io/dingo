@@ -6423,16 +6423,55 @@ Two classes are not simple pass/redact. A URI field -- `barkBaseUrl`,
 `tokenRegistry.sourceUrl`, `offchainMetadata.ipfsGatewayUrl`, and
 `databaseLifecycle.snapshotCloudDestination` -- keeps its scheme, host,
 port, path, and non-credential parameters and loses only its userinfo
-password and any credential-shaped parameter, because "which host and
-database was this node pointed at" is most of the reason the configuration
-is logged at all; the same handling covers both URL-form and keyword-form
-database DSNs. A
-provider-config field (`plugins.*.config`, a free-form `map[string]any`
-whose keys belong to the selected provider, not to `Config`) is walked
-recursively and classified per key name, so a secret nested at any depth
-under a provider section is still redacted; unrecognized keys default to
-redacted, which means an out-of-tree provider's benign key is
-over-redacted until it is added to the key table.
+password and the value of every credential-named parameter, because "which
+host and database was this node pointed at" is most of the reason the
+configuration is logged at all; the same handling covers both URL-form and
+keyword-form database DSNs. A provider-config field (`plugins.*.config`, a
+free-form `map[string]any` whose keys belong to the selected provider, not
+to `Config`) is walked recursively and classified per key name, so a
+secret nested at any depth under a provider section is still redacted;
+unrecognized keys default to redacted, which means an out-of-tree
+provider's benign key is over-redacted until it is added to the key table.
+A secret classification -- including the unrecognized-key default --
+covers the whole subtree beneath the key and is applied before any
+recursion, because walking into it would reclassify the inner keys by
+their own names and an inner key classified plain (`host`, `mode`) would
+then render part of a secret-bearing value. The API providers' nested
+`tls` and `auth` sections are classified as renderable containers so their
+own policy keys are still walked and classified individually.
+
+Both the URI parameters and the provider keys are decided by one
+credential classifier, `isCredentialKeyName`, which works per key-name
+word rather than per substring. A `\b`-anchored pattern over a raw key
+name is the wrong shape for this: `_` is a word character, so `\bsecret`
+cannot match `client_secret` and `\btoken` cannot match `api_token`, and
+`access[-_]?key` cannot reach the `=` of `accessKeyId=` past the `Id`
+suffix. Enumerating spellings instead only moves the next miss further
+out. So a key name is split into words at separators, at camelCase and
+acronym boundaries (`accessKeyId`, `IPFSGatewayURL`), and -- for a
+run-together spelling such as `apikey` -- by segmenting the word against
+the classifier's own vocabulary, which succeeds only when known words
+cover the word completely, so `monkey` and `keyspace` do not become
+credentials. The verdict is then set membership over four small word
+groups: words that name a credential outright (`password`, `secret`,
+`token`, `signature`, ...), `key`/`keys`, the qualifiers that make a key a
+credential (`api`, `access`, `private`, `client`, `shared`, ...), and the
+location words (`path`, `file`, `dir`, ...) that mean the value is where a
+credential is kept rather than the credential -- `tokenFilePath` and
+`signingKeyFile` name paths an operator needs to see. `TestIsCredentialKeyName`
+holds the term set against a table of camelCase, snake_case, kebab-case,
+prefixed, suffixed, and run-together spellings.
+
+Query strings are located with `net/url` and then scanned pair by pair, so
+the decision is per parameter name; keyword-form DSNs are scanned by the
+same routine with whitespace separators, optional whitespace around `=`,
+and quoted values, so a quoted password containing whitespace is redacted
+whole. The two classification tables and the classifier are held to one
+answer by tests: no provider key or `Config` field path classified
+renderable may read as a credential, apart from an explicitly listed
+review exception (`midnight.authTokenPolicyId` and
+`midnight.authTokenAssetName` name public on-chain data, not a token), and
+every path classified secret must read as one.
 
 The walk is deliberately uniform and does not defer to a nested type's own
 `slog.LogValuer` (`apiconfig.AuthPolicy` has one). One table with one
