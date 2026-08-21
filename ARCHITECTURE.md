@@ -1898,6 +1898,20 @@ Byron's own transaction rules need no parameters either: `eras.ValidateTxByron`
 runs `byronValidateBadInputs`, `byronValidateValueConserved` and
 `byronValidateWitnesses`, each of which discards the argument.
 
+The Byron start applies to an empty database only. `setEpochCache` returns as
+soon as `epochCache` is populated, which is what keeps an already-synced node
+untouched — and equally what means a database created by an earlier binary keeps
+epoch 0 tagged with a post-Byron era at slot 0. Upgrading does not repair it:
+its Shelley-relative slots stay shifted, and it fails with the same
+genesis-overlay rejection as before.
+
+`warnOnPreByronPrefixEpochCache` detects that shape at startup and logs a
+warning naming the epoch, the era found, the era expected, and that a resync
+from an empty database is the remedy. It does not act on the data. The condition
+is the same one that chooses a Byron start — a Byron genesis is configured, the
+network does not declare Shelley at genesis, and Dijkstra was not forced — so
+the detection cannot disagree with the startup path it reports on.
+
 The Musashi prototype (prototype-2026w29) tags its early chain as Conway (NtN block type 7) but its block headers carry a Leios-extended header body — the 10 standard Babbage fields plus `leios_certified` and `leios_announcement` — that gouroboros' strict Conway decoder rejects. Rather than loosen the shared gouroboros Conway decoder that every real Conway network relies on, dingo decodes these blocks itself, scoped to the Musashi network magic (164) and block type 7, at three entry points:
 
 - Chain-sync headers: `ouroboros/chainsync.go` takes the raw RollForward callback (`chainsyncClientRollForwardRaw`), and `decodeChainsyncHeader` routes Musashi Conway-tagged headers through the Dijkstra header decoder (`gdijkstra.NewDijkstraBlockHeaderFromCbor`), which accepts the trailing extension. Taking the raw callback is required because the decoded callback would let gouroboros' strict Conway decode fail before dingo can intervene.

@@ -4817,3 +4817,89 @@ func TestReconstructTransitionInfoIgnoresStaleShelleyPParamsUnderByron(
 		"a Shelley pparams value under a Byron era must not be read as a transition",
 	)
 }
+
+// TestWarnOnPreByronPrefixEpochCache pins the detection of a database written
+// before the Byron prefix was preserved at startup. The startup fix only
+// applies to an empty database, so an operator who already began a preprod or
+// mainnet from-genesis sync keeps epoch 0 tagged Shelley at slot 0 and sees the
+// same overlay rejection as before -- with nothing to say the binary already
+// carries the fix. The warning is the only signal, so it needs to fire exactly
+// on that shape.
+func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {"k": 432, "protocolMagic": 2},
+		"blockVersionData": {"slotDuration": "20000"}
+	}`
+
+	newLedger := func(
+		t *testing.T, withByron, shelleyAtGenesis bool,
+	) (*LedgerState, *bytes.Buffer) {
+		t.Helper()
+		cfg := &cardano.CardanoNodeConfig{}
+		if withByron {
+			require.NoError(t, cfg.LoadByronGenesisFromReader(
+				strings.NewReader(byronGenesisJSON),
+			))
+		}
+		if shelleyAtGenesis {
+			cfg.TestShelleyHardForkAtEpoch = new(uint64)
+		}
+		var logs bytes.Buffer
+		return &LedgerState{
+			config: LedgerStateConfig{
+				CardanoNodeConfig: cfg,
+				Logger: slog.New(slog.NewTextHandler(
+					&logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+				)),
+			},
+		}, &logs
+	}
+
+	const warning = "database predates Byron prefix preservation"
+
+	t.Run("stale shape warns", func(t *testing.T) {
+		ls, logs := newLedger(t, true, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+			{EpochId: 1, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.Contains(t, logs.String(), warning)
+	})
+
+	t.Run("byron epoch zero is silent", func(t *testing.T) {
+		ls, logs := newLedger(t, true, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ByronEraDesc.Id},
+			{EpochId: 4, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
+
+	t.Run("shelley declared at genesis is silent", func(t *testing.T) {
+		// preview's shape: no Byron prefix to preserve, so epoch 0 being
+		// Shelley is correct rather than stale.
+		ls, logs := newLedger(t, true, true)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
+
+	t.Run("no byron genesis is silent", func(t *testing.T) {
+		ls, logs := newLedger(t, false, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
+
+	t.Run("empty cache is silent", func(t *testing.T) {
+		ls, logs := newLedger(t, true, false)
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
+}

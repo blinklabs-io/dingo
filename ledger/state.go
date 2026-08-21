@@ -6400,6 +6400,51 @@ func (ls *LedgerState) PrepareEpochCacheForStartup() error {
 	})
 }
 
+// warnOnPreByronPrefixEpochCache reports a database written before the Byron
+// prefix was preserved at startup.
+//
+// The startup fix is deliberately scoped to the empty-database branch above, so
+// a database that already tagged epoch 0 with a post-Byron era is not repaired
+// by upgrading. Its Shelley-relative slots stay shifted, and the failure it
+// produces is the same genesis-overlay rejection as before the fix, with
+// nothing to indicate that the binary already carries it. Detecting the shape
+// turns that into a diagnosable message.
+//
+// Log only. Repair means resyncing from an empty database, which is the
+// operator's call and not something to do to their data on their behalf.
+//
+// The condition is the same one setEpochCache uses to choose a Byron start, so
+// the two cannot disagree: a Byron genesis is configured, the network does not
+// declare Shelley at genesis, and Dijkstra was not forced. Under those inputs a
+// fresh database tags epoch 0 as Byron, so a post-Byron era there could only
+// have been written by an earlier binary.
+func (ls *LedgerState) warnOnPreByronPrefixEpochCache() {
+	if len(ls.epochCache) == 0 ||
+		ls.config.CardanoNodeConfig == nil ||
+		ls.config.CardanoNodeConfig.ByronGenesis() == nil ||
+		ls.config.StartInDijkstra ||
+		shelleyDeclaredAtGenesis(ls.config.CardanoNodeConfig) {
+		return
+	}
+	firstEpoch := ls.epochCache[0]
+	if firstEpoch.EpochId != 0 || firstEpoch.EraId <= eras.ByronEraDesc.Id {
+		return
+	}
+	ls.config.Logger.Warn(
+		"database predates Byron prefix preservation and cannot be repaired in place",
+		"component",
+		"ledger",
+		"epoch",
+		firstEpoch.EpochId,
+		"era_id",
+		firstEpoch.EraId,
+		"expected_era_id",
+		eras.ByronEraDesc.Id,
+		"action",
+		"resync from an empty database to follow the canonical chain",
+	)
+}
+
 // shelleyDeclaredAtGenesis reports whether the configuration declares that
 // Shelley is already active at epoch 0, which is what distinguishes a network
 // with no Byron prefix from one that reaches Shelley on chain.
@@ -6445,6 +6490,7 @@ func (ls *LedgerState) setEpochCache(
 			return fmt.Errorf("unknown era ID %d", ls.currentEpoch.EraId)
 		}
 		ls.currentEra = *eraDesc
+		ls.warnOnPreByronPrefixEpochCache()
 		// Update metrics
 		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 		return nil
