@@ -21,7 +21,9 @@ import (
 	"math/big"
 	"reflect"
 	"runtime"
+	"strings"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -330,7 +332,8 @@ func TxSizeForFee(tx lcommon.Transaction) uint64 {
 	if shelleyTx, ok := tx.(*shelley.ShelleyTransaction); ok {
 		bodyCbor := shelleyTx.Body.Cbor()
 		witnessCbor := shelleyTx.WitnessSet.Cbor()
-		if len(bodyCbor) > 0 && len(witnessCbor) > 0 {
+		if len(bodyCbor) > 0 && len(witnessCbor) > 0 &&
+			lcommon.Blake2b256Hash(bodyCbor) == shelleyTx.Hash() {
 			size := 1 + len(bodyCbor) + len(witnessCbor)
 			if auxData := shelleyTx.AuxiliaryData(); auxData != nil &&
 				len(auxData.Cbor()) > 0 {
@@ -340,12 +343,140 @@ func TxSizeForFee(tx lcommon.Transaction) uint64 {
 			}
 			return uint64(size)
 		}
+		// Some decoded block paths retain the body's original hash but not
+		// its raw component bytes. If the reconstructed body hashes
+		// differently, it is not the on-wire body, so recover the known
+		// Shelley protocol-update wire size rather than charging for the
+		// encoder's null-expanded representation.
+		if size, ok := canonicalShelleyUpdateSize(shelleyTx); ok {
+			return size
+		}
 	}
 	fullSize := uint64(len(tx.Cbor()))
 	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
 		return fullSize - 1
 	}
 	return fullSize
+}
+
+func canonicalShelleyUpdateSize(
+	tx *shelley.ShelleyTransaction,
+) (uint64, bool) {
+	txCbor := tx.Cbor()
+	if len(txCbor) == 0 || tx.Type() >= txTypeAlonzo {
+		return 0, false
+	}
+	var envelope []cbor.RawMessage
+	if _, err := cbor.Decode(txCbor, &envelope); err != nil || len(envelope) < 3 {
+		return 0, false
+	}
+	if lcommon.Blake2b256Hash(envelope[0]) == tx.Hash() {
+		return 0, false
+	}
+	var body map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(envelope[0], &body); err != nil {
+		return 0, false
+	}
+	updateCbor, ok := body[6]
+	if !ok {
+		return 0, false
+	}
+	var update []cbor.RawMessage
+	if _, err := cbor.Decode(updateCbor, &update); err != nil || len(update) < 2 {
+		return 0, false
+	}
+	var paramUpdates map[lcommon.Blake2b224]cbor.RawMessage
+	if _, err := cbor.Decode(update[0], &paramUpdates); err != nil {
+		return 0, false
+	}
+	changed := false
+	for key, paramUpdateCbor := range paramUpdates {
+		var paramUpdate map[uint]cbor.RawMessage
+		if _, err := cbor.Decode(paramUpdateCbor, &paramUpdate); err != nil {
+			return 0, false
+		}
+		paramChanged := false
+		for field, value := range paramUpdate {
+			if len(value) == 1 && value[0] == 0xf6 {
+				delete(paramUpdate, field)
+				paramChanged = true
+				changed = true
+			}
+		}
+		if paramChanged {
+			encoded, err := cbor.Encode(paramUpdate)
+			if err != nil {
+				return 0, false
+			}
+			paramUpdates[key] = encoded
+		}
+	}
+	if !changed {
+		return 0, false
+	}
+	encodedParamUpdates, err := cbor.Encode(paramUpdates)
+	if err != nil {
+		return 0, false
+	}
+	update[0] = encodedParamUpdates
+	encodedUpdate, err := cbor.Encode(update)
+	if err != nil {
+		return 0, false
+	}
+	body[6] = encodedUpdate
+	encodedBody, err := cbor.Encode(body)
+	if err != nil {
+		return 0, false
+	}
+	envelope[0] = encodedBody
+	encodedTx, err := cbor.Encode(envelope)
+	if err != nil {
+		return 0, false
+	}
+	return uint64(len(encodedTx)), true
+}
+
+// validatePreAlonzoTx runs the upstream rules while replacing its fee rule
+// only when a decoded Shelley protocol-update transaction has lost its raw
+// component bytes. Genuine wire encodings, including explicit null fields,
+// remain governed by the upstream fee rule.
+func validatePreAlonzoTx(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+	rules []lcommon.UtxoValidationRuleFunc,
+	minFeeA uint,
+	minFeeB uint,
+) error {
+	shelleyTx, ok := tx.(*shelley.ShelleyTransaction)
+	if !ok {
+		errs := make([]error, 0, len(rules))
+		for _, validationFunc := range rules {
+			errs = append(errs, validationFunc(tx, slot, ls, pp))
+		}
+		return errors.Join(errs...)
+	}
+	_, reconstructed := canonicalShelleyUpdateSize(shelleyTx)
+	if !reconstructed {
+		errs := make([]error, 0, len(rules))
+		for _, validationFunc := range rules {
+			errs = append(errs, validationFunc(tx, slot, ls, pp))
+		}
+		return errors.Join(errs...)
+	}
+	errs := make([]error, 0, len(rules))
+	for _, validationFunc := range rules {
+		if strings.HasSuffix(
+			utxoValidationRuleName(validationFunc),
+			".UtxoValidateFeeTooSmallUtxo",
+		) {
+			continue
+		}
+		errs = append(errs, validationFunc(tx, slot, ls, pp))
+	}
+	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
+	return errors.Join(errs...)
 }
 
 // ValidateTxSize checks that the transaction size does

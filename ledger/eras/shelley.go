@@ -184,12 +184,17 @@ func ValidateTxShelley(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := make([]error, 0, len(shelley.UtxoValidationRules))
-	for _, validationFunc := range shelley.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
-		)
+	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
+	if !ok {
+		return ErrIncompatibleProtocolParams
 	}
-	return errors.Join(errs...)
+	return validatePreAlonzoTx(
+		tx,
+		slot,
+		ls,
+		pp,
+		shelley.UtxoValidationRules,
+		tmpPparams.MinFeeA,
+		tmpPparams.MinFeeB,
+	)
 }
