@@ -135,6 +135,7 @@ var sentinelSecrets = []string{
 	// access[-_]?key pattern cannot reach past the "Id" suffix.
 	"AKIAEXAMPLE",
 	"SENTINEL-NESTED-AUTH-SECRET",
+	"SENTINEL-SCALAR-AUTH-SECTION",
 }
 
 // sentinelSecretConfig plants a sentinel in every secret-bearing field and
@@ -226,6 +227,15 @@ func sentinelSecretConfig() *Config {
 									"PROVIDER-SECRET",
 							},
 						},
+					},
+				},
+				Utxorpc: hostplugin.Selection{
+					Provider: "utxorpc",
+					Config: map[string]any{
+						"port": 9090,
+						// A scalar under a container key is not a
+						// policy this walk can classify key by key.
+						"auth": "SENTINEL-SCALAR-AUTH-SECTION",
 					},
 				},
 				Mesh: hostplugin.Selection{
@@ -394,6 +404,31 @@ func TestRedactURICredentials(t *testing.T) {
 				redactedPlaceholder + "&prefix=dingo",
 		},
 		{
+			name: "percent encoded credential parameter name",
+			in: "https://api.example/v1?api%5Fkey=abc123" +
+				"&page%5Fsize=50",
+			want: "https://api.example/v1?api%5Fkey=" +
+				redactedPlaceholder + "&page%5Fsize=50",
+		},
+		{
+			name: "plus encoded credential parameter name",
+			in:   "https://api.example/v1?api+key=abc123&page=2",
+			want: "https://api.example/v1?api+key=" +
+				redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "undecodable parameter name fails closed",
+			in:   "https://api.example/v1?api%5key=abc123&page=2",
+			want: "https://api.example/v1?api%5key=" +
+				redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "keyword dsn password with an escape in it",
+			in:   "host=db.example password=hunter%202 dbname=dingo",
+			want: "host=db.example password=" + redactedPlaceholder +
+				" dbname=dingo",
+		},
+		{
 			name: "kebab case credential header parameter",
 			in:   "https://api.example/v1?x-api-key=abc123&page=2",
 			want: "https://api.example/v1?x-api-key=" +
@@ -529,6 +564,19 @@ var credentialKeyNameSpellings = map[string]bool{
 	"apitoken":     true,
 	"accesskeyid":  true,
 	"clientsecret": true,
+	// percent- and plus-encoded, the spellings a URI query carries a
+	// parameter name in. The classifier decodes a name before it splits
+	// it, so an encoding cannot move a term out of reach.
+	"api%5Fkey":       true,
+	"api%5fkey":       true,
+	"api+key":         true,
+	"client%2Dsecret": true,
+	"page%5Fsize":     false,
+	// An escape that does not decode leaves the name unreadable, here
+	// and in whatever would consume it, so it is treated as a
+	// credential rather than rendered.
+	"api%5key": true,
+	"100%pure": true,
 	// bare terms
 	"password":  true,
 	"passwd":    true,
@@ -649,6 +697,7 @@ func TestProviderConfigKeyTableAgreesWithClassifier(t *testing.T) {
 
 	for _, key := range slices.Concat(
 		providerConfigPlainKeys,
+		providerConfigSectionKeys,
 		providerConfigURIKeys,
 	) {
 		if isCredentialKeyName(key) {
@@ -816,5 +865,126 @@ func TestProviderConfigNestedSectionsAreWalked(t *testing.T) {
 				rendered,
 			)
 		}
+	}
+}
+
+// TestProviderConfigKeyClassesAreUnambiguous catches a provider key listed
+// under two classes, where the effective class would depend on map
+// iteration order.
+func TestProviderConfigKeyClassesAreUnambiguous(t *testing.T) {
+	t.Parallel()
+
+	seen := make(map[string]int)
+	for _, keys := range [][]string{
+		providerConfigPlainKeys,
+		providerConfigSectionKeys,
+		providerConfigURIKeys,
+		providerConfigSecretKeys,
+	} {
+		for _, key := range keys {
+			seen[key]++
+		}
+	}
+	for key, count := range seen {
+		if count > 1 {
+			t.Errorf("provider key %q is classified %d times", key, count)
+		}
+	}
+}
+
+// TestProviderConfigSectionKeyRequiresASection is the value-shape
+// counterpart to classifying "auth" and "tls" as containers. Those keys
+// name a nested section, so a section is walked and classified key by key
+// while a value of any other shape at the same key is not a policy this
+// walk can classify at all and is redacted whole. Classifying them
+// renderable instead rendered a scalar there as plain text.
+func TestProviderConfigSectionKeyRequiresASection(t *testing.T) {
+	t.Parallel()
+
+	shapes := map[string]any{
+		"scalar": "SENTINEL-SECTION-SCALAR",
+		"slice":  []any{"SENTINEL-SECTION-SLICE"},
+		"sliceOfMaps": []any{
+			map[string]any{"mode": "SENTINEL-SECTION-SLICE-MAP"},
+		},
+		"nonStringKeyedMap": map[int]any{
+			1: "SENTINEL-SECTION-INT-MAP",
+		},
+	}
+	for _, key := range providerConfigSectionKeys {
+		for shape, value := range shapes {
+			t.Run(key+"/"+shape, func(t *testing.T) {
+				t.Parallel()
+
+				rendered := providerConfigValue(reflect.ValueOf(
+					map[string]any{key: value},
+				)).String()
+				if strings.Contains(rendered, "SENTINEL-SECTION") {
+					t.Errorf(
+						"provider key %q renders a %s value: %s",
+						key,
+						shape,
+						rendered,
+					)
+				}
+				if !strings.Contains(rendered, redactedPlaceholder) {
+					t.Errorf(
+						"provider key %q with a %s value is not "+
+							"redacted: %s",
+						key,
+						shape,
+						rendered,
+					)
+				}
+			})
+		}
+	}
+}
+
+// TestProviderConfigSectionKeyNilValue pins that an explicitly empty
+// section renders as itself. A nil discloses nothing, and "auth: " with
+// nothing under it is what an operator needs to see about their file.
+func TestProviderConfigSectionKeyNilValue(t *testing.T) {
+	t.Parallel()
+
+	rendered := providerConfigValue(reflect.ValueOf(
+		map[string]any{"auth": nil},
+	)).String()
+	if !strings.Contains(rendered, "<nil>") {
+		t.Errorf("nil section is not rendered as nil: %s", rendered)
+	}
+}
+
+// TestClassedValueURIShapeFailsClosed covers the same value-shape
+// dimension for a URI-classified value. Only a shape holding strings can
+// have its credentials removed; any other shape cannot be transformed at
+// all, so it is redacted instead of rendered untransformed.
+func TestClassedValueURIShapeFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	dsn := "postgres://dingo:SENTINEL-SHAPE-PASSWORD@db.example/dingo"
+	shapes := map[string]any{
+		"sliceOfAny":  []any{dsn},
+		"mapOfAny":    map[string]any{"primary": dsn},
+		"mapOfNonStr": map[string][]string{"primary": {dsn}},
+	}
+	for shape, value := range shapes {
+		t.Run(shape, func(t *testing.T) {
+			t.Parallel()
+
+			rendered := classedValue(
+				reflect.ValueOf(value),
+				logURI,
+			).String()
+			if strings.Contains(rendered, "SENTINEL-SHAPE-PASSWORD") {
+				t.Errorf("URI %s leaks its credential: %s", shape, rendered)
+			}
+			// The same shape under a plain classification is rendered:
+			// failing closed is the URI rule, not a blanket one.
+			plain := classedValue(reflect.ValueOf(value), logPlain).String()
+			if !strings.Contains(plain, "db.example") {
+				t.Errorf("plain %s dropped its value: %s", shape, plain)
+			}
+		})
 	}
 }

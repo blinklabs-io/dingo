@@ -51,6 +51,13 @@ const (
 	// logProviderConfig recursively renders a plugin provider's
 	// free-form configuration map, classifying each key by name.
 	logProviderConfig
+	// logProviderSection is the class of a provider configuration key
+	// that names a nested section rather than a value of its own. The
+	// section is walked so its own keys are classified by name, and a
+	// value of any other shape at the same key is redacted: the key says
+	// only that a container belongs there, so it classifies nothing
+	// about a scalar, a slice, or a map this walk cannot key into.
+	logProviderSection
 )
 
 // logSecretConfigFields are the Config field paths (dotted Go field names)
@@ -265,9 +272,7 @@ var configLogClasses = sync.OnceValue(func() map[string]logClass {
 
 // providerConfigPlainKeys are the lower-cased keys a compiled-in plugin
 // provider accepts in its free-form configuration map that carry no
-// secret. "auth" and "tls" are the nested sections of the API providers:
-// they are containers, so classifying them plain is what lets the walk
-// recurse and classify the keys inside them by name.
+// secret.
 var providerConfigPlainKeys = []string{
 	// database/plugin/metadata/sqlite
 	"datadir", "maxconnections",
@@ -283,11 +288,19 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} tls and auth sections and the
-	// policy keys inside them
-	"auth", "tls",
+	// api/{blockfrost,mesh,utxorpc} policy keys inside the tls and auth
+	// sections
 	"mode", "certfilepath", "keyfilepath", "tokenfilepath",
 }
+
+// providerConfigSectionKeys are provider configuration keys whose value is
+// a nested section of further keys. The API providers nest their tls and
+// auth policies there, so the section has to stay walkable or the whole
+// policy disappears from a startup log -- but only a section is walkable,
+// and classifying these keys separately from the values that carry no
+// secret is what keeps a non-section value at the same key from being
+// rendered as one.
+var providerConfigSectionKeys = []string{"auth", "tls"}
 
 // providerConfigURIKeys are provider configuration keys holding a URI or
 // database DSN, rendered with only their credential components removed.
@@ -306,9 +319,10 @@ var providerConfigSecretKeys = []string{"password", "token"}
 var providerConfigKeyClasses = sync.OnceValue(func() map[string]logClass {
 	classes := make(map[string]logClass)
 	for class, keys := range map[logClass][]string{
-		logPlain:  providerConfigPlainKeys,
-		logURI:    providerConfigURIKeys,
-		logSecret: providerConfigSecretKeys,
+		logPlain:           providerConfigPlainKeys,
+		logProviderSection: providerConfigSectionKeys,
+		logURI:             providerConfigURIKeys,
+		logSecret:          providerConfigSecretKeys,
 	} {
 		for _, key := range keys {
 			classes[key] = class
@@ -400,20 +414,36 @@ func logFieldName(field reflect.StructField) string {
 	return tag
 }
 
-// classedValue renders a non-struct configuration value according to class.
+// classedValue renders a non-struct configuration value according to
+// class. Every class that renders anything states which shapes it can
+// render, and a value of any other shape is redacted rather than rendered
+// through a rule that does not apply to it.
 func classedValue(v reflect.Value, class logClass) slog.Value {
 	switch class {
 	case logProviderConfig:
 		return providerConfigValue(v)
 	case logURI:
-		return mappedValue(v, redactURICredentials)
+		return mappedValue(v, redactURICredentials, redactedValue)
 	case logPlain:
-		return mappedValue(v, func(s string) string { return s })
+		return mappedValue(
+			v,
+			func(s string) string { return s },
+			plainValue,
+		)
+	case logProviderSection:
+		// A section is rendered by providerConfigEntry, which reaches
+		// here only for a value that is not one.
+		return redactedValue(v)
 	case logSecret:
 		return redactedValue(v)
 	default:
 		return redactedValue(v)
 	}
+}
+
+// plainValue renders v as itself.
+func plainValue(v reflect.Value) slog.Value {
+	return slog.AnyValue(v.Interface())
 }
 
 // redactedValue replaces a secret-bearing value with redactedPlaceholder. A
@@ -429,7 +459,16 @@ func redactedValue(v reflect.Value) slog.Value {
 // mappedValue renders v, applying transform to every string it contains so
 // a slice or map of URIs is handled element by element rather than as one
 // opaque value.
-func mappedValue(v reflect.Value, transform func(string) string) slog.Value {
+//
+// A shape holding no strings to transform -- a map of slices, a slice of
+// structs -- cannot be transformed at all, so fallback decides it.
+// Rendering such a value whole is right for a plain field and would leak
+// an untransformed credential under a URI one.
+func mappedValue(
+	v reflect.Value,
+	transform func(string) string,
+	fallback func(reflect.Value) slog.Value,
+) slog.Value {
 	switch v.Kind() { //nolint:exhaustive // reflect.Kind default is intended
 	case reflect.String:
 		return slog.StringValue(transform(v.String()))
@@ -438,7 +477,7 @@ func mappedValue(v reflect.Value, transform func(string) string) slog.Value {
 		for i := range v.Len() {
 			item := v.Index(i)
 			if item.Kind() != reflect.String {
-				return slog.AnyValue(v.Interface())
+				return fallback(v)
 			}
 			items = append(items, transform(item.String()))
 		}
@@ -446,7 +485,7 @@ func mappedValue(v reflect.Value, transform func(string) string) slog.Value {
 	case reflect.Map:
 		if v.Type().Key().Kind() != reflect.String ||
 			v.Type().Elem().Kind() != reflect.String {
-			return slog.AnyValue(v.Interface())
+			return fallback(v)
 		}
 		attrs := make([]slog.Attr, 0, v.Len())
 		for _, key := range sortedStringKeys(v) {
@@ -457,7 +496,7 @@ func mappedValue(v reflect.Value, transform func(string) string) slog.Value {
 		}
 		return slog.GroupValue(attrs...)
 	default:
-		return slog.AnyValue(v.Interface())
+		return fallback(v)
 	}
 }
 
@@ -465,7 +504,7 @@ func mappedValue(v reflect.Value, transform func(string) string) slog.Value {
 // map, classifying each key by name and recursing into nested maps so a
 // secret nested under any depth of provider sections is still redacted.
 func providerConfigValue(v reflect.Value) slog.Value {
-	if v.Kind() != reflect.Map || v.Type().Key().Kind() != reflect.String {
+	if !isProviderConfigSection(v) {
 		return slog.StringValue(redactedPlaceholder)
 	}
 	attrs := make([]slog.Attr, 0, v.Len())
@@ -481,7 +520,7 @@ func providerConfigValue(v reflect.Value) slog.Value {
 }
 
 // providerConfigEntry renders one provider configuration entry. A nested
-// map or slice under a non-secret key is walked so its own keys are
+// section or slice under a non-secret key is walked so its own keys are
 // classified by name; anything else is rendered according to its key's
 // class.
 //
@@ -490,6 +529,12 @@ func providerConfigValue(v reflect.Value) slog.Value {
 // into it would reclassify the inner keys by their own names, and an
 // inner key that happens to be classified plain ("host", "mode") would
 // then render part of a value whose enclosing key is a secret.
+//
+// A logProviderSection class is the one place where the key's class and
+// the value's shape have to agree: the key says a container belongs
+// there, so a section is walked and anything else is redacted. Deciding
+// that here, once, is what keeps every container key from needing its own
+// shape check.
 func providerConfigEntry(v reflect.Value, class logClass) slog.Value {
 	if !v.IsValid() {
 		return slog.AnyValue(nil)
@@ -497,7 +542,14 @@ func providerConfigEntry(v reflect.Value, class logClass) slog.Value {
 	if class == logSecret {
 		return redactedValue(v)
 	}
-	if v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
+	section := isProviderConfigSection(v)
+	if class == logProviderSection {
+		if !section {
+			return redactedValue(v)
+		}
+		return providerConfigValue(v)
+	}
+	if section {
 		return providerConfigValue(v)
 	}
 	if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
@@ -512,6 +564,14 @@ func providerConfigEntry(v reflect.Value, class logClass) slog.Value {
 		return slog.AnyValue(items)
 	}
 	return classedValue(v, class)
+}
+
+// isProviderConfigSection reports whether v is a nested provider
+// configuration section: a map this walk can key into and classify entry
+// by entry.
+func isProviderConfigSection(v reflect.Value) bool {
+	return v.Kind() == reflect.Map &&
+		v.Type().Key().Kind() == reflect.String
 }
 
 // unwrapInterface resolves an interface-typed reflect.Value to the value it
@@ -569,9 +629,43 @@ func redactURICredentials(s string) string {
 // around '=' is optional, and a value containing whitespace is quoted.
 func redactCredentialParams(s string) string {
 	if start, end, ok := uriQuerySpan(s); ok {
-		return s[:start] + redactParams(s[start:end], "&;") + s[end:]
+		return s[:start] +
+			redactParams(s[start:end], uriQuerySyntax) +
+			s[end:]
 	}
-	return redactParams(s, " \t\r\n")
+	return redactParams(s, keywordDSNSyntax)
+}
+
+// paramSyntax describes how one parameter form spells its "name=value"
+// pairs, so one scanner serves both forms and neither can be given the
+// other's rules by accident.
+type paramSyntax struct {
+	// delims are the bytes that separate one pair from the next.
+	delims string
+	// encoded reports whether a name carries percent- and plus-escapes,
+	// as a URI query's names do. Those escape bytes belong to the name:
+	// without them "api%5Fkey" scans as the two fragments "api" and
+	// "5Fkey", and neither of those reads as a credential.
+	encoded bool
+}
+
+var (
+	// uriQuerySyntax is a URI query string: '&' or ';' separates the
+	// pairs and the names are percent-encoded.
+	uriQuerySyntax = paramSyntax{delims: "&;", encoded: true}
+	// keywordDSNSyntax is the keyword-form database DSN: whitespace
+	// separates the pairs and the keywords are literal, because no DSN
+	// parser percent-decodes them.
+	keywordDSNSyntax = paramSyntax{delims: " \t\r\n"}
+)
+
+// isNameByte reports whether b belongs to a parameter name written in this
+// syntax.
+func (syntax paramSyntax) isNameByte(b byte) bool {
+	if syntax.encoded && (b == '%' || b == '+') {
+		return true
+	}
+	return isKeyNameByte(b)
 }
 
 // uriQuerySpan returns the bounds of s's URI query string, if it has one.
@@ -598,21 +692,22 @@ func uriQuerySpan(s string) (int, int, bool) {
 }
 
 // redactParams replaces the value of every credential-named parameter in
-// s, whose parameters are separated by any byte in delims. Separators,
-// ordering, quoting, and every non-credential value are copied through
-// byte for byte, because a redacted DSN is only useful if the host,
-// database, and options it names survive.
-func redactParams(s, delims string) string {
+// s, whose parameters are spelled in syntax. Separators, ordering,
+// quoting, name encoding, and every non-credential value are copied
+// through byte for byte, because a redacted DSN is only useful if the
+// host, database, and options it names survive. Only the classification
+// of a name decodes it; the output keeps the operator's own bytes.
+func redactParams(s string, syntax paramSyntax) string {
 	var out strings.Builder
 	out.Grow(len(s))
 	for i := 0; i < len(s); {
 		skipped := i
-		for i < len(s) && !isKeyNameByte(s[i]) {
+		for i < len(s) && !syntax.isNameByte(s[i]) {
 			i++
 		}
 		out.WriteString(s[skipped:i])
 		nameEnd := i
-		for nameEnd < len(s) && isKeyNameByte(s[nameEnd]) {
+		for nameEnd < len(s) && syntax.isNameByte(s[nameEnd]) {
 			nameEnd++
 		}
 		name := s[i:nameEnd]
@@ -622,11 +717,11 @@ func redactParams(s, delims string) string {
 		}
 		out.WriteString(name)
 		i = nameEnd
-		valueStart, ok := paramValueStart(s, nameEnd)
+		valueStart, ok := paramValueStart(s, nameEnd, syntax)
 		if !ok {
 			continue
 		}
-		valueEnd := paramValueEnd(s, valueStart, delims)
+		valueEnd := paramValueEnd(s, valueStart, syntax)
 		if valueEnd > valueStart && isCredentialKeyName(name) {
 			out.WriteString(s[nameEnd:valueStart])
 			out.WriteString(redactedPlaceholder)
@@ -646,14 +741,14 @@ func redactParams(s, delims string) string {
 // whitespace followed by another "name=" pair instead means this
 // parameter's value is empty; consuming the next pair as the value would
 // hide a non-credential option behind the placeholder.
-func paramValueStart(s string, nameEnd int) (int, bool) {
+func paramValueStart(s string, nameEnd int, syntax paramSyntax) (int, bool) {
 	i := skipParamSpace(s, nameEnd)
 	if i >= len(s) || s[i] != '=' {
 		return 0, false
 	}
 	i++
 	if spaced := skipParamSpace(s, i); spaced != i &&
-		!startsParam(s, spaced) {
+		!startsParam(s, spaced, syntax) {
 		i = spaced
 	}
 	return i, true
@@ -663,7 +758,7 @@ func paramValueStart(s string, nameEnd int) (int, bool) {
 // quoted value ends at its closing quote, so a keyword DSN password
 // containing whitespace is redacted whole rather than up to its first
 // space; an unquoted value ends at the first byte in delims.
-func paramValueEnd(s string, i int, delims string) int {
+func paramValueEnd(s string, i int, syntax paramSyntax) int {
 	if i < len(s) && (s[i] == '\'' || s[i] == '"') {
 		quote := s[i]
 		for j := i + 1; j < len(s); {
@@ -679,7 +774,7 @@ func paramValueEnd(s string, i int, delims string) int {
 		return len(s)
 	}
 	for ; i < len(s); i++ {
-		if strings.IndexByte(delims, s[i]) >= 0 {
+		if strings.IndexByte(syntax.delims, s[i]) >= 0 {
 			return i
 		}
 	}
@@ -687,9 +782,9 @@ func paramValueEnd(s string, i int, delims string) int {
 }
 
 // startsParam reports whether a new "name=" pair begins at i.
-func startsParam(s string, i int) bool {
+func startsParam(s string, i int, syntax paramSyntax) bool {
 	end := i
-	for end < len(s) && isKeyNameByte(s[end]) {
+	for end < len(s) && syntax.isNameByte(s[end]) {
 		end++
 	}
 	if end == i {
@@ -744,14 +839,15 @@ func redactURIUserinfo(s string) string {
 // refreshToken, privateKey, sasToken, SharedAccessSignature -- only moves
 // the next miss one spelling further out.
 //
-// So a name is decomposed into words first: at separators
+// So a name is decoded and then decomposed into words: at separators
 // ("client_secret", "x-api-key", "auth.token"), at camelCase and acronym
 // boundaries ("accessKeyId", "IPFSGatewayURL"), and, for a run-together
 // spelling such as "apikey" or "accesskeyid", by segmenting the word
 // against the vocabulary below -- which succeeds only when known words
 // cover the word completely, so "monkey" and "keyspace" do not become
 // credentials. The decision is then set membership over those words, and
-// no prefix, suffix, or separator can move a term out of reach.
+// no prefix, suffix, separator, or percent-escape can move a term out of
+// reach.
 
 // credentialWords name a credential themselves: one of them anywhere in a
 // key name means the value is a credential.
@@ -813,8 +909,19 @@ var keyNameVocabulary = sync.OnceValue(func() []string {
 
 // isCredentialKeyName reports whether a value stored under the
 // configuration key or URI parameter name is a credential.
+//
+// The name is decoded before it is split, so an encoded spelling
+// classifies as the name it decodes to. Only the classification decodes:
+// every caller renders the operator's original bytes.
 func isCredentialKeyName(name string) bool {
-	words := keyNameWords(name)
+	decoded, ok := decodeKeyNameEscapes(name)
+	if !ok {
+		// An escape that does not decode leaves the name unreadable
+		// here and in whatever else would consume it, so what it names
+		// is unknown and its value fails closed.
+		return true
+	}
+	words := keyNameWords(decoded)
 	switch {
 	case containsWord(words, locationWords):
 		return false
@@ -824,6 +931,21 @@ func isCredentialKeyName(name string) bool {
 		return containsWord(words, keyWords) &&
 			containsWord(words, credentialQualifierWords)
 	}
+}
+
+// decodeKeyNameEscapes decodes the percent- and plus-escapes of a key
+// name, reporting whether every escape in it was well formed. A name
+// carrying no escape is its own decoding, so the common case neither
+// allocates nor changes classification.
+func decodeKeyNameEscapes(name string) (string, bool) {
+	if !strings.ContainsAny(name, "%+") {
+		return name, true
+	}
+	decoded, err := url.QueryUnescape(name)
+	if err != nil {
+		return name, false
+	}
+	return decoded, true
 }
 
 // containsWord reports whether any of words appears in set.
