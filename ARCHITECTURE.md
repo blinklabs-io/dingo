@@ -2965,9 +2965,13 @@ the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
 Transaction-structure failures are handled separately from state-dependent
-missing-input failures. In particular, a Conway `DuplicateInputError` (such as
-duplicate reference inputs) cannot be repaired by selecting a different UTxO
-producer history. Replay recovery therefore rejects the primary-chain branch
+missing-input failures. In particular a duplicate input -- regular, collateral,
+or reference -- cannot be repaired by selecting a different UTxO producer
+history. Every Shelley-family era delegates that rule to
+`shelley.UtxoValidateNoDuplicateInputs` and so reports
+`shelley.DuplicateInputError`; Byron has its own rule and reports
+`eras.DuplicateInputByronError`. `isDeterministicTxValidationError` classifies
+both. Replay recovery therefore rejects the primary-chain branch
 and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors

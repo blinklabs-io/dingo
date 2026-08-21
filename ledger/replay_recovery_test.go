@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1776,6 +1778,62 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 		250*time.Millisecond,
 		"canonical deterministic rejection must not request another fresh intersection",
 	)
+}
+
+// Byron does not share the Shelley duplicate-input rule: ledger/eras returns
+// DuplicateInputByronError. The verdict is the same structural one, so a Byron
+// duplicate must take the deterministic branch instead of the state-dependent
+// unresolved-producer fallback that repeatedly rediscovers the same block.
+func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubID := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if ok && resync.Reason ==
+				event.ChainsyncResyncReasonDeterministicTxValidationRecovery {
+				resyncCh <- resync
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	ls.config.EventBus = bus
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("byron-duplicate-input-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: errors.Join(
+			fmt.Errorf(
+				"byron UTxO rule: %w",
+				eras.DuplicateInputByronError{
+					TxId:  hex.EncodeToString(testHashBytes("byron-dup")),
+					Index: 0,
+				},
+			),
+			errors.New("unrelated joined validation detail"),
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.False(t, ls.replayRecoveryTipTracked)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"Byron deterministic recovery must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {

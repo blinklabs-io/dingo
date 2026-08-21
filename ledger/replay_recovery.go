@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -352,9 +353,20 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // duplicate input is invalid regardless of which chain produced the input,
 // so treating it as an unresolved producer sends recovery down the fallback
 // path and can repeatedly rediscover the same rejected block.
+//
+// Every Shelley-family era delegates the rule to
+// shelley.UtxoValidateNoDuplicateInputs and therefore reports
+// shelley.DuplicateInputError for a duplicated regular, collateral, or
+// reference input. Byron has its own rule in ledger/eras and reports
+// eras.DuplicateInputByronError, which is the same structural verdict and
+// must not fall through to state-dependent producer resolution.
 func isDeterministicTxValidationError(err error) bool {
 	var duplicateInputErr shelley.DuplicateInputError
-	return errors.As(err, &duplicateInputErr)
+	if errors.As(err, &duplicateInputErr) {
+		return true
+	}
+	var byronDuplicateInputErr eras.DuplicateInputByronError
+	return errors.As(err, &byronDuplicateInputErr)
 }
 
 // recoverFromDeterministicTxValidationError drops a primary-chain block that
