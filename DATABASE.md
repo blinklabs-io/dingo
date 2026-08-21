@@ -844,6 +844,16 @@ blob transaction is committed and carries the new commit timestamp while metadat
 does not — the same inconsistency a failed metadata commit leaves, and the same
 recovery (trim the blob store back to the metadata tip) applies.
 
+Every terminal path out of `Txn.Commit` — including that failed-`Sync` partial
+commit — releases the commit barrier hold exactly once, via `Txn.finishLocked`.
+It has to be the same step that sets `finished`, because `finished` is also what
+makes a subsequent `Rollback`/`Release` a no-op: a path that marked the
+transaction finished without releasing would strand the shared hold for the
+process's lifetime, with no later call able to repair it, and the next
+`PauseCommits`/`PauseCommitsContext` would then wait on a reader that never
+releases while the barrier's writer preference blocked every read-write `Txn`
+constructed behind it.
+
 Plugins whose writes are already durable on commit implement `Sync` as a no-op:
 an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
 its writer closes successfully.

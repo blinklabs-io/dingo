@@ -114,6 +114,23 @@ func (t *Txn) releaseCommitBarrierLocked() {
 	}
 }
 
+// finishLocked marks the transaction terminal and releases its commit
+// barrier hold. Every path in Commit and rollback that sets finished must
+// go through it, because finished is also what makes a later
+// Rollback/Release a no-op: a terminal path that sets the flag without
+// releasing strands the shared hold for the process's lifetime, and the
+// caller's deferred Release cannot repair it. That is not a bounded cost —
+// PauseCommits then waits forever for a reader that will never release,
+// and the barrier's writer preference blocks every read-write Txn
+// constructed behind it. Releasing exactly once is safe to route
+// everywhere because releaseCommitBarrierLocked clears barrierHeld before
+// unlocking, so a repeat call is a no-op rather than an unmatched RUnlock
+// (which cancellableBarrier panics on). Callers must hold t.lock.
+func (t *Txn) finishLocked() {
+	t.finished = true
+	t.releaseCommitBarrierLocked()
+}
+
 func NewTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
@@ -331,8 +348,7 @@ func (t *Txn) Commit() error {
 	}
 	// Fail fast if neither store is available for a read-write transaction
 	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
-		t.finished = true
-		t.releaseCommitBarrierLocked()
+		t.finishLocked()
 		t.lock.Unlock()
 		return types.ErrNoStoreAvailable
 	}
@@ -351,8 +367,7 @@ func (t *Txn) Commit() error {
 			// Rollback both transactions on timestamp update failure
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
-			t.finished = true
-			t.releaseCommitBarrierLocked()
+			t.finishLocked()
 			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
@@ -365,8 +380,7 @@ func (t *Txn) Commit() error {
 			if t.metadataTxn != nil {
 				_ = t.metadataTxn.Rollback()
 			}
-			t.finished = true
-			t.releaseCommitBarrierLocked()
+			t.finishLocked()
 			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
 		}
@@ -386,7 +400,7 @@ func (t *Txn) Commit() error {
 		if blobStore := t.db.Blob(); blobStore != nil && t.metadataTxn != nil {
 			if syncErr := blobStore.Sync(); syncErr != nil {
 				_ = t.metadataTxn.Rollback()
-				t.finished = true
+				t.finishLocked()
 				// The blob transaction is committed and carries the new commit
 				// timestamp while metadata does not, which is the same
 				// inconsistency a failed metadata commit leaves behind. Report
@@ -413,7 +427,7 @@ func (t *Txn) Commit() error {
 	if t.metadataTxn != nil {
 		if err := t.metadataTxn.Commit(); err != nil {
 			_ = t.metadataTxn.Rollback()
-			t.finished = true
+			t.finishLocked()
 			// Only return PartialCommitError when blob was actually committed.
 			// Per docstring, this error type signifies "blob commits but metadata fails."
 			// When t.blobTxn == nil (metadata-only txn), no blob was committed.
@@ -429,19 +443,16 @@ func (t *Txn) Commit() error {
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
-				t.releaseCommitBarrierLocked()
 				t.lock.Unlock()
 				return ret
 			}
-			t.releaseCommitBarrierLocked()
 			t.lock.Unlock()
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
-	t.finished = true
 	t.committed = true
 	t.dispatching = true
-	t.releaseCommitBarrierLocked()
+	t.finishLocked()
 	t.lock.Unlock()
 	t.dispatchAfterCommit()
 	return nil
@@ -468,8 +479,7 @@ func (t *Txn) rollback() error {
 			errs = append(errs, fmt.Errorf("metadata rollback: %w", err))
 		}
 	}
-	t.finished = true
-	t.releaseCommitBarrierLocked()
+	t.finishLocked()
 	return errors.Join(errs...)
 }
 
