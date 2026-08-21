@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"sync"
 	"testing"
@@ -604,6 +605,47 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 		t,
 		event.ChainsyncResyncReasonChainSwitchCursorAhead,
 		resync.Reason,
+	)
+}
+
+func TestChainSwitchNeedsFreshCursorUsesObservedTip(
+	t *testing.T,
+) {
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	require.Zero(t, testChain.HeaderCount())
+	localTip := testChain.Tip()
+
+	connId1 := testChainsyncConnId(6000, 3001)
+	connId2 := testChainsyncConnId(6000, 3002)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	needsFreshCursor := ls.chainSwitchNeedsFreshCursorLocked(
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: connId1,
+			NewConnectionId:      connId2,
+			NewTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					math.MaxUint64,
+					[]byte("advertised-outlier"),
+				),
+				BlockNumber: math.MaxUint64,
+			},
+			NewObservedTip: localTip,
+		},
+		connId2,
+	)
+	assert.False(
+		t,
+		needsFreshCursor,
+		"an untrusted advertisement must not force a resync when the delivered frontier is at the local tip",
 	)
 }
 

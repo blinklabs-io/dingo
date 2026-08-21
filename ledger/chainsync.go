@@ -548,6 +548,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	newObservedTip := chainSwitchNewObservedTip(e)
 	// Registered before the mutex is taken so defer's LIFO order runs it
 	// after the unlock. See pendingPublishes.
 	var pending pendingPublishes
@@ -626,7 +627,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"local_tip_slot",
 			ls.PrimaryChainTip().Point.Slot,
 			"peer_tip_slot",
-			e.NewTip.Point.Slot,
+			newObservedTip.Point.Slot,
 		)
 		ls.requestChainsyncResync(
 			effectiveConnId,
@@ -926,11 +927,26 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 		return false
 	}
 	localTip := ls.PrimaryChainTip()
-	if e.NewTip.BlockNumber > localTip.BlockNumber {
+	newObservedTip := chainSwitchNewObservedTip(e)
+	if newObservedTip.BlockNumber > localTip.BlockNumber {
 		return true
 	}
-	return e.NewTip.BlockNumber == localTip.BlockNumber &&
-		e.NewTip.Point.Slot > localTip.Point.Slot
+	return newObservedTip.BlockNumber == localTip.BlockNumber &&
+		newObservedTip.Point.Slot > localTip.Point.Slot
+}
+
+// chainSwitchNewObservedTip returns the peer frontier that chain selection
+// actually compared. Events created before NewObservedTip was added (including
+// direct unit-test and integration producers) fall back to the advertised tip.
+func chainSwitchNewObservedTip(
+	e chainselection.ChainSwitchEvent,
+) ochainsync.Tip {
+	observed := e.NewObservedTip
+	if observed.BlockNumber > 0 || observed.Point.Slot > 0 ||
+		len(observed.Point.Hash) > 0 {
+		return observed
+	}
+	return e.NewTip
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {

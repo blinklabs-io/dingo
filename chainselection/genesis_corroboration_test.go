@@ -549,42 +549,50 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 		Point:       ocommon.Point{Slot: 100000, Hash: []byte("net-tip")},
 		BlockNumber: 100000,
 	}
-	deliver := func(slot uint64) {
-		obs := ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: slot,
-				Hash: []byte(fmt.Sprintf("h%d", slot)),
-			},
-			BlockNumber: slot,
+	var delivered uint64
+	deliverThrough := func(target uint64) {
+		for delivered < target {
+			next := min(delivered+cs.securityParam, target)
+			obs := ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: next,
+					Hash: []byte(fmt.Sprintf("h%d", next)),
+				},
+				BlockNumber: next,
+			}
+			require.True(t, cs.updatePeerTipObserved(
+				peerA,
+				advertised,
+				obs,
+				nil,
+			))
+			require.True(t, cs.updatePeerTipObserved(
+				peerB,
+				advertised,
+				obs,
+				nil,
+			))
+			cs.SetLocalTip(obs)
+			delivered = next
 		}
-		require.True(t, cs.updatePeerTipObserved(peerA, advertised, obs, nil))
-		require.True(t, cs.updatePeerTipObserved(peerB, advertised, obs, nil))
 	}
 
 	// Both peers advertise slot 100000 but have only delivered the slot-1
 	// header. The far advertised tip has not been delivered, so the node must
 	// stay in Genesis (no premature exit on early observed headers).
-	deliver(1)
+	deliverThrough(1)
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode(),
 		"must not exit Genesis on early observed headers")
 
 	// Sync progresses: headers are delivered up to slot 50000 and the local tip
 	// follows. Still far below the advertised tip, so stay in Genesis.
-	deliver(50000)
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 50000, Hash: []byte("local-50000")},
-		BlockNumber: 50000,
-	})
+	deliverThrough(50000)
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
 	// Only once the peers have DELIVERED headers up to within the window (30) of
 	// their advertised tip — and the local tip has caught up — does the node
 	// exit to Praos.
-	deliver(99990)
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 99990, Hash: []byte("local-99990")},
-		BlockNumber: 99990,
-	})
+	deliverThrough(99990)
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
 }
 

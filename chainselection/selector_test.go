@@ -1803,6 +1803,143 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 	)
 }
 
+func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(
+	t *testing.T,
+) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // preview k
+	})
+
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118000000, Hash: []byte("local")},
+		BlockNumber: 4588334,
+	}
+	cs.SetLocalTip(localTip)
+
+	connId := newTestConnectionId(1)
+	staleAdvertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 110000000, Hash: []byte("stale")},
+		BlockNumber: 4260191,
+	}
+	require.True(t, cs.updatePeerTipObserved(
+		connId,
+		staleAdvertisedTip,
+		localTip,
+		nil,
+	))
+
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118010000, Hash: []byte("network")},
+		BlockNumber: 4589660,
+	}
+	nextObservedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118000020, Hash: []byte("next")},
+		BlockNumber: localTip.BlockNumber + 1,
+	}
+
+	require.True(
+		t,
+		cs.updatePeerTipObserved(
+			connId,
+			advertisedTip,
+			nextObservedTip,
+			nil,
+		),
+		"the next delivered block must not be rejected because the network tip is far ahead",
+	)
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, advertisedTip, peerTip.Tip)
+	assert.Equal(t, nextObservedTip, peerTip.ObservedTip)
+}
+
+func TestAdvertisedTipOutlierDoesNotSuppressObservedFrontier(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 10,
+	})
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("local")},
+		BlockNumber: 1000,
+	})
+
+	outlierConn := newTestConnectionId(1)
+	require.True(t, cs.updatePeerTipObserved(
+		outlierConn,
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: math.MaxUint64,
+				Hash: []byte("advertised-outlier"),
+			},
+			BlockNumber: math.MaxUint64,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1001, Hash: []byte("observed-1")},
+			BlockNumber: 1001,
+		},
+		nil,
+	))
+
+	honestConn := newTestConnectionId(2)
+	require.True(t, cs.updatePeerTipObserved(
+		honestConn,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1004, Hash: []byte("honest")},
+			BlockNumber: 1004,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1004, Hash: []byte("honest")},
+			BlockNumber: 1004,
+		},
+		nil,
+	))
+
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(
+		t,
+		honestConn,
+		*bestPeer,
+		"an advertised outlier must not make a better delivered frontier unselectable",
+	)
+}
+
+func TestChainSwitchEventIncludesObservedFrontier(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, eventCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	advertisedTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: math.MaxUint64,
+			Hash: []byte("advertised-outlier"),
+		},
+		BlockNumber: math.MaxUint64,
+	}
+	observedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1001, Hash: []byte("observed")},
+		BlockNumber: 1001,
+	}
+	require.True(t, cs.updatePeerTipObserved(
+		newTestConnectionId(1),
+		advertisedTip,
+		observedTip,
+		nil,
+	))
+
+	select {
+	case evt := <-eventCh:
+		switchEvent, ok := evt.Data.(ChainSwitchEvent)
+		require.True(t, ok)
+		assert.Equal(t, advertisedTip, switchEvent.NewTip)
+		assert.Equal(t, observedTip, switchEvent.NewObservedTip)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for chain switch event")
+	}
+}
+
 func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {
 	// A known peer whose previous tip was at block 0 must still be
 	// checked. Without this, a malicious peer could send tip=0 first,

@@ -56,10 +56,12 @@ const (
 // chainsync roll forward.
 type PeerTipUpdateEvent struct {
 	ConnectionId ouroboros.ConnectionId
-	Tip          ochainsync.Tip
-	ObservedTip  ochainsync.Tip
-	VRFOutput    []byte // VRF output from observed block header for tie-breaking
-	PraosView    PraosTiebreakerView
+	// Tip is the untrusted remote advertised tip.
+	Tip ochainsync.Tip
+	// ObservedTip is the header frontier actually delivered by the peer.
+	ObservedTip ochainsync.Tip
+	VRFOutput   []byte // VRF output from observed block header for tie-breaking
+	PraosView   PraosTiebreakerView
 }
 
 // PeerActivityEvent is published when a peer has recent protocol activity
@@ -84,8 +86,10 @@ type PeerRollbackEvent struct {
 // Fields:
 //   - PreviousConnectionId: The connection ID of the peer we were following.
 //   - NewConnectionId: The connection ID of the peer we are now following.
-//   - NewTip: The chain tip of the new peer.
-//   - PreviousTip: The chain tip of the previous peer at the time of the switch.
+//   - NewTip: The advertised chain tip of the new peer.
+//   - PreviousTip: The advertised chain tip of the previous peer at switch time.
+//   - NewObservedTip: The delivered frontier of the new peer.
+//   - PreviousObservedTip: The delivered frontier of the previous peer.
 //   - ComparisonResult: Why the new chain is better than the previous chain.
 //   - BlockDifference: NewTip.BlockNumber - PreviousTip.BlockNumber.
 type ChainSwitchEvent struct {
@@ -93,6 +97,8 @@ type ChainSwitchEvent struct {
 	NewConnectionId      ouroboros.ConnectionId
 	NewTip               ochainsync.Tip
 	PreviousTip          ochainsync.Tip
+	NewObservedTip       ochainsync.Tip
+	PreviousObservedTip  ochainsync.Tip
 	ComparisonResult     ChainComparisonResult
 	BlockDifference      int64
 }

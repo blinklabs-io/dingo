@@ -26,11 +26,15 @@ import (
 // PeerChainTip tracks the chain tip reported by a specific peer.
 type PeerChainTip struct {
 	ConnectionId ouroboros.ConnectionId
-	Tip          ochainsync.Tip
-	ObservedTip  ochainsync.Tip
-	VRFOutput    []byte // VRF output from tip block for tie-breaking
-	PraosView    PraosTiebreakerView
-	LastUpdated  time.Time
+	// Tip is the remote peer's advertised chain tip. It is untrusted and may
+	// be far ahead of the headers the peer has actually delivered.
+	Tip ochainsync.Tip
+	// ObservedTip is the latest header locally delivered by this peer. Chain
+	// comparison and handoff decisions use this frontier.
+	ObservedTip ochainsync.Tip
+	VRFOutput   []byte // VRF output from tip block for tie-breaking
+	PraosView   PraosTiebreakerView
+	LastUpdated time.Time
 	// observedSlots is the recent observed slot frontier used for Genesis
 	// density. observedPoints is the same frontier with block hashes, used
 	// for Genesis corroboration (detecting whether other peers report the
