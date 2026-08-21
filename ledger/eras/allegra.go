@@ -158,12 +158,17 @@ func ValidateTxAllegra(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := make([]error, 0, len(allegra.UtxoValidationRules))
-	for _, validationFunc := range allegra.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
-		)
+	tmpPparams, ok := pp.(*allegra.AllegraProtocolParameters)
+	if !ok {
+		return ErrIncompatibleProtocolParams
 	}
-	return errors.Join(errs...)
+	return validatePreAlonzoTx(
+		tx,
+		slot,
+		ls,
+		pp,
+		allegra.UtxoValidationRules,
+		tmpPparams.MinFeeA,
+		tmpPparams.MinFeeB,
+	)
 }

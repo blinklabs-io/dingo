@@ -21,7 +21,9 @@ import (
 	"math/big"
 	"reflect"
 	"runtime"
+	"strings"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -320,11 +322,93 @@ const txTypeAlonzo = 4
 // not contain an IsValid byte, so their full CBOR length
 // is the fee-relevant size.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
+	if size, ok := canonicalPreAlonzoTxSize(tx); ok {
+		return size
+	}
 	fullSize := uint64(len(tx.Cbor()))
 	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
 		return fullSize - 1
 	}
 	return fullSize
+}
+
+// canonicalPreAlonzoTxSize returns the fee size for historical
+// protocol-update transactions whose raw update maps contain explicit null
+// placeholders. Cardano's fee encoding omits those absent optional fields.
+func canonicalPreAlonzoTxSize(tx lcommon.Transaction) (uint64, bool) {
+	if tx.Type() >= txTypeAlonzo {
+		return 0, false
+	}
+	txCbor := tx.Cbor()
+	if len(txCbor) == 0 {
+		return 0, false
+	}
+
+	var envelope []cbor.RawMessage
+	if _, err := cbor.Decode(txCbor, &envelope); err != nil || len(envelope) < 3 {
+		return 0, false
+	}
+	var body map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(envelope[0], &body); err != nil {
+		return 0, false
+	}
+	updateCbor, ok := body[6]
+	if !ok {
+		return 0, false
+	}
+	var update []cbor.RawMessage
+	if _, err := cbor.Decode(updateCbor, &update); err != nil || len(update) < 2 {
+		return 0, false
+	}
+	var paramUpdates map[lcommon.Blake2b224]cbor.RawMessage
+	if _, err := cbor.Decode(update[0], &paramUpdates); err != nil {
+		return 0, false
+	}
+	changed := false
+	for key, paramUpdateCbor := range paramUpdates {
+		var paramUpdate map[uint]cbor.RawMessage
+		if _, err := cbor.Decode(paramUpdateCbor, &paramUpdate); err != nil {
+			return 0, false
+		}
+		paramChanged := false
+		for field, value := range paramUpdate {
+			if len(value) == 1 && value[0] == 0xf6 {
+				delete(paramUpdate, field)
+				paramChanged = true
+				changed = true
+			}
+		}
+		if paramChanged {
+			encoded, err := cbor.Encode(paramUpdate)
+			if err != nil {
+				return 0, false
+			}
+			paramUpdates[key] = encoded
+		}
+	}
+	if !changed {
+		return 0, false
+	}
+	encodedParamUpdates, err := cbor.Encode(paramUpdates)
+	if err != nil {
+		return 0, false
+	}
+	update[0] = encodedParamUpdates
+	encodedUpdate, err := cbor.Encode(update)
+	if err != nil {
+		return 0, false
+	}
+	body[6] = encodedUpdate
+	encodedBody, err := cbor.Encode(body)
+	if err != nil {
+		return 0, false
+	}
+	envelope[0] = encodedBody
+	encodedTx, err := cbor.Encode(envelope)
+	if err != nil {
+		return 0, false
+	}
+	return uint64(len(encodedTx)), true
 }
 
 // ValidateTxSize checks that the transaction size does
@@ -342,6 +426,42 @@ func ValidateTxSize(
 		)
 	}
 	return nil
+}
+
+// validatePreAlonzoTx runs the upstream rules while replacing its fee rule
+// for protocol-update transactions. gouroboros measures those transactions
+// from preserved raw CBOR, but Cardano's fee encoding omits explicit null
+// placeholders in historical update maps.
+func validatePreAlonzoTx(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+	rules []lcommon.UtxoValidationRuleFunc,
+	minFeeA uint,
+	minFeeB uint,
+) error {
+	_, canonicalFeeSize := canonicalPreAlonzoTxSize(tx)
+	if !canonicalFeeSize {
+		errs := make([]error, 0, len(rules))
+		for _, validationFunc := range rules {
+			errs = append(errs, validationFunc(tx, slot, ls, pp))
+		}
+		return errors.Join(errs...)
+	}
+
+	errs := make([]error, 0, len(rules))
+	for _, validationFunc := range rules {
+		if strings.HasSuffix(
+			utxoValidationRuleName(validationFunc),
+			".UtxoValidateFeeTooSmallUtxo",
+		) {
+			continue
+		}
+		errs = append(errs, validationFunc(tx, slot, ls, pp))
+	}
+	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
+	return errors.Join(errs...)
 }
 
 // ValidateTxExUnits checks that total execution units

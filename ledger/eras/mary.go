@@ -157,12 +157,17 @@ func ValidateTxMary(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := make([]error, 0, len(mary.UtxoValidationRules))
-	for _, validationFunc := range mary.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
-		)
+	tmpPparams, ok := pp.(*mary.MaryProtocolParameters)
+	if !ok {
+		return ErrIncompatibleProtocolParams
 	}
-	return errors.Join(errs...)
+	return validatePreAlonzoTx(
+		tx,
+		slot,
+		ls,
+		pp,
+		mary.UtxoValidationRules,
+		tmpPparams.MinFeeA,
+		tmpPparams.MinFeeB,
+	)
 }
