@@ -6397,6 +6397,48 @@ sqlite is opened per-process, and the default blob plugin's exclusive
 per-directory lock already rules out two full database opens racing at
 once regardless of metadata plugin.
 
+### Redacted Configuration Logging
+
+`internal/node`'s `logStartupConfig` debug-logs the whole effective
+configuration at startup, which means the configuration is the one place
+where a Koios API key, an inline API auth token, or a storage provider
+password or DSN would be persisted into an operator's log files. It logs
+through `Config.LogValue` (`internal/config/redact.go`), the explicit
+`slog.LogValuer` representation of a `Config`, rather than formatting the
+struct: unexported fields are never rendered, and every rendered value is
+classified first.
+
+Classification is a fail-safe allow-list, not a deny-list. Each dotted
+`Config` field path is listed in exactly one of four groups -- plain,
+secret, URI, or provider config -- and an unlisted path resolves to the
+zero `logClass`, which is `logSecret`. A field added without a
+classification is therefore redacted rather than leaked, and
+`TestConfigLogClassesCoverEveryConfigField` fails on it, so the silent
+over-redaction that fail-safe default produces turns into a required
+explicit decision instead of a surprise in production logs. The same test
+rejects a classification whose field no longer exists, catching a rename.
+
+Two classes are not simple pass/redact. A URI field -- `barkBaseUrl`,
+`barkBlockDownloadHosts`, `mithril.aggregatorUrl`,
+`tokenRegistry.sourceUrl`, `offchainMetadata.ipfsGatewayUrl`, and
+`databaseLifecycle.snapshotCloudDestination` -- keeps its scheme, host,
+port, path, and non-credential parameters and loses only its userinfo
+password and any credential-shaped parameter, because "which host and
+database was this node pointed at" is most of the reason the configuration
+is logged at all; the same handling covers both URL-form and keyword-form
+database DSNs. A
+provider-config field (`plugins.*.config`, a free-form `map[string]any`
+whose keys belong to the selected provider, not to `Config`) is walked
+recursively and classified per key name, so a secret nested at any depth
+under a provider section is still redacted; unrecognized keys default to
+redacted, which means an out-of-tree provider's benign key is
+over-redacted until it is added to the key table.
+
+The walk is deliberately uniform and does not defer to a nested type's own
+`slog.LogValuer` (`apiconfig.AuthPolicy` has one). One table with one
+exhaustiveness test decides what a configuration log contains, so a nested
+`LogValue` cannot become a second, untested source of truth.
+
 ## Stake Snapshots
 
 Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
