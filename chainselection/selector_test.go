@@ -1905,6 +1905,7 @@ func TestAdvertisedTipOutlierDoesNotSuppressObservedFrontier(t *testing.T) {
 
 func TestChainSwitchEventIncludesObservedFrontier(t *testing.T) {
 	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
 	cs := NewChainSelector(ChainSelectorConfig{
 		EventBus:      eventBus,
 		SecurityParam: 10,

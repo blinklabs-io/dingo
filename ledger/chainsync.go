@@ -548,13 +548,13 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	if !ok {
 		return
 	}
-	newObservedTip := chainSwitchNewObservedTip(e)
 	// Registered before the mutex is taken so defer's LIFO order runs it
 	// after the unlock. See pendingPublishes.
 	var pending pendingPublishes
 	defer pending.flush()
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
+	var effectiveObservedTip ochainsync.Tip
 	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
@@ -606,6 +606,10 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		}
 	}
 	if err == nil {
+		effectiveObservedTip, _ = ls.chainSwitchObservedTipForConnection(
+			e,
+			effectiveConnId,
+		)
 		requestFreshCursor = ls.chainSwitchNeedsFreshCursorLocked(
 			e,
 			effectiveConnId,
@@ -627,7 +631,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"local_tip_slot",
 			ls.PrimaryChainTip().Point.Slot,
 			"peer_tip_slot",
-			newObservedTip.Point.Slot,
+			effectiveObservedTip.Point.Slot,
 		)
 		ls.requestChainsyncResync(
 			effectiveConnId,
@@ -926,13 +930,29 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
 		return false
 	}
+	newObservedTip, ok := ls.chainSwitchObservedTipForConnection(e, connId)
+	if !ok {
+		return false
+	}
 	localTip := ls.PrimaryChainTip()
-	newObservedTip := chainSwitchNewObservedTip(e)
 	if newObservedTip.BlockNumber > localTip.BlockNumber {
 		return true
 	}
 	return newObservedTip.BlockNumber == localTip.BlockNumber &&
 		newObservedTip.Point.Slot > localTip.Point.Slot
+}
+
+func (ls *LedgerState) chainSwitchObservedTipForConnection(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	if sameConnectionId(connId, e.NewConnectionId) {
+		return chainSwitchNewObservedTip(e), true
+	}
+	if ls.config.GetPeerObservedTipFunc == nil {
+		return ochainsync.Tip{}, false
+	}
+	return ls.config.GetPeerObservedTipFunc(connId)
 }
 
 // chainSwitchNewObservedTip returns the peer frontier that chain selection

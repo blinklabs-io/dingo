@@ -32,16 +32,20 @@ type PeerChainTip struct {
 	// ObservedTip is the latest header locally delivered by this peer. Chain
 	// comparison and handoff decisions use this frontier.
 	ObservedTip ochainsync.Tip
-	VRFOutput   []byte // VRF output from tip block for tie-breaking
-	PraosView   PraosTiebreakerView
-	LastUpdated time.Time
+	// observedTipSet distinguishes a delivered origin/rollback frontier from
+	// legacy callers that did not provide ObservedTip and need Tip as fallback.
+	observedTipSet bool
+	VRFOutput      []byte // VRF output from tip block for tie-breaking
+	PraosView      PraosTiebreakerView
+	LastUpdated    time.Time
 	// observedSlots is the recent observed slot frontier used for Genesis
 	// density. observedPoints is the same frontier with block hashes, used
 	// for Genesis corroboration (detecting whether other peers report the
 	// same blocks). The two slices are maintained in lockstep: index i of
 	// observedPoints is the (slot, hash) for observedSlots[i].
-	observedSlots  []uint64
-	observedPoints []ocommon.Point
+	observedSlots      []uint64
+	observedPoints     []ocommon.Point
+	observedTipHistory []ochainsync.Tip
 }
 
 // NewPeerChainTip creates a new PeerChainTip with the given connection ID,
@@ -52,10 +56,11 @@ func NewPeerChainTip(
 	vrfOutput []byte,
 ) *PeerChainTip {
 	return &PeerChainTip{
-		ConnectionId: connId,
-		Tip:          tip,
-		ObservedTip:  tip,
-		VRFOutput:    vrfOutput,
+		ConnectionId:   connId,
+		Tip:            tip,
+		ObservedTip:    tip,
+		observedTipSet: true,
+		VRFOutput:      vrfOutput,
 		PraosView: PraosTiebreakerViewFromTip(
 			tip,
 			vrfOutput,
@@ -103,6 +108,7 @@ func (p *PeerChainTip) UpdateTipWithObservedPraosView(
 ) {
 	p.Tip = tip
 	p.ObservedTip = observedTip
+	p.observedTipSet = true
 	p.VRFOutput = vrfOutput
 	p.PraosView = praosView
 	p.LastUpdated = time.Now()
@@ -117,8 +123,37 @@ func (p *PeerChainTip) ApplyRollback(
 	if p == nil {
 		return
 	}
+	previousObservedTip := p.ObservedTip
 	p.Tip = tip
-	p.ObservedTip = tip
+	p.ObservedTip = ochainsync.Tip{Point: clonePoint(point)}
+	p.observedTipSet = true
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		p.observedTipHistory = nil
+	} else {
+		found := false
+		if previousObservedTip.Point.Slot == point.Slot &&
+			bytes.Equal(previousObservedTip.Point.Hash, point.Hash) {
+			p.ObservedTip = cloneObservedTip(previousObservedTip)
+			found = true
+		}
+		for i := len(p.observedTipHistory) - 1; !found && i >= 0; i-- {
+			historyTip := p.observedTipHistory[i]
+			if historyTip.Point.Slot == point.Slot &&
+				bytes.Equal(historyTip.Point.Hash, point.Hash) {
+				p.ObservedTip = cloneObservedTip(historyTip)
+				p.observedTipHistory = p.observedTipHistory[:i+1]
+				found = true
+				break
+			}
+		}
+		if !found {
+			// RollBackward carries only a point, not its block number. If the
+			// point is outside the bounded delivered-header history, retain the
+			// point with a conservative zero block number instead of promoting
+			// the peer's untrusted advertised tip.
+			p.observedTipHistory = nil
+		}
+	}
 	p.VRFOutput = nil
 	p.PraosView = PraosTiebreakerView{}
 	p.LastUpdated = time.Now()
@@ -140,6 +175,40 @@ func (p *PeerChainTip) ApplyRollback(
 	}
 	p.observedSlots = p.observedSlots[:keepUntil]
 	p.trimObservedPointsTo(keepUntil)
+}
+
+// recordObservedTipHistory retains enough delivered tips to restore the exact
+// observed frontier on a protocol rollback. maxEntries is expressed in blocks;
+// callers retain k+1 entries so any valid rollback within k can be resolved.
+func (p *PeerChainTip) recordObservedTipHistory(
+	tip ochainsync.Tip,
+	maxEntries uint64,
+) {
+	if p == nil {
+		return
+	}
+	if maxEntries == 0 {
+		maxEntries = 1
+	}
+	p.observedTipSet = true
+	if tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 {
+		p.observedTipHistory = nil
+		return
+	}
+	for len(p.observedTipHistory) > 0 &&
+		p.observedTipHistory[len(p.observedTipHistory)-1].Point.Slot >=
+			tip.Point.Slot {
+		p.observedTipHistory = p.observedTipHistory[:len(p.observedTipHistory)-1]
+	}
+	p.observedTipHistory = append(
+		p.observedTipHistory,
+		cloneObservedTip(tip),
+	)
+	// #nosec G115 -- a slice length is non-negative and always fits uint64.
+	for maxEntries > 0 &&
+		uint64(len(p.observedTipHistory)) > maxEntries {
+		p.observedTipHistory = p.observedTipHistory[1:]
+	}
 }
 
 // trimObservedPointsTo keeps observedPoints aligned with observedSlots after a
@@ -243,6 +312,13 @@ func clonePoint(point ocommon.Point) ocommon.Point {
 	return ocommon.Point{Slot: point.Slot, Hash: hash}
 }
 
+func cloneObservedTip(tip ochainsync.Tip) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       clonePoint(tip.Point),
+		BlockNumber: tip.BlockNumber,
+	}
+}
+
 // cloneObservedPoints deep-copies an observed-point frontier, including each
 // point's hash backing array, for use by the selector's deep-copy getters.
 func cloneObservedPoints(points []ocommon.Point) []ocommon.Point {
@@ -340,7 +416,8 @@ func (p *PeerChainTip) SelectionTip() ochainsync.Tip {
 	if p == nil {
 		return ochainsync.Tip{}
 	}
-	if p.ObservedTip.BlockNumber > 0 || p.ObservedTip.Point.Slot > 0 ||
+	if p.observedTipSet || p.ObservedTip.BlockNumber > 0 ||
+		p.ObservedTip.Point.Slot > 0 ||
 		len(p.ObservedTip.Point.Hash) > 0 {
 		return p.ObservedTip
 	}

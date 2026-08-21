@@ -389,6 +389,12 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 	vrfOutput []byte,
 	praosView PraosTiebreakerView,
 ) bool {
+	if observedTip.BlockNumber == 0 && observedTip.Point.Slot == 0 &&
+		len(observedTip.Point.Hash) == 0 {
+		// Preserve compatibility with legacy/direct producers that did not
+		// provide a distinct delivered frontier.
+		observedTip = tip
+	}
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
 		cs.config.Logger.Debug(
@@ -523,6 +529,10 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				cs.genesisWindowSlotsLocked(),
 				trackHashes,
 			)
+			peerTip.recordObservedTipHistory(
+				observedTip,
+				safeAddUint64(cs.securityParam, 1),
+			)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
 			if len(cs.peerTips) >= cs.maxTrackedPeers {
@@ -539,17 +549,22 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				}
 			}
 			peerTip := &PeerChainTip{
-				ConnectionId: connId,
-				Tip:          tip,
-				ObservedTip:  observedTip,
-				VRFOutput:    vrfOutput,
-				PraosView:    praosView,
-				LastUpdated:  time.Now(),
+				ConnectionId:   connId,
+				Tip:            tip,
+				ObservedTip:    observedTip,
+				observedTipSet: true,
+				VRFOutput:      vrfOutput,
+				PraosView:      praosView,
+				LastUpdated:    time.Now(),
 			}
 			peerTip.recordObservedPoint(
 				observedTip.Point,
 				cs.genesisWindowSlotsLocked(),
 				trackHashes,
+			)
+			peerTip.recordObservedTipHistory(
+				observedTip,
+				safeAddUint64(cs.securityParam, 1),
 			)
 			cs.peerTips[connId] = peerTip
 		}
@@ -884,6 +899,15 @@ func (cs *ChainSelector) GetPeerTip(
 		copy(tipCopy.observedSlots, pt.observedSlots)
 	}
 	tipCopy.observedPoints = cloneObservedPoints(pt.observedPoints)
+	if len(pt.observedTipHistory) > 0 {
+		tipCopy.observedTipHistory = make(
+			[]ochainsync.Tip,
+			len(pt.observedTipHistory),
+		)
+		for i, tip := range pt.observedTipHistory {
+			tipCopy.observedTipHistory[i] = cloneObservedTip(tip)
+		}
+	}
 	return &tipCopy
 }
 
@@ -907,6 +931,15 @@ func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainT
 			copy(tipCopy.observedSlots, v.observedSlots)
 		}
 		tipCopy.observedPoints = cloneObservedPoints(v.observedPoints)
+		if len(v.observedTipHistory) > 0 {
+			tipCopy.observedTipHistory = make(
+				[]ochainsync.Tip,
+				len(v.observedTipHistory),
+			)
+			for i, tip := range v.observedTipHistory {
+				tipCopy.observedTipHistory[i] = cloneObservedTip(tip)
+			}
+		}
 		result[k] = &tipCopy
 	}
 	return result

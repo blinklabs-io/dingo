@@ -628,6 +628,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 				}
 				return nil
 			},
+			GetPeerObservedTipFunc: n.getPeerObservedTip,
 			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
 				return n.connManager != nil &&
 					n.connManager.GetConnectionById(connId) != nil

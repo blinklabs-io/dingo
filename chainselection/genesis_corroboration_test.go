@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"sync"
 	"testing"
@@ -173,6 +174,59 @@ func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	require.Equal(t, []uint64{10, 20, 40}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h40"), pt.observedPoints[2].Hash)
+}
+
+func TestApplyRollbackDoesNotPromoteAdvertisedTipToObserved(t *testing.T) {
+	connId := newTestConnectionId(1)
+	observedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("observed")},
+		BlockNumber: 10,
+	}
+	pt := NewPeerChainTip(connId, observedTip, nil)
+	rollbackPoint := ocommon.Point{Slot: 90, Hash: []byte("rollback")}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("network")},
+		BlockNumber: math.MaxUint64,
+	}
+
+	pt.ApplyRollback(rollbackPoint, advertisedTip)
+
+	assert.Equal(t, advertisedTip, pt.Tip)
+	assert.Equal(t, rollbackPoint, pt.SelectionTip().Point)
+	assert.NotEqual(t, advertisedTip, pt.SelectionTip())
+}
+
+func TestApplyRollbackRestoresDeliveredFrontierFromHistory(t *testing.T) {
+	connId := newTestConnectionId(1)
+	delivered := []ochainsync.Tip{
+		{
+			Point:       ocommon.Point{Slot: 80, Hash: []byte("block-8")},
+			BlockNumber: 8,
+		},
+		{
+			Point:       ocommon.Point{Slot: 90, Hash: []byte("block-9")},
+			BlockNumber: 9,
+		},
+		{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("block-10")},
+			BlockNumber: 10,
+		},
+	}
+	pt := NewPeerChainTip(connId, delivered[0], nil)
+	for _, tip := range delivered {
+		pt.UpdateTipWithObserved(tip, tip, nil)
+		pt.recordObservedTipHistory(tip, 3)
+	}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("network")},
+		BlockNumber: 100,
+	}
+
+	pt.ApplyRollback(delivered[0].Point, advertisedTip)
+
+	assert.Equal(t, delivered[0], pt.SelectionTip())
+	require.Len(t, pt.observedTipHistory, 1)
+	assert.Equal(t, delivered[0], pt.observedTipHistory[0])
 }
 
 // confirmsRecentChain requires the witness's chain, as far as it reaches into

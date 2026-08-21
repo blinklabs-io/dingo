@@ -2383,7 +2383,10 @@ incrementally against the previous delivered frontier (with the local-tip
 catch-up allowance). It also prevents a peer's unbounded advertisement from
 suppressing other peers or forcing a chain-switch resync. Genesis exit may
 consult the advertised slot only through the separately documented
-delivered-frontier gate below.
+delivered-frontier gate below. A RollBackward restores the delivered frontier
+from a bounded `k+1` header history; if the point is no longer retained, the
+selector uses the rollback point with a conservative zero block number and
+never promotes the accompanying advertised tip into the observed frontier.
 
 A queued header range that no peer will serve is bounded by a failure count,
 `blockfetchRangeFailure`, capped at `blockfetchMaxSameRangeFailures`. Failing

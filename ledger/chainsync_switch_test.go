@@ -649,6 +649,55 @@ func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 	)
 }
 
+func TestChainSwitchNeedsFreshCursorIgnoresFailedTargetFrontier(
+	t *testing.T,
+) {
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	require.Zero(t, testChain.HeaderCount())
+	localTip := testChain.Tip()
+
+	previousConnId := testChainsyncConnId(6000, 3001)
+	failedTargetConnId := testChainsyncConnId(6000, 3002)
+	fallbackConnId := testChainsyncConnId(6000, 3003)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				if sameConnectionId(connId, fallbackConnId) {
+					return localTip, true
+				}
+				return ochainsync.Tip{}, false
+			},
+		},
+	}
+
+	needsFreshCursor := ls.chainSwitchNeedsFreshCursorLocked(
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: previousConnId,
+			NewConnectionId:      failedTargetConnId,
+			NewObservedTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					localTip.Point.Slot+100,
+					[]byte("failed-target"),
+				),
+				BlockNumber: localTip.BlockNumber + 100,
+			},
+		},
+		fallbackConnId,
+	)
+	assert.False(
+		t,
+		needsFreshCursor,
+		"a failed target's observed frontier must not drive recovery for the fallback connection",
+	)
+}
+
 type chainSwitchFallbackFixture struct {
 	ls             *LedgerState
 	resyncCh       <-chan event.Event
@@ -685,6 +734,17 @@ func newChainSwitchFallbackFixture(
 			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &currentConn
+			},
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				if sameConnectionId(connId, connId3) {
+					return ochainsync.Tip{
+						Point:       ocommon.NewPoint(200, []byte("active-tip")),
+						BlockNumber: 10,
+					}, true
+				}
+				return ochainsync.Tip{}, false
 			},
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,

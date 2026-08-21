@@ -63,6 +63,7 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
@@ -169,6 +170,19 @@ type Node struct {
 	// rebuild re-registers fresh ones under the same names. See
 	// metrics_registerer.go.
 	rebuildableMetrics *rebuildableRegisterer
+}
+
+func (n *Node) getPeerObservedTip(
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	if n.chainSelector == nil {
+		return ochainsync.Tip{}, false
+	}
+	peerTip := n.chainSelector.GetPeerTip(connId)
+	if peerTip == nil {
+		return ochainsync.Tip{}, false
+	}
+	return peerTip.SelectionTip(), true
 }
 
 func New(cfg Config) (*Node, error) {
@@ -803,6 +817,7 @@ func (n *Node) Run(ctx context.Context) error {
 				}
 				return nil
 			},
+			GetPeerObservedTipFunc: n.getPeerObservedTip,
 			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
 				return n.connManager != nil &&
 					n.connManager.GetConnectionById(connId) != nil
