@@ -533,8 +533,33 @@ func DownloadSnapshot(
 	ctx context.Context,
 	cfg DownloadConfig,
 ) (string, error) {
+	path, root, err := downloadSnapshot(ctx, cfg)
+	if root != nil {
+		if closeErr := root.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return path, err
+}
+
+// downloadSnapshot implements DownloadSnapshot, but returns the still-open
+// root anchored to cfg.DestDir instead of closing it before returning. The
+// caller is responsible for closing root exactly once, on every return path
+// including error, once it is done with it.
+//
+// A caller that only needs the downloaded path may discard root immediately
+// (DownloadSnapshot does exactly that). A caller that goes on to extract or
+// remove the downloaded file should do so through root and the filename it
+// requested in cfg, not by re-resolving the returned path: this function's
+// own directory verification already closed the window where a symlink
+// swapped in for cfg.DestDir could redirect its writes, and re-resolving the
+// path afterward reopens that same window at the handoff to the next step.
+func downloadSnapshot(
+	ctx context.Context,
+	cfg DownloadConfig,
+) (string, *os.Root, error) {
 	if err := cfg.Validate(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -555,21 +580,20 @@ func DownloadSnapshot(
 	cleanDestDir := filepath.Clean(cfg.DestDir)
 	parent := filepath.Dir(cleanDestDir)
 	if err := os.MkdirAll(parent, extractDirMode); err != nil {
-		return "", fmt.Errorf("creating download directory: %w", err)
+		return "", nil, fmt.Errorf("creating download directory: %w", err)
 	}
 	parentRoot, err := os.OpenRoot(parent)
 	if err != nil {
-		return "", fmt.Errorf("opening download parent: %w", err)
+		return "", nil, fmt.Errorf("opening download parent: %w", err)
 	}
 	root, rootErr := openExtractRoot(parentRoot, filepath.Base(cleanDestDir))
 	closeErr := parentRoot.Close()
 	if rootErr != nil {
-		return "", fmt.Errorf("creating download directory: %w", rootErr)
+		return "", nil, fmt.Errorf("creating download directory: %w", rootErr)
 	}
 	if closeErr != nil {
-		return "", fmt.Errorf("creating download directory: %w", closeErr)
+		return "", nil, fmt.Errorf("creating download directory: %w", closeErr)
 	}
-	defer root.Close()
 
 	filename := downloadFilename(cfg)
 	lastObservedSize := rootFileSize(root, filename)
@@ -579,10 +603,10 @@ func DownloadSnapshot(
 		startSize := rootFileSize(root, filename)
 		path, err := downloadSnapshotOnce(ctx, cfg, root)
 		if err == nil {
-			return path, nil
+			return path, root, nil
 		}
 		if ctx.Err() != nil {
-			return "", err
+			return "", root, err
 		}
 		currentSize := rootFileSize(root, filename)
 		madeProgress := currentSize > startSize ||
@@ -600,7 +624,7 @@ func DownloadSnapshot(
 				consecutiveIdleRetries++
 			}
 			if consecutiveIdleRetries > maxIdleRetries {
-				return "", err
+				return "", root, err
 			}
 			cfg.Logger.Warn(
 				"snapshot download stalled, retrying",
@@ -620,7 +644,7 @@ func DownloadSnapshot(
 			// safe to pass to transientRetryDelay.
 			transientRetries++
 			if transientRetries > maxTransientRetries {
-				return "", err
+				return "", root, err
 			}
 			delay := transientRetryDelay(transientRetries - 1)
 			cfg.Logger.Warn(
@@ -634,11 +658,11 @@ func DownloadSnapshot(
 			)
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", root, ctx.Err()
 			case <-time.After(delay):
 			}
 		} else {
-			return "", err
+			return "", root, err
 		}
 	}
 }
@@ -1059,11 +1083,38 @@ func ExtractArchive(
 	logger *slog.Logger,
 	opts ...ExtractOption,
 ) (string, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf(
+			"opening archive: %w",
+			err,
+		)
+	}
+	defer file.Close()
+	return extractArchiveFile(ctx, file, archivePath, destDir, logger, opts...)
+}
+
+// extractArchiveFile extracts from an already-open archive handle instead of
+// a bare path. archiveLabel is used for logging only.
+//
+// A caller that holds a directory handle open across download, extraction,
+// and cleanup — to keep all three anchored to the same directory even if its
+// name is later replaced — opens the archive through that handle
+// (root.Open(filename)) and passes the result here, rather than calling
+// ExtractArchive with a path that would be re-resolved by name.
+func extractArchiveFile(
+	ctx context.Context,
+	file *os.File,
+	archiveLabel string,
+	destDir string,
+	logger *slog.Logger,
+	opts ...ExtractOption,
+) (string, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	logger = logger.With(
-		"archive", archivePath,
+		"archive", archiveLabel,
 		"destination", destDir,
 	)
 
@@ -1074,15 +1125,6 @@ func ExtractArchive(
 		return "", err
 	}
 	defer cleanup()
-
-	file, err := os.Open(archivePath)
-	if err != nil {
-		return "", fmt.Errorf(
-			"opening archive: %w",
-			err,
-		)
-	}
-	defer file.Close()
 
 	fileInfo, err := file.Stat()
 	if err != nil {

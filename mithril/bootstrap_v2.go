@@ -1078,6 +1078,19 @@ func newImmutableProgressWithContext(
 
 // fetchImmutableArchive downloads and extracts a single immutable
 // archive, then removes the archive file to bound disk usage.
+//
+// The download, the extraction, and the removal are all anchored to the
+// same directory handle DownloadSnapshot's internal directory verification
+// opens on archiveDir, rather than each re-resolving archiveDir by name.
+// archiveDir is shared by every archive this pool downloads and is deleted
+// out from under the process on every success (see the comment below), so a
+// directory swapped in for its name between this call's steps would, with a
+// bare path, redirect extraction to attacker-controlled content and let
+// os.Remove delete an external file. Passing the retained root and a
+// root-relative filename to extraction and removal instead means a later
+// swap of archiveDir's name cannot affect either operation: they resolve
+// through the handle opened before the swap could happen, not through the
+// name.
 func fetchImmutableArchive(
 	ctx context.Context,
 	cfg BootstrapConfig,
@@ -1092,13 +1105,13 @@ func fetchImmutableArchive(
 	// and reach the operator. extractLogger (discarded) is still used for
 	// the extraction step to suppress per-file INFO noise.
 	dlLogger := cfg.Logger.With("immutable_file_number", num)
-	archivePath, err := DownloadSnapshot(
+	archivePath := immutableArchivePath(archiveDir, num)
+	archiveFilename := filepath.Base(archivePath)
+	_, root, err := downloadSnapshot(
 		ctx, DownloadConfig{
-			URL:     location.ImmutableArchiveURI(num),
-			DestDir: archiveDir,
-			Filename: filepath.Base(
-				immutableArchivePath(archiveDir, num),
-			),
+			URL:                 location.ImmutableArchiveURI(num),
+			DestDir:             archiveDir,
+			Filename:            archiveFilename,
 			Logger:              dlLogger,
 			HTTPClient:          cfg.httpClient,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
@@ -1107,19 +1120,29 @@ func fetchImmutableArchive(
 			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
+	if root != nil {
+		defer root.Close()
+	}
 	if err != nil {
 		return err
 	}
+
+	file, err := root.Open(archiveFilename)
+	if err != nil {
+		return fmt.Errorf("opening downloaded archive: %w", err)
+	}
+	defer file.Close()
+
 	// Merge: every immutable archive extracts into one shared directory,
 	// concurrently, so this destination accumulates across calls and must
 	// not be staged-and-swapped.
-	if _, err := ExtractArchive(
-		ctx, archivePath, extractDir, extractLogger,
+	if _, err := extractArchiveFile(
+		ctx, file, archivePath, extractDir, extractLogger,
 		WithMergeIntoDestination(),
 	); err != nil {
 		return fmt.Errorf("extracting: %w", err)
 	}
-	if err := os.Remove(archivePath); err != nil {
+	if err := root.Remove(archiveFilename); err != nil {
 		cfg.Logger.Warn(
 			"failed to remove immutable archive after extraction",
 			"component", "mithril",

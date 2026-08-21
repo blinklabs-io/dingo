@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1105,6 +1106,147 @@ func TestBootstrapUnsupportedBackend(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported Mithril backend")
+}
+
+// swapOnEOFBody replaces oldDir with a symlink to newDir the instant the
+// client finishes reading this response body to EOF. The swap runs
+// synchronously inside the Read call the client is blocked on, so it always
+// completes before the caller's io.Copy returns -- no sleep or poll needed
+// to win the race.
+type swapOnEOFBody struct {
+	io.ReadCloser
+	swapped        *atomic.Bool
+	oldDir, newDir string
+}
+
+func (b *swapOnEOFBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) && b.swapped.CompareAndSwap(false, true) {
+		// Rename the directory entry aside rather than removing it: the
+		// downloaded file inside it must survive the swap, reachable only
+		// through the *os.Root opened on it before this point. Renaming
+		// changes the name, not the directory's contents or the inode a
+		// held fd already refers to.
+		orphaned := b.oldDir + ".orphaned"
+		if err := os.Rename(b.oldDir, orphaned); err == nil {
+			_ = os.Symlink(b.newDir, b.oldDir)
+		}
+	}
+	return n, err
+}
+
+// swapDirOnDownloadCompleteTransport arms swapOnEOFBody on every response it
+// hands back.
+type swapDirOnDownloadCompleteTransport struct {
+	oldDir, newDir string
+	swapped        atomic.Bool
+}
+
+func (t *swapDirOnDownloadCompleteTransport) RoundTrip(
+	req *http.Request,
+) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	resp.Body = &swapOnEOFBody{
+		ReadCloser: resp.Body,
+		swapped:    &t.swapped,
+		oldDir:     t.oldDir,
+		newDir:     t.newDir,
+	}
+	return resp, nil
+}
+
+// TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload is the
+// regression test for the residual TOCTOU CodeRabbit and a human reviewer
+// flagged on PR #3303: DownloadSnapshot's own directory hardening protects
+// the download itself, but fetchImmutableArchive used to reopen the
+// downloaded archive by joining archiveDir -- a bare path -- with the
+// filename for extraction, and again to remove it afterward. Swapping
+// archiveDir for a symlink between the download finishing and those two
+// steps running redirected both through the replacement: silently
+// extracting whatever sat there, and deleting a same-named file outside
+// archiveDir entirely.
+//
+// Anchoring extraction and removal to the *os.Root DownloadSnapshot's
+// directory verification already opened, instead of re-resolving archiveDir
+// by name, closes that window: both operations resolve through the handle
+// opened before the swap, so the swap cannot redirect them.
+func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
+	t *testing.T,
+) {
+	probeLink := filepath.Join(t.TempDir(), "probe")
+	requireSymlinkSupport(t, t.TempDir(), probeLink)
+
+	const num = 0
+	archiveContent := buildTarZst(t, map[string][]byte{
+		"00000.chunk": []byte("real chunk data"),
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(archiveContent)
+		},
+	))
+	t.Cleanup(server.Close)
+
+	downloadDir := t.TempDir()
+	archiveDir := filepath.Join(downloadDir, "immutable-archives-test")
+	extractDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	// Planted under the name fetchImmutableArchive looks up once the swap
+	// lands: archiveDir/00000.tar.zst. Deliberately not a valid zstd
+	// archive, so the buggy pre-fix code path -- which would open and try
+	// to extract this file -- fails loudly instead of coincidentally
+	// succeeding.
+	archiveFilename := filepath.Base(immutableArchivePath(archiveDir, num))
+	canaryPath := filepath.Join(outsideDir, archiveFilename)
+	canaryContent := []byte("external file that must survive untouched")
+	require.NoError(t, os.WriteFile(canaryPath, canaryContent, 0o640))
+
+	cfg := BootstrapConfig{
+		Logger:            slog.New(slog.DiscardHandler),
+		AllowInsecureHTTP: true,
+		httpClient: &http.Client{
+			Transport: &swapDirOnDownloadCompleteTransport{
+				oldDir: archiveDir,
+				newDir: outsideDir,
+			},
+		},
+	}
+	location := &CardanoDatabaseLocation{
+		URITemplate: server.URL + "/{immutable_file_number}.tar.zst",
+	}
+
+	err := fetchImmutableArchive(
+		context.Background(),
+		cfg,
+		slog.New(slog.DiscardHandler),
+		location,
+		num,
+		archiveDir,
+		extractDir,
+	)
+	require.NoError(
+		t, err,
+		"extraction and cleanup must use the directory verified before "+
+			"the swap, not the replaced name",
+	)
+
+	// The external file must be untouched: neither opened as the archive
+	// (its content is not a valid zstd stream, so a wrong-file open would
+	// have failed extraction above) nor removed by the post-extraction
+	// cleanup.
+	data, readErr := os.ReadFile(canaryPath)
+	require.NoError(t, readErr, "canary file must not have been removed")
+	assert.Equal(t, canaryContent, data)
+
+	// The real archive content must have been the one extracted.
+	extracted, err := os.ReadFile(filepath.Join(extractDir, "00000.chunk"))
+	require.NoError(t, err)
+	assert.Equal(t, "real chunk data", string(extracted))
 }
 
 // TestOpenImmutableRootRefusesSymlinkedDir covers the immutable directory
