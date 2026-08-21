@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -55,7 +56,12 @@ func newAPIModeSQLStore(t *testing.T) (*sqlstore.Store, *sql.DB) {
 	require.NoError(t, err)
 	require.NoError(t, store.Start(t.Context()))
 	t.Cleanup(func() {
-		require.NoError(t, store.Close())
+		// Logged rather than asserted: require calls FailNow, which stops
+		// the remaining cleanup callbacks and leaks the t.TempDir removal
+		// registered before this one.
+		if err := store.Close(); err != nil {
+			t.Logf("closing store: %v", err)
+		}
 	})
 	return store, writeDB
 }
@@ -149,55 +155,58 @@ func TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop(
 	store, db := newAPIModeSQLStore(t)
 	seedWitnessRows(t, db, 0, 2000)
 
-	assertIndexed := func(t *testing.T, when string) {
-		t.Helper()
-		for _, table := range sqlstore.TransactionWitnessTables() {
-			index, ok := transactionWitnessCleanupIndexes[table]
-			require.True(
-				t,
-				ok,
-				"table %q has no expected cleanup index; a new witness "+
-					"table needs its transaction_id index classified for "+
-					"bulk load",
-				table,
-			)
-			plan := queryPlan(
-				t,
-				db,
-				sqlstore.TransactionWitnessCleanupSQL(table),
-				1,
-			)
-			// SQLite reports a covering index as "USING COVERING INDEX",
-			// so the index name and the equality it resolves are matched
-			// rather than one literal spelling of the whole node.
-			require.Contains(
-				t,
-				plan,
-				"SEARCH "+table+" USING",
-				"%s: the %s idempotency delete must be an indexed search:\n%s",
-				when, table, plan,
-			)
-			require.Contains(
-				t,
-				plan,
-				"INDEX "+index+" (transaction_id=?)",
-				"%s: the %s idempotency delete must resolve transaction_id "+
-					"through %s:\n%s",
-				when, table, index, plan,
-			)
-			require.NotContains(
-				t,
-				plan,
-				"SCAN "+table,
-				"%s: the %s idempotency delete must not scan the table:\n%s",
-				when, table, plan,
-			)
-		}
-	}
-
-	assertIndexed(t, "before deferring indexes")
+	requireWitnessCleanupIndexed(t, db, "before deferring indexes")
 	require.NoError(t, store.DropDeferredIndexes())
-	assertIndexed(t, "after DropDeferredIndexes")
+	requireWitnessCleanupIndexed(t, db, "after DropDeferredIndexes")
+}
+
+// requireWitnessCleanupIndexed asserts that every witness-table idempotency
+// delete resolves transaction_id through its index, quoting the plan and the
+// caller's stage description when it does not.
+func requireWitnessCleanupIndexed(t *testing.T, db *sql.DB, when string) {
+	t.Helper()
+	for _, table := range sqlstore.TransactionWitnessTables() {
+		index, ok := transactionWitnessCleanupIndexes[table]
+		require.True(
+			t,
+			ok,
+			"table %q has no expected cleanup index; a new witness "+
+				"table needs its transaction_id index classified for "+
+				"bulk load",
+			table,
+		)
+		plan := queryPlan(
+			t,
+			db,
+			sqlstore.TransactionWitnessCleanupSQL(table),
+			1,
+		)
+		// SQLite reports a covering index as "USING COVERING INDEX",
+		// so the index name and the equality it resolves are matched
+		// rather than one literal spelling of the whole node.
+		require.Contains(
+			t,
+			plan,
+			"SEARCH "+table+" USING",
+			"%s: the %s idempotency delete must be an indexed search:\n%s",
+			when, table, plan,
+		)
+		require.Contains(
+			t,
+			plan,
+			"INDEX "+index+" (transaction_id=?)",
+			"%s: the %s idempotency delete must resolve transaction_id "+
+				"through %s:\n%s",
+			when, table, index, plan,
+		)
+		require.NotContains(
+			t,
+			plan,
+			"SCAN "+table,
+			"%s: the %s idempotency delete must not scan the table:\n%s",
+			when, table, plan,
+		)
+	}
 }
 
 // witnessCleanupSweep returns the median duration of one full witness-cleanup
@@ -382,5 +391,125 @@ func TestSetTransactionCostFlatAfterDeferredIndexDrop(t *testing.T) {
 		"per-transaction write cost must not track the rows already "+
 			"written: rows grew %.0fx, median cost grew %.1fx (%v)",
 		growth, ratio, medians,
+	)
+}
+
+// preChangeDeferredWitnessIndexes names the witness transaction_id indexes a
+// binary shipped before issue #3253 still carried in its deferred-index
+// manifest, and therefore dropped at the start of every bulk-load cycle.
+var preChangeDeferredWitnessIndexes = []string{
+	"idx_key_witness_transaction_id",
+	"idx_witness_scripts_transaction_id",
+	"idx_redeemer_transaction_id",
+}
+
+// seedPreChangeDeferredCycle leaves the store in the state a binary whose
+// manifest still deferred these three indexes leaves on disk when its cycle is
+// interrupted: the indexes dropped, and the durable recovery marker still set.
+//
+// Dropping the indexes directly is the whole point. The schema migration that
+// created them is already recorded complete, so its
+// CREATE INDEX IF NOT EXISTS never runs again, and a manifest that no longer
+// names them cannot rebuild them either.
+func seedPreChangeDeferredCycle(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, index := range preChangeDeferredWitnessIndexes {
+		_, err := db.Exec("DROP INDEX IF EXISTS " + index)
+		require.NoError(t, err)
+		require.False(
+			t,
+			sqliteIndexExists(t, db, index),
+			"%s must be absent for this to test the upgrade path",
+			index,
+		)
+	}
+	_, err := db.Exec(
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+		 ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`,
+		deferred.SyncStateKey,
+		deferred.SyncStateValue,
+	)
+	require.NoError(t, err)
+}
+
+// TestRetainedIndexesRepairPreChangeDeferredCycle covers the upgrade path for
+// issue #3253.
+//
+// Taking the three witness transaction_id indexes out of the manifest fixes
+// databases the fixed binary bootstraps itself, but not one already on disk.
+// A binary whose manifest still held them dropped them before backfill and
+// rebuilds them only in the full rebuild, and #3253's own reporter ran that
+// backfill for hours across restarts, so an interrupted cycle is the expected
+// state rather than a corner case. On such a database the newer manifest can
+// no longer name the indexes to rebuild them and migration v1 is recorded
+// complete, so without the repair the full scans this fix removes become
+// permanent.
+//
+// Both entry points a restarted node takes are covered: another bulk-load
+// cycle, and the pending-marker repair a plain serve runs.
+func TestRetainedIndexesRepairPreChangeDeferredCycle(t *testing.T) {
+	t.Parallel()
+	for name, repair := range map[string]func(*sqlstore.Store) error{
+		"next bulk-load cycle": (*sqlstore.Store).DropDeferredIndexes,
+		"pending-marker repair": (*sqlstore.Store).
+			BuildDeferredIndexes,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store, db := newAPIModeSQLStore(t)
+			seedWitnessRows(t, db, 0, 500)
+			seedPreChangeDeferredCycle(t, db)
+
+			require.NoError(t, repair(store))
+
+			for _, index := range preChangeDeferredWitnessIndexes {
+				require.True(
+					t,
+					sqliteIndexExists(t, db, index),
+					"%s must be restored: nothing else recreates an index "+
+						"the manifest no longer names",
+					index,
+				)
+			}
+			requireWitnessCleanupIndexed(t, db, "after "+name)
+		})
+	}
+}
+
+// TestBuildDeferredIndexesKeepsMarkerUntilRetainedIndexesExist pins the
+// ordering the repair depends on: the durable marker asserts that every index
+// an older manifest may have dropped is back, so it may not be cleared while
+// one of them is still missing.
+func TestBuildDeferredIndexesKeepsMarkerUntilRetainedIndexesExist(
+	t *testing.T,
+) {
+	t.Parallel()
+	store, db := newAPIModeSQLStore(t)
+	seedPreChangeDeferredCycle(t, db)
+
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "the seeded cycle must look interrupted")
+
+	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(
+		t,
+		pending,
+		"the critical rebuild must leave the marker for the full rebuild",
+	)
+
+	require.NoError(t, store.BuildDeferredIndexes())
+	for _, index := range preChangeDeferredWitnessIndexes {
+		require.True(t, sqliteIndexExists(t, db, index))
+	}
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(
+		t,
+		pending,
+		"the marker must clear once the full manifest and the retained "+
+			"indexes are present",
 	)
 }

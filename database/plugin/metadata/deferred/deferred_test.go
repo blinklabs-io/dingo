@@ -141,3 +141,76 @@ func TestManifestKeepsImportIdempotencyIndexes(t *testing.T) {
 		}
 	}
 }
+
+// TestRetainedIsDisjointFromManifest guards the contract the repair rests on:
+// an index cannot be both dropped for bulk load and restored before the drop.
+func TestRetainedIsDisjointFromManifest(t *testing.T) {
+	deferredNames := map[string]bool{}
+	for _, idx := range Manifest {
+		deferredNames[idx.Name] = true
+	}
+	for _, idx := range Retained {
+		if deferredNames[idx.Name] {
+			t.Errorf(
+				"%q is in both Manifest and Retained; an index is either "+
+					"deferrable or kept resident, not both",
+				idx.Name,
+			)
+		}
+	}
+}
+
+// TestRetainedEntriesAreResolvable confirms each entry carries what the shared
+// SQL store needs to recreate it, since a Retained entry is only ever used to
+// issue CREATE INDEX for an index that is already missing.
+func TestRetainedEntriesAreResolvable(t *testing.T) {
+	if len(Retained) == 0 {
+		t.Fatal("Retained is empty; the exclusion rule names entries")
+	}
+	seen := map[string]int{}
+	for i, idx := range Retained {
+		if idx.Name == "" || idx.Table == "" || len(idx.Columns) == 0 {
+			t.Errorf(
+				"retained entry %d is incomplete (name=%q table=%q columns=%v)",
+				i, idx.Name, idx.Table, idx.Columns,
+			)
+		}
+		if prev, ok := seen[idx.Name]; ok {
+			t.Errorf(
+				"duplicate retained entry %q at indices %d and %d",
+				idx.Name, prev, i,
+			)
+		}
+		seen[idx.Name] = i
+	}
+}
+
+// TestRetainedCoversImportIdempotencyIndexes is the other half of
+// TestManifestKeepsImportIdempotencyIndexes: keeping an index out of the
+// manifest only helps a database an older manifest already dropped it from if
+// the drop and rebuild paths restore it, and they read this list to do so.
+func TestRetainedCoversImportIdempotencyIndexes(t *testing.T) {
+	want := []string{
+		"idx_key_witness_transaction_id",
+		"idx_witness_scripts_transaction_id",
+		"idx_redeemer_transaction_id",
+		"idx_plutus_data_transaction_id",
+		"idx_address_transaction_transaction_id",
+		"idx_certs_transaction_id",
+		"idx_utxo_staking_deleted_amount",
+	}
+	present := map[string]bool{}
+	for _, idx := range Retained {
+		present[idx.Name] = true
+	}
+	for _, name := range want {
+		if !present[name] {
+			t.Errorf(
+				"%q is excluded from Manifest for an import predicate but "+
+					"missing from Retained, so a database an older "+
+					"manifest dropped it from never gets it back",
+				name,
+			)
+		}
+	}
+}

@@ -543,6 +543,15 @@ which query paths it also serves. `SetTransaction` clears `key_witness`,
 b-tree descent with a full scan of a table the same import is still growing,
 which makes historical backfill quadratic rather than merely slower.
 
+Those seven indexes are named in `deferred.Retained`, and the drop and
+full-rebuild paths create any of them that is absent before touching the
+manifest. Excluding an index from the manifest does not restore it on databases
+already on disk: a binary whose manifest still carried it dropped it at the
+start of a bulk-load cycle and recreates it only in the full rebuild, and the
+versioned migration that created it is recorded complete, so its
+`CREATE INDEX IF NOT EXISTS` never runs again. Taking an index out of the
+manifest therefore means adding it to `Retained`.
+
 ### Midnight Indexer
 
 | Table | Columns | Keys / indexes | Relationships and notes |

@@ -37,6 +37,13 @@ func (s *Store) DropDeferredIndexes() error {
 		context.Background(),
 		nil,
 		func(db queryer) error {
+			// An older binary's manifest may have dropped an index this
+			// one keeps out of the manifest, so restore those before
+			// dropping anything: the cycle about to start is the one whose
+			// per-row predicates need them.
+			if err := s.ensureRetainedIndexes(db); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(
 				context.Background(),
 				`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
@@ -121,6 +128,15 @@ func (s *Store) buildDeferredIndexes(
 		context.Background(),
 		nil,
 		func(db queryer) error {
+			if clearPending {
+				// The marker can outlive the binary that set it. Clearing
+				// it asserts that every index an older manifest may have
+				// dropped is back, including the ones this manifest no
+				// longer carries.
+				if err := s.ensureRetainedIndexes(db); err != nil {
+					return err
+				}
+			}
 			for _, index := range indexes {
 				exists, err := s.deferredIndexExists(db, index)
 				if err != nil {
@@ -164,6 +180,40 @@ func (s *Store) buildDeferredIndexes(
 			return nil
 		},
 	)
+}
+
+// ensureRetainedIndexes creates any deferred.Retained index missing from the
+// schema. Present indexes cost one catalog lookup each and are left alone.
+func (s *Store) ensureRetainedIndexes(db queryer) error {
+	for _, index := range deferred.Retained {
+		exists, err := s.deferredIndexExists(db, index)
+		if err != nil {
+			return fmt.Errorf(
+				"check retained index %s: %w",
+				index.Name,
+				err,
+			)
+		}
+		if exists {
+			continue
+		}
+		statement := s.dialect.CreateIndexSQL(
+			index.Name,
+			index.Table,
+			index.Columns,
+		)
+		if _, err := db.ExecContext(
+			context.Background(),
+			statement,
+		); err != nil {
+			return fmt.Errorf(
+				"restore retained index %s: %w",
+				index.Name,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 func (s *Store) deferredIndexExists(
