@@ -37,6 +37,9 @@ package deferred
 //     (import_checkpoint.import_key, backfill_checkpoint.phase).
 //   - The utxo (tx_id, output_idx) lookup index, required to
 //     resolve transaction inputs during backfill UTxO spending.
+//   - Indexes the import path's own idempotency deletes filter on
+//     (key_witness, witness_scripts, redeemer, plutus_data by
+//     transaction_id; address_transaction by transaction_id).
 //   - Cross-row uniqueness constraints used by ledger-state import
 //     (pool_stake_snapshot, reward_snapshot, reward_pool_input,
 //     network_state, account.staking_key, drep.credential, etc.).
@@ -46,8 +49,11 @@ package deferred
 //
 //  1. Does any import path (ledger-state import, immutable blob
 //     load, backfill block replay) rely on the index for an ON
-//     CONFLICT target, FK enforcement, or constraint lookup? If
-//     yes, leave it out of the manifest.
+//     CONFLICT target, FK enforcement, constraint lookup, or the
+//     WHERE clause of a per-row idempotency delete or aggregate
+//     refresh? If yes, leave it out of the manifest. A predicate an
+//     import path runs once per transaction cannot afford a scan of
+//     a table the same import path is growing.
 //  2. Does the index only serve API/query/rollback paths that do
 //     not run during Mithril sync? If yes, add it here.
 //  3. Composite indexes share state with their constituent columns. If a field
@@ -242,12 +248,19 @@ var Manifest = []Index{
 		Columns: []string{"cert_type"},
 		Notes:   "Certificate type filter",
 	},
-	{
-		Name:    "idx_redeemer_transaction_id",
-		Table:   "redeemer",
-		Columns: []string{"transaction_id"},
-		Notes:   "Redeemer transaction lookup",
-	},
+	// idx_redeemer_transaction_id, idx_key_witness_transaction_id, and
+	// idx_witness_scripts_transaction_id are deliberately NOT deferred.
+	// storeTransactionWitnesses (database/plugin/metadata/sqlstore) rewrites
+	// the witness tables on every API-mode SetTransaction, and clears the
+	// previous attempt's rows first with an unconditional
+	// DELETE ... WHERE transaction_id = ? per table. With those indexes
+	// dropped each delete is a full scan of a table that gains a row per
+	// transaction written, so per-transaction cost grows with the rows
+	// already present and historical backfill turns quadratic: measured on
+	// preview, Mithril backfill fell from 3311 to 9 blocks/sec by 2%
+	// progress while its own ETA climbed from 30m to 177h (issue #3253).
+	// plutus_data, the fourth table the same loop clears, was never
+	// deferred; these three now match it.
 	{
 		Name:    "idx_redeemer_index",
 		Table:   "redeemer",
@@ -261,12 +274,6 @@ var Manifest = []Index{
 		Notes:   "Redeemer tag filter",
 	},
 	{
-		Name:    "idx_key_witness_transaction_id",
-		Table:   "key_witness",
-		Columns: []string{"transaction_id"},
-		Notes:   "Witness transaction lookup",
-	},
-	{
 		Name:    "idx_key_witness_type",
 		Table:   "key_witness",
 		Columns: []string{"type"},
@@ -277,12 +284,6 @@ var Manifest = []Index{
 		Table:   "witness_scripts",
 		Columns: []string{"script_hash"},
 		Notes:   "Script hash lookup",
-	},
-	{
-		Name:    "idx_witness_scripts_transaction_id",
-		Table:   "witness_scripts",
-		Columns: []string{"transaction_id"},
-		Notes:   "Script transaction lookup",
 	},
 	{
 		Name:    "idx_witness_scripts_type",

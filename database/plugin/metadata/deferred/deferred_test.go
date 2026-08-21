@@ -108,3 +108,36 @@ func TestSyncStateConstants(t *testing.T) {
 		t.Errorf("SyncStateValue changed: got %q", SyncStateValue)
 	}
 }
+
+// TestManifestKeepsImportIdempotencyIndexes covers issue #3253.
+//
+// The import path clears each of these tables by transaction_id once per
+// transaction before re-inserting, so deferring the index the predicate needs
+// turns a b-tree descent into a scan of a table the same import path is
+// growing. Two of the four tables listed here were never deferred; the other
+// two were, and that is what made Mithril's API-mode backfill quadratic.
+//
+// Pinned by name because the manifest is data: nothing fails to compile when a
+// contributor adds one of these back, and the cost only shows up on a
+// multi-hour bootstrap.
+func TestManifestKeepsImportIdempotencyIndexes(t *testing.T) {
+	retained := map[string]string{
+		"idx_key_witness_transaction_id":         "key_witness",
+		"idx_witness_scripts_transaction_id":     "witness_scripts",
+		"idx_redeemer_transaction_id":            "redeemer",
+		"idx_plutus_data_transaction_id":         "plutus_data",
+		"idx_address_transaction_transaction_id": "address_transaction",
+	}
+	for _, idx := range Manifest {
+		if table, ok := retained[idx.Name]; ok {
+			t.Errorf(
+				"manifest defers %q, but SetTransaction filters %s by "+
+					"transaction_id on every transaction it writes; "+
+					"dropping it makes that delete a full scan of a table "+
+					"the import is still growing (issue #3253)",
+				idx.Name,
+				table,
+			)
+		}
+	}
+}
