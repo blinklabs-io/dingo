@@ -1195,6 +1195,65 @@ func (ls *LedgerState) isValidEraAdvancement(
 	)
 }
 
+// eraTransitionPath returns the consecutive era IDs needed to advance from
+// currentEraID to targetEraID. A boundary block may require two transitions
+// when it is encoded in the immediately preceding era but carries the
+// protocol major for its successor (for example, the Prime-mainnet
+// Mary->Alonzo->Babbage boundary). More than two transitions in one boundary
+// are not accepted: there is no safe way to reconstruct the omitted
+// per-epoch rules from a single block.
+func (ls *LedgerState) eraTransitionPath(
+	currentEraID, targetEraID uint,
+) ([]uint, bool) {
+	if currentEraID == targetEraID {
+		return nil, true
+	}
+	eraList := ls.eraList()
+	currentIndex := -1
+	targetIndex := -1
+	for i := range eraList {
+		switch eraList[i].Id {
+		case currentEraID:
+			currentIndex = i
+		case targetEraID:
+			targetIndex = i
+		}
+	}
+	if currentIndex < 0 || targetIndex <= currentIndex ||
+		targetIndex-currentIndex > 2 {
+		return nil, false
+	}
+	path := make([]uint, 0, targetIndex-currentIndex)
+	for i := currentIndex + 1; i <= targetIndex; i++ {
+		path = append(path, eraList[i].Id)
+	}
+	return path, true
+}
+
+// boundaryEraForBlock determines the era that a boundary block requires.
+// The chainsync era identifies the block body, while its header protocol
+// major can identify the successor era during a hard-fork boundary. Only the
+// immediately following header era is accepted, so an arbitrary future
+// protocol version cannot turn into an era transition accidentally.
+func (ls *LedgerState) boundaryEraForBlock(
+	currentEraID, blockEraID, headerMajor uint,
+	headerMajorKnown bool,
+) uint {
+	targetEraID := blockEraID
+	if !headerMajorKnown {
+		return targetEraID
+	}
+	headerEraID, ok := ls.eraForVersion(headerMajor)
+	if !ok || headerEraID == blockEraID ||
+		!ls.isValidEraAdvancement(blockEraID, headerEraID) {
+		return targetEraID
+	}
+	if _, ok := ls.eraTransitionPath(currentEraID, headerEraID); !ok {
+		return targetEraID
+	}
+	return headerEraID
+}
+
 func (ls *LedgerState) isHardForkTransition(
 	oldVersion, newVersion ProtocolVersion,
 ) bool {
@@ -3101,6 +3160,28 @@ func (ls *LedgerState) transitionToEra(
 	addedSlot uint64,
 	currentPParams lcommon.ProtocolParameters,
 ) (*EraTransitionResult, error) {
+	return ls.transitionToEraFrom(
+		txn,
+		nextEraId,
+		startEpoch,
+		addedSlot,
+		currentPParams,
+		ls.currentEra.Id,
+	)
+}
+
+// transitionToEraFrom is transitionToEra with an explicit source era. The
+// source must be explicit when two adjacent hard forks are applied at one
+// epoch boundary: LedgerState.currentEra is intentionally unchanged until
+// the surrounding database transaction commits.
+func (ls *LedgerState) transitionToEraFrom(
+	txn *database.Txn,
+	nextEraId uint,
+	startEpoch uint64,
+	addedSlot uint64,
+	currentPParams lcommon.ProtocolParameters,
+	fromEraId uint,
+) (*EraTransitionResult, error) {
 	nextEraPtr, ok := ls.eraById(nextEraId)
 	if !ok || nextEraPtr == nil {
 		return nil, fmt.Errorf("unknown era ID %d", nextEraId)
@@ -3111,7 +3192,6 @@ func (ls *LedgerState) transitionToEra(
 		NewEra:     nextEra,
 	}
 	if nextEra.HardForkFunc != nil {
-		fromEraId := ls.currentEra.Id
 		// Perform hard fork
 		// This generally means upgrading pparams from previous era
 		newPParams, err := nextEra.HardForkFunc(
@@ -4407,34 +4487,42 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 				}
 
-				// Check for era change. The guard rejects multi-step
-				// forward, backwards, and to/from-unknown-era cases:
-				// each era boundary on a healthy chain is crossed by
-				// a block from that era, so anything else implies a
-				// non-conforming block, a malformed snapshot, or a
-				// chain-selection bug. Allowing a multi-step jump
-				// would silently apply each intermediate era's
-				// HardForkFunc but skip per-era epoch-based events
-				// that should have fired during the omitted span.
-				if nextEpochEraId != snapshotEra.Id {
-					if !ls.isValidEraAdvancement(
+				// A boundary block can be encoded in the era immediately
+				// before the era announced by its header. Apply that pair of
+				// consecutive transitions in one transaction, but reject any
+				// larger jump because omitted per-epoch rules cannot be
+				// reconstructed safely from one block.
+				transitionPath, ok := ls.eraTransitionPath(
+					snapshotEra.Id, nextEpochEraId,
+				)
+				if !ok {
+					return fmt.Errorf(
+						"refusing era advancement from %d to %d: "+
+							"only one or two consecutive transitions are "+
+							"permitted at a boundary",
 						snapshotEra.Id, nextEpochEraId,
-					) {
-						return fmt.Errorf(
-							"refusing era advancement from %d to %d: "+
-								"only single-step forward advancement to "+
-								"a known era is permitted",
-							snapshotEra.Id, nextEpochEraId,
-						)
-					}
-					result, err := ls.transitionToEra(
+					)
+				}
+				// When two eras are crossed at one boundary, let the epoch
+				// rollover enact pending protocol updates in the source era
+				// first. Applying both transitions before the rollover would
+				// let an old-era update overwrite the successor era's pparams
+				// (Prime's epoch-9 major-5 update otherwise regresses Babbage
+				// major 7).
+				transitionsBeforeRollover := len(transitionPath)
+				if transitionsBeforeRollover == 2 {
+					transitionsBeforeRollover = 0
+				}
+				for _, transitionEraID := range transitionPath[:transitionsBeforeRollover] {
+					result, err := ls.transitionToEraFrom(
 						txn,
-						nextEpochEraId,
+						transitionEraID,
 						snapshotEpoch.EpochId,
 						snapshotEpoch.StartSlot+uint64(
 							snapshotEpoch.LengthInSlots,
 						),
 						workingPParams,
+						workingEraId,
 					)
 					if err != nil {
 						return err
@@ -4443,7 +4531,6 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					workingEraId = result.NewEra.Id
 					eraTransitions = append(eraTransitions, result)
 				}
-
 				// Process epoch rollover
 				workingEraPtr, ok := ls.eraById(workingEraId)
 				if !ok {
@@ -4459,6 +4546,78 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return err
 				}
 				rolloverResult = result
+				if transitionsBeforeRollover == 0 && len(transitionPath) == 2 {
+					// The rollover must enact source-era updates before the
+					// hard-fork path. Now that it has done so, apply both
+					// transitions using the resulting parameters and make the
+					// new epoch durable in the final era.
+					workingPParams = rolloverResult.NewCurrentPParams
+					workingEraId = rolloverResult.NewCurrentEra.Id
+					for _, transitionEraID := range transitionPath {
+						result, err := ls.transitionToEraFrom(
+							txn,
+							transitionEraID,
+							snapshotEpoch.EpochId,
+							snapshotEpoch.StartSlot+uint64(
+								snapshotEpoch.LengthInSlots,
+							),
+							workingPParams,
+							workingEraId,
+						)
+						if err != nil {
+							return err
+						}
+						workingPParams = result.NewPParams
+						workingEraId = result.NewEra.Id
+						eraTransitions = append(eraTransitions, result)
+					}
+
+					newEpoch := rolloverResult.NewCurrentEpoch
+					newEpoch.EraId = workingEraId
+					if err := ls.db.SetEpoch(
+						newEpoch.StartSlot,
+						newEpoch.EpochId,
+						newEpoch.Nonce,
+						newEpoch.EvolvingNonce,
+						newEpoch.CandidateNonce,
+						newEpoch.LastEpochBlockNonce,
+						newEpoch.EraId,
+						newEpoch.SlotLength,
+						newEpoch.LengthInSlots,
+						txn,
+					); err != nil {
+						return fmt.Errorf("update transitioned epoch: %w", err)
+					}
+					pparamsCbor, err := cbor.Encode(&workingPParams)
+					if err != nil {
+						return fmt.Errorf(
+							"encode transitioned protocol parameters: %w", err,
+						)
+					}
+					if err := ls.db.SetPParams(
+						pparamsCbor,
+						newEpoch.StartSlot,
+						newEpoch.EpochId,
+						workingEraId,
+						txn,
+					); err != nil {
+						return fmt.Errorf(
+							"persist transitioned protocol parameters: %w", err,
+						)
+					}
+					rolloverResult.NewCurrentEpoch = newEpoch
+					rolloverResult.NewCurrentPParams = workingPParams
+					finalEra, ok := ls.eraById(workingEraId)
+					if !ok || finalEra == nil {
+						return fmt.Errorf("unknown transitioned era ID %d", workingEraId)
+					}
+					rolloverResult.NewCurrentEra = *finalEra
+					for i := range rolloverResult.NewEpochCache {
+						if rolloverResult.NewEpochCache[i].EpochId == newEpoch.EpochId {
+							rolloverResult.NewEpochCache[i].EraId = workingEraId
+						}
+					}
+				}
 				return nil
 			}, true)
 			if err != nil {
@@ -4917,7 +5076,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
 							snapshotEpoch.SlotLength == 0 {
 							needsEpochRollover = true
-							nextEpochEraId = uint(next.Era().Id)
+							headerMajor, headerMajorKnown := HeaderProtocolMajor(
+								next.Header(),
+							)
+							nextEpochEraId = ls.boundaryEraForBlock(
+								snapshotEra.Id,
+								uint(next.Era().Id),
+								headerMajor,
+								headerMajorKnown,
+							)
 							// Cache rest of the batch for next loop
 							cachedNextBatch = nextBatch[i+offset:]
 							nextBatch = nil

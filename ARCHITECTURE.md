@@ -372,6 +372,8 @@ sequenceDiagram
     LS->>LS: validate transactions (Phase 1 + Phase 2)
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
+    LS->>LS: at an era boundary, enact source-era pparams before hard-fork transitions
+    LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block
 
     Note over Peer,DB: Stage 4 — Persistence
     LS->>ChM: chain.AddBlocks(batch) — 50 blocks max
