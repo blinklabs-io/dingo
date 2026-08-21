@@ -15,7 +15,6 @@
 package database
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -23,40 +22,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	metadataSqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
-
-// newCommitBarrierTestDB is newSyncBarrierTestDB over an arbitrary blob
-// store, so a case can inject a store whose Sync or SetCommitTimestamp
-// fails without changing the shared mockBlobStore.
-func newCommitBarrierTestDB(
-	t *testing.T,
-	blobStore blob.BlobStore,
-) *Database {
-	t.Helper()
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	sqliteStore, err := metadataSqlite.NewSQLStore(
-		metadataSqlite.Config{},
-		metadata.ProviderDependencies{Logger: logger},
-	)
-	require.NoError(t, err)
-	require.NoError(t, sqliteStore.Start(context.Background()))
-	db := &Database{
-		blob:     blobStore,
-		metadata: sqliteStore,
-		logger:   logger,
-		config:   &Config{Logger: logger},
-	}
-	t.Cleanup(func() {
-		require.NoError(t, db.Close())
-	})
-	return db
-}
 
 // timestampFailingBlobStore fails SetCommitTimestamp, which is what
 // Commit's updateCommitTimestamp step calls before either store commits.
@@ -175,7 +145,7 @@ func requireCommitBarrierFree(t *testing.T, db *Database) {
 func TestFailedBlobSyncDoesNotBlockTheNextWriter(t *testing.T) {
 	syncErr := errors.New("fsync failed")
 	store := &mockBlobStore{syncErr: syncErr}
-	db := newCommitBarrierTestDB(t, store)
+	db := newSyncBarrierTestDB(t, store)
 
 	txn := db.Transaction(true)
 	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
@@ -225,7 +195,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "successful combined commit",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &mockBlobStore{})
+				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(true)
@@ -237,7 +207,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "successful metadata-only commit",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &mockBlobStore{})
+				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.MetadataTxn(true)
@@ -249,7 +219,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "read-only commit",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &mockBlobStore{})
+				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(false)
@@ -260,7 +230,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "rollback",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &mockBlobStore{})
+				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(true)
@@ -272,7 +242,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "release",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &mockBlobStore{})
+				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(true)
@@ -283,7 +253,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "commit timestamp failure",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &timestampFailingBlobStore{
+				return newSyncBarrierTestDB(t, &timestampFailingBlobStore{
 					mockBlobStore: &mockBlobStore{},
 					err:           injected,
 				})
@@ -304,7 +274,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "blob commit failure",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &mockBlobStore{
+				return newSyncBarrierTestDB(t, &mockBlobStore{
 					commitErrs: []error{injected},
 				})
 			},
@@ -320,7 +290,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "blob sync failure",
 			newDB: func(t *testing.T) *Database {
-				return newCommitBarrierTestDB(t, &mockBlobStore{
+				return newSyncBarrierTestDB(t, &mockBlobStore{
 					syncErr: injected,
 				})
 			},
@@ -421,7 +391,7 @@ func TestCommitBarrierSurvivesConcurrentFailingCommits(t *testing.T) {
 	store := &serializedBlobStore{
 		mockBlobStore: &mockBlobStore{syncErr: errors.New("fsync failed")},
 	}
-	db := newCommitBarrierTestDB(t, store)
+	db := newSyncBarrierTestDB(t, store)
 
 	const writers = 8
 	done := make(chan struct{}, writers)
