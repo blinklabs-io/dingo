@@ -575,18 +575,12 @@ type Config struct {
 	// defaults off until throughput and stability are proven (issue #1894
 	// phase 1). See ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"         envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
-	// BlockPipelineValidateEnabled turns on the block pipeline's VRF/KES
-	// validate stage (issue #1894 phase 3), in addition to decode. Has no
-	// effect unless BlockPipelineEnabled is also set. This moves the
-	// VRF/KES crypto check to run in parallel, immediately before ledger
-	// apply, instead of serially at admission: once every admitted block is
-	// guaranteed to pass through this check, the existing serial
-	// admission-time VRF/KES crypto check is skipped as redundant (see
-	// blockPipelineRevalidatesCrypto). Admission-time checks the pipeline's
-	// validate stage does not perform -- the registered-VRF-key/
-	// leader-eligibility state checks and the epoch-cache-advance side
-	// effect -- still run unconditionally. See ARCHITECTURE.md ("Block
-	// Processing Pipeline").
+	// BlockPipelineValidateEnabled adds parallel VRF/KES and OpCert checks to
+	// block-pipeline replay (issue #1894 phase 3). It requires
+	// BlockPipelineEnabled. Admission-time header validation remains the
+	// authoritative gate because ls.chain is visible to downstream readers
+	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
+	// Pipeline").
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled" envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
