@@ -55,6 +55,27 @@ func (f *fakeArtifactSource) Logs(
 	return f.logs[service], nil
 }
 
+// requireSinglePathSegment asserts that name addresses exactly one entry
+// directly inside root, and does so without depending on the platform's
+// separator. A literal would: filepath.Join normalizes through Clean,
+// whose documented last step replaces every slash with filepath.Separator,
+// so on Windows filepath.Dir(filepath.Join("/root", name)) is `\root` and
+// never equals a "/root" literal. This file carries no build tag, so it
+// runs under the untagged `go test ./...` that release validation runs on
+// windows-latest; an assertion that only holds on one separator fails
+// there and blocks the release. Both sides are built with filepath here,
+// so they normalize identically on every platform.
+func requireSinglePathSegment(
+	t *testing.T,
+	root, name string,
+	msgAndArgs ...any,
+) {
+	t.Helper()
+	joined := filepath.Join(root, name)
+	require.Equal(t, filepath.Clean(root), filepath.Dir(joined), msgAndArgs...)
+	require.Equal(t, name, filepath.Base(joined), msgAndArgs...)
+}
+
 func testEndpoints() []NodeEndpoint {
 	return []NodeEndpoint{
 		{Name: "dingo-1", Role: "producer", Container: "dingo-1"},
@@ -123,8 +144,7 @@ func TestPlanFailureCaptureKeepsTheNameInsideTheRoot(t *testing.T) {
 	)
 
 	require.True(t, ok)
-	require.Equal(t, "/artifacts",
-		filepath.Dir(filepath.Join("/artifacts", plan.Name)),
+	requireSinglePathSegment(t, "/artifacts", plan.Name,
 		"the artifact directory must be a direct child of the root",
 	)
 }
@@ -332,8 +352,7 @@ func TestArtifactNameStaysASinglePathSegment(t *testing.T) {
 	for _, name := range artifactNameCorpus {
 		got := ArtifactName(name)
 		require.NotEmpty(t, got, "%q encoded to nothing", name)
-		require.Equal(t, "/root",
-			filepath.Dir(filepath.Join("/root", got)),
+		requireSinglePathSegment(t, "/root", got,
 			"%q encoded to %q, which leaves the root", name, got,
 		)
 	}
