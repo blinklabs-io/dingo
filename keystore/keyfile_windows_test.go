@@ -223,6 +223,17 @@ func TestAdministratorAccountACEAcceptedWindows(t *testing.T) {
 	assert.NoError(t, checkOpenFilePermissions(file))
 }
 
+func TestAdministratorAccountACERejectedWhenOwnerIsNotAdministratorsWindows(t *testing.T) {
+	// The LA allowance is conditional on the owner being Built-in
+	// Administrators. A file owned by an ordinary principal must not gain an
+	// LA ace for free.
+	assert.ErrorIs(t, checkOpenDACL(
+		"test.skey",
+		"S-1-5-21-999999999-888888888-777777777-1001",
+		"(A;;GR;;;LA)",
+	), ErrInsecureFileMode)
+}
+
 func TestNullDACLFileModeWindows(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.skey")

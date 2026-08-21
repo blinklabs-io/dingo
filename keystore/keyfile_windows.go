@@ -154,23 +154,25 @@ func checkOpenDACL(path, owner, dacl string) error {
 	allowed := map[string]bool{
 		owner: true,
 		"BA":  true, // Built-in Administrators
-		"LA":  true, // Built-in Administrator account
 		"SY":  true, // Local System
 		"CO":  true, // Creator Owner
 		"OW":  true, // Owner Rights
 	}
-	// LA is allowed for the same reason BA is. It is the built-in
-	// Administrator account and a member of Built-in Administrators, so it
-	// reaches the file through BA whether or not its own ACE is present, and
-	// an administrator can take ownership of any file regardless of the DACL.
-	// Admitting BA while rejecting LA rejected a file no less protected than
-	// one the check already accepts.
+	// An ACE for the built-in Administrator account is accepted only when the
+	// file is owned by Built-in Administrators. In that case every member of
+	// that group already has owner-equivalent access, so the LA ace grants
+	// nothing the owner does not already have, and BA itself is allowed above.
 	//
-	// This is not hypothetical: where a file is owned by the Administrators
-	// group (S-1-5-32-544) and carries an ACE for the Administrator account,
-	// owner and trustee are different principals, so the owner comparison does
-	// not cover it. Windows hosts administered that way, and GitHub's Windows
-	// runners, both produce that combination.
+	// The condition is what keeps this narrow. An LA ace on a file owned by
+	// some other principal stays rejected, including the case a domain
+	// Administrator shares RID 500 with the local one and differs only in the
+	// domain part, which trusteeOwnerMatch must not conflate.
+	//
+	// Hosts where files are owned by the Administrators group produce owner BA
+	// with an LA ace, and so do GitHub's Windows runners.
+	if ownerIsBuiltinAdministrators(owner) {
+		allowed["LA"] = true
+	}
 	for {
 		start := strings.IndexByte(dacl, '(')
 		if start < 0 {
@@ -227,6 +229,15 @@ func checkOpenDACL(path, owner, dacl string) error {
 		)
 	}
 	return nil
+}
+
+// ownerIsBuiltinAdministrators reports whether the descriptor owner is the
+// Built-in Administrators group. The group SID is resolved through Windows
+// rather than compared against a literal, matching how trustee aliases are
+// resolved elsewhere in this file.
+func ownerIsBuiltinAdministrators(owner string) bool {
+	match, err := trusteeOwnerMatch("BA", owner)
+	return err == nil && match
 }
 
 // trusteeOwnerMatch compares a DACL trustee with the descriptor owner. SDDL
