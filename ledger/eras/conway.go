@@ -319,35 +319,44 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 //     outputs, and detects them through a *BabbageTransactionOutput type
 //     assertion that misses outputs wrapped by a later era.
 //
-// What this rule enforces, once some purpose needs a V1 script:
-//
-//   - an inline datum on a consumed input, a reference input, or a produced
-//     output (cardano-ledger's InlineDatumsNotSupported, raised from
-//     transTxOutV1 for every translated output)
-//   - a reference script on a produced output (ReferenceScriptsNotSupported,
-//     from the same translation)
+// What this rule enforces, once some purpose needs a V1 script: an inline
+// datum on a consumed input, a reference input, or a produced output. That is
+// the full set of outputs cardano-ledger's Conway V1 toPlutusTxInfo translates,
+// and transTxOutV1 raises InlineDatumsNotSupported for each
+// (IntersectMBO/cardano-ledger, eras/conway/impl/src/Cardano/Ledger/Conway/
+// TxInfo.hs -- inputs via mapM, reference inputs via mapM_, outputs via
+// zipWithM).
 //
 // Datum presence is read through the TransactionOutput interface, so outputs
 // wrapped by a later era are still inspected, and datum-*hash* outputs stay
 // out of scope because Datum() reports nil for them.
 //
-// Deliberately not enforced, each a known divergence from cardano-ledger:
+// Nothing else is enforced here, and neither omission is a divergence from
+// Conway. Conway shadows Babbage's transTxOutV1 and toPlutusTxInfo, dropping
+// two restrictions Babbage had:
 //
-//   - The mere presence of a reference input. cardano-ledger's V1
-//     toPlutusTxInfo raises ReferenceInputsNotSupported for it, but gouroboros
-//     #1980 removed the same assertion after it failed that repository's
-//     Conway UTXOS vector "can use reference scripts".
-//   - A reference script on a *spent* input. transTxOutV1 raises
-//     ReferenceScriptsNotSupported for it.
+//   - A reference script, on a spent input or a produced output. Conway's
+//     transTxOutV1 checks only dataTxOutL; Babbage's checks
+//     referenceScriptTxOutL first and raises ReferenceScriptsNotSupported.
+//     Reading the Babbage file alone suggests the opposite conclusion.
+//   - The mere presence of a reference input. Babbage's V1 toPlutusTxInfo
+//     opens with "unless (Set.null refInputs) $ Left ReferenceInputsNotSupported".
+//     Conway replaced that with translating each reference input through
+//     transTxInInfoV1 and discarding the result, so a reference input is
+//     permitted and only its inline datum disqualifies -- which is what the
+//     loop below does.
 //
-// Neither is asserted here because this repository's conformance suite cannot
-// arbitrate them: its harness runs gouroboros' rule functions directly
+// This rule is registered for Conway, so Conway's semantics apply. gouroboros
+// #1980 reached the same shape from the other direction: asserting
+// ReferenceInputsNotSupported there failed that repository's Conway UTXOS
+// vector "can use reference scripts".
+//
+// The conformance suite in this repository cannot arbitrate any of it. Its
+// harness runs gouroboros' rule functions directly
 // (ouroboros-mock/conformance/validation_rules.go lists
 // conway.UtxoValidateInlineDatumsWithPlutusV1), so it never reaches this
 // override -- disabling this rule outright still leaves all 315 vectors
-// passing. Adding a rejection on reasoning alone risks re-introducing the
-// class of false positive this rule exists to remove. Both belong upstream,
-// where the vectors do exercise the rule.
+// passing.
 //
 // Not a gap: a V1 script that is merely present but required by no purpose.
 // An unused *explicit* script witness is separately rejected by
@@ -401,14 +410,8 @@ func validateConwayInlineDatumsWithPlutusV1(
 		if output.Datum() != nil {
 			return notSupported
 		}
-		// A reference script on a produced output is deliberately not
-		// disqualifying. Conway defines its own transTxOutV1 that shadows
-		// Babbage's and drops the ReferenceScriptsNotSupported branch, so it
-		// checks only the inline datum
-		// (IntersectMBO/cardano-ledger, eras/conway/impl/src/Cardano/Ledger/
-		// Conway/TxInfo.hs). Babbage's version does carry that branch, which is
-		// why reading the Babbage file alone suggests the opposite. This rule
-		// is registered for Conway, so Conway's semantics apply.
+		// No reference-script check: Conway's transTxOutV1 drops Babbage's
+		// ReferenceScriptsNotSupported branch. See the doc comment.
 	}
 	return nil
 }
