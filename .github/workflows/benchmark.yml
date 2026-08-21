@@ -80,7 +80,13 @@ jobs:
           set -euo pipefail
           date_stamp=$(date -u +%Y-%m-%d)
           short_sha=$(git rev-parse --short HEAD)
-          run_file="../benchmark-data-branch/runs/${date_stamp}-${short_sha}.txt"
+          # GITHUB_RUN_ID-GITHUB_RUN_ATTEMPT makes the filename unique even
+          # when the same commit is re-run on the same day (a failed run
+          # retried, or a manual workflow_dispatch shortly after a scheduled
+          # run) -- otherwise a rerun's `tee` truncates the very file a
+          # concurrent or prior run is using as its baseline, and the
+          # comparison silently degrades to "compare a file against itself".
+          run_file="../benchmark-data-branch/runs/${date_stamp}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${short_sha}.txt"
           echo "run_file=${run_file}" >> "$GITHUB_OUTPUT"
           make bench-ci | tee "${run_file}"
 
@@ -92,12 +98,29 @@ jobs:
         # and latest.txt together, but tolerate it rather than hard-failing
         # on a manually-tampered branch).
         if: steps.benchmark-data.outputs.bootstrap == 'false' && steps.benchmark-data.outputs.baseline_file != ''
+        # baseline_file/run_file are passed through env instead of interpolated
+        # directly into the script below: a `${{ ... }}` expansion splices its
+        # value into the generated shell script as literal text before bash
+        # ever parses it, so an unexpected value (e.g. a tampered
+        # benchmark-data branch) could inject shell syntax rather than being
+        # treated as a plain argument. Referencing "$BASELINE_FILE"/"$RUN_FILE"
+        # is normal variable expansion and cannot re-parse as script.
+        env:
+          BASELINE_FILE: ${{ steps.benchmark-data.outputs.baseline_file }}
+          RUN_FILE: ${{ steps.run-bench.outputs.run_file }}
         shell: bash
         run: |
           set -euo pipefail
+          # Belt-and-suspenders: reject anything that isn't a filename this
+          # workflow could have produced itself, in case benchmark-data was
+          # tampered with between runs.
+          if [[ ! "$(basename "${BASELINE_FILE}")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]+-[0-9]+-[0-9a-f]{4,40}\.txt$ ]]; then
+            echo "baseline_file has an unexpected name: ${BASELINE_FILE}" >&2
+            exit 1
+          fi
           go run ./internal/benchci/cmd/benchcheck \
-            "${{ steps.benchmark-data.outputs.baseline_file }}" \
-            "${{ steps.run-bench.outputs.run_file }}" \
+            "${BASELINE_FILE}" \
+            "${RUN_FILE}" \
             report.md | tee -a "$GITHUB_OUTPUT"
 
       - name: write-step-summary
@@ -123,10 +146,14 @@ jobs:
       # benchmark-data worktree created above (checked out one level above
       # the main checkout, so Go tooling in earlier steps never scans it).
       - name: publish-benchmark-data
+        # Same reasoning as check-regression: pass the step output through
+        # env rather than interpolating it directly into the script.
+        env:
+          RUN_FILE: ${{ steps.run-bench.outputs.run_file }}
         shell: bash
         run: |
           set -euo pipefail
-          run_file="${{ steps.run-bench.outputs.run_file }}"
+          run_file="${RUN_FILE}"
           basename "${run_file}" > ../benchmark-data-branch/runs/latest.txt
 
           cutoff=$(date -u -d '104 weeks ago' +%Y-%m-%d)
@@ -157,6 +184,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # gh issue create fails outright if the label doesn't exist yet;
+          # this repo doesn't have "performance-regression" pre-provisioned,
+          # so create it on first use. Idempotent: gh label create fails
+          # (non-fatal here) if it already exists.
+          gh label create performance-regression \
+            --color b60205 \
+            --description "Weekly benchmark run flagged a >5% significant regression" \
+            2>/dev/null || true
           existing=$(gh issue list \
             --search 'in:title "Benchmark regression tracker"' \
             --label performance-regression \
