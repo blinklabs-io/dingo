@@ -152,18 +152,48 @@ func CertDepositAllegra(
 	}
 }
 
+var allegraUtxoValidationRules = buildAllegraValidationRules()
+
+// buildAllegraValidationRules mirrors buildShelleyValidationRules: Allegra
+// reuses ShelleyProtocolParameterUpdate and AllegraTransactionBody also lacks
+// MarshalCBOR, so an Allegra protocol-update transaction rebuilt from block
+// components is sized the same 210 bytes too large.
+func buildAllegraValidationRules() []indexedUtxoValidationRule {
+	return buildIndexedUtxoValidationRulesWithSkips(
+		allegra.UtxoValidationRules,
+		[]utxoValidationRuleSkip{
+			{
+				index:          allegraUtxoValidateFeeTooSmallRuleIndex,
+				validationFunc: allegra.UtxoValidateFeeTooSmallUtxo,
+				name:           "allegra.UtxoValidateFeeTooSmallUtxo",
+			},
+			{
+				index:          allegraUtxoValidateMaxTxSizeRuleIndex,
+				validationFunc: allegra.UtxoValidateMaxTxSizeUtxo,
+				name:           "allegra.UtxoValidateMaxTxSizeUtxo",
+			},
+		},
+	)
+}
+
 func ValidateTxAllegra(
 	tx lcommon.Transaction,
 	slot uint64,
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := make([]error, 0, len(allegra.UtxoValidationRules))
-	for _, validationFunc := range allegra.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
-		)
+	tmpPparams, ok := pp.(*allegra.AllegraProtocolParameters)
+	if !ok || tmpPparams == nil {
+		return ErrIncompatibleProtocolParams
 	}
-	return errors.Join(errs...)
+	return validatePreAlonzoTx(
+		tx,
+		slot,
+		ls,
+		pp,
+		allegraUtxoValidationRules,
+		tmpPparams.MaxTxSize,
+		tmpPparams.MinFeeA,
+		tmpPparams.MinFeeB,
+	)
 }

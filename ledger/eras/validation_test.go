@@ -23,11 +23,13 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
@@ -1214,6 +1216,321 @@ func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(t *testing.T
 	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
 	assert.Len(t, blockTx.Cbor(), 1_366)
 	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
+}
+
+// TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes covers the
+// same defect in Allegra. AllegraProtocolParameterUpdate is an alias for
+// ShelleyProtocolParameterUpdate and AllegraTransactionBody also has no
+// MarshalCBOR, so an Allegra protocol-update transaction rebuilt from block
+// components is inflated by the same 210 bytes. The preprod fixture body uses
+// only fields Allegra shares with Shelley, so it decodes in both eras.
+func TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes(
+	t *testing.T,
+) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	wireTx, err := allegra.NewAllegraTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_156), TxSizeForFee(wireTx))
+
+	blockTx := &allegra.AllegraTransaction{
+		Body:       wireTx.Body,
+		WitnessSet: wireTx.WitnessSet,
+	}
+	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
+	assert.Len(t, blockTx.Cbor(), 1_366)
+	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
+}
+
+// TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection pins the reason Mary
+// is excluded from preAlonzoRebuiltWireSize: MaryTransactionBody implements
+// MarshalCBOR and returns its preserved bytes, so a rebuilt Mary transaction
+// already encodes to its wire size. If upstream loses that method this test
+// fails and Mary has to be added to preAlonzoRebuiltWireSize.
+func TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection(t *testing.T) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	wireTx, err := mary.NewMaryTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	blockTx := &mary.MaryTransaction{
+		Body:       wireTx.Body,
+		WitnessSet: wireTx.WitnessSet,
+	}
+	assert.Len(t, blockTx.Cbor(), 1_156)
+	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
+	_, rebuilt := preAlonzoRebuiltWireSize(blockTx)
+	assert.False(t, rebuilt)
+}
+
+func TestPreAlonzoRebuiltWireSize(t *testing.T) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	wireTx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	t.Run("decoded from complete cbor", func(t *testing.T) {
+		// Stored transaction CBOR is the encoding the node received, so it is
+		// never recomputed from components.
+		_, ok := preAlonzoRebuiltWireSize(wireTx)
+		assert.False(t, ok)
+	})
+	t.Run("rebuilt from components", func(t *testing.T) {
+		size, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{
+			Body:       wireTx.Body,
+			WitnessSet: wireTx.WitnessSet,
+		})
+		require.True(t, ok)
+		// 1-byte array header + 343-byte body + 811-byte witness set +
+		// 1-byte CBOR null auxiliary data.
+		assert.Equal(t, uint64(1_156), size)
+	})
+	t.Run("no preserved component bytes", func(t *testing.T) {
+		_, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{})
+		assert.False(t, ok)
+	})
+	t.Run("missing witness set bytes", func(t *testing.T) {
+		_, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{
+			Body: wireTx.Body,
+		})
+		assert.False(t, ok)
+	})
+	t.Run("metadata without preserved auxiliary bytes", func(t *testing.T) {
+		// Metadata is present but its original auxiliary-data bytes are not,
+		// so the wire size cannot be rebuilt and the caller must fall back.
+		_, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{
+			Body:       wireTx.Body,
+			WitnessSet: wireTx.WitnessSet,
+			TxMetadata: &lcommon.MetaInt{},
+		})
+		assert.False(t, ok)
+	})
+	t.Run("post-alonzo transaction", func(t *testing.T) {
+		_, ok := preAlonzoRebuiltWireSize(&conway.ConwayTransaction{})
+		assert.False(t, ok)
+	})
+}
+
+func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		shelley.UtxoValidationRules,
+		shelleyUtxoValidateFeeTooSmallRuleIndex,
+		shelley.UtxoValidateFeeTooSmallUtxo,
+		"shelley.UtxoValidateFeeTooSmallUtxo",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		shelley.UtxoValidationRules,
+		shelleyUtxoValidateMaxTxSizeRuleIndex,
+		shelley.UtxoValidateMaxTxSizeUtxo,
+		"shelley.UtxoValidateMaxTxSizeUtxo",
+	)
+	require.Len(
+		t,
+		shelleyUtxoValidationRules,
+		len(shelley.UtxoValidationRules)-2,
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		shelleyUtxoValidationRules,
+		shelley.UtxoValidateFeeTooSmallUtxo,
+		"Shelley validation must size the minimum fee with TxSizeForFee",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		shelleyUtxoValidationRules,
+		shelley.UtxoValidateMaxTxSizeUtxo,
+		"Shelley validation must size the max-size check with TxSizeForFee",
+	)
+
+	requireRuleIndexResolvesToFunc(
+		t,
+		allegra.UtxoValidationRules,
+		allegraUtxoValidateFeeTooSmallRuleIndex,
+		allegra.UtxoValidateFeeTooSmallUtxo,
+		"allegra.UtxoValidateFeeTooSmallUtxo",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		allegra.UtxoValidationRules,
+		allegraUtxoValidateMaxTxSizeRuleIndex,
+		allegra.UtxoValidateMaxTxSizeUtxo,
+		"allegra.UtxoValidateMaxTxSizeUtxo",
+	)
+	require.Len(
+		t,
+		allegraUtxoValidationRules,
+		len(allegra.UtxoValidationRules)-2,
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		allegraUtxoValidationRules,
+		allegra.UtxoValidateFeeTooSmallUtxo,
+		"Allegra validation must size the minimum fee with TxSizeForFee",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		allegraUtxoValidationRules,
+		allegra.UtxoValidateMaxTxSizeUtxo,
+		"Allegra validation must size the max-size check with TxSizeForFee",
+	)
+}
+
+// TestValidateTxPreAlonzoRebuiltUpdateTxSizes drives ValidateTxShelley and
+// ValidateTxAllegra with the preprod protocol-update transaction rebuilt the
+// way a block delivers it. The upstream fee and max-size rules size it from
+// len(tx.Cbor()), which is 1366 bytes for a rebuilt transaction; the Dingo
+// replacements size it from TxSizeForFee, which is the 1156 bytes that were on
+// the wire. The empty mock ledger state fails other rules, so each assertion
+// is on the fee or size message specifically.
+func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
+	const (
+		preprodMinFeeA   = 44
+		preprodMinFeeB   = 155_381
+		preprodMaxTxSize = 16_384
+
+		dingoFeeTooSmall     = "is less than the calculated minimum fee"
+		dingoSizeTooLarge    = "exceeds maximum"
+		upstreamFeeTooSmall  = "fee too small: provided 206245, minimum 215485"
+		upstreamSizeTooLarge = "transaction size too large: size 1366"
+	)
+
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	shelleyWireTx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	allegraWireTx, err := allegra.NewAllegraTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name             string
+		tx               lcommon.Transaction
+		validateTx       lcommon.UtxoValidationRuleFunc
+		upstreamFeeRule  lcommon.UtxoValidationRuleFunc
+		upstreamSizeRule lcommon.UtxoValidationRuleFunc
+	}{
+		{
+			name: "shelley",
+			tx: &shelley.ShelleyTransaction{
+				Body:       shelleyWireTx.Body,
+				WitnessSet: shelleyWireTx.WitnessSet,
+			},
+			validateTx:       ValidateTxShelley,
+			upstreamFeeRule:  shelley.UtxoValidateFeeTooSmallUtxo,
+			upstreamSizeRule: shelley.UtxoValidateMaxTxSizeUtxo,
+		},
+		{
+			name: "allegra",
+			tx: &allegra.AllegraTransaction{
+				Body:       allegraWireTx.Body,
+				WitnessSet: allegraWireTx.WitnessSet,
+			},
+			validateTx:       ValidateTxAllegra,
+			upstreamFeeRule:  allegra.UtxoValidateFeeTooSmallUtxo,
+			upstreamSizeRule: allegra.UtxoValidateMaxTxSizeUtxo,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := newMockLedgerState()
+			require.Len(t, tc.tx.Cbor(), 1_366)
+			require.Equal(t, uint64(1_156), TxSizeForFee(tc.tx))
+
+			pparams := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: preprodMaxTxSize,
+			}
+			// The upstream fee rule this era replaces rejects the rebuilt
+			// transaction at the inflated size.
+			require.ErrorContains(
+				t,
+				tc.upstreamFeeRule(tc.tx, 0, ls, pparams),
+				upstreamFeeTooSmall,
+			)
+			err := tc.validateTx(tc.tx, 0, ls, pparams)
+			require.Error(t, err, "unresolvable inputs must still fail")
+			assert.NotContains(t, err.Error(), dingoFeeTooSmall)
+			assert.NotContains(t, err.Error(), "fee too small")
+
+			// Raising minFeeA by one lovelace puts the declared fee below the
+			// minimum for the wire size too, so the replacement fee check is
+			// running rather than silently absent.
+			tighterFee := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA + 1,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: preprodMaxTxSize,
+			}
+			require.ErrorContains(
+				t,
+				tc.validateTx(tc.tx, 0, ls, tighterFee),
+				dingoFeeTooSmall,
+			)
+
+			// Fee and max-size must be judged against the same size. A limit
+			// between the wire size and the rebuilt size is exceeded by the
+			// upstream rule and not by the replacement.
+			narrowSize := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: 1_200,
+			}
+			require.ErrorContains(
+				t,
+				tc.upstreamSizeRule(tc.tx, 0, ls, narrowSize),
+				upstreamSizeTooLarge,
+			)
+			err = tc.validateTx(tc.tx, 0, ls, narrowSize)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), dingoSizeTooLarge)
+			assert.NotContains(t, err.Error(), "transaction size too large")
+
+			// A limit below the wire size is still enforced.
+			tinySize := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: 1_000,
+			}
+			require.ErrorContains(
+				t,
+				tc.validateTx(tc.tx, 0, ls, tinySize),
+				"transaction size 1156 exceeds maximum 1000",
+			)
+		})
+	}
+}
+
+func TestValidateTxPreAlonzoRejectsWrongProtocolParams(t *testing.T) {
+	tests := []struct {
+		name       string
+		validateTx lcommon.UtxoValidationRuleFunc
+	}{
+		{name: "shelley", validateTx: ValidateTxShelley},
+		{name: "allegra", validateTx: ValidateTxAllegra},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := newMockLedgerState()
+			require.ErrorIs(
+				t,
+				tc.validateTx(
+					&shelley.ShelleyTransaction{},
+					0,
+					ls,
+					&conway.ConwayProtocolParameters{},
+				),
+				ErrIncompatibleProtocolParams,
+			)
+			// A nil typed pointer must not be dereferenced for MinFeeA.
+			var nilPparams *shelley.ShelleyProtocolParameters
+			require.ErrorIs(
+				t,
+				tc.validateTx(&shelley.ShelleyTransaction{}, 0, ls, nilPparams),
+				ErrIncompatibleProtocolParams,
+			)
+		})
+	}
 }
 
 func TestTxSizeForFee_RebuiltConwayTxPreservesCanonicalSize(t *testing.T) {

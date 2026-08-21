@@ -178,6 +178,32 @@ func CertDepositShelley(
 	}
 }
 
+var shelleyUtxoValidationRules = buildShelleyValidationRules()
+
+// buildShelleyValidationRules drops the upstream fee and max-size rules so
+// ValidateTxShelley can apply the Dingo checks that size a transaction with
+// TxSizeForFee. buildIndexedUtxoValidationRulesWithSkips panics at package
+// initialization if either hardcoded index stops resolving to the named
+// upstream function, so an upstream rename or reordering fails loudly instead
+// of silently leaving the upstream rule in place.
+func buildShelleyValidationRules() []indexedUtxoValidationRule {
+	return buildIndexedUtxoValidationRulesWithSkips(
+		shelley.UtxoValidationRules,
+		[]utxoValidationRuleSkip{
+			{
+				index:          shelleyUtxoValidateFeeTooSmallRuleIndex,
+				validationFunc: shelley.UtxoValidateFeeTooSmallUtxo,
+				name:           "shelley.UtxoValidateFeeTooSmallUtxo",
+			},
+			{
+				index:          shelleyUtxoValidateMaxTxSizeRuleIndex,
+				validationFunc: shelley.UtxoValidateMaxTxSizeUtxo,
+				name:           "shelley.UtxoValidateMaxTxSizeUtxo",
+			},
+		},
+	)
+}
+
 func ValidateTxShelley(
 	tx lcommon.Transaction,
 	slot uint64,
@@ -185,7 +211,7 @@ func ValidateTxShelley(
 	pp lcommon.ProtocolParameters,
 ) error {
 	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
 	return validatePreAlonzoTx(
@@ -193,7 +219,8 @@ func ValidateTxShelley(
 		slot,
 		ls,
 		pp,
-		shelley.UtxoValidationRules,
+		shelleyUtxoValidationRules,
+		tmpPparams.MaxTxSize,
 		tmpPparams.MinFeeA,
 		tmpPparams.MinFeeB,
 	)
