@@ -454,3 +454,25 @@ func TestArtifactNameNeverEndsInAStrippedCharacter(t *testing.T) {
 		)
 	}
 }
+
+// TestArtifactNameKeepsCase pins the one place the encoding stops short
+// of a filesystem guarantee. Case is preserved rather than escaped, so
+// two names differing only in case encode differently but share a
+// directory on a filesystem that folds case.
+//
+// The pair is deliberately absent from artifactNameCorpus, which
+// TestArtifactNamesCreateDistinctDirectories creates for real: adding it
+// would fail on macOS and Windows. That is the boundary being recorded,
+// not a defect being hidden -- escaping case would render
+// TestSustainedConsensus as %54est%53ustained%43onsensus, and the
+// directory has to stay findable from the name in the failure output.
+func TestArtifactNameKeepsCase(t *testing.T) {
+	require.NotEqual(t,
+		ArtifactName("TestX/a"), ArtifactName("TestX/A"),
+		"the encoding itself must not fold case",
+	)
+	require.Equal(t, "TestSustainedConsensus",
+		ArtifactName("TestSustainedConsensus"),
+		"escaping case would cost every scenario its readable name",
+	)
+}

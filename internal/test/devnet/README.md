@@ -374,7 +374,12 @@ which captures explicitly through `NodeControl.CaptureFailureArtifacts`,
 and the Go test name for every canonical scenario, which
 `NewTestHarness` wires up on its own. A subtest renders as
 `parent/child`, so the separator is percent-escaped to keep the evidence
-in one directory per test; a name without one is used as written.
+in one directory per test, as is anything a filesystem would reject or
+rewrite -- Windows refuses `: * ? " < > |` and strips a trailing dot or
+space, which would otherwise put two scenarios in one directory. A name
+built from Go identifiers is used as written. Case is left alone, so
+directories stay readable; on a filesystem that folds case, two scenario
+names differing only in case would share one.
 
 Observation and writing happen at different times. Chain observers run
 for the whole of a scenario, so `observed-chains.json` is a continuous

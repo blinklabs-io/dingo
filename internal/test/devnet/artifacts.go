@@ -121,6 +121,17 @@ func PlanFailureCapture(
 // not because they escape the segment, but because the filesystem reads
 // them as something other than the name asked for.
 //
+// Case is the one difference deliberately left unescaped, so the
+// guarantee above is a guarantee on any filesystem that distinguishes
+// case, and not on one that folds it: on macOS or Windows, TestX/a and
+// TestX/A encode differently but land in one directory. Closing that
+// would cost the readable name, which is the thing the encoding exists
+// to protect -- escaping case renders TestSustainedConsensus as
+// %54est%53ustained%43onsensus, and a digest suffix trades the exact
+// name for a probability. DevNet captures on Linux, where case is
+// significant, and two Go test names differing only in case is a naming
+// problem of its own. TestArtifactNameKeepsCase pins this boundary.
+//
 // Only what a filesystem would reject or rewrite is escaped, so a name
 // built from Go identifiers comes back exactly as written. That is every
 // scenario in the canonical suite, and it is what makes the directory
