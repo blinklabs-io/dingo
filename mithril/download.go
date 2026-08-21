@@ -542,19 +542,32 @@ func DownloadSnapshot(
 	maxIdleRetries := cfg.maxIdleRetries()
 	maxTransientRetries := cfg.maxTransientRetries()
 
-	// Ensure the destination directory exists, then anchor every
-	// subsequent directory/file operation to its filesystem identity via
-	// os.Root. A plain absolute path re-resolves through the OS on every
-	// os.OpenFile/os.Stat call and would follow a symlink swapped into
-	// the tree after this point (TOCTOU); os.Root binds a handle to
-	// DestDir once and refuses to traverse a symlink that would escape
-	// it.
-	if err := os.MkdirAll(cfg.DestDir, 0o750); err != nil {
+	// Create and open DestDir through a verified handle on its parent,
+	// the same guard ExtractArchive/openImmutableRoot apply to their own
+	// destinations: a bare os.MkdirAll(cfg.DestDir)+os.OpenRoot(cfg.DestDir)
+	// would follow a symlink already sitting at DestDir, or one swapped
+	// in for it, since neither call inspects what it's binding to.
+	// openExtractRoot creates the leaf if missing and refuses it — and
+	// refuses a substitution racing the check — if it resolves to
+	// anything but a real directory. Every subsequent directory/file
+	// operation in this download then goes through the returned root, so
+	// a symlink swapped in afterward cannot redirect them either.
+	cleanDestDir := filepath.Clean(cfg.DestDir)
+	parent := filepath.Dir(cleanDestDir)
+	if err := os.MkdirAll(parent, extractDirMode); err != nil {
 		return "", fmt.Errorf("creating download directory: %w", err)
 	}
-	root, err := os.OpenRoot(cfg.DestDir)
+	parentRoot, err := os.OpenRoot(parent)
 	if err != nil {
-		return "", fmt.Errorf("opening download root: %w", err)
+		return "", fmt.Errorf("opening download parent: %w", err)
+	}
+	root, rootErr := openExtractRoot(parentRoot, filepath.Base(cleanDestDir))
+	closeErr := parentRoot.Close()
+	if rootErr != nil {
+		return "", fmt.Errorf("creating download directory: %w", rootErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("creating download directory: %w", closeErr)
 	}
 	defer root.Close()
 

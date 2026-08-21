@@ -1204,44 +1204,6 @@ func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
 		"nothing may be created through a symlinked extraction directory")
 }
 
-// TestDownloadImmutablesRefusesSymlinkedArchiveDir covers the immutable
-// archive scratch directory itself being a symlink planted before the
-// download starts.
-//
-// Unlike immutableDir (openImmutableRoot, above), archiveDir isn't kept
-// open as a handle for the rest of the function — every actual write
-// into it goes through DownloadSnapshot, which anchors its own Root at
-// DestDir. This pins that the initial creation step alone already
-// refuses to follow the symlink, rather than silently succeeding the
-// way a plain os.MkdirAll would (its target already exists as a
-// directory).
-func TestDownloadImmutablesRefusesSymlinkedArchiveDir(t *testing.T) {
-	downloadDir := t.TempDir()
-	outside := t.TempDir()
-
-	artifact := &CardanoDatabaseSnapshot{Hash: "deadbeef"}
-	extractDir := filepath.Join(downloadDir, "immutable-"+artifact.Hash)
-	archiveRelDir := "immutable-archives-" + truncateDigest(artifact.Hash)
-	requireSymlinkSupport(
-		t, outside, filepath.Join(downloadDir, archiveRelDir),
-	)
-
-	err := downloadImmutables(
-		context.Background(),
-		BootstrapConfig{},
-		artifact,
-		map[string]string{},
-		downloadDir,
-		extractDir,
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "creating archive directory")
-
-	entries, readErr := os.ReadDir(outside)
-	require.NoError(t, readErr)
-	assert.Empty(t, entries, "must not write through the symlink")
-}
-
 // TestBootstrapV2CarriesTheVerifiedAncillaryHandle pins that the handle a
 // verified result carries is the one the manifest was checked through.
 //

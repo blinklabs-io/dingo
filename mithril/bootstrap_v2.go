@@ -763,29 +763,17 @@ func downloadImmutables(
 	}
 	defer immutableRoot.Close()
 
-	archiveRelDir := filepath.Base(
-		"immutable-archives-" + truncateDigest(artifact.Hash),
+	// archiveDir is not created here. A create-then-close-then-hand-off-
+	// the-bare-path step would itself be a TOCTOU window: a symlink
+	// swapped in for it between this function returning and the first
+	// download would be followed by whatever opens it next. Instead,
+	// DownloadSnapshot (called below, once per archive) creates and
+	// verifies its own DestDir through a handle on its parent every time
+	// it runs, closing that window at the point it actually matters.
+	archiveDir := filepath.Join(
+		downloadDir,
+		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
 	)
-	archiveDir := filepath.Join(downloadDir, archiveRelDir)
-	// Same TOCTOU guard as openImmutableRoot above, applied to the
-	// archive scratch directory: create it through a Root anchored at
-	// downloadDir so a symlink swapped in at archiveRelDir is refused
-	// rather than followed. The handle isn't kept open afterward — every
-	// actual write into archiveDir goes through DownloadSnapshot, which
-	// anchors its own Root at DestDir.
-	downloadRoot, err := os.OpenRoot(downloadDir)
-	if err != nil {
-		return fmt.Errorf("opening download root: %w", err)
-	}
-	archiveRoot, archiveErr := openExtractRoot(downloadRoot, archiveRelDir)
-	closeErr := downloadRoot.Close()
-	if archiveErr != nil {
-		return fmt.Errorf("creating archive directory: %w", archiveErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("creating archive directory: %w", closeErr)
-	}
-	archiveRoot.Close()
 
 	locations := make(
 		[]*CardanoDatabaseLocation,

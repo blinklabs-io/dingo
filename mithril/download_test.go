@@ -753,6 +753,40 @@ func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
 	)
 }
 
+// TestDownloadSnapshotRefusesSymlinkedDestDir proves DownloadSnapshot
+// refuses to create/open its destination through a pre-existing symlink
+// at DestDir itself, as opposed to the file it writes there (the
+// preceding test). A bare os.MkdirAll(cfg.DestDir)+os.OpenRoot(cfg.DestDir)
+// would silently succeed and write through such a symlink, because
+// neither call inspects what it is binding to before using it.
+func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("data"))
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	parent := t.TempDir()
+	outside := t.TempDir()
+	destDir := filepath.Join(parent, "dest")
+	requireSymlinkSupport(t, outside, destDir)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
+	})
+	require.Error(t, err)
+
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(
+		t, entries,
+		"download must not write through the symlinked DestDir",
+	)
+}
+
 // TestOsRootRejectsFinalSymlinkWithTrailingSlash directly exercises the
 // exact shape of GO-2026-4970 (CVE-2026-39822) against the os.Root API
 // this fix depends on: on Unix, os.Root.Open("symlink/") — the final
