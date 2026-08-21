@@ -437,6 +437,13 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 	requireRuleIndexResolvesToFunc(
 		t,
 		conway.UtxoValidationRules,
+		conwayUtxoValidateConwayFeaturesRuleIndex,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
+		"conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
 		conwayUtxoValidateFeeTooSmallRuleIndex,
 		conway.UtxoValidateFeeTooSmallUtxo,
 		"conway.UtxoValidateFeeTooSmallUtxo",
@@ -449,6 +456,18 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		"conway.UtxoValidatePlutusScripts",
 	)
 	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
+		"Conway validation must count only needed PlutusV1/V2 scripts",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		validateConwayFeaturesWithNeededPlutusV1V2,
+		"Conway validation must install Dingo's needed-script rule",
+	)
 	requireIndexedRulesExcludeFunc(
 		t,
 		conwayUtxoValidationRules,
