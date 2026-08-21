@@ -321,7 +321,7 @@ func (c *Client) runServeKey(ctx context.Context) {
 			_ = conn.Close()
 			return
 		}
-		delivered := false
+		installedKey := false
 		for {
 			var kp KeyPush
 			if err := readFrame(conn, &kp); err != nil {
@@ -332,8 +332,9 @@ func (c *Client) runServeKey(ctx context.Context) {
 				}
 				break
 			}
-			c.applyKeyPush(kp)
-			delivered = true
+			if c.applyKeyPush(kp) {
+				installedKey = true
+			}
 		}
 		// A session that ended must back off too. Previously only a failed
 		// dial slept, so an agent that completed the handshake and then closed
@@ -343,24 +344,31 @@ func (c *Client) runServeKey(ctx context.Context) {
 		// MinReconnect/MaxReconnect are documented as bounding reconnect, and
 		// on this path they bounded nothing.
 		//
-		// A session that delivered a key is treated as productive, so a
-		// long-lived connection that drops reconnects promptly; only sessions
-		// that keep ending with nothing delivered escalate.
-		if delivered {
+		// Only a session that actually installed a key is productive, so a
+		// long-lived connection that drops reconnects promptly. A session that
+		// pushed something applyKeyPush refused -- an agent holding the wrong
+		// pool's key, a mislabelled frame, a stale period -- installed nothing,
+		// so it escalates like a session that pushed nothing at all. Counting a
+		// refused push as productive pinned the backoff at MinReconnect forever
+		// and logged a rejection every interval.
+		if installedKey {
 			backoff = c.cfg.MinReconnect
 		}
 		if !sleepCtx(ctx, backoff) {
 			return
 		}
-		if !delivered {
+		if !installedKey {
 			backoff = nextBackoff(backoff, c.cfg.MaxReconnect)
 		}
 	}
 }
 
 // applyKeyPush installs a pushed key into local state after cross-checking it
-// against the operational certificate.
-func (c *Client) applyKeyPush(kp KeyPush) {
+// against the operational certificate. It reports whether the key was
+// installed; every rejection path returns false, which is what lets the
+// reconnect loop tell a productive session from one that delivered nothing
+// usable.
+func (c *Client) applyKeyPush(kp KeyPush) bool {
 	// Refuse anything that is not a key push. Trusting the frame's contents
 	// without checking what it claims to be would let a mislabelled or
 	// out-of-band frame install key material.
@@ -370,7 +378,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 			"type", kp.Type,
 		)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	// Compare unconditionally. Treating an absent vkey as "nothing to check"
 	// let a push with no vkey skip the operational-certificate cross-check
@@ -380,7 +388,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 			"ignoring KES key push: pushed KES vkey missing or does not match operational certificate",
 		)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	if kp.Period < c.start {
 		c.logger.Warn(
@@ -389,7 +397,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 			"opcert_start", c.start,
 		)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	depth := kp.Depth
 	if depth == 0 {
@@ -408,7 +416,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 			"want", kes.CardanoKesDepth,
 		)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	// Validate the key's layout before it can reach kes.Sign. A short or
 	// malformed buffer indexes out of range while deriving the public key, so
@@ -421,7 +429,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 			"depth", depth,
 		)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	internal := kp.Period - c.start
 	maxPeriod := kes.MaxPeriod(depth)
@@ -432,7 +440,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 			"max_period", maxPeriod,
 		)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	// Derive the public key from the pushed secret and require it to match the
 	// operational certificate. The vkey compared above is only what the agent
@@ -449,7 +457,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 		)
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	// The comparison above is necessary but nowhere near sufficient. For any
 	// depth above 0, kes.PublicKey with no cached public key falls through to
@@ -472,7 +480,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 		)
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	if !kes.VerifySignedKES(c.kesVKey, candidate.Period, probe, probeSig) {
 		c.logger.Error(
@@ -480,7 +488,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 		)
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -488,13 +496,13 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 	if c.closed {
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	// Reject a push that would move the key backward (stale/duplicate).
 	if c.kesSKey != nil && internal < c.kesSKey.Period {
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
-		return
+		return false
 	}
 	if c.kesSKey != nil {
 		wipe(c.kesSKey.Data)
@@ -502,6 +510,7 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 	c.kesSKey = candidate
 	wipe(kp.KESSignKey)
 	c.logger.Info("received KES key from agent", "absolute_period", kp.Period)
+	return true
 }
 
 // runSign pumps sign requests over a persistent connection, reconnecting on

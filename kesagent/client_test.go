@@ -736,13 +736,16 @@ func TestServeKeyRejectsExpiredPush(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	client.applyKeyPush(KeyPush{
+	installed := client.applyKeyPush(KeyPush{
 		Type:       KeyPushType,
 		Period:     start + kes.MaxPeriod(kes.CardanoKesDepth),
 		Depth:      kes.CardanoKesDepth,
 		KESSignKey: bytes.Clone(master.Data),
 		KESVKey:    vkey,
 	})
+	if installed {
+		t.Fatal("expired KES key push was reported as installed")
+	}
 	if client.HasKey() {
 		t.Fatal("expired KES key push was installed")
 	}
@@ -927,6 +930,40 @@ func TestServeKeyRejectsKeyForgedFromPublicRootHashes(t *testing.T) {
 	}
 }
 
+// sessionLog records when each agent session begins, so a test can assert
+// reconnect cadence from the intervals between sessions instead of from a count
+// taken after a fixed sleep. The client sleeps before dialling, so an interval
+// can only be longer than the backoff in force, never shorter: the assertions
+// below hold on a loaded machine and do not need re-tuning when the reconnect
+// constants change.
+type sessionLog struct {
+	mu sync.Mutex
+	at []time.Time
+}
+
+func (l *sessionLog) mark() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.at = append(l.at, time.Now())
+}
+
+func (l *sessionLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.at)
+}
+
+// intervals returns the gaps between successive sessions.
+func (l *sessionLog) intervals() []time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]time.Duration, 0, max(len(l.at)-1, 0))
+	for i := 1; i < len(l.at); i++ {
+		out = append(out, l.at[i].Sub(l.at[i-1]))
+	}
+	return out
+}
+
 // TestServeKeyBacksOffWhenSessionsEndImmediately covers the reconnect path for
 // a session that ends rather than a dial that fails.
 //
@@ -939,9 +976,10 @@ func TestServeKeyBacksOffWhenSessionsEndImmediately(t *testing.T) {
 	const start = uint64(0)
 	_, _, opcert := newTestKES(t, start)
 
-	var connections atomic.Int64
+	const minReconnect = 100 * time.Millisecond
+	var sessions sessionLog
 	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
-		connections.Add(1)
+		sessions.mark()
 		// Handshake completes inside startFakeAgent; drop immediately after.
 		_ = conn.Close()
 	})
@@ -950,7 +988,7 @@ func TestServeKeyBacksOffWhenSessionsEndImmediately(t *testing.T) {
 		SocketPath:   agent.socket(),
 		Mode:         ModeServeKey,
 		OpCert:       opcert,
-		MinReconnect: 200 * time.Millisecond,
+		MinReconnect: minReconnect,
 		MaxReconnect: time.Second,
 	})
 	if err != nil {
@@ -958,14 +996,79 @@ func TestServeKeyBacksOffWhenSessionsEndImmediately(t *testing.T) {
 	}
 	client.Start(t.Context())
 
-	time.Sleep(time.Second)
+	// Four sessions give three intervals. Without the backoff on session end
+	// the loop produced them a millisecond or two apart.
+	waitFor(t, 5*time.Second, func() bool { return sessions.count() >= 4 })
 
-	// With a 200ms floor, one second of reconnecting cannot legitimately
-	// exceed a handful of attempts. The pre-fix loop reached four figures.
-	if got := connections.Load(); got > 12 {
+	for i, gap := range sessions.intervals() {
+		if gap < minReconnect {
+			t.Fatalf(
+				"reconnect %d came %v after the previous session; the floor is %v (all intervals: %v)",
+				i+1, gap, minReconnect, sessions.intervals(),
+			)
+		}
+	}
+}
+
+// TestServeKeyEscalatesBackoffWhenPushesAreRejected pins that a session which
+// delivered a frame applyKeyPush refused counts as unproductive.
+//
+// An agent holding a key for another opcert -- a misconfigured deployment, or
+// one left pointing at a rotated certificate -- pushes and disconnects on every
+// session. Treating a refused push as productive reset the backoff to
+// MinReconnect on every session, so the client reconnected at the floor
+// indefinitely, logging a rejection each interval, and MaxReconnect was
+// unreachable on this path.
+func TestServeKeyEscalatesBackoffWhenPushesAreRejected(t *testing.T) {
+	const start = uint64(0)
+	vkey, _, opcert := newTestKES(t, start)
+
+	// A vkey the operational certificate does not match, so every push is
+	// refused. The signing key is well-formed but all zeroes: it could not
+	// derive this vkey either, so the push is refused whichever check runs
+	// first.
+	wrongVKey := bytes.Clone(vkey)
+	wrongVKey[0] ^= 0xff
+
+	const minReconnect = 100 * time.Millisecond
+	var sessions sessionLog
+	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
+		sessions.mark()
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     start,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: make([]byte, secretKeySize(kes.CardanoKesDepth)),
+			KESVKey:    wrongVKey,
+		})
+		_ = conn.Close()
+	})
+
+	client, err := New(Config{
+		SocketPath:   agent.socket(),
+		Mode:         ModeServeKey,
+		OpCert:       opcert,
+		MinReconnect: minReconnect,
+		MaxReconnect: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	// Five sessions give four intervals: 100ms, 200ms, 400ms, 800ms once a
+	// refused push stops counting as progress, and a flat 100ms while it does.
+	waitFor(t, 5*time.Second, func() bool { return sessions.count() >= 5 })
+
+	intervals := sessions.intervals()
+	last := intervals[len(intervals)-1]
+	if last < 4*minReconnect {
 		t.Fatalf(
-			"reconnect loop is not backing off: %d connections in 1s (expected a handful)",
-			got,
+			"backoff did not escalate across sessions whose pushes were refused: intervals %v, last %v (want >= %v)",
+			intervals, last, 4*minReconnect,
 		)
+	}
+	if client.HasKey() {
+		t.Fatal("a push whose vkey does not match the operational certificate was installed")
 	}
 }
