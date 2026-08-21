@@ -2381,10 +2381,13 @@ frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
 catch-up allowance). It also prevents a peer's unbounded advertisement from
-suppressing other peers or forcing a chain-switch resync. Genesis exit may
-consult the advertised slot only through the separately documented
-delivered-frontier gate below. A RollBackward restores the delivered frontier
-from a bounded `k+1` header history; if the point is no longer retained, the
+suppressing other peers or forcing a chain-switch resync. A tip update that
+carries no delivered frontier at all is recorded as having delivered nothing:
+the advertised tip is never substituted for a missing observed frontier, and
+the peer is bounded and compared as block 0 until it delivers a header.
+Genesis exit may consult the advertised slot only through the separately
+documented delivered-frontier gate below. A RollBackward restores the
+delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
 selector uses the rollback point with a conservative zero block number and
 never promotes the accompanying advertised tip into the observed frontier.
 

@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"net"
@@ -2443,4 +2444,72 @@ func TestSelectBestChainAllowsPlausiblyBehindPeer(t *testing.T) {
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
 	assert.Equal(t, behindConn, *bestPeer)
+}
+
+// TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip asserts that a peer
+// tip update carrying no delivered frontier is recorded as having delivered
+// nothing, rather than being credited with its untrusted advertised tip. The
+// accompanying Praos view describes the absent delivered header, so promoting
+// the advertised tip would also leave the stored view and the stored frontier
+// on different slots, which UpdateTipWithObservedPraosView forbids.
+func TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
+	cs.SetLocalTip(tip(99, 999, "local"))
+
+	// First peer: no reference frontier exists yet, so the plausibility bound
+	// cannot reject it. It advertises a tip far ahead but delivers no headers.
+	farConn := newTestConnectionId(1)
+	farAdvertised := tip(1_000_000, 5_000_000, "advertised-far")
+	farVRF := bytes.Repeat([]byte{0x01}, VRFOutputSize)
+	require.True(t, cs.updatePeerTipObservedPraosView(
+		farConn,
+		farAdvertised,
+		ochainsync.Tip{},
+		farVRF,
+		NewPraosTiebreakerViewFull(
+			ochainsync.Tip{},
+			[]byte("issuer-far"),
+			1,
+			farVRF,
+			PraosTiebreakerConfigBeforeConway(),
+		),
+	))
+
+	farTip := cs.GetPeerTip(farConn)
+	require.NotNil(t, farTip)
+	assert.Equal(
+		t,
+		ochainsync.Tip{},
+		farTip.SelectionTip(),
+		"an omitted delivered frontier must not be replaced by the advertised tip",
+	)
+
+	// A peer that actually delivered a header must outrank the peer that
+	// delivered nothing, and must not be measured for plausibility against the
+	// undelivered claim.
+	honestConn := newTestConnectionId(2)
+	honestTip := tip(100, 1000, "honest")
+	honestVRF := bytes.Repeat([]byte{0xff}, VRFOutputSize)
+	require.True(t, cs.updatePeerTipObservedPraosView(
+		honestConn,
+		honestTip,
+		honestTip,
+		honestVRF,
+		NewPraosTiebreakerViewFull(
+			honestTip,
+			[]byte("issuer-honest"),
+			1,
+			honestVRF,
+			PraosTiebreakerConfigBeforeConway(),
+		),
+	))
+
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(
+		t,
+		honestConn,
+		*bestPeer,
+		"a peer that delivered no headers must not hold selection on its advertised tip",
+	)
 }

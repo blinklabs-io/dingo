@@ -389,12 +389,6 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 	vrfOutput []byte,
 	praosView PraosTiebreakerView,
 ) bool {
-	if observedTip.BlockNumber == 0 && observedTip.Point.Slot == 0 &&
-		len(observedTip.Point.Hash) == 0 {
-		// Preserve compatibility with legacy/direct producers that did not
-		// provide a distinct delivered frontier.
-		observedTip = tip
-	}
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
 		cs.config.Logger.Debug(
@@ -430,14 +424,12 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		//  3. First peer ever: no reference exists, accept to
 		//     allow bootstrap.
 		if cs.securityParam > 0 {
+			// Callers without a distinct delivered frontier pass the
+			// advertised tip for both values, as UpdatePeerTip does. An
+			// all-zero delivered frontier therefore means the peer has
+			// delivered nothing, and is bounded as block 0 rather than
+			// being credited with its untrusted advertisement.
 			observedBlock := observedTip.BlockNumber
-			if observedTip.BlockNumber == 0 &&
-				observedTip.Point.Slot == 0 &&
-				len(observedTip.Point.Hash) == 0 {
-				// Callers without a distinct delivered frontier use the
-				// advertised tip for both values (as UpdatePeerTip does).
-				observedBlock = tip.BlockNumber
-			}
 			observedReject := false
 			advertisedReject := false
 			hasReference := false
