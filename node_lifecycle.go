@@ -95,8 +95,6 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/cbor"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // quiesceForLiveLifecycleOp stops every subsystem that touches storage, or
@@ -522,161 +520,12 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to reload chain manager: %w", err)
 	}
 	n.chainManager = cm
-	enableDijkstra := n.config.experimentalDijkstraEnabled()
-
+	// The contextcheck exemption below covers ledgerStateConfig's
+	// EndorserBlockFetcher callback: it is driven by the ledger's own later
+	// call, exactly as the method value it replaced was, and only defers
+	// resolving n.ouroboros() -- it does not inherit this function's ctx.
 	state, err := ledger.NewLedgerState(
-		ledger.LedgerStateConfig{
-			ChainManager:       n.chainManager,
-			Database:           n.db,
-			EventBus:           n.eventBus,
-			Logger:             n.config.logger,
-			CardanoNodeConfig:  n.config.cardanoNodeConfig,
-			PromRegistry:       n.config.promRegistry,
-			ForgeBlocks:        n.config.isDevMode(),
-			ValidateHistorical: n.config.validateHistorical,
-			EnableDijkstra:     enableDijkstra,
-			StartInDijkstra:    n.config.startEra.IsDijkstra(),
-			// Closures, not method values: n.ouroboros is replaced further
-			// down this restore, and a method value would pin the rebuilt
-			// ledger to the outgoing instance. Same for
-			// BlockfetchRequestRangeFunc and PeerRequestFunc below.
-			EndorserBlockProvider: func(
-				ebHash []byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				return n.ouroboros().EndorserBlockTxsByHash(ebHash)
-			},
-			// The fetch is driven by the ledger's own call, exactly as the
-			// method value this replaced was; the closure only defers
-			// resolving n.ouroboros().
-			EndorserBlockFetcher: func( //nolint:contextcheck
-				ebSlot uint64,
-				ebHash []byte,
-			) error {
-				return n.ouroboros().FetchEndorserBlockByPoint(ebSlot, ebHash)
-			},
-			EndorserBlockWaitSlots:        n.leiosPipelineTiming().CertifyByDeadlineSlots,
-			LeiosApplyEndorserBlockTxs:    !n.config.isMusashiNetwork(),
-			SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
-			SkipDijkstraTxValidation:      n.config.prototypeTrustBypassesEnabled(),
-			// These six must mirror Run()'s construction exactly: they're
-			// operator-configured reward/pool-validation feature flags
-			// (CIP-23 min pool margin, CIP-50 pledge leverage, CIP-0163
-			// full-pot rewards, CIP-0163 delegator-inactivity expiry), not
-			// derived from the network, and were previously omitted here
-			// entirely -- silently resetting them to their zero values
-			// (disabled) on every live restore/truncate regardless of what
-			// was actually configured. DelegatorInactivityEnabled/
-			// DelegatorInactivity specifically: a node configured for
-			// CIP-0163 delegator-inactivity expiry would silently run with
-			// the gate disabled after any live restore/truncate until a
-			// full process restart, with no indication anything changed.
-			MinPoolMargin:              n.config.minPoolMargin,
-			PledgeLeverageEnabled:      n.config.pledgeLeverageEnabled,
-			PledgeLeverage:             n.config.pledgeLeverage,
-			FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
-			DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
-			DelegatorInactivity:        n.config.delegatorInactivity,
-			// Same class of bug as the six flags above: operator-configured,
-			// not network-derived, and must mirror Run()'s construction so a
-			// live restore/truncate doesn't silently drop back to serial
-			// decode after being explicitly enabled.
-			BlockPipelineEnabled:         n.config.blockPipelineEnabled,
-			BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
-			BlockfetchRequestRangeFunc: func(
-				connId ouroboros.ConnectionId,
-				start ocommon.Point,
-				end ocommon.Point,
-			) error {
-				return n.ouroboros().
-					BlockfetchClientRequestRange(connId, start, end)
-			},
-			PeersWithBlockFunc: func(
-				origin ouroboros.ConnectionId,
-				point ocommon.Point,
-			) []ouroboros.ConnectionId {
-				if n.chainsyncState == nil {
-					return nil
-				}
-				return n.chainsyncState.PeersWithBlock(origin, point)
-			},
-			RecordBlockfetchLatencyFunc: func(
-				connId ouroboros.ConnectionId,
-				latency time.Duration,
-			) {
-				if n.chainsyncState != nil {
-					n.chainsyncState.RecordBlockfetchLatency(connId, latency)
-				}
-			},
-			BlockfetchLatencyFunc: func(
-				connId ouroboros.ConnectionId,
-			) (time.Duration, bool) {
-				if n.chainsyncState == nil {
-					return 0, false
-				}
-				return n.chainsyncState.BlockfetchLatency(connId)
-			},
-			BlockfetchLatencyMedianFunc: func() (time.Duration, int) {
-				if n.chainsyncState == nil {
-					return 0, 0
-				}
-				return n.chainsyncState.BlockfetchLatencyMedian()
-			},
-			DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
-			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
-				if n.chainsyncState != nil {
-					return n.chainsyncState.GetClientConnId()
-				}
-				return nil
-			},
-			GetPeerObservedTipFunc: n.getPeerObservedTip,
-			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
-				return n.connManager != nil &&
-					n.connManager.GetConnectionById(connId) != nil
-			},
-			ConnectionSwitchFunc: func() {
-				if n.chainsyncState != nil && n.ledgerState != nil {
-					n.chainsyncState.ClearSeenHeadersFrom(
-						n.ledgerState.Tip().Point.Slot,
-					)
-				}
-			},
-			ClearSeenHeadersFromFunc: func(fromSlot uint64) {
-				if n.chainsyncState != nil {
-					n.chainsyncState.ClearSeenHeadersFrom(fromSlot)
-				}
-			},
-			PeerHeaderLookupFunc: func(
-				connId ouroboros.ConnectionId,
-				hash []byte,
-			) (ledger.ChainsyncEvent, []byte, bool) {
-				if n.chainsyncState == nil {
-					return ledger.ChainsyncEvent{}, nil, false
-				}
-				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(
-					connId,
-					hash,
-				)
-				if !ok {
-					return ledger.ChainsyncEvent{}, nil, false
-				}
-				return ledger.ChainsyncEvent{
-					ConnectionId: h.ConnectionId,
-					BlockHeader:  h.BlockHeader,
-					Point:        h.Point,
-					Tip:          h.Tip,
-					BlockNumber:  h.BlockNumber,
-					Type:         h.Type,
-					Rollback:     h.Rollback,
-				}, prevHash, true
-			},
-			FatalErrorFunc: func(err error) {
-				n.config.logger.Error(
-					"fatal ledger error, initiating shutdown",
-					"error", err,
-				)
-				n.cancel()
-			},
-		},
+		n.ledgerStateConfig(), //nolint:contextcheck
 	)
 	if err != nil {
 		return fmt.Errorf("failed to reload state database: %w", err)

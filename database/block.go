@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -268,6 +269,51 @@ func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
 	return ret, err
 }
 
+// BlockIDByPointLocal returns the locally stored metadata ID for point without
+// allowing a blob-store wrapper to fall through to a remote archive. Retained
+// tombstones still carry the metadata needed for this lookup.
+func BlockIDByPointLocal(
+	db *Database,
+	point ocommon.Point,
+) (uint64, error) {
+	txn := db.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	if txn.Blob() == nil {
+		return 0, types.ErrNilTxn
+	}
+	store := db.Blob()
+	if store == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	var (
+		metadata types.BlockMetadata
+		err      error
+	)
+	if reader, ok := store.(blob.LocalBlockReader); ok {
+		_, metadata, err = reader.GetBlockLocal(
+			txn.Blob(), point.Slot, point.Hash,
+		)
+	} else {
+		_, metadata, err = store.GetBlock(
+			txn.Blob(), point.Slot, point.Hash,
+		)
+	}
+	if err != nil && !errors.Is(err, types.ErrHistoryExpired) {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return 0, models.ErrBlockNotFound
+		}
+		return 0, err
+	}
+	if metadata.ID == 0 && errors.Is(err, types.ErrHistoryExpired) {
+		return 0, fmt.Errorf(
+			"%w: expired block at slot %d has no local metadata ID",
+			models.ErrBlockNotFound,
+			point.Slot,
+		)
+	}
+	return metadata.ID, nil
+}
+
 func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 	var ret models.Block
 	txn := db.Transaction(false)
@@ -490,6 +536,56 @@ func BlockBySlotTxn(txn *Txn, slot uint64) (models.Block, error) {
 	return ret, nil
 }
 
+func (d *Database) blockKeyByIndex(
+	blockIndex uint64,
+	txn *Txn,
+) ([]byte, error) {
+	indexKey := types.BlockBlobIndexKey(blockIndex)
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return nil, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return nil, types.ErrBlobStoreUnavailable
+	}
+	val, err := blob.Get(blobTxn, indexKey)
+	if err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return nil, models.ErrBlockNotFound
+		}
+		return nil, err
+	}
+	return val, nil
+}
+
+// BlockPointByIndex returns the point encoded in the current block-index
+// entry without loading the referenced block CBOR or metadata. It is intended
+// for primary-chain membership checks that need only the canonical slot and
+// hash at an internal block index.
+func (d *Database) BlockPointByIndex(
+	blockIndex uint64,
+	txn *Txn,
+) (ocommon.Point, error) {
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	blockKey, err := d.blockKeyByIndex(blockIndex, txn)
+	if err != nil {
+		return ocommon.Point{}, err
+	}
+	point, err := BlockBlobKeyToPoint(blockKey)
+	if err != nil {
+		return ocommon.Point{}, fmt.Errorf(
+			"parsing block index %d value: %w",
+			blockIndex,
+			err,
+		)
+	}
+	return point, nil
+}
+
 func (d *Database) BlockByIndex(
 	blockIndex uint64,
 	txn *Txn,
@@ -498,23 +594,11 @@ func (d *Database) BlockByIndex(
 		txn = d.BlobTxn(false)
 		defer txn.Rollback() //nolint:errcheck
 	}
-	indexKey := types.BlockBlobIndexKey(blockIndex)
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return models.Block{}, types.ErrNilTxn
-	}
-	blob := txn.DB().Blob()
-	if blob == nil {
-		return models.Block{}, types.ErrBlobStoreUnavailable
-	}
-	val, err := blob.Get(blobTxn, indexKey)
+	blockKey, err := d.blockKeyByIndex(blockIndex, txn)
 	if err != nil {
-		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return models.Block{}, models.ErrBlockNotFound
-		}
 		return models.Block{}, err
 	}
-	return blockByKey(txn, val)
+	return blockByKey(txn, blockKey)
 }
 
 // BlockAtOrAfterIndex returns the first block whose chain index is greater

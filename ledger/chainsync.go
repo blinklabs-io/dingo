@@ -1090,6 +1090,92 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 	return false
 }
 
+// headerAlreadyOnPrimaryChain identifies a replayed header that is already
+// present on the authoritative primary chain but is behind its current tip.
+// This shape is normal while a from-genesis ledger catches up after restart:
+// the block store can be far ahead of the applied ledger, and a peer may
+// replay a historical header while the local chain tip has already advanced.
+// It is not a fork and must not contribute to headerMismatchCount.
+//
+// Only a point confirmed present in the primary-chain index suppresses fork
+// handling. A lookup failure is not evidence of a duplicate, so it is logged
+// and reported as a non-match.
+//
+// The caller holds chainsyncMutex, so the guards below keep storage reads off
+// paths that cannot need them. The origin point carries no hash, and a header
+// beyond the localTip snapshot is not observed in the primary-chain index at
+// handler entry. The O(1) local hash index then rejects an unknown fork header
+// before a point lookup could fall through to a configured Bark archive. On a
+// hash-index hit, the returned block ID is checked through the point-only
+// primary-chain index path, avoiding a second block-CBOR read. A hash-index
+// miss also probes the exact local point key for pre-index databases, but that
+// bounded compatibility lookup cannot fall through to Bark's archive.
+func (ls *LedgerState) headerAlreadyOnPrimaryChain(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) bool {
+	if ls.db == nil || len(e.Point.Hash) == 0 {
+		return false
+	}
+	if e.Point.Slot > localTip.Point.Slot {
+		return false
+	}
+	block, err := ls.blockByHash(e.Point.Hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		// Blocks written before the hash index was introduced still have an
+		// exact point key and metadata. Probe that local path without allowing
+		// Bark to fall through to its archive on an unknown fork hash.
+		blockID, localErr := database.BlockIDByPointLocal(ls.db, e.Point)
+		if errors.Is(localErr, models.ErrBlockNotFound) {
+			return false
+		}
+		if localErr != nil {
+			ls.config.Logger.Debug(
+				"could not check legacy historical header by local point",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", localErr,
+			)
+			return false
+		}
+		contains, localErr := ls.primaryChainContainsBlockID(blockID, e.Point)
+		if localErr != nil {
+			ls.config.Logger.Debug(
+				"could not check legacy historical header against primary chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", localErr,
+			)
+			return false
+		}
+		return contains
+	}
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not prefilter historical header by hash index",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	contains, err := ls.primaryChainContainsBlock(block, e.Point)
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not check historical header against primary chain",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	return contains
+}
+
 func (ls *LedgerState) findPeerForkPath(
 	e ChainsyncEvent,
 	initialPrevHash []byte,
@@ -2460,6 +2546,20 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"local_tip_slot", localTip.Point.Slot,
 					"block_prev_hash", notFitErr.BlockPrevHash(),
 					"chain_tip_hash", notFitErr.TipHash(),
+					"connection_id", e.ConnectionId.String(),
+				)
+				return nil
+			}
+			// A header still on the authoritative primary chain is a
+			// historical replay, not a competing candidate. Checked after
+			// the in-memory discards above because it reads the block
+			// store while chainsyncMutex is held.
+			if ls.headerAlreadyOnPrimaryChain(e, localTip) {
+				ls.config.Logger.Debug(
+					"ignoring historical primary-chain roll forward",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"local_tip_slot", localTip.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
 				return nil
