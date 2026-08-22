@@ -38,3 +38,17 @@ func (d *BlobStoreGCS) Backup(ctx context.Context, w io.Writer) error {
 func (d *BlobStoreGCS) Restore(ctx context.Context, r io.Reader) error {
 	return blobbackup.Restore(ctx, d, r, maxBlobReadBytes, "gcs restore")
 }
+
+// ValidateBackup verifies the complete shared cloud backup framing without
+// touching the configured bucket.
+func (d *BlobStoreGCS) ValidateBackup(ctx context.Context, r io.Reader) error {
+	return blobbackup.Validate(
+		ctx, r, maxBlobReadBytes, "gcs backup validation",
+	)
+}
+
+// Reset removes the configured prefix after lifecycle restore has retained a
+// rollback backup of it.
+func (d *BlobStoreGCS) Reset(ctx context.Context) error {
+	return blobbackup.Reset(ctx, d, "gcs reset")
+}

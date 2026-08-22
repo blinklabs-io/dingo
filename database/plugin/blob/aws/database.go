@@ -58,6 +58,9 @@ type BlobStoreS3 struct {
 	prefix        string
 	region        string
 	timeout       time.Duration
+	// listPageSize is a test seam for exercising paginator boundaries with a
+	// small real S3 dataset. Zero leaves the SDK/service default unchanged.
+	listPageSize int32
 }
 
 const maxBlobReadBytes int64 = 256 << 20
@@ -404,6 +407,9 @@ func (it *s3StreamIterator) reset(seek []byte) {
 	it.cancel = cancel
 	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String(it.store.bucket),
+	}
+	if it.store.listPageSize > 0 {
+		input.MaxKeys = aws.Int32(it.store.listPageSize)
 	}
 	if prefix := it.store.fullKey(string(it.prefix)); prefix != "" {
 		input.Prefix = aws.String(prefix)
