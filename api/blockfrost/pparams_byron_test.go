@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -249,4 +250,30 @@ func TestDrepStatus_UsesAvailabilityNotZeroSentinel(t *testing.T) {
 
 		assert.False(t, expired)
 	})
+}
+
+// TestProtocolParamsForSlot_ByronEpochRowSentinel covers the branch a Byron
+// slot actually takes once the chain has recorded epochs.
+//
+// The epoch_id=0 row exists with era_id 0 (Byron), so the lookup does not fall
+// through to GetCurrentPParams; it reaches db.GetPParams, which returns
+// (nil, nil) because Byron never writes a protocol-parameter row — the era
+// defines no DecodePParamsFunc at all. That absence is the same Byron fact the
+// nil-current-pparams branch reports, so it must carry the same sentinel
+// rather than an untyped "decoded protocol parameters are nil".
+func TestProtocolParamsForSlot_ByronEpochRowSentinel(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	_, err := store.Exec(`
+INSERT INTO epoch (epoch_id, start_slot, length_in_slots, era_id)
+VALUES (?, ?, ?, ?)`,
+		0, 0, 100, byron.EraIdByron,
+	)
+	require.NoError(t, err)
+
+	pparams, err := adapter.protocolParamsForSlot(50)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)
+	assert.Nil(t, pparams)
 }

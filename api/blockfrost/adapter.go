@@ -5047,7 +5047,17 @@ func (a *NodeAdapter) protocolParamsForSlot(
 		return nil, err
 	}
 	if pparams == nil {
-		return nil, errors.New("decoded protocol parameters are nil")
+		// GetPParams reports (nil, nil) when the era recorded no
+		// protocol-parameter row. Byron is the era that does so by
+		// construction — it has no parameter CBOR and no decoder — so this
+		// carries the same sentinel as the no-epoch-row branch rather than
+		// an untyped error a caller cannot distinguish.
+		return nil, fmt.Errorf(
+			"epoch %d era %d: %w",
+			epoch.EpochId,
+			era.Id,
+			ErrProtocolParamsUnavailable,
+		)
 	}
 	return pparams, nil
 }
