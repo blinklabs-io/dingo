@@ -68,7 +68,7 @@ func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		10*time.Second,
+		5*time.Second,
 		"an unrepairable validation failure must stop the ledger pipeline",
 	)
 
@@ -109,7 +109,7 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	testutil.WaitForCondition(
 		t,
 		func() bool { return attempts.Load() >= 3 },
-		10*time.Second,
+		5*time.Second,
 		"a recoverable failure must keep restarting the pipeline",
 	)
 	assert.Zero(
@@ -122,7 +122,7 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		10*time.Second,
+		5*time.Second,
 		"the pipeline loop must exit when its context is cancelled",
 	)
 }
