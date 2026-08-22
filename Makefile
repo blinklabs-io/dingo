@@ -21,6 +21,8 @@ PROTOC_ZIP=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARC
 PROTOC=$(PROTOC_DIR)/bin/protoc
 SQLC_VERSION=v1.31.1
 SQLC=go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+GOVULNCHECK_VERSION=v1.7.0
+GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
 PROTOC_SHA256_linux_aarch_64=4a802ed23d70f7bad7eb19e5a3e724b3aa967250d572cadfd537c1ba939aee6a
@@ -37,7 +39,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check gorm-check test bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck gorm-check test bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -99,6 +101,9 @@ sql: ## Generate typed database/sql queries with pinned sqlc
 
 sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 	git diff --exit-code -- database/plugin/metadata/sqlstore/internal/query
+
+govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
+	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
 
 gorm-check: ## Fail if the removed ORM returns to source or dependencies
 	@status=0; \

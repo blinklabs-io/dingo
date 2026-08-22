@@ -357,16 +357,24 @@ func downloadIdleTimeoutCause(timeout time.Duration) error {
 	)
 }
 
-func downloadDestinationPath(cfg DownloadConfig) string {
+// downloadFilename returns the sanitized destination file name (relative
+// to DestDir) for cfg.
+func downloadFilename(cfg DownloadConfig) string {
 	filename := filepath.Base(cfg.Filename)
 	if filename == "." || filename == "/" {
 		filename = "snapshot.tar.zst"
 	}
-	return filepath.Join(cfg.DestDir, filename)
+	return filename
 }
 
-func downloadFileSize(filename string) int64 {
-	fi, err := os.Stat(filename)
+func downloadDestinationPath(cfg DownloadConfig) string {
+	return filepath.Join(cfg.DestDir, downloadFilename(cfg))
+}
+
+// rootFileSize returns the size of filename (relative to root), or 0 if
+// it cannot be stat'd.
+func rootFileSize(root *os.Root, filename string) int64 {
+	fi, err := root.Stat(filename)
 	if err != nil {
 		return 0
 	}
@@ -525,28 +533,87 @@ func DownloadSnapshot(
 	ctx context.Context,
 	cfg DownloadConfig,
 ) (string, error) {
+	path, root, err := downloadSnapshot(ctx, cfg)
+	if root != nil {
+		if closeErr := root.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return path, err
+}
+
+// downloadSnapshot implements DownloadSnapshot, but returns the still-open
+// root anchored to cfg.DestDir instead of closing it before returning. The
+// caller is responsible for closing root exactly once, on every return path
+// including error, once it is done with it.
+//
+// A caller that only needs the downloaded path may discard root immediately
+// (DownloadSnapshot does exactly that). A caller that goes on to extract or
+// remove the downloaded file should do so through root and the filename it
+// requested in cfg, not by re-resolving the returned path: this function's
+// own directory verification already closed the window where a symlink
+// swapped in for cfg.DestDir could redirect its writes, and re-resolving the
+// path afterward reopens that same window at the handoff to the next step.
+func downloadSnapshot(
+	ctx context.Context,
+	cfg DownloadConfig,
+) (string, *os.Root, error) {
 	if err := cfg.Validate(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	maxIdleRetries := cfg.maxIdleRetries()
 	maxTransientRetries := cfg.maxTransientRetries()
-	destPath := downloadDestinationPath(cfg)
-	lastObservedSize := downloadFileSize(destPath)
+
+	// Create and open DestDir through a verified handle on its parent,
+	// the same guard ExtractArchive/openImmutableRoot apply to their own
+	// destinations: a bare os.MkdirAll(cfg.DestDir)+os.OpenRoot(cfg.DestDir)
+	// would follow a symlink already sitting at DestDir, or one swapped
+	// in for it, since neither call inspects what it's binding to.
+	// openExtractRoot creates the leaf if missing and refuses it — and
+	// refuses a substitution racing the check — if it resolves to
+	// anything but a real directory. Every subsequent directory/file
+	// operation in this download then goes through the returned root, so
+	// a symlink swapped in afterward cannot redirect them either.
+	cleanDestDir := filepath.Clean(cfg.DestDir)
+	parent := filepath.Dir(cleanDestDir)
+	if err := os.MkdirAll(parent, extractDirMode); err != nil {
+		return "", nil, fmt.Errorf("creating download directory: %w", err)
+	}
+	parentRoot, err := os.OpenRoot(parent)
+	if err != nil {
+		return "", nil, fmt.Errorf("opening download parent: %w", err)
+	}
+	root, rootErr := openExtractRoot(parentRoot, filepath.Base(cleanDestDir))
+	closeErr := parentRoot.Close()
+	if rootErr != nil {
+		return "", nil, fmt.Errorf("creating download directory: %w", rootErr)
+	}
+	if closeErr != nil {
+		// root itself opened fine; only closing parentRoot failed. Close
+		// it here rather than returning it: a caller that only sees an
+		// error return has no reason to expect a handle to clean up, and
+		// leaving that expectation implicit is how it gets leaked.
+		_ = root.Close()
+		return "", nil, fmt.Errorf("creating download directory: %w", closeErr)
+	}
+
+	filename := downloadFilename(cfg)
+	lastObservedSize := rootFileSize(root, filename)
 	consecutiveIdleRetries := 0
 	transientRetries := 0
 	for attempt := 1; ; attempt++ {
-		startSize := downloadFileSize(destPath)
-		path, err := downloadSnapshotOnce(ctx, cfg)
+		startSize := rootFileSize(root, filename)
+		path, err := downloadSnapshotOnce(ctx, cfg, root)
 		if err == nil {
-			return path, nil
+			return path, root, nil
 		}
 		if ctx.Err() != nil {
-			return "", err
+			return "", root, err
 		}
-		currentSize := downloadFileSize(destPath)
+		currentSize := rootFileSize(root, filename)
 		madeProgress := currentSize > startSize ||
 			currentSize > lastObservedSize
 		// Progress resets both retry counters symmetrically: partial
@@ -562,7 +629,7 @@ func DownloadSnapshot(
 				consecutiveIdleRetries++
 			}
 			if consecutiveIdleRetries > maxIdleRetries {
-				return "", err
+				return "", root, err
 			}
 			cfg.Logger.Warn(
 				"snapshot download stalled, retrying",
@@ -582,7 +649,7 @@ func DownloadSnapshot(
 			// safe to pass to transientRetryDelay.
 			transientRetries++
 			if transientRetries > maxTransientRetries {
-				return "", err
+				return "", root, err
 			}
 			delay := transientRetryDelay(transientRetries - 1)
 			cfg.Logger.Warn(
@@ -596,11 +663,11 @@ func DownloadSnapshot(
 			)
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", root, ctx.Err()
 			case <-time.After(delay):
 			}
 		} else {
-			return "", err
+			return "", root, err
 		}
 	}
 }
@@ -608,6 +675,7 @@ func DownloadSnapshot(
 func downloadSnapshotOnce(
 	ctx context.Context,
 	cfg DownloadConfig,
+	root *os.Root,
 ) (string, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -619,19 +687,12 @@ func downloadSnapshotOnce(
 	downloadCtx, cancelDownload := context.WithCancelCause(ctx)
 	defer cancelDownload(nil)
 
-	// Ensure destination directory exists
-	if err := os.MkdirAll(cfg.DestDir, 0o750); err != nil {
-		return "", fmt.Errorf(
-			"creating download directory: %w",
-			err,
-		)
-	}
-
+	filename := downloadFilename(cfg)
 	destPath := downloadDestinationPath(cfg)
 
 	// Check for partial download to support resume
 	var existingSize int64
-	if fi, err := os.Stat(destPath); err == nil {
+	if fi, err := root.Stat(filename); err == nil {
 		existingSize = fi.Size()
 	}
 
@@ -705,8 +766,8 @@ func downloadSnapshotOnce(
 		if resp.ContentLength > 0 {
 			totalSize = resp.ContentLength
 		}
-		file, err = os.OpenFile(
-			destPath,
+		file, err = root.OpenFile(
+			filename,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o640,
 		)
@@ -740,8 +801,8 @@ func downloadSnapshotOnce(
 			)
 			// Discard partial file and restart from scratch
 			existingSize = 0
-			file, err = os.OpenFile(
-				destPath,
+			file, err = root.OpenFile(
+				filename,
 				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 				0o640,
 			)
@@ -820,8 +881,8 @@ func downloadSnapshotOnce(
 			if resp.ContentLength > 0 {
 				totalSize = existingSize + resp.ContentLength
 			}
-			file, err = os.OpenFile(
-				destPath,
+			file, err = root.OpenFile(
+				filename,
 				os.O_APPEND|os.O_WRONLY,
 				0o640,
 			)
@@ -850,7 +911,7 @@ func downloadSnapshotOnce(
 			)
 		}
 		if expectedSize > 0 {
-			fi, err := os.Stat(destPath)
+			fi, err := root.Stat(filename)
 			if err != nil {
 				return "", fmt.Errorf(
 					"verifying existing download: %w",
@@ -861,7 +922,7 @@ func downloadSnapshotOnce(
 				// Remove the corrupt/oversized file so
 				// the next attempt starts fresh instead
 				// of looping on the same 416 error.
-				os.Remove(destPath) //nolint:errcheck
+				root.Remove(filename) //nolint:errcheck
 				return "", fmt.Errorf(
 					"existing file size mismatch "+
 						"(removed): got %d, want %d",
@@ -972,7 +1033,7 @@ func downloadSnapshotOnce(
 
 	// Verify file size if expected size was provided
 	if cfg.ExpectedSize > 0 {
-		fi, err := os.Stat(destPath)
+		fi, err := root.Stat(filename)
 		if err != nil {
 			return "", fmt.Errorf(
 				"verifying download size: %w", err,
@@ -981,7 +1042,7 @@ func downloadSnapshotOnce(
 		if fi.Size() != cfg.ExpectedSize {
 			// Remove so the next attempt starts fresh
 			// instead of resuming from a corrupt file.
-			os.Remove(destPath) //nolint:errcheck
+			root.Remove(filename) //nolint:errcheck
 			return "", fmt.Errorf(
 				"download size mismatch "+
 					"(removed): got %d bytes, "+
@@ -1027,11 +1088,38 @@ func ExtractArchive(
 	logger *slog.Logger,
 	opts ...ExtractOption,
 ) (string, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf(
+			"opening archive: %w",
+			err,
+		)
+	}
+	defer file.Close()
+	return extractArchiveFile(ctx, file, archivePath, destDir, logger, opts...)
+}
+
+// extractArchiveFile extracts from an already-open archive handle instead of
+// a bare path. archiveLabel is used for logging only.
+//
+// A caller that holds a directory handle open across download, extraction,
+// and cleanup — to keep all three anchored to the same directory even if its
+// name is later replaced — opens the archive through that handle
+// (root.Open(filename)) and passes the result here, rather than calling
+// ExtractArchive with a path that would be re-resolved by name.
+func extractArchiveFile(
+	ctx context.Context,
+	file *os.File,
+	archiveLabel string,
+	destDir string,
+	logger *slog.Logger,
+	opts ...ExtractOption,
+) (string, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	logger = logger.With(
-		"archive", archivePath,
+		"archive", archiveLabel,
 		"destination", destDir,
 	)
 
@@ -1042,15 +1130,6 @@ func ExtractArchive(
 		return "", err
 	}
 	defer cleanup()
-
-	file, err := os.Open(archivePath)
-	if err != nil {
-		return "", fmt.Errorf(
-			"opening archive: %w",
-			err,
-		)
-	}
-	defer file.Close()
 
 	fileInfo, err := file.Stat()
 	if err != nil {

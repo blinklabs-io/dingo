@@ -2394,6 +2394,30 @@ bridge the gap, the ledger emits `chainsync.resync` with reason
 for a fresh intersect from the current local tip instead of waiting for a cursor
 that has already moved past the missing blocks.
 
+Each peer has two distinct frontiers. `PeerChainTip.Tip` is the remote peer's
+untrusted advertised network tip; `PeerChainTip.ObservedTip` is the latest
+header that peer actually delivered locally. Plausibility checks, Praos
+comparison, and behind-peer filtering use the delivered frontier. A
+`ChainSwitchEvent` preserves the advertised tips in `NewTip`/`PreviousTip` for
+protocol compatibility and carries the decision frontiers separately in
+`NewObservedTip`/`PreviousObservedTip`; ledger resync decisions use the observed
+field (falling back to `NewTip` for legacy/direct event producers). Before the
+node has applied any local block, new peers' advertisements remain bounded
+against the first bootstrap peer; after a local tip exists, the delivered
+frontier is the authority. This lets a node resume when the honest advertised
+tip is arbitrarily far ahead: the next delivered header is still checked
+incrementally against the previous delivered frontier (with the local-tip
+catch-up allowance). It also prevents a peer's unbounded advertisement from
+suppressing other peers or forcing a chain-switch resync. A tip update that
+carries no delivered frontier at all is recorded as having delivered nothing:
+the advertised tip is never substituted for a missing observed frontier, and
+the peer is bounded and compared as block 0 until it delivers a header.
+Genesis exit may consult the advertised slot only through the separately
+documented delivered-frontier gate below. A RollBackward restores the
+delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
+selector uses the rollback point with a conservative zero block number and
+never promotes the accompanying advertised tip into the observed frontier.
+
 A queued header range that no peer will serve is bounded by a failure count,
 `blockfetchRangeFailure`, capped at `blockfetchMaxSameRangeFailures`. Failing
 to obtain the range has two shapes and both count against the same range,
@@ -2605,9 +2629,9 @@ real network tip.
 The exit horizon (`bestKnownGenesisSlotLocked`) is the highest advertised tip
 slot among **corroborated (selectable)** peers that have **actually delivered
 headers up to within the window of that advertised tip**
-(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded —
-the implausible-tip check bounds the advertised *block number* but not the
-*slot*, and the first peer is accepted with no reference — and corroboration
+(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded;
+the implausible-tip check deliberately bounds the delivered frontier instead,
+because an honest advertisement can be far ahead during catch-up. Corroboration
 alone does not fix this, because it validates the *delivered* headers (the
 observed frontier), not the advertised claim: a peer that delivers one shared
 early header (passing corroboration) can still advertise a slot near
@@ -3076,6 +3100,48 @@ no rewind can fix) rather than a peer/fork problem, it surfaces the
 `dingo_ledger_attip_recovery_nonconverging_total` metric and a throttled
 operator warning; a node in this state needs the underlying validation
 divergence resolved.
+
+Both recovery paths refuse a rewind target below the Mithril anchor, and that
+refusal has its own terminal bound (issues #3261 and #3301). Refusing rewinds
+instead to the applied ledger tip and asks ChainSync for a fresh intersection,
+which is an escape only while some peer offers a different chain; for a
+canonical block every peer offers the same one. When the failing block sits a
+short distance past the anchor, every target the rewind schedule produces falls
+inside the protected window, so the refusal fires on all of them and the node
+cycles the peer set indefinitely without moving its tip.
+`observeMithrilBoundaryRejection` therefore tallies successful boundary
+recovery attempts that do not advance the applied ledger high-water mark and,
+once they exceed
+`maxMithrilBoundaryRecoveryRejections` — one per scheduled rewind depth plus
+the capped retry the schedule settles on — declares the failure unrepairable.
+The applied tip, not the reported failing `(block, tx)`, is the convergence
+signal: replay can report different slowly advancing failures while rebuilding
+to the same state, and changing identities must not rearm the budget. A local
+rollback error does not count because no replay attempt completed.
+This is a decision about repairability rather than a list of error types:
+recovery's only lever for any validation rule is to rewind and replay, so once
+every legal target has been replayed and returned the same verdict, no local
+history remains that could change it. A Conway rule 45 delegation failure
+against imported account state reaches that point exactly as a structural error
+would. Deepening the rewind to the anchor itself is not an alternative: it costs
+a full replay of the protected window and still reads the same imported state.
+Exhaustion increments
+`dingo_ledger_mithril_trust_window_unrepairable_total`, logs the operator
+action (re-bootstrap from a newer Mithril snapshot, or resync from genesis) at
+ERROR, and returns `errHaltLedgerPipeline`. The tally clears when block
+application advances past the applied high-water mark, so a wedge broken by
+peer rotation leaves a later failure a fresh budget.
+
+`errHaltLedgerPipeline` is terminal in `ledgerProcessBlocks`: the restart loop
+announces the halt at ERROR, sets `dingo_ledger_pipeline_halted`, and returns,
+so the pipeline goroutine exits and `Close` still joins it through
+`processBlocksWG`. The node keeps serving queries and metrics, which is why the
+gauge matters — nothing clears it, so it, and not the absence of new log lines,
+is the signal that the node has permanently stopped following the chain. The
+loop body lives in `ledgerProcessBlocksWithAttempt` with the per-attempt work
+injected, so back-off, announcement, and halt decisions are testable without a
+chain reader and block pipeline behind them. Recovery raises the halt; the
+ledger neither denies peers nor stops the node itself.
 
 Topology configuration is loaded from an explicit topology file when provided,
 otherwise from the embedded `network/topology.json` for built-in networks,
@@ -7830,14 +7896,20 @@ the pipeline neither recovers nor stops. After `noProgressStuckThreshold`
 consecutive no-progress
 restarts the loop treats the failure as deterministic rather than
 transient, escalating the wait beyond the transient ceiling (bounded by
-`noProgressStuckBackoffMax`), logging the transition once at ERROR, and
+`noProgressStuckBackoffMax`), announcing the condition at ERROR, and
 exporting `dingo_ledger_pipeline_stuck` alongside
 `dingo_ledger_pipeline_no_progress_restarts` so a node that has silently
 stopped following the chain is visible to monitoring instead of only to
 whoever reads a repeating WARN. Both reset as soon as the tip advances.
+The announcement is not once-only: `pipelineStuckShouldAnnounce` repeats it
+every `noProgressStuckReannounceInterval` further no-progress restarts, roughly
+every ten minutes at the stuck backoff ceiling. Announcing the transition alone
+and then dropping to WARN left log-level alerting seeing a wedged node as
+healthy — one ERROR line covered eighteen hours in the field, buried among
+unrelated warnings (issue #3261).
 This still changes only the retry rate and the operator signal, never
 whether a block is accepted — a node wedged on a rejected block is equally
-wedged either way, but it now says so once, loudly, and stops spinning.
+wedged either way, but it now keeps saying so, loudly, and stops spinning.
 
 ### CIP-0163 Bookkeeping Shared Between Ledger Rollback and Lifecycle Truncate
 

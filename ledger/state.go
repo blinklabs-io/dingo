@@ -342,6 +342,12 @@ type FatalErrorFunc func(err error)
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
 
+// GetPeerObservedTipFunc returns the delivered frontier tracked for a peer.
+// The boolean is false when the connection is no longer tracked.
+type GetPeerObservedTipFunc func(
+	ouroboros.ConnectionId,
+) (ochainsync.Tip, bool)
+
 // ConnectionLiveFunc reports whether a connection is still registered with the
 // connection manager. This allows the ledger to drop late chainsync events that
 // arrive after teardown.
@@ -399,6 +405,7 @@ type LedgerStateConfig struct {
 	BlockfetchLatencyFunc       BlockfetchLatencyFunc
 	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
 	GetActiveConnectionFunc     GetActiveConnectionFunc
+	GetPeerObservedTipFunc      GetPeerObservedTipFunc
 	ConnectionLiveFunc          ConnectionLiveFunc
 	ConnectionSwitchFunc        ConnectionSwitchFunc
 	ClearSeenHeadersFromFunc    ClearSeenHeadersFromFunc
@@ -780,6 +787,13 @@ type LedgerState struct {
 	replayRecoveryHighWaterSlot   uint64
 	replayRecoveryNoProgressCount int
 	replayRecoveryHolding         bool
+	// Consecutive successful recovery attempts refused at the Mithril trust
+	// boundary without advancing the applied tip (issues #3261 and #3301).
+	// The refusal's only escape is peer rotation, which cannot help for a
+	// canonical block, so the applied high-water tally turns an unbounded
+	// reject-and-retry loop into a terminal condition even when replay reports
+	// changing failing block or transaction identities.
+	mithrilBoundaryRecovery *mithrilBoundaryRecoveryProgress
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
@@ -4214,7 +4228,29 @@ const (
 	// outside (a peer serving a different chain, an operator repairing
 	// state), but at a rate that neither burns CPU nor buries the logs.
 	noProgressStuckBackoffMax = 30 * time.Second
+	// noProgressStuckReannounceInterval is how many further no-progress
+	// restarts pass between ERROR announcements once the pipeline is stuck.
+	// Announcing the transition once and then dropping to WARN every 100
+	// restarts made a node that had stopped following the chain look quiet
+	// to log-level alerting: one ERROR line covered 18 hours, mixed into
+	// 129k WARN lines from everything else (issue #3261). At the stuck
+	// backoff ceiling this re-announces roughly every ten minutes, which is
+	// often enough to alert on and rare enough not to become the noise it
+	// replaces.
+	noProgressStuckReannounceInterval = 20
 )
+
+// pipelineStuckShouldAnnounce reports whether a stuck no-progress restart
+// warrants an ERROR announcement. True on the transition into stuck and every
+// noProgressStuckReannounceInterval restarts after it, so the condition stays
+// visible for as long as it lasts rather than only when it began.
+func pipelineStuckShouldAnnounce(consecutiveNoProgress int) bool {
+	if consecutiveNoProgress < noProgressStuckThreshold {
+		return false
+	}
+	return (consecutiveNoProgress-noProgressStuckThreshold)%
+		noProgressStuckReannounceInterval == 0
+}
 
 // runLedgerReadChainAttempt runs one read+process attempt: it launches
 // readChain on a fresh child context of ctx, hands the result channel to
@@ -4355,23 +4391,76 @@ func (ls *LedgerState) trackPipelineProgress(
 // consecutive no-progress restarts (trackPipelineProgress/
 // ledgerPipelineBackoff) to back off and surface a stuck-pipeline signal
 // when a failure is deterministic rather than transient.
+//
+// errHaltLedgerPipeline is the one error class that is not retried. Recovery
+// raises it once it has established that no local replay can change a block's
+// verdict, at which point restarting would only rediscover the same block, so
+// the loop announces the terminal condition and returns instead (issue #3261).
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
+	ls.ledgerProcessBlocksWithAttempt(
+		ctx,
+		func(attemptCtx context.Context) error {
+			return ls.runLedgerReadChainAttempt(
+				attemptCtx,
+				ls.ledgerReadChain,
+				ls.ledgerProcessBlocksFromSource,
+			)
+		},
+	)
+}
+
+// ledgerProcessBlocksWithAttempt is ledgerProcessBlocks' restart loop with the
+// per-attempt work injected, so the loop's own decisions -- back off, announce,
+// or stop for good -- can be exercised without standing up a chain reader and a
+// block pipeline behind them.
+func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
+	ctx context.Context,
+	attempt func(context.Context) error,
+) {
 	// Clear the no-progress gauges however this loop exits — normal return,
 	// or a shutdown cancelling one of the retry timers. Deferred rather than
 	// cleared at each return so a path added later cannot strand a stale
 	// "stuck" reading in monitoring for the life of the process.
-	defer ls.metrics.setPipelineNoProgress(0, false)
+	// A halted pipeline is not a pipeline making no progress -- it is one
+	// that has stopped -- so its own terminal gauge stands instead of a
+	// zeroed no-progress reading that would look healthy.
+	halted := false
+	defer func() {
+		if halted {
+			return
+		}
+		ls.metrics.setPipelineNoProgress(0, false)
+	}()
 	var progress pipelineProgress
 	for {
-		err := ls.runLedgerReadChainAttempt(
-			ctx,
-			ls.ledgerReadChain,
-			ls.ledgerProcessBlocksFromSource,
-		)
+		err := attempt(ctx)
 		if err == nil || ctx.Err() != nil {
 			return
 		}
 		ls.handleLedgerProcessBlocksError(err)
+		if errors.Is(err, errHaltLedgerPipeline) {
+			// Recovery has established that no local replay can change
+			// this verdict, so restarting the pipeline would only
+			// rediscover the same block. Stop, and leave a terminal
+			// signal behind: the announcement is the last log line this
+			// pipeline writes, and the gauge is what an operator alerts
+			// on afterwards.
+			halted = true
+			ls.metrics.setPipelineHalted()
+			ls.RLock()
+			haltTipSlot := ls.currentTip.Point.Slot
+			ls.RUnlock()
+			ls.config.Logger.Error(
+				"ledger pipeline halted on an unrepairable validation failure; the node has stopped following the chain and will not resume without operator intervention",
+				"component",
+				"ledger",
+				"tip_slot",
+				haltTipSlot,
+				"error",
+				err,
+			)
+			return
+		}
 		if errors.Is(err, errCertifiedEndorserBlockUnavailable) {
 			// This retry has its own delay and used to skip the no-progress
 			// accounting entirely, so an endorser block that never becomes
@@ -4385,7 +4474,9 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 				endorserStuck,
 			)
 			if endorserStuck &&
-				progress.consecutiveNoProgress == noProgressStuckThreshold {
+				pipelineStuckShouldAnnounce(
+					progress.consecutiveNoProgress,
+				) {
 				ls.config.Logger.Error(
 					"ledger pipeline stuck: a certified endorser block has stayed unavailable across repeated restarts without advancing the tip; the node is no longer following the chain",
 					"component",
@@ -4419,12 +4510,16 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			stuck,
 		)
 		if progress.consecutiveNoProgress > 0 {
-			// Announce the transition into stuck exactly once, at ERROR: a
-			// deterministic failure is not going to clear on its own, so it
-			// is an operator-actionable condition rather than another line
-			// in a repeating WARN.
+			// Announce the stuck condition at ERROR on the transition and
+			// periodically for as long as it lasts: a deterministic failure
+			// is not going to clear on its own, and a node that has stopped
+			// following the chain must not fall silent at ERROR after one
+			// line while the WARN below is buried among unrelated warnings
+			// (issue #3261).
 			if stuck &&
-				progress.consecutiveNoProgress == noProgressStuckThreshold {
+				pipelineStuckShouldAnnounce(
+					progress.consecutiveNoProgress,
+				) {
 				ls.config.Logger.Error(
 					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
 					"component",
@@ -4474,7 +4569,7 @@ func (ls *LedgerState) handleLedgerProcessBlocksError(err error) {
 	}
 	if errors.Is(err, errHaltLedgerPipeline) {
 		ls.config.Logger.Warn(
-			"block processing hit persistent validation failure, restarting pipeline",
+			"block processing hit persistent validation failure, halting ledger pipeline",
 			"error",
 			err,
 		)
@@ -5498,6 +5593,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// failure gets a fresh recovery budget (issues #2939, #3005).
 				ls.resetAtTipRecoveryDescent(pendingTip.Point.Slot)
 				ls.resetReplayRecoveryNonProgress(pendingTip.Point.Slot)
+				ls.resetMithrilBoundaryRejections(pendingTip.Point.Slot)
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				if wantEnableValidation {
 					ls.validationEnabled = true

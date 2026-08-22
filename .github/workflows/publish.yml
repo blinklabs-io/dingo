@@ -97,6 +97,8 @@ jobs:
         run: go build ./cmd/dingo
       - name: go-test
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 20m ./...
+      - name: govulncheck
+        run: make govulncheck
 
   create-draft-release:
     runs-on: ubuntu-latest
