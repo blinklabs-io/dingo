@@ -250,10 +250,21 @@ func (ls *LedgerState) SubmitAsyncDBTxn(
 	opFunc func(txn *database.Txn) error,
 	readWrite bool,
 ) error {
-	err := ls.SubmitAsyncDBOperation(func(db *database.Database) error {
+	err := ls.submitDBTxnOperation(opFunc, readWrite)
+	return ls.handleDBTxnResult(err)
+}
+
+func (ls *LedgerState) submitDBTxnOperation(
+	opFunc func(txn *database.Txn) error,
+	readWrite bool,
+) error {
+	return ls.SubmitAsyncDBOperation(func(db *database.Database) error {
 		txn := db.Transaction(readWrite)
 		return txn.Do(opFunc)
 	})
+}
+
+func (ls *LedgerState) handleDBTxnResult(err error) error {
 	// Check for partial commit and trigger recovery if needed.
 	// Guard against recursive recovery: if we're already in recovery and another
 	// PartialCommitError occurs, don't attempt recovery again to prevent unbounded recursion.
@@ -301,6 +312,64 @@ func (ls *LedgerState) SubmitAsyncDBTxn(
 		)
 	}
 	return err
+}
+
+// blockApplyCandidatePoint returns the last block that the block-apply
+// callback will examine. A block at the next epoch boundary is examined and
+// cached, but the suffix after it is not touched until the next loop.
+func blockApplyCandidatePoint(
+	blocks []ledger.Block,
+	epoch models.Epoch,
+) ocommon.Point {
+	candidate := blocks[0]
+	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	for _, block := range blocks {
+		candidate = block
+		if epoch.SlotLength == 0 || block.SlotNumber() >= epochEnd {
+			break
+		}
+	}
+	return ocommon.NewPoint(
+		candidate.SlotNumber(),
+		candidate.Hash().Bytes(),
+	)
+}
+
+// submitBlockApplyDBTxn serializes a block-apply commit and its after-commit
+// transaction events against every primary-chain rollback that emits undo
+// events. The expected ledger tip and last block the batch will examine are
+// captured before waiting for the serializer. If a rollback wins the race,
+// either the ledger tip changes or the examined block disappears from the
+// primary chain, and the stale batch is rejected rather than published after
+// the undo.
+func (ls *LedgerState) submitBlockApplyDBTxn(
+	expectedTip ochainsync.Tip,
+	candidateTip ocommon.Point,
+	opFunc func(txn *database.Txn) error,
+) error {
+	err := func() error {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+
+		ls.RLock()
+		currentTip := ls.currentTip
+		ls.RUnlock()
+		if currentTip.BlockNumber != expectedTip.BlockNumber ||
+			!pointMatches(currentTip.Point, expectedTip.Point) {
+			return errStaleChainIterator
+		}
+		if _, err := database.BlockByPoint(ls.db, candidateTip); err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return errStaleChainIterator
+			}
+			return fmt.Errorf("check block-apply candidate tip: %w", err)
+		}
+		return ls.submitDBTxnOperation(opFunc, true)
+	}()
+	// Partial-commit recovery can itself rewind the primary chain, so it must
+	// run after releasing transactionEventMutex rather than recursively trying
+	// to acquire it from rollbackPrimaryChainInSecurityParamWindows.
+	return ls.handleDBTxnResult(err)
 }
 
 // SubmitAsyncDBReadTxn submits a read-only database transaction operation for execution on the worker pool.
@@ -886,6 +955,13 @@ type LedgerState struct {
 	// closes the narrower, earlier window between gathering raw blocks and
 	// submitting them, which has no other guard at all.
 	blockPipelineGatherMutex sync.RWMutex
+	// transactionEventMutex serializes block-apply commits (including their
+	// database AfterCommit Apply publication) against rollback validation,
+	// Undo publication, and primary-chain truncation. Without it, a rollback
+	// can observe a newly committed block before its AfterCommit callback has
+	// reached the ordered lane, publishing Undo before Apply. See
+	// submitBlockApplyDBTxn and rollbackChainAndState.
+	transactionEventMutex sync.Mutex
 
 	// publishCtx is cancelled at the top of Close so a ledger.tx publish
 	// parked on a full ordered lane cannot outlive shutdown. Only the
@@ -896,6 +972,10 @@ type LedgerState struct {
 	// cancellation" and matches the pre-existing behaviour.
 	publishCtx    context.Context
 	publishCancel context.CancelFunc
+	// beforeTransactionApplyPublish is a test-only sequencing hook. Nil in
+	// production; tests use it to hold the exact post-commit/pre-publication
+	// window without relying on scheduler timing.
+	beforeTransactionApplyPublish func()
 
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
@@ -3015,10 +3095,18 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 		context.Background(),
 		"chainsync rollback",
 	)
-	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
-		return err
-	}
-	if err := ls.chain.Rollback(point); err != nil {
+	// A database commit becomes visible before its AfterCommit callbacks run.
+	// Exclude that window so blocksAboveSlot can never publish an Undo for the
+	// new state before the matching Apply reaches the ordered lane.
+	err := func() error {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+			return err
+		}
+		return ls.chain.Rollback(point)
+	}()
+	if err != nil {
 		return err
 	}
 	if err := ls.rollback(point); err != nil {
@@ -5133,7 +5221,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// restarts (errRestartLedgerPipeline), and abandoning a
 			// publish on a restart would drop events subscribers
 			// derive state from. Only Close cancels publishCtx.
-			err = ls.SubmitAsyncDBTxn(
+			candidateTip := blockApplyCandidatePoint(
+				nextBatch[i:end],
+				snapshotEpoch,
+			)
+			err = ls.submitBlockApplyDBTxn(
+				snapshotTip,
+				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
 					deltaBatch = NewLedgerDeltaBatch()
 					for offset, next := range nextBatch[i:end] {
@@ -5369,7 +5463,6 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 					return nil
 				},
-				true,
 			)
 			if err != nil {
 				// Undo events published down this recovery path are

@@ -380,8 +380,10 @@ sequenceDiagram
     LS->>ChM: chain.AddBlocks(batch) — 50 blocks max
     ChM->>DB: blob.SetBlock(slot, hash, cbor)
     ChM->>DB: metadata: UTxOs, txs, certs, governance
+    DB-->>LS: durable commit succeeds
+    LS->>EB: publish TransactionEvent per tx (AfterCommit)
     ChM->>EB: publish ChainUpdateEvent
-    LS->>EB: publish BlockEvent, TransactionEvent per tx
+    LS->>EB: publish BlockEvent
 
     Note over Peer,DB: Rollback Path
     Peer->>OB: RollBackward(point)
@@ -401,15 +403,19 @@ and sees a rollback's undo events (`Rollback: true`) before any transaction
 event the ledger emits afterwards.
 
 Two producers feed that lane, on different goroutines: `LedgerDelta.apply`
-(`ledger/delta.go`) publishes forward events from the `ledgerProcessBlocks`
-goroutine, and the rollback path publishes undo events from whichever
-goroutine performs the rollback. Nothing serializes those two, so the ordering
-comes from a happens-before rather than from a lock:
-`rollbackChainAndState` calls `emitRollbackTransactionEvents` **before**
-`chain.Rollback` truncates. The apply goroutine can only apply a
-post-rollback block after it observes that truncation, so an undo enqueued
-ahead of the truncation is necessarily ahead of any forward event for a block
-applied after it.
+(`ledger/delta.go`) registers forward events on the database transaction's
+`AfterCommit` drain from the `ledgerProcessBlocks` goroutine, and the rollback
+path publishes undo events from whichever goroutine performs the rollback.
+`AfterCommit` runs callbacks in registration order only after durable commit;
+an apply error, rollback, or failed commit discards them. The database commit
+becomes visible before its `AfterCommit` callbacks finish, so the two producer
+goroutines share `transactionEventMutex`: `submitBlockApplyDBTxn` holds it from
+the stale-tip recheck through commit and Apply enqueue, while primary-chain
+rollback paths hold it across rollback validation, Undo enqueue, and chain
+truncation. If Apply wins, its events reach the ordered lane before an Undo can
+be read from the committed state. If rollback wins, truncation and the ledger
+rewind make the waiting block batch stale, and the tip recheck rejects it
+instead of publishing Apply after Undo.
 
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback
@@ -423,10 +429,10 @@ different lane. Before #2287 the undo events were emitted from a `go`
 statement onto the reordering shared pool, which lost the same race twice
 over.
 
-The forward path keeps async semantics deliberately: it publishes from inside
-the block-apply database transaction, so a synchronous publish would hold that
-transaction open under subscriber backpressure. `ledger.block` remains
-`PublishBlocking` on the handler's own goroutine.
+The forward path keeps async semantics deliberately: its after-commit callback
+only enqueues onto the ordered lane, so subscribers cannot observe an Apply
+before storage is durable and their work never runs inline in `Commit`.
+`ledger.block` remains `PublishBlocking` on the handler's own goroutine.
 
 Because a publisher parked on a full lane is released only by the EventBus
 stopping, and a live restore/truncate closes the `LedgerState` while keeping
@@ -7661,9 +7667,12 @@ immediately in practice.
 
 `rollbackChainAndState` sequences three steps in order, and the ordering is
 load-bearing in both directions: `drainBlockPipelineBeforeRollback` first,
-then `validateAndEmitRollbackUndo` (reject-then-emit-undo-events, from
-issue #2287/#3209's ordering fix, `ledger/block_event.go`), then
-`ls.chain.Rollback`. Draining before validating/emitting matters because
+then, while holding `transactionEventMutex`,
+`validateAndEmitRollbackUndo` (reject-then-emit-undo-events, from the
+ordering fix for issues #2287/#3209 in `ledger/block_event.go`) and
+`ls.chain.Rollback`. Draining before taking the transaction-event serializer
+avoids waiting for pipeline work whose commit needs that same serializer.
+Draining before validating/emitting matters because
 `validateAndEmitRollbackUndo`'s emit reads what is already committed to the
 db (`blocksAboveSlot`) — a block the pipeline is still decoding/validating/
 applying for the fork about to be abandoned is not there yet, so emitting
