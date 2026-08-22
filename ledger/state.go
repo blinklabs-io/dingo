@@ -779,6 +779,13 @@ type LedgerState struct {
 	replayRecoveryHighWaterSlot   uint64
 	replayRecoveryNoProgressCount int
 	replayRecoveryHolding         bool
+	// Records the one fresh-intersection request already spent on a
+	// deterministic transaction rejection, keyed on the failing block and
+	// the applied tip. Chain selection gets one alternate-branch
+	// opportunity per failing block; after that the branch is still
+	// rejected, but peers are no longer rotated for it. See
+	// deterministicTxRecoveryLatch in ledger/replay_recovery.go.
+	deterministicTxRecoveryResync *deterministicTxRecoveryLatch
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
@@ -5210,6 +5217,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// failure gets a fresh recovery budget (issues #2939, #3005).
 				ls.resetAtTipRecoveryDescent(pendingTip.Point.Slot)
 				ls.resetReplayRecoveryNonProgress(pendingTip.Point.Slot)
+				ls.resetDeterministicTxRecovery(pendingTip.Point.Slot)
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				if wantEnableValidation {
 					ls.validationEnabled = true

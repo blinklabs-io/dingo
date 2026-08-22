@@ -25,8 +25,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -187,6 +189,9 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if !errors.As(err, &validationErr) {
 		return false, nil
 	}
+	if isDeterministicTxValidationError(validationErr.Cause) {
+		return ls.recoverFromDeterministicTxValidationError(validationErr)
+	}
 	if ls.IsAtTip() {
 		return ls.recoverAtTipFromTxValidationError(validationErr)
 	}
@@ -341,6 +346,236 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.armContinuationAudit(rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
+}
+
+// isDeterministicTxValidationError identifies transaction-structure failures
+// that cannot be repaired by replaying a different local UTxO history. A
+// duplicate input is invalid regardless of which chain produced the input,
+// so treating it as an unresolved producer sends recovery down the fallback
+// path and can repeatedly rediscover the same rejected block.
+//
+// Every Shelley-family era delegates the rule to
+// shelley.UtxoValidateNoDuplicateInputs and therefore reports
+// shelley.DuplicateInputError for a duplicated regular, collateral, or
+// reference input. Byron has its own rule in ledger/eras and reports
+// eras.DuplicateInputByronError, which is the same structural verdict and
+// must not fall through to state-dependent producer resolution.
+//
+// Deterministic is not the same as correct. The Shelley-family rule
+// deduplicates unconditionally while the CBOR decoder leaves untagged
+// pre-Conway array fields unchecked, so a canonical pre-Conway block can carry
+// a wire-level duplicate cardano-node coalesces and this verdict rejects
+// (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
+// non-terminal for exactly that reason.
+func isDeterministicTxValidationError(err error) bool {
+	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
+	return ok
+}
+
+// deterministicTxRecoveryLatch records the single fresh-intersection request
+// already spent on one failing block at one applied ledger tip. Keyed on the
+// failing block and transaction as well as the tip, so a different rejected
+// block on a newly selected branch gets its own peer rotation instead of
+// inheriting a latch that was never about it -- the same identity the sibling
+// at-tip escalation keys on (atTipRecoveryAttempt.matches).
+type deterministicTxRecoveryLatch struct {
+	TipSlot    uint64
+	BlockPoint ocommon.Point
+	TxHash     []byte
+}
+
+func newDeterministicTxRecoveryLatch(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) *deterministicTxRecoveryLatch {
+	blockPoint := validationErr.BlockPoint
+	blockPoint.Hash = append([]byte(nil), blockPoint.Hash...)
+	return &deterministicTxRecoveryLatch{
+		TipSlot:    tipSlot,
+		BlockPoint: blockPoint,
+		TxHash:     append([]byte(nil), validationErr.TxHash...),
+	}
+}
+
+func (l *deterministicTxRecoveryLatch) matches(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) bool {
+	return l != nil &&
+		tipSlot <= l.TipSlot &&
+		validationErr.BlockPoint.Slot == l.BlockPoint.Slot &&
+		bytes.Equal(validationErr.BlockPoint.Hash, l.BlockPoint.Hash) &&
+		bytes.Equal(validationErr.TxHash, l.TxHash)
+}
+
+// deterministicTxRecoveryResyncSpentLocked reports whether the one fresh
+// ChainSync intersection for this failing block at this applied tip has
+// already been requested. Callers hold at least the read lock.
+func (ls *LedgerState) deterministicTxRecoveryResyncSpentLocked(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) bool {
+	return ls.deterministicTxRecoveryResync.matches(tipSlot, validationErr)
+}
+
+// markDeterministicTxRecoveryResync records the fresh-intersection request.
+// The latch is written under the write lock because resetDeterministicTxRecovery
+// clears it from inside the tip-advance critical section in
+// ledgerProcessBlocksFromSource, so both sides of the field use the same lock
+// rather than relying on the two callers staying on one goroutine.
+func (ls *LedgerState) markDeterministicTxRecoveryResync(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.deterministicTxRecoveryResync = newDeterministicTxRecoveryLatch(
+		tipSlot,
+		validationErr,
+	)
+}
+
+// recoverFromDeterministicTxValidationError drops a primary-chain block that
+// contains a transaction with a deterministic structural error. The ledger
+// tip is the last applied good point; rewinding both stores to it rejects the
+// branch and lets ChainSync obtain a fresh intersection. This is deliberately
+// separate from unresolved-input recovery: the latter is state-dependent and
+// still needs producer resolution and the security-parameter fallback.
+//
+// The rejection is never terminal. Rejecting the chain that contains a block
+// this node believes is invalid, and continuing to reject it, is the response
+// tryRecoverFromHeaderValidationError already gives a block whose deferred
+// header checks fail (see header_validation_recovery.go): a local
+// false-positive verdict must leave the node able to follow a chain a peer
+// later offers. What is bounded is peer rotation, not the rejection -- a
+// repeat rejection of the same failing block at the same applied tip rewinds
+// again but does not request another fresh intersection, because chain
+// selection has already been given its alternate-branch opportunity for that
+// block and further rotations only close connections. Repeated rejections
+// therefore make no tip progress, which is what the pipeline's own
+// no-progress accounting (trackPipelineProgress / ledgerPipelineBackoff)
+// escalates and exports as dingo_ledger_pipeline_stuck. Whether a validation
+// failure should ever become terminal, and what terminal must report, is
+// issue #3261 rather than this path.
+func (ls *LedgerState) recoverFromDeterministicTxValidationError(
+	validationErr *txValidationError,
+) (bool, error) {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return false, nil
+	}
+
+	ls.RLock()
+	ledgerTip := ls.currentTip
+	resyncSpent := ls.deterministicTxRecoveryResyncSpentLocked(
+		ledgerTip.Point.Slot,
+		validationErr,
+	)
+	ls.RUnlock()
+	rewindPoint := ledgerTip.Point
+	if rewindPoint.Slot >= validationErr.BlockPoint.Slot {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"deterministic transaction validation rejected a block at or behind the ledger tip; no rewind target precedes it",
+				"component", "ledger",
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"ledger_tip_slot", rewindPoint.Slot,
+				"error", validationErr.Cause,
+			)
+		}
+		return false, nil
+	}
+	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
+		return false, nil
+	}
+
+	// Chain selection can abandon the ledger tip between the snapshot above
+	// and the rewind. If the point is already gone, the rejected block was
+	// removed by that chain choice and the pipeline can safely restart.
+	if err := ls.chain.ValidateRollback(rewindPoint); err != nil &&
+		errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"chain selection moved the primary chain off the deterministic transaction recovery point; the rejected block is already gone",
+				"component", "ledger",
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"rewind_target_slot", rewindPoint.Slot,
+				"error", err,
+			)
+		}
+		return true, nil
+	}
+
+	if ls.config.Logger != nil {
+		ls.config.Logger.Warn(
+			"deterministic transaction validation rejected a block on the primary chain; rewinding so chain selection can offer another candidate",
+			"component", "ledger",
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot", validationErr.BlockPoint.Slot,
+			"rewind_target_slot", rewindPoint.Slot,
+			"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+			"error", validationErr.Cause,
+		)
+	}
+	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
+		if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+			return true, nil
+		}
+		return false, fmt.Errorf(
+			"rewind primary chain after deterministic transaction validation failure: %w",
+			err,
+		)
+	}
+	if err := ls.rollback(rewindPoint); err != nil {
+		return false, fmt.Errorf(
+			"rollback ledger state after deterministic transaction validation failure: %w",
+			err,
+		)
+	}
+	if resyncSpent {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"deterministic transaction validation rejected the same block again at the same applied tip; rejecting the branch without rotating peers",
+				"component", "ledger",
+				"tx_hash", hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"ledger_tip_slot", rewindPoint.Slot,
+				"hint", "peers are serving a transaction this node rejects; the pipeline keeps rejecting it and reports no tip progress",
+			)
+		}
+		return true, nil
+	}
+	ls.markDeterministicTxRecoveryResync(rewindPoint.Slot, validationErr)
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					Reason: event.
+						ChainsyncResyncReasonDeterministicTxValidationRecovery,
+					Point: rewindPoint,
+				},
+			),
+		)
+	}
+	return true, nil
+}
+
+// resetDeterministicTxRecovery clears the one-resync latch only after the
+// ledger advances beyond the tip at which the deterministic rejection was
+// recorded. Replaying up to that same tip is not evidence that a valid branch
+// was found. Called from the tip-advance critical section in
+// ledgerProcessBlocksFromSource, so it takes no lock of its own; the paired
+// write goes through markDeterministicTxRecoveryResync.
+func (ls *LedgerState) resetDeterministicTxRecovery(newTipSlot uint64) {
+	if ls.deterministicTxRecoveryResync == nil ||
+		newTipSlot <= ls.deterministicTxRecoveryResync.TipSlot {
+		return
+	}
+	ls.deterministicTxRecoveryResync = nil
 }
 
 // observeReplayRecoveryTip records the applied tip seen immediately before an

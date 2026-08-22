@@ -2990,6 +2990,47 @@ paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
 the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
+
+Transaction-structure failures are handled separately from state-dependent
+missing-input failures. In particular a duplicate input -- regular, collateral,
+or reference -- cannot be repaired by selecting a different UTxO producer
+history. Every Shelley-family era delegates that rule to
+`shelley.UtxoValidateNoDuplicateInputs` and so reports
+`shelley.DuplicateInputError`; Byron has its own rule and reports
+`eras.DuplicateInputByronError`. `isDeterministicTxValidationError` classifies
+both. Replay recovery therefore rejects the primary-chain branch
+and rolls both stores back to the last applied ledger tip, then publishes a
+`chainsync.resync` event with reason `deterministic tx validation recovery` so
+ChainSync obtains a fresh intersection. Other transaction-validation errors
+continue through producer resolution and the unresolved-producer fallback.
+
+The rejection is never terminal. A redelivery of the same failing block at the
+same applied tip is rejected and rewound again but spends no further peer
+rotation, because chain selection has already had its alternate-branch
+opportunity for that block and further rotations only close connections. The
+latch that records it keys on the applied tip together with the failing block
+and transaction, so a different rejected block on a newly selected branch gets
+its own fresh intersection; forward progress past the recorded tip clears it.
+Repeated rejections therefore make no tip progress, which the pipeline's own
+no-progress accounting escalates and exports as `dingo_ledger_pipeline_stuck`.
+Rejecting the chain rather than halting on it is the same choice
+`tryRecoverFromHeaderValidationError` makes and for the same reason: the
+verdict can be a local false positive, so the node has to stay able to follow a
+chain a later peer offers. Whether a validation failure ever becomes terminal,
+and what a terminal state must report, is issue #3261.
+
+That false positive is not hypothetical for the Shelley-family rule. The rule
+deduplicates every input set unconditionally, while the CBOR decoder leaves
+untagged (pre-Conway) array fields unchecked so pre-Conway encodings stay
+valid. A canonical pre-Conway block can therefore carry a wire-level duplicate
+that cardano-node coalesces at decode and dingo rejects: preview block
+`98a969c42dc92c3d52c462c687e67df683418d7d597a4883d3187e03e17b41fe` at slot
+1462320 (Babbage, epoch 16) repeats one reference input in an untagged array,
+and is the first block on preview where the rule fires. The divergence is a
+gouroboros rule-applicability defect (blinklabs-io/gouroboros#1989); what
+recovery owes it is only that such a verdict cannot wedge the node
+permanently.
+
 The continuation audit is run only after a fetched body is accepted by the
 queued primary chain, so late bodies from an abandoned fetch cannot seed its
 producer window. Its diagnostic database probes are also capped per block
