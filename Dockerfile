@@ -1,3 +1,11 @@
+# 1.26.3-1 is the newest published tag of this image, and it is behind the Go
+# patch releases that fix the standard-library advisories govulncheck finds
+# reachable from this module (the last of them fixed in 1.26.6). What actually
+# compiles the release binary is go.mod's `toolchain` floor, not this tag:
+# GOTOOLCHAIN is `auto` in this image, so the build fetches that toolchain and
+# uses it in place of the image's own go1.26.3. Advance this tag when
+# blinklabs-io/docker-go publishes a newer one; never lower the go.mod floor to
+# match it.
 FROM ghcr.io/blinklabs-io/go:1.26.3-1 AS build
 
 ARG VERSION
