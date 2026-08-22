@@ -690,6 +690,12 @@ type LedgerState struct {
 	// (test-only), guarded by timeConverterOnce.
 	timeConverter     *SlotTimeConverter
 	timeConverterOnce sync.Once
+	// preByronPrefixWarned records that warnOnPreByronPrefixEpochCache has
+	// already reported the stale shape. loadEpochs runs twice on startup --
+	// once from PrepareEpochCacheForStartup and again from Start -- and both
+	// take the populated-cache branch on a database that already has epochs,
+	// so without this the operator sees the diagnosis duplicated.
+	preByronPrefixWarned bool
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
@@ -6430,6 +6436,12 @@ func (ls *LedgerState) warnOnPreByronPrefixEpochCache() {
 	if firstEpoch.EpochId != 0 || firstEpoch.EraId <= eras.ByronEraDesc.Id {
 		return
 	}
+	// Set only once the shape is confirmed, so a call that returned early
+	// above cannot suppress a later real diagnosis.
+	if ls.preByronPrefixWarned {
+		return
+	}
+	ls.preByronPrefixWarned = true
 	ls.config.Logger.Warn(
 		"database predates Byron prefix preservation and cannot be repaired in place",
 		"component",

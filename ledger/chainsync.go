@@ -4902,7 +4902,14 @@ func (ls *LedgerState) processEpochRollover(
 	// triggers a hard fork (era transition)
 	oldVer, oldErr := GetProtocolVersion(currentPParams)
 	newVer, newErr := GetProtocolVersion(newPParams)
-	if oldErr != nil {
+	// Only warn when parameters are present but yield no version. Byron holds
+	// nil parameters by design, so a nil value is the expected shape for every
+	// rollover in the prefix rather than a fault: warning on it emitted both
+	// lines below on each one, 416 of them on a mainnet sync from genesis. A
+	// non-nil value that still yields no version is a real anomaly and keeps
+	// its warning. Hard-fork detection is skipped either way by the error
+	// check below, so nothing here changes which rollovers are examined.
+	if oldErr != nil && currentPParams != nil {
 		ls.config.Logger.Warn(
 			"could not extract protocol version from "+
 				"current pparams, skipping hard fork "+
@@ -4913,7 +4920,7 @@ func (ls *LedgerState) processEpochRollover(
 			"component", "ledger",
 		)
 	}
-	if newErr != nil {
+	if newErr != nil && newPParams != nil {
 		ls.config.Logger.Warn(
 			"could not extract protocol version from "+
 				"new pparams, skipping hard fork "+

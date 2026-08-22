@@ -4867,6 +4867,20 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 		assert.Contains(t, logs.String(), warning)
 	})
 
+	t.Run("stale shape warns once per process", func(t *testing.T) {
+		// loadEpochs runs twice on startup, from PrepareEpochCacheForStartup
+		// and again from Start, and both take the populated-cache branch on a
+		// database that already has epochs. An operator in exactly the
+		// situation this diagnoses should not see it twice.
+		ls, logs := newLedger(t, true, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.Equal(t, 1, strings.Count(logs.String(), warning))
+	})
+
 	t.Run("byron epoch zero is silent", func(t *testing.T) {
 		ls, logs := newLedger(t, true, false)
 		ls.epochCache = []models.Epoch{
