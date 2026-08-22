@@ -1999,15 +1999,21 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 - KES signature verification with period checks
 - Slot leader eligibility checking
 
-Byron main-block validation derives its configured genesis issuers and active
+Byron main-block validation derives its configured genesis issuers and initial
 heavy delegations from the Byron genesis file. Stateless validation verifies
-the protocol magic, proxy certificate, and exact header signature; the ledger
-then charges the resolved genesis issuer against the rolling `k`-signature PBFT
-window. The in-memory window is updated only after the block transaction
-commits. On startup or after a rollback, it is reconstructed in canonical order
-from at most the last `k` Byron main blocks at the applied tip. Byron epoch
-boundary blocks do not carry a PBFT issuer signature and therefore do not
-advance that window.
+the protocol magic, genesis issuer, proxy certificate, exact header signature,
+and current-slot bound. Ordered ledger application then ticks the active
+delegation view, validates the signing delegate, and charges the resolved
+genesis issuer against the rolling `k`-signature PBFT window. Each main block's
+delegation payload is signature-checked and scheduled for activation after
+`2k` slots; activation replaces the issuer's delegate, while self-delegation
+revokes the prior delegate. The in-memory delegation and issuer-window states
+are updated only after the block transaction commits. On startup or after a
+rollback, the delegation view is reconstructed from the canonical Byron chain
+through the applied tip, while the issuer window retains only its last `k`
+main-block issuers. Byron epoch boundary blocks still enforce the current-slot
+bound and tick due delegations, but do not carry a PBFT issuer signature or
+advance the issuer window.
 
 Before resolving or eagerly forecasting an epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.

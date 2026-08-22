@@ -19,21 +19,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/blinklabs-io/dingo/chain"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 type byronPBFTCache struct {
 	config      *byronconsensus.ByronConfig
-	state       byronconsensus.PBFTState
+	state       byronPBFTState
 	tip         ocommon.Point
 	initialized bool
+}
+
+type byronPBFTState struct {
+	issuerState     byronconsensus.PBFTState
+	delegationState byronconsensus.PBFTDelegationState
 }
 
 func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
@@ -71,11 +74,10 @@ func (ls *LedgerState) byronPBFTConfig() (byronconsensus.ByronConfig, error) {
 
 func (ls *LedgerState) validateByronPBFTHeader(
 	block ledger.Block,
+	delegationState byronconsensus.PBFTDelegationState,
 ) (byronconsensus.PBFTIssuer, error) {
-	if block == nil {
-		return byronconsensus.PBFTIssuer{}, errors.New(
-			"cannot validate nil Byron PBFT block",
-		)
+	if err := ls.validateByronPBFTHeaderCrypto(block); err != nil {
+		return byronconsensus.PBFTIssuer{}, err
 	}
 	if block.Type() == ledgerbyron.BlockTypeByronEbb {
 		return byronconsensus.PBFTIssuer{}, nil
@@ -92,6 +94,7 @@ func (ls *LedgerState) validateByronPBFTHeader(
 	if err != nil {
 		return byronconsensus.PBFTIssuer{}, err
 	}
+	config.GenesisDelegations = delegationState.ActiveDelegations()
 	issuer, err := byronconsensus.ValidatePBFTHeader(header, config)
 	if err != nil {
 		return byronconsensus.PBFTIssuer{}, fmt.Errorf(
@@ -100,18 +103,59 @@ func (ls *LedgerState) validateByronPBFTHeader(
 			err,
 		)
 	}
+	return issuer, nil
+}
+
+func (ls *LedgerState) validateByronPBFTHeaderCrypto(
+	block ledger.Block,
+) error {
+	if block == nil {
+		return errors.New(
+			"cannot validate nil Byron PBFT block",
+		)
+	}
+	if block.Type() == ledgerbyron.BlockTypeByronEbb {
+		return ls.validateByronPBFTCurrentSlot(block)
+	}
+	header, ok := block.Header().(*ledgerbyron.ByronMainBlockHeader)
+	if !ok || header == nil {
+		return fmt.Errorf(
+			"byron main block at slot %d has unexpected header type %T",
+			block.SlotNumber(),
+			block.Header(),
+		)
+	}
+	config, err := ls.byronPBFTConfig()
+	if err != nil {
+		return err
+	}
+	_, err = byronconsensus.ValidatePBFTHeaderCrypto(header, config)
+	if err != nil {
+		return fmt.Errorf(
+			"byron PBFT header verification failed at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if err := ls.validateByronPBFTCurrentSlot(block); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
 	currentSlot, err := ls.CurrentSlot()
 	if err != nil {
-		return byronconsensus.PBFTIssuer{}, fmt.Errorf(
+		return fmt.Errorf(
 			"resolve current slot for Byron PBFT header at slot %d: %w",
 			block.SlotNumber(),
 			err,
 		)
 	}
 	if err := validateByronPBFTSlot(block.SlotNumber(), currentSlot); err != nil {
-		return byronconsensus.PBFTIssuer{}, err
+		return err
 	}
-	return issuer, nil
+	return nil
 }
 
 func validateByronPBFTSlot(blockSlot, currentSlot uint64) error {
@@ -137,13 +181,13 @@ func batchContainsByronBlocks(blocks []ledger.Block) bool {
 func (ls *LedgerState) byronPBFTStateAtTip(
 	ctx context.Context,
 	tip ocommon.Tip,
-) (byronconsensus.PBFTState, error) {
+) (byronPBFTState, error) {
 	config, err := ls.byronPBFTConfig()
 	if err != nil {
-		return byronconsensus.PBFTState{}, err
+		return byronPBFTState{}, err
 	}
 	if config.SecurityParam == 0 {
-		return byronconsensus.PBFTState{}, errors.New(
+		return byronPBFTState{}, errors.New(
 			"byron PBFT security parameter must be greater than zero",
 		)
 	}
@@ -155,130 +199,199 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 	ls.RUnlock()
 	if cached && cachedTip.Slot == tip.Point.Slot &&
 		bytes.Equal(cachedTip.Hash, tip.Point.Hash) {
-		return byronconsensus.NewPBFTState(
-			cachedState.SignatureHistory(),
-			config.SecurityParam,
-		)
+		return cachedState, nil
+	}
+	state, err := newByronPBFTState(config)
+	if err != nil {
+		return byronPBFTState{}, err
 	}
 	if tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 {
-		return byronconsensus.NewPBFTState(nil, config.SecurityParam)
+		return state, nil
 	}
 	if ls.chain == nil {
-		return byronconsensus.PBFTState{}, errors.New(
+		return byronPBFTState{}, errors.New(
 			"rebuild Byron PBFT state: primary chain is unavailable",
 		)
 	}
 
-	iter, err := ls.chain.FromPointReverseContext(ctx, tip.Point, true)
+	iter, err := ls.chain.FromPointContext(ctx, ocommon.Point{}, false)
 	if err != nil {
-		return byronconsensus.PBFTState{}, fmt.Errorf(
-			"rebuild Byron PBFT state from tip %d/%x: %w",
+		return byronPBFTState{}, fmt.Errorf(
+			"rebuild Byron PBFT state through tip %d/%x: %w",
 			tip.Point.Slot,
 			tip.Point.Hash,
 			err,
 		)
 	}
 	defer iter.Cancel()
-	issuersNewestFirst := make(
-		[]lcommon.Blake2b224,
-		0,
-		min(config.SecurityParam, uint64(128)),
-	)
-	for uint64(len(issuersNewestFirst)) < config.SecurityParam {
+	for {
 		result, err := iter.Next(false)
-		if errors.Is(err, chain.ErrIteratorChainOrigin) {
-			break
+		if errors.Is(err, chain.ErrIteratorChainTip) {
+			return byronPBFTState{}, fmt.Errorf(
+				"rebuild Byron PBFT state: canonical chain ended before tip %d/%x",
+				tip.Point.Slot,
+				tip.Point.Hash,
+			)
 		}
 		if err != nil {
-			return byronconsensus.PBFTState{}, fmt.Errorf(
+			return byronPBFTState{}, fmt.Errorf(
 				"rebuild Byron PBFT state: walk canonical chain: %w",
 				err,
 			)
 		}
 		if result == nil {
-			return byronconsensus.PBFTState{}, errors.New(
-				"rebuild Byron PBFT state: reverse iterator returned nil result",
+			return byronPBFTState{}, errors.New(
+				"rebuild Byron PBFT state: iterator returned nil result",
 			)
 		}
 		if result.Block.Type != ledgerbyron.BlockTypeByronMain &&
 			result.Block.Type != ledgerbyron.BlockTypeByronEbb {
-			break
-		}
-		if result.Block.Type == ledgerbyron.BlockTypeByronEbb {
-			continue
+			return byronPBFTState{}, fmt.Errorf(
+				"rebuild Byron PBFT state: encountered non-Byron block at slot %d before Byron tip %d",
+				result.Block.Slot,
+				tip.Point.Slot,
+			)
 		}
 		block, err := result.Block.Decode()
 		if err != nil {
-			return byronconsensus.PBFTState{}, fmt.Errorf(
+			return byronPBFTState{}, fmt.Errorf(
 				"rebuild Byron PBFT state: decode block at slot %d: %w",
 				result.Block.Slot,
 				err,
 			)
 		}
-		header, ok := block.Header().(*ledgerbyron.ByronMainBlockHeader)
-		if !ok || header == nil {
-			return byronconsensus.PBFTState{}, fmt.Errorf(
-				"rebuild Byron PBFT state: block at slot %d has header type %T",
-				result.Block.Slot,
-				block.Header(),
-			)
-		}
-		genesisHash, err := byronconsensus.PBFTVerificationKeyHash(
-			header.ConsensusData.PubKey,
-		)
+		state, err = ls.advanceByronPBFTState(state, block, false)
 		if err != nil {
-			return byronconsensus.PBFTState{}, fmt.Errorf(
-				"rebuild Byron PBFT state: derive issuer at slot %d: %w",
+			return byronPBFTState{}, fmt.Errorf(
+				"rebuild Byron PBFT state: apply block at slot %d: %w",
 				result.Block.Slot,
 				err,
 			)
 		}
-		issuersNewestFirst = append(
-			issuersNewestFirst,
-			genesisHash,
-		)
+		if result.Block.Slot == tip.Point.Slot &&
+			bytes.Equal(result.Block.Hash, tip.Point.Hash) {
+			return state, nil
+		}
 	}
-	slices.Reverse(issuersNewestFirst)
-	return byronconsensus.NewPBFTState(
-		issuersNewestFirst,
+}
+
+func newByronPBFTState(
+	config byronconsensus.ByronConfig,
+) (byronPBFTState, error) {
+	issuerState, err := byronconsensus.NewPBFTState(
+		nil,
 		config.SecurityParam,
 	)
+	if err != nil {
+		return byronPBFTState{}, err
+	}
+	delegationState, err := byronconsensus.NewPBFTDelegationState(config)
+	if err != nil {
+		return byronPBFTState{}, err
+	}
+	return byronPBFTState{
+		issuerState:     issuerState,
+		delegationState: delegationState,
+	}, nil
 }
 
 func (ls *LedgerState) advanceByronPBFTState(
-	state byronconsensus.PBFTState,
+	state byronPBFTState,
 	block ledger.Block,
 	shouldValidate bool,
-) (byronconsensus.PBFTState, error) {
+) (byronPBFTState, error) {
+	epoch, err := byronBlockEpoch(block)
+	if err != nil {
+		return byronPBFTState{}, err
+	}
+	state.delegationState = state.delegationState.Tick(
+		epoch,
+		block.SlotNumber(),
+	)
+	if shouldValidate {
+		issuer, err := ls.validateByronPBFTHeader(
+			block,
+			state.delegationState,
+		)
+		if err != nil {
+			return byronPBFTState{}, err
+		}
+		if block.Type() != ledgerbyron.BlockTypeByronEbb {
+			state.issuerState, err = state.issuerState.Transition(
+				issuer.GenesisKeyHash,
+			)
+			if err != nil {
+				return byronPBFTState{}, err
+			}
+		}
+	}
 	if block.Type() == ledgerbyron.BlockTypeByronEbb {
 		return state, nil
 	}
 	header, ok := block.Header().(*ledgerbyron.ByronMainBlockHeader)
 	if !ok || header == nil {
-		return byronconsensus.PBFTState{}, fmt.Errorf(
+		return byronPBFTState{}, fmt.Errorf(
 			"advance Byron PBFT state: block at slot %d has header type %T",
 			block.SlotNumber(),
 			block.Header(),
 		)
 	}
-	var issuerHash lcommon.Blake2b224
-	if shouldValidate {
-		issuer, err := ls.validateByronPBFTHeader(block)
+	if !shouldValidate {
+		issuer, err := byronconsensus.PBFTIssuerFromHeader(header)
 		if err != nil {
-			return byronconsensus.PBFTState{}, err
+			return byronPBFTState{}, fmt.Errorf(
+				"observe trusted Byron PBFT header at slot %d: %w",
+				block.SlotNumber(),
+				err,
+			)
 		}
-		issuerHash = issuer.GenesisKeyHash
-		return state.Transition(issuerHash)
+		state.issuerState, err = state.issuerState.Observe(
+			issuer.GenesisKeyHash,
+		)
+		if err != nil {
+			return byronPBFTState{}, err
+		}
 	}
-	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(
-		header.ConsensusData.PubKey,
+	mainBlock, ok := block.(*ledgerbyron.ByronMainBlock)
+	if !ok || mainBlock == nil {
+		return byronPBFTState{}, fmt.Errorf(
+			"advance Byron PBFT delegation state: block at slot %d has type %T",
+			block.SlotNumber(),
+			block,
+		)
+	}
+	state.delegationState, err = state.delegationState.ApplyPayload(
+		epoch,
+		block.SlotNumber(),
+		mainBlock.Body.DlgPayload,
 	)
 	if err != nil {
-		return byronconsensus.PBFTState{}, fmt.Errorf(
-			"observe trusted Byron PBFT header at slot %d: %w",
+		return byronPBFTState{}, fmt.Errorf(
+			"apply Byron PBFT delegation payload at slot %d: %w",
 			block.SlotNumber(),
 			err,
 		)
 	}
-	return state.Observe(issuerHash)
+	return state, nil
+}
+
+func byronBlockEpoch(block ledger.Block) (uint64, error) {
+	switch header := block.Header().(type) {
+	case *ledgerbyron.ByronMainBlockHeader:
+		if header == nil {
+			return 0, errors.New("nil Byron main-block header")
+		}
+		return header.ConsensusData.SlotId.Epoch, nil
+	case *ledgerbyron.ByronEpochBoundaryBlockHeader:
+		if header == nil {
+			return 0, errors.New("nil Byron epoch-boundary header")
+		}
+		return header.ConsensusData.Epoch, nil
+	default:
+		return 0, fmt.Errorf(
+			"byron block at slot %d has unexpected header type %T",
+			block.SlotNumber(),
+			block.Header(),
+		)
+	}
 }

@@ -48,7 +48,6 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
-	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -5101,7 +5100,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var blocksProcessed int
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
-			var runningByronPBFTState byronconsensus.PBFTState
+			var runningByronPBFTState byronPBFTState
 			if trackByronPBFT {
 				runningByronPBFTState, err = ls.byronPBFTStateAtTip(
 					ctx,
@@ -5115,7 +5114,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					)
 				}
 			}
-			var pendingByronPBFTState byronconsensus.PBFTState
+			var pendingByronPBFTState byronPBFTState
 			var pendingByronPBFTTip ocommon.Point
 			var pendingByronPBFT bool
 			// Track expected previous hash for batch processing - updated after each block

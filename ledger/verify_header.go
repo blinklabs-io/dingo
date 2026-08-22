@@ -285,10 +285,12 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 	allowEpochCacheAdvance bool,
 ) (models.Epoch, error) {
 	// Byron uses PBFT rather than Praos. Validate its exact signature,
-	// configured issuer/delegation state, protocol magic, and current-slot
-	// bound before avoiding the Praos epoch/nonce lookups below.
+	// configured genesis issuer, protocol magic, and current-slot bound before
+	// avoiding the Praos epoch/nonce lookups below. Ordered active-delegation
+	// and issuer-window checks run during ledger application because parallel
+	// pre-validation cannot see earlier blocks in the same batch.
 	if block.Era().Id == byron.EraIdByron {
-		_, err := ls.validateByronPBFTHeader(block)
+		err := ls.validateByronPBFTHeaderCrypto(block)
 		return models.Epoch{}, err
 	}
 
