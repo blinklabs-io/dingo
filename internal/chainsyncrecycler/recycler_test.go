@@ -590,6 +590,10 @@ func TestTickSuppressesResyncOnLedgerApplicationBacklog(t *testing.T) {
 		activeConn: &active,
 	}
 	selector := plateauSelector(connId, 500)
+	peerTip := selector.peerTips[connId.String()]
+	require.NotNil(t, peerTip)
+	peerTip.Tip = testTip(^uint64(0), ^uint64(0))
+	peerTip.ObservedTip = testTip(500, 250)
 	pub := newFakePublisher()
 	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
 

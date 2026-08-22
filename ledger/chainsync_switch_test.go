@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"sync"
 	"testing"
@@ -607,6 +608,97 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 	)
 }
 
+func TestChainSwitchNeedsFreshCursorUsesObservedTip(
+	t *testing.T,
+) {
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	require.Zero(t, testChain.HeaderCount())
+	localTip := testChain.Tip()
+
+	connId1 := testChainsyncConnId(6000, 3001)
+	connId2 := testChainsyncConnId(6000, 3002)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	needsFreshCursor := ls.chainSwitchNeedsFreshCursorLocked(
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: connId1,
+			NewConnectionId:      connId2,
+			NewTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					math.MaxUint64,
+					[]byte("advertised-outlier"),
+				),
+				BlockNumber: math.MaxUint64,
+			},
+			NewObservedTip:    localTip,
+			NewObservedTipSet: true,
+		},
+		connId2,
+	)
+	assert.False(
+		t,
+		needsFreshCursor,
+		"an untrusted advertisement must not force a resync when the delivered frontier is at the local tip",
+	)
+}
+
+func TestChainSwitchNeedsFreshCursorIgnoresFailedTargetFrontier(
+	t *testing.T,
+) {
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	require.Zero(t, testChain.HeaderCount())
+	localTip := testChain.Tip()
+
+	previousConnId := testChainsyncConnId(6000, 3001)
+	failedTargetConnId := testChainsyncConnId(6000, 3002)
+	fallbackConnId := testChainsyncConnId(6000, 3003)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				if sameConnectionId(connId, fallbackConnId) {
+					return localTip, true
+				}
+				return ochainsync.Tip{}, false
+			},
+		},
+	}
+
+	needsFreshCursor := ls.chainSwitchNeedsFreshCursorLocked(
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: previousConnId,
+			NewConnectionId:      failedTargetConnId,
+			NewObservedTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					localTip.Point.Slot+100,
+					[]byte("failed-target"),
+				),
+				BlockNumber: localTip.BlockNumber + 100,
+			},
+		},
+		fallbackConnId,
+	)
+	assert.False(
+		t,
+		needsFreshCursor,
+		"a failed target's observed frontier must not drive recovery for the fallback connection",
+	)
+}
+
 type chainSwitchFallbackFixture struct {
 	ls             *LedgerState
 	resyncCh       <-chan event.Event
@@ -643,6 +735,17 @@ func newChainSwitchFallbackFixture(
 			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &currentConn
+			},
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				if sameConnectionId(connId, connId3) {
+					return ochainsync.Tip{
+						Point:       ocommon.NewPoint(200, []byte("active-tip")),
+						BlockNumber: 10,
+					}, true
+				}
+				return ochainsync.Tip{}, false
 			},
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,
@@ -2040,4 +2143,49 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 	assert.Equal(t, 1, testChain.HeaderCount())
+}
+
+// TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue covers the
+// advertising-only peer this path exists to distrust.
+//
+// A zero delivered frontier is a real observation: the peer delivered nothing.
+// Inferring "field absent" from it fell back to the advertised NewTip, which
+// handed that peer's advertisement to ledger cursor recovery. The fallback now
+// keys on NewObservedTipSet, which every producer in chainselection sets, so
+// only a producer that never populated the field reaches the advertised tip.
+func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
+	advertised := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 9_000, Hash: []byte{0xaa}},
+		BlockNumber: 900,
+	}
+	delivered := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte{0xbb}},
+		BlockNumber: 10,
+	}
+
+	t.Run("delivered frontier is used when set", func(t *testing.T) {
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip:            advertised,
+			NewObservedTip:    delivered,
+			NewObservedTipSet: true,
+		})
+		assert.Equal(t, delivered, got)
+	})
+
+	t.Run("zero delivered frontier is not the advertised tip", func(t *testing.T) {
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip:            advertised,
+			NewObservedTipSet: true,
+		})
+		assert.Equal(t, ochainsync.Tip{}, got)
+		assert.NotEqual(t, advertised, got)
+	})
+
+	t.Run("unset falls back to the advertised tip", func(t *testing.T) {
+		// Older events and direct unit-test or integration constructors.
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip: advertised,
+		})
+		assert.Equal(t, advertised, got)
+	})
 }

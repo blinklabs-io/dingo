@@ -342,6 +342,12 @@ type FatalErrorFunc func(err error)
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
 
+// GetPeerObservedTipFunc returns the delivered frontier tracked for a peer.
+// The boolean is false when the connection is no longer tracked.
+type GetPeerObservedTipFunc func(
+	ouroboros.ConnectionId,
+) (ochainsync.Tip, bool)
+
 // ConnectionLiveFunc reports whether a connection is still registered with the
 // connection manager. This allows the ledger to drop late chainsync events that
 // arrive after teardown.
@@ -399,6 +405,7 @@ type LedgerStateConfig struct {
 	BlockfetchLatencyFunc       BlockfetchLatencyFunc
 	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
 	GetActiveConnectionFunc     GetActiveConnectionFunc
+	GetPeerObservedTipFunc      GetPeerObservedTipFunc
 	ConnectionLiveFunc          ConnectionLiveFunc
 	ConnectionSwitchFunc        ConnectionSwitchFunc
 	ClearSeenHeadersFromFunc    ClearSeenHeadersFromFunc
