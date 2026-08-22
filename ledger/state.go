@@ -667,6 +667,12 @@ type LedgerState struct {
 	// (test-only), guarded by timeConverterOnce.
 	timeConverter     *SlotTimeConverter
 	timeConverterOnce sync.Once
+	// preByronPrefixWarned records that warnOnPreByronPrefixEpochCache has
+	// already reported the stale shape. loadEpochs runs twice on startup --
+	// once from PrepareEpochCacheForStartup and again from Start -- and both
+	// take the populated-cache branch on a database that already has epochs,
+	// so without this the operator sees the diagnosis duplicated.
+	preByronPrefixWarned bool
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
@@ -2612,7 +2618,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		newCurrentEra     eras.EraDesc
 		newPParams        lcommon.ProtocolParameters
 		newPrevPParams    lcommon.ProtocolParameters
-		eraResolved       bool
+		// ppComputed distinguishes "computePParams succeeded and returned
+		// nil" from "computePParams was skipped or failed". Byron has no
+		// protocol-parameter representation, so a rollback into Byron
+		// legitimately computes nil, and a nil check alone cannot tell that
+		// apart from an error -- which would leave the pre-rollback Shelley
+		// value in place under a Byron currentEra.
+		ppComputed  bool
+		eraResolved bool
 	)
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
@@ -2682,6 +2695,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		} else {
 			newPParams = pp
 			newPrevPParams = prevPP
+			ppComputed = true
 		}
 	}
 	newTipDensity := ls.chainFragmentDensity(
@@ -2719,7 +2733,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			ls.prevEraPParams = nil
 		}
 	}
-	if newPParams != nil {
+	// Assign on "was computed", not on "is non-nil". Rolling back into Byron
+	// computes nil legitimately, and the previous nil check skipped the
+	// assignment there, leaving ls.currentPParams holding its Shelley value
+	// while ls.currentEra had already become Byron. That contradicted the
+	// era/parameter invariant this path maintains everywhere else, and
+	// GetCurrentPParams reported Shelley parameters for a Byron ledger until
+	// the next rollover healed it via cloneProtocolParametersForEra.
+	if ppComputed {
 		ls.currentPParams = newPParams
 		ls.prevEraPParams = newPrevPParams
 	}
@@ -5942,6 +5963,21 @@ func (ls *LedgerState) loadPParams() error {
 // the OLD era, but currentPParams carries the bumped version.  If those
 // pparams map to a later era than currentEra, we restore TransitionKnown.
 func (ls *LedgerState) reconstructTransitionInfo() {
+	if ls.currentEra.Id == eras.ByronEraDesc.Id {
+		// Byron has no protocol-version pparams, so there is no transition to
+		// reconstruct and a Shelley-shaped value must not be read as one --
+		// that would fabricate a transition at epoch zero, when the first
+		// Shelley block on chain is what establishes the real boundary.
+		//
+		// This is not redundant with the currentPParams == nil check below.
+		// rollbackChainAndState calls this immediately after setting
+		// currentEra, and until ppComputed replaced the old nil test there a
+		// rollback into Byron left currentPParams holding its Shelley value
+		// under a Byron era -- exactly the shape this guard rejects. The guard
+		// stays as the invariant's backstop for any future caller that
+		// reaches here with the two out of step.
+		return
+	}
 	if ls.currentPParams == nil {
 		return
 	}
@@ -6348,8 +6384,15 @@ func (ls *LedgerState) computePParams(
 func (ls *LedgerState) computeGenesisProtocolParameters(
 	era eras.EraDesc,
 ) (lcommon.ProtocolParameters, error) {
+	// Byron has no protocol-parameter CBOR representation in the ledger
+	// state. Its genesis config supplies the era timing and security values;
+	// returning Shelley parameters here would make startup falsely infer a
+	// pending Shelley transition and would leave epoch rollovers with a
+	// parameter value that cannot be cloned using a Byron decoder.
+	if era.Id == eras.ByronEraDesc.Id {
+		return nil, nil
+	}
 	// Start with Shelley parameters as the base for all eras
-	// (Byron also uses Shelley as base)
 	pparams, err := eras.HardForkShelley(
 		ls.config.CardanoNodeConfig,
 		nil,
@@ -6420,6 +6463,80 @@ func (ls *LedgerState) PrepareEpochCacheForStartup() error {
 	})
 }
 
+// warnOnPreByronPrefixEpochCache reports a database written before the Byron
+// prefix was preserved at startup.
+//
+// The startup fix is deliberately scoped to the empty-database branch above, so
+// a database that already tagged epoch 0 with a post-Byron era is not repaired
+// by upgrading. Its Shelley-relative slots stay shifted, and the failure it
+// produces is the same genesis-overlay rejection as before the fix, with
+// nothing to indicate that the binary already carries it. Detecting the shape
+// turns that into a diagnosable message.
+//
+// Log only. Repair means resyncing from an empty database, which is the
+// operator's call and not something to do to their data on their behalf.
+//
+// The condition is the same one setEpochCache uses to choose a Byron start, so
+// the two cannot disagree: a Byron genesis is configured, the network does not
+// declare Shelley at genesis, and Dijkstra was not forced. Under those inputs a
+// fresh database tags epoch 0 as Byron, so a post-Byron era there could only
+// have been written by an earlier binary.
+func (ls *LedgerState) warnOnPreByronPrefixEpochCache() {
+	if len(ls.epochCache) == 0 ||
+		ls.config.CardanoNodeConfig == nil ||
+		ls.config.CardanoNodeConfig.ByronGenesis() == nil ||
+		ls.config.StartInDijkstra ||
+		shelleyDeclaredAtGenesis(ls.config.CardanoNodeConfig) {
+		return
+	}
+	firstEpoch := ls.epochCache[0]
+	if firstEpoch.EpochId != 0 || firstEpoch.EraId <= eras.ByronEraDesc.Id {
+		return
+	}
+	// Set only once the shape is confirmed, so a call that returned early
+	// above cannot suppress a later real diagnosis.
+	if ls.preByronPrefixWarned {
+		return
+	}
+	ls.preByronPrefixWarned = true
+	ls.config.Logger.Warn(
+		"database predates Byron prefix preservation and cannot be repaired in place",
+		"component",
+		"ledger",
+		"epoch",
+		firstEpoch.EpochId,
+		"era_id",
+		firstEpoch.EraId,
+		"expected_era_id",
+		eras.ByronEraDesc.Id,
+		"action",
+		"resync from an empty database to follow the canonical chain",
+	)
+}
+
+// shelleyDeclaredAtGenesis reports whether the configuration declares that
+// Shelley is already active at epoch 0, which is what distinguishes a network
+// with no Byron prefix from one that reaches Shelley on chain.
+//
+// Read through CardanoNodeConfig.DeclaredHardForkEpoch, which reports what the
+// file says regardless of ExperimentalHardForksEnabled. HardForkEpoch answers a
+// different question -- whether a fork is *scheduled* -- and returns
+// (0, false) when the flag is unset, which hides preview's declaration
+// (TestShelleyHardForkAtEpoch: 0 with ExperimentalHardForksEnabled: False).
+// Both accessors read the same field through the same switch, so there is one
+// interpreter of it rather than two.
+//
+// Only epoch 0 counts. A nonzero value declares a Shelley hard fork some
+// epochs in, which means epochs 0..N-1 are Byron -- a Byron prefix, not the
+// absence of one -- so those configurations keep the Byron start.
+func shelleyDeclaredAtGenesis(cfg *cardano.CardanoNodeConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	epoch, declared := cfg.DeclaredHardForkEpoch("shelley")
+	return declared && epoch == 0
+}
+
 func (ls *LedgerState) setEpochCache(
 	txn *database.Txn,
 	epochs []models.Epoch,
@@ -6442,6 +6559,7 @@ func (ls *LedgerState) setEpochCache(
 			return fmt.Errorf("unknown era ID %d", ls.currentEpoch.EraId)
 		}
 		ls.currentEra = *eraDesc
+		ls.warnOnPreByronPrefixEpochCache()
 		// Update metrics
 		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 		return nil
@@ -6467,6 +6585,21 @@ func (ls *LedgerState) setEpochCache(
 	startEraId := uint(0)
 	if startEraOk {
 		startEraId = startEra.Id
+	}
+	// A real Cardano network with Byron genesis starts in Byron and reaches
+	// Shelley when the first Shelley boundary is observed on chain. The
+	// Shelley protocol version identifies the first post-Byron era, but does
+	// not identify its absolute hard-fork epoch. Starting Shelley at slot 0
+	// shifts all Shelley-relative slots on networks with a Byron prefix (for
+	// example preprod), which makes genesis-overlay delegation reject the
+	// canonical first Shelley block. Configurations that declare Shelley at
+	// epoch 0 have no Byron prefix and keep the immediate transition, as do
+	// Shelley-only configs without Byron genesis.
+	if startEraId > eras.ByronEraDesc.Id &&
+		ls.config.CardanoNodeConfig.ByronGenesis() != nil &&
+		!ls.config.StartInDijkstra &&
+		!shelleyDeclaredAtGenesis(ls.config.CardanoNodeConfig) {
+		startEraId = eras.ByronEraDesc.Id
 	}
 	if ls.config.StartInDijkstra {
 		startEraId = eras.DijkstraEraDesc.Id
