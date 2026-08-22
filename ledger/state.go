@@ -7045,18 +7045,40 @@ func (ls *LedgerState) primaryChainContainsPoint(
 		}
 		return false, err
 	}
+	return ls.primaryChainContainsBlock(block, point)
+}
+
+// primaryChainContainsBlock checks whether block's internal ID currently maps
+// to point on the authoritative primary chain. The block itself may come from
+// an abandoned fork retained in the append-only blob store, so blob presence
+// alone is not authoritative.
+func (ls *LedgerState) primaryChainContainsBlock(
+	block models.Block,
+	point ocommon.Point,
+) (bool, error) {
+	if block.Slot != point.Slot || !bytes.Equal(block.Hash, point.Hash) {
+		return false, nil
+	}
+	return ls.primaryChainContainsBlockID(block.ID, point)
+}
+
+func (ls *LedgerState) primaryChainContainsBlockID(
+	blockID uint64,
+	point ocommon.Point,
+) (bool, error) {
 	// Blob presence by point is not authoritative: abandoned-fork blocks remain
 	// in the append-only blob store. The current primary chain is identified by
-	// its block-index entry, so compare the indexed block at this ID with the
-	// requested point.
-	indexedBlock, err := ls.db.BlockByIndex(block.ID, nil)
+	// its block-index entry, so compare the point encoded at this ID with the
+	// requested point. Reading only the index value avoids loading the indexed
+	// block's CBOR a second time while chainsyncMutex is held.
+	indexedPoint, err := ls.db.BlockPointByIndex(blockID, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil
 		}
 		return false, err
 	}
-	return bytes.Equal(indexedBlock.Hash, point.Hash), nil
+	return pointMatches(indexedPoint, point), nil
 }
 
 // durableAppliedFloor returns the point of the highest block whose ledger

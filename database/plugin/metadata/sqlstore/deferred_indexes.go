@@ -27,15 +27,36 @@ import (
 
 var _ metadata.DeferredIndexManager = (*Store)(nil)
 
-// DropDeferredIndexes records the durable recovery marker and drops the
-// manifest in one SQLite transaction.
-func (s *Store) DropDeferredIndexes() error {
+// withDeferredIndexWrite runs fn in one write transaction, with every
+// deferred.Retained index guaranteed resident before fn sees the database.
+//
+// Every entry point in this file returns with the store able to serve writes,
+// and SetTransaction's per-row idempotency deletes are full scans of a growing
+// table without those indexes. An older binary's manifest may have dropped one
+// that this manifest keeps out; the versioned migration that created it is
+// recorded complete, so restoring it here is its only way back. Enforcing that
+// once, on the path every drop and rebuild takes, is what keeps a rebuild path
+// from being added without it.
+func (s *Store) withDeferredIndexWrite(fn func(db queryer) error) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
 	return s.withWriteTransaction(
 		context.Background(),
 		nil,
+		func(db queryer) error {
+			if err := s.ensureRetainedIndexes(db); err != nil {
+				return err
+			}
+			return fn(db)
+		},
+	)
+}
+
+// DropDeferredIndexes records the durable recovery marker and drops the
+// manifest in one SQLite transaction.
+func (s *Store) DropDeferredIndexes() error {
+	return s.withDeferredIndexWrite(
 		func(db queryer) error {
 			if _, err := db.ExecContext(
 				context.Background(),
@@ -114,12 +135,7 @@ func (s *Store) buildDeferredIndexes(
 	indexes []deferred.Index,
 	clearPending bool,
 ) error {
-	if err := s.ensureReady(); err != nil {
-		return err
-	}
-	return s.withWriteTransaction(
-		context.Background(),
-		nil,
+	return s.withDeferredIndexWrite(
 		func(db queryer) error {
 			for _, index := range indexes {
 				exists, err := s.deferredIndexExists(db, index)
@@ -164,6 +180,40 @@ func (s *Store) buildDeferredIndexes(
 			return nil
 		},
 	)
+}
+
+// ensureRetainedIndexes creates any deferred.Retained index missing from the
+// schema. Present indexes cost one catalog lookup each and are left alone.
+func (s *Store) ensureRetainedIndexes(db queryer) error {
+	for _, index := range deferred.Retained {
+		exists, err := s.deferredIndexExists(db, index)
+		if err != nil {
+			return fmt.Errorf(
+				"check retained index %s: %w",
+				index.Name,
+				err,
+			)
+		}
+		if exists {
+			continue
+		}
+		statement := s.dialect.CreateIndexSQL(
+			index.Name,
+			index.Table,
+			index.Columns,
+		)
+		if _, err := db.ExecContext(
+			context.Background(),
+			statement,
+		); err != nil {
+			return fmt.Errorf(
+				"restore retained index %s: %w",
+				index.Name,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 func (s *Store) deferredIndexExists(
