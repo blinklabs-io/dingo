@@ -21,11 +21,13 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -180,6 +182,24 @@ func (f *trustWindowLedger) drainResyncs() int {
 	}
 }
 
+// requireResyncs consumes exactly n resync events, failing if fewer arrive.
+//
+// EventBus.Publish only enqueues; the SubscribeFunc handler runs on its own
+// goroutine, so drainResyncs can return before the last publish has landed. A
+// straggler then arrives during a later phase and is counted by an assertion
+// that expects silence, which fails on a false positive rather than a real one.
+func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
+	t.Helper()
+	for i := range n {
+		testutil.RequireReceive(
+			t,
+			f.resyncs,
+			2*time.Second,
+			fmt.Sprintf("pre-halt resync %d of %d", i+1, n),
+		)
+	}
+}
+
 // TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers issue
 // #3261: when every rewind target the at-tip recovery schedule produces lies
 // inside the Mithril protected window, the trust boundary guard refuses all of
@@ -238,7 +258,7 @@ func TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState(
 
 	// The terminal state is sticky and quiet: further deliveries of the same
 	// block keep halting and must not ask for yet another fresh intersection.
-	fixture.drainResyncs()
+	fixture.requireResyncs(t, recoveries)
 	for range 3 {
 		recovered, err := fixture.ls.tryRecoverFromTxValidationError(
 			fixture.failing,
