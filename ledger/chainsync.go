@@ -554,6 +554,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	defer pending.flush()
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
+	var effectiveObservedTip ochainsync.Tip
 	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
@@ -605,6 +606,10 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		}
 	}
 	if err == nil {
+		effectiveObservedTip, _ = ls.chainSwitchObservedTipForConnection(
+			e,
+			effectiveConnId,
+		)
 		requestFreshCursor = ls.chainSwitchNeedsFreshCursorLocked(
 			e,
 			effectiveConnId,
@@ -626,7 +631,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"local_tip_slot",
 			ls.PrimaryChainTip().Point.Slot,
 			"peer_tip_slot",
-			e.NewTip.Point.Slot,
+			effectiveObservedTip.Point.Slot,
 		)
 		ls.requestChainsyncResync(
 			effectiveConnId,
@@ -925,12 +930,48 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
 		return false
 	}
+	newObservedTip, ok := ls.chainSwitchObservedTipForConnection(e, connId)
+	if !ok {
+		return false
+	}
 	localTip := ls.PrimaryChainTip()
-	if e.NewTip.BlockNumber > localTip.BlockNumber {
+	if newObservedTip.BlockNumber > localTip.BlockNumber {
 		return true
 	}
-	return e.NewTip.BlockNumber == localTip.BlockNumber &&
-		e.NewTip.Point.Slot > localTip.Point.Slot
+	return newObservedTip.BlockNumber == localTip.BlockNumber &&
+		newObservedTip.Point.Slot > localTip.Point.Slot
+}
+
+func (ls *LedgerState) chainSwitchObservedTipForConnection(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	if sameConnectionId(connId, e.NewConnectionId) {
+		return chainSwitchNewObservedTip(e), true
+	}
+	if ls.config.GetPeerObservedTipFunc == nil {
+		return ochainsync.Tip{}, false
+	}
+	return ls.config.GetPeerObservedTipFunc(connId)
+}
+
+// chainSwitchNewObservedTip returns the peer frontier that chain selection
+// actually compared.
+//
+// The fallback is keyed on NewObservedTipSet, not on the frontier being
+// zero-valued. A zero frontier is a real observation meaning the peer delivered
+// nothing, which is exactly the advertising-only peer this path must not trust:
+// inferring "absent" from it handed such a peer's advertised outlier to ledger
+// cursor recovery. Only a producer that never populated the field -- an older
+// event, or a direct unit-test or integration constructor -- falls back to the
+// advertised tip.
+func chainSwitchNewObservedTip(
+	e chainselection.ChainSwitchEvent,
+) ochainsync.Tip {
+	if e.NewObservedTipSet {
+		return e.NewObservedTip
+	}
+	return e.NewTip
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
@@ -1052,6 +1093,92 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 		}
 	}
 	return false
+}
+
+// headerAlreadyOnPrimaryChain identifies a replayed header that is already
+// present on the authoritative primary chain but is behind its current tip.
+// This shape is normal while a from-genesis ledger catches up after restart:
+// the block store can be far ahead of the applied ledger, and a peer may
+// replay a historical header while the local chain tip has already advanced.
+// It is not a fork and must not contribute to headerMismatchCount.
+//
+// Only a point confirmed present in the primary-chain index suppresses fork
+// handling. A lookup failure is not evidence of a duplicate, so it is logged
+// and reported as a non-match.
+//
+// The caller holds chainsyncMutex, so the guards below keep storage reads off
+// paths that cannot need them. The origin point carries no hash, and a header
+// beyond the localTip snapshot is not observed in the primary-chain index at
+// handler entry. The O(1) local hash index then rejects an unknown fork header
+// before a point lookup could fall through to a configured Bark archive. On a
+// hash-index hit, the returned block ID is checked through the point-only
+// primary-chain index path, avoiding a second block-CBOR read. A hash-index
+// miss also probes the exact local point key for pre-index databases, but that
+// bounded compatibility lookup cannot fall through to Bark's archive.
+func (ls *LedgerState) headerAlreadyOnPrimaryChain(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) bool {
+	if ls.db == nil || len(e.Point.Hash) == 0 {
+		return false
+	}
+	if e.Point.Slot > localTip.Point.Slot {
+		return false
+	}
+	block, err := ls.blockByHash(e.Point.Hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		// Blocks written before the hash index was introduced still have an
+		// exact point key and metadata. Probe that local path without allowing
+		// Bark to fall through to its archive on an unknown fork hash.
+		blockID, localErr := database.BlockIDByPointLocal(ls.db, e.Point)
+		if errors.Is(localErr, models.ErrBlockNotFound) {
+			return false
+		}
+		if localErr != nil {
+			ls.config.Logger.Debug(
+				"could not check legacy historical header by local point",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", localErr,
+			)
+			return false
+		}
+		contains, localErr := ls.primaryChainContainsBlockID(blockID, e.Point)
+		if localErr != nil {
+			ls.config.Logger.Debug(
+				"could not check legacy historical header against primary chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", localErr,
+			)
+			return false
+		}
+		return contains
+	}
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not prefilter historical header by hash index",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	contains, err := ls.primaryChainContainsBlock(block, e.Point)
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not check historical header against primary chain",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	return contains
 }
 
 func (ls *LedgerState) findPeerForkPath(
@@ -2428,6 +2555,20 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 				return nil
 			}
+			// A header still on the authoritative primary chain is a
+			// historical replay, not a competing candidate. Checked after
+			// the in-memory discards above because it reads the block
+			// store while chainsyncMutex is held.
+			if ls.headerAlreadyOnPrimaryChain(e, localTip) {
+				ls.config.Logger.Debug(
+					"ignoring historical primary-chain roll forward",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"local_tip_slot", localTip.Point.Slot,
+					"connection_id", e.ConnectionId.String(),
+				)
+				return nil
+			}
 			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
@@ -2624,6 +2765,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 }
 
 func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
+	return ls.shouldEnforceBlockPipelineCrypto(slot)
+}
+
+// shouldEnforceBlockPipelineCrypto mirrors the serial header path's
+// validation-state gates for blocks read back from the primary chain. The
+// pipeline workers still run for every submitted block, but their result must
+// not reject trusted historical/Mithril data or a block whose epoch nonce is
+// intentionally unavailable until ledger apply catches up.
+func (ls *LedgerState) shouldEnforceBlockPipelineCrypto(slot uint64) bool {
 	validationEnabled, mithrilLedgerSlot := ls.validationStateSnapshot()
 	if !validationEnabled {
 		return false
@@ -2631,40 +2781,7 @@ func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false
 	}
-	if ls.blockPipelineRevalidatesCrypto() {
-		return false
-	}
 	return ls.hasCachedEpochNonceForSlot(slot)
-}
-
-// blockPipelineRevalidatesCrypto reports whether every block admitted here
-// will independently pass through the block-decode pipeline's VRF/KES
-// validate stage (LedgerStateConfig.BlockPipelineValidateEnabled) before
-// ledger apply -- see decodeReadChainBatch, which aborts the whole read
-// batch on a pipeline validation failure exactly as it does on a decode
-// failure. When that is true, the serial admission-time stateless VRF/KES
-// crypto check (verifyBlockHeaderOnlyCrypto / the crypto half of
-// verifyBlockHeaderCryptoBeforeApply) is redundant: the same block would be
-// cryptographically re-verified a second time, uselessly, before every
-// sync's steady-state admission path even finishes. Callers must still run
-// the non-crypto parts of admission-time verification unconditionally --
-// the registered-VRF-key and leader-eligibility state checks
-// (verifyBlockHeaderState) and the epoch-cache-advance side effect
-// (headerVerificationEpoch's ensureEpochForSlot) -- neither of which the
-// pipeline's validate stage performs (it is scoped to VRF/KES only, per
-// NewLedgerState's VerifyConfig) or can perform (the pipeline validates
-// blocks already committed to ls.chain, well after any admission-time
-// epoch-cache forecast would need to happen for a live, arriving header).
-//
-// ls.blockPipeline is nil whenever BlockPipelineEnabled is off or
-// ManualBlockProcessing bypasses ledgerReadChainIterator entirely (see
-// NewLedgerState), so checking it directly -- rather than only the config
-// flag -- also correctly keeps this false in both of those cases. The
-// pointer itself is set once at construction and never reassigned, so
-// reading it without ls.RLock() here is safe, matching every other
-// unguarded ls.blockPipeline read (e.g. decodeReadChainBatch).
-func (ls *LedgerState) blockPipelineRevalidatesCrypto() bool {
-	return ls.blockPipeline != nil && ls.config.BlockPipelineValidateEnabled
 }
 
 func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
@@ -3045,49 +3162,31 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	validationEnabled, _ := ls.validationStateSnapshot()
 	if validationEnabled {
 		var verifyErr error
-		if ls.blockPipelineRevalidatesCrypto() {
-			// The block-decode pipeline's validate stage will
-			// independently re-verify VRF/KES for this block before
-			// ledger apply (decodeReadChainBatch aborts the batch on
-			// failure exactly as it would for a crypto failure here), so
-			// redoing the same stateless crypto check at admission would
-			// only verify it twice. Run the non-crypto half of admission
-			// verification unconditionally: registered-VRF-key and
-			// leader-eligibility state checks, and the epoch-cache-advance
-			// side effect the pipeline's own Eta0Provider deliberately
-			// does not perform (see blockPipelineRevalidatesCrypto).
+		// Chainsync may already have verified the queued header before
+		// blockfetch started. When the fetched block matches that first
+		// verified queued header by point, a second verification is
+		// redundant. Chain insertion still checks that the block matches the
+		// queued header hash before accepting it.
+		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
+			e.Point,
+		)
+		if !headerAlreadyVerified &&
+			!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
+			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+				return err
+			}
+			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
+				e.Point,
+			)
+		}
+		if !headerAlreadyVerified {
+			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+		} else {
 			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
 				e.Block,
 				true,
 				true,
 			)
-		} else {
-			// Chainsync may already have verified the queued header before
-			// blockfetch started. When the fetched block matches that first
-			// verified queued header by point, a second VRF/KES verification is
-			// redundant. Chain insertion still checks that the block matches the
-			// queued header hash before accepting it.
-			headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
-				e.Point,
-			)
-			if !headerAlreadyVerified &&
-				!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
-				if err := ls.flushPendingBlockfetchBlocks(); err != nil {
-					return err
-				}
-				headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
-					e.Point,
-				)
-			}
-			if !headerAlreadyVerified {
-				verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
-			} else {
-				verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
-					e.Block,
-					true,
-					true,
-				)
-			}
 		}
 		if verifyErr != nil {
 			if errors.Is(verifyErr, errHeaderVerificationDeferred) {
@@ -4618,11 +4717,24 @@ func cloneProtocolParametersForEra(
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
+//
+// deferBoundarySnapshot suppresses the authoritative mark-snapshot capture so
+// the caller can take it after applying era transitions that this rollover does
+// not perform itself. Only the multi-era boundary path sets it: a boundary block
+// encoded in the era before the era its header announces needs the rollover to
+// enact source-era pparam updates first, so the final era and protocol
+// parameters do not exist yet when the capture would normally run. Capturing
+// then would durably record the source era's protocol major for an epoch that
+// runs at the successor era's, and disagree with the post-commit
+// EpochTransitionEvent. When set and the rollover reaches the capture point, the
+// result reports BoundarySnapshotDeferred so exactly one capture is taken —
+// re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
+	deferBoundarySnapshot bool,
 ) (*EpochRolloverResult, error) {
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
@@ -5039,8 +5151,14 @@ func (ls *LedgerState) processEpochRollover(
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
-	// CaptureGenesisSnapshot at startup.
-	if err := ls.captureEpochBoundarySnapshot(txn, currentEpoch, result); err != nil {
+	// CaptureGenesisSnapshot at startup. A multi-era boundary defers the capture
+	// to the caller, which takes it once the remaining era transitions have
+	// produced the era and protocol parameters the new epoch actually runs at.
+	if deferBoundarySnapshot {
+		result.BoundarySnapshotDeferred = true
+	} else if err := ls.captureEpochBoundarySnapshot(
+		txn, currentEpoch, result,
+	); err != nil {
 		return nil, err
 	}
 

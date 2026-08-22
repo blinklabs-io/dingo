@@ -16,27 +16,51 @@ package ledger
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// productionValidateVerifyConfig mirrors the VerifyConfig NewLedgerState
-// wires onto the block pipeline's validate stage: VRF/KES only, matching
-// the scope of the existing serial header-only check (verifyBlockHeaderHex).
+// productionValidateVerifyConfig mirrors the generic VRF/KES portion of
+// NewLedgerState's pipeline wiring. Dingo adds OpCert verification after the
+// generic stage succeeds.
 var productionValidateVerifyConfig = lcommon.VerifyConfig{
 	SkipBodyHashValidation:    true,
 	SkipTransactionValidation: true,
 	SkipStakePoolValidation:   true,
+}
+
+func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	_, err = NewLedgerState(LedgerStateConfig{
+		ChainManager:                 cm,
+		Database:                     db,
+		Logger:                       testLogger(),
+		BlockPipelineEnabled:         true,
+		BlockPipelineValidateEnabled: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "slotsPerKESPeriod")
 }
 
 // buildValidatedTestModelsBlock wraps testutil.BuildValidatedConwayBlockBytes
@@ -66,6 +90,295 @@ func buildValidatedTestModelsBlock(
 	}, vb
 }
 
+func wrongNonceHexFor(t *testing.T, nonceHex string) string {
+	t.Helper()
+	require.GreaterOrEqual(t, len(nonceHex), 2)
+
+	wrongNonceHex := nonceHex[:len(nonceHex)-2] + "00"
+	if wrongNonceHex == nonceHex {
+		wrongNonceHex = nonceHex[:len(nonceHex)-2] + "11"
+	}
+	return wrongNonceHex
+}
+
+func newValidatedPipelineTestLedger(
+	t *testing.T,
+	vb testutil.ValidatedConwayBlock,
+) *LedgerState {
+	t.Helper()
+	nonce, err := hex.DecodeString(vb.EpochNonceHex)
+	require.NoError(t, err)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 1_000_000,
+				Nonce:         nonce,
+			},
+		},
+		validationEnabled: true,
+		config: LedgerStateConfig{
+			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
+			Logger:                       testLogger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
+	ls.publishSnapshotsLocked()
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(1),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0(vb.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	t.Cleanup(func() {
+		if ls.blockPipeline != nil {
+			require.NoError(t, ls.blockPipeline.Stop())
+		}
+	})
+	return ls
+}
+
+// loadRealByronMainBlock returns a genuine Byron main block from the shared
+// ouroboros-consensus golden fixtures. The pipeline regression needs actual
+// Byron CBOR rather than a mock whose Era method merely reports Byron.
+func loadRealByronMainBlock(t *testing.T) models.Block {
+	t.Helper()
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	require.NoError(t, err)
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Block_Byron_regular",
+	)
+	require.NoError(t, err)
+	raw, err := fixture.ConsensusLedgerBlockBytes()
+	require.NoError(t, err)
+	blockType, err := fixture.LedgerBlockType()
+	require.NoError(t, err)
+	require.Equal(t, uint(gledger.BlockTypeByronMain), blockType)
+	decoded, err := gledger.NewBlockFromCbor(blockType, raw)
+	require.NoError(t, err)
+	return models.Block{
+		Slot:   decoded.SlotNumber(),
+		Hash:   decoded.Hash().Bytes(),
+		Number: decoded.BlockNumber(),
+		Type:   blockType,
+		Cbor:   raw,
+	}
+}
+
+func TestDecodeReadChainBatchAcceptsRealByronWithValidation(t *testing.T) {
+	block := loadRealByronMainBlock(t)
+	ls := &LedgerState{
+		validationEnabled: true,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         nil,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
+			Logger:                       testLogger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
+	ls.publishSnapshotsLocked()
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(1),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+		pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, ls.blockPipeline.Stop()) })
+
+	decoded, ok := ls.decodeReadChainBatch(
+		t.Context(),
+		[]models.Block{block},
+	)
+	require.True(t, ok)
+	require.Len(t, decoded, 1)
+	require.Equal(t, gledger.BlockTypeByronMain, decoded[0].Type())
+}
+
+func TestDecodeReadChainBatchRejectsInvalidOpCertWhenEnabled(t *testing.T) {
+	var seed [32]byte
+	seed[0] = 91
+	vb := testutil.BuildValidatedConwayBlockBytesWithInvalidOpCert(
+		t,
+		seed,
+		17,
+		100,
+		1,
+	)
+	block := models.Block{
+		Slot:   vb.Slot,
+		Hash:   vb.Hash,
+		Number: vb.BlockNumber,
+		Type:   gledger.BlockTypeConway,
+		Cbor:   vb.Cbor,
+	}
+	ls := newValidatedPipelineTestLedger(t, vb)
+
+	_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+	assert.False(
+		t,
+		ok,
+		"VRF/KES-valid block with an unrelated OpCert signer must be rejected",
+	)
+}
+
+func TestDecodeReadChainBatchReturnsRecoverableValidationError(t *testing.T) {
+	var seed [32]byte
+	seed[0] = 94
+	vb := testutil.BuildValidatedConwayBlockBytesWithInvalidOpCert(
+		t,
+		seed,
+		20,
+		100,
+		1,
+	)
+	block := models.Block{
+		Slot:   vb.Slot,
+		Hash:   vb.Hash,
+		Number: vb.BlockNumber,
+		Type:   gledger.BlockTypeConway,
+		Cbor:   vb.Cbor,
+	}
+	ls := newValidatedPipelineTestLedger(t, vb)
+
+	_, err := ls.decodeReadChainBatchWithError(
+		t.Context(),
+		[]models.Block{block},
+	)
+	require.Error(t, err)
+	var validationErr *headerValidationError
+	require.ErrorAs(t, err, &validationErr)
+	require.NotNil(t, validationErr)
+	assert.Equal(t, block.Slot, validationErr.BlockPoint.Slot)
+	assert.Equal(t, block.Hash, validationErr.BlockPoint.Hash)
+	assert.Contains(t, validationErr.Cause.Error(), "operational certificate")
+}
+
+func TestDecodeReadChainBatchRejectsExpiredOpCertWhenEnabled(t *testing.T) {
+	var seed [32]byte
+	seed[0] = 92
+	const slotsPerKesPeriod = uint64(129600)
+	block, vb := buildValidatedTestModelsBlock(
+		t,
+		seed,
+		18,
+		2*slotsPerKesPeriod,
+		1,
+	)
+	ls := newValidatedPipelineTestLedger(t, vb)
+	ls.config.CardanoNodeConfig.ShelleyGenesis().MaxKESEvolutions = 1
+
+	_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+	assert.False(
+		t,
+		ok,
+		"block beyond the OpCert's maximum KES evolutions must be rejected",
+	)
+}
+
+func TestDecodeReadChainBatchSkipsValidationWithoutCachedNonce(
+	t *testing.T,
+) {
+	var seed [32]byte
+	seed[0] = 93
+	block, vb := buildValidatedTestModelsBlock(t, seed, 19, 100, 1)
+	ls := newValidatedPipelineTestLedger(t, vb)
+	ls.epochCache = []models.Epoch{
+		{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 1_000_000,
+			Nonce:         nil,
+		},
+	}
+	ls.publishSnapshotsLocked()
+	require.NoError(t, ls.blockPipeline.Stop())
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(1),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+
+	decoded, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+	require.True(
+		t,
+		ok,
+		"the read path must mirror admission's nonce-availability gate",
+	)
+	require.Len(t, decoded, 1)
+}
+
+func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*LedgerState, models.Block)
+	}{
+		{
+			name: "historical validation disabled",
+			mutate: func(ls *LedgerState, _ models.Block) {
+				ls.validationEnabled = false
+			},
+		},
+		{
+			name: "inside Mithril trust boundary",
+			mutate: func(ls *LedgerState, block models.Block) {
+				ls.mithrilLedgerSlot = block.Slot
+			},
+		},
+	}
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seed [32]byte
+			seed[0] = byte(95 + index) //nolint:gosec
+			block, vb := buildValidatedTestModelsBlock(
+				t,
+				seed,
+				21,
+				100,
+				1,
+			)
+			ls := newValidatedPipelineTestLedger(t, vb)
+			tt.mutate(ls, block)
+			ls.publishSnapshotsLocked()
+
+			require.NoError(t, ls.blockPipeline.Stop())
+			ls.blockPipeline = pipeline.NewBlockPipeline(
+				pipeline.WithDecodeWorkers(1),
+				pipeline.WithValidateWorkers(1),
+				pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
+				pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
+				pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+			)
+			require.NoError(t, ls.blockPipeline.Start(t.Context()))
+
+			decoded, ok := ls.decodeReadChainBatch(
+				t.Context(),
+				[]models.Block{block},
+			)
+			require.True(t, ok)
+			require.Len(t, decoded, 1)
+		})
+	}
+}
+
 func TestDecodeReadChainBatchValidatesBlocksWhenEnabled(t *testing.T) {
 	var seed1, seed2 [32]byte
 	seed1[0], seed2[0] = 1, 2
@@ -75,23 +388,7 @@ func TestDecodeReadChainBatchValidatesBlocksWhenEnabled(t *testing.T) {
 	block2, _ := buildValidatedTestModelsBlock(t, seed2, nonceSeed, 500, 2)
 	rawBatch := []models.Block{block1, block2}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger:                       testLogger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
-	ls.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(2),
-		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0(vb1.EpochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(vb1.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
-	)
-	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	defer func() {
-		require.NoError(t, ls.blockPipeline.Stop())
-	}()
+	ls := newValidatedPipelineTestLedger(t, vb1)
 
 	decoded, ok := ls.decodeReadChainBatch(t.Context(), rawBatch)
 	require.True(t, ok)
@@ -128,23 +425,7 @@ func TestDecodeReadChainBatchValidatesBlockAcrossKesPeriodBoundary(
 	)
 	require.GreaterOrEqual(t, vb.Slot, uint64(slotsPerKesPeriod))
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger:                       testLogger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
-	ls.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(1),
-		pipeline.WithValidateWorkers(1),
-		pipeline.WithEta0(vb.EpochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
-	)
-	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	defer func() {
-		require.NoError(t, ls.blockPipeline.Stop())
-	}()
+	ls := newValidatedPipelineTestLedger(t, vb)
 
 	decoded, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
 	require.True(
@@ -163,31 +444,20 @@ func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 	seed[0] = 3
 	block, vb := buildValidatedTestModelsBlock(t, seed, 7, 100, 1)
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger:                       testLogger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
+	ls := newValidatedPipelineTestLedger(t, vb)
+	require.NoError(t, ls.blockPipeline.Stop())
 	// Configure the pipeline with a *different* epoch nonce than the one the
 	// block was actually proven against, so VRF verification genuinely
 	// fails (rather than tampering CBOR bytes, which risks failing decode
 	// instead of validation and testing the wrong thing).
-	wrongNonceHex := vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "00"
-	if wrongNonceHex == vb.EpochNonceHex {
-		wrongNonceHex = vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "11"
-	}
 	ls.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0(wrongNonceHex),
+		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	defer func() {
-		require.NoError(t, ls.blockPipeline.Stop())
-	}()
 
 	_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
 	assert.False(t, ok, "batch with a VRF-invalid block must be rejected")
@@ -233,12 +503,8 @@ func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
 		t, seed4, correctNonceSeed, 700, 4,
 	)
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger:                       testLogger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
+	ls := newValidatedPipelineTestLedger(t, vb2)
+	require.NoError(t, ls.blockPipeline.Stop())
 	ls.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
@@ -247,9 +513,6 @@ func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
 		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	defer func() {
-		require.NoError(t, ls.blockPipeline.Stop())
-	}()
 
 	_, ok := ls.decodeReadChainBatch(
 		t.Context(),
@@ -299,14 +562,10 @@ func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 	// Wire a nonce that will fail validation -- if decodeReadChainBatch
 	// incorrectly consulted the validation outcome anyway, this would flip
 	// the assertion below from ok=true to ok=false.
-	wrongNonceHex := vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "00"
-	if wrongNonceHex == vb.EpochNonceHex {
-		wrongNonceHex = vb.EpochNonceHex[:len(vb.EpochNonceHex)-2] + "11"
-	}
 	ls.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0(wrongNonceHex),
+		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
@@ -432,13 +691,10 @@ func TestBlockPipelineEta0Provider_ReturnsNonceHex(t *testing.T) {
 }
 
 // TestBlockPipelineEta0Provider_EmptyCache is a regression test for
-// blockPipelineEta0Provider previously wrapping *every* error
-// headerVerificationEpoch can return in errBlockPipelineEta0Unavailable.
-// An empty epoch cache makes epochForSlot fail to find any epoch at all --
-// errHeaderVerificationDeferred, not the Byron-only "epoch found but has no
-// nonce" case (errEpochNonceUnavailable) -- so drainBlockPipelineErrors must
-// classify it as an unexpected error, not silently as the harmless Byron
-// case.
+// blockPipelineEta0Provider previously wrapping *every* lookup error in
+// errBlockPipelineEta0Unavailable. An empty epoch cache means the published
+// state does not cover the slot at all, so it must be classified as deferred
+// rather than as the distinct "covered epoch has no nonce" case.
 func TestBlockPipelineEta0Provider_EmptyCache(t *testing.T) {
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -450,22 +706,18 @@ func TestBlockPipelineEta0Provider_EmptyCache(t *testing.T) {
 
 	_, err := ls.blockPipelineEta0Provider(1000)
 	require.Error(t, err)
+	assert.True(t, errors.Is(err, errHeaderVerificationDeferred))
 	assert.False(
 		t,
 		errors.Is(err, errBlockPipelineEta0Unavailable),
-		"a missing-epoch-data error must not be classified as the "+
-			"expected Byron-only eta0-unavailable case",
+		"a slot outside the cache must not be classified as a covered epoch without a nonce",
 	)
 }
 
-// TestBlockPipelineEta0Provider_NoNonceForEpoch simulates a Byron-era epoch
-// (present in the cache but with no Praos nonce yet) and confirms the
-// provider fails rather than returning a bogus nonce -- decodeReadChainBatch
-// relies on this to ignore validation failures specifically (and only) for
-// Byron-era blocks. It also confirms drainBlockPipelineErrors' classifying
-// sentinel is present on the error, since only this specific "epoch has no
-// nonce" case is meant to be wrapped in it (see
-// TestBlockPipelineEta0Provider_EmptyCache for the contrasting case).
+// TestBlockPipelineEta0Provider_NoNonceForEpoch covers an epoch present in the
+// cache without a published Praos nonce. This is permanent for Byron and can
+// be transient later; the provider must fail rather than inventing a nonce,
+// while preserving the sentinel that lets enforcement defer to admission.
 func TestBlockPipelineEta0Provider_NoNonceForEpoch(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
@@ -488,7 +740,6 @@ func TestBlockPipelineEta0Provider_NoNonceForEpoch(t *testing.T) {
 	assert.True(
 		t,
 		errors.Is(err, errBlockPipelineEta0Unavailable),
-		"the Byron-only epoch-has-no-nonce case must be classified as "+
-			"the expected eta0-unavailable error",
+		"a covered epoch without a nonce must retain the eta0-unavailable sentinel",
 	)
 }

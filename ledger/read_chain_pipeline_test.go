@@ -34,6 +34,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// decodeReadChainBatch retains the former boolean test surface while
+// production uses decodeReadChainBatchWithError to route persisted validation
+// failures into chain recovery.
+func (ls *LedgerState) decodeReadChainBatch(
+	ctx context.Context,
+	rawBatch []models.Block,
+) (decoded []gledger.Block, ok bool) {
+	decoded, err := ls.decodeReadChainBatchWithError(ctx, rawBatch)
+	return decoded, err == nil
+}
+
 // buildDecodableTestBlock returns a models.Block wrapping a real, decodable
 // Conway block at the given slot/block number, along with its canonical
 // point. The block bytes themselves come from the shared
@@ -141,6 +152,45 @@ func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
 	}()
 	_, ok = pipelineLS.decodeReadChainBatch(ctx, rawBatch)
 	assert.False(t, ok)
+}
+
+func TestLedgerReadChainIteratorForwardsDecodeError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	badPoint := ocommon.Point{
+		Slot: 20,
+		Hash: []byte("bad-hash-bad-hash-bad-hash-32by"),
+	}
+	iter := &scriptedLedgerReadIterator{
+		ctx: ctx,
+		results: []*chain.ChainIteratorResult{{
+			Point: badPoint,
+			Block: models.Block{
+				Slot: badPoint.Slot,
+				Hash: badPoint.Hash,
+				Type: gledger.BlockTypeConway,
+				Cbor: []byte{0xff, 0xff, 0xff},
+			},
+		}},
+	}
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	resultCh := make(chan readChainResult)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	}()
+
+	select {
+	case result := <-resultCh:
+		require.Error(t, result.err)
+		assert.Contains(t, result.err.Error(), "decode block at slot 20")
+		close(result.done)
+	case <-readerDone:
+		t.Fatal("reader returned without forwarding the decode error")
+	}
+	cancel()
+	<-readerDone
 }
 
 // TestLedgerReadChainIteratorPipelineMatchesSerial exercises the full

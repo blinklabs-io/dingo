@@ -100,6 +100,25 @@ const maxAtTipRecoveryDescents = 2
 // ChainSync connection (issue #3005).
 const maxReplayRecoveryNoProgress = 2
 
+// maxMithrilBoundaryRecoveryRejections bounds how many successful validation
+// recovery attempts may refuse a rewind at the Mithril trust boundary without
+// advancing the applied ledger tip before the failure is declared
+// unrepairable (issues #3261 and #3301).
+//
+// The bound covers the whole legal rewind space. A boundary rejection rewinds
+// to the applied ledger tip -- the deepest point recovery may reach without
+// crossing the anchor -- and asks ChainSync for a fresh intersection, so one
+// rejection per scheduled rewind depth exhausts every target the schedule can
+// produce, plus one for the capped retry the schedule settles on. Past that,
+// every legal target has been replayed and returned the same verdict.
+const maxMithrilBoundaryRecoveryRejections = maxAtTipRecoveryAttempts + 1
+
+type mithrilBoundaryRecoveryProgress struct {
+	highWaterTipSlot uint64
+	rejections       int
+	halted           bool
+}
+
 type atTipRecoveryAttempt struct {
 	BlockPoint ocommon.Point
 	TxHash     []byte
@@ -739,6 +758,7 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 ) error {
 	return ls.rejectRecoveryAtMithrilBoundary(
 		"replay recovery rollback exceeds Mithril trust boundary",
+		validationErr,
 		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
 			ls.config.Logger.Warn(
 				"detected replay recovery below Mithril trust boundary, rejecting peer chain",
@@ -980,6 +1000,7 @@ func (ls *LedgerState) rejectAtTipRecoveryAtMithrilBoundary(
 ) error {
 	return ls.rejectRecoveryAtMithrilBoundary(
 		"at-tip recovery rollback exceeds Mithril trust boundary",
+		validationErr,
 		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
 			ls.config.Logger.Warn(
 				"at-tip validation recovery would cross Mithril trust boundary, rejecting peer chain",
@@ -1016,8 +1037,74 @@ func (ls *LedgerState) rejectAtTipRecoveryAtMithrilBoundary(
 	)
 }
 
+// observeMithrilBoundaryRejection tallies consecutive successful boundary
+// recovery attempts that do not advance the applied ledger high-water mark and
+// reports whether the legal rewind space is exhausted.
+//
+// This is the repairability decision for a validation failure, and it is
+// deliberately not a list of error types (issue #3261). Recovery has exactly
+// one lever for any validation rule: rewind below the failing block and replay,
+// so the ledger re-derives the state that block reads. The Mithril trust
+// boundary is a hard floor on that lever -- blocks at or below
+// mithrilLedgerSlot were accepted on certificate evidence rather than replay,
+// so their state cannot be re-derived at all. When the failing block sits only
+// a short distance past the anchor, every target the rewind schedule produces
+// falls inside the protected window and is refused; the only legal target left
+// is the applied ledger tip, which each refusal already rewinds to. Once that
+// has been replayed for every scheduled depth and the same failure comes back,
+// no local history remains that could change the verdict, whatever rule
+// rejected the block -- a Conway rule 45 delegation failure against imported
+// account state reaches this point exactly as a structural error would.
+//
+// The escape a refusal offers is peer rotation, and that is what makes the loop
+// unbounded rather than merely slow: it cannot help when the block is
+// canonical, because the next peer serves the same block. Deepening the rewind
+// to the anchor itself is not an alternative -- it costs a full replay of the
+// protected window and still reads the same imported state.
+//
+// The applied tip is the convergence signal rather than the failing block or
+// transaction identity. Replay can encounter different, slowly advancing
+// failures while rebuilding to the same applied tip; rearming the budget on
+// each identity would let that sequence retry forever (issue #3301).
+//
+// Runs on the ledger pipeline goroutine, like its at-tip and replay siblings,
+// so the tally needs no additional locking. Callers record an attempt only
+// after the local rewind succeeds, so a rollback mechanics error cannot consume
+// the validation-recovery budget.
+func (ls *LedgerState) observeMithrilBoundaryRejection(
+	tipSlot uint64,
+) (int, bool) {
+	if ls.mithrilBoundaryRecovery == nil ||
+		tipSlot > ls.mithrilBoundaryRecovery.highWaterTipSlot {
+		ls.mithrilBoundaryRecovery = &mithrilBoundaryRecoveryProgress{
+			highWaterTipSlot: tipSlot,
+			rejections:       1,
+		}
+	} else {
+		ls.mithrilBoundaryRecovery.rejections++
+	}
+	rejections := ls.mithrilBoundaryRecovery.rejections
+	if rejections > maxMithrilBoundaryRecoveryRejections {
+		ls.mithrilBoundaryRecovery.halted = true
+	}
+	return rejections, ls.mithrilBoundaryRecovery.halted
+}
+
+// resetMithrilBoundaryRejections clears the boundary-rejection tally once the
+// applied ledger tip advances beyond the high-water mark the refusals could
+// not cross. Peer rotation found a chain this node can follow, so the trust
+// window is no longer wedged and a later failure starts with a fresh budget.
+func (ls *LedgerState) resetMithrilBoundaryRejections(newTipSlot uint64) {
+	if ls.mithrilBoundaryRecovery == nil ||
+		newTipSlot <= ls.mithrilBoundaryRecovery.highWaterTipSlot {
+		return
+	}
+	ls.mithrilBoundaryRecovery = nil
+}
+
 func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 	errContext string,
+	validationErr *txValidationError,
 	logRejection func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point),
 ) error {
 	ls.RLock()
@@ -1031,12 +1118,46 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 			ErrRollbackExceedsMithrilBoundary,
 		)
 	}
+	if ls.mithrilBoundaryRecovery != nil &&
+		ls.mithrilBoundaryRecovery.halted {
+		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
+	}
 	logRejection(mithrilLedgerSlot, rewindPoint)
 	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to Mithril trust boundary: %w",
 			err,
 		)
+	}
+	rejections, exhausted := ls.observeMithrilBoundaryRejection(
+		rewindPoint.Slot,
+	)
+	if exhausted {
+		ls.metrics.incMithrilTrustWindowUnrepairable()
+		ls.config.Logger.Error(
+			"validation failure inside the Mithril trust window cannot be repaired by replaying local history, halting ledger pipeline",
+			"component",
+			"ledger",
+			"tx_hash",
+			hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot",
+			validationErr.BlockPoint.Slot,
+			"failing_block_hash",
+			hex.EncodeToString(validationErr.BlockPoint.Hash),
+			"ledger_tip_slot",
+			rewindPoint.Slot,
+			"ledger_tip_hash",
+			hex.EncodeToString(rewindPoint.Hash),
+			"mithril_ledger_slot",
+			mithrilLedgerSlot,
+			"boundary_rejections",
+			rejections,
+			"error",
+			validationErr.Cause,
+			"hint",
+			"the node has stopped following the chain; the state this block needs was established at or before the Mithril anchor and cannot be re-derived without crossing it, so re-bootstrap from a newer Mithril snapshot or resync from genesis",
+		)
+		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
 	}
 	ls.chainsyncMutex.Lock()
 	ls.resetChainsyncResyncState()

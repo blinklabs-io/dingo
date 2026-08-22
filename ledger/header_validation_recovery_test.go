@@ -178,6 +178,65 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 	}
 }
 
+func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	blocks := make([]models.Block, 0, 4)
+	for slot := uint64(1); slot <= 4; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	ledgerTipBlock := blocks[1]
+	ledgerTip := ochainsync.Tip{
+		Point:       makeTestPoint(ledgerTipBlock),
+		BlockNumber: ledgerTipBlock.Number,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+
+	ls := &LedgerState{
+		db:                db,
+		chain:             cm.PrimaryChain(),
+		currentTip:        ledgerTip,
+		validationEnabled: true,
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	done := make(chan struct{})
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{
+		err: &headerValidationError{
+			BlockPoint: makeTestPoint(blocks[2]),
+			Cause:      errors.New("invalid operational certificate"),
+		},
+		done: done,
+	}
+	close(results)
+
+	err = ls.ledgerProcessBlocksFromSource(t.Context(), results)
+	require.ErrorIs(t, err, errRestartLedgerPipeline)
+	require.Equal(t, ledgerTipBlock.Slot, cm.PrimaryChain().Tip().Point.Slot)
+	select {
+	case <-done:
+	default:
+		t.Fatal("reader result was not released after validation recovery")
+	}
+}
+
 // A rejected block at or behind the ledger tip has no rewind target that
 // precedes it, so both the chain rewind and the ledger rollback would be
 // no-ops against their own position and the block would survive. Reporting

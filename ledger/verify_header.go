@@ -62,27 +62,18 @@ var (
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
 	)
-	// errEpochNonceUnavailable is raised only by headerVerificationEpoch's
-	// empty-nonce branch: epoch data covers the slot, but that epoch has no
-	// Praos nonce recorded. In practice this only ever happens for
-	// Byron-era slots, which have no Praos nonce at all -- every other
-	// error headerVerificationEpoch can return (deferred/past-horizon,
-	// hard-fork-summary lookup failures, forecast-build errors, missing
-	// epoch data) is a genuinely unexpected condition, not this
-	// Byron-specific case, and must not be confused with it.
+	// errEpochNonceUnavailable marks an epoch-cache entry that covers the
+	// requested slot but has no published Praos nonce. Byron epochs always
+	// have this shape; a post-Byron entry can also have it transiently while
+	// nonce state catches up. It is distinct from a slot that is outside the
+	// published cache entirely.
 	errEpochNonceUnavailable = errors.New(
 		"epoch has no nonce for slot",
 	)
-	// errBlockPipelineEta0Unavailable is what blockPipelineEta0Provider
-	// wraps errEpochNonceUnavailable in -- the expected, Byron-only "no
-	// Praos nonce for this slot" case (see blockPipelineEta0Provider's doc
-	// comment). Every other error headerVerificationEpoch can return is
-	// returned by blockPipelineEta0Provider unchanged, not wrapped in this
-	// sentinel, so drainBlockPipelineErrors's classification (which uses
-	// this sentinel to log/count the expected case below error level)
-	// correctly buckets a genuine deferred/forecast failure on a
-	// non-Byron block as unexpected instead of silently treating it as
-	// the harmless Byron case.
+	// errBlockPipelineEta0Unavailable marks an epoch-cache entry with no
+	// Praos nonce. This is expected for Byron and can be transient for later
+	// eras; slots outside the published cache use
+	// errHeaderVerificationDeferred instead.
 	errBlockPipelineEta0Unavailable = errors.New(
 		"block-processing pipeline: epoch nonce unavailable",
 	)
@@ -1354,42 +1345,42 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 
 // blockPipelineEta0Provider implements gouroboros' pipeline.Eta0Provider for
 // the block-processing pipeline's validate stage (issue #1894 phase 3). It
-// looks up the epoch nonce for a block's slot using the same epoch-cache
-// machinery as the serial header-crypto path (headerVerificationEpoch,
-// epochNonceHex), but never advances the epoch cache
-// (allowEpochCacheAdvance=false): the pipeline only ever validates blocks
-// already committed to ls.chain (read back by ledgerReadChainIterator), so
-// unlike the chainsync-header path -- which must forecast ahead of ledger
-// apply for freshly-arriving live headers -- the epoch cache should already
-// cover them. Not advancing it also avoids mutating shared epoch-cache state
-// concurrently from multiple validate-stage worker goroutines, which all
-// call this function without any external synchronization between them.
+// reads only the already-published epoch cache. Unlike the admission path it
+// must neither forecast nor rebuild the hard-fork summary: validate workers
+// run concurrently over blocks already committed to ls.chain, and a missing
+// cached nonce means this later validation is deferred under the same gate as
+// the serial path. Avoiding headerVerificationEpoch here also keeps the hot
+// path O(logical cache scan) instead of rebuilding the full era summary for
+// every block.
 //
-// Byron-era slots have no Praos epoch nonce and always fail this lookup
-// with errEpochNonceUnavailable (headerVerificationEpoch rejects an epoch
-// with an empty nonce); callers must treat that specific failure on a
-// Byron-era block as expected, exactly as the serial path's
-// verifyBlockHeaderHex explicitly skips Byron blocks rather than trying to
-// validate them.
+// Byron-era slots have no Praos epoch nonce. Callers skip VRF/KES validation
+// for decoded Byron blocks, exactly as the serial path's verifyBlockHeaderHex
+// does. A missing nonce for any decoded post-Byron block is handled by the
+// same validation-state gate as admission rather than treated as a
+// cryptographic rejection.
 //
-// Only errEpochNonceUnavailable is wrapped in errBlockPipelineEta0Unavailable
-// below. Every other error headerVerificationEpoch can return --
-// errHeaderVerificationDeferred, hard-fork-summary lookup failures,
-// forecast-build errors -- is none of them Byron-specific and is returned
-// unchanged, so drainBlockPipelineErrors's classification (which keys off
-// errBlockPipelineEta0Unavailable) does not misclassify a genuine failure
-// on a non-Byron block as the expected, harmless case.
+// An epoch without a nonce is wrapped in errBlockPipelineEta0Unavailable.
+// A slot outside the published cache is wrapped in
+// errHeaderVerificationDeferred, so the error drain and enforcement path can
+// distinguish missing state from a cryptographic rejection.
 func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
-	epoch, err := ls.headerVerificationEpoch(slot, false)
+	epoch, err := ls.epochForSlot(slot)
 	if err != nil {
-		if errors.Is(err, errEpochNonceUnavailable) {
-			return "", fmt.Errorf(
-				"%w: %w",
-				errBlockPipelineEta0Unavailable,
-				err,
-			)
-		}
-		return "", err
+		return "", fmt.Errorf(
+			"%w: block-processing pipeline nonce lookup for slot %d: %w",
+			errHeaderVerificationDeferred,
+			slot,
+			err,
+		)
+	}
+	if len(epoch.Nonce) == 0 {
+		return "", fmt.Errorf(
+			"%w: %w: epoch %d has no nonce for slot %d",
+			errBlockPipelineEta0Unavailable,
+			errEpochNonceUnavailable,
+			epoch.EpochId,
+			slot,
+		)
 	}
 	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
 }

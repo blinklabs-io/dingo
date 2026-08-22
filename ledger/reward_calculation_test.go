@@ -4892,6 +4892,7 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 			},
 			eras.ShelleyEraDesc,
 			pparams,
+			false,
 		)
 		return err
 	})

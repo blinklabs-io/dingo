@@ -187,6 +187,15 @@ Plain `docker compose` invocations are not location-independent — pass
 compose file's `build.context` paths (`.` and `../../..`) are resolved
 relative to the compose file itself, not your shell's CWD.
 
+The block replay validation path is opt-in, matching production defaults.
+Set both passthroughs when a change needs that path in either DevNet profile:
+
+```bash
+DEVNET_BLOCK_PIPELINE_ENABLED=true \
+DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED=true \
+  ./run-tests.sh --accelerated
+```
+
 The scripts must, however, stay at this path inside the repo: the compose
 file references `../../..` to pick up the Dingo source tree for its build
 context, and the `topology/*.json` and `testnet*.yaml` files are mounted by

@@ -278,6 +278,42 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 	t *testing.T,
 ) {
+	// Positive control: prove this test reaches the recovery body when no
+	// batch is active. Without this control, replacing the whole body of
+	// ensureBlockfetchDrainingAfterForkQueueFailure with `return` would make
+	// the absence-only assertions below pass.
+	control := newChainsyncRollbackFixture(t)
+	controlConnId := testChainsyncConnId(6204, 3001)
+	controlHeader := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("fork-overflow-drain-positive-control"),
+		),
+		prevHash:    lcommon.NewBlake2b256(control.currentTip.Point.Hash),
+		blockNumber: control.currentTip.BlockNumber + 1,
+		slot:        control.currentTip.Point.Slot + 1,
+	}
+	require.NoError(t, control.ls.chain.AddBlockHeader(controlHeader))
+	controlRequests := 0
+	control.ls.config.BlockfetchRequestRangeFunc = func(
+		_ ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) error {
+		controlRequests++
+		return nil
+	}
+	control.ls.ensureBlockfetchDrainingAfterForkQueueFailure(
+		controlConnId,
+		nil,
+	)
+	require.Equal(
+		t,
+		1,
+		controlRequests,
+		"positive control must start a fetch when no batch is active",
+	)
+	require.NotNil(t, control.ls.chainsyncBlockfetchReadyChan)
+
 	fixture := newChainsyncRollbackFixture(t)
 	maxHeaders := fixture.ls.chain.MaxQueuedHeaders()
 	connId := testChainsyncConnId(6202, 3001)

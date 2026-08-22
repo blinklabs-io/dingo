@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -317,21 +318,45 @@ INSERT INTO address_transaction (
 	return nil
 }
 
+// transactionWitnessTables are the per-transaction detail tables
+// storeTransactionWitnesses rewrites wholesale. Every SetTransaction clears
+// the rows the previous attempt left behind before re-inserting, so a
+// re-processed block cannot accumulate duplicate witnesses.
+var transactionWitnessTables = []string{
+	"key_witness",
+	"witness_scripts",
+	"redeemer",
+	"plutus_data",
+}
+
+// TransactionWitnessTables lists the tables TransactionWitnessCleanupSQL is
+// issued against, in the order storeTransactionWitnesses clears them.
+func TransactionWitnessTables() []string {
+	return slices.Clone(transactionWitnessTables)
+}
+
+// TransactionWitnessCleanupSQL is the idempotency delete storeTransactionWitnesses
+// runs against one witness table on every API-mode SetTransaction.
+//
+// Exported so a test can pin its query plan against the statement the store
+// actually runs. The predicate column must stay indexed through bulk load:
+// unindexed, each of these deletes degrades into a full scan of a table that
+// grows with every transaction written, which makes historical backfill
+// quadratic (issue #3253).
+func TransactionWitnessCleanupSQL(table string) string {
+	return "DELETE FROM " + table + " WHERE transaction_id = ?"
+}
+
 func storeTransactionWitnesses(
 	db queryer,
 	transactionID int64,
 	transaction lcommon.Transaction,
 	slot uint64,
 ) error {
-	for _, table := range []string{
-		"key_witness",
-		"witness_scripts",
-		"redeemer",
-		"plutus_data",
-	} {
+	for _, table := range transactionWitnessTables {
 		if _, err := db.ExecContext(
 			context.Background(),
-			"DELETE FROM "+table+" WHERE transaction_id = ?",
+			TransactionWitnessCleanupSQL(table),
 			transactionID,
 		); err != nil {
 			return fmt.Errorf("delete existing %s rows: %w", table, err)

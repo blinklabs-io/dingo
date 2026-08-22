@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	metadataSqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -30,12 +31,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newSyncBarrierTestDB builds a Database pairing a mock blob store with a real
-// in-memory sqlite metadata store, which is the combination the combined-commit
-// durability barrier applies to.
+// newSyncBarrierTestDB builds a Database pairing the given blob store with a
+// real in-memory sqlite metadata store, which is the combination the
+// combined-commit durability barrier applies to. The parameter is the
+// interface so a case can inject a store whose Sync or SetCommitTimestamp
+// fails without changing the shared mockBlobStore.
 func newSyncBarrierTestDB(
 	t *testing.T,
-	store *mockBlobStore,
+	store blob.BlobStore,
 ) *Database {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
