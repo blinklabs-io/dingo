@@ -130,6 +130,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 	db, err := database.New(&database.Config{
 		DataDir: tmpDir,
 		Logger:  logger,
+		Network: "preview",
 	}, stores)
 	require.NoError(t, err)
 
@@ -745,11 +746,16 @@ func requireGenesisDeepForkWins(
 		)
 	}
 
-	require.Eventually(t, func() bool {
-		return n.ledgerState.Tip().Point.Slot == ancestor.Slot
-	}, 10*time.Second, 20*time.Millisecond,
+	require.Eventually(
+		t,
+		func() bool {
+			return n.ledgerState.Tip().Point.Slot == ancestor.Slot
+		},
+		10*time.Second,
+		20*time.Millisecond,
 		"ledger did not roll back to the Genesis-selected fork intersection at slot %d (tip is %d)",
-		ancestor.Slot, n.ledgerState.Tip().Point.Slot,
+		ancestor.Slot,
+		n.ledgerState.Tip().Point.Slot,
 	)
 }
 
@@ -1205,8 +1211,8 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 
 // TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss confirms the other
 // half of the same fix: restoring a snapshot from a genuinely different
-// network onto a running node must be rejected — caught by
-// validateRestoredAgainstNodeConfig before the swap — with the node's own
+// network onto a running node must be rejected by the manifest compatibility
+// callback before restore preflight can reset either remote store, with the node's own
 // data and tip left completely untouched and the node still usable,
 // rather than the node being torn down (dingo#1651 follow-up).
 func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
@@ -1246,12 +1252,12 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	oldCtx := n.ctx
 	_, err = n.Restore(context.Background(), snapshotDir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "node settings mismatch")
+	require.Contains(t, err.Error(), "manifest network")
 
 	// n.db is deliberately not asserted to be the same pointer here --
 	// see TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss's
 	// identical comment: Restore now quiesces and closes storage before
-	// validateRestoredAgainstNodeConfig runs at all, so a rejected restore
+	// the manifest compatibility callback runs, so a rejected restore
 	// still ends up with a freshly reopened *database.Database over the
 	// same untouched data, not the original pointer.
 	require.Same(t, oldCtx, n.ctx)

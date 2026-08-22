@@ -38,3 +38,17 @@ func (d *BlobStoreS3) Backup(ctx context.Context, w io.Writer) error {
 func (d *BlobStoreS3) Restore(ctx context.Context, r io.Reader) error {
 	return blobbackup.Restore(ctx, d, r, maxBlobReadBytes, "s3 restore")
 }
+
+// ValidateBackup verifies the complete shared cloud backup framing without
+// touching the configured bucket.
+func (d *BlobStoreS3) ValidateBackup(ctx context.Context, r io.Reader) error {
+	return blobbackup.Validate(
+		ctx, r, maxBlobReadBytes, "s3 backup validation",
+	)
+}
+
+// Reset removes the configured prefix after lifecycle restore has retained a
+// rollback backup of it.
+func (d *BlobStoreS3) Reset(ctx context.Context) error {
+	return blobbackup.Reset(ctx, d, "s3 reset")
+}

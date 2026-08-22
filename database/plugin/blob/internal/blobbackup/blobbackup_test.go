@@ -251,6 +251,7 @@ func (it *fakeIterator) Item() types.BlobItem {
 type fakeTxn struct {
 	store   *fakeStore
 	pending map[string][]byte
+	deleted map[string]struct{}
 }
 
 func (t *fakeTxn) Commit() error {
@@ -258,6 +259,9 @@ func (t *fakeTxn) Commit() error {
 		return t.store.failCommitErr
 	}
 	maps.Copy(t.store.data, t.pending)
+	for key := range t.deleted {
+		delete(t.store.data, key)
+	}
 	return nil
 }
 
@@ -277,7 +281,11 @@ func newFakeStore() *fakeStore {
 }
 
 func (s *fakeStore) NewTransaction(bool) types.Txn {
-	return &fakeTxn{store: s, pending: map[string][]byte{}}
+	return &fakeTxn{
+		store:   s,
+		pending: map[string][]byte{},
+		deleted: map[string]struct{}{},
+	}
 }
 
 func (s *fakeStore) NewIterator(
@@ -313,6 +321,16 @@ func (s *fakeStore) Set(txn types.Txn, key, value []byte) error {
 	return nil
 }
 
+func (s *fakeStore) Delete(txn types.Txn, key []byte) error {
+	ft, ok := txn.(*fakeTxn)
+	if !ok {
+		return errors.New("blobbackup test: wrong txn type")
+	}
+	delete(ft.pending, string(key))
+	ft.deleted[string(key)] = struct{}{}
+	return nil
+}
+
 // TestBackupRestoreRoundTripFake validates a full Backup-then-Restore round
 // trip against the fake store, confirming Restore accepts a genuine
 // terminator (correct record count and checksum) produced by a real Backup
@@ -341,6 +359,69 @@ func TestBackupRestoreRoundTripFake(t *testing.T) {
 		),
 	)
 	require.Equal(t, []byte("value-a"), dst.data["key-a"])
+}
+
+func TestValidateBackupRoundTripAndCorruption(t *testing.T) {
+	src := newFakeStore()
+	txn := src.NewTransaction(true)
+	require.NoError(t, src.Set(txn, []byte("key-a"), []byte("value-a")))
+	require.NoError(t, txn.Commit())
+
+	var backup bytes.Buffer
+	require.NoError(
+		t,
+		Backup(
+			context.Background(), src, &backup, testMaxValueLen, "test backup",
+		),
+	)
+	valid := append([]byte(nil), backup.Bytes()...)
+	require.NoError(t, Validate(
+		context.Background(),
+		bytes.NewReader(valid),
+		testMaxValueLen,
+		"test validation",
+	))
+
+	require.Error(t, Validate(
+		context.Background(),
+		bytes.NewReader(valid[:len(valid)-1]),
+		testMaxValueLen,
+		"test validation",
+	))
+
+	corrupt := append([]byte(nil), valid...)
+	corrupt[len(corrupt)-1] ^= 0xff
+	err := Validate(
+		context.Background(),
+		bytes.NewReader(corrupt),
+		testMaxValueLen,
+		"test validation",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "corrupted")
+}
+
+func TestResetRemovesEveryKeyInBoundedBatches(t *testing.T) {
+	store := newFakeStore()
+	txn := store.NewTransaction(true)
+	for i := range DefaultRestoreBatchRecords + 7 {
+		key := fmt.Appendf(nil, "key-%04d", i)
+		require.NoError(t, store.Set(txn, key, []byte("value")))
+	}
+	require.NoError(t, txn.Commit())
+
+	require.NoError(t, Reset(context.Background(), store, "test reset"))
+	require.Empty(t, store.data)
+}
+
+func TestResetCommitFailurePreservesOriginalBatch(t *testing.T) {
+	store := newFakeStore()
+	store.data["original"] = []byte("value")
+	store.failCommitErr = errors.New("injected commit failure")
+
+	err := Reset(context.Background(), store, "test reset")
+	require.Error(t, err)
+	require.Equal(t, map[string][]byte{"original": []byte("value")}, store.data)
 }
 
 // TestRestoreRejectsTerminatorWithMismatchedChecksum guards the exact gap a

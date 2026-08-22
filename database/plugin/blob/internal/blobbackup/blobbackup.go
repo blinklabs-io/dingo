@@ -102,6 +102,7 @@ type Store interface {
 	) types.BlobIterator
 	Get(txn types.Txn, key []byte) ([]byte, error)
 	Set(txn types.Txn, key, value []byte) error
+	Delete(txn types.Txn, key []byte) error
 }
 
 // Backup streams every key/value currently in store to w, using the store's
@@ -409,6 +410,137 @@ func Restore(
 		)
 	}
 	return nil
+}
+
+// Validate reads and verifies a complete backup stream without writing any
+// records to a store. Restore orchestration calls this before it captures or
+// mutates the live target, so failures after the fixed header (including a
+// truncated record, a bad terminator checksum/count, and trailing data) are
+// rejected while the original database is still intact.
+func Validate(
+	ctx context.Context,
+	r io.Reader,
+	maxValueLen int64,
+	errPrefix string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cr := &contextReader{ctx: ctx, r: bufio.NewReader(r)}
+	var header [5]byte
+	if _, err := io.ReadFull(cr, header[:]); err != nil {
+		return fmt.Errorf("%s: read header: %w", errPrefix, err)
+	}
+	if [4]byte(header[:4]) != Magic {
+		return fmt.Errorf("%s: not a recognized backup stream", errPrefix)
+	}
+	if header[4] != Version {
+		return fmt.Errorf(
+			"%s: unsupported backup version %d", errPrefix, header[4],
+		)
+	}
+
+	checksum := crc32.NewIEEE()
+	var recordCount uint64
+	for {
+		key, value, err := ReadRecord(cr, maxValueLen)
+		if err != nil {
+			if term, ok := errors.AsType[*ErrTerminator](err); ok {
+				if term.RecordCount != recordCount ||
+					term.Checksum != checksum.Sum32() {
+					return fmt.Errorf(
+						"%s: backup stream is corrupted or truncated -- "+
+							"terminator declares %d record(s) (checksum %08x), "+
+							"but %d record(s) (checksum %08x) were actually read",
+						errPrefix, term.RecordCount, term.Checksum,
+						recordCount, checksum.Sum32(),
+					)
+				}
+				var trailing [1]byte
+				_, trailErr := io.ReadFull(cr, trailing[:])
+				switch {
+				case trailErr == nil:
+					return fmt.Errorf(
+						"%s: backup stream has trailing data after its "+
+							"terminator (concatenated or malformed backup)",
+						errPrefix,
+					)
+				case errors.Is(trailErr, io.EOF):
+					return nil
+				default:
+					return fmt.Errorf(
+						"%s: read after backup terminator: %w",
+						errPrefix, trailErr,
+					)
+				}
+			}
+			return fmt.Errorf("%s: %w", errPrefix, err)
+		}
+		_ = WriteRecord(checksum, key, value, maxValueLen)
+		recordCount++
+	}
+}
+
+// Reset removes every key from store in bounded transactions. It is used only
+// by live restore after a complete rollback backup has been written. Restarting
+// the iterator after each committed batch keeps iterator state independent of
+// the writes and makes a retry continue from the remaining keys.
+func Reset(
+	ctx context.Context,
+	store Store,
+	errPrefix string,
+) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		readTxn := store.NewTransaction(false)
+		it := store.NewIterator(readTxn, types.BlobIteratorOptions{})
+		if it == nil {
+			_ = readTxn.Rollback()
+			return fmt.Errorf("%s: blob iterator is nil", errPrefix)
+		}
+		if err := it.Err(); err != nil {
+			it.Close()
+			_ = readTxn.Rollback()
+			return fmt.Errorf("%s: blob iterator: %w", errPrefix, err)
+		}
+		keys := make([][]byte, 0, DefaultRestoreBatchRecords)
+		for it.Valid() && len(keys) < DefaultRestoreBatchRecords {
+			if err := ctx.Err(); err != nil {
+				it.Close()
+				_ = readTxn.Rollback()
+				return err
+			}
+			item := it.Item()
+			if item != nil {
+				keys = append(keys, append([]byte(nil), item.Key()...))
+			}
+			it.Next()
+		}
+		iterErr := it.Err()
+		it.Close()
+		_ = readTxn.Rollback()
+		if iterErr != nil {
+			return fmt.Errorf("%s: blob iterator: %w", errPrefix, iterErr)
+		}
+		if len(keys) == 0 {
+			return nil
+		}
+
+		writeTxn := store.NewTransaction(true)
+		for _, key := range keys {
+			if err := store.Delete(writeTxn, key); err != nil {
+				_ = writeTxn.Rollback()
+				return fmt.Errorf("%s: delete key %x: %w", errPrefix, key, err)
+			}
+		}
+		if err := writeTxn.Commit(); err != nil {
+			_ = writeTxn.Rollback()
+			return fmt.Errorf("%s: commit delete batch: %w", errPrefix, err)
+		}
+	}
 }
 
 // partialDataWarning returns an empty string only if the store is
