@@ -311,8 +311,12 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		cfg.SlotDuration = time.Second // Default 1 second slots
 	}
 
+	// Only assign a non-nil fallback. Storing a nil *PoolCredentials in the
+	// interface leaves f.kes non-nil while its value is nil, so the
+	// "KES signer not configured" guard in SignBlockHeader never fires and the
+	// call panics on a nil-pointer dereference instead.
 	kesSigner := cfg.KESSigner
-	if kesSigner == nil {
+	if kesSigner == nil && cfg.Credentials != nil {
 		kesSigner = cfg.Credentials
 	}
 
@@ -730,8 +734,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return err
 	}
 
-	// Ensure KES key is at correct period
+	// Ensure KES key is at correct period. A failure here is a lost slot and
+	// must be counted as one: without it a node whose KES agent never delivered
+	// a key incremented only forgeNodeIsLeader, so Forge_could_not_forge stayed
+	// at zero while every won slot was forfeited.
 	if err := f.kes.UpdateKESPeriod(kesPeriod); err != nil {
+		f.incCouldNotForge()
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 

@@ -72,6 +72,14 @@ func NewPoolCredentials() *PoolCredentials {
 	return &PoolCredentials{}
 }
 
+// secretFileBytes reads a secret key file's bytes. It is a variable so a test
+// can retain the exact buffer loadSecretKeyFromFile wipes; the wipe is
+// otherwise unobservable, because the buffer is local and becomes unreachable
+// garbage the moment the function returns.
+var secretFileBytes = func(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxSecretKeyFileSize+1))
+}
+
 // loadSecretKeyFromFile opens and checks a secret key before reading from the
 // same handle, avoiding a TOCTOU race between the permission check and read.
 func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
@@ -94,7 +102,13 @@ func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
 	if err := keystore.CheckOpenFilePermissions(f); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxSecretKeyFileSize+1))
+	data, err := secretFileBytes(f)
+	// The file bytes are the cardano-cli envelope, whose cborHex field carries
+	// the secret key in the clear. Wipe them before returning so the only copy
+	// left behind is the parsed key the caller owns and wipes itself.
+	// LoadKeyFromBytes decodes cborHex into a fresh buffer, so nothing in the
+	// returned key aliases this one.
+	defer wipeBytes(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
 	}
@@ -634,4 +648,11 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 		)
 	}
 	return true, vrfMatched, nil
+}
+
+// wipeBytes zeroes a buffer that held secret material.
+func wipeBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
