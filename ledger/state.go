@@ -314,12 +314,34 @@ func (ls *LedgerState) handleDBTxnResult(err error) error {
 	return err
 }
 
+// blockApplyCandidatePoint returns the last block that the block-apply
+// callback will examine. A block at the next epoch boundary is examined and
+// cached, but the suffix after it is not touched until the next loop.
+func blockApplyCandidatePoint(
+	blocks []ledger.Block,
+	epoch models.Epoch,
+) ocommon.Point {
+	candidate := blocks[0]
+	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	for _, block := range blocks {
+		candidate = block
+		if epoch.SlotLength == 0 || block.SlotNumber() >= epochEnd {
+			break
+		}
+	}
+	return ocommon.NewPoint(
+		candidate.SlotNumber(),
+		candidate.Hash().Bytes(),
+	)
+}
+
 // submitBlockApplyDBTxn serializes a block-apply commit and its after-commit
 // transaction events against every primary-chain rollback that emits undo
-// events. The expected ledger tip and candidate batch tip are captured before
-// waiting for the serializer. If a rollback wins the race, either the ledger
-// tip changes or the candidate block disappears from the primary chain, and
-// the stale batch is rejected rather than published after the undo.
+// events. The expected ledger tip and last block the batch will examine are
+// captured before waiting for the serializer. If a rollback wins the race,
+// either the ledger tip changes or the examined block disappears from the
+// primary chain, and the stale batch is rejected rather than published after
+// the undo.
 func (ls *LedgerState) submitBlockApplyDBTxn(
 	expectedTip ochainsync.Tip,
 	candidateTip ocommon.Point,
@@ -5199,9 +5221,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// restarts (errRestartLedgerPipeline), and abandoning a
 			// publish on a restart would drop events subscribers
 			// derive state from. Only Close cancels publishCtx.
-			candidateTip := ocommon.NewPoint(
-				nextBatch[end-1].SlotNumber(),
-				nextBatch[end-1].Hash().Bytes(),
+			candidateTip := blockApplyCandidatePoint(
+				nextBatch[i:end],
+				snapshotEpoch,
 			)
 			err = ls.submitBlockApplyDBTxn(
 				snapshotTip,

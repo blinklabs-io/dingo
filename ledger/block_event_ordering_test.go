@@ -251,9 +251,10 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 	commitReached := make(chan struct{})
 	allowPublish := make(chan struct{})
 	var releaseOnce sync.Once
+	var commitOnce sync.Once
 	releasePublish := func() { releaseOnce.Do(func() { close(allowPublish) }) }
 	ls.beforeTransactionApplyPublish = func() {
-		close(commitReached)
+		commitOnce.Do(func() { close(commitReached) })
 		<-allowPublish
 	}
 
@@ -328,6 +329,63 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 		"rollback after Apply publication",
 	))
 	require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
+}
+
+func TestBlockApplyCandidatePointUsesLastExaminedBlock(t *testing.T) {
+	blockHash := func(value byte) []byte {
+		ret := make([]byte, 32)
+		ret[0] = value
+		return ret
+	}
+	blocks := []ledger.Block{
+		&readChainMockBlock{slot: 9, hash: blockHash(9)},
+		&readChainMockBlock{slot: 10, hash: blockHash(10)},
+		&readChainMockBlock{slot: 11, hash: blockHash(11)},
+	}
+
+	testCases := []struct {
+		name     string
+		blocks   []ledger.Block
+		epoch    models.Epoch
+		wantSlot uint64
+		wantHash []byte
+	}{
+		{
+			name:     "chunk without boundary",
+			blocks:   blocks,
+			epoch:    models.Epoch{StartSlot: 0, LengthInSlots: 20, SlotLength: 1},
+			wantSlot: 11,
+			wantHash: blockHash(11),
+		},
+		{
+			name:     "boundary before suffix",
+			blocks:   blocks,
+			epoch:    models.Epoch{StartSlot: 0, LengthInSlots: 10, SlotLength: 1},
+			wantSlot: 10,
+			wantHash: blockHash(10),
+		},
+		{
+			name:     "boundary at offset zero",
+			blocks:   blocks[1:],
+			epoch:    models.Epoch{StartSlot: 0, LengthInSlots: 10, SlotLength: 1},
+			wantSlot: 10,
+			wantHash: blockHash(10),
+		},
+		{
+			name:     "missing epoch examines first block",
+			blocks:   blocks,
+			epoch:    models.Epoch{},
+			wantSlot: 9,
+			wantHash: blockHash(9),
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := blockApplyCandidatePoint(testCase.blocks, testCase.epoch)
+			require.Equal(t, testCase.wantSlot, got.Slot)
+			require.Equal(t, testCase.wantHash, got.Hash)
+		})
+	}
 }
 
 func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {

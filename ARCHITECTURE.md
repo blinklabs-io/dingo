@@ -7668,8 +7668,8 @@ immediately in practice.
 `rollbackChainAndState` sequences three steps in order, and the ordering is
 load-bearing in both directions: `drainBlockPipelineBeforeRollback` first,
 then, while holding `transactionEventMutex`,
-`validateAndEmitRollbackUndo` (reject-then-emit-undo-events, from issue
-#2287/#3209's ordering fix, `ledger/block_event.go`) and
+`validateAndEmitRollbackUndo` (reject-then-emit-undo-events, from the
+ordering fix for issues #2287/#3209 in `ledger/block_event.go`) and
 `ls.chain.Rollback`. Draining before taking the transaction-event serializer
 avoids waiting for pipeline work whose commit needs that same serializer.
 Draining before validating/emitting matters because
