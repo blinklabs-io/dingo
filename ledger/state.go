@@ -1204,14 +1204,15 @@ func (ls *LedgerState) isValidEraAdvancement(
 }
 
 // eraTransitionPath returns the consecutive era IDs needed to advance from
-// currentEraID to targetEraID. A boundary block may require two transitions
-// when it is encoded in the immediately preceding era but carries the
-// protocol major for its successor (for example, the Prime-mainnet
+// currentEraID to targetEraID. A two-transition path is accepted only when
+// allowTwoTransitions records that boundaryEraForBlock validated the block's
+// immediate-successor header elevation (for example, the Prime-mainnet
 // Mary->Alonzo->Babbage boundary). More than two transitions in one boundary
-// are not accepted: there is no safe way to reconstruct the omitted
+// are never accepted: there is no safe way to reconstruct the omitted
 // per-epoch rules from a single block.
 func (ls *LedgerState) eraTransitionPath(
 	currentEraID, targetEraID uint,
+	allowTwoTransitions bool,
 ) ([]uint, bool) {
 	if currentEraID == targetEraID {
 		return nil, true
@@ -1227,8 +1228,9 @@ func (ls *LedgerState) eraTransitionPath(
 			targetIndex = i
 		}
 	}
-	if currentIndex < 0 || targetIndex <= currentIndex ||
-		targetIndex-currentIndex > 2 {
+	distance := targetIndex - currentIndex
+	if currentIndex < 0 || targetIndex <= currentIndex || distance > 2 ||
+		(distance == 2 && !allowTwoTransitions) {
 		return nil, false
 	}
 	path := make([]uint, 0, targetIndex-currentIndex)
@@ -1242,24 +1244,27 @@ func (ls *LedgerState) eraTransitionPath(
 // The chainsync era identifies the block body, while its header protocol
 // major can identify the successor era during a hard-fork boundary. Only the
 // immediately following header era is accepted, so an arbitrary future
-// protocol version cannot turn into an era transition accidentally.
+// protocol version cannot turn into an era transition accidentally. The
+// boolean result records whether that validated elevation justifies a
+// two-transition boundary path.
 func (ls *LedgerState) boundaryEraForBlock(
 	currentEraID, blockEraID, headerMajor uint,
 	headerMajorKnown bool,
-) uint {
+) (uint, bool) {
 	targetEraID := blockEraID
 	if !headerMajorKnown {
-		return targetEraID
+		return targetEraID, false
 	}
 	headerEraID, ok := ls.eraForVersion(headerMajor)
 	if !ok || headerEraID == blockEraID ||
 		!ls.isValidEraAdvancement(blockEraID, headerEraID) {
-		return targetEraID
+		return targetEraID, false
 	}
-	if _, ok := ls.eraTransitionPath(currentEraID, headerEraID); !ok {
-		return targetEraID
+	path, ok := ls.eraTransitionPath(currentEraID, headerEraID, true)
+	if !ok {
+		return targetEraID, false
 	}
-	return headerEraID
+	return headerEraID, len(path) == 2
 }
 
 func (ls *LedgerState) isHardForkTransition(
@@ -4541,6 +4546,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	}
 	// Process blocks
 	var nextEpochEraId uint
+	var allowTwoEraBoundaryTransition bool
 	var needsEpochRollover bool
 	var end, i int
 	var err error
@@ -4557,6 +4563,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	for {
 		if needsEpochRollover {
 			needsEpochRollover = false
+			boundaryAllowsTwoEraTransition := allowTwoEraBoundaryTransition
+			allowTwoEraBoundaryTransition = false
 
 			// Capture current state with read lock before the transaction.
 			// This avoids holding ls.Lock() during SubmitAsyncDBTxn, which
@@ -4602,13 +4610,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// larger jump because omitted per-epoch rules cannot be
 				// reconstructed safely from one block.
 				transitionPath, ok := ls.eraTransitionPath(
-					snapshotEra.Id, nextEpochEraId,
+					snapshotEra.Id,
+					nextEpochEraId,
+					boundaryAllowsTwoEraTransition,
 				)
 				if !ok {
 					return fmt.Errorf(
 						"refusing era advancement from %d to %d: "+
-							"only one or two consecutive transitions are "+
-							"permitted at a boundary",
+							"two consecutive transitions require a "+
+							"validated successor header at the boundary",
 						snapshotEra.Id, nextEpochEraId,
 					)
 				}
@@ -5138,7 +5148,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							headerMajor, headerMajorKnown := HeaderProtocolMajor(
 								next.Header(),
 							)
-							nextEpochEraId = ls.boundaryEraForBlock(
+							nextEpochEraId,
+								allowTwoEraBoundaryTransition = ls.boundaryEraForBlock(
 								snapshotEra.Id,
 								uint(next.Era().Id),
 								headerMajor,

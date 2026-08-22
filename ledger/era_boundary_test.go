@@ -38,6 +38,7 @@ func TestEraTransitionPathAllowsPrimeBoundaryPair(t *testing.T) {
 	path, ok := ls.eraTransitionPath(
 		eras.MaryEraDesc.Id,
 		eras.BabbageEraDesc.Id,
+		true,
 	)
 	require.True(t, ok)
 	require.Equal(
@@ -52,6 +53,7 @@ func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
 	path, ok := ls.eraTransitionPath(
 		eras.MaryEraDesc.Id,
 		eras.ConwayEraDesc.Id,
+		true,
 	)
 	require.False(t, ok)
 	require.Nil(t, path)
@@ -59,24 +61,51 @@ func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
 
 func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
 	ls := &LedgerState{}
-	target := ls.boundaryEraForBlock(
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.MaryEraDesc.Id,
 		eras.AlonzoEraDesc.Id,
 		7,
 		true,
 	)
 	require.Equal(t, eras.BabbageEraDesc.Id, target)
+	require.True(t, allowTwoTransitions)
 }
 
 func TestBoundaryEraForBlockRejectsNonAdjacentHeaderEra(t *testing.T) {
 	ls := &LedgerState{}
-	target := ls.boundaryEraForBlock(
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.MaryEraDesc.Id,
 		eras.AlonzoEraDesc.Id,
-		12,
+		eras.ConwayEraDesc.MinMajorVersion,
 		true,
 	)
 	require.Equal(t, eras.AlonzoEraDesc.Id, target)
+	require.False(t, allowTwoTransitions)
+}
+
+func TestEraAdvancementRejectsRawTwoStepBodyJumpWithoutHeaderElevation(
+	t *testing.T,
+) {
+	ls := &LedgerState{}
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
+		eras.MaryEraDesc.Id,
+		eras.BabbageEraDesc.Id,
+		eras.BabbageEraDesc.MinMajorVersion,
+		true,
+	)
+	require.Equal(t, eras.BabbageEraDesc.Id, target)
+	require.False(t, allowTwoTransitions)
+
+	_, ok := ls.eraTransitionPath(
+		eras.MaryEraDesc.Id,
+		target,
+		allowTwoTransitions,
+	)
+	require.False(
+		t,
+		ok,
+		"a raw two-era body jump must not skip the omitted era",
+	)
 }
 
 // newBoundaryRolloverLedger builds a LedgerState positioned at the end of a
@@ -169,7 +198,9 @@ func newBoundaryRolloverLedger(
 // once, after those transitions, so its protocol version is the one the new
 // epoch actually runs at. Capturing it at the end of the rollover records the
 // source era's major instead, and that value is durable.
-func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(t *testing.T) {
+func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
+	t *testing.T,
+) {
 	ls, db := newBoundaryRolloverLedger(t)
 
 	var captures []event.EpochTransitionEvent
@@ -183,6 +214,7 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(t *testing.T)
 	transitionPath, ok := ls.eraTransitionPath(
 		eras.ShelleyEraDesc.Id,
 		eras.MaryEraDesc.Id,
+		true,
 	)
 	require.True(t, ok)
 	require.Len(t, transitionPath, 2)
