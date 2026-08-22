@@ -114,8 +114,8 @@ func TestSyncStateConstants(t *testing.T) {
 // The import path clears each of these tables by transaction_id once per
 // transaction before re-inserting, so deferring the index the predicate needs
 // turns a b-tree descent into a scan of a table the same import path is
-// growing. Two of the four tables listed here were never deferred; the other
-// two were, and that is what made Mithril's API-mode backfill quadratic.
+// growing. Two of the five tables listed here were never deferred; the other
+// three were, and that is what made Mithril's API-mode backfill quadratic.
 //
 // Pinned by name because the manifest is data: nothing fails to compile when a
 // contributor adds one of these back, and the cost only shows up on a
