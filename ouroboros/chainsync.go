@@ -733,6 +733,10 @@ func (o *Ouroboros) chainsyncClientRollForward(
 ) error {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		// Record arrival before chain-selection, deduplication, or EventBus
+		// delivery can delay the header. The ledger uses this timestamp for the
+		// Ouroboros future-header check.
+		arrivalTime := time.Now()
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
 		point := ocommon.NewPoint(blockSlot, blockHash)
@@ -828,6 +832,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 					Point:        point,
 					Type:         blockType,
 					BlockHeader:  v,
+					ArrivalTime:  arrivalTime,
 					Tip:          tip,
 				},
 			)
@@ -893,6 +898,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				ledger.ChainsyncEventType,
 				ledger.ChainsyncEvent{
 					ConnectionId: ctx.ConnectionId,
+					ArrivalTime:  arrivalTime,
 					Point:        point,
 					Type:         blockType,
 					BlockHeader:  v,
