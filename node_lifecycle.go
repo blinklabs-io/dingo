@@ -1317,6 +1317,28 @@ func (n *Node) Snapshot(
 	)
 }
 
+func (n *Node) stopForPendingRestoreRollback(
+	err error,
+	recovery *lifecycle.RestoreRecovery,
+) error {
+	if !errors.Is(err, lifecycle.ErrRestoreRollbackPending) {
+		return nil
+	}
+	// Automatic compensation already failed under a non-cancelled context.
+	// Reopening these providers could make the node serve an unknown mixture
+	// of original and incoming state. Keep it stopped for supervised recovery
+	// from the retained backups instead.
+	n.cancel()
+	if recovery != nil {
+		return fmt.Errorf(
+			"restore: %w (node stopped with remote rollback pending at %q)",
+			err,
+			recovery.BackupDir(),
+		)
+	}
+	return fmt.Errorf("restore: %w", err)
+}
+
 // Restore replaces this running node's database with the snapshot at
 // snapshotDir, quiescing and reinitializing every storage-dependent
 // subsystem in-process (see this file's package comment for exactly what
@@ -1329,9 +1351,10 @@ func (n *Node) Snapshot(
 //
 // A bad snapshot is rejected with both original stores intact. A failure after
 // a live external reset automatically restores the original metadata and blob
-// pair before this method resumes the node. Only an unconfirmed storage drain,
-// an unrecoverable local directory swap, or reinitialization failure brings the
-// node down (n.cancel()) for a supervised restart.
+// pair before this method resumes the node. An incomplete automatic rollback,
+// unconfirmed storage drain, unrecoverable local directory swap, or
+// reinitialization failure brings the node down (n.cancel()) for a supervised
+// restart.
 func (n *Node) Restore(
 	ctx context.Context,
 	snapshotDir string,
@@ -1488,6 +1511,9 @@ func (n *Node) Restore(
 	)
 	if err != nil {
 		_ = os.RemoveAll(stagingDir)
+		if stopErr := n.stopForPendingRestoreRollback(err, recovery); stopErr != nil {
+			return lifecycle.Manifest{}, stopErr
+		}
 		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, fmt.Errorf(

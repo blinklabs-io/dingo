@@ -1148,6 +1148,19 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	}
 }
 
+func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{ctx: ctx, cancel: cancel}
+	pendingErr := errors.Join(
+		lifecycle.ErrRestoreRollbackPending,
+		errors.New("injected remote rollback failure"),
+	)
+
+	err := n.stopForPendingRestoreRollback(pendingErr, nil)
+	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
+	require.Error(t, n.ctx.Err(), "node must stop instead of reopening unsafe stores")
+}
+
 // TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a
 // severe regression found via manual live testing (dingo#1651 follow-up):
 // a Restore that failed because the blob backup was corrupted used to

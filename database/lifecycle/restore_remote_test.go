@@ -301,6 +301,7 @@ func runRemoteRestoreFailureRollback(
 		require.ErrorIs(t, err, errInjectedRemoteBlobRestore)
 	}
 	if wantRollbackFailure {
+		require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
 		require.Contains(t, err.Error(), "automatic restore rollback failed")
 		require.Contains(t, err.Error(), "original backups preserved at")
 		return
@@ -323,6 +324,56 @@ func runRemoteRestoreFailureRollback(
 		require.NoError(t, err)
 	}
 	restored.close(t)
+}
+
+func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	original := openRemoteTestDatabase(t, remoteDir)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	original.close(t)
+
+	incoming := newTestDB(t)
+	require.NoError(t, incoming.BlockCreate(testBlock(1, 0x99), nil))
+	snapshotDir := filepath.Join(t.TempDir(), "incoming")
+	_, err := lifecycle.Snapshot(
+		ctx,
+		incoming,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+	manifest, err := lifecycle.ReadManifest(snapshotDir)
+	require.NoError(t, err)
+	manifest.BlobPlugin = remoteBlobProviderName
+	manifest.MetadataPlugin = remoteMetadataProviderName
+	require.NoError(t, lifecycle.WriteManifest(snapshotDir, manifest))
+
+	control := &remoteBlobRestoreControl{}
+	control.failRestores.Store(2)
+	host := newRemoteRestoreHost(t, remoteDir, control)
+	_, recovery, err := lifecycle.RestoreRecoverable(
+		metadata.AllowResetOfPopulatedTarget(ctx),
+		host,
+		nil,
+		snapshotDir,
+		filepath.Join(t.TempDir(), "local-staging-target"),
+		nil,
+		lifecycle.RestoreStorageConfig{},
+	)
+	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
+	require.NotNil(t, recovery)
+	require.DirExists(t, recovery.BackupDir())
+	// The injected provider consumed both failures. The retained handle can
+	// retry compensation while its host remains active.
+	require.NoError(t, recovery.Rollback(context.Background()))
+	_, statErr := os.Stat(recovery.BackupDir())
+	require.True(t, os.IsNotExist(statErr))
 }
 
 func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {

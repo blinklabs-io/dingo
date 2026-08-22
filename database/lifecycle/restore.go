@@ -76,6 +76,12 @@ func checkNoDataDirOverride(pluginKind string, cfg map[string]any) error {
 // restore whose durability on disk was never confirmed.
 var syncDir = fsyncdir.Sync
 
+// ErrRestoreRollbackPending means restore mutated an external store and its
+// automatic compensation did not complete. The error includes the retained
+// backup directory. A live caller must not reopen or serve the target until
+// recovery succeeds.
+var ErrRestoreRollbackPending = errors.New("automatic restore rollback failed")
+
 // syncDirTree fsyncs every directory under root, so a file written into
 // any of them has a durable directory entry, not just durable content --
 // a file's own fsync does not guarantee the directory entry naming it
@@ -249,6 +255,10 @@ func RestoreValidated(
 //
 // The supplied plugin host must remain active until Commit or Rollback returns;
 // Rollback resolves the same providers through it to reload the retained copy.
+// If automatic compensation fails, this returns both
+// ErrRestoreRollbackPending and a non-nil recovery handle so a caller can
+// recognize that the target is unsafe and retry Rollback while the host is
+// still active.
 func RestoreRecoverable(
 	ctx context.Context,
 	host *plugin.Host,
@@ -352,16 +362,21 @@ func restoreValidated(
 	if err != nil {
 		return Manifest{}, err
 	}
+	retainRollback := func() {
+		if retainRecovery != nil {
+			*retainRecovery = &RestoreRecovery{
+				rollback:      rollback,
+				host:          host,
+				manifest:      manifest,
+				targetDataDir: targetDataDir,
+				storageConfig: storageConfig,
+			}
+		}
+	}
 	defer func() {
 		if err == nil {
 			if retainRecovery != nil {
-				*retainRecovery = &RestoreRecovery{
-					rollback:      rollback,
-					host:          host,
-					manifest:      manifest,
-					targetDataDir: targetDataDir,
-					storageConfig: storageConfig,
-				}
+				retainRollback()
 				return
 			}
 			_ = os.RemoveAll(rollback.dir)
@@ -384,10 +399,12 @@ func restoreValidated(
 			_ = os.RemoveAll(rollback.dir)
 			return
 		}
+		retainRollback()
 		err = errors.Join(
 			err,
 			fmt.Errorf(
-				"automatic restore rollback failed; original backups preserved at %q: %w",
+				"%w; original backups preserved at %q: %w",
+				ErrRestoreRollbackPending,
 				rollback.dir,
 				rollbackErr,
 			),
@@ -570,7 +587,9 @@ type restoreRollback struct {
 
 // RestoreRecovery retains the original external stores after a successful
 // RestoreRecoverable call until its caller completes the enclosing live-node
-// operation. It is safe to call Commit or Rollback more than once; the first
+// operation. It is also returned with ErrRestoreRollbackPending so the caller
+// can retry an unsuccessful automatic rollback while the plugin host remains
+// active. It is safe to call Commit or Rollback more than once; the first
 // successful disposition wins.
 type RestoreRecovery struct {
 	mu            sync.Mutex

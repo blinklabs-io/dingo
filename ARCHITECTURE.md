@@ -1688,8 +1688,10 @@ Any reset/restore error, cancellation after mutation, or final cross-store
 validation failure triggers compensation under `context.WithoutCancel`, first
 restoring the original blob state and then the original metadata state. A
 rollback failure is joined with, rather than substituted for, the initiating
-restore error; its message names the retained rollback directory so an operator
-can recover manually. Ordinary restore removes rollback files only after both
+restore error as `ErrRestoreRollbackPending`; its message names the retained
+rollback directory, and recoverable callers retain a retry handle. A live node
+stays stopped rather than reopening an uncertain provider pair. Ordinary
+restore removes rollback files only after both
 incoming stores pass `validateRestoredDatabase`. Live node restore uses
 `RestoreRecoverable` to retain them through the local directory swap and node
 reinitialization, then calls `Commit`; a later swap failure can still call
