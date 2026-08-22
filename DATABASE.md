@@ -219,7 +219,8 @@ CI.
   reset. For a live replacement of a populated remote target it also captures
   rollback backups of both stores. S3/GCS implement `blob.Resettable` with
   provider-native bounded deletion: S3 uses `DeleteObjects` batches of at most
-  1,000 keys, while GCS issues direct object deletes. Both bypass the ordinary
+  1,000 keys, while GCS issues direct object deletes with a fresh provider
+  timeout for every object. Both bypass the ordinary
   transaction commit path because its existence probes and per-key
   compensation downloads would duplicate the complete rollback backup already
   retained for this operation. Any metadata/blob reset or restore failure,

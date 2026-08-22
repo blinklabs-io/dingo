@@ -66,13 +66,27 @@ func (d *BlobStoreGCS) resetBatch(ctx context.Context, keys [][]byte) error {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-	deleteCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	return deleteBatchIndividually(ctx, keys, timeout, d.deleteObject)
+}
+
+func deleteBatchIndividually(
+	ctx context.Context,
+	keys [][]byte,
+	timeout time.Duration,
+	deleteObject func(context.Context, []byte) error,
+) error {
 	for _, key := range keys {
-		if err := deleteCtx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := d.deleteObject(deleteCtx, key); err != nil &&
+		// GCS has no batch-delete RPC. Give each individual operation the
+		// provider timeout instead of sharing one deadline across as many as
+		// 1,000 sequential calls; the caller context still cancels the whole
+		// reset immediately.
+		deleteCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := deleteObject(deleteCtx, key)
+		cancel()
+		if err != nil &&
 			!errors.Is(err, types.ErrBlobKeyNotFound) {
 			return err
 		}

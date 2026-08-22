@@ -1678,7 +1678,8 @@ database or object prefix. Before resetting either external store,
 the metadata archive, reads the complete cloud-blob stream (all record framing,
 terminator count, CRC32 checksum, and trailing-data check), and captures
 provider-native rollback backups of both original stores. S3/GCS reset keys in
-bounded provider-native batches (S3 `DeleteObjects`, direct GCS deletes) and
+bounded provider-native batches (S3 `DeleteObjects`, direct GCS deletes with
+per-operation provider timeouts) and
 restart their listing after every successful batch, so iteration never depends
 on objects deleted by an earlier batch and reset does not download the full
 prefix again for per-transaction compensation.
