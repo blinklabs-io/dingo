@@ -7522,6 +7522,17 @@ ledger reader reaches the validate stage, and `ls.chain` is consumed by the
 downstream blockfetch server and UTxO RPC sync/watch readers. A block that has
 not passed admission crypto must therefore never enter that chain.
 
+ChainSync admission also enforces the Ouroboros future-header rule before a
+header enters that queue. The raw network callback records `ChainsyncEvent`'s
+`ArrivalTime` immediately, before header decoding, chain-selection, and
+EventBus work can delay delivery. Ledger admission converts the header slot to
+its wall-clock onset using the active hard-fork summary. A header received no
+more than two seconds early (the `ouroboros-consensus` default clock-skew
+allowance) waits until its slot begins; a header received earlier is rejected
+and its connection is recycled. Judging the recorded arrival rather than the
+later handler time means local decode, EventBus, or scheduler delay cannot make
+an invalid early header appear timely.
+
 `blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
 it does not forecast, mutate the cache, or rebuild `HardForkSummary` per
 block. `decodeReadChainBatch` enforces pipeline results only when the serial

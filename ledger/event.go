@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -65,11 +67,15 @@ type BlockfetchEvent struct {
 type ChainsyncEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
 	BlockHeader  ledger.BlockHeader
-	Point        ocommon.Point  // Chain point for roll forward/backward
-	Tip          ochainsync.Tip // Upstream chain tip
-	BlockNumber  uint64
-	Type         uint // Block or header type ID
-	Rollback     bool // Set to true for a Rollback event
+	// ArrivalTime is recorded immediately when the ChainSync callback receives
+	// a roll-forward header. It lets ledger admission judge the peer's clock at
+	// arrival even if event delivery or header processing is delayed.
+	ArrivalTime time.Time
+	Point       ocommon.Point  // Chain point for roll forward/backward
+	Tip         ochainsync.Tip // Upstream chain tip
+	BlockNumber uint64
+	Type        uint // Block or header type ID
+	Rollback    bool // Set to true for a Rollback event
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports
