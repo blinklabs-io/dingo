@@ -158,7 +158,14 @@ jobs:
   # Run the platform-specific suite only after Linux release validation and
   # draft creation have succeeded.
   go-test-other:
-    name: go-test (${{ matrix.platform }}) (${{ matrix.go-version }})
+    # Deliberately unnamed, so GitHub generates `go-test-other (<platform>,
+    # <go-version>)`. A custom `name:` carrying matrix references collided with
+    # go-test-platforms.yml, which renders the same string on a tag, and branch
+    # protection matches a check by name — two workflows claiming one context
+    # make a required check ambiguous. It also rendered literally as
+    # `go-test (${{ matrix.platform }}) (${{ matrix.go-version }})` on every
+    # non-tag push, because this job is skipped there and a skipped matrix job
+    # never expands its matrix.
     needs: [ci, create-draft-release]
     # The only job in this workflow without an explicit grant, so it inherited
     # repository or organization defaults. It builds and runs tests and needs
