@@ -554,6 +554,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	defer pending.flush()
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
+	var effectiveObservedTip ochainsync.Tip
 	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
@@ -605,6 +606,10 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		}
 	}
 	if err == nil {
+		effectiveObservedTip, _ = ls.chainSwitchObservedTipForConnection(
+			e,
+			effectiveConnId,
+		)
 		requestFreshCursor = ls.chainSwitchNeedsFreshCursorLocked(
 			e,
 			effectiveConnId,
@@ -626,7 +631,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"local_tip_slot",
 			ls.PrimaryChainTip().Point.Slot,
 			"peer_tip_slot",
-			e.NewTip.Point.Slot,
+			effectiveObservedTip.Point.Slot,
 		)
 		ls.requestChainsyncResync(
 			effectiveConnId,
@@ -925,12 +930,48 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
 		return false
 	}
+	newObservedTip, ok := ls.chainSwitchObservedTipForConnection(e, connId)
+	if !ok {
+		return false
+	}
 	localTip := ls.PrimaryChainTip()
-	if e.NewTip.BlockNumber > localTip.BlockNumber {
+	if newObservedTip.BlockNumber > localTip.BlockNumber {
 		return true
 	}
-	return e.NewTip.BlockNumber == localTip.BlockNumber &&
-		e.NewTip.Point.Slot > localTip.Point.Slot
+	return newObservedTip.BlockNumber == localTip.BlockNumber &&
+		newObservedTip.Point.Slot > localTip.Point.Slot
+}
+
+func (ls *LedgerState) chainSwitchObservedTipForConnection(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	if sameConnectionId(connId, e.NewConnectionId) {
+		return chainSwitchNewObservedTip(e), true
+	}
+	if ls.config.GetPeerObservedTipFunc == nil {
+		return ochainsync.Tip{}, false
+	}
+	return ls.config.GetPeerObservedTipFunc(connId)
+}
+
+// chainSwitchNewObservedTip returns the peer frontier that chain selection
+// actually compared.
+//
+// The fallback is keyed on NewObservedTipSet, not on the frontier being
+// zero-valued. A zero frontier is a real observation meaning the peer delivered
+// nothing, which is exactly the advertising-only peer this path must not trust:
+// inferring "absent" from it handed such a peer's advertised outlier to ledger
+// cursor recovery. Only a producer that never populated the field -- an older
+// event, or a direct unit-test or integration constructor -- falls back to the
+// advertised tip.
+func chainSwitchNewObservedTip(
+	e chainselection.ChainSwitchEvent,
+) ochainsync.Tip {
+	if e.NewObservedTipSet {
+		return e.NewObservedTip
+	}
+	return e.NewTip
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
@@ -4676,11 +4717,24 @@ func cloneProtocolParametersForEra(
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
+//
+// deferBoundarySnapshot suppresses the authoritative mark-snapshot capture so
+// the caller can take it after applying era transitions that this rollover does
+// not perform itself. Only the multi-era boundary path sets it: a boundary block
+// encoded in the era before the era its header announces needs the rollover to
+// enact source-era pparam updates first, so the final era and protocol
+// parameters do not exist yet when the capture would normally run. Capturing
+// then would durably record the source era's protocol major for an epoch that
+// runs at the successor era's, and disagree with the post-commit
+// EpochTransitionEvent. When set and the rollover reaches the capture point, the
+// result reports BoundarySnapshotDeferred so exactly one capture is taken —
+// re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
+	deferBoundarySnapshot bool,
 ) (*EpochRolloverResult, error) {
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
@@ -5097,8 +5151,14 @@ func (ls *LedgerState) processEpochRollover(
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
-	// CaptureGenesisSnapshot at startup.
-	if err := ls.captureEpochBoundarySnapshot(txn, currentEpoch, result); err != nil {
+	// CaptureGenesisSnapshot at startup. A multi-era boundary defers the capture
+	// to the caller, which takes it once the remaining era transitions have
+	// produced the era and protocol parameters the new epoch actually runs at.
+	if deferBoundarySnapshot {
+		result.BoundarySnapshotDeferred = true
+	} else if err := ls.captureEpochBoundarySnapshot(
+		txn, currentEpoch, result,
+	); err != nil {
 		return nil, err
 	}
 
