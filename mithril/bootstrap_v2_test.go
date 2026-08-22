@@ -1113,10 +1113,15 @@ func TestBootstrapUnsupportedBackend(t *testing.T) {
 // synchronously inside the Read call the client is blocked on, so it always
 // completes before the caller's io.Copy returns -- no sleep or poll needed
 // to win the race.
+//
+// A failed Rename or Symlink is recorded on the shared transport rather than
+// ignored: silently accepting either failure would let this test pass
+// without ever performing the swap it claims to, exercising nothing.
 type swapOnEOFBody struct {
 	io.ReadCloser
 	swapped        *atomic.Bool
 	oldDir, newDir string
+	swapErr        *error
 }
 
 func (b *swapOnEOFBody) Read(p []byte) (int, error) {
@@ -1128,18 +1133,28 @@ func (b *swapOnEOFBody) Read(p []byte) (int, error) {
 		// changes the name, not the directory's contents or the inode a
 		// held fd already refers to.
 		orphaned := b.oldDir + ".orphaned"
-		if err := os.Rename(b.oldDir, orphaned); err == nil {
-			_ = os.Symlink(b.newDir, b.oldDir)
+		if renameErr := os.Rename(b.oldDir, orphaned); renameErr != nil {
+			*b.swapErr = fmt.Errorf(
+				"renaming %s aside: %w", b.oldDir, renameErr,
+			)
+		} else if symErr := os.Symlink(b.newDir, b.oldDir); symErr != nil {
+			*b.swapErr = fmt.Errorf(
+				"symlinking %s: %w", b.oldDir, symErr,
+			)
 		}
 	}
 	return n, err
 }
 
 // swapDirOnDownloadCompleteTransport arms swapOnEOFBody on every response it
-// hands back.
+// hands back. swapped and swapErr are set exactly once, by the single
+// archive download this test drives; the caller checks both once
+// fetchImmutableArchive returns, before trusting the swap actually
+// happened.
 type swapDirOnDownloadCompleteTransport struct {
 	oldDir, newDir string
 	swapped        atomic.Bool
+	swapErr        error
 }
 
 func (t *swapDirOnDownloadCompleteTransport) RoundTrip(
@@ -1154,6 +1169,7 @@ func (t *swapDirOnDownloadCompleteTransport) RoundTrip(
 		swapped:    &t.swapped,
 		oldDir:     t.oldDir,
 		newDir:     t.newDir,
+		swapErr:    &t.swapErr,
 	}
 	return resp, nil
 }
@@ -1206,15 +1222,14 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 	canaryContent := []byte("external file that must survive untouched")
 	require.NoError(t, os.WriteFile(canaryPath, canaryContent, 0o640))
 
+	transport := &swapDirOnDownloadCompleteTransport{
+		oldDir: archiveDir,
+		newDir: outsideDir,
+	}
 	cfg := BootstrapConfig{
 		Logger:            slog.New(slog.DiscardHandler),
 		AllowInsecureHTTP: true,
-		httpClient: &http.Client{
-			Transport: &swapDirOnDownloadCompleteTransport{
-				oldDir: archiveDir,
-				newDir: outsideDir,
-			},
-		},
+		httpClient:        &http.Client{Transport: transport},
 	}
 	location := &CardanoDatabaseLocation{
 		URITemplate: server.URL + "/{immutable_file_number}.tar.zst",
@@ -1229,6 +1244,20 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 		archiveDir,
 		extractDir,
 	)
+
+	// Establish that the swap this test relies on actually happened before
+	// trusting anything downstream of it: a Rename or Symlink failure here
+	// would otherwise let the test pass without ever exercising the swap.
+	require.NoError(
+		t,
+		transport.swapErr,
+		"the directory swap itself must succeed",
+	)
+	require.True(t, transport.swapped.Load(), "the swap must have run")
+	linkTarget, linkErr := os.Readlink(archiveDir)
+	require.NoError(t, linkErr, "archiveDir must now be the planted symlink")
+	require.Equal(t, outsideDir, linkTarget)
+
 	require.NoError(
 		t, err,
 		"extraction and cleanup must use the directory verified before "+
@@ -1247,6 +1276,90 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 	extracted, err := os.ReadFile(filepath.Join(extractDir, "00000.chunk"))
 	require.NoError(t, err)
 	assert.Equal(t, "real chunk data", string(extracted))
+}
+
+// TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure is the
+// error-path counterpart to the test above, covering the case wolf31o2's
+// review specifically called out: downloadImmutables used to clean up after
+// a failed fetchImmutableArchive itself, by joining archiveDir -- a bare
+// path -- with the filename and calling os.Remove. Swapping archiveDir for a
+// symlink between the download finishing and that cleanup running let it
+// delete a same-named external file through the replacement, regardless of
+// whether fetchImmutableArchive's own download or extraction failed.
+//
+// fetchImmutableArchive now removes its own archive file through its
+// retained root on every exit, successful or not, so downloadImmutables no
+// longer does any archiveDir cleanup of its own. This test drives a genuine
+// extraction failure (the downloaded content is not a valid archive) to
+// prove that failure path's cleanup is anchored the same way the success
+// path already is.
+func TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure(
+	t *testing.T,
+) {
+	probeLink := filepath.Join(t.TempDir(), "probe")
+	requireSymlinkSupport(t, t.TempDir(), probeLink)
+
+	const num = 0
+	// Deliberately not a valid zstd stream, so extraction fails.
+	notAnArchive := []byte("this is not a valid zstd archive")
+
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(notAnArchive)
+		},
+	))
+	t.Cleanup(server.Close)
+
+	downloadDir := t.TempDir()
+	archiveDir := filepath.Join(downloadDir, "immutable-archives-test")
+	extractDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	archiveFilename := filepath.Base(immutableArchivePath(archiveDir, num))
+	canaryPath := filepath.Join(outsideDir, archiveFilename)
+	canaryContent := []byte("external file that must survive untouched")
+	require.NoError(t, os.WriteFile(canaryPath, canaryContent, 0o640))
+
+	transport := &swapDirOnDownloadCompleteTransport{
+		oldDir: archiveDir,
+		newDir: outsideDir,
+	}
+	cfg := BootstrapConfig{
+		Logger:            slog.New(slog.DiscardHandler),
+		AllowInsecureHTTP: true,
+		httpClient:        &http.Client{Transport: transport},
+	}
+	location := &CardanoDatabaseLocation{
+		URITemplate: server.URL + "/{immutable_file_number}.tar.zst",
+	}
+
+	err := fetchImmutableArchive(
+		context.Background(),
+		cfg,
+		slog.New(slog.DiscardHandler),
+		location,
+		num,
+		archiveDir,
+		extractDir,
+	)
+
+	require.NoError(
+		t,
+		transport.swapErr,
+		"the directory swap itself must succeed",
+	)
+	require.True(t, transport.swapped.Load(), "the swap must have run")
+	linkTarget, linkErr := os.Readlink(archiveDir)
+	require.NoError(t, linkErr, "archiveDir must now be the planted symlink")
+	require.Equal(t, outsideDir, linkTarget)
+
+	require.Error(t, err, "extraction must fail on non-archive content")
+
+	// The failure-path cleanup must not have touched the external file
+	// through the swapped-in symlink.
+	data, readErr := os.ReadFile(canaryPath)
+	require.NoError(t, readErr, "canary file must not have been removed")
+	assert.Equal(t, canaryContent, data)
 }
 
 // TestOpenImmutableRootRefusesSymlinkedDir covers the immutable directory

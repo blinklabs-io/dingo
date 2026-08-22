@@ -927,10 +927,11 @@ func downloadImmutables(
 					archiveDir, extractDir,
 				); err != nil {
 					lastErr = err
+					// fetchImmutableArchive has already removed its own
+					// archive file, through the root it downloaded
+					// through, on every exit -- no bare-path cleanup of
+					// archiveDir needed here.
 					removeImmutableTrio(immutableRoot, num)
-					_ = os.Remove(
-						immutableArchivePath(archiveDir, num),
-					)
 					cfg.Logger.Warn(
 						"immutable archive location failed, trying next",
 						"component", "mithril",
@@ -946,9 +947,6 @@ func downloadImmutables(
 				)
 				if lastErr != nil {
 					removeImmutableTrio(immutableRoot, num)
-					_ = os.Remove(
-						immutableArchivePath(archiveDir, num),
-					)
 					cfg.Logger.Warn(
 						"immutable archive verification failed, trying next",
 						"component", "mithril",
@@ -1107,7 +1105,7 @@ func fetchImmutableArchive(
 	dlLogger := cfg.Logger.With("immutable_file_number", num)
 	archivePath := immutableArchivePath(archiveDir, num)
 	archiveFilename := filepath.Base(archivePath)
-	_, root, err := downloadSnapshot(
+	_, root, dlErr := downloadSnapshot(
 		ctx, DownloadConfig{
 			URL:                 location.ImmutableArchiveURI(num),
 			DestDir:             archiveDir,
@@ -1121,10 +1119,31 @@ func fetchImmutableArchive(
 		},
 	)
 	if root != nil {
-		defer root.Close()
+		// Removed here, through the same root every other operation in
+		// this function uses, on every exit -- success, download failure
+		// leaving a partial file, or extraction failure leaving a
+		// complete one. The caller used to repeat this cleanup itself by
+		// joining archiveDir (a bare path) with the filename after this
+		// function returned; a directory swapped in for archiveDir's name
+		// in that gap made that cleanup delete a same-named external file
+		// through the replacement instead of this one. Doing it here,
+		// still anchored to root, closes that gap on the failure path the
+		// same way the success path was already closed.
+		defer func() {
+			if removeErr := root.Remove(archiveFilename); removeErr != nil &&
+				!os.IsNotExist(removeErr) {
+				cfg.Logger.Warn(
+					"failed to remove immutable archive after fetch",
+					"component", "mithril",
+					"path", archivePath,
+					"error", removeErr,
+				)
+			}
+			root.Close()
+		}()
 	}
-	if err != nil {
-		return err
+	if dlErr != nil {
+		return dlErr
 	}
 
 	file, err := root.Open(archiveFilename)
@@ -1141,14 +1160,6 @@ func fetchImmutableArchive(
 		WithMergeIntoDestination(),
 	); err != nil {
 		return fmt.Errorf("extracting: %w", err)
-	}
-	if err := root.Remove(archiveFilename); err != nil {
-		cfg.Logger.Warn(
-			"failed to remove immutable archive after extraction",
-			"component", "mithril",
-			"path", archivePath,
-			"error", err,
-		)
 	}
 	return nil
 }

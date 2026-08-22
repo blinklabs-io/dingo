@@ -592,6 +592,11 @@ func downloadSnapshot(
 		return "", nil, fmt.Errorf("creating download directory: %w", rootErr)
 	}
 	if closeErr != nil {
+		// root itself opened fine; only closing parentRoot failed. Close
+		// it here rather than returning it: a caller that only sees an
+		// error return has no reason to expect a handle to clean up, and
+		// leaving that expectation implicit is how it gets leaked.
+		_ = root.Close()
 		return "", nil, fmt.Errorf("creating download directory: %w", closeErr)
 	}
 
