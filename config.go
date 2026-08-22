@@ -241,6 +241,8 @@ type Config struct {
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
+	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
+	shelleyKESAgentSignTimeout                                                          time.Duration
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
@@ -514,6 +516,18 @@ func (n *Node) configValidate() error {
 			n.config.cfg.StartEra,
 			internalconfig.StartEraDijkstra,
 		)
+	}
+	// Mutually exclusive KES key sources. The CLI rejects this combination in
+	// internalconfig.Config.Validate, which this path never calls, so a
+	// programmatic block producer that set both had its local key file silently
+	// ignored in favour of the agent.
+	if n.config.cfg.BlockProducer {
+		if err := internalconfig.ValidateKESKeySources(
+			n.config.cfg.ShelleyKESKey,
+			n.config.cfg.ShelleyKESAgentSocket,
+		); err != nil {
+			return err
+		}
 	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
@@ -797,6 +811,8 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
+	c.shelleyKESAgentSocket, c.shelleyKESAgentMode = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode
+	c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
@@ -1382,6 +1398,45 @@ func WithShelleyKESKey(path string) ConfigOptionFunc {
 func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyOperationalCertificate = path
+	}
+}
+
+// WithShelleyKESAgentSocket sources the KES signing key from a running bursa
+// KES agent over the given Unix-domain service socket instead of a local
+// --shelley-kes-key file (CARDANO_SHELLEY_KES_AGENT_SOCKET). The VRF key and
+// operational certificate flags still apply. Mirrors cardano-node's
+// --shelley-kes-agent-socket. When empty (default), the file-based KES key is
+// used and forging behavior is unchanged.
+func WithShelleyKESAgentSocket(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentSocket = path
+		c.shelleyKESAgentSocket = path
+	}
+}
+
+// WithShelleyKESAgentMode selects the KES agent service mode:
+// "serve-key" (default; the agent pushes the evolving KES sign key and the
+// node signs headers locally) or "sign" (the node forwards header bodies and
+// the agent returns signatures; the key never enters the node)
+// (CARDANO_SHELLEY_KES_AGENT_MODE). Only meaningful together with
+// WithShelleyKESAgentSocket.
+func WithShelleyKESAgentMode(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentMode = mode
+		c.shelleyKESAgentMode = mode
+	}
+}
+
+// WithShelleyKESAgentSignTimeout bounds one sign-mode round trip to the KES
+// agent (CARDANO_SHELLEY_KES_AGENT_SIGN_TIMEOUT). It must stay below a slot:
+// block production calls the signer synchronously on the slot-aligned loop, so
+// a longer timeout parks forging for several slots when the agent stops
+// answering. Zero uses the client default (500ms). Only meaningful together
+// with WithShelleyKESAgentSocket in sign mode.
+func WithShelleyKESAgentSignTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentSignTimeout = d
+		c.shelleyKESAgentSignTimeout = d
 	}
 }
 

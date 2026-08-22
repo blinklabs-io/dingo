@@ -510,6 +510,20 @@ func TestRunMode_Validation(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_KESAgentMode(t *testing.T) {
+	cfg := &Config{ShelleyKESAgentSocket: "/run/kes-agent.sock"}
+	cfg.ApplyDefaults()
+	if cfg.ShelleyKESAgentMode != "serve-key" {
+		t.Fatalf("expected serve-key default, got %q", cfg.ShelleyKESAgentMode)
+	}
+
+	cfg.ShelleyKESAgentMode = "sign"
+	cfg.ApplyDefaults()
+	if cfg.ShelleyKESAgentMode != "sign" {
+		t.Fatalf("expected explicit sign mode to remain unchanged, got %q", cfg.ShelleyKESAgentMode)
+	}
+}
+
 func TestRunMode_IsDevMode(t *testing.T) {
 	tests := []struct {
 		mode      RunMode

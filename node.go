@@ -50,6 +50,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -106,6 +107,7 @@ type Node struct {
 	// without recomputing them and drifting from Run.
 	ouroborosConfig                  ouroborosPkg.OuroborosConfig
 	blockForger                      *forging.BlockForger
+	kesAgentClient                   *kesagent.Client
 	leaderElection                   *leader.Election
 	rtsMetrics                       *rtsMetrics
 	shutdownFuncs                    []func(context.Context) error

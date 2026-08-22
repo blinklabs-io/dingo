@@ -279,12 +279,15 @@ graph LR
     bark["bark"]
     mithril["mithril<br/>(no internal dingo imports)"]
     keystore["keystore"]
+    kesagent["kesagent"]
 
     root --> chain & chainsync & chainsel & connmgr & db & ev
     root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology & plugin & intplugins
     root --> intnode_ledgerpeers & intrecycler
     root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
+    root --> kesagent
+    kesagent --> ledger_forging
 
     cmd --> root & cardano_cfg & db & db_models & plugin & intplugins
     cmd --> intcfg & intnode & ledgerstate & ledger_eras
@@ -613,6 +616,15 @@ sequenceDiagram
     BF->>EB: publish SlotBattleEvent
 ```
 
+When block production uses `--shelley-kes-agent-socket`, node composition loads
+the VRF key and operational certificate locally, then injects a
+`kesagent.Client` into the builder and forger. In `serve-key` mode the client
+receives and validates the evolving KES secret key; in `sign` mode it forwards
+header signing requests so the secret key remains with the agent. The node
+owns the client lifecycle: failed forging initialization closes a temporary
+client, successful startup retains it, and live lifecycle operations and node
+shutdown stop the client before wiping any locally held key material.
+
 ## Directory Structure
 
 ```
@@ -786,6 +798,10 @@ dingo/
 │   ├── keyfile_unix.go  # Unix file permissions
 │   ├── keyfile_windows.go # Windows ACL permissions
 │   └── evolution.go     # KES key evolution
+├── kesagent/            # bursa KES agent client (forging.KESSigner)
+│   ├── protocol.go      # Length-prefixed JSON frames, Hello/KeyPush/Sign
+│   ├── client.go        # serve-key and sign pumps, reconnect, key validation
+│   └── metrics.go       # Agent connection and key-state metrics
 ├── config/cardano/      # Embedded Cardano network configurations
 ├── internal/
 │   ├── chainsyncrecycler/ # Chainsync stall/plateau recycler component
@@ -3283,14 +3299,36 @@ When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype
 
 When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between step 3 and step 5. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
 
-### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
+### Pool Credentials (`ledger/forging/keys.go`, `keystore/`, `kesagent/`)
 
-VRF signing keys, KES signing keys, and operational certificates are loaded from files at startup. The `keystore` package handles platform-specific file permission checks (Unix file modes, Windows ACLs) and KES key evolution.
+VRF signing keys and operational certificates are loaded from files at startup. The KES signing key has two sources: the local `--shelley-kes-key` file (the default), or an external bursa KES agent over `--shelley-kes-agent-socket`, in which case `PoolCredentials.LoadVRFAndOpCert` leaves the KES key unset and `kesagent.Client` supplies signatures through the `forging.KESSigner` seam. The two are mutually exclusive and rejected together on both the CLI and programmatic paths. The `keystore` package handles platform-specific file permission checks (Unix file modes, Windows ACLs) and KES key evolution.
 
 VRF and KES secret-key loads check permissions on the open file handle and
 reject group/other access on Unix or insecure DACL grants on Windows before
-reading the key. Operational certificates contain public data and remain
-exempt from the secret-key permission check.
+reading the key, and wipe the file's bytes once parsed — the cardano-cli
+envelope carries the secret in its `cborHex` field. Operational certificates
+contain public data and remain exempt from the secret-key permission check.
+
+Agent-sourced keys are validated against the operational certificate before
+installation: frame type, declared KES vkey, tree depth, key layout, period
+window, derived public key, and a signed probe verified against the opcert's
+vkey. Agent connection and key state are exported as
+`dingo_kes_agent_connected`, `dingo_kes_agent_key_present`,
+`dingo_kes_agent_key_period`, `dingo_kes_agent_connect_failures_total`,
+`dingo_kes_agent_rejected_pushes_total`, and
+`dingo_kes_agent_sign_failures_total`, because a producer whose agent never
+answered otherwise looks healthy in the forging metrics until a slot is lost.
+Block-producer startup waits a bounded interval for the agent to deliver a key
+(serve-key) or accept a session (sign) and logs an error rather than failing,
+since the agent may legitimately start after the node.
+
+One agent can serve the same KES key to more than one producer, and nothing in
+the protocol or in this client detects that. Two producers holding the same key
+and opcert will both sign for the same pool, which is equivocation: the pool
+forfeits the affected blocks and, once the ledger observes two headers for one
+slot from one pool, risks being treated as adversarial. Operators running a
+hot-standby producer must ensure only one node at a time is connected to an
+agent serving the active key.
 
 ### Leios Voting (`ledger/leios/`)
 

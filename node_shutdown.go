@@ -113,6 +113,10 @@ func (n *Node) shutdown() error {
 	if n.blockForger != nil {
 		n.blockForger.Stop()
 	}
+	// Wipe any KES key material held by the agent client.
+	if n.kesAgentClient != nil {
+		n.kesAgentClient.Close()
+	}
 
 	// Stop leader election to clean up resources
 	if n.leaderElection != nil {

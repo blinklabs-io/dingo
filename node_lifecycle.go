@@ -110,6 +110,9 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	if n.blockForger != nil {
 		n.blockForger.Stop()
 	}
+	if n.kesAgentClient != nil {
+		n.kesAgentClient.Close()
+	}
 	if n.leaderElection != nil {
 		if stopErr := n.leaderElection.Stop(); stopErr != nil {
 			err = errors.Join(

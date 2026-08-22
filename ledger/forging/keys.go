@@ -72,6 +72,14 @@ func NewPoolCredentials() *PoolCredentials {
 	return &PoolCredentials{}
 }
 
+// secretFileBytes reads a secret key file's bytes. It is a variable so a test
+// can retain the exact buffer loadSecretKeyFromFile wipes; the wipe is
+// otherwise unobservable, because the buffer is local and becomes unreachable
+// garbage the moment the function returns.
+var secretFileBytes = func(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxSecretKeyFileSize+1))
+}
+
 // loadSecretKeyFromFile opens and checks a secret key before reading from the
 // same handle, avoiding a TOCTOU race between the permission check and read.
 func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
@@ -94,7 +102,13 @@ func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
 	if err := keystore.CheckOpenFilePermissions(f); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxSecretKeyFileSize+1))
+	data, err := secretFileBytes(f)
+	// The file bytes are the cardano-cli envelope, whose cborHex field carries
+	// the secret key in the clear. Wipe them before returning so the only copy
+	// left behind is the parsed key the caller owns and wipes itself.
+	// LoadKeyFromBytes decodes cborHex into a fresh buffer, so nothing in the
+	// returned key aliases this one.
+	defer wipeBytes(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
 	}
@@ -122,20 +136,9 @@ func (pc *PoolCredentials) LoadFromFiles(
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	// Load VRF signing key
-	vrfKey, err := loadSecretKeyFromFile(vrfSKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to load VRF signing key: %w", err)
+	if err := pc.loadVRFAndOpCertLocked(vrfSKeyPath, opCertPath); err != nil {
+		return err
 	}
-	if len(vrfKey.SKey) != vrf.SeedSize {
-		return fmt.Errorf(
-			"invalid VRF key size: expected %d, got %d",
-			vrf.SeedSize,
-			len(vrfKey.SKey),
-		)
-	}
-	pc.vrfSKey = vrfKey.SKey
-	pc.vrfVKey = vrfKey.VKey
 
 	// Load KES signing key
 	kesKey, err := loadSecretKeyFromFile(kesSKeyPath)
@@ -156,7 +159,45 @@ func (pc *PoolCredentials) LoadFromFiles(
 	}
 	pc.kesVKey = kesKey.VKey
 
-	// Load operational certificate
+	// Validate that OpCert KES vkey matches the loaded KES key
+	if !bytes.Equal(pc.kesVKey, pc.opCert.KESVKey) {
+		return errors.New(
+			"KES verification key mismatch: loaded key does not match OpCert KES vkey",
+		)
+	}
+
+	return nil
+}
+
+// loadVRFAndOpCertLocked loads the VRF signing key and the operational
+// certificate and derives the pool ID. Both credential loaders need exactly
+// this; only the KES handling differs between them, so keeping one copy means a
+// change to key-size checks, opcert parsing or pool-ID derivation cannot apply
+// to one path and silently miss the other.
+//
+// The caller must hold pc.mu.
+func (pc *PoolCredentials) loadVRFAndOpCertLocked(
+	vrfSKeyPath string,
+	opCertPath string,
+) error {
+	// loadSecretKeyFromFile, not bursa.LoadKeyFromFile: the VRF signing key
+	// is a secret and must keep the regular-file, permission, and size
+	// checks. The operational certificate below is public, so it uses the
+	// plain loader.
+	vrfKey, err := loadSecretKeyFromFile(vrfSKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load VRF signing key: %w", err)
+	}
+	if len(vrfKey.SKey) != vrf.SeedSize {
+		return fmt.Errorf(
+			"invalid VRF key size: expected %d, got %d",
+			vrf.SeedSize,
+			len(vrfKey.SKey),
+		)
+	}
+	pc.vrfSKey = vrfKey.SKey
+	pc.vrfVKey = vrfKey.VKey
+
 	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
 	if err != nil {
 		return fmt.Errorf("failed to load operational certificate: %w", err)
@@ -171,14 +212,6 @@ func (pc *PoolCredentials) LoadFromFiles(
 
 	// Derive pool ID from cold verification key (Blake2b-224 hash)
 	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash(pc.opCert.ColdVKey))
-
-	// Validate that OpCert KES vkey matches the loaded KES key
-	if !bytes.Equal(pc.kesVKey, pc.opCert.KESVKey) {
-		return errors.New(
-			"KES verification key mismatch: loaded key does not match OpCert KES vkey",
-		)
-	}
-
 	return nil
 }
 
@@ -246,6 +279,44 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 	pc.kesSKey = evolvedKey
 
 	return nil
+}
+
+// LoadVRFAndOpCert loads the VRF signing key and operational certificate from
+// files but leaves the KES signing key unset. It is used when the KES key is
+// sourced from an external KES agent rather than a local --shelley-kes-key
+// file: the agent holds and evolves the KES sign key, while the VRF key, the
+// operational certificate (and hence the pool ID and cold verification key)
+// still come from local files. The KES verification key is taken from the
+// operational certificate so opcert validation, the ledger cross-check, and
+// the block header still work unchanged. KESSign / UpdateKESPeriod on the
+// resulting credentials are unavailable (no local key); the forger routes
+// those through the agent-backed KESSigner instead.
+func (pc *PoolCredentials) LoadVRFAndOpCert(
+	vrfSKeyPath string,
+	opCertPath string,
+) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	if err := pc.loadVRFAndOpCertLocked(vrfSKeyPath, opCertPath); err != nil {
+		return err
+	}
+	// The KES verification key is committed to by the opcert; the local KES
+	// signing key is intentionally left nil (held by the agent).
+	pc.kesVKey = pc.opCert.KESVKey
+	pc.kesSKey = nil
+
+	return nil
+}
+
+// HasVRFAndOpCert reports whether the VRF key and operational certificate are
+// loaded, independent of whether a local KES signing key is present. The
+// forger uses this gate when the KES key is sourced from an external agent
+// (see LoadVRFAndOpCert); the fully local path uses IsLoaded.
+func (pc *PoolCredentials) HasVRFAndOpCert() bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.vrfSKey != nil && pc.opCert != nil
 }
 
 // VRFProve generates a VRF proof for leader election.
@@ -577,4 +648,11 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 		)
 	}
 	return true, vrfMatched, nil
+}
+
+// wipeBytes zeroes a buffer that held secret material.
+func wipeBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
