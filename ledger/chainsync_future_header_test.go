@@ -97,9 +97,10 @@ func TestCheckChainsyncHeaderArrivalBoundaries(t *testing.T) {
 		require.Equal(t, []time.Duration{2 * time.Second}, *waits)
 	})
 
-	t.Run("one nanosecond beyond skew is rejected", func(t *testing.T) {
+	t.Run("invalid arrival stays rejected after processing delay", func(t *testing.T) {
 		arrival := systemStart.Add(100*time.Second - time.Nanosecond)
-		ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+		processTime := systemStart.Add(103 * time.Second)
+		ls, waits := newFutureHeaderTestLedger(t, systemStart, processTime)
 
 		err := ls.checkChainsyncHeaderArrival(
 			futureHeaderEvent(102, arrival),

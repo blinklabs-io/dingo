@@ -724,18 +724,15 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	return nil
 }
 
-func (o *Ouroboros) chainsyncClientRollForward(
+func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
 	blockData any,
 	tip ochainsync.Tip,
+	arrivalTime time.Time,
 ) error {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
-		// Record arrival before chain-selection, deduplication, or EventBus
-		// delivery can delay the header. The ledger uses this timestamp for the
-		// Ouroboros future-header check.
-		arrivalTime := time.Now()
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
 		point := ocommon.NewPoint(blockSlot, blockHash)
@@ -1469,6 +1466,10 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	blockData []byte,
 	tip ochainsync.Tip,
 ) error {
+	// Record arrival at the raw network callback boundary. Header decoding can
+	// block behind another peer's in-flight decode of the same bytes, so a
+	// timestamp taken by the decoded handler would already include local work.
+	arrivalTime := time.Now()
 	key := hashDecodeInput(blockType, blockData)
 	header, err := decodeWithPanicSafeMetrics(
 		o.headerDecodeCache,
@@ -1494,7 +1495,13 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 			blockType,
 		)
 	}
-	return o.chainsyncClientRollForward(ctx, blockType, header, tip)
+	return o.chainsyncClientRollForwardAt(
+		ctx,
+		blockType,
+		header,
+		tip,
+		arrivalTime,
+	)
 }
 
 func (o *Ouroboros) instrumentChainsyncRollForwardRaw(
