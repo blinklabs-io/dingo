@@ -3084,6 +3084,48 @@ no rewind can fix) rather than a peer/fork problem, it surfaces the
 operator warning; a node in this state needs the underlying validation
 divergence resolved.
 
+Both recovery paths refuse a rewind target below the Mithril anchor, and that
+refusal has its own terminal bound (issues #3261 and #3301). Refusing rewinds
+instead to the applied ledger tip and asks ChainSync for a fresh intersection,
+which is an escape only while some peer offers a different chain; for a
+canonical block every peer offers the same one. When the failing block sits a
+short distance past the anchor, every target the rewind schedule produces falls
+inside the protected window, so the refusal fires on all of them and the node
+cycles the peer set indefinitely without moving its tip.
+`observeMithrilBoundaryRejection` therefore tallies successful boundary
+recovery attempts that do not advance the applied ledger high-water mark and,
+once they exceed
+`maxMithrilBoundaryRecoveryRejections` — one per scheduled rewind depth plus
+the capped retry the schedule settles on — declares the failure unrepairable.
+The applied tip, not the reported failing `(block, tx)`, is the convergence
+signal: replay can report different slowly advancing failures while rebuilding
+to the same state, and changing identities must not rearm the budget. A local
+rollback error does not count because no replay attempt completed.
+This is a decision about repairability rather than a list of error types:
+recovery's only lever for any validation rule is to rewind and replay, so once
+every legal target has been replayed and returned the same verdict, no local
+history remains that could change it. A Conway rule 45 delegation failure
+against imported account state reaches that point exactly as a structural error
+would. Deepening the rewind to the anchor itself is not an alternative: it costs
+a full replay of the protected window and still reads the same imported state.
+Exhaustion increments
+`dingo_ledger_mithril_trust_window_unrepairable_total`, logs the operator
+action (re-bootstrap from a newer Mithril snapshot, or resync from genesis) at
+ERROR, and returns `errHaltLedgerPipeline`. The tally clears when block
+application advances past the applied high-water mark, so a wedge broken by
+peer rotation leaves a later failure a fresh budget.
+
+`errHaltLedgerPipeline` is terminal in `ledgerProcessBlocks`: the restart loop
+announces the halt at ERROR, sets `dingo_ledger_pipeline_halted`, and returns,
+so the pipeline goroutine exits and `Close` still joins it through
+`processBlocksWG`. The node keeps serving queries and metrics, which is why the
+gauge matters — nothing clears it, so it, and not the absence of new log lines,
+is the signal that the node has permanently stopped following the chain. The
+loop body lives in `ledgerProcessBlocksWithAttempt` with the per-attempt work
+injected, so back-off, announcement, and halt decisions are testable without a
+chain reader and block pipeline behind them. Recovery raises the halt; the
+ledger neither denies peers nor stops the node itself.
+
 Topology configuration is loaded from an explicit topology file when provided,
 otherwise from the embedded `network/topology.json` for built-in networks,
 falling back to the legacy network bootstrap-peer list only when no embedded
@@ -7837,14 +7879,20 @@ the pipeline neither recovers nor stops. After `noProgressStuckThreshold`
 consecutive no-progress
 restarts the loop treats the failure as deterministic rather than
 transient, escalating the wait beyond the transient ceiling (bounded by
-`noProgressStuckBackoffMax`), logging the transition once at ERROR, and
+`noProgressStuckBackoffMax`), announcing the condition at ERROR, and
 exporting `dingo_ledger_pipeline_stuck` alongside
 `dingo_ledger_pipeline_no_progress_restarts` so a node that has silently
 stopped following the chain is visible to monitoring instead of only to
 whoever reads a repeating WARN. Both reset as soon as the tip advances.
+The announcement is not once-only: `pipelineStuckShouldAnnounce` repeats it
+every `noProgressStuckReannounceInterval` further no-progress restarts, roughly
+every ten minutes at the stuck backoff ceiling. Announcing the transition alone
+and then dropping to WARN left log-level alerting seeing a wedged node as
+healthy — one ERROR line covered eighteen hours in the field, buried among
+unrelated warnings (issue #3261).
 This still changes only the retry rate and the operator signal, never
 whether a block is accepted — a node wedged on a rejected block is equally
-wedged either way, but it now says so once, loudly, and stops spinning.
+wedged either way, but it now keeps saying so, loudly, and stops spinning.
 
 ### CIP-0163 Bookkeeping Shared Between Ledger Rollback and Lifecycle Truncate
 

@@ -82,6 +82,17 @@ type stateMetrics struct {
 	// wedged node is visible only as a repeating WARN. See issue #3165.
 	pipelineNoProgressRestarts prometheus.Gauge
 	pipelineStuck              prometheus.Gauge
+	// Set to 1 once the ledger pipeline has stopped retrying altogether.
+	// Unlike pipelineStuck this is terminal: the pipeline goroutine has
+	// returned and nothing will clear it short of a restart, so it is the
+	// signal to alert on for a node that has permanently stopped following
+	// the chain. See issue #3261.
+	pipelineHalted prometheus.Gauge
+	// Incremented when validation recovery declares a failure unrepairable
+	// because every rewind target it may legally reach lies inside the
+	// Mithril protected window. Each increment is one node that can no
+	// longer follow the chain without being re-bootstrapped.
+	mithrilTrustWindowUnrepairable prometheus.Counter
 	// Incremented for each epoch-boundary reward round that could not be
 	// applied because one of its inputs was absent. Every increment leaves
 	// reward balances -- and the leadership stake derived from them --
@@ -180,6 +191,24 @@ func (m *stateMetrics) incBlockPipelineUnexpectedError() {
 		return
 	}
 	m.blockPipelineUnexpectedErrors.Inc()
+}
+
+// setPipelineHalted records that the ledger pipeline has stopped retrying.
+// Terminal by design: nothing clears it, because nothing restarts the pipeline.
+func (m *stateMetrics) setPipelineHalted() {
+	if m == nil || m.pipelineHalted == nil {
+		return
+	}
+	m.pipelineHalted.Set(1)
+}
+
+// incMithrilTrustWindowUnrepairable records a validation failure that no legal
+// rewind can repair because the trust anchor blocks every deeper target.
+func (m *stateMetrics) incMithrilTrustWindowUnrepairable() {
+	if m == nil || m.mithrilTrustWindowUnrepairable == nil {
+		return
+	}
+	m.mithrilTrustWindowUnrepairable.Inc()
 }
 
 func (m *stateMetrics) setPipelineNoProgress(restarts int, stuck bool) {
@@ -373,6 +402,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_pipeline_stuck",
 			Help: "1 while the ledger pipeline has restarted without tip progress often enough to be treated as stuck on a deterministic failure (operator intervention required), 0 otherwise",
+		},
+	)
+	m.pipelineHalted = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_pipeline_halted",
+			Help: "1 once the ledger pipeline has stopped retrying on an unrepairable validation failure; terminal, so the node is no longer following the chain and requires operator intervention",
+		},
+	)
+	m.mithrilTrustWindowUnrepairable = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_mithril_trust_window_unrepairable_total",
+			Help: "validation failures declared unrepairable because every legal rewind target lay inside the Mithril protected window; the state the failing block needs predates the anchor and cannot be re-derived without crossing it",
 		},
 	)
 	m.blockPipelineBlocksDecoded = promautoFactory.NewGauge(
