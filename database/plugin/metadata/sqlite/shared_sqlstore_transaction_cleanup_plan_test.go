@@ -160,6 +160,107 @@ func TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop(
 	requireWitnessCleanupIndexed(t, db, "after DropDeferredIndexes")
 }
 
+// TestRetainedIndexesResidentAfterCriticalRebuild covers the repair path a
+// node takes when a prior bulk-load cycle was interrupted.
+//
+// serve calls RepairCriticalDeferredIndexes before it clears sync_status, and
+// Mithril sync calls BuildCritical before it clears its own. Both return with
+// the store about to accept API writes, and neither waits for the lazy
+// remainder that background maintenance finishes later. A database an older
+// binary's manifest had dropped a retained transaction_id index from therefore
+// has to be repaired by the critical rebuild too: otherwise every
+// SetTransaction between that point and the full rebuild clears its witness
+// tables with the full scan the retained set exists to prevent.
+//
+// The state under test is that database, reproduced by dropping the retained
+// set out from under a pending marker.
+func TestRetainedIndexesResidentAfterCriticalRebuild(t *testing.T) {
+	t.Parallel()
+	store, db := newAPIModeSQLStore(t)
+	seedWitnessRows(t, db, 0, 2000)
+
+	require.NoError(t, store.DropDeferredIndexes())
+	dropRetainedIndexes(t, db)
+	requireWitnessCleanupScans(t, db)
+
+	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	requireRetainedIndexesResident(t, db, "after BuildCriticalDeferredIndexes")
+	requireWitnessCleanupIndexed(t, db, "after BuildCriticalDeferredIndexes")
+
+	// The critical rebuild owns only the critical subset, so the marker has
+	// to survive it for background maintenance to finish the rest.
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(
+		t,
+		pending,
+		"BuildCriticalDeferredIndexes must leave the marker for the lazy "+
+			"remainder",
+	)
+}
+
+// dropRetainedIndexes removes every deferred.Retained index, reproducing what
+// a binary whose manifest still deferred them leaves on disk.
+//
+// The names are manifest constants, not input, and SQLite takes no bound
+// parameter in DDL.
+func dropRetainedIndexes(t *testing.T, db *sql.DB) {
+	t.Helper()
+	require.NotEmpty(t, deferred.Retained)
+	for _, index := range deferred.Retained {
+		_, err := db.Exec("DROP INDEX IF EXISTS " + index.Name)
+		require.NoError(t, err, "dropping retained index %s", index.Name)
+	}
+}
+
+// requireRetainedIndexesResident asserts that every deferred.Retained index is
+// present in the schema.
+func requireRetainedIndexesResident(t *testing.T, db *sql.DB, when string) {
+	t.Helper()
+	for _, index := range deferred.Retained {
+		var found int
+		require.NoError(t, db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master
+WHERE type = 'index' AND name = ?`,
+			index.Name,
+		).Scan(&found))
+		require.Equal(
+			t,
+			1,
+			found,
+			"%s: retained index %s must be resident whenever the store "+
+				"can serve writes",
+			when,
+			index.Name,
+		)
+	}
+}
+
+// requireWitnessCleanupScans asserts the negative case the repair has to fix:
+// with the retained set absent, the idempotency deletes are full scans. Without
+// it a rebuild that restored nothing would still pass the assertions above if
+// the indexes had never been missing.
+func requireWitnessCleanupScans(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, table := range sqlstore.TransactionWitnessTables() {
+		plan := queryPlan(
+			t,
+			db,
+			sqlstore.TransactionWitnessCleanupSQL(table),
+			1,
+		)
+		require.Contains(
+			t,
+			plan,
+			"SCAN "+table,
+			"the simulated interrupted cycle must leave the %s "+
+				"idempotency delete unindexed:\n%s",
+			table,
+			plan,
+		)
+	}
+}
+
 // requireWitnessCleanupIndexed asserts that every witness-table idempotency
 // delete resolves transaction_id through its index, quoting the plan and the
 // caller's stage description when it does not.
@@ -295,8 +396,29 @@ func TestTransactionWitnessCleanupCostFlatAcrossCardinality(t *testing.T) {
 		return float64(medians[len(medians)-1]) / float64(medians[0])
 	}
 	fixedRatio := ratio(fixed)
-	controlRatio := ratio(control)
 	growth := float64(slices.Max(steps)) / float64(slices.Min(steps))
+
+	// Both stores execute the same four statements per pass, so both pay the
+	// same cardinality-independent cost per pass: statement preparation and
+	// one commit per table, which no index changes. The fixed store's median
+	// is that cost plus a bounded number of b-tree descents, which is what
+	// makes it a usable estimate of the floor. The control's growth is
+	// therefore measured on the difference -- the scan component, the only
+	// term the row count drives. Dividing the raw medians instead mixes the
+	// floor into both ends of the ratio and understates the decay whenever
+	// the floor is large, which on a loaded machine it is.
+	scanCost := func(step int) float64 {
+		return float64(control[step] - fixed[step])
+	}
+	require.Positive(
+		t,
+		scanCost(0),
+		"the control must be slower than the fixed store at the smallest "+
+			"cardinality already, or the two stores are not differing in "+
+			"the three indexes under test: fixed %v, control %v",
+		fixed, control,
+	)
+	controlRatio := scanCost(len(control)-1) / scanCost(0)
 
 	require.Greater(
 		t,
@@ -304,7 +426,7 @@ func TestTransactionWitnessCleanupCostFlatAcrossCardinality(t *testing.T) {
 		growth/2,
 		"control (three transaction_id indexes dropped) must show the "+
 			"reported decay, or this sweep is too small to measure "+
-			"anything: rows grew %.0fx, cost grew %.1fx (fixed %v, "+
+			"anything: rows grew %.0fx, scan cost grew %.1fx (fixed %v, "+
 			"control %v)",
 		growth, controlRatio, fixed, control,
 	)

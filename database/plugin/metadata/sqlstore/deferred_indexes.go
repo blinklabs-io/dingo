@@ -27,9 +27,17 @@ import (
 
 var _ metadata.DeferredIndexManager = (*Store)(nil)
 
-// DropDeferredIndexes records the durable recovery marker and drops the
-// manifest in one SQLite transaction.
-func (s *Store) DropDeferredIndexes() error {
+// withDeferredIndexWrite runs fn in one write transaction, with every
+// deferred.Retained index guaranteed resident before fn sees the database.
+//
+// Every entry point in this file returns with the store able to serve writes,
+// and SetTransaction's per-row idempotency deletes are full scans of a growing
+// table without those indexes. An older binary's manifest may have dropped one
+// that this manifest keeps out; the versioned migration that created it is
+// recorded complete, so restoring it here is its only way back. Enforcing that
+// once, on the path every drop and rebuild takes, is what keeps a rebuild path
+// from being added without it.
+func (s *Store) withDeferredIndexWrite(fn func(db queryer) error) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
@@ -37,13 +45,19 @@ func (s *Store) DropDeferredIndexes() error {
 		context.Background(),
 		nil,
 		func(db queryer) error {
-			// An older binary's manifest may have dropped an index this
-			// one keeps out of the manifest, so restore those before
-			// dropping anything: the cycle about to start is the one whose
-			// per-row predicates need them.
 			if err := s.ensureRetainedIndexes(db); err != nil {
 				return err
 			}
+			return fn(db)
+		},
+	)
+}
+
+// DropDeferredIndexes records the durable recovery marker and drops the
+// manifest in one SQLite transaction.
+func (s *Store) DropDeferredIndexes() error {
+	return s.withDeferredIndexWrite(
+		func(db queryer) error {
 			if _, err := db.ExecContext(
 				context.Background(),
 				`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
@@ -121,22 +135,8 @@ func (s *Store) buildDeferredIndexes(
 	indexes []deferred.Index,
 	clearPending bool,
 ) error {
-	if err := s.ensureReady(); err != nil {
-		return err
-	}
-	return s.withWriteTransaction(
-		context.Background(),
-		nil,
+	return s.withDeferredIndexWrite(
 		func(db queryer) error {
-			if clearPending {
-				// The marker can outlive the binary that set it. Clearing
-				// it asserts that every index an older manifest may have
-				// dropped is back, including the ones this manifest no
-				// longer carries.
-				if err := s.ensureRetainedIndexes(db); err != nil {
-					return err
-				}
-			}
 			for _, index := range indexes {
 				exists, err := s.deferredIndexExists(db, index)
 				if err != nil {

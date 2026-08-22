@@ -4095,11 +4095,13 @@ and rollback predicates, while lazy indexes cover secondary query paths. Only
 indexes no import path filters on are eligible at all — an index a per-row
 import predicate needs stays resident, since dropping it turns that predicate
 into a full scan of a table the import is still growing. Those indexes are
-named in `deferred.Retained`, and the drop and full-rebuild paths create any of
-them that is absent, which repairs a database an older binary's manifest had
-already dropped them from — the versioned migration that created them is
-recorded complete and never re-runs. `DATABASE.md` records which indexes that
-rule keeps out of the manifest. The metadata plugin exposes
+named in `deferred.Retained`, and every drop and rebuild path creates any of
+them that is absent — the critical rebuild included, since it is the last step
+before the node serves API writes and the full rebuild can finish much later.
+That repairs a database an older binary's manifest had already dropped them
+from; the versioned migration that created them is recorded complete and never
+re-runs. `DATABASE.md` records which indexes that rule keeps out of the
+manifest. The metadata plugin exposes
 `BuildCriticalDeferredIndexes` for the critical subset and
 `BuildDeferredIndexes` for the full manifest. Mithril sync rebuilds the
 critical subset before clearing `sync_status`, then leaves the pending
