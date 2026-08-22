@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Errors returned by the client.
@@ -36,7 +38,9 @@ var (
 	ErrNoKeyYet = errors.New("kesagent: no KES key received from agent yet")
 	// ErrExhausted is returned when the requested period is beyond the
 	// key's remaining evolutions.
-	ErrExhausted = errors.New("kesagent: KES key exhausted for requested period")
+	ErrExhausted = errors.New(
+		"kesagent: KES key exhausted for requested period",
+	)
 	// ErrPastPeriod is returned when a period below the key's current period
 	// is requested (KES keys only evolve forward).
 	ErrPastPeriod = errors.New("kesagent: requested KES period is in the past")
@@ -46,16 +50,41 @@ var (
 	ErrClosed = errors.New("kesagent: client is closed")
 	// ErrInvalidSignature is returned when the agent's signature fails KES
 	// verification.
-	ErrInvalidSignature = errors.New("kesagent: agent returned an invalid signature")
+	ErrInvalidSignature = errors.New(
+		"kesagent: agent returned an invalid signature",
+	)
+	// ErrNotReady is returned by WaitForReady when the client could not reach
+	// a state where it can produce a signature within the given timeout.
+	ErrNotReady = errors.New("kesagent: KES agent not ready")
+	// ErrAgentSign is returned when the agent answered a sign request with an
+	// error of its own (an exhausted key, a refused period). It is a reply, not
+	// a transport failure, so the connection stays up and the request is not
+	// retried.
+	ErrAgentSign = errors.New("kesagent: agent sign error")
 )
 
 const (
 	defaultMinReconnect = 500 * time.Millisecond
 	defaultMaxReconnect = 5 * time.Second
-	defaultSignTimeout  = 5 * time.Second
+	// defaultSignTimeout must stay below one slot. A mainnet slot is one
+	// second, checkAndForgeProduction runs synchronously on the slot-aligned
+	// forging loop and ignores its context, so a sign timeout above a slot
+	// parks block production for several slots when the agent stops
+	// answering. A unix-socket round trip to a healthy agent is sub-
+	// millisecond, so this is generous; SignTimeout overrides it.
+	defaultSignTimeout = 500 * time.Millisecond
 	// defaultHandshakeTimeout bounds the Hello exchange so an agent that
 	// accepts the socket without speaking cannot wedge the client.
 	defaultHandshakeTimeout = 5 * time.Second
+	// connectWarnRepeat is how many consecutive failed connection attempts
+	// pass between Warn records. The first failure always warns; the rest stay
+	// at Debug so a long agent outage does not flood the log while still
+	// re-reporting itself roughly once a minute at the backoff ceiling.
+	connectWarnRepeat = 12
+	// rejectLogInterval bounds how often one rejection reason reaches the log.
+	// An agent looping on a refused push emitted 5000 Error records in about
+	// two seconds, which buries every other block-producer log line.
+	rejectLogInterval = 30 * time.Second
 )
 
 // Config configures a Client.
@@ -83,6 +112,9 @@ type Config struct {
 	// HandshakeTimeout bounds the Hello exchange on a freshly accepted
 	// connection. Zero uses the default.
 	HandshakeTimeout time.Duration
+	// PromRegistry, when non-nil, receives the client's connection and key
+	// state metrics.
+	PromRegistry prometheus.Registerer
 }
 
 // Client sources KES material from a bursa KES agent and implements
@@ -97,6 +129,21 @@ type Client struct {
 	opCert  *forging.OpCert
 	kesVKey []byte // expected KES vkey (from opCert), used to vet pushes
 	start   uint64 // opCert KES start period
+	metrics *clientMetrics
+
+	// ready is closed once the client can produce a signature: a validated key
+	// is held (serve-key) or a session is established (sign). WaitForReady
+	// blocks on it so a misconfigured socket surfaces at startup instead of at
+	// the first slot win.
+	ready     chan struct{}
+	readyOnce sync.Once
+
+	// rejectMu guards the rejection-log throttle. It is separate from mu
+	// because a rejection is reported from inside the locked section of
+	// applyKeyPush.
+	rejectMu         sync.Mutex
+	rejectLast       map[string]time.Time
+	rejectSuppressed map[string]uint64
 
 	mu sync.Mutex
 	// serve-key: the current local signing key, evolving forward. nil until
@@ -148,7 +195,9 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("kesagent: operational certificate is required")
 	}
 	if len(cfg.OpCert.KESVKey) == 0 {
-		return nil, errors.New("kesagent: operational certificate has no KES vkey")
+		return nil, errors.New(
+			"kesagent: operational certificate has no KES vkey",
+		)
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -166,14 +215,21 @@ func New(cfg Config) (*Client, error) {
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = defaultHandshakeTimeout
 	}
-	return &Client{
-		cfg:     cfg,
-		logger:  logger.With("component", "kesagent"),
-		opCert:  cfg.OpCert,
-		kesVKey: bytes.Clone(cfg.OpCert.KESVKey),
-		start:   cfg.OpCert.KESPeriod,
-		reqCh:   make(chan *signReq),
-	}, nil
+	c := &Client{
+		cfg:              cfg,
+		logger:           logger.With("component", "kesagent"),
+		opCert:           cfg.OpCert,
+		kesVKey:          bytes.Clone(cfg.OpCert.KESVKey),
+		start:            cfg.OpCert.KESPeriod,
+		reqCh:            make(chan *signReq),
+		ready:            make(chan struct{}),
+		rejectLast:       make(map[string]time.Time),
+		rejectSuppressed: make(map[string]uint64),
+	}
+	if cfg.PromRegistry != nil {
+		c.metrics = initClientMetrics(cfg.PromRegistry)
+	}
+	return c, nil
 }
 
 // Start begins the client's background loop and returns immediately. The loop
@@ -301,19 +357,23 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 // reconnects.
 func (c *Client) runServeKey(ctx context.Context) {
 	backoff := c.cfg.MinReconnect
+	failures := uint64(0)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		conn, err := c.dial(ctx)
 		if err != nil {
-			c.logger.Debug("serve-key connect failed; will retry", "error", err)
+			failures++
+			c.noteConnectFailure(ctx, ModeServeKey, failures, err)
 			if !sleepCtx(ctx, backoff) {
 				return
 			}
 			backoff = nextBackoff(backoff, c.cfg.MaxReconnect)
 			continue
 		}
+		failures = 0
+		c.setConnectedMetric(true)
 		c.logger.Info("connected to KES agent (serve-key)")
 		// Recorded atomically with the lifecycle state so cancellation racing
 		// this dial cannot leave the connection untracked.
@@ -327,12 +387,17 @@ func (c *Client) runServeKey(ctx context.Context) {
 			if err := readFrame(conn, &kp); err != nil {
 				_ = conn.Close()
 				c.setConn(nil)
+				c.setConnectedMetric(false)
 				if ctx.Err() == nil {
-					c.logger.Warn("KES agent connection lost; reconnecting", "error", err)
+					c.logger.Warn(
+						"KES agent connection lost; reconnecting",
+						"error",
+						err,
+					)
 				}
 				break
 			}
-			if c.applyKeyPush(kp) {
+			if c.applyKeyPush(ctx, kp) {
 				installedKey = true
 			}
 		}
@@ -368,12 +433,17 @@ func (c *Client) runServeKey(ctx context.Context) {
 // installed; every rejection path returns false, which is what lets the
 // reconnect loop tell a productive session from one that delivered nothing
 // usable.
-func (c *Client) applyKeyPush(kp KeyPush) bool {
+func (c *Client) applyKeyPush(ctx context.Context, kp KeyPush) bool {
 	// Refuse anything that is not a key push. Trusting the frame's contents
 	// without checking what it claims to be would let a mislabelled or
-	// out-of-band frame install key material.
-	if kp.Type != "" && kp.Type != KeyPushType {
-		c.logger.Error(
+	// out-of-band frame install key material. The type is required, not
+	// merely checked when present: protocol.go documents every serve-key frame
+	// as carrying "type":"key_push", so an agent that omits it is not speaking
+	// this protocol and its frame's other fields mean nothing.
+	if kp.Type != KeyPushType {
+		c.rejectPush(
+			ctx,
+			slog.LevelError,
 			"ignoring KES key push: unexpected frame type",
 			"type", kp.Type,
 		)
@@ -384,14 +454,18 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 	// let a push with no vkey skip the operational-certificate cross-check
 	// entirely and be installed as trusted.
 	if !bytes.Equal(kp.KESVKey, c.kesVKey) {
-		c.logger.Error(
+		c.rejectPush(
+			ctx,
+			slog.LevelError,
 			"ignoring KES key push: pushed KES vkey missing or does not match operational certificate",
 		)
 		wipe(kp.KESSignKey)
 		return false
 	}
 	if kp.Period < c.start {
-		c.logger.Warn(
+		c.rejectPush(
+			ctx,
+			slog.LevelWarn,
 			"ignoring KES key push: pushed period before opcert start",
 			"pushed_period", kp.Period,
 			"opcert_start", c.start,
@@ -399,6 +473,11 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 		wipe(kp.KESSignKey)
 		return false
 	}
+	// An omitted depth means the Shelley depth. Shelley fixes it, so there is
+	// exactly one value a conforming agent can mean, and the checks below still
+	// require the resolved value to be that one. The key's own material is
+	// bound by the derivation and probe checks further down regardless of what
+	// this field claims.
 	depth := kp.Depth
 	if depth == 0 {
 		depth = kes.CardanoKesDepth
@@ -410,7 +489,9 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 	// reject, and a key at any other depth could not produce Shelley-valid
 	// signatures even if it were installed.
 	if depth != kes.CardanoKesDepth {
-		c.logger.Error(
+		c.rejectPush(
+			ctx,
+			slog.LevelError,
 			"ignoring KES key push: unsupported key depth",
 			"depth", depth,
 			"want", kes.CardanoKesDepth,
@@ -422,7 +503,9 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 	// malformed buffer indexes out of range while deriving the public key, so
 	// the size check has to come first.
 	if want := secretKeySize(depth); len(kp.KESSignKey) != want {
-		c.logger.Error(
+		c.rejectPush(
+			ctx,
+			slog.LevelError,
 			"ignoring KES key push: unexpected signing key size",
 			"size", len(kp.KESSignKey),
 			"want", want,
@@ -434,7 +517,9 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 	internal := kp.Period - c.start
 	maxPeriod := kes.MaxPeriod(depth)
 	if internal >= maxPeriod {
-		c.logger.Warn(
+		c.rejectPush(
+			ctx,
+			slog.LevelWarn,
 			"ignoring KES key push: pushed period is at or beyond key expiry",
 			"relative_period", internal,
 			"max_period", maxPeriod,
@@ -452,7 +537,9 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 	}
 	derived := kes.PublicKey(candidate)
 	if !bytes.Equal(derived, c.kesVKey) {
-		c.logger.Error(
+		c.rejectPush(
+			ctx,
+			slog.LevelError,
 			"ignoring KES key push: signing key does not derive the operational certificate's KES vkey",
 		)
 		wipe(candidate.Data)
@@ -474,16 +561,21 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 	probe := []byte("dingo kes-agent pushed-key verification")
 	probeSig, err := kes.Sign(candidate, candidate.Period, probe)
 	if err != nil {
-		c.logger.Error(
+		c.rejectPush(
+			ctx,
+			slog.LevelError,
 			"ignoring KES key push: pushed key could not sign a verification probe",
-			"error", err,
+			"error",
+			err,
 		)
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
 		return false
 	}
 	if !kes.VerifySignedKES(c.kesVKey, candidate.Period, probe, probeSig) {
-		c.logger.Error(
+		c.rejectPush(
+			ctx,
+			slog.LevelError,
 			"ignoring KES key push: pushed key does not sign for the operational certificate's KES vkey",
 		)
 		wipe(candidate.Data)
@@ -498,10 +590,23 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 		wipe(kp.KESSignKey)
 		return false
 	}
-	// Reject a push that would move the key backward (stale/duplicate).
+	// Reject a push that would move the key backward (stale/duplicate). Say so:
+	// the reconnect loop counts this session as unproductive and escalates its
+	// backoff to MaxReconnect, and without a record the escalation has no
+	// explanation anywhere. An agent stuck on a period the node has already
+	// evolved past is the common cause.
 	if c.kesSKey != nil && internal < c.kesSKey.Period {
 		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
+		c.rejectPush(
+			ctx,
+			slog.LevelWarn,
+			"ignoring KES key push: pushed period is behind the key already held",
+			"pushed_relative_period",
+			internal,
+			"held_relative_period",
+			c.kesSKey.Period,
+		)
 		return false
 	}
 	if c.kesSKey != nil {
@@ -509,69 +614,379 @@ func (c *Client) applyKeyPush(kp KeyPush) bool {
 	}
 	c.kesSKey = candidate
 	wipe(kp.KESSignKey)
+	c.setKeyMetric(true, kp.Period)
+	c.markReady()
 	c.logger.Info("received KES key from agent", "absolute_period", kp.Period)
 	return true
 }
 
-// runSign pumps sign requests over a persistent connection, reconnecting on
-// error, until ctx is cancelled.
+// markReady releases WaitForReady. Called on the first installed key in
+// serve-key mode and on the first established session in sign mode.
+func (c *Client) markReady() {
+	c.readyOnce.Do(func() { close(c.ready) })
+}
+
+// noteConnectFailure reports a failed connection attempt.
+//
+// The first failure and every connectWarnRepeat-th consecutive failure are
+// logged at Warn. At Debug they were invisible: a wrong
+// --shelley-kes-agent-socket path produced no record at Info or above while the
+// node logged "KES signing key sourced from agent" and "block forger started in
+// production mode", so the node reported a healthy producer and forged nothing
+// until a slot was lost. The intervening failures stay at Debug so a long agent
+// outage does not flood the log.
+func (c *Client) noteConnectFailure(
+	ctx context.Context,
+	mode string,
+	failures uint64,
+	err error,
+) {
+	if c.metrics != nil {
+		c.metrics.connectFailures.Inc()
+	}
+	level := slog.LevelDebug
+	if failures == 1 || failures%connectWarnRepeat == 0 {
+		level = slog.LevelWarn
+	}
+	c.logger.Log(
+		ctx,
+		level,
+		"could not connect to KES agent; block production will fail until it is reachable",
+		"mode",
+		mode,
+		"socket",
+		c.cfg.SocketPath,
+		"consecutive_failures",
+		failures,
+		"error",
+		err,
+	)
+}
+
+// rejectPush records a refused key push.
+//
+// Every rejection increments the rejected-push counter, but at most one record
+// per reason reaches the log per rejectLogInterval: an agent looping on a
+// refused push produced 5000 Error records in about two seconds. The suppressed
+// count rides along on the next record for that reason, so throttling hides the
+// repetition and not the volume.
+func (c *Client) rejectPush(
+	ctx context.Context,
+	level slog.Level,
+	msg string,
+	attrs ...any,
+) {
+	if c.metrics != nil {
+		c.metrics.rejectedPushes.Inc()
+	}
+	now := time.Now()
+	c.rejectMu.Lock()
+	if last, seen := c.rejectLast[msg]; seen &&
+		now.Sub(last) < rejectLogInterval {
+		c.rejectSuppressed[msg]++
+		c.rejectMu.Unlock()
+		return
+	}
+	suppressed := c.rejectSuppressed[msg]
+	delete(c.rejectSuppressed, msg)
+	c.rejectLast[msg] = now
+	c.rejectMu.Unlock()
+	if suppressed > 0 {
+		attrs = append(attrs, "suppressed_since_last_record", suppressed)
+	}
+	c.logger.Log(ctx, level, msg, attrs...)
+}
+
+// runSign keeps a connection to the agent and pumps sign requests over it,
+// reconnecting on error, until ctx is cancelled.
+//
+// The connection is established eagerly and re-established while idle rather
+// than lazily on the first request. Two reasons, both about the gap between
+// slot wins, which on a real pool is hours:
+//
+//   - A wrong socket path, a permission problem, or a mode mismatch is then
+//     reported at startup instead of at the first slot win.
+//   - An agent that closes an idle connection (an idle timeout, a restart, a
+//     socket recycle) is noticed while nothing is waiting on it, instead of by
+//     the write that follows the FIN: parked in a select on reqCh the pump never
+//     read the socket, so the close went unseen and the next slot win failed
+//     with "write: broken pipe" and forfeited the block.
 func (c *Client) runSign(ctx context.Context) {
-	var conn net.Conn
+	var (
+		conn     net.Conn
+		watcher  *idleWatcher
+		failures uint64
+		// served records whether the current session answered a request. A
+		// session that served nothing is unproductive, so it backs off like a
+		// failed dial: an agent that accepts and immediately closes -- its
+		// shutdown window, or a listener that answers and hangs up -- otherwise
+		// sends this loop straight back to dial with no delay.
+		served bool
+	)
 	defer func() {
+		if watcher != nil {
+			watcher.stop()
+		}
 		if conn != nil {
 			_ = conn.Close()
 		}
 	}()
 	backoff := c.cfg.MinReconnect
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if conn == nil {
+			newConn, err := c.dial(ctx)
+			if err != nil {
+				failures++
+				c.noteConnectFailure(ctx, ModeSign, failures, err)
+				ok, servedOne := c.waitBeforeReconnect(ctx, backoff, &conn)
+				if !ok {
+					return
+				}
+				if servedOne {
+					served = true
+					backoff = c.cfg.MinReconnect
+					continue
+				}
+				backoff = nextBackoff(backoff, c.cfg.MaxReconnect)
+				continue
+			}
+			// Recorded so the client's cancellation watcher can close a
+			// connection parked in a read; otherwise a shutdown while a request
+			// is in flight leaks this goroutine and the socket until the agent
+			// replies.
+			if err := c.registerConn(ctx, newConn); err != nil {
+				_ = newConn.Close()
+				return
+			}
+			conn = newConn
+			failures = 0
+			served = false
+			c.setConnectedMetric(true)
+			c.markReady()
+			c.logger.Info("connected to KES agent (sign)")
+		}
+		if watcher == nil {
+			watcher = newIdleWatcher(conn)
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case req := <-c.reqCh:
-			if conn == nil {
-				newConn, err := c.dial(ctx)
-				if err != nil {
-					c.logger.Debug("sign connect failed", "error", err)
-					req.resp <- signResp{err: err}
-					if !sleepCtx(ctx, backoff) {
-						return
-					}
-					backoff = nextBackoff(backoff, c.cfg.MaxReconnect)
-					continue
-				}
-				c.logger.Info("connected to KES agent (sign)")
-				// Recorded so the client's cancellation watcher can close a
-				// connection parked in readFrame; otherwise a shutdown while a
-				// request is in flight leaks this goroutine and the socket
-				// until the agent replies.
-				if err := c.registerConn(ctx, newConn); err != nil {
-					_ = newConn.Close()
-					req.resp <- signResp{err: err}
-					return
-				}
-				conn = newConn
+		case <-watcher.broken:
+			watcher.stop()
+			watcher = nil
+			c.dropSignConn(&conn)
+			if ctx.Err() != nil {
+				return
+			}
+			c.logger.Warn(
+				"KES agent closed the idle sign connection; reconnecting",
+			)
+			if served {
 				backoff = c.cfg.MinReconnect
 			}
-			sig, err := roundTripSign(
-				conn,
-				c.kesVKey,
-				c.start,
-				req.period,
-				req.msg,
-				c.cfg.SignTimeout,
-			)
-			if err != nil {
-				// Transport error: drop the connection so the next request
-				// reconnects.
-				_ = conn.Close()
-				c.setConn(nil)
-				conn = nil
-				c.logger.Warn("KES agent sign failed; will reconnect", "error", err)
+			ok, servedOne := c.waitBeforeReconnect(ctx, backoff, &conn)
+			if !ok {
+				return
 			}
+			if servedOne {
+				served = true
+				backoff = c.cfg.MinReconnect
+			} else if !served {
+				backoff = nextBackoff(backoff, c.cfg.MaxReconnect)
+			}
+		case req := <-c.reqCh:
+			// The idle read has to stop before the connection carries a
+			// request, or it consumes the response's first byte.
+			if !watcher.stop() {
+				c.dropSignConn(&conn)
+			}
+			watcher = nil
+			sig, err := c.serveSignRequest(ctx, &conn, req)
 			req.resp <- signResp{sig: sig, err: err}
+			if err == nil {
+				served = true
+				backoff = c.cfg.MinReconnect
+			}
 		}
 	}
 }
+
+// dropSignConn closes and forgets the pump's connection.
+func (c *Client) dropSignConn(conn *net.Conn) {
+	current := *conn
+	*conn = nil
+	if current == nil {
+		return
+	}
+	_ = current.Close()
+	c.setConn(nil)
+	c.setConnectedMetric(false)
+}
+
+// serveSignRequest performs one sign round trip, dialling if the pump holds no
+// connection and retrying exactly once on a transport error.
+//
+// The retry is what stops an idle-closed connection from costing a block. Even
+// with the idle watcher there is a window: a FIN that arrives between stopping
+// the watcher and writing the request is only discovered by that write, as
+// "write: broken pipe". Retrying on a fresh connection turns a lost slot into a
+// slightly slower one. An error the agent actually replied with is not a
+// transport fault and is not retried — asking the same question twice would get
+// the same answer.
+func (c *Client) serveSignRequest(
+	ctx context.Context,
+	conn *net.Conn,
+	req *signReq,
+) ([]byte, error) {
+	var lastErr error
+	for attempt := range 2 {
+		if *conn == nil {
+			newConn, err := c.dial(ctx)
+			if err != nil {
+				c.noteConnectFailure(ctx, ModeSign, 1, err)
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				return nil, err
+			}
+			if err := c.registerConn(ctx, newConn); err != nil {
+				_ = newConn.Close()
+				return nil, err
+			}
+			*conn = newConn
+			c.setConnectedMetric(true)
+			c.markReady()
+		}
+		sig, err := roundTripSign(
+			*conn,
+			c.kesVKey,
+			c.start,
+			req.period,
+			req.msg,
+			c.cfg.SignTimeout,
+		)
+		if err == nil {
+			return sig, nil
+		}
+		lastErr = err
+		if c.metrics != nil {
+			c.metrics.signFailures.Inc()
+		}
+		// An agent-level refusal came back over a working connection; keep it.
+		if errors.Is(err, ErrAgentSign) {
+			return nil, err
+		}
+		c.dropSignConn(conn)
+		var transport *transportError
+		if attempt == 0 && errors.As(err, &transport) && ctx.Err() == nil {
+			c.logger.Warn(
+				"KES agent sign failed on a stale connection; retrying once on a fresh one",
+				"error",
+				err,
+			)
+			continue
+		}
+		c.logger.Warn("KES agent sign failed; will reconnect", "error", err)
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+// waitBeforeReconnect holds off the next dial for d while continuing to serve
+// sign requests. It reports whether the loop should continue and whether any
+// request was served during the wait.
+//
+// A request arriving during the backoff dials on its own rather than being
+// refused or left queued: the backoff exists to stop a hot reconnect loop
+// against an agent that keeps hanging up, not to decline a slot win. The forging
+// loop calls KESSign synchronously, so a request parked for a whole backoff
+// costs slots.
+func (c *Client) waitBeforeReconnect(
+	ctx context.Context,
+	d time.Duration,
+	conn *net.Conn,
+) (bool, bool) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	served := false
+	for {
+		select {
+		case <-ctx.Done():
+			return false, served
+		case <-timer.C:
+			return true, served
+		case req := <-c.reqCh:
+			sig, err := c.serveSignRequest(ctx, conn, req)
+			req.resp <- signResp{sig: sig, err: err}
+			if err == nil {
+				served = true
+			}
+		}
+	}
+}
+
+// idleWatcher reads one byte from an otherwise idle sign connection so a FIN
+// from the agent is noticed while nothing is waiting on the socket.
+//
+// The read must be stopped before the connection carries a request, or it would
+// consume the response's first byte. stop unblocks it with a read deadline in
+// the past, waits for it to exit, then clears the deadline again.
+type idleWatcher struct {
+	conn net.Conn
+	// broken is closed when the connection cannot carry the next request.
+	broken chan struct{}
+	// done is closed when the reader goroutine has exited.
+	done chan struct{}
+}
+
+func newIdleWatcher(conn net.Conn) *idleWatcher {
+	w := &idleWatcher{
+		conn:   conn,
+		broken: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	go func() {
+		defer close(w.done)
+		var b [1]byte
+		_, err := conn.Read(b[:])
+		// A deadline error is stop() unblocking this read, and is the only
+		// outcome that leaves the connection usable. Anything else -- EOF, a
+		// reset, a closed socket, or the agent sending a frame nobody asked
+		// for -- means it cannot carry the next request.
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			close(w.broken)
+		}
+	}()
+	return w
+}
+
+// stop ends the idle read and reports whether the connection is still usable.
+func (w *idleWatcher) stop() bool {
+	// A deadline already in the past unblocks the read immediately.
+	_ = w.conn.SetReadDeadline(time.Now().Add(-time.Second))
+	<-w.done
+	_ = w.conn.SetReadDeadline(time.Time{})
+	select {
+	case <-w.broken:
+		return false
+	default:
+		return true
+	}
+}
+
+// transportError marks a failure of the connection itself, as distinct from a
+// reply the agent actually sent. Only a transport failure is worth retrying on
+// a fresh connection.
+type transportError struct {
+	err error
+}
+
+func (e *transportError) Error() string { return e.err.Error() }
+
+func (e *transportError) Unwrap() error { return e.err }
 
 // roundTripSign performs one sign request/response over conn.
 func roundTripSign(
@@ -599,16 +1014,16 @@ func roundTripSign(
 		Period:  period,
 		Message: msg,
 	}); err != nil {
-		return nil, err
+		return nil, &transportError{err: err}
 	}
 	var resp SignResponse
 	if err := readFrame(conn, &resp); err != nil {
-		return nil, err
+		return nil, &transportError{err: err}
 	}
 	if resp.Error != "" {
 		// An agent-level error (e.g. exhausted key) is not a transport
 		// failure; surface it without dropping the connection.
-		return nil, fmt.Errorf("kesagent: agent sign error: %s", resp.Error)
+		return nil, fmt.Errorf("%w: %s", ErrAgentSign, resp.Error)
 	}
 	// Validate the reply rather than trusting whatever came back. A
 	// mislabelled frame, a reply for a different period, or an empty
@@ -797,6 +1212,42 @@ func (c *Client) HasKey() bool {
 	return c.kesSKey != nil
 }
 
+// WaitForReady blocks until the client can produce a signature, or until
+// timeout elapses or ctx is cancelled.
+//
+// Ready means a validated key is held in serve-key mode, and a session with the
+// agent is established in sign mode. Startup calls this so a wrong socket path,
+// a permission problem, or a mode mismatch is reported while the operator is
+// still watching the node start, rather than at the first slot win hours later.
+// It does not keep waiting past the timeout: the agent is a separate process
+// that may legitimately come up after the node, and a producer that logs loudly
+// and keeps retrying is better than one that refuses to start because of a
+// restarting agent.
+func (c *Client) WaitForReady(
+	ctx context.Context,
+	timeout time.Duration,
+) error {
+	c.mu.Lock()
+	started, closed := c.started, c.closed
+	c.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	if !started {
+		return ErrNotStarted
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-c.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("%w after %s", ErrNotReady, timeout)
+	}
+}
+
 // Close wipes any locally held key material.
 // Close stops the background loop and wipes any key material the client holds.
 // It is safe to call more than once, and safe to call on a client that was
@@ -818,6 +1269,8 @@ func (c *Client) Close() {
 		c.kesSKey = nil
 	}
 	c.mu.Unlock()
+	c.setKeyMetric(false, 0)
+	c.setConnectedMetric(false)
 
 	if stop != nil {
 		stop()
@@ -839,7 +1292,9 @@ func secretKeySize(depth uint64) int {
 	if depth == 0 {
 		return ed25519KeySize
 	}
-	return ed25519KeySize + int(depth)*perLevel // #nosec G115 -- depth is bounded by the caller
+	return ed25519KeySize + int(
+		depth,
+	)*perLevel // #nosec G115 -- depth is bounded by the caller
 }
 
 func wipe(b []byte) {

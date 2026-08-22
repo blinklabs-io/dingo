@@ -39,7 +39,10 @@ import (
 // newTestKES generates a fresh KES key and a matching operational certificate
 // with the given absolute start period. The returned master key is at internal
 // period 0; callers clone and evolve it to produce keys at later periods.
-func newTestKES(t *testing.T, start uint64) ([]byte, *kes.SecretKey, *forging.OpCert) {
+func newTestKES(
+	t *testing.T,
+	start uint64,
+) ([]byte, *kes.SecretKey, *forging.OpCert) {
 	t.Helper()
 	seed := make([]byte, kes.SeedSize)
 	if _, err := rand.Read(seed); err != nil {
@@ -61,7 +64,10 @@ func newTestKES(t *testing.T, start uint64) ([]byte, *kes.SecretKey, *forging.Op
 
 // evolveClone returns a clone of master evolved forward to the given internal
 // period.
-func evolveClone(master *kes.SecretKey, internal uint64) (*kes.SecretKey, error) {
+func evolveClone(
+	master *kes.SecretKey,
+	internal uint64,
+) (*kes.SecretKey, error) {
 	cur := &kes.SecretKey{
 		Depth:  master.Depth,
 		Period: master.Period,
@@ -85,11 +91,15 @@ func evolveClone(master *kes.SecretKey, internal uint64) (*kes.SecretKey, error)
 type fakeAgent struct {
 	ln      net.Listener
 	handler func(index int, conn net.Conn)
-	conns   int32
+	conns   atomic.Int32
 	wg      sync.WaitGroup
 }
 
-func startFakeAgent(t *testing.T, mode string, handler func(index int, conn net.Conn)) *fakeAgent {
+func startFakeAgent(
+	t *testing.T,
+	mode string,
+	handler func(index int, conn net.Conn),
+) *fakeAgent {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "agent.sock")
 	ln, err := net.Listen("unix", sock)
@@ -103,7 +113,7 @@ func startFakeAgent(t *testing.T, mode string, handler func(index int, conn net.
 			if err != nil {
 				return
 			}
-			idx := int(atomic.AddInt32(&a.conns, 1)) - 1
+			idx := int(a.conns.Add(1)) - 1
 			a.wg.Go(func() {
 				defer func() { _ = conn.Close() }()
 				// Every connection starts with the Hello handshake.
@@ -161,7 +171,9 @@ func TestServeKeyModeSignsAndVerifies(t *testing.T) {
 		_, _ = conn.Read(buf)
 	})
 
-	client, err := New(Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert})
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert},
+	)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -180,7 +192,11 @@ func TestServeKeyModeSignsAndVerifies(t *testing.T) {
 			t.Fatalf("sign at %d: %v", period, err)
 		}
 		if !kes.VerifySignedKES(vkey, period-start, msg, sig) {
-			t.Fatalf("signature at absolute %d (relative %d) did not verify", period, period-start)
+			t.Fatalf(
+				"signature at absolute %d (relative %d) did not verify",
+				period,
+				period-start,
+			)
 		}
 	}
 }
@@ -218,7 +234,9 @@ func TestServeKeyModePicksUpRePush(t *testing.T) {
 		_, _ = conn.Read(buf)
 	})
 
-	client, err := New(Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert})
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert},
+	)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -226,12 +244,20 @@ func TestServeKeyModePicksUpRePush(t *testing.T) {
 
 	// Wait for the first push to land, then let the agent send the second, so
 	// the observed jump to period 4 can only come from the re-push.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 1 },
+	)
 	close(releaseSecond)
 
 	// The re-pushed (evolved) key advances the client's held period without
 	// any local KESSign-driven evolution.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 4 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 4 },
+	)
 
 	msg := []byte("post-evolve header")
 	sig, err := client.KESSign(4, msg)
@@ -271,7 +297,9 @@ func TestSignModeForwardsAndVerifies(t *testing.T) {
 		}
 	})
 
-	client, err := New(Config{SocketPath: agent.socket(), Mode: ModeSign, OpCert: opcert})
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeSign, OpCert: opcert},
+	)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -359,7 +387,10 @@ func TestRegisterConnRejectsCanceledContext(t *testing.T) {
 		_ = serverConn.Close()
 	}()
 
-	if err := client.registerConn(ctx, clientConn); !errors.Is(err, context.Canceled) {
+	if err := client.registerConn(ctx, clientConn); !errors.Is(
+		err,
+		context.Canceled,
+	) {
 		t.Fatalf("expected canceled context error, got %v", err)
 	}
 	client.mu.Lock()
@@ -414,8 +445,12 @@ func TestServeKeyModeReconnectsAfterDrop(t *testing.T) {
 
 	// After the dropped first connection, the client reconnects and receives
 	// the period-5 key.
-	waitFor(t, 3*time.Second, func() bool { return client.CurrentPeriod() == 5 })
-	connections := atomic.LoadInt32(&agent.conns)
+	waitFor(
+		t,
+		3*time.Second,
+		func() bool { return client.CurrentPeriod() == 5 },
+	)
+	connections := agent.conns.Load()
 	if connections < 2 {
 		t.Fatalf("expected at least 2 connections, got %d", connections)
 	}
@@ -462,22 +497,23 @@ func TestSignModeReconnectsAfterDrop(t *testing.T) {
 
 	const period = uint64(3)
 	msg := []byte("reconnect header")
-	// First request hits the dropped connection and errors.
-	if _, err := client.KESSign(period, msg); err == nil {
-		t.Fatal("expected first sign to fail on dropped connection")
+	// The first request hits the connection the agent drops, and must still
+	// return a signature: the transport error is retried once on a fresh
+	// connection. Before that retry existed this call failed with "write:
+	// broken pipe" or EOF and the caller lost the block, which on a real pool
+	// is the next slot win hours later.
+	sig, err := client.KESSign(period, msg)
+	if err != nil {
+		t.Fatalf("sign across a dropped connection: %v", err)
 	}
-	// Second request reconnects and succeeds.
-	var sig []byte
-	waitFor(t, 3*time.Second, func() bool {
-		s, err := client.KESSign(period, msg)
-		if err != nil {
-			return false
-		}
-		sig = s
-		return true
-	})
 	if !kes.VerifySignedKES(vkey, period-start, msg, sig) {
 		t.Fatal("signature after reconnect did not verify")
+	}
+	if connections := agent.conns.Load(); connections < 2 {
+		t.Fatalf(
+			"expected the retry to open a second connection, got %d",
+			connections,
+		)
 	}
 }
 
@@ -519,7 +555,9 @@ func TestServeKeyRejectsMismatchedKESVKey(t *testing.T) {
 		_, _ = conn.Read(buf)
 	})
 
-	client, err := New(Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert})
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert},
+	)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -529,7 +567,11 @@ func TestServeKeyRejectsMismatchedKESVKey(t *testing.T) {
 	// claims a later period, so had it been accepted the legitimate push that
 	// follows would have been refused as moving backward, leaving the bad key
 	// installed.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 1 },
+	)
 
 	// The held key must be the legitimate one: it has to verify against the
 	// opcert's vkey, which the rejected key cannot do.
@@ -596,7 +638,11 @@ func TestServeKeyRejectsPushWithoutKESVKey(t *testing.T) {
 	// claims a later period, so had it been accepted the legitimate push that
 	// follows would have been refused as moving backward, leaving the bad key
 	// installed.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 1 },
+	)
 
 	msg := []byte("after vkey-less push")
 	sig, err := client.KESSign(1, msg)
@@ -657,7 +703,11 @@ func TestServeKeyRejectsKeyNotDerivingOpCertVKey(t *testing.T) {
 	// claims a later period, so had it been accepted the legitimate push that
 	// follows would have been refused as moving backward, leaving the bad key
 	// installed.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 1 },
+	)
 
 	msg := []byte("after impostor push")
 	sig, err := client.KESSign(1, msg)
@@ -712,7 +762,11 @@ func TestServeKeyRejectsMalformedKeyWithoutPanic(t *testing.T) {
 	// claims a later period, so had it been accepted the legitimate push that
 	// follows would have been refused as moving backward, leaving the bad key
 	// installed.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 1 },
+	)
 
 	msg := []byte("after malformed push")
 	sig, err := client.KESSign(1, msg)
@@ -736,7 +790,7 @@ func TestServeKeyRejectsExpiredPush(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	installed := client.applyKeyPush(KeyPush{
+	installed := client.applyKeyPush(t.Context(), KeyPush{
 		Type:       KeyPushType,
 		Period:     start + kes.MaxPeriod(kes.CardanoKesDepth),
 		Depth:      kes.CardanoKesDepth,
@@ -766,7 +820,9 @@ func TestServeKeyRejectsUnsupportedDepth(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	var logMu sync.Mutex
-	logger := slog.New(slog.NewTextHandler(&syncWriter{mu: &logMu, w: &logBuf}, nil))
+	logger := slog.New(
+		slog.NewTextHandler(&syncWriter{mu: &logMu, w: &logBuf}, nil),
+	)
 
 	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
 		// A deeper tree, with a buffer sized consistently for it so the layout
@@ -807,13 +863,20 @@ func TestServeKeyRejectsUnsupportedDepth(t *testing.T) {
 
 	// The rejected push claims the later period, so had it been installed the
 	// legitimate push below would have been refused as moving backward.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 1 },
+	)
 
 	logMu.Lock()
 	logged := logBuf.String()
 	logMu.Unlock()
 	if !strings.Contains(logged, "unsupported key depth") {
-		t.Fatalf("depth was not rejected on the depth rule; log was:\n%s", logged)
+		t.Fatalf(
+			"depth was not rejected on the depth rule; log was:\n%s",
+			logged,
+		)
 	}
 
 	msg := []byte("after unsupported-depth push")
@@ -918,7 +981,11 @@ func TestServeKeyRejectsKeyForgedFromPublicRootHashes(t *testing.T) {
 
 	// The forged push claims the later period, so if it were accepted the
 	// legitimate push behind it would be refused as moving backward.
-	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	waitFor(
+		t,
+		2*time.Second,
+		func() bool { return client.CurrentPeriod() == 1 },
+	)
 
 	msg := []byte("after forged push")
 	sig, err := client.KESSign(1, msg)
@@ -1004,7 +1071,10 @@ func TestServeKeyBacksOffWhenSessionsEndImmediately(t *testing.T) {
 		if gap < minReconnect {
 			t.Fatalf(
 				"reconnect %d came %v after the previous session; the floor is %v (all intervals: %v)",
-				i+1, gap, minReconnect, sessions.intervals(),
+				i+1,
+				gap,
+				minReconnect,
+				sessions.intervals(),
 			)
 		}
 	}
@@ -1065,10 +1135,14 @@ func TestServeKeyEscalatesBackoffWhenPushesAreRejected(t *testing.T) {
 	if last < 4*minReconnect {
 		t.Fatalf(
 			"backoff did not escalate across sessions whose pushes were refused: intervals %v, last %v (want >= %v)",
-			intervals, last, 4*minReconnect,
+			intervals,
+			last,
+			4*minReconnect,
 		)
 	}
 	if client.HasKey() {
-		t.Fatal("a push whose vkey does not match the operational certificate was installed")
+		t.Fatal(
+			"a push whose vkey does not match the operational certificate was installed",
+		)
 	}
 }

@@ -72,8 +72,9 @@ type Hello struct {
 	Mode     string `json:"mode"`
 }
 
-// Frame type identifiers. A frame's declared type is checked before its
-// contents are trusted.
+// Frame type identifiers. A frame's declared type is required to match before
+// its contents are trusted: applyKeyPush refuses a frame whose type is anything
+// other than KeyPushType, absent included.
 const (
 	KeyPushType      = "key_push"
 	SignRequestType  = "sign_request"
@@ -84,8 +85,11 @@ const (
 // signing key, its verification key, its absolute KES period, and the
 // operational certificate.
 type KeyPush struct {
-	Type       string `json:"type"` // "key_push"
-	Period     uint64 `json:"period"`
+	Type   string `json:"type"` // "key_push"; required
+	Period uint64 `json:"period"`
+	// Depth is the KES tree depth. Shelley fixes it at kes.CardanoKesDepth,
+	// which is the only value accepted; an omitted (zero) value means that
+	// depth rather than a depth-0 key.
 	Depth      uint64 `json:"depth"`
 	KESSignKey []byte `json:"kes_sign_key"`
 	KESVKey    []byte `json:"kes_vkey"`
@@ -117,7 +121,10 @@ func writeFrame(w io.Writer, v any) error {
 		return fmt.Errorf("kesagent: frame too large (%d bytes)", len(payload))
 	}
 	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload))) // #nosec G115 -- bounded by maxFrameLen
+	binary.BigEndian.PutUint32(
+		hdr[:],
+		uint32(len(payload)),
+	) // #nosec G115 -- bounded by maxFrameLen
 	if _, err := w.Write(hdr[:]); err != nil {
 		return fmt.Errorf("kesagent: write frame header: %w", err)
 	}
@@ -127,7 +134,20 @@ func writeFrame(w io.Writer, v any) error {
 	return nil
 }
 
+// framePayloadBuffer allocates a frame's payload buffer. It is a variable so a
+// test can retain the exact buffer readFrame wipes; the wipe is otherwise
+// unobservable, because the buffer is local and becomes unreachable garbage the
+// moment readFrame returns.
+var framePayloadBuffer = func(n uint32) []byte { return make([]byte, n) }
+
 // readFrame reads a single length-prefixed JSON frame into v.
+//
+// The payload buffer is wiped before returning on every path. A serve-key frame
+// holds the base64-encoded KES signing key, so without the wipe every push --
+// accepted or rejected -- leaves a trivially decodable copy of the pool's
+// signing key in freed heap memory, and a push recurs on every evolve and every
+// reconnect. json.Unmarshal base64-decodes into freshly allocated fields, so
+// nothing in v aliases this buffer.
 func readFrame(r io.Reader, v any) error {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -140,7 +160,8 @@ func readFrame(r io.Reader, v any) error {
 	if n > maxFrameLen {
 		return fmt.Errorf("kesagent: frame too large (%d bytes)", n)
 	}
-	payload := make([]byte, n)
+	payload := framePayloadBuffer(n)
+	defer wipe(payload)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return fmt.Errorf("kesagent: read frame payload: %w", err)
 	}
