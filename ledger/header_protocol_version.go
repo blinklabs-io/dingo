@@ -193,6 +193,12 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 // regardless, so nothing is weakened. HeaderProtocolMajor carries the standing
 // note that a new Praos-family era needs an explicit case there.
 //
+// The early return also skips the ls.isMainnet() call below, so a header with
+// no version is accepted without the network having to be identifiable. That is
+// deliberate: there is nothing to validate against a network-specific rule when
+// the header carries no version, so failing closed on an unidentifiable network
+// would reject the whole Byron prefix over a value it never consults.
+//
 // For every header that does carry a version, pparams is required and a nil
 // value is an error. Such a block cannot reach here with nil pparams anyway:
 // ledgerProcessBlock runs validateInboundBlockEnvelope first, which rejects a

@@ -894,6 +894,13 @@ When `Node.Run()` is called, components are initialized in this order:
     experimental Shelley hard-fork epoch is the explicit exception used by
     Shelley-at-slot-zero test profiles; this keeps absolute slots aligned for
     genesis-overlay delegation on networks with a Byron prefix.
+    This applies to the empty-database branch only, which is what keeps an
+    already-synced node's data untouched. A database written before the Byron
+    prefix was retained still has epoch 0 tagged with a post-Byron era and
+    Shelley-relative slots, and is not repaired in place: startup logs
+    `database predates Byron prefix preservation and cannot be repaired in
+    place`, and the remedy is a resync from an empty database, which is the
+    operator's decision.
 10. Snapshot manager creation, then `LedgerState.SetEpochBoundarySnapshotHook`
     wiring (authoritative epoch-boundary capture), then genesis snapshot capture
     (or reuse of an existing post-Mithril Mark snapshot window), then manager
