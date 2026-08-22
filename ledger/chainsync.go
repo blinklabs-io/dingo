@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -152,6 +154,11 @@ const (
 	headerMismatchResyncThreshold = 20
 
 	maxPeerHeaderHistoryPerConn = 256
+
+	// Match ouroboros-consensus' default maximum permissible clock skew. A
+	// header within this window is held until its slot begins; an earlier
+	// header is invalid and the connection is recycled.
+	defaultHeaderClockSkew = 2 * time.Second
 )
 
 // ErrRollbackLoopDetected is returned by handleEventChainsyncRollback when
@@ -165,6 +172,33 @@ var ErrRollbackLoopDetected = errors.New(
 var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
+
+type headerTooFarInFutureError struct {
+	point       ocommon.Point
+	arrivalTime time.Time
+	slotTime    time.Time
+	cause       error
+}
+
+func (e *headerTooFarInFutureError) Error() string {
+	if e.cause != nil {
+		return fmt.Sprintf(
+			"header at slot %d is beyond the current slot forecast: %v",
+			e.point.Slot,
+			e.cause,
+		)
+	}
+	return fmt.Sprintf(
+		"header at slot %d arrived %s before its slot onset, exceeding %s clock skew",
+		e.point.Slot,
+		e.slotTime.Sub(e.arrivalTime),
+		defaultHeaderClockSkew,
+	)
+}
+
+func (e *headerTooFarInFutureError) Unwrap() error {
+	return e.cause
+}
 
 type peerHeaderRecord struct {
 	event    ChainsyncEvent
@@ -2374,6 +2408,23 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	if err := ls.checkChainsyncHeaderArrival(e); err != nil {
+		if _, tooFar := errors.AsType[*headerTooFarInFutureError](err); tooFar && ls.config.EventBus != nil {
+			pending.add(
+				ls.config.EventBus,
+				ConnectionRecycleRequestedEventType,
+				event.NewEvent(
+					ConnectionRecycleRequestedEventType,
+					ConnectionRecycleRequestedEvent{
+						ConnectionId: e.ConnectionId,
+						Reason:       "header_too_far_in_future",
+					},
+				),
+			)
+		}
+		return fmt.Errorf("check chainsync header arrival: %w", err)
+	}
+
 	// Detect connection switch so pipeline ownership is handed off
 	// even when the first post-switch event is a header rather than
 	// a rollback. Without this, headers from a newly-selected active
@@ -2719,6 +2770,59 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			pending,
 		)
 		return nil
+	}
+	return nil
+}
+
+// checkChainsyncHeaderArrival enforces the Ouroboros ChainSync future-header
+// rule against the timestamp recorded at network ingress. Headers that arrived
+// no more than defaultHeaderClockSkew before their slot are delayed until slot
+// onset; headers received earlier are rejected. A zero timestamp is retained
+// for compatibility with synthetic/internal events that never crossed the
+// network ingress path.
+func (ls *LedgerState) checkChainsyncHeaderArrival(e ChainsyncEvent) error {
+	if e.ArrivalTime.IsZero() || ls.slotClock == nil || e.BlockHeader == nil {
+		return nil
+	}
+	headerSlot := e.BlockHeader.SlotNumber()
+	arrivalSlot, err := ls.slotClock.slotAtTime(e.ArrivalTime)
+	if err != nil {
+		return fmt.Errorf("resolve header arrival slot: %w", err)
+	}
+	if headerSlot <= arrivalSlot {
+		return nil
+	}
+	if headerSlot > math.MaxInt64 {
+		return &headerTooFarInFutureError{
+			point:       e.Point,
+			arrivalTime: e.ArrivalTime,
+			cause:       errors.New("slot exceeds the supported time range"),
+		}
+	}
+	slotTime, err := ls.slotClock.SlotToTime(headerSlot)
+	if err != nil {
+		if errors.Is(err, hardfork.ErrPastHorizon) {
+			return &headerTooFarInFutureError{
+				point:       e.Point,
+				arrivalTime: e.ArrivalTime,
+				cause:       err,
+			}
+		}
+		return fmt.Errorf("resolve header slot onset: %w", err)
+	}
+	if slotTime.Sub(e.ArrivalTime) > defaultHeaderClockSkew {
+		return &headerTooFarInFutureError{
+			point:       e.Point,
+			arrivalTime: e.ArrivalTime,
+			slotTime:    slotTime,
+		}
+	}
+	waitCtx := ls.ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	if err := ls.slotClock.waitUntil(waitCtx, slotTime); err != nil {
+		return fmt.Errorf("wait for header slot onset: %w", err)
 	}
 	return nil
 }

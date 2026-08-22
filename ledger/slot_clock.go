@@ -110,7 +110,8 @@ type SlotClock struct {
 	behindHorizon bool
 
 	// For testing: allow injection of custom time source
-	nowFunc func() time.Time
+	nowFunc  func() time.Time
+	waitFunc func(context.Context, time.Duration) error
 }
 
 // NewSlotClock creates a new SlotClock with the given provider and configuration
@@ -129,6 +130,21 @@ func NewSlotClock(
 		config:      config,
 		subscribers: make([]chan SlotTick, 0),
 		nowFunc:     time.Now,
+		waitFunc:    waitForDuration,
+	}
+}
+
+func waitForDuration(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -210,6 +226,12 @@ func (sc *SlotClock) CurrentSlot() (uint64, error) {
 	return sc.provider.TimeToSlot(sc.nowFunc())
 }
 
+// slotAtTime returns the slot containing t. Unlike CurrentSlot, it does not
+// read the clock, so callers can classify an observation by its recorded time.
+func (sc *SlotClock) slotAtTime(t time.Time) (uint64, error) {
+	return sc.provider.TimeToSlot(t)
+}
+
 // CurrentEpoch returns the current epoch based on wall-clock time.
 // This works regardless of sync state and can be called during catch up or load.
 func (sc *SlotClock) CurrentEpoch() (EpochInfo, error) {
@@ -230,6 +252,17 @@ func (sc *SlotClock) GetEpochForSlot(slot uint64) (EpochInfo, error) {
 // This works regardless of sync state and can be called during catch up or load.
 func (sc *SlotClock) SlotToTime(slot uint64) (time.Time, error) {
 	return sc.provider.SlotToTime(slot)
+}
+
+// waitUntil blocks until target according to the same clock CurrentSlot uses,
+// or until ctx is cancelled. The injected wait function keeps boundary tests
+// deterministic without sleeping.
+func (sc *SlotClock) waitUntil(ctx context.Context, target time.Time) error {
+	delay := target.Sub(sc.nowFunc())
+	if delay <= 0 {
+		return nil
+	}
+	return sc.waitFunc(ctx, delay)
 }
 
 // NextSlotTime returns the time when the next slot will start
