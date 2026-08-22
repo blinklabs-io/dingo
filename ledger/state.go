@@ -712,6 +712,7 @@ type LedgerState struct {
 	epochSnapshotStakeHook             atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
 	reachedTip                         atomic.Bool
 	currentTip                         ochainsync.Tip
+	byronPBFT                          byronPBFTCache
 	currentEpoch                       models.Epoch
 	dbWorkerPool                       *DatabaseWorkerPool
 	slotClock                          *SlotClock
@@ -1020,6 +1021,10 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.StartInDijkstra && !cfg.EnableDijkstra {
 		return nil, errors.New("StartInDijkstra requires EnableDijkstra")
 	}
+	byronPBFT, err := newByronPBFTCache(cfg)
+	if err != nil {
+		return nil, err
+	}
 	// Initialize database worker pool config with defaults if not set
 	if cfg.DatabaseWorkerPoolConfig.WorkerPoolSize == 0 &&
 		cfg.DatabaseWorkerPoolConfig.TaskQueueSize == 0 {
@@ -1033,6 +1038,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		chain:              cfg.ChainManager.PrimaryChain(),
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
+		byronPBFT:          byronPBFT,
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -5188,6 +5194,24 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var pendingNonce []byte
 			var blocksProcessed int
 			runningNonce := snapshotNonce
+			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
+			var runningByronPBFTState byronPBFTState
+			if trackByronPBFT {
+				runningByronPBFTState, err = ls.byronPBFTStateAtTip(
+					ctx,
+					snapshotTip,
+				)
+				if err != nil {
+					completeReadResult()
+					return fmt.Errorf(
+						"reconstruct Byron PBFT state: %w",
+						err,
+					)
+				}
+			}
+			var pendingByronPBFTState byronPBFTState
+			var pendingByronPBFTTip ocommon.Point
+			var pendingByronPBFT bool
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
 			if !parentEnvelopeSet {
@@ -5335,6 +5359,28 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 									offsetErr,
 								)
 							}
+						}
+						if trackByronPBFT &&
+							next.Era().Id == byron.EraIdByron {
+							nextPBFTState, pbftErr := ls.advanceByronPBFTState(
+								runningByronPBFTState,
+								next,
+								shouldValidateBlock,
+							)
+							if pbftErr != nil {
+								deltaBatch.Release()
+								if shouldValidateBlock {
+									return &headerValidationError{
+										BlockPoint: tmpPoint,
+										Cause:      pbftErr,
+									}
+								}
+								return pbftErr
+							}
+							runningByronPBFTState = nextPBFTState
+							pendingByronPBFTState = nextPBFTState
+							pendingByronPBFTTip = tmpPoint
+							pendingByronPBFT = true
 						}
 						// Skip full block processing for blocks
 						// already handled during Mithril gap closure.
@@ -5534,6 +5580,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// Brief lock to ensure readers see consistent state.
 				ls.Lock()
 				ls.currentTip = pendingTip
+				if pendingByronPBFT {
+					ls.byronPBFT.state = pendingByronPBFTState
+					ls.byronPBFT.tip = pendingByronPBFTTip
+					ls.byronPBFT.initialized = true
+				}
 				if len(pendingNonce) > 0 {
 					ls.currentTipBlockNonce = pendingNonce
 				}

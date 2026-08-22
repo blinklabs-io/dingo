@@ -26,6 +26,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -208,6 +209,31 @@ func TestDecodeReadChainBatchAcceptsRealByronWithValidation(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, decoded, 1)
 	require.Equal(t, gledger.BlockTypeByronMain, decoded[0].Type())
+}
+
+func TestVerifyBlockHeaderStatelessCryptoRejectsTamperedByronSignature(
+	t *testing.T,
+) {
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	header, ok := block.Header().(*byron.ByronMainBlockHeader)
+	require.True(t, ok)
+	require.Len(t, header.ConsensusData.BlockSig, 2)
+	proxySignature, ok := header.ConsensusData.BlockSig[1].([]any)
+	require.True(t, ok)
+	require.Len(t, proxySignature, 2)
+	signature, ok := proxySignature[1].([]byte)
+	require.True(t, ok)
+	require.NotEmpty(t, signature)
+	signature[0] ^= 0xff
+
+	nodeConfig := newByronPBFTTestNodeConfig(t, block, 10)
+	ls := &LedgerState{
+		config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
+	}
+	_, err = ls.verifyBlockHeaderStatelessCrypto(block, false)
+	require.ErrorContains(t, err, "signature")
 }
 
 func TestDecodeReadChainBatchRejectsInvalidOpCertWhenEnabled(t *testing.T) {
