@@ -956,15 +956,20 @@ func (ls *LedgerState) chainSwitchObservedTipForConnection(
 }
 
 // chainSwitchNewObservedTip returns the peer frontier that chain selection
-// actually compared. Events created before NewObservedTip was added (including
-// direct unit-test and integration producers) fall back to the advertised tip.
+// actually compared.
+//
+// The fallback is keyed on NewObservedTipSet, not on the frontier being
+// zero-valued. A zero frontier is a real observation meaning the peer delivered
+// nothing, which is exactly the advertising-only peer this path must not trust:
+// inferring "absent" from it handed such a peer's advertised outlier to ledger
+// cursor recovery. Only a producer that never populated the field -- an older
+// event, or a direct unit-test or integration constructor -- falls back to the
+// advertised tip.
 func chainSwitchNewObservedTip(
 	e chainselection.ChainSwitchEvent,
 ) ochainsync.Tip {
-	observed := e.NewObservedTip
-	if observed.BlockNumber > 0 || observed.Point.Slot > 0 ||
-		len(observed.Point.Hash) > 0 {
-		return observed
+	if e.NewObservedTipSet {
+		return e.NewObservedTip
 	}
 	return e.NewTip
 }

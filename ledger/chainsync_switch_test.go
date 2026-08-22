@@ -638,7 +638,8 @@ func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 				),
 				BlockNumber: math.MaxUint64,
 			},
-			NewObservedTip: localTip,
+			NewObservedTip:    localTip,
+			NewObservedTipSet: true,
 		},
 		connId2,
 	)
@@ -2142,4 +2143,49 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 	assert.Equal(t, 1, testChain.HeaderCount())
+}
+
+// TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue covers the
+// advertising-only peer this path exists to distrust.
+//
+// A zero delivered frontier is a real observation: the peer delivered nothing.
+// Inferring "field absent" from it fell back to the advertised NewTip, which
+// handed that peer's advertisement to ledger cursor recovery. The fallback now
+// keys on NewObservedTipSet, which every producer in chainselection sets, so
+// only a producer that never populated the field reaches the advertised tip.
+func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
+	advertised := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 9_000, Hash: []byte{0xaa}},
+		BlockNumber: 900,
+	}
+	delivered := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte{0xbb}},
+		BlockNumber: 10,
+	}
+
+	t.Run("delivered frontier is used when set", func(t *testing.T) {
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip:            advertised,
+			NewObservedTip:    delivered,
+			NewObservedTipSet: true,
+		})
+		assert.Equal(t, delivered, got)
+	})
+
+	t.Run("zero delivered frontier is not the advertised tip", func(t *testing.T) {
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip:            advertised,
+			NewObservedTipSet: true,
+		})
+		assert.Equal(t, ochainsync.Tip{}, got)
+		assert.NotEqual(t, advertised, got)
+	})
+
+	t.Run("unset falls back to the advertised tip", func(t *testing.T) {
+		// Older events and direct unit-test or integration constructors.
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip: advertised,
+		})
+		assert.Equal(t, advertised, got)
+	})
 }

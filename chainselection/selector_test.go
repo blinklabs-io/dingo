@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 func newTestConnectionId(n int) ouroboros.ConnectionId {
@@ -1931,15 +1932,21 @@ func TestChainSwitchEventIncludesObservedFrontier(t *testing.T) {
 		nil,
 	))
 
-	select {
-	case evt := <-eventCh:
-		switchEvent, ok := evt.Data.(ChainSwitchEvent)
-		require.True(t, ok)
-		assert.Equal(t, advertisedTip, switchEvent.NewTip)
-		assert.Equal(t, observedTip, switchEvent.NewObservedTip)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for chain switch event")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		eventCh,
+		2*time.Second,
+		"chain switch event",
+	)
+	switchEvent, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok)
+	assert.Equal(t, advertisedTip, switchEvent.NewTip)
+	assert.Equal(t, observedTip, switchEvent.NewObservedTip)
+	assert.True(
+		t,
+		switchEvent.NewObservedTipSet,
+		"producers in this package always mark the frontier as present",
+	)
 }
 
 func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {

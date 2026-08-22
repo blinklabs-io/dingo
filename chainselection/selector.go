@@ -760,6 +760,7 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
 							NewObservedTip:       newSelectionTip,
+							NewObservedTipSet:    true,
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
@@ -1562,6 +1563,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 					NewTip:               newTip,
 					PreviousTip:          previousTip,
 					NewObservedTip:       newObservedTip,
+					NewObservedTipSet:    true,
 					PreviousObservedTip:  previousObservedTip,
 					ComparisonResult:     comparisonResult,
 					BlockDifference:      blockDiff,
@@ -1766,6 +1768,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
 							NewObservedTip:       newSelectionTip,
+							NewObservedTipSet:    true,
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
