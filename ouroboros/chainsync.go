@@ -61,6 +61,182 @@ const (
 
 var chainsyncRestartAfter = time.After
 
+type chainsyncHeaderAdmissionFunc func(
+	context.Context,
+	ledger.ChainsyncEvent,
+) (bool, error)
+
+type chainsyncScheduleAtFunc func(time.Time, func()) func()
+
+type scheduledChainsyncResync struct {
+	onset  time.Time
+	cancel func()
+	fired  bool
+}
+
+type chainsyncClientDoneContext struct {
+	done <-chan struct{}
+}
+
+func (c chainsyncClientDoneContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c chainsyncClientDoneContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c chainsyncClientDoneContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c chainsyncClientDoneContext) Value(any) any {
+	return nil
+}
+
+func chainsyncAdmissionContext(
+	ctx ochainsync.CallbackContext,
+) context.Context {
+	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
+		return context.Background()
+	}
+	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+}
+
+func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
+	timer := time.AfterFunc(time.Until(onset), fn)
+	return func() {
+		timer.Stop()
+	}
+}
+
+// scheduleFutureHeaderResync keeps at most one recovery timer per connection.
+// The earliest resolvable onset wins: every later dropped header is already
+// covered by re-intersecting from the last ledger-accepted point at that time.
+func (o *Ouroboros) scheduleFutureHeaderResync(
+	connId ouroboros.ConnectionId,
+	onset time.Time,
+) {
+	if o.chainsyncScheduleAt == nil || o.eventBus == nil || onset.IsZero() {
+		return
+	}
+	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
+		return
+	}
+	o.futureHeaderResyncMu.Lock()
+	if o.futureHeaderResyncClosed {
+		o.futureHeaderResyncMu.Unlock()
+		return
+	}
+	if current := o.futureHeaderResyncs[connId]; current != nil {
+		if current.fired {
+			o.futureHeaderResyncMu.Unlock()
+			return
+		}
+		if !onset.Before(current.onset) {
+			o.futureHeaderResyncMu.Unlock()
+			return
+		}
+		current.cancel()
+	}
+	scheduled := &scheduledChainsyncResync{onset: onset}
+	// A timer whose onset is already due may invoke its callback before the
+	// scheduler returns. Arm publication only after the marker and cancel
+	// function are installed, or that callback can observe no current timer and
+	// strand the connection in the withheld state without a recovery event.
+	armed := make(chan struct{})
+	scheduled.cancel = o.chainsyncScheduleAt(onset, func() {
+		go func() {
+			<-armed
+			o.futureHeaderResyncMu.Lock()
+			if o.futureHeaderResyncs[connId] != scheduled || scheduled.fired {
+				o.futureHeaderResyncMu.Unlock()
+				return
+			}
+			// Retain the marker until the resync handler stops the old
+			// protocol. Headers received between timer onset and Stop must
+			// stay withheld or they can advance the remote cursor across the
+			// gap being recovered.
+			scheduled.fired = true
+			o.futureHeaderResyncMu.Unlock()
+
+			ctx := o.futureHeaderResyncCtx
+			if ctx == nil {
+				return
+			}
+			o.eventBus.PublishOrderedContext(
+				ctx,
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: connId,
+						Reason:       event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+					},
+				),
+			)
+		}()
+	})
+	o.futureHeaderResyncs[connId] = scheduled
+	// Connection removal publishes its close event only after removing the
+	// connection from connManager. Re-check that authoritative state while the
+	// timer marker is installed and still protected: the close handler may have
+	// run between the optimistic lookup above and this insertion, when there was
+	// not yet a marker for it to cancel.
+	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
+		scheduled.cancel()
+		delete(o.futureHeaderResyncs, connId)
+		close(armed)
+		o.futureHeaderResyncMu.Unlock()
+		return
+	}
+	close(armed)
+	o.futureHeaderResyncMu.Unlock()
+}
+
+func (o *Ouroboros) futureHeaderResyncPending(
+	connId ouroboros.ConnectionId,
+) bool {
+	o.futureHeaderResyncMu.Lock()
+	defer o.futureHeaderResyncMu.Unlock()
+	return o.futureHeaderResyncs[connId] != nil
+}
+
+func (o *Ouroboros) completeFutureHeaderResync(
+	connId ouroboros.ConnectionId,
+) {
+	o.cancelFutureHeaderResync(connId)
+}
+
+func (o *Ouroboros) cancelFutureHeaderResync(
+	connId ouroboros.ConnectionId,
+) {
+	o.futureHeaderResyncMu.Lock()
+	if scheduled := o.futureHeaderResyncs[connId]; scheduled != nil {
+		scheduled.cancel()
+		delete(o.futureHeaderResyncs, connId)
+	}
+	o.futureHeaderResyncMu.Unlock()
+}
+
+func (o *Ouroboros) stopFutureHeaderResyncs() {
+	if o.futureHeaderResyncCancel != nil {
+		o.futureHeaderResyncCancel()
+	}
+	o.futureHeaderResyncMu.Lock()
+	o.futureHeaderResyncClosed = true
+	for connId, scheduled := range o.futureHeaderResyncs {
+		scheduled.cancel()
+		delete(o.futureHeaderResyncs, connId)
+	}
+	o.futureHeaderResyncMu.Unlock()
+}
+
 func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 	if timeout < ochainsync.MustReplyTimeoutMax {
 		return ochainsync.MustReplyTimeoutMax
@@ -326,9 +502,10 @@ func (o *Ouroboros) RestartChainsyncClientWithPoints(
 	return nil
 }
 
-func (o *Ouroboros) resyncChainsyncClientWithPoints(
+func (o *Ouroboros) resyncChainsyncClientWithPointsAfterStop(
 	connId ouroboros.ConnectionId,
 	intersectPoints []ocommon.Point,
+	afterStop func(),
 ) error {
 	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
@@ -347,6 +524,9 @@ func (o *Ouroboros) resyncChainsyncClientWithPoints(
 			connId.String(),
 			err,
 		)
+	}
+	if afterStop != nil {
+		afterStop()
 	}
 	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
 }
@@ -761,6 +941,64 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			"connection_id", ctx.ConnectionId.String(),
 			"ingress_eligible", ingressEligible,
 		)
+		chainsyncEvent := ledger.ChainsyncEvent{
+			ConnectionId: ctx.ConnectionId,
+			ArrivalTime:  arrivalTime,
+			Point:        point,
+			Type:         blockType,
+			BlockHeader:  v,
+			Tip:          tip,
+		}
+		// Enforce the future-header boundary on this peer's protocol callback,
+		// before any observed-tip, cursor, dedup, or ledger mutation. A
+		// permitted wait therefore blocks only this peer and never the shared
+		// ledger ChainSync dispatch mutex/goroutine.
+		if ingressEligible && o.chainsyncHeaderAdmission != nil {
+			accepted, err := o.chainsyncHeaderAdmission(
+				chainsyncAdmissionContext(ctx),
+				chainsyncEvent,
+			)
+			if err != nil {
+				o.config.Logger.Warn(
+					"chainsync: future-header admission failed closed",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", err,
+				)
+				return err
+			}
+			if !accepted {
+				// Returning nil deliberately drops this header without turning
+				// ambiguous local/remote clock skew into a connection penalty.
+				// Re-intersect at the earliest dropped header's onset so the
+				// protocol cursor cannot permanently strand the accepted chain.
+				if o.chainsyncHeaderSlotTime != nil {
+					onset, onsetErr := o.chainsyncHeaderSlotTime(blockSlot)
+					if onsetErr == nil {
+						o.scheduleFutureHeaderResync(ctx.ConnectionId, onset)
+					} else {
+						o.config.Logger.Error(
+							"chainsync: failed to schedule future-header recovery",
+							"component", "ouroboros",
+							"slot", blockSlot,
+							"connection_id", ctx.ConnectionId.String(),
+							"error", onsetErr,
+						)
+					}
+				}
+				return nil
+			}
+			if o.futureHeaderResyncPending(ctx.ConnectionId) {
+				o.config.Logger.Debug(
+					"chainsync: header withheld pending future-header re-intersection",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+				)
+				return nil
+			}
+		}
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -893,14 +1131,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
 				ledger.ChainsyncEventType,
-				ledger.ChainsyncEvent{
-					ConnectionId: ctx.ConnectionId,
-					ArrivalTime:  arrivalTime,
-					Point:        point,
-					Type:         blockType,
-					BlockHeader:  v,
-					Tip:          tip,
-				},
+				chainsyncEvent,
 			),
 		); err != nil {
 			return err
@@ -1361,9 +1592,16 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 								err,
 							)
 						}
-						return o.resyncChainsyncClientWithPoints(
+						var afterStop func()
+						if e.Reason == event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery {
+							afterStop = func() {
+								o.completeFutureHeaderResync(connId)
+							}
+						}
+						return o.resyncChainsyncClientWithPointsAfterStop(
 							connId,
 							intersectPoints,
+							afterStop,
 						)
 					},
 				)

@@ -17,11 +17,11 @@ package ledger
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -31,6 +31,29 @@ import (
 type pastHorizonSlotTimeProvider struct {
 	SlotTimeProvider
 	rejectedSlot uint64
+}
+
+type arrivalPastHorizonSlotTimeProvider struct {
+	SlotTimeProvider
+}
+
+func (p arrivalPastHorizonSlotTimeProvider) TimeToSlot(
+	time.Time,
+) (uint64, error) {
+	return 0, hardfork.ErrPastHorizon
+}
+
+type failingSlotTimeProvider struct {
+	SlotTimeProvider
+	rejectedSlot uint64
+	err          error
+}
+
+func (p failingSlotTimeProvider) SlotToTime(slot uint64) (time.Time, error) {
+	if slot == p.rejectedSlot {
+		return time.Time{}, p.err
+	}
+	return p.SlotTimeProvider.SlotToTime(slot)
 }
 
 func (p pastHorizonSlotTimeProvider) SlotToTime(
@@ -59,6 +82,9 @@ func newFutureHeaderTestLedger(
 	return &LedgerState{
 		slotClock: clock,
 		ctx:       t.Context(),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
 	}, &waits
 }
 
@@ -74,16 +100,18 @@ func futureHeaderEvent(slot uint64, arrival time.Time) ChainsyncEvent {
 	}
 }
 
-func TestCheckChainsyncHeaderArrivalBoundaries(t *testing.T) {
+func TestAwaitChainsyncHeaderAdmissionBoundaries(t *testing.T) {
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 
 	t.Run("current header is accepted immediately", func(t *testing.T) {
 		arrival := systemStart.Add(100 * time.Second)
 		ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
 
-		require.NoError(t, ls.checkChainsyncHeaderArrival(
+		accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
 			futureHeaderEvent(100, arrival),
-		))
+		)
+		require.NoError(t, err)
+		require.True(t, accepted)
 		require.Empty(t, *waits)
 	})
 
@@ -91,26 +119,31 @@ func TestCheckChainsyncHeaderArrivalBoundaries(t *testing.T) {
 		arrival := systemStart.Add(100 * time.Second)
 		ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
 
-		require.NoError(t, ls.checkChainsyncHeaderArrival(
+		accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
 			futureHeaderEvent(102, arrival),
-		))
+		)
+		require.NoError(t, err)
+		require.True(t, accepted)
 		require.Equal(t, []time.Duration{2 * time.Second}, *waits)
 	})
 
-	t.Run("invalid arrival stays rejected after processing delay", func(t *testing.T) {
-		arrival := systemStart.Add(100*time.Second - time.Nanosecond)
-		processTime := systemStart.Add(103 * time.Second)
-		ls, waits := newFutureHeaderTestLedger(t, systemStart, processTime)
+	t.Run(
+		"beyond skew is deliberately dropped despite processing delay",
+		func(t *testing.T) {
+			arrival := systemStart.Add(100*time.Second - time.Nanosecond)
+			processTime := systemStart.Add(103 * time.Second)
+			ls, waits := newFutureHeaderTestLedger(t, systemStart, processTime)
 
-		err := ls.checkChainsyncHeaderArrival(
-			futureHeaderEvent(102, arrival),
-		)
-		var futureErr *headerTooFarInFutureError
-		require.ErrorAs(t, err, &futureErr)
-		require.Empty(t, *waits)
-	})
+			accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
+				futureHeaderEvent(102, arrival),
+			)
+			require.NoError(t, err)
+			require.False(t, accepted)
+			require.Empty(t, *waits)
+		},
+	)
 
-	t.Run("slot past the forecast horizon is rejected", func(t *testing.T) {
+	t.Run("slot past the forecast horizon is deferred", func(t *testing.T) {
 		arrival := systemStart.Add(100 * time.Second)
 		ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
 		ls.slotClock.provider = pastHorizonSlotTimeProvider{
@@ -118,38 +151,65 @@ func TestCheckChainsyncHeaderArrivalBoundaries(t *testing.T) {
 			rejectedSlot:     10_000,
 		}
 
-		err := ls.checkChainsyncHeaderArrival(
+		accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
 			futureHeaderEvent(10_000, arrival),
 		)
-		var futureErr *headerTooFarInFutureError
-		require.ErrorAs(t, err, &futureErr)
-		require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+		require.NoError(t, err)
+		require.True(t, accepted)
 		require.Empty(t, *waits)
 	})
 
-	t.Run("processing delay does not change arrival judgment", func(t *testing.T) {
-		arrival := systemStart.Add(101 * time.Second)
-		processTime := systemStart.Add(103 * time.Second)
-		ls, waits := newFutureHeaderTestLedger(t, systemStart, processTime)
+	t.Run(
+		"processing delay does not change arrival judgment",
+		func(t *testing.T) {
+			arrival := systemStart.Add(101 * time.Second)
+			processTime := systemStart.Add(103 * time.Second)
+			ls, waits := newFutureHeaderTestLedger(t, systemStart, processTime)
 
-		require.NoError(t, ls.checkChainsyncHeaderArrival(
-			futureHeaderEvent(102, arrival),
-		))
-		require.Empty(t, *waits)
-	})
+			accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
+				futureHeaderEvent(102, arrival),
+			)
+			require.NoError(t, err)
+			require.True(t, accepted)
+			require.Empty(t, *waits)
+		},
+	)
 
-	t.Run("synthetic event without arrival remains compatible", func(t *testing.T) {
-		now := systemStart.Add(100 * time.Second)
-		ls, waits := newFutureHeaderTestLedger(t, systemStart, now)
+	t.Run(
+		"historical catch-up does not convert queued arrival time",
+		func(t *testing.T) {
+			arrival := systemStart.Add(1_000_000 * time.Second)
+			ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+			ls.slotClock.provider = arrivalPastHorizonSlotTimeProvider{
+				SlotTimeProvider: ls.slotClock.provider,
+			}
 
-		require.NoError(t, ls.checkChainsyncHeaderArrival(
-			futureHeaderEvent(10_000, time.Time{}),
-		))
-		require.Empty(t, *waits)
-	})
+			accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
+				futureHeaderEvent(900, arrival),
+			)
+			require.NoError(t, err)
+			require.True(t, accepted)
+			require.Empty(t, *waits)
+		},
+	)
+
+	t.Run(
+		"synthetic event without arrival remains compatible",
+		func(t *testing.T) {
+			now := systemStart.Add(100 * time.Second)
+			ls, waits := newFutureHeaderTestLedger(t, systemStart, now)
+
+			accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
+				futureHeaderEvent(10_000, time.Time{}),
+			)
+			require.NoError(t, err)
+			require.True(t, accepted)
+			require.Empty(t, *waits)
+		},
+	)
 }
 
-func TestCheckChainsyncHeaderArrivalPropagatesCancellation(t *testing.T) {
+func TestAwaitChainsyncHeaderAdmissionPropagatesCancellation(t *testing.T) {
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
@@ -157,36 +217,102 @@ func TestCheckChainsyncHeaderArrivalPropagatesCancellation(t *testing.T) {
 		return context.Canceled
 	}
 
-	err := ls.checkChainsyncHeaderArrival(futureHeaderEvent(101, arrival))
+	accepted, err := ls.AwaitChainsyncHeaderAdmission(
+		t.Context(),
+		futureHeaderEvent(101, arrival),
+	)
+	require.False(t, accepted)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestFutureHeaderRecyclesConnection(t *testing.T) {
+func TestAwaitChainsyncHeaderAdmissionFailsClosedOnNilContext(t *testing.T) {
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Close)
-	ls.config.EventBus = bus
-	_, recycleCh := bus.Subscribe(ConnectionRecycleRequestedEventType)
 
-	var pending pendingPublishes
-	err := ls.handleEventChainsyncBlockHeaderWithPending(
-		futureHeaderEvent(103, arrival),
-		&pending,
+	accepted, err := ls.AwaitChainsyncHeaderAdmission(
+		nil,
+		futureHeaderEvent(101, arrival),
 	)
-	require.Error(t, err)
-	var futureErr *headerTooFarInFutureError
-	require.True(t, errors.As(err, &futureErr))
-	pending.flush()
+	require.False(t, accepted)
+	require.EqualError(t, err, "chainsync header admission context is nil")
+}
 
-	recycleEvent := testutil.RequireReceive(
-		t,
-		recycleCh,
-		2*time.Second,
-		"far-future header should recycle its ChainSync connection",
+func TestAwaitChainsyncHeaderAdmissionFailsClosedOnConversionError(
+	t *testing.T,
+) {
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+	wantErr := errors.New("slot conversion unavailable")
+	ls.slotClock.provider = failingSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		rejectedSlot:     101,
+		err:              wantErr,
+	}
+
+	accepted, err := ls.AwaitChainsyncHeaderAdmission(
+		t.Context(),
+		futureHeaderEvent(101, arrival),
 	)
-	recycle, ok := recycleEvent.Data.(ConnectionRecycleRequestedEvent)
-	require.True(t, ok)
-	require.Equal(t, "header_too_far_in_future", recycle.Reason)
+	require.False(t, accepted)
+	require.ErrorIs(t, err, wantErr)
+	require.Empty(t, *waits)
+}
+
+func TestFutureHeaderWaitDoesNotHoldChainsyncMutex(t *testing.T) {
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	waiting := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	ls.slotClock.waitFunc = func(context.Context, time.Duration) error {
+		close(waiting)
+		<-release
+		return nil
+	}
+	go func() {
+		e := futureHeaderEvent(101, arrival)
+		accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(), e)
+		if err == nil && !accepted {
+			err = errors.New("header was not accepted")
+		}
+		done <- err
+	}()
+
+	<-waiting
+	mutexAvailable := ls.chainsyncMutex.TryLock()
+	if mutexAvailable {
+		ls.chainsyncMutex.Unlock()
+	}
+	close(release)
+	require.NoError(t, <-done)
+	require.True(t, mutexAvailable,
+		"peer-local slot wait must not hold the node-wide chainsync mutex")
+}
+
+func TestAwaitChainsyncHeaderAdmissionUsesCrossEraSlotOnset(t *testing.T) {
+	ls := crossEraLedger(t)
+	provider := newSlotTimeConverterProvider(ls.timeConv())
+	clock := NewSlotClock(provider, DefaultSlotClockConfig())
+	boundary, err := provider.SlotToTime(200)
+	require.NoError(t, err)
+	arrival := boundary.Add(-defaultHeaderClockSkew)
+	clock.nowFunc = func() time.Time { return arrival }
+	var waited time.Duration
+	clock.waitFunc = func(_ context.Context, delay time.Duration) error {
+		waited = delay
+		return nil
+	}
+	ls.slotClock = clock
+	ls.ctx = t.Context()
+
+	accepted, err := ls.AwaitChainsyncHeaderAdmission(
+		t.Context(),
+		futureHeaderEvent(200, arrival),
+	)
+	require.NoError(t, err)
+	require.True(t, accepted)
+	require.Equal(t, defaultHeaderClockSkew, waited)
 }

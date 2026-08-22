@@ -7848,13 +7848,23 @@ not passed admission crypto must therefore never enter that chain.
 ChainSync admission also enforces the Ouroboros future-header rule before a
 header enters that queue. The raw network callback records `ChainsyncEvent`'s
 `ArrivalTime` immediately, before header decoding, chain-selection, and
-EventBus work can delay delivery. Ledger admission converts the header slot to
-its wall-clock onset using the active hard-fork summary. A header received no
-more than two seconds early (the `ouroboros-consensus` default clock-skew
-allowance) waits until its slot begins; a header received earlier is rejected
-and its connection is recycled. Judging the recorded arrival rather than the
-later handler time means local decode, EventBus, or scheduler delay cannot make
-an invalid early header appear timely.
+EventBus work can delay delivery. The per-peer protocol callback asks ledger
+admission to convert the header slot to its wall-clock onset using the active
+hard-fork summary before observed-tip, dedup, or ledger state changes. A header
+received no more than two seconds early (the `ouroboros-consensus` default
+clock-skew allowance) waits on that peer callback until its slot begins; it
+never sleeps under the node-wide ChainSync dispatch mutex. A resolvable header
+received earlier is dropped without recycling or penalizing the peer, because
+the node cannot distinguish peer skew from a slow local clock. One coalesced
+timer per connection re-intersects the mini-protocol at the earliest dropped
+header's onset so the remote cursor cannot strand the accepted chain; later
+headers from that peer remain withheld until the old mini-protocol has stopped
+and the re-intersection can replay from ledger-accepted points. A slot
+past the hard-fork forecast is deferred to the normal header-verification path,
+which already treats `ErrPastHorizon` as unavailable state rather than peer
+fault. Judging the recorded arrival rather than the later handler time means
+local decode, EventBus, or scheduler delay cannot make an invalid early header
+appear timely.
 
 `blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
 it does not forecast, mutate the cache, or rebuild `HardForkSummary` per

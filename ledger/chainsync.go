@@ -157,7 +157,8 @@ const (
 
 	// Match ouroboros-consensus' default maximum permissible clock skew. A
 	// header within this window is held until its slot begins; an earlier
-	// header is invalid and the connection is recycled.
+	// resolvable header is dropped and recovered by a peer-local re-intersection
+	// without treating ambiguous local clock skew as a peer fault.
 	defaultHeaderClockSkew = 2 * time.Second
 )
 
@@ -172,33 +173,6 @@ var ErrRollbackLoopDetected = errors.New(
 var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
-
-type headerTooFarInFutureError struct {
-	point       ocommon.Point
-	arrivalTime time.Time
-	slotTime    time.Time
-	cause       error
-}
-
-func (e *headerTooFarInFutureError) Error() string {
-	if e.cause != nil {
-		return fmt.Sprintf(
-			"header at slot %d is beyond the current slot forecast: %v",
-			e.point.Slot,
-			e.cause,
-		)
-	}
-	return fmt.Sprintf(
-		"header at slot %d arrived %s before its slot onset, exceeding %s clock skew",
-		e.point.Slot,
-		e.slotTime.Sub(e.arrivalTime),
-		defaultHeaderClockSkew,
-	)
-}
-
-func (e *headerTooFarInFutureError) Unwrap() error {
-	return e.cause
-}
 
 type peerHeaderRecord struct {
 	event    ChainsyncEvent
@@ -1182,10 +1156,14 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 		if localErr != nil {
 			ls.config.Logger.Debug(
 				"could not check legacy historical header against primary chain",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"error", localErr,
+				"component",
+				"ledger",
+				"slot",
+				e.Point.Slot,
+				"hash",
+				hex.EncodeToString(e.Point.Hash),
+				"error",
+				localErr,
 			)
 			return false
 		}
@@ -2449,23 +2427,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
-	if err := ls.checkChainsyncHeaderArrival(e); err != nil {
-		if _, tooFar := errors.AsType[*headerTooFarInFutureError](err); tooFar && ls.config.EventBus != nil {
-			pending.add(
-				ls.config.EventBus,
-				ConnectionRecycleRequestedEventType,
-				event.NewEvent(
-					ConnectionRecycleRequestedEventType,
-					ConnectionRecycleRequestedEvent{
-						ConnectionId: e.ConnectionId,
-						Reason:       "header_too_far_in_future",
-					},
-				),
-			)
-		}
-		return fmt.Errorf("check chainsync header arrival: %w", err)
-	}
-
 	// Detect connection switch so pipeline ownership is handed off
 	// even when the first post-switch event is a header rather than
 	// a rollback. Without this, headers from a newly-selected active
@@ -2815,57 +2776,67 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	return nil
 }
 
-// checkChainsyncHeaderArrival enforces the Ouroboros ChainSync future-header
-// rule against the timestamp recorded at network ingress. Headers that arrived
-// no more than defaultHeaderClockSkew before their slot are delayed until slot
-// onset; headers received earlier are rejected. A zero timestamp is retained
-// for compatibility with synthetic/internal events that never crossed the
-// network ingress path.
-func (ls *LedgerState) checkChainsyncHeaderArrival(e ChainsyncEvent) error {
+// AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
+// rule against the timestamp recorded at network ingress. It must run from the
+// per-peer ChainSync callback before the header updates observed-tip, dedup, or
+// ledger state; callers must not invoke it while holding the node-wide
+// chainsync dispatch mutex.
+//
+// A header received no more than defaultHeaderClockSkew before its slot waits
+// for slot onset and is accepted. A header received earlier is deliberately
+// dropped by returning (false, nil): local clock skew cannot by itself justify
+// penalizing the peer. ErrPastHorizon is also accepted as a deferred decision,
+// matching headerVerificationEpoch; without a forecast the header cannot be
+// proven future. Other conversion failures fail closed. A zero timestamp is
+// retained for compatibility with synthetic/internal events that never crossed
+// the network ingress path. As with other Go APIs that accept a context, ctx
+// must not be nil.
+func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
+	ctx context.Context,
+	e ChainsyncEvent,
+) (bool, error) {
 	if e.ArrivalTime.IsZero() || ls.slotClock == nil || e.BlockHeader == nil {
-		return nil
+		return true, nil
 	}
 	headerSlot := e.BlockHeader.SlotNumber()
-	arrivalSlot, err := ls.slotClock.slotAtTime(e.ArrivalTime)
-	if err != nil {
-		return fmt.Errorf("resolve header arrival slot: %w", err)
-	}
-	if headerSlot <= arrivalSlot {
-		return nil
-	}
-	if headerSlot > math.MaxInt64 {
-		return &headerTooFarInFutureError{
-			point:       e.Point,
-			arrivalTime: e.ArrivalTime,
-			cause:       errors.New("slot exceeds the supported time range"),
-		}
-	}
 	slotTime, err := ls.slotClock.SlotToTime(headerSlot)
 	if err != nil {
 		if errors.Is(err, hardfork.ErrPastHorizon) {
-			return &headerTooFarInFutureError{
-				point:       e.Point,
-				arrivalTime: e.ArrivalTime,
-				cause:       err,
-			}
+			return true, nil
 		}
-		return fmt.Errorf("resolve header slot onset: %w", err)
+		return false, fmt.Errorf("resolve header slot onset: %w", err)
 	}
-	if slotTime.Sub(e.ArrivalTime) > defaultHeaderClockSkew {
-		return &headerTooFarInFutureError{
-			point:       e.Point,
-			arrivalTime: e.ArrivalTime,
-			slotTime:    slotTime,
+	earlyBy := slotTime.Sub(e.ArrivalTime)
+	if earlyBy <= 0 {
+		return true, nil
+	}
+	if earlyBy > defaultHeaderClockSkew {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"dropping chainsync header received before permitted clock-skew window",
+				"component",
+				"ledger",
+				"connection_id",
+				connIdKey(e.ConnectionId),
+				"slot",
+				headerSlot,
+				"early_by",
+				earlyBy,
+				"permitted_clock_skew",
+				defaultHeaderClockSkew,
+				"possible_local_clock_skew",
+				true,
+			)
 		}
+		return false, nil
 	}
-	waitCtx := ls.ctx
-	if waitCtx == nil {
-		waitCtx = context.Background()
+	if ctx == nil {
+		return false, errors.New("chainsync header admission context is nil")
 	}
-	if err := ls.slotClock.waitUntil(waitCtx, slotTime); err != nil {
-		return fmt.Errorf("wait for header slot onset: %w", err)
+	if err := ls.slotClock.waitUntil(ctx, slotTime); err != nil {
+		return false, fmt.Errorf("wait for header slot onset: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {

@@ -226,12 +226,6 @@ func (sc *SlotClock) CurrentSlot() (uint64, error) {
 	return sc.provider.TimeToSlot(sc.nowFunc())
 }
 
-// slotAtTime returns the slot containing t. Unlike CurrentSlot, it does not
-// read the clock, so callers can classify an observation by its recorded time.
-func (sc *SlotClock) slotAtTime(t time.Time) (uint64, error) {
-	return sc.provider.TimeToSlot(t)
-}
-
 // CurrentEpoch returns the current epoch based on wall-clock time.
 // This works regardless of sync state and can be called during catch up or load.
 func (sc *SlotClock) CurrentEpoch() (EpochInfo, error) {

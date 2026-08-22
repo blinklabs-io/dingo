@@ -44,6 +44,11 @@ const (
 	ChainsyncResyncReasonBlockfetchRangeUnavailable        = "blockfetch could not obtain the queued header range"
 	ChainsyncResyncReasonHeaderValidationRecovery          = "deferred header validation recovery"
 	ChainsyncResyncReasonForkQueueOverflowRestartFailed    = "failed to restart blockfetch after fork-resolution header-queue overflow"
+	// ChainsyncResyncReasonFutureHeaderAdmissionRecovery re-intersects the
+	// ChainSync mini-protocol after a resolvable header was deliberately dropped
+	// outside the permitted clock-skew window. It is not a peer-fault signal and
+	// does not require a fresh connection or peer cooldown.
+	ChainsyncResyncReasonFutureHeaderAdmissionRecovery = "future header admission recovery"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should
