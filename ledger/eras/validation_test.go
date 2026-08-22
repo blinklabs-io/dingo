@@ -3392,3 +3392,31 @@ func TestConwayPlutusRejectsNilPparams(t *testing.T) {
 	)
 	assert.ErrorIs(t, certErr, ErrIncompatibleProtocolParams)
 }
+
+// TestPreAlonzoCertDepositRejectsNilPparams completes the typed-nil guard
+// across the pre-Alonzo eras.
+//
+// TestConwayPlutusRejectsNilPparams already pins CertDepositConway, and the
+// ValidateTx path was guarded for these eras, but their CertDeposit functions
+// kept an ok-only assertion and then read PoolDeposit and KeyDeposit directly.
+// A typed nil satisfies the assertion, so an unguarded nil panicked here while
+// the sibling era returned an error.
+func TestPreAlonzoCertDepositRejectsNilPparams(t *testing.T) {
+	certs := []lcommon.Certificate{
+		&lcommon.StakeRegistrationCertificate{},
+		&lcommon.PoolRegistrationCertificate{},
+	}
+	for _, cert := range certs {
+		var nilShelley *shelley.ShelleyProtocolParameters
+		_, err := CertDepositShelley(cert, nilShelley)
+		assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+
+		var nilAllegra *allegra.AllegraProtocolParameters
+		_, err = CertDepositAllegra(cert, nilAllegra)
+		assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+
+		var nilMary *mary.MaryProtocolParameters
+		_, err = CertDepositMary(cert, nilMary)
+		assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+	}
+}

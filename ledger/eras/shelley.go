@@ -165,7 +165,9 @@ func CertDepositShelley(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
-	if !ok {
+	// A typed nil satisfies the assertion, so the nil test is not
+	// redundant: without it the deposit reads below dereference it.
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
