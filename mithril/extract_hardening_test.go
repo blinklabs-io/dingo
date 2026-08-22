@@ -69,6 +69,35 @@ func requireDirectorySwap(t *testing.T, oldpath, newpath string) {
 	}
 }
 
+// requireDirectorySwapSupport reports the same constraint as
+// requireDirectorySwap without performing the caller's swap.
+//
+// A test that stages its swap from another goroutine — the download
+// transport's, say — cannot use requireDirectorySwap, because t.Skip is only
+// valid on the goroutine running the test. Probing the capability here, before
+// the scenario is armed, keeps the skip on the test goroutine and keeps the
+// reason identical: where the platform refuses the rename, the manoeuvre cannot
+// be staged at all, which bounds the attack rather than the guarantee.
+func requireDirectorySwapSupport(t *testing.T) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "swap-probe")
+	require.NoError(t, os.Mkdir(dir, 0o750))
+	// A handle *beneath* the directory, which is the shape the extraction path
+	// holds open while the swap is attempted.
+	held, err := os.Create(filepath.Join(dir, "held"))
+	require.NoError(t, err)
+	defer held.Close()
+	if err := os.Rename(dir, dir+".moved"); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf(
+				"cannot swap a directory with open handles beneath it: %v",
+				err,
+			)
+		}
+		require.NoError(t, err)
+	}
+}
+
 // TestExtractArchiveRefusesNonEmptyDestination covers the default exclusive
 // mode: a destination that already holds content is not extracted into, so
 // archive contents can never be merged with files placed there by someone
