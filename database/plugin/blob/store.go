@@ -116,3 +116,14 @@ type BlobStore interface {
 	// object stores) may return nil.
 	Sync() error
 }
+
+// LocalBlockReader is an optional extension for wrappers that can bypass a
+// remote archive fallback. Database code uses it for bounded local probes
+// where a cache miss must remain a miss.
+type LocalBlockReader interface {
+	GetBlockLocal(
+		txn types.Txn,
+		slot uint64,
+		hash []byte,
+	) ([]byte, types.BlockMetadata, error)
+}

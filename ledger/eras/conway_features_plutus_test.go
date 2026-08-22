@@ -47,7 +47,7 @@ func TestConwayFeaturesRuleAllowsUnneededPlutusV1V2(t *testing.T) {
 			ls := newMockLedgerState()
 			ls.addUtxo(input, testAddressScriptOutput{
 				testOutput: newTestOutput(1_000_000),
-				addr:       newConwayFeaturesKeyAddress(t),
+				addr:       newTestKeyAddress(t),
 				scriptRef:  tc.script,
 			})
 
@@ -84,7 +84,7 @@ func TestConwayFeaturesRuleRejectsNeededPlutusV1V2(t *testing.T) {
 			ls := newMockLedgerState()
 			ls.addUtxo(input, testAddressScriptOutput{
 				testOutput: newTestOutput(1_000_000),
-				addr:       newConwayFeaturesScriptAddress(t, tc.script),
+				addr:       newTestScriptAddress(t, tc.script),
 				scriptRef:  tc.script,
 			})
 
@@ -128,31 +128,4 @@ func newConwayFeaturesTestTx(
 			},
 		},
 	}
-}
-
-func newConwayFeaturesKeyAddress(t *testing.T) lcommon.Address {
-	t.Helper()
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		make([]byte, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	return addr
-}
-
-func newConwayFeaturesScriptAddress(
-	t *testing.T,
-	s lcommon.Script,
-) lcommon.Address {
-	t.Helper()
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeScriptNone,
-		lcommon.AddressNetworkTestnet,
-		s.Hash().Bytes(),
-		nil,
-	)
-	require.NoError(t, err)
-	return addr
 }
