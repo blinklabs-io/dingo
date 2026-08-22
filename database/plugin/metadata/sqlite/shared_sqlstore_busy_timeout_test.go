@@ -71,7 +71,7 @@ func TestBackupDSNSetsBusyTimeoutFirst(t *testing.T) {
 func parsePragmas(t *testing.T, dsn string) []string {
 	t.Helper()
 	var out []string
-	for _, part := range strings.Split(dsn, "&") {
+	for part := range strings.SplitSeq(dsn, "&") {
 		if v, ok := strings.CutPrefix(part, "_pragma="); ok {
 			out = append(out, v)
 		}

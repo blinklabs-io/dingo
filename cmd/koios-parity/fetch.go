@@ -45,6 +45,7 @@ phase then opens Dingo's metadata database read-only (see --metadata-plugin/
 	cmd.Flags().Int("grace-hours", defaultGraceHours,
 		"a just-closed epoch's zero-row --accounts fetch within this window is retried, not accepted as final (see check/run/watch's identical flag)")
 	addAccountsFlag(cmd)
+	addAccountChunkFlags(cmd)
 	// Only used when --accounts is set (see fetchRun): the standalone fetch
 	// command otherwise never contacts Dingo's database at all.
 	addDingoDBFlags(cmd)
@@ -63,6 +64,10 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	throughEpoch, _ := cmd.Flags().GetUint64("through-epoch")
 	forceRefresh, _ := cmd.Flags().GetBool("force-refresh")
 	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
+	accountChunkSize, accountChunkMaxBytes, err := resolveAccountChunkFlags(cmd)
 	if err != nil {
 		return err
 	}
@@ -94,16 +99,18 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
-		Network:         network,
-		APIKey:          koiosAPIKey(cmd),
-		CachePath:       resolveCachePath(),
-		Concurrency:     concurrency,
-		FromEpoch:       fromEpoch,
-		ThroughEpoch:    throughEpoch,
-		ForceRefresh:    forceRefresh,
-		AccountsEnabled: accounts,
-		AccountsSource:  accountsSource,
-		GraceHours:      graceHours,
+		Network:              network,
+		APIKey:               koiosAPIKey(cmd),
+		CachePath:            resolveCachePath(),
+		Concurrency:          concurrency,
+		FromEpoch:            fromEpoch,
+		ThroughEpoch:         throughEpoch,
+		ForceRefresh:         forceRefresh,
+		AccountsEnabled:      accounts,
+		AccountsSource:       accountsSource,
+		GraceHours:           graceHours,
+		AccountChunkSize:     accountChunkSize,
+		AccountChunkMaxBytes: accountChunkMaxBytes,
 	}, slog.Default())
 	if err != nil {
 		return err

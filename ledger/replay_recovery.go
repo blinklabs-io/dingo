@@ -458,6 +458,19 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			)
 		}
 		nextPoint := ocommon.NewPoint(nextBlock.Slot, nextBlock.Hash)
+		// Validate, then emit undo events, before each window's
+		// truncation. This function's own doc comment notes the chain can
+		// move between reading the tip and rewinding to it, so the
+		// rejection here is reachable, not theoretical: emitting without
+		// it would tell subscribers to undo blocks the failed rewind
+		// leaves applied. See validateAndEmitRollbackUndo.
+		if err := ls.validateAndEmitRollbackUndo(nextPoint); err != nil {
+			return fmt.Errorf(
+				"rollback primary chain to intermediate point %d: %w",
+				nextIndex,
+				err,
+			)
+		}
 		if err := ls.chain.Rollback(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
@@ -466,6 +479,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			)
 		}
 		tipIndex = nextIndex
+	}
+	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
 	if err := ls.chain.Rollback(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)

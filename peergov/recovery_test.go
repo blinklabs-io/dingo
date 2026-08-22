@@ -16,6 +16,7 @@ package peergov
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"strings"
@@ -453,7 +454,7 @@ func TestPeerGovernor_Reconcile_RedialsDisconnectedTopologyPeer(t *testing.T) {
 		},
 	}
 	pg.mu.Unlock()
-	t.Cleanup(pg.Stop)
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 
 	pg.reconcile(t.Context())
 
@@ -492,7 +493,7 @@ func TestPeerGovernor_Reconcile_RedialsGossipPeerWhenNoUpstream(t *testing.T) {
 		},
 	}
 	pg.mu.Unlock()
-	t.Cleanup(pg.Stop)
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 
 	pg.reconcile(t.Context())
 

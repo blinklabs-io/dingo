@@ -110,6 +110,8 @@ services:
       DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
       DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
       DINGO_PLUGINS_MEMPOOL_PROVIDER: "${DEVNET_MEMPOOL_PROVIDER:-fifo}"
+      DINGO_BLOCK_PIPELINE_ENABLED: "${DEVNET_BLOCK_PIPELINE_ENABLED:-false}"
+      DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED: "${DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED:-false}"
       # Expose node-to-client over TCP (private port 3002) so the host test
       # harness can run LocalStateQuery. Avoids a cross-uid host socket mount:
       # the dingo image runs as uid 1000 and cannot bind a socket in a
@@ -275,6 +277,8 @@ services:
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+      DINGO_BLOCK_PIPELINE_ENABLED: "${DEVNET_BLOCK_PIPELINE_ENABLED:-false}"
+      DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED: "${DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED:-false}"
       # Expose node-to-client over TCP (private port 3002) on all interfaces
       # so the in-network txpump can submit transactions without a cross-uid
       # unix-socket mount (the socket is owned by the dingo uid).

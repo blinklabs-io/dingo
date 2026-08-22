@@ -19,7 +19,7 @@ require (
 	github.com/aws/smithy-go v1.27.8
 	github.com/blinklabs-io/bark v0.1.0
 	github.com/blinklabs-io/bursa v0.16.1-0.20260817233527-1eb8b64db609
-	github.com/blinklabs-io/gouroboros v0.193.3
+	github.com/blinklabs-io/gouroboros v0.194.0
 	github.com/blinklabs-io/ouroboros-mock v0.16.0
 	github.com/blinklabs-io/plutigo v0.3.0
 	github.com/blockfrost/blockfrost-go v0.5.0
@@ -54,7 +54,7 @@ require (
 	google.golang.org/api v0.293.0
 	google.golang.org/grpc v1.83.0
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.56.0
 )

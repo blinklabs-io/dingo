@@ -452,6 +452,45 @@ func accountsEnabled(cmd *cobra.Command) bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
+// addAccountChunkFlags registers dingo #3099's --account-chunk-size/
+// --account-chunk-max-bytes flags, shared by fetch/run/watch (the
+// subcommands that actually issue /account_reward_history requests — check
+// only reads the cache, so it has no use for these). 0 (the default for
+// both) means "use the package default"
+// (koiosparity.koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault) —
+// unset flags never change existing --accounts behavior.
+func addAccountChunkFlags(cmd *cobra.Command) {
+	cmd.Flags().Int("account-chunk-size", 0,
+		"max stake addresses per /account_reward_history request when --accounts is set (0 = package default, 100)")
+	cmd.Flags().Int("account-chunk-max-bytes", 0,
+		"max encoded body size per /account_reward_history request when --accounts is set (0 = package default, 32KiB)")
+}
+
+// resolveAccountChunkFlags reads --account-chunk-size/--account-chunk-max-bytes,
+// rejecting a negative value the same way resolveGraceHours does for
+// --grace-hours: a negative value would silently reach chunkAddressesByCountAndSize's
+// own "<=0 means use the default" branch instead of failing loudly on an
+// obviously-wrong operator input.
+func resolveAccountChunkFlags(
+	cmd *cobra.Command,
+) (size, maxBytes int, err error) {
+	size, _ = cmd.Flags().GetInt("account-chunk-size")
+	if size < 0 {
+		return 0, 0, fmt.Errorf(
+			"--account-chunk-size must not be negative, got %d (0 selects the package default)",
+			size,
+		)
+	}
+	maxBytes, _ = cmd.Flags().GetInt("account-chunk-max-bytes")
+	if maxBytes < 0 {
+		return 0, 0, fmt.Errorf(
+			"--account-chunk-max-bytes must not be negative, got %d (0 selects the package default)",
+			maxBytes,
+		)
+	}
+	return size, maxBytes, nil
+}
+
 // addDingoDB registers --metadata-plugin and --metadata-dsn on cmd and
 // should be called for every subcommand that reads from Dingo's database.
 func addDingoDBFlags(cmd *cobra.Command) {

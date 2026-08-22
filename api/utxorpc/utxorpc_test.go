@@ -168,6 +168,20 @@ func TestUtxorpc_StartStop(t *testing.T) {
 	require.NoError(t, err, "failed to stop utxorpc")
 }
 
+// publishServer registers server on u's listener the way Start does, for tests
+// that drive Stop against a hand-built server rather than a real Start. The
+// bind is marked settled immediately because the caller serves the listener
+// itself, so there is none in flight for Stop to wait on.
+func publishServer(t *testing.T, u *Utxorpc, server *http.Server) {
+	t.Helper()
+	published, bindDone, err := u.listener.Publish(
+		func() *http.Server { return server },
+	)
+	require.NoError(t, err)
+	require.Same(t, server, published)
+	close(bindDone)
+}
+
 // TestUtxorpc_StopForcesCloseOnUnboundedStream covers Stop's escalation to
 // a hard Close when a client keeps a connection open, standing in for a
 // WatchTx/WatchMempool stream that never returns.
@@ -188,9 +202,9 @@ func TestUtxorpc_StopForcesCloseOnUnboundedStream(t *testing.T) {
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	server := &http.Server{Handler: mux}
-	u.server = server
-	go server.Serve(ln)
+	server := &http.Server{Handler: mux} //nolint:gosec // test server
+	publishServer(t, u, server)
+	go server.Serve(ln) //nolint:errcheck // test server
 	t.Cleanup(func() { close(blockHandler) })
 
 	client := &http.Client{}
@@ -235,9 +249,9 @@ func TestUtxorpc_StopObservesCtxCancellation(t *testing.T) {
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	server := &http.Server{Handler: mux}
-	u.server = server
-	go server.Serve(ln)
+	server := &http.Server{Handler: mux} //nolint:gosec // test server
+	publishServer(t, u, server)
+	go server.Serve(ln) //nolint:errcheck // test server
 	t.Cleanup(func() { close(blockHandler) })
 
 	client := &http.Client{}

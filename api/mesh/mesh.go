@@ -22,15 +22,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
-	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
@@ -85,9 +83,11 @@ type Server struct {
 	genesisID           *BlockIdentifier
 	genesisStartTimeSec int64
 	addrNetworkID       uint8
-	httpServer          *http.Server
-	verifier            *apiauth.Verifier
-	mu                  sync.Mutex
+	// listener owns the start/stop protocol, including releasing the
+	// listening socket as part of what Stop waits for -- see
+	// internal/apilistener.
+	listener *apilistener.Listener
+	verifier *apiauth.Verifier
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -169,6 +169,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		genesisID:           genesisID,
 		genesisStartTimeSec: cfg.GenesisStartTimeSec,
 		addrNetworkID:       addrNetID,
+		listener:            apilistener.New("Mesh API", logger),
 	}, nil
 }
 
@@ -180,50 +181,50 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mesh: %w", err)
 	}
-	s.mu.Lock()
-	if s.httpServer != nil {
-		s.mu.Unlock()
-		return errors.New("server already started")
+	// The verifier is installed inside the build callback so it is published
+	// with the server it belongs to: a second Start is rejected before the
+	// callback runs, and so cannot replace a running server's verifier.
+	server, bindDone, err := s.listener.Publish(func() *http.Server {
+		s.verifier = verifier
+		mux := http.NewServeMux()
+		s.registerRoutes(mux)
+
+		// CORS must wrap authentication, not the reverse: httpcors.Handler
+		// fully answers an OPTIONS preflight itself and never calls the
+		// handler it wraps for one, so browsers -- which never attach
+		// Authorization to a preflight request -- never need a credential to
+		// pass CORS negotiation. Every other request, including a
+		// non-preflight OPTIONS, still reaches the mux normally. See
+		// internal/apiauth's Middleware doc comment for the general statement
+		// of this ordering rule.
+		authenticated := apiauth.Middleware(s.verifier)(mux)
+		return &http.Server{
+			Addr: s.config.ListenAddress,
+			Handler: httpcors.Handler(
+				authenticated,
+				httpcors.Config{
+					AllowedOrigins: s.config.CORSAllowedOrigins,
+				},
+			),
+			ReadHeaderTimeout: 60 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+	})
+	if err != nil {
+		return err
 	}
-	s.verifier = verifier
 
-	mux := http.NewServeMux()
-	s.registerRoutes(mux)
-
-	// CORS must wrap authentication, not the reverse: httpcors.Handler
-	// fully answers an OPTIONS preflight itself and never calls the
-	// handler it wraps for one, so browsers -- which never attach
-	// Authorization to a preflight request -- never need a credential to
-	// pass CORS negotiation. Every other request, including a
-	// non-preflight OPTIONS, still reaches the mux normally. See
-	// internal/apiauth's Middleware doc comment for the general statement
-	// of this ordering rule.
-	authenticated := apiauth.Middleware(s.verifier)(mux)
-	server := &http.Server{
-		Addr: s.config.ListenAddress,
-		Handler: httpcors.Handler(
-			authenticated,
-			httpcors.Config{
-				AllowedOrigins: s.config.CORSAllowedOrigins,
-			},
-		),
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	s.httpServer = server
-
-	// Launch context monitor before unlocking so there
-	// is no window where Stop() could race with the
-	// goroutine not yet existing.
+	// Launched before the bind so a context cancelled mid-bind still tears the
+	// server down: Take is what makes an in-flight bind close its own socket.
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
-		s.mu.Lock()
-		srv := s.httpServer
-		s.httpServer = nil
-		s.mu.Unlock()
-
-		if srv != nil {
+		job, _ := s.listener.TakeIf(server)
+		// Nil when a concurrent Stop won the detach -- it owns the teardown
+		// and its caller is already waiting on it -- or when this server was
+		// already stopped and a restart published another one, which is not
+		// this monitor's to touch. Either way there is nothing to do here.
+		if job != nil {
 			s.logger.Debug(
 				"context cancelled, shutting down " +
 					"Mesh API server",
@@ -235,8 +236,8 @@ func (s *Server) Start(ctx context.Context) error {
 			)
 			defer cancel()
 			//nolint:contextcheck
-			if err := srv.Shutdown(
-				shutdownCtx,
+			if err := s.listener.Shutdown(
+				shutdownCtx, job, apilistener.Graceful,
 			); err != nil {
 				s.logger.Error(
 					"failed to shutdown Mesh API "+
@@ -248,13 +249,16 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	s.mu.Unlock()
-
-	if err := s.startServer(server); err != nil {
-		s.mu.Lock()
-		s.httpServer = nil
-		s.mu.Unlock()
+	served, err := s.listener.Bind(server, bindDone, s.config.TLS)
+	if err != nil {
+		s.listener.Unpublish(server)
 		return err
+	}
+	if !served {
+		// A concurrent Stop or context cancellation detached this server while
+		// it was binding, so Bind closed the socket rather than serving it.
+		// Saying the listener came up would be false.
+		return nil
 	}
 
 	s.logger.Info(
@@ -265,66 +269,15 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down the HTTP server.
+// Stop gracefully shuts down the HTTP server, and does not return until the
+// listening socket has been released -- see internal/apilistener.
 func (s *Server) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	srv := s.httpServer
-	s.httpServer = nil
-	s.mu.Unlock()
-
-	if srv != nil {
-		s.logger.Debug("shutting down Mesh API server")
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf(
-				"failed to shutdown Mesh API server: %w",
-				err,
-			)
-		}
+	job, inFlight := s.listener.Take()
+	if job == nil {
+		return s.listener.AwaitTeardown(ctx, inFlight)
 	}
-	return nil
-}
-
-// startServer starts the HTTP server with deterministic
-// error detection.
-func (s *Server) startServer(
-	server *http.Server,
-) error {
-	useTLS := s.config.TLS.Enabled
-	if useTLS {
-		if err := tlsutil.ConfigureServerTLS(
-			server,
-			s.config.TLS.CertFilePath,
-			s.config.TLS.KeyFilePath,
-		); err != nil {
-			return fmt.Errorf(
-				"failed to load TLS keypair for Mesh API server: %w",
-				err,
-			)
-		}
-	}
-	ln, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to listen for Mesh API server: %w",
-			err,
-		)
-	}
-	go func() {
-		var serveErr error
-		if useTLS {
-			serveErr = server.ServeTLS(ln, "", "")
-		} else {
-			serveErr = server.Serve(ln)
-		}
-		if serveErr != nil &&
-			!errors.Is(serveErr, http.ErrServerClosed) {
-			s.logger.Error(
-				"Mesh API server error",
-				"error", serveErr,
-			)
-		}
-	}()
-	return nil
+	s.logger.Debug("shutting down Mesh API server")
+	return s.listener.Shutdown(ctx, job, apilistener.Graceful)
 }
 
 // registerRoutes registers all Mesh API endpoints.

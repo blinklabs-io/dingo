@@ -15,21 +15,35 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/pipeline"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// decodeReadChainBatch retains the former boolean test surface while
+// production uses decodeReadChainBatchWithError to route persisted validation
+// failures into chain recovery.
+func (ls *LedgerState) decodeReadChainBatch(
+	ctx context.Context,
+	rawBatch []models.Block,
+) (decoded []gledger.Block, ok bool) {
+	decoded, err := ls.decodeReadChainBatchWithError(ctx, rawBatch)
+	return decoded, err == nil
+}
 
 // buildDecodableTestBlock returns a models.Block wrapping a real, decodable
 // Conway block at the given slot/block number, along with its canonical
@@ -138,6 +152,45 @@ func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
 	}()
 	_, ok = pipelineLS.decodeReadChainBatch(ctx, rawBatch)
 	assert.False(t, ok)
+}
+
+func TestLedgerReadChainIteratorForwardsDecodeError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	badPoint := ocommon.Point{
+		Slot: 20,
+		Hash: []byte("bad-hash-bad-hash-bad-hash-32by"),
+	}
+	iter := &scriptedLedgerReadIterator{
+		ctx: ctx,
+		results: []*chain.ChainIteratorResult{{
+			Point: badPoint,
+			Block: models.Block{
+				Slot: badPoint.Slot,
+				Hash: badPoint.Hash,
+				Type: gledger.BlockTypeConway,
+				Cbor: []byte{0xff, 0xff, 0xff},
+			},
+		}},
+	}
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	resultCh := make(chan readChainResult)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	}()
+
+	select {
+	case result := <-resultCh:
+		require.Error(t, result.err)
+		assert.Contains(t, result.err.Error(), "decode block at slot 20")
+		close(result.done)
+	case <-readerDone:
+		t.Fatal("reader returned without forwarding the decode error")
+	}
+	cancel()
+	<-readerDone
 }
 
 // TestLedgerReadChainIteratorPipelineMatchesSerial exercises the full
@@ -533,4 +586,348 @@ func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
 
 		require.NoError(t, ls.blockPipeline.Stop())
 	}
+}
+
+// TestBlockPipelineLifecycleNoGoroutineLeakWithValidation extends
+// TestBlockPipelineLifecycleNoGoroutineLeak (decode-only) to the
+// decode+validate pipeline configuration added in commit c6142feb: the
+// validate-stage worker pool has its own Start/Stop lifecycle
+// (ValidateStageWorkerPool), separate from the decode worker pool, and had
+// zero goroutine-leak coverage before this test. Uses genuinely VRF/KES-
+// valid blocks (buildValidatedTestModelsBlock) so the validate stage
+// actually runs real crypto and its worker goroutines actually do work
+// across the whole Start/Submit/Stop cycle, rather than the pipeline
+// silently skipping validation.
+func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
+	const iterations = 20
+
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+
+	for i := range iterations {
+		var seed [32]byte
+		seed[0] = byte(i + 1)      //nolint:gosec
+		nonceSeed := byte(100 + i) //nolint:gosec
+		block, vb := buildValidatedTestModelsBlock(
+			t,
+			seed,
+			nonceSeed,
+			uint64(10_000+i*1_000), //nolint:gosec
+			uint64(i+1),            //nolint:gosec
+		)
+
+		ls := &LedgerState{
+			config: LedgerStateConfig{
+				Logger:                       testLogger(),
+				BlockPipelineValidateEnabled: true,
+			},
+		}
+		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithDecodeWorkers(2),
+			pipeline.WithValidateWorkers(2),
+			pipeline.WithEta0(vb.EpochNonceHex),
+			pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
+			pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		)
+		ctx := t.Context()
+		require.NoError(t, ls.blockPipeline.Start(ctx))
+
+		decoded, ok := ls.decodeReadChainBatch(ctx, []models.Block{block})
+		require.True(t, ok)
+		require.Len(t, decoded, 1)
+
+		require.NoError(t, ls.blockPipeline.Stop())
+	}
+
+	runtime.GC()
+	after := runtime.NumGoroutine()
+	// Same generous slack as TestBlockPipelineLifecycleNoGoroutineLeak, for
+	// the same reason (runtime.NumGoroutine() is not perfectly quiescent
+	// even absent any leak).
+	assert.LessOrEqual(
+		t,
+		after,
+		baseline+5,
+		"goroutine count grew from %d to %d over %d decode+validate "+
+			"block-pipeline start/stop cycles; possible leak in the "+
+			"validate-stage worker pool lifecycle",
+		baseline,
+		after,
+		iterations,
+	)
+}
+
+// TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled extends
+// TestLedgerReadChainIteratorRollbackTrimMatchesBothModes (serial vs.
+// decode-only pipeline) to the decode+validate pipeline configuration,
+// using genuinely VRF/KES-valid blocks (buildValidatedTestModelsBlock) so
+// the validate stage's real crypto checks are actually exercised rather
+// than trivially no-op'ing (a batch containing an invalid block would fail
+// decodeReadChainBatch entirely, which would make this test's "trims
+// identically" comparison meaningless). Together with
+// TestLedgerReadChainIteratorRollbackTrimMatchesBothModes, this proves a
+// rollback landing mid-batch trims identically across all three
+// configurations dingo supports: serial, decode-only pipeline, and
+// decode+validate pipeline.
+func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
+	t *testing.T,
+) {
+	var seed1, seed2 [32]byte
+	seed1[0], seed2[0] = 21, 22
+	const nonceSeed = 55
+
+	block1, vb1 := buildValidatedTestModelsBlock(t, seed1, nonceSeed, 100, 1)
+	block2, _ := buildValidatedTestModelsBlock(t, seed2, nonceSeed, 500, 2)
+	point1 := ocommon.Point{Slot: block1.Slot, Hash: block1.Hash}
+	point2 := ocommon.Point{Slot: block2.Slot, Hash: block2.Hash}
+
+	run := func(t *testing.T, ls *LedgerState) readChainResult {
+		t.Helper()
+		// Use an explicit cancellable context (not t.Context()) so the
+		// background goroutine below is fully drained before this helper
+		// returns, instead of lingering until the whole test completes.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		resultCh := make(chan readChainResult)
+		iter := &scriptedLedgerReadIterator{
+			ctx: ctx,
+			results: []*chain.ChainIteratorResult{
+				{Point: point1, Block: block1},
+				{Point: point2, Block: block2},
+				// Rollback to the first block: since it's already in the
+				// gathered batch, this should trim to a 1-block batch
+				// rather than emit a genuine rollback result.
+				{Rollback: true, Point: point1},
+			},
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			ls.ledgerReadChainIterator(ctx, iter, resultCh)
+		}()
+		result := <-resultCh
+		close(result.done)
+		cancel()
+		<-done
+		return result
+	}
+
+	serialLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	serialResult := run(t, serialLS)
+	require.False(t, serialResult.rollback)
+	require.Len(t, serialResult.blocks, 1)
+	assert.Equal(t, block1.Slot, serialResult.blocks[0].SlotNumber())
+
+	validateLS := &LedgerState{
+		config: LedgerStateConfig{
+			Logger:                       testLogger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	validateLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(2),
+		pipeline.WithValidateWorkers(2),
+		pipeline.WithEta0(vb1.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb1.SlotsPerKesPeriod),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, validateLS.blockPipeline.Start(t.Context()))
+	defer func() {
+		require.NoError(t, validateLS.blockPipeline.Stop())
+	}()
+	validateResult := run(t, validateLS)
+	require.False(t, validateResult.rollback)
+	require.Len(t, validateResult.blocks, 1)
+	assert.Equal(
+		t,
+		block1.Slot,
+		validateResult.blocks[0].SlotNumber(),
+	)
+	assert.Equal(
+		t,
+		serialResult.blocks[0].Hash(),
+		validateResult.blocks[0].Hash(),
+	)
+}
+
+// TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp verifies issue #1894
+// phase 5's rollback-coordination helper is a true no-op -- returns
+// immediately, does not panic -- when ls.blockPipeline is nil (pipeline
+// disabled or ManualBlockProcessing), matching every other
+// pipeline-conditional code path in this file.
+func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ls.drainBlockPipelineBeforeRollback(t.Context(), "test")
+	}()
+	testutil.RequireReceive(
+		t, done, time.Second,
+		"drainBlockPipelineBeforeRollback blocked with a nil block pipeline",
+	)
+}
+
+// TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork is a regression
+// test for issue #1894 phase 5's rollback-coordination helper: it must
+// actually wait for ls.blockPipeline's in-flight decode/validate work to
+// finish, not merely check PendingCount() once and return. Uses the
+// validate stage with real VRF/KES crypto and a single worker per stage so
+// a batch of blocks takes measurable time to drain, then asserts:
+//  1. immediately after submitting the whole batch, genuine backlog exists
+//     (PendingCount() > 0) -- this is the precondition that makes the
+//     second assertion meaningful rather than vacuously true;
+//  2. immediately after drainBlockPipelineBeforeRollback returns,
+//     PendingCount() is 0.
+//
+// If drainBlockPipelineBeforeRollback were reverted to a no-op (or its
+// WaitForDrain call removed), the second assertion would fail: essentially
+// no wall-clock time passes between the two PendingCount() checks other
+// than the call itself, so a backlog confirmed present immediately before
+// the call would still be present immediately after it, absent an actual
+// wait. Verified directly: temporarily reverting
+// drainBlockPipelineBeforeRollback to `if ls.blockPipeline == nil { return
+// } ` (dropping the WaitForDrain call) makes this test fail.
+func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
+	const numBlocks = 25
+
+	var seed0 [32]byte
+	seed0[0] = 1
+	firstBlock, vb := buildValidatedTestModelsBlock(t, seed0, 200, 100, 1)
+
+	blocks := make([]models.Block, 0, numBlocks)
+	blocks = append(blocks, firstBlock)
+	for i := 1; i < numBlocks; i++ {
+		var seed [32]byte
+		seed[0] = byte(i + 1) //nolint:gosec
+		block, _ := buildValidatedTestModelsBlock(
+			t,
+			seed,
+			200,
+			uint64(1_000*(i+1)), //nolint:gosec
+			uint64(i+1),         //nolint:gosec
+		)
+		blocks = append(blocks, block)
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger:                       testLogger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(1),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0(vb.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	ctx := t.Context()
+	require.NoError(t, ls.blockPipeline.Start(ctx))
+	defer func() {
+		require.NoError(t, ls.blockPipeline.Stop())
+	}()
+
+	for _, raw := range blocks {
+		tip := ocommon.Tip{
+			Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
+			BlockNumber: raw.Number,
+		}
+		require.NoError(
+			t,
+			ls.blockPipeline.Submit(ctx, raw.Type, raw.Cbor, tip),
+		)
+	}
+
+	// Precondition: real backlog exists right after submission. If this
+	// ever starts flaking (e.g. validation becomes fast enough that a
+	// single worker drains 25 items before this check runs), increase
+	// numBlocks rather than delete the assertion -- it's what makes the
+	// post-drain assertion below meaningful.
+	require.Positive(
+		t,
+		ls.blockPipeline.PendingCount(),
+		"test setup did not produce a pipeline backlog to drain -- "+
+			"the assertion below would be vacuous",
+	)
+
+	ls.drainBlockPipelineBeforeRollback(t.Context(), "test")
+
+	assert.Equal(
+		t,
+		0,
+		ls.blockPipeline.PendingCount(),
+		"drainBlockPipelineBeforeRollback returned before the "+
+			"block-pipeline backlog was actually drained",
+	)
+}
+
+// TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline proves
+// issue #1894 phase 5's drainBlockPipelineBeforeRollback call inside
+// processChainIteratorRollback does not change that function's rollback
+// decision or resulting state: an idle, started block-pipeline attached to
+// the fixture must produce byte-for-byte identical outcomes (error, chain
+// tip, ledger tip, block nonce, persisted tip) to the pipeline-disabled
+// case, for both the "stale rollback superseded" and "stale rollback,
+// ledger tip abandoned" branches already covered by
+// TestProcessChainIteratorRollbackSkipsStaleRollback and
+// TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned.
+func TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline(
+	t *testing.T,
+) {
+	type outcome struct {
+		err        error
+		chainTip   ochainsync.Tip
+		currentTip ochainsync.Tip
+		nonce      []byte
+		dbTip      ochainsync.Tip
+	}
+
+	runAbandonedTipScenario := func(
+		t *testing.T,
+		attachPipeline bool,
+	) outcome {
+		t.Helper()
+		fixture := newChainsyncRollbackFixture(t)
+		if attachPipeline {
+			fixture.ls.blockPipeline = pipeline.NewBlockPipeline(
+				pipeline.WithDecodeWorkers(2),
+			)
+			require.NoError(t, fixture.ls.blockPipeline.Start(t.Context()))
+			t.Cleanup(func() {
+				require.NoError(t, fixture.ls.blockPipeline.Stop())
+			})
+		}
+		// Use the identical fork content ("same-fork") for both scenarios
+		// -- attachPipeline must be the only variable, or the two
+		// fixtures would legitimately end up on different forks with
+		// different tips, making the comparison below meaningless.
+		putPrimaryChainOnForkBeyondK(t, fixture, "same-fork")
+
+		err := fixture.ls.processChainIteratorRollback(
+			t.Context(),
+			fixture.ancestorTip.Point,
+		)
+		dbTip, dbErr := fixture.ls.db.GetTip(nil)
+		require.NoError(t, dbErr)
+		return outcome{
+			err:        err,
+			chainTip:   fixture.ls.chain.Tip(),
+			currentTip: fixture.ls.currentTip,
+			nonce:      fixture.ls.currentTipBlockNonce,
+			dbTip:      dbTip,
+		}
+	}
+
+	withoutPipeline := runAbandonedTipScenario(t, false)
+	withPipeline := runAbandonedTipScenario(t, true)
+
+	require.ErrorIs(t, withoutPipeline.err, errRestartLedgerPipeline)
+	require.ErrorIs(t, withPipeline.err, errRestartLedgerPipeline)
+	assert.Equal(t, withoutPipeline.chainTip, withPipeline.chainTip)
+	assert.Equal(t, withoutPipeline.currentTip, withPipeline.currentTip)
+	assert.True(t, bytes.Equal(withoutPipeline.nonce, withPipeline.nonce))
+	assert.Equal(t, withoutPipeline.dbTip, withPipeline.dbTip)
 }

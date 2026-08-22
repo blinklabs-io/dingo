@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -48,7 +49,7 @@ var (
 	configFile string
 )
 
-func commonRun(cfg *config.Config) *slog.Logger {
+func commonRun(cfg *config.Config) (*slog.Logger, error) {
 	// Configure logger from config. The --debug flag is the highest-precedence
 	// override (CLI > env > YAML > defaults): it forces debug level and source
 	// locations regardless of the configured level.
@@ -79,15 +80,13 @@ func commonRun(cfg *config.Config) *slog.Logger {
 	// Configure max processes with our logger wrapper, toss undo func
 	_, err := maxprocs.Set(maxprocs.Logger(slogPrintf))
 	if err != nil {
-		// If we hit this, something really wrong happened
-		slog.Error(err.Error())
-		os.Exit(1)
+		return nil, fmt.Errorf("configuring max processes: %w", err)
 	}
 	logger.Info(
 		"version: "+version.GetVersionString(),
 		"component", programName,
 	)
-	return logger
+	return logger, nil
 }
 
 // newLogger builds a slog.Logger writing to w. format selects the handler
@@ -250,7 +249,23 @@ func listCommand() *cobra.Command {
 	return cmd
 }
 
+// closeProfileFile closes f, reporting a close failure to stderr instead of
+// silently dropping it -- a truncated profile file is otherwise
+// indistinguishable from a clean one until someone tries to load it.
+func closeProfileFile(stderr io.Writer, f *os.File, kind string) {
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(stderr, "could not close %s profile file: %v\n", kind, err)
+	}
+}
+
 func main() {
+	// run's body executes as a normal function return -- not os.Exit --
+	// specifically so its deferred CPU-profile cleanup always runs before
+	// the process actually terminates, on every path out of run().
+	os.Exit(run())
+}
+
+func run() int {
 	// Parse profiling flags before cobra setup (handle both --flag=value and --flag value syntax)
 	cpuprofile := ""
 	memprofile := ""
@@ -301,12 +316,12 @@ func main() {
 		) //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		defer f.Close()
+		defer closeProfileFile(os.Stderr, f, "CPU")
 		if err := pprof.StartCPUProfile(f); err != nil {
 			fmt.Fprintf(os.Stderr, "could not start CPU profile: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		defer func() {
 			pprof.StopCPUProfile()
@@ -315,8 +330,9 @@ func main() {
 	}
 
 	rootCmd := &cobra.Command{
-		Use:   programName,
-		Short: "Dingo - a Go Cardano node",
+		Use:           programName,
+		Short:         "Dingo - a Go Cardano node",
+		SilenceErrors: true,
 		Long: `Dingo - a Go Cardano node by Blink Labs.
 
 Configuration Precedence (highest to lowest):
@@ -352,11 +368,10 @@ Database Workers:
 		// PersistentPreRunE, not explicit `--help` or `-h` output, so this
 		// does not touch the help text itself.
 		SilenceUsage: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
-				slog.Error("no config found in context")
-				os.Exit(1)
+				return errors.New("no config found in context")
 			}
 
 			// When no subcommand given, check RunMode from config.
@@ -367,13 +382,13 @@ Database Workers:
 			case config.RunModeLoad:
 				// Validate() has already enforced that ImmutableDbPath
 				// is set for load mode
-				loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
+				return loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
 			case config.RunModeServe, config.RunModeDev, config.RunModeLeios:
 				// serve, dev, and leios modes all run the server
-				serveRun(cmd, args, cfg)
+				return serveRun(cmd, args, cfg)
 			default:
 				// Empty or unrecognized RunMode defaults to serve mode
-				serveRun(cmd, args, cfg)
+				return serveRun(cmd, args, cfg)
 			}
 		},
 	}
@@ -471,6 +486,7 @@ Database Workers:
 	// Execute cobra command
 	exitCode := 0
 	if err := rootCmd.Execute(); err != nil {
+		slog.Error(err.Error())
 		exitCode = 1
 	}
 
@@ -490,11 +506,9 @@ Database Workers:
 			} else {
 				fmt.Fprintf(os.Stderr, "Memory profiling complete\n")
 			}
-			f.Close()
+			closeProfileFile(os.Stderr, f, "memory")
 		}
 	}
 
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
+	return exitCode
 }

@@ -21,9 +21,13 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // CheckConfig holds parameters for a parity check run.
@@ -778,5 +782,241 @@ func compareEpochAccounts(
 			epochEndTime,
 		)...,
 	)
+	out = append(
+		out,
+		accountLifecycleMismatches(
+			ctx, cache, dingo, network, epoch, stakeEpoch, dingoOutputs, now,
+		)...,
+	)
 	return out
+}
+
+// accountLifecycleMismatches (dingo #3099) reports the two account
+// dimensions #3097's CompareAccountEpoch structurally cannot: confirmed
+// zero-reward accounts and newly-registered/deregistered accounts between
+// adjacent stake epochs. Purely informational: every mismatch returned here
+// uses one of CategoryAcctZeroReward/CategoryAcctNewlyRegistered/
+// CategoryAcctDeregistered, which DetermineStatus treats as a no-op, never
+// FAIL or ERROR.
+//
+// A genuine cache/DB error from either lookup is reported as CategoryDBError
+// rather than silently swallowed — only an explicitly absent/incomplete
+// previous-epoch signal is treated as "disable this report", never any
+// other error, so a real storage failure can never masquerade as "nothing
+// to report".
+//
+// maxAccountLifecycleSample bounds how many addresses are embedded, as a
+// comma-joined debugging sample, in each aggregate lifecycle mismatch row —
+// see aggregateAccountLifecycleMismatch's doc comment for why these are
+// summarized rather than reported one row per address.
+const maxAccountLifecycleSample = 20
+
+func accountLifecycleMismatches(
+	ctx context.Context,
+	cache *Cache,
+	dingo RewardParitySource,
+	network string,
+	epoch, stakeEpoch uint64,
+	currentOutputs []*models.RewardAccountOutput,
+	now time.Time,
+) []CheckMismatch {
+	var out []CheckMismatch
+
+	zeroReward, err := cache.GetZeroRewardAccountsForEpoch(network, epoch)
+	if err != nil {
+		return append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "koios_account_checked",
+			KoiosValue: fmt.Sprintf("error: %v", err),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		})
+	}
+	if len(zeroReward) > 0 {
+		out = append(out, aggregateAccountLifecycleMismatch(
+			network,
+			epoch,
+			CategoryAcctZeroReward,
+			"account_zero_reward",
+			zeroReward,
+			now,
+		))
+	}
+
+	// Newly-registered/deregistered accounts are diffed from Dingo's own
+	// epoch-scoped reward_account_output universe — which stake addresses
+	// Dingo actually computed a reward output for at this specific stake
+	// epoch — not from koios_account_checked's persisted "requested
+	// universe". That set unions in Koios's own all-time historical account
+	// list (BuildAccountAddressUniverse), resolved once per Fetch run and
+	// reused across every epoch, so it stays essentially static regardless
+	// of whether an account is genuinely active/delegated in any given
+	// epoch: diffing against it would make this report reflect almost
+	// nothing for a Koios-known account (it never leaves the union) rather
+	// than genuine epoch-over-epoch registration/deregistration.
+	if stakeEpoch == 0 || dingo == nil {
+		// No valid previous stake epoch to diff against (stakeEpoch-1 would
+		// underflow) — should not be reachable in practice, since checkEpoch
+		// already excludes pre-staking epochs via koiosStakeEpoch's own
+		// guard before ever calling compareEpochAccounts. The dingo == nil
+		// check is defensive (compareEpochAccounts always passes a real
+		// source in production) and lets callers that only care about the
+		// zero-reward half of this report (see e.g. this package's own
+		// tests) pass nil rather than a throwaway source implementation.
+		return out
+	}
+	if _, prunable := dingo.(*DatabaseSource); prunable {
+		// DatabaseSource (the in-process observer's reward source) reads
+		// reward_account_output through core-mode's rolling pruning window
+		// (see DatabaseSource.GetRewardAccountOutputs) and cannot
+		// distinguish "the previous stake epoch genuinely had no reward
+		// accounts" from "its rows have since been pruned" — an empty,
+		// error-free result either way. Treating a pruned-empty result as a
+		// complete previous-epoch universe would make every account in the
+		// current epoch look newly registered. Only *DingoDB (the
+		// standalone CLI's full, unpruned copy) can be trusted for this
+		// diff; skip it entirely for a prunable source rather than report a
+		// false lifecycle signal. Zero-reward reporting above is unaffected
+		// — it doesn't depend on any historical epoch's data.
+		return out
+	}
+	previousOutputs, err := dingo.GetRewardAccountOutputs(ctx, stakeEpoch-1)
+	if err != nil {
+		return append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "reward_account_output",
+			DingoValue: fmt.Sprintf("error: %v", err),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		})
+	}
+
+	// currentOutputs' own decode failures are already reported by
+	// compareEpochAccounts's own dingoRows-building loop above (the same
+	// underlying rows) — only previousOutputs has no other reporting path,
+	// since nothing else in this package ever decodes the previous stake
+	// epoch's addresses.
+	prevSet, prevDecodeErrs := dingoRewardAddressSet(previousOutputs)
+	currSet, currDecodeErrs := dingoRewardAddressSet(currentOutputs)
+	if prevDecodeErrs > 0 {
+		out = append(out, CheckMismatch{
+			Network: network,
+			Epoch:   epoch,
+			Field:   "reward_account_output_address_decode",
+			DingoValue: fmt.Sprintf(
+				"%d previous-epoch reward_account_output row(s) failed to decode",
+				prevDecodeErrs,
+			),
+			Category:  CategoryDBError,
+			CheckedAt: now,
+		})
+	}
+	if prevDecodeErrs > 0 || currDecodeErrs > 0 {
+		// Either side's set is now missing an address purely because a row
+		// failed to decode, not because it actually registered/deregistered
+		// — diffing incomplete sets would misreport that row's address as
+		// newly-registered or deregistered. The decode failure itself is
+		// already reported (previous-epoch above; current-epoch by
+		// compareEpochAccounts's own dingoRows-building loop), so skip the
+		// diff rather than emit a misleading one.
+		return out
+	}
+
+	var newlyRegistered, deregistered []string
+	for addr := range currSet {
+		if !prevSet[addr] {
+			newlyRegistered = append(newlyRegistered, addr)
+		}
+	}
+	for addr := range prevSet {
+		if !currSet[addr] {
+			deregistered = append(deregistered, addr)
+		}
+	}
+	sort.Strings(newlyRegistered)
+	sort.Strings(deregistered)
+
+	if len(newlyRegistered) > 0 {
+		out = append(out, aggregateAccountLifecycleMismatch(
+			network,
+			epoch,
+			CategoryAcctNewlyRegistered,
+			"account_lifecycle_newly_registered",
+			newlyRegistered,
+			now,
+		))
+	}
+	if len(deregistered) > 0 {
+		out = append(out, aggregateAccountLifecycleMismatch(
+			network,
+			epoch,
+			CategoryAcctDeregistered,
+			"account_lifecycle_deregistered",
+			deregistered,
+			now,
+		))
+	}
+	return out
+}
+
+// dingoRewardAddressSet decodes a set of RewardAccountOutput rows into a
+// deduplicated bech32 stake-address set, mirroring
+// BuildAccountAddressUniverse's own dedup approach. A row with an
+// unsupported credential tag is skipped from the set (rather than aborting
+// the whole diff) but counted in decodeErrs — silently dropping such a row
+// would make that address look deregistered (if it was in the previous
+// epoch's set) or simply never newly-registered (if it's in the current
+// epoch's set), which is misleading, not a real lifecycle change. The
+// caller is responsible for reporting decodeErrs > 0 as a CategoryDBError
+// mismatch when there's no other reporting path for this specific input
+// (see accountLifecycleMismatches's call site).
+func dingoRewardAddressSet(
+	outputs []*models.RewardAccountOutput,
+) (set map[string]bool, decodeErrs int) {
+	set = make(map[string]bool, len(outputs))
+	for _, o := range outputs {
+		addr, err := StakeAddressFromCredential(o.StakingKey, o.CredentialTag)
+		if err != nil {
+			decodeErrs++
+			continue
+		}
+		set[addr] = true
+	}
+	return set, decodeErrs
+}
+
+// aggregateAccountLifecycleMismatch builds one summary CheckMismatch row for
+// an entire category of addresses, rather than one row per address.
+// Zero-reward accounts in particular can be the large majority of a
+// network's whole address universe (Koios never emits a row at all for a
+// zero-reward account), so reporting them one-row-per-address would scale
+// insert time, cache size, and JSON report memory with the size of the
+// account universe, and would drown out genuine mismatches in
+// CheckEpochStatus.MismatchCount. KoiosValue carries the total affected
+// count; DingoValue carries a capped, comma-joined sample of addresses for
+// debugging, not the full list — the persisted koios_account_checked/
+// koios_account_universe data remains queryable directly for anyone who
+// needs the complete list.
+func aggregateAccountLifecycleMismatch(
+	network string,
+	epoch uint64,
+	category, field string,
+	addrs []string,
+	now time.Time,
+) CheckMismatch {
+	sample := addrs
+	if len(sample) > maxAccountLifecycleSample {
+		sample = sample[:maxAccountLifecycleSample]
+	}
+	return CheckMismatch{
+		Network:    network,
+		Epoch:      epoch,
+		Field:      field,
+		DingoValue: "sample: " + strings.Join(sample, ","),
+		KoiosValue: strconv.Itoa(len(addrs)),
+		Category:   category,
+		CheckedAt:  now,
+	}
 }

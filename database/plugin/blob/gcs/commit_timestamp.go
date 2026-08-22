@@ -29,10 +29,9 @@ import (
 const commitTimestampBlobKey = "metadata_commit_timestamp"
 
 func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
+	// No nil check: NewTransaction returns a concrete *gcsTxn as a types.Txn,
+	// and a non-nil pointer in an interface is never nil.
 	txn := b.NewTransaction(false)
-	if txn == nil {
-		return 0, types.ErrNilTxn
-	}
 	defer txn.Rollback() //nolint:errcheck // no-op for this backend
 
 	r, err := b.Get(txn, []byte(commitTimestampBlobKey))
@@ -62,14 +61,9 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 					"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
 					err,
 				)
-				// Create a new transaction for migration
+				// Create a new transaction for migration. As above, it
+				// cannot be nil, so there is nothing to check.
 				migrateTxn := b.NewTransaction(true)
-				if migrateTxn == nil {
-					b.logger.Errorf(
-						"failed to create migration transaction: blob store unavailable",
-					)
-					return ts, nil
-				}
 				defer migrateTxn.Rollback() //nolint:errcheck
 				if migrateErr := b.SetCommitTimestamp(ts, migrateTxn); migrateErr != nil {
 					b.logger.Errorf(

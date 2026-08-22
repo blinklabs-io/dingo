@@ -141,8 +141,16 @@ func serveAuxiliaryListener(
 	}
 }
 
+// logStartupConfig debug-logs the effective node configuration through
+// Config's redacted representation (Config.LogValue), so a debug log never
+// persists a Koios API key, an inline API auth token, or a storage provider
+// password or DSN credential.
+func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
+	logger.Debug("config", "component", "node", "config", cfg)
+}
+
 func Run(cfg *config.Config, logger *slog.Logger) error {
-	logger.Debug(fmt.Sprintf("config: %+v", cfg), "component", "node")
+	logStartupConfig(logger, cfg)
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
 		"component", "node",
@@ -543,6 +551,22 @@ func buildDingoConfig(
 				BatchSize: cfg.OffchainMetadata.BatchSize,
 				MaxBytes:  cfg.OffchainMetadata.MaxBytes,
 				AllowPrivateAddresses: cfg.OffchainMetadata.
+					AllowPrivateAddresses,
+			},
+		),
+		dingo.WithTokenRegistryConfig(
+			dingo.TokenRegistryConfig{
+				Enabled:   cfg.TokenRegistry.Enabled,
+				SourceURL: cfg.TokenRegistry.SourceURL,
+				Interval:  cfg.TokenRegistry.Interval,
+				RequestTimeout: cfg.TokenRegistry.
+					RequestTimeout,
+				UserAgent: cfg.TokenRegistry.UserAgent,
+				MaxBytes:  cfg.TokenRegistry.MaxBytes,
+				MaxEntryBytes: cfg.TokenRegistry.
+					MaxEntryBytes,
+				StoreLogos: cfg.TokenRegistry.StoreLogos,
+				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,
 			},
 		),

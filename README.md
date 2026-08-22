@@ -30,6 +30,19 @@ Note: On Windows systems, named pipes are used instead of Unix sockets for node-
   <img src="./.github/dingo-20241210.png" alt="dingo screenshot" width="640">
 </div>
 
+## Documentation
+
+Start with the [Dingo documentation index](docs/README.md). It maps the
+versioned documentation in this repository, the package comments exposed by
+`go doc`, and the public operator guides at
+[docs.blinklabs.io](https://docs.blinklabs.io/guides/dingo/001-dingo/).
+
+For code-level questions, use the [Go code reference](docs/code-reference.md)
+to find package `doc.go` files and commands that render documentation from the
+exact revision checked out. Automated tools can also use the public
+[LLM documentation index](https://docs.blinklabs.io/llms.txt) or the focused
+[Cardano nodes and operations set](https://docs.blinklabs.io/_llms-txt/cardano-nodes-and-operations.txt).
+
 ## Running
 
 Dingo supports configuration via a YAML config file (`dingo.yaml`), environment variables, and command-line flags. Priority: CLI flags > environment variables > YAML config > defaults.

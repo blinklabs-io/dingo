@@ -50,6 +50,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -61,6 +62,10 @@ import (
 
 const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
+	// Keep each cleanup transaction short enough that it cannot monopolize
+	// SQLite while blockfetch handlers persist sync state during shutdown or
+	// catch-up. Later timer or epoch-boundary runs continue the cleanup.
+	cleanupConsumedUtxoBatchSize = 1_000
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 	ledgerIntersectDenseCount    = 32
 	ledgerAncestorSearchWindow   = 10_000
@@ -69,8 +74,17 @@ const (
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
 	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
 	// of the block-processing pipeline (issue #1894). Validation workers stay
-	// at 0 (disabled) until a later phase wires an Eta0Provider.
+	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
+	// turns them on (phase 3).
 	blockPipelineDecodeWorkers = 2
+	// blockPipelineValidateWorkers is the fixed VRF/KES validate worker count
+	// for phase 3 of the block-processing pipeline (issue #1894). VRF and KES
+	// verification are each substantially more expensive than a CBOR decode,
+	// so validation is the pipeline's throughput bottleneck; this is kept
+	// equal to blockPipelineDecodeWorkers for now rather than scaled
+	// differently, matching phase 1's fixed-worker-count approach until
+	// there's a throughput profile to size it against.
+	blockPipelineValidateWorkers = 2
 )
 
 // DatabaseOperation represents an asynchronous database operation
@@ -449,12 +463,10 @@ type LedgerStateConfig struct {
 	// reached from a preview/preprod/mainnet configuration.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
-	// validation rule set entirely. dingo already trusts (logs, does not reject)
-	// every Dijkstra tx-validation disagreement, because the block was admitted
-	// to the chain by its Leios certificate and the prototype does not itself
-	// validate endorser-block transactions. On the Haskell-conformant path
-	// (Musashi) certified closure and ranking-block transactions are trusted in
-	// the same way. Running dingo's rule set only to discard any disagreement is
+	// validation rule set entirely. On the Haskell-conformant Musashi path,
+	// certified closure and ranking-block transactions are trusted because the
+	// prototype does not validate endorser-block transactions. Running dingo's
+	// rule set only to discard any disagreement is
 	// wasted work that prevents the node from reaching tip under load. Set true
 	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
 	// requires an unambiguous Musashi identity so this can never be reached
@@ -511,7 +523,44 @@ type LedgerStateConfig struct {
 	// CBOR decode work is scheduled. Off by default: throughput and
 	// stability are still being proven (issue #1894 phase 1). See
 	// ARCHITECTURE.md ("Block Processing Pipeline").
+	//
+	// A rollback drains blockPipeline's in-flight decode/validate backlog
+	// (drainBlockPipelineBeforeRollback, issue #1894 phase 5) before it
+	// proceeds, to shrink -- not eliminate -- the window in which an
+	// already-in-flight batch from an abandoned fork could otherwise be
+	// applied after the rollback. See ARCHITECTURE.md ("Phase 5: rollback
+	// coordination").
 	BlockPipelineEnabled bool
+	// BlockPipelineValidateEnabled adds parallel VRF/KES validation to the
+	// decode pipeline (issue #1894 phase 3). Dingo supplements the generic
+	// stage with the OpCert cold-key signature and MaxKESEvolutions checks,
+	// and enforces results only where the serial path has validation state:
+	// not trusted historical/Mithril replay and only with a cached epoch
+	// nonce. A rejection is returned as headerValidationError so the already-
+	// persisted chain can be rewound rather than retried forever.
+	//
+	// This is defense in depth, not a replacement for admission validation.
+	// Headers and blocks remain fully checked before entering ls.chain because
+	// that chain is served to downstream clients before ledger apply. See
+	// ARCHITECTURE.md ("Block Processing Pipeline").
+	//
+	// This flag's extra CPU cost (two dedicated VRF/KES workers) can make
+	// block-apply throughput fall behind header arrival during bursty
+	// near-tip conditions more easily than decode-only phase 1 or the
+	// pre-pipeline baseline hit in practice; if that happens for long
+	// enough, the chain's queued-header backlog can reach capacity while a
+	// fork is being resolved. tryResolveFork's failure handling used to
+	// silently strand that backlog in exactly that case, stalling sync
+	// with no error logged above WARN until chainsyncrecycler's
+	// local-tip-plateau watchdog eventually forced a resync (~20 minutes
+	// with default config) -- this was a general, pre-existing gap in
+	// tryResolveFork, not specific to this flag (reproduced live under
+	// this flag, under decode-only, and under the pre-pipeline baseline
+	// alike); the flag's throughput cost just makes it easier to reach.
+	// See ensureBlockfetchDrainingAfterForkQueueFailure and
+	// ARCHITECTURE.md ("Fork-resolution header-queue overflow must still
+	// restart blockfetch") for the fix and the full explanation.
+	BlockPipelineValidateEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the slot and the complete set of standalone
@@ -639,6 +688,7 @@ type LedgerState struct {
 	rewardInputRollbackActive          atomic.Int64               // non-zero while rollback can mutate reward calculation inputs
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
+	cleanupConsumedUtxosRunning        atomic.Bool
 	Scheduler                          *Scheduler
 	chain                              *chain.Chain
 	db                                 *database.Database
@@ -754,7 +804,7 @@ type LedgerState struct {
 	// node_lifecycle.go's package doc). Without a way to signal this
 	// goroutine specifically, it keeps applying incoming blocks with no
 	// awareness that Close is about to run — Close waited for every other
-	// background goroutine (rollbackWG, replayWG, rewardPrecomputeWG below)
+	// background goroutine (replayWG, rewardPrecomputeWG below)
 	// but not this one, the actual pipeline that writes blocks to the
 	// database. A block landing mid-write exactly as Close proceeds to
 	// shut down dbWorkerPool leaves the persisted block-ID index
@@ -764,7 +814,7 @@ type LedgerState struct {
 	// transient condition a retry can recover from.
 	processBlocksCancel context.CancelFunc
 	// processBlocksWG tracks that same goroutine so Close can wait for it
-	// to actually exit before proceeding, the same way rollbackWG/replayWG/
+	// to actually exit before proceeding, the same way replayWG/
 	// rewardPrecomputeWG already do for the others.
 	processBlocksWG sync.WaitGroup
 
@@ -783,13 +833,70 @@ type LedgerState struct {
 	// one attempt's reader goroutine ever submits to it at a time -- see the
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
+	// blockPipelineErrorsDone is closed once drainBlockPipelineErrors (the
+	// goroutine that continuously reads blockPipeline.Errors() for the
+	// pipeline's full lifetime) has returned. Set alongside blockPipeline.
+	// Start in Start; nil whenever blockPipeline is nil or was never
+	// started. See drainBlockPipelineErrors's doc comment for why this
+	// goroutine exists: gouroboros' pipeline pushes every stage error onto
+	// a fixed-size errorsChan before forwarding the item onward, and never
+	// drains it itself -- without a permanent reader, errorsChan fills
+	// (deterministically, on real chain sync, from expected per-block
+	// Byron-era validate-stage errors -- see blockPipelineEta0Provider) and
+	// every validate worker permanently blocks on `errors <- err`,
+	// cascading into an unrecoverable Submit deadlock.
+	blockPipelineErrorsDone chan struct{}
+	// blockPipelineGatherMutex serializes ledgerReadChainIterator's
+	// gather-then-submit sequence (collecting raw blocks via iter.Next(),
+	// then handing them to decodeReadChainBatch, which -- when blockPipeline
+	// is non-nil -- Submits every one of them and drains their Results()
+	// before returning) against rollbackChainAndState's out-of-band
+	// rollback path.
+	//
+	// drainBlockPipelineBeforeRollback alone is not enough for that path:
+	// it only waits for work already Submitted to blockPipeline
+	// (PendingCount) to finish. A batch the reader has already pulled off
+	// the chain iterator into its local rawBatch, but not yet passed to
+	// decodeReadChainBatch, holds nothing in the pipeline's queues -- so
+	// WaitForDrain observes an empty pipeline and returns immediately, and
+	// the reader can then Submit and apply those raw blocks, from the very
+	// fork chain-selection just decided to abandon, after the rollback
+	// already believed it was safe to proceed. rollbackChainAndState
+	// (reached from chainsync per-connection handling, never from
+	// ledgerProcessBlocks) has no other way to learn the reader is
+	// mid-gather.
+	//
+	// The reader holds the read lock for exactly the gather-plus-submit
+	// span (see ledgerReadChainIterator); rollbackChainAndState holds the
+	// write lock from before it calls drainBlockPipelineBeforeRollback
+	// through ls.chain.Rollback, so no gather-then-submit cycle can start,
+	// and none already in flight can reach Submit, while a rollback is
+	// physically truncating the chain. Once ls.chain.Rollback returns, the
+	// chain package's own iterator bookkeeping (ChainIterator.needsRollback,
+	// set under the chain's own locks in Chain.rollbackLocked) makes any
+	// later iter.Next() call safe on its own, so the write lock does not
+	// need to extend past it.
+	//
+	// This does not replace processChainIteratorRollback's stale-tip
+	// backstop -- a batch the reader already hung off decodeReadChainBatch
+	// before either lock existed and is now working through
+	// ledgerProcessBlocksFromSource's DB-apply is a separate, already
+	// documented and accepted window (see drainBlockPipelineBeforeRollback's
+	// doc comment); that backstop remains what corrects it. This mutex
+	// closes the narrower, earlier window between gathering raw blocks and
+	// submitting them, which has no other guard at all.
+	blockPipelineGatherMutex sync.RWMutex
 
-	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
-	// to prevent Add-after-Wait panics from the TOCTOU race between
-	// closed.Load() and Add(1) in handleEventChainUpdate.
-	rollbackMu sync.Mutex
-	// rollbackWG tracks in-flight rollback event emission goroutines
-	rollbackWG sync.WaitGroup
+	// publishCtx is cancelled at the top of Close so a ledger.tx publish
+	// parked on a full ordered lane cannot outlive shutdown. Only the
+	// EventBus stopping otherwise releases such a publisher, and a live
+	// restore/truncate closes the LedgerState while keeping the bus
+	// running, so without this the Close waits below are unbounded.
+	// Nil on a bare-struct LedgerState (tests), which reads as "no
+	// cancellation" and matches the pre-existing behaviour.
+	publishCtx    context.Context
+	publishCancel context.CancelFunc
+
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
 	// closed.Load() and Add(1) in replayBufferedHeadersAsync (#2107).
@@ -905,6 +1012,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
 	ls.publishSnapshotsLocked()
 	// Cache configured chain checkpoints (keyed by block height) so the
@@ -920,6 +1028,13 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// counters.
 	ls.metrics.init(cfg.PromRegistry)
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
+	if cfg.BlockPipelineEnabled && cfg.BlockPipelineValidateEnabled &&
+		!cfg.ManualBlockProcessing && ls.SlotsPerKESPeriod() == 0 {
+		ls.publishCancel()
+		return nil, errors.New(
+			"block pipeline validation requires slotsPerKESPeriod from Shelley genesis",
+		)
+	}
 	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
 	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
@@ -929,15 +1044,38 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// altogether, so no pipeline is constructed for that mode -- leaving
 	// blockPipeline non-nil but permanently unstarted otherwise.
 	if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing {
-		// Validation stays disabled (ValidateWorkers defaults to 0) for
-		// phase 1: only decode is parallelized. ApplyFunc is left nil --
-		// actual ledger apply continues to happen downstream in
-		// ledgerProcessBlocksFromSource exactly as it does today; the
-		// pipeline's apply stage here only re-sequences decoded results
-		// back into submission order.
-		ls.blockPipeline = pipeline.NewBlockPipeline(
+		// ApplyFunc is left nil in every case -- actual ledger apply
+		// continues to happen downstream in ledgerProcessBlocksFromSource
+		// exactly as it does today; the pipeline's apply stage here only
+		// re-sequences decoded (and, if enabled, validated) results back
+		// into submission order.
+		pipelineOpts := []pipeline.PipelineOption{
 			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
-		)
+		}
+		if cfg.BlockPipelineValidateEnabled {
+			// Wire VRF/KES validation (phase 3). Eta0Provider reads the
+			// published epoch cache without forecasting or mutation; a
+			// missing nonce is handled by the serial-equivalence gate in
+			// decodeReadChainBatch.
+			//
+			// VerifyConfig scopes gouroboros' generic stage to VRF/KES.
+			// decodeReadChainBatch supplements a successful result with
+			// Dingo's OpCert signature/expiry checks. Body/transaction and
+			// registered-pool state validation remain in their existing
+			// ledger paths.
+			pipelineOpts = append(
+				pipelineOpts,
+				pipeline.WithValidateWorkers(blockPipelineValidateWorkers),
+				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
+				pipeline.WithVerifyConfig(lcommon.VerifyConfig{
+					SkipBodyHashValidation:    true,
+					SkipTransactionValidation: true,
+					SkipStakePoolValidation:   true,
+				}),
+			)
+		}
+		ls.blockPipeline = pipeline.NewBlockPipeline(pipelineOpts...)
 	}
 	return ls, nil
 }
@@ -1219,6 +1357,13 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		if err := ls.blockPipeline.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start block-decode pipeline: %w", err)
 		}
+		// Launched immediately, before the goroutine below (or anything
+		// else) can submit a single block to the pipeline: see
+		// drainBlockPipelineErrors's doc comment on why an undrained
+		// errorsChan deadlocks the pipeline once enough validate-stage
+		// errors (e.g. Byron-era blocks) have flowed through it.
+		ls.blockPipelineErrorsDone = make(chan struct{})
+		go ls.drainBlockPipelineErrors()
 	}
 	// Start goroutine to process new blocks unless the caller will feed trusted
 	// batches directly into the replay loop. Uses its own child context
@@ -1549,14 +1694,13 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
-// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout,
-// CloseProcessBlocksDrainTimeout, and CloseBlockfetchDrainTimeout bound the
-// corresponding waits in Close() below. Exported (not local consts) so tests — including cross-package
+// CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
+// CloseBlockfetchDrainTimeout bound the corresponding waits in Close()
+// below. Exported (not local consts) so tests — including cross-package
 // node-level tests exercising how a caller reacts to Close failing to
 // confirm drain — can shrink them instead of running real multi-second
 // timeouts.
 var (
-	CloseRollbackDrainTimeout        = 10 * time.Second
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
 	// A Leios block-processing transaction can include a large endorser
 	// closure and legitimately outlive the short blockfetch waits. Keep this
@@ -1565,9 +1709,23 @@ var (
 	CloseProcessBlocksDrainTimeout = 20 * time.Second
 	CloseBlockPipelineDrainTimeout = 10 * time.Second
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
+	// BlockPipelineRollbackDrainTimeout bounds how long an asynchronous
+	// rollback (chainsync fork resolution or a peer-reported rollback --
+	// see rollbackChainAndState) waits for ls.blockPipeline to drain
+	// in-flight decode/validate work before proceeding. See
+	// drainBlockPipelineBeforeRollback's doc comment for what this
+	// protects against and, just as importantly, what it does not.
+	// Exported, like the Close* timeouts above, so tests can shrink it
+	// instead of running a real multi-second wait.
+	BlockPipelineRollbackDrainTimeout = 5 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
+	// Release any ledger.tx publish parked on a full ordered lane before
+	// waiting on the goroutines that might be doing the publishing.
+	if ls.publishCancel != nil {
+		ls.publishCancel()
+	}
 	if !ls.closed.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -1616,7 +1774,17 @@ func (ls *LedgerState) Close() error {
 	if ls.blockPipeline != nil {
 		blockPipelineStopDone = make(chan error, 1)
 		go func() {
-			blockPipelineStopDone <- ls.blockPipeline.Stop()
+			stopErr := ls.blockPipeline.Stop()
+			// Stop closes errorsChan as one of its final steps, once every
+			// stage has fully drained -- see BlockPipeline.Stop. Waiting for
+			// drainBlockPipelineErrors here (it exits via range-over-channel
+			// as soon as that close is visible) adds no additional blocking
+			// beyond what Stop already guarantees, and ensures the drain
+			// goroutine cannot still be running once this reports done.
+			if ls.blockPipelineErrorsDone != nil {
+				<-ls.blockPipelineErrorsDone
+			}
+			blockPipelineStopDone <- stopErr
 		}()
 	}
 
@@ -1665,7 +1833,10 @@ func (ls *LedgerState) Close() error {
 		select {
 		case stopErr := <-blockPipelineStopDone:
 			if stopErr != nil {
-				err = errors.Join(err, fmt.Errorf("block-decode pipeline shutdown: %w", stopErr))
+				err = errors.Join(
+					err,
+					fmt.Errorf("block-decode pipeline shutdown: %w", stopErr),
+				)
 			}
 		case <-time.After(CloseBlockPipelineDrainTimeout):
 			err = errors.Join(
@@ -1748,37 +1919,10 @@ func (ls *LedgerState) Close() error {
 		)
 	}
 
-	// Wait for in-flight rollback event emission goroutines.
-	// Hold rollbackMu so no new goroutine can Add(1) between our
-	// closed flag and this Wait.
-	ls.config.Logger.Info("waiting for in-flight rollback goroutines")
-	rollbackStart := time.Now()
-	ls.rollbackMu.Lock()
-	rollbackDone := make(chan struct{})
-	go func() {
-		ls.rollbackWG.Wait()
-		close(rollbackDone)
-	}()
-	select {
-	case <-rollbackDone:
-		ls.config.Logger.Info(
-			"rollback goroutines finished",
-			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
-		)
-	case <-time.After(CloseRollbackDrainTimeout):
-		ls.config.Logger.Warn(
-			"timed out waiting for rollback goroutines",
-			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
-		)
-		err = errors.Join(
-			err,
-			fmt.Errorf(
-				"timed out after %s waiting for in-flight rollback goroutines",
-				time.Since(rollbackStart).Round(time.Millisecond),
-			),
-		)
-	}
-	ls.rollbackMu.Unlock()
+	// Rollback transaction events no longer need a drain wait here.
+	// They are emitted inline by handleEventChainUpdate (see
+	// block_event.go), so the UnsubscribeAndWait on ChainUpdateEventType
+	// above already guarantees none is in flight by this point.
 
 	// Drain in-flight replayBufferedHeadersAsync goroutines so they
 	// finish issuing DB reads before the owner closes the database
@@ -2220,14 +2364,29 @@ func (ls *LedgerState) protocolMajorForEvent(
 // the tip they are always on. Returns false when no upstream tip is known yet
 // (no peer connected), since we can't determine proximity.
 func (ls *LedgerState) isNearTip(slot uint64) bool {
+	return ls.isNearTipWithStabilityWindow(slot, ls.calculateStabilityWindow())
+}
+
+func (ls *LedgerState) isNearTipWithStabilityWindow(
+	slot, stabilityWindow uint64,
+) bool {
 	upstreamTip := ls.syncUpstreamTipSlot.Load()
 	if upstreamTip == 0 {
 		return false
 	}
+	return nearUpstreamTip(slot, upstreamTip, stabilityWindow)
+}
+
+// nearUpstreamTip reports whether slot is within stabilityWindow of a KNOWN
+// upstreamTip. Callers that must tell "upstream tip unknown" apart from
+// "known, and we are far behind it" read syncUpstreamTipSlot themselves and
+// call this directly; isNearTipWithStabilityWindow folds unknown into
+// not-near, which is the safe answer for its callers but not for all of them.
+func nearUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 	if slot >= upstreamTip {
 		return true
 	}
-	return upstreamTip-slot <= ls.calculateStabilityWindow()
+	return upstreamTip-slot <= stabilityWindow
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
@@ -2247,6 +2406,22 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) cleanupConsumedUtxos() {
+	// Cleanup is advisory pruning. Never let the periodic timer and the epoch
+	// transition trigger occupy SQLite's single write connection at the same
+	// time. Each invocation handles one bounded batch so cleanup remains
+	// resumable and cannot hold the connection for an unbounded drain.
+	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer ls.cleanupConsumedUtxosRunning.Store(false)
+	if ls.ctx != nil {
+		select {
+		case <-ls.ctx.Done():
+			return
+		default:
+		}
+	}
+
 	// In API storage mode we retain spent UTxO metadata rows past the
 	// stability window so historical transaction queries can resolve
 	// input/collateral/reference-input details via spent_at_tx_id,
@@ -2264,6 +2439,24 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	eraId := ls.currentEra.Id
 	ls.RUnlock()
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
+	// Read once and gate on a KNOWN upstream tip only. An unknown one is not
+	// evidence of catching up: no peer has ever connected, or the last active
+	// connection dropped and zeroed it (see handleEventChainsyncBlockfetch's
+	// active-connection handling in chainsync.go). Deferring on that would
+	// retain consumed rows forever on a node without peers, where cleanup
+	// previously ran off the local tip alone -- an unbounded utxo table in
+	// exactly the mode documented as minimal storage.
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip != 0 &&
+		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow) {
+		ls.config.Logger.Debug(
+			"deferring consumed UTxO cleanup while catching up",
+			"component", "ledger",
+			"tip_slot", tipSlot,
+			"upstream_tip_slot", upstreamTip,
+		)
+		return
+	}
 
 	// Delete UTxOs that are marked as deleted and older than our slot window
 	ls.config.Logger.Debug(
@@ -2274,26 +2467,20 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	if tipSlot > stabilityWindow {
-		for {
-			// No lock needed here - the database handles its own consistency
-			// and we're not accessing any in-memory LedgerState fields.
-			// The tipSlot was captured above with a read lock.
-			count, err := ls.db.UtxosDeleteConsumed(
-				tipSlot-stabilityWindow,
-				10000,
-				nil,
+		// No lock needed here - the database handles its own consistency
+		// and we're not accessing any in-memory LedgerState fields.
+		// The tipSlot was captured above with a read lock.
+		_, err := ls.db.UtxosDeleteConsumed(
+			tipSlot-stabilityWindow,
+			cleanupConsumedUtxoBatchSize,
+			nil,
+		)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to cleanup consumed UTxOs",
+				"component", "ledger",
+				"error", err,
 			)
-			if count == 0 {
-				break
-			}
-			if err != nil {
-				ls.config.Logger.Error(
-					"failed to cleanup consumed UTxOs",
-					"component", "ledger",
-					"error", err,
-				)
-				break
-			}
 		}
 	}
 }
@@ -2612,6 +2799,96 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return nil
 }
 
+// drainBlockPipelineBeforeRollback waits, up to
+// BlockPipelineRollbackDrainTimeout, for ls.blockPipeline to finish any
+// decode/validate work already submitted before a rollback proceeds to
+// physically remove blocks from ls.chain and truncate ledger metadata. It
+// is a no-op when ls.blockPipeline is nil (pipeline disabled or
+// ManualBlockProcessing), matching every other pipeline-conditional code
+// path in this file.
+//
+// Why this matters (issue #1894 phase 5): ledgerReadChainIterator -- the
+// pipeline's only submitter -- runs on its own goroutine, entirely
+// decoupled from the goroutine that decides a rollback. rollbackChainAndState
+// in particular is reached from chainsync per-connection handling
+// (handleEventChainsyncRollback, tryResolveFork), never from
+// ledgerProcessBlocks itself. Chain-selection can decide to abandon a fork
+// while the reader goroutine has already gathered and submitted a batch of
+// blocks -- from that very fork -- to the pipeline's decode/validate
+// workers and is blocked draining Results() for it. Without this wait,
+// ls.chain.Rollback can delete those blocks' rows out from under a
+// validate-stage worker still processing them, and -- more importantly --
+// ledgerProcessBlocksFromSource can go on to apply that already-decoded
+// batch to ls.currentTip immediately afterward, momentarily re-advancing
+// the ledger tip onto a fork chain-selection has already discarded.
+//
+// What this does NOT do: it only waits for ls.blockPipeline's own decode/
+// validate stages (PendingCount) to empty, not for
+// ledgerProcessBlocksFromSource's subsequent DB-apply of a batch already
+// drained from the pipeline before this call started -- that step runs
+// entirely outside blockPipeline (issue #1894 phase 2, wiring real ledger
+// apply into gouroboros' pipeline.ApplyFunc, is deliberately deferred to
+// #3227; see this file's other doc comments on that decision). A rollback
+// landing exactly in that narrower window can still leave ls.currentTip
+// transiently re-advanced onto an abandoned block. This is not a new
+// failure mode introduced by the pipeline: processChainIteratorRollback's
+// stale-tip detection (a direct, uncached database.BlockByPoint lookup)
+// already exists specifically to self-heal exactly this class of lag
+// between chain-selection and ledger apply, and remains the backstop here
+// regardless of how this wait performs. This wait exists to shrink that
+// window and the resulting spurious errRestartLedgerPipeline churn (a full
+// read-chain-attempt restart), not to claim it eliminates the window
+// outright.
+//
+// ctx bounds the wait together with BlockPipelineRollbackDrainTimeout --
+// whichever fires first ends the wait -- so a caller with its own
+// cancellable context (e.g. processChainIteratorRollback, driven by
+// ledgerProcessBlocksFromSource's attempt context) does not block a
+// shutdown or restart on the fixed timeout. Callers with no context of
+// their own (rollbackChainAndState, reached from chainsync event handling
+// with no ctx threaded through) pass context.Background(), matching
+// decodeReadChainBatch's identical, already-established choice for the
+// same reason.
+//
+// reason is included in the log line on both the success and timeout
+// paths purely for operator diagnostics; it does not affect behavior.
+func (ls *LedgerState) drainBlockPipelineBeforeRollback(
+	ctx context.Context,
+	reason string,
+) {
+	if ls.blockPipeline == nil {
+		return
+	}
+	waitCtx, cancel := context.WithTimeout(
+		ctx,
+		BlockPipelineRollbackDrainTimeout,
+	)
+	defer cancel()
+	start := time.Now()
+	if err := ls.blockPipeline.WaitForDrain(waitCtx); err != nil {
+		ls.config.Logger.Warn(
+			"timed out waiting for block-processing pipeline to drain before rollback, proceeding anyway",
+			"component",
+			"ledger",
+			"reason",
+			reason,
+			"elapsed",
+			time.Since(start).Round(time.Millisecond),
+			"pending",
+			ls.blockPipeline.PendingCount(),
+			"error",
+			err,
+		)
+		return
+	}
+	ls.config.Logger.Debug(
+		"block-processing pipeline drained before rollback",
+		"component", "ledger",
+		"reason", reason,
+		"elapsed", time.Since(start).Round(time.Millisecond),
+	)
+}
+
 // rollbackChainAndState rewinds the primary chain and then synchronizes the
 // metadata-backed ledger state to the same point.
 func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
@@ -2620,6 +2897,54 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	ls.RUnlock()
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
+	}
+	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
+	// entire remainder of this function -- see blockPipelineGatherMutex's
+	// doc comment on the LedgerState struct for why drainBlockPipelineBeforeRollback
+	// alone cannot close this window: it only accounts for work already
+	// handed to blockPipeline, not for raw blocks the reader has already
+	// pulled off the chain iterator but not yet submitted.
+	ls.blockPipelineGatherMutex.Lock()
+	defer ls.blockPipelineGatherMutex.Unlock()
+	// Drain in-flight pipeline work before validating/emitting the undo
+	// events, and validate/emit those events before the physical
+	// truncation -- both orderings exist for the same reason: each step
+	// can only see, or only outrun, what has already happened before it.
+	//
+	// Draining first matters because validateAndEmitRollbackUndo's emit
+	// (emitRollbackTransactionEvents, via blocksAboveSlot) works from what
+	// is already committed to the db. Blocks the pipeline is still
+	// decoding/validating/applying for the fork about to be abandoned are
+	// not there yet. If they finished applying (and published their own
+	// forward ledger.tx events) after the undo emit had already run, no
+	// undo event would ever cover them, and chain.Rollback would still
+	// physically delete them -- a ledger.tx subscriber would keep derived
+	// state for a transaction the chain silently dropped. Draining first
+	// lets any such in-flight blocks finish applying and publish their
+	// forward events, so blocksAboveSlot's read (and the undo events it
+	// drives) covers them too.
+	//
+	// Emitting before truncating matters for the opposite reason: the
+	// block-apply goroutine can start applying the post-rollback chain the
+	// moment chain.Rollback lands and publish forward events on the same
+	// ledger.tx lane, so the undos have to be enqueued first -- but only
+	// once the rollback is known to be acceptable. See
+	// validateAndEmitRollbackUndo.
+	//
+	// No ctx is threaded through the chainsync event-handling call chain
+	// that reaches this method (handleEventChainsyncRollback,
+	// tryResolveFork), so drainBlockPipelineBeforeRollback deliberately
+	// uses context.Background(), identical to decodeReadChainBatch's own
+	// Submit calls and for the same reason: this wait, like that
+	// submission, must not be cut short by an unrelated per-attempt
+	// cancellation.
+	//nolint:contextcheck // see comment above
+	ls.drainBlockPipelineBeforeRollback(
+		context.Background(),
+		"chainsync rollback",
+	)
+	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+		return err
 	}
 	if err := ls.chain.Rollback(point); err != nil {
 		return err
@@ -2679,9 +3004,23 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 // un-rolled-back ls.currentTip, so ledgerProcessBlock's prev-hash check
 // failed identically forever (errStaleChainIterator in a tight loop, no
 // forward progress, eventually exhausting the node).
+//
+// Also drains ls.blockPipeline (drainBlockPipelineBeforeRollback) before
+// either branch below runs. This is the reader iterator's own goroutine
+// reporting its own rollback, so by construction ls.blockPipeline is
+// already fully drained by the time this runs: decodeReadChainBatch
+// submits and drains a whole batch synchronously before
+// ledgerReadChainIterator ever emits a result, rollback or otherwise (see
+// its doc comment), so nothing from *this* attempt is still in flight
+// here. The call is kept anyway as a defensive invariant guard -- issue
+// #1894 phase 5's actual cross-goroutine race is closed in
+// rollbackChainAndState instead, which is reached from chainsync handling
+// on a different goroutine and has no equivalent synchronous guarantee.
 func (ls *LedgerState) processChainIteratorRollback(
+	ctx context.Context,
 	point ocommon.Point,
 ) error {
+	ls.drainBlockPipelineBeforeRollback(ctx, "chain iterator rollback")
 	chainTip := ls.chain.Tip()
 	stale := chainTip.Point.Slot != point.Slot ||
 		!bytes.Equal(chainTip.Point.Hash, point.Hash)
@@ -3081,6 +3420,7 @@ func (ls *LedgerState) StabilityWindow() uint64 {
 type readChainResult struct {
 	rollbackPoint ocommon.Point
 	blocks        []ledger.Block
+	err           error
 	rollback      bool
 	done          chan struct{}
 }
@@ -3218,6 +3558,25 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		// never blocks mid-batch.
 		rawBatch := make([]models.Block, 0, batchSize)
 		var rollbackNext *chain.ChainIteratorResult
+		// gatherLockHeld tracks whether blockPipelineGatherMutex's read
+		// lock is currently held for this batch-gather pass -- see that
+		// field's doc comment on the LedgerState struct. It is acquired
+		// lazily, immediately before any iter.Next() call that will not
+		// block waiting for new chain data, and immediately after any
+		// call that does block once it returns real data, so a rollback's
+		// write lock is never made to wait on a call that is blocked
+		// purely because the chain has not grown yet -- that call holds
+		// nothing of this iteration's raw batch to protect. Once held, it
+		// stays held through decodeReadChainBatch so nothing gathered
+		// under it can be invalidated by a concurrent rollback before it
+		// is submitted.
+		gatherLockHeld := false
+		releaseGatherLock := func() {
+			if gatherLockHeld {
+				ls.blockPipelineGatherMutex.RUnlock()
+				gatherLockHeld = false
+			}
+		}
 		// Gather up next batch of raw blocks
 		for {
 			// Check cancellation on every iteration, not just once per
@@ -3228,6 +3587,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			// blockPipeline after cancellation before ever noticing.
 			select {
 			case <-ctx.Done():
+				releaseGatherLock()
 				return
 			default:
 			}
@@ -3235,6 +3595,11 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				next = cachedNext
 				cachedNext = nil
 			} else {
+				blockingCall := shouldBlock
+				if !blockingCall && !gatherLockHeld {
+					ls.blockPipelineGatherMutex.RLock()
+					gatherLockHeld = true
+				}
 				next, err = iter.Next(shouldBlock)
 				shouldBlock = false
 				if err != nil {
@@ -3243,15 +3608,26 @@ func (ls *LedgerState) ledgerReadChainIterator(
 							"failed to get next block from chain iterator",
 							"error", err,
 						)
+						releaseGatherLock()
 						return
 					}
 					shouldBlock = true
 					// Break out of inner loop to flush DB transaction and log
 					break
 				}
+				if blockingCall && !gatherLockHeld {
+					// The blocking call above returned real data (a
+					// block or a rollback marker), so the iterator was
+					// woken rather than still waiting -- safe to take
+					// the lock now, before this pass's gathered data
+					// (if any) is used or extended further.
+					ls.blockPipelineGatherMutex.RLock()
+					gatherLockHeld = true
+				}
 			}
 			if next == nil {
 				ls.config.Logger.Error("next block from chain iterator is nil")
+				releaseGatherLock()
 				return
 			}
 			if next.Rollback {
@@ -3267,8 +3643,22 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				break
 			}
 		}
-		nextBatch, ok := ls.decodeReadChainBatch(ctx, rawBatch)
-		if !ok {
+		nextBatch, decodeErr := ls.decodeReadChainBatchWithError(ctx, rawBatch)
+		releaseGatherLock()
+		if decodeErr != nil {
+			result = readChainResult{
+				err:  decodeErr,
+				done: make(chan struct{}),
+			}
+			select {
+			case resultCh <- result:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case <-result.done:
+			case <-ctx.Done():
+			}
 			return
 		}
 		if rollbackNext != nil {
@@ -3309,6 +3699,91 @@ func (ls *LedgerState) ledgerReadChainIterator(
 	}
 }
 
+// drainBlockPipelineErrors continuously reads ls.blockPipeline.Errors() for
+// the pipeline's full lifetime, from just after Start() until the channel
+// closes (inside Stop(), once every stage has fully drained -- see
+// BlockPipeline.Stop). This is required for correctness, not just
+// observability: gouroboros' StageWorkerPool.worker pushes every non-nil
+// stage error onto errorsChan *before* forwarding the item onward to
+// Results(), unconditionally and regardless of whether the error is
+// "expected" for this item (e.g. blockPipelineEta0Provider can fail while
+// cached epoch nonce state is unavailable, which decodeReadChainBatch
+// deliberately defers when it later reads the same item back from Results()
+// -- but by then the error has already been pushed here). errorsChan's
+// capacity is bounded
+// (PipelineConfig.PrefetchBufferSize, 1000 by default) with nothing else in
+// this codebase ever reading from it; during a long interval without cached
+// nonce state it fills permanently after roughly that many blocks, and every
+// validate worker then blocks forever on `errors <- err` inside worker(),
+// cascading backpressure through validatedChan/decodedChan/submitChan into
+// ls.blockPipeline.Submit() -- which decodeReadChainBatch calls with
+// context.Background() deliberately, so it also blocks forever with no log
+// line, no error, and no timeout. This goroutine is what prevents that:
+// as long as it is running for the pipeline's entire lifetime, errorsChan
+// never fills regardless of how many expected-to-fail items flow through
+// the validate stage.
+func (ls *LedgerState) drainBlockPipelineErrors() {
+	defer close(ls.blockPipelineErrorsDone)
+	for err := range ls.blockPipeline.Errors() {
+		ls.recordBlockPipelineError(err)
+	}
+}
+
+// recordBlockPipelineError classifies and reports a single error read off
+// ls.blockPipeline.Errors(). errorsChan carries a bare error with no item or
+// era context (see drainBlockPipelineErrors), so classification here keys on
+// error identity rather than era -- decodeReadChainBatch is the path with
+// access to the decoded block, and it independently gates enforcement on
+// block.Era().Id, so this function's classification only affects operator
+// visibility, never whether a block is accepted.
+//
+// Two cases are expected/transient and logged at debug level under their
+// own counters so a full sync does not spam the logs at error level:
+//   - errBlockPipelineEta0Unavailable: the cached epoch entry has no Praos
+//     nonce. This is expected for Byron and can be transient for later eras;
+//     this function cannot inspect the item's era, so the log remains neutral.
+//   - errHeaderVerificationDeferred: the pipeline's epoch cache has not yet
+//     caught up with a block already committed to ls.chain. ARCHITECTURE.md
+//     ("Block Processing Pipeline") documents this as a transient race that
+//     resolves once the epoch cache catches up, so it is not lumped in with
+//     genuine decode/validate/apply problems below.
+//
+// Anything else reaching errorsChan indicates a genuine decode/validate/apply
+// problem the pipeline itself could not report any other way
+// (decodeReadChainBatch separately logs the same decode/validation errors
+// when it reads the corresponding item back from Results(), but that only
+// covers items that make it that far -- this is the only path that also
+// covers, e.g., apply-stage invariant violations such as
+// pipeline.ErrBlockNotValidated) and is logged at error level plus its own
+// counter for operator visibility.
+func (ls *LedgerState) recordBlockPipelineError(err error) {
+	if err == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, errBlockPipelineEta0Unavailable):
+		ls.metrics.incBlockPipelineExpectedEta0Error()
+		ls.config.Logger.Debug(
+			"block-processing pipeline: cached epoch has no Praos nonce for validate stage",
+			"error",
+			err,
+		)
+	case errors.Is(err, errHeaderVerificationDeferred):
+		ls.metrics.incBlockPipelineDeferredEpochCacheError()
+		ls.config.Logger.Debug(
+			"block-processing pipeline: epoch cache does not yet cover validate-stage slot (expected transient, resolves once the epoch cache catches up)",
+			"error",
+			err,
+		)
+	default:
+		ls.metrics.incBlockPipelineUnexpectedError()
+		ls.config.Logger.Error(
+			"block-processing pipeline reported an unexpected error",
+			"error", err,
+		)
+	}
+}
+
 // decodeReadChainBatch decodes a batch of raw blocks gathered from the chain
 // iterator into ledger.Block values, preserving input order. When
 // ls.blockPipeline is configured (LedgerStateConfig.BlockPipelineEnabled) it
@@ -3318,11 +3793,9 @@ func (ls *LedgerState) ledgerReadChainIterator(
 // regardless of which worker finishes first). Otherwise it decodes serially,
 // exactly as ledgerReadChainIterator did before the pipeline existed.
 //
-// Either way, a single decode failure anywhere in the batch discards the
-// whole batch and returns ok=false, matching pre-pipeline behavior of never
-// handing a partially-decoded batch downstream; the caller should return
-// immediately in that case. All errors are logged here so callers don't need
-// to log again.
+// A decode failure or an enforced validation failure anywhere in the batch
+// discards the whole batch. The preserved error lets a persisted-block
+// validation failure be recovered with its exact block point.
 //
 // Once a pipeline submission has started, it always runs to completion --
 // submit-and-drain is all-or-nothing, using a background context for the
@@ -3338,12 +3811,16 @@ func (ls *LedgerState) ledgerReadChainIterator(
 // the first Submit call is safe because nothing has been submitted yet;
 // once started, only genuine pipeline shutdown (Stop(), which closes the
 // Results channel) can still interrupt the drain.
-func (ls *LedgerState) decodeReadChainBatch(
+// decodeReadChainBatchWithError is the error-preserving form used by the
+// ledger reader. Keeping the cause lets a validation failure on an already
+// persisted block enter header-validation recovery instead of silently
+// closing the reader and restarting on the same block forever.
+func (ls *LedgerState) decodeReadChainBatchWithError(
 	ctx context.Context,
 	rawBatch []models.Block,
-) (decoded []ledger.Block, ok bool) {
+) (decoded []ledger.Block, retErr error) {
 	if len(rawBatch) == 0 {
-		return nil, true
+		return nil, nil
 	}
 	if ls.blockPipeline == nil {
 		decoded = make([]ledger.Block, 0, len(rawBatch))
@@ -3354,17 +3831,23 @@ func (ls *LedgerState) decodeReadChainBatch(
 					"failed to decode block",
 					"error", err,
 				)
-				return nil, false
+				return nil, fmt.Errorf("decode block at slot %d: %w", raw.Slot, err)
 			}
 			decoded = append(decoded, block)
 		}
-		return decoded, true
+		return decoded, nil
 	}
 	select {
 	case <-ctx.Done():
-		return nil, false
+		return nil, ctx.Err()
 	default:
 	}
+	// Refresh the block-pipeline gauges on every exit from here on,
+	// success or failure, so a batch that aborts partway through (decode or
+	// validation error) still reports the errors it accumulated.
+	defer func() {
+		ls.metrics.updateBlockPipelineStats(ls.blockPipeline.Stats())
+	}()
 	// submitCtx is deliberately not ctx (attemptCtx) -- see the doc comment
 	// above.
 	submitCtx := context.Background()
@@ -3381,29 +3864,127 @@ func (ls *LedgerState) decodeReadChainBatch(
 				"failed to submit block to decode pipeline",
 				"error", err,
 			)
-			return nil, false
+			return nil, fmt.Errorf("submit block to decode pipeline: %w", err)
 		}
 	}
 	results := ls.blockPipeline.Results()
 	decoded = make([]ledger.Block, 0, len(rawBatch))
+	// retErr remembers a decode or validation failure anywhere in the batch.
+	// Once set, every remaining iteration below still reads its
+	// expected Results() entry (so this call fully drains what it
+	// Submitted) but discards it rather than appending to decoded or
+	// returning early. Returning as soon as the first failure is seen
+	// would leave the rest of this batch's entries unread on the shared
+	// results channel for the *next* retry attempt's own
+	// decodeReadChainBatch call to mistakenly pull off and mismatch
+	// against its own, unrelated submissions -- blockPipeline has no
+	// notion of "whose submission is whose" beyond result order (see this
+	// function's doc comment on why a submission always runs to
+	// completion).
 	for range rawBatch {
 		item, chOk := <-results
 		if !chOk {
 			ls.config.Logger.Error(
 				"decode pipeline results channel closed unexpectedly",
 			)
-			return nil, false
+			return nil, errors.New(
+				"decode pipeline results channel closed unexpectedly",
+			)
+		}
+		if retErr != nil {
+			continue
 		}
 		if decodeErr := item.DecodeError(); decodeErr != nil {
 			ls.config.Logger.Error(
 				"failed to decode block",
 				"error", decodeErr,
 			)
-			return nil, false
+			retErr = fmt.Errorf("decode block: %w", decodeErr)
+			continue
 		}
-		decoded = append(decoded, item.Block())
+		block := item.Block()
+		// Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
+		// to validate against (blockPipelineEta0Provider always fails the
+		// nonce lookup for them), matching the serial path's
+		// verifyBlockHeaderHex, which explicitly skips Byron blocks rather
+		// than trying to validate them. Ignore any validation outcome for
+		// them here for the same reason.
+		if ls.config.BlockPipelineValidateEnabled &&
+			block.Era().Id != byron.EraIdByron &&
+			ls.shouldEnforceBlockPipelineCrypto(block.SlotNumber()) {
+			if valErr := item.ValidationError(); valErr != nil {
+				// The validation-state snapshot can change between the gate
+				// above and the provider's lookup. A missing/deferred nonce is
+				// not evidence that the block is invalid; admission or the
+				// deferred apply-time check remains authoritative.
+				if errors.Is(valErr, errBlockPipelineEta0Unavailable) ||
+					errors.Is(valErr, errHeaderVerificationDeferred) {
+					decoded = append(decoded, block)
+					continue
+				}
+				ls.config.Logger.Error(
+					"failed to validate block",
+					"error", valErr,
+					"slot", block.SlotNumber(),
+				)
+				retErr = &headerValidationError{
+					BlockPoint: ocommon.NewPoint(
+						block.SlotNumber(),
+						block.Hash().Bytes(),
+					),
+					Cause: fmt.Errorf(
+						"block pipeline VRF/KES validation: %w",
+						valErr,
+					),
+				}
+				continue
+			}
+			if !item.IsValid() {
+				ls.config.Logger.Error(
+					"block failed pipeline VRF/KES validation",
+					"slot", block.SlotNumber(),
+				)
+				retErr = &headerValidationError{
+					BlockPoint: ocommon.NewPoint(
+						block.SlotNumber(),
+						block.Hash().Bytes(),
+					),
+					Cause: errors.New(
+						"block failed pipeline VRF/KES validation",
+					),
+				}
+				continue
+			}
+			if opCertErr := verifyOpCertHeaderCrypto(
+				block.Header(),
+				block.SlotNumber(),
+				ls.SlotsPerKESPeriod(),
+				ls.maxKESEvolutions(),
+			); opCertErr != nil {
+				ls.config.Logger.Error(
+					"failed to validate block operational certificate",
+					"error", opCertErr,
+					"slot", block.SlotNumber(),
+				)
+				retErr = &headerValidationError{
+					BlockPoint: ocommon.NewPoint(
+						block.SlotNumber(),
+						block.Hash().Bytes(),
+					),
+					Cause: fmt.Errorf(
+						"block pipeline operational certificate validation: %w",
+						opCertErr,
+					),
+				}
+				continue
+			}
+		}
+		decoded = append(decoded, block)
 	}
-	return decoded, true
+	if retErr != nil {
+		return nil, retErr
+	}
+	return decoded, nil
 }
 
 // noProgressBackoffBase/Max bound the delay applied when consecutive
@@ -3642,7 +4223,8 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			// deterministic failure is not going to clear on its own, so it
 			// is an operator-actionable condition rather than another line
 			// in a repeating WARN.
-			if stuck && progress.consecutiveNoProgress == noProgressStuckThreshold {
+			if stuck &&
+				progress.consecutiveNoProgress == noProgressStuckThreshold {
 				ls.config.Logger.Error(
 					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
 					"component",
@@ -4176,6 +4758,25 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return nil
 				}
 				currentReadResultDone = result.done
+				if result.err != nil {
+					completeReadResult()
+					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+						result.err,
+					)
+					if recoverErr != nil {
+						return fmt.Errorf(
+							"recover read-chain header validation failure: %w",
+							recoverErr,
+						)
+					}
+					if recovered {
+						return errRestartLedgerPipeline
+					}
+					return fmt.Errorf(
+						"read-chain decode or validation: %w",
+						result.err,
+					)
+				}
 				nextBatch = result.blocks
 				// Process rollback
 				// Note: We do NOT hold ls.Lock() here because rollback() calls
@@ -4184,6 +4785,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// method handles its own locking for in-memory state updates.
 				if result.rollback {
 					if err = ls.processChainIteratorRollback(
+						ctx,
 						result.rollbackPoint,
 					); err != nil {
 						completeReadResult()
@@ -4297,234 +4899,246 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// applied after commit to avoid mutating in-memory state on txn failure)
 			var wantEnableValidation bool
 
-			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
-				deltaBatch = NewLedgerDeltaBatch()
-				for offset, next := range nextBatch[i:end] {
-					tmpPoint := ocommon.Point{
-						Slot: next.SlotNumber(),
-						Hash: next.Hash().Bytes(),
-					}
-					// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
-					if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
-						snapshotEpoch.SlotLength == 0 {
-						needsEpochRollover = true
-						nextEpochEraId = uint(next.Era().Id)
-						// Cache rest of the batch for next loop
-						cachedNextBatch = nextBatch[i+offset:]
-						nextBatch = nil
-						break
-					}
-					// Determine if this block should be validated.
-					// Skip validation of historical blocks when
-					// ValidateHistorical=false, as they were already
-					// validated by the network. Validate blocks within
-					// the stability window near the tip.
-					var shouldValidateBlock bool
-					if snapshotValidationEnabled {
-						shouldValidateBlock = true
-						// When validation was already enabled from
-						// config (ValidateHistorical), we still need
-						// to detect reaching the chain tip for
-						// metrics gating (IsAtTip).
-						if !wantEnableValidation &&
+			// The transaction events this eventually publishes are
+			// bounded by ls.publishCtx, not by this loop's ctx, on
+			// purpose: that ctx is re-derived whenever the pipeline
+			// restarts (errRestartLedgerPipeline), and abandoning a
+			// publish on a restart would drop events subscribers
+			// derive state from. Only Close cancels publishCtx.
+			err = ls.SubmitAsyncDBTxn(
+				func(txn *database.Txn) error { //nolint:contextcheck
+					deltaBatch = NewLedgerDeltaBatch()
+					for offset, next := range nextBatch[i:end] {
+						tmpPoint := ocommon.Point{
+							Slot: next.SlotNumber(),
+							Hash: next.Hash().Bytes(),
+						}
+						// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
+						if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
+							snapshotEpoch.SlotLength == 0 {
+							needsEpochRollover = true
+							nextEpochEraId = uint(next.Era().Id)
+							// Cache rest of the batch for next loop
+							cachedNextBatch = nextBatch[i+offset:]
+							nextBatch = nil
+							break
+						}
+						// Determine if this block should be validated.
+						// Skip validation of historical blocks when
+						// ValidateHistorical=false, as they were already
+						// validated by the network. Validate blocks within
+						// the stability window near the tip.
+						var shouldValidateBlock bool
+						if snapshotValidationEnabled {
+							shouldValidateBlock = true
+							// When validation was already enabled from
+							// config (ValidateHistorical), we still need
+							// to detect reaching the chain tip for
+							// metrics gating (IsAtTip).
+							if !wantEnableValidation &&
+								snapshotChainsyncState == SyncingChainsyncState &&
+								next.SlotNumber() >= cutoffSlot {
+								wantEnableValidation = true
+							}
+						} else if !ls.config.TrustedReplay &&
 							snapshotChainsyncState == SyncingChainsyncState &&
 							next.SlotNumber() >= cutoffSlot {
-							wantEnableValidation = true
+							// Do not validate blocks covered by the
+							// Mithril snapshot. These were already
+							// verified by the certificate chain during
+							// import; re-validating them fails because
+							// the UTxO set from the snapshot does not
+							// contain intermediate states for volatile
+							// blocks fetched during gap closure.
+							if snapshotMithrilSlot > 0 &&
+								next.SlotNumber() <= snapshotMithrilSlot {
+								// Still within Mithril trust boundary —
+								// skip validation but mark that we've
+								// reached the tip region so catch-up mode
+								// and bulk-load pragmas are disabled.
+								wantEnableValidation = true
+							} else {
+								wantEnableValidation = true
+								shouldValidateBlock = true
+							}
 						}
-					} else if !ls.config.TrustedReplay &&
-						snapshotChainsyncState == SyncingChainsyncState &&
-						next.SlotNumber() >= cutoffSlot {
-						// Do not validate blocks covered by the
-						// Mithril snapshot. These were already
-						// verified by the certificate chain during
-						// import; re-validating them fails because
-						// the UTxO set from the snapshot does not
-						// contain intermediate states for volatile
-						// blocks fetched during gap closure.
-						if snapshotMithrilSlot > 0 &&
-							next.SlotNumber() <= snapshotMithrilSlot {
-							// Still within Mithril trust boundary —
-							// skip validation but mark that we've
-							// reached the tip region so catch-up mode
-							// and bulk-load pragmas are disabled.
-							wantEnableValidation = true
-						} else {
-							wantEnableValidation = true
-							shouldValidateBlock = true
-						}
-					}
-					// Flush accumulated deltas before the first validated
-					// block so that UTxOs created by earlier non-validated
-					// blocks are visible during validation lookups.
-					if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
-						if err := deltaBatch.apply(ls, txn); err != nil {
+						// Flush accumulated deltas before the first validated
+						// block so that UTxOs created by earlier non-validated
+						// blocks are visible during validation lookups.
+						if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
+							if err := deltaBatch.apply(ls, txn); err != nil {
+								deltaBatch.Release()
+								return err
+							}
 							deltaBatch.Release()
-							return err
+							deltaBatch = NewLedgerDeltaBatch()
 						}
-						deltaBatch.Release()
-						deltaBatch = NewLedgerDeltaBatch()
-					}
-					// Compute CBOR offsets for this block (required for transaction storage)
-					var blockOffsets *database.BlockIngestionResult
-					blockCbor := next.Cbor()
-					if len(next.Transactions()) > 0 && len(blockCbor) == 0 {
-						deltaBatch.Release()
-						return fmt.Errorf(
-							"block at slot %d hash %x has %d transactions but no CBOR data",
-							tmpPoint.Slot,
-							tmpPoint.Hash,
-							len(next.Transactions()),
-						)
-					}
-					if len(blockCbor) > 0 && len(next.Transactions()) > 0 {
-						indexer := database.NewBlockIndexer(
-							tmpPoint.Slot,
-							tmpPoint.Hash,
-						)
-						var offsetErr error
-						blockOffsets, offsetErr = indexer.ComputeOffsets(
-							blockCbor,
-							next,
-						)
-						if offsetErr != nil {
+						// Compute CBOR offsets for this block (required for transaction storage)
+						var blockOffsets *database.BlockIngestionResult
+						blockCbor := next.Cbor()
+						if len(next.Transactions()) > 0 && len(blockCbor) == 0 {
 							deltaBatch.Release()
 							return fmt.Errorf(
-								"compute CBOR offsets for block at slot %d: %w",
+								"block at slot %d hash %x has %d transactions but no CBOR data",
 								tmpPoint.Slot,
-								offsetErr,
+								tmpPoint.Hash,
+								len(next.Transactions()),
 							)
 						}
-					}
-					// Skip full block processing for blocks
-					// already handled during Mithril gap closure.
-					// Their transaction metadata was recorded by
-					// SetGapBlockTransaction; re-processing them
-					// via SetTransaction would fail with "UTxO
-					// already spent" since the Mithril snapshot's
-					// UTxO set already reflects the spent state.
-					if snapshotMithrilSlot > 0 &&
-						tmpPoint.Slot <= snapshotMithrilSlot {
-						// Load stored nonce so the rolling nonce
-						// stays correct across the gap boundary.
-						if storedNonce, nonceErr := ls.db.GetBlockNonce(
-							tmpPoint, txn,
-						); nonceErr == nil && len(storedNonce) > 0 {
-							runningNonce = storedNonce
-							pendingNonce = storedNonce
-						}
-						pendingTip = ochainsync.Tip{
-							Point:       tmpPoint,
-							BlockNumber: next.BlockNumber(),
-						}
-						expectedPrevHash = tmpPoint.Hash
-						parentEnvelope = envelopeParentFromBlock(next)
-						blocksProcessed++
-						continue
-					}
-					// Process block
-					skipPhase2Validation := shouldValidateBlock &&
-						ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
-							next.BlockNumber(),
-							snapshotEra.Id,
-						)
-					delta, err = ls.ledgerProcessBlock(
-						txn,
-						tmpPoint,
-						next,
-						shouldValidateBlock,
-						// wantEnableValidation is the same flag that stores
-						// reachedTip after this batch commits; passing it here
-						// guards the transition batch too (issue #3005 P1).
-						wantEnableValidation,
-						skipPhase2Validation,
-						expectedPrevHash,
-						parentEnvelope,
-						blockOffsets,
-						snapshotEra,
-						snapshotPParams,
-						snapshotPrevEraPParams,
-					)
-					if err != nil {
-						deltaBatch.Release()
-						return err
-					}
-					if delta != nil {
-						deltaBatch.addDelta(delta)
-					}
-					// Update expected prev hash for next block in batch
-					expectedPrevHash = tmpPoint.Hash
-					parentEnvelope = envelopeParentFromBlock(next)
-					// Track pending tip (will be committed after txn succeeds)
-					pendingTip = ochainsync.Tip{
-						Point:       tmpPoint,
-						BlockNumber: next.BlockNumber(),
-					}
-					blocksProcessed++
-					// Calculate block rolling nonce (evolving nonce η_v).
-					// The evolving nonce is ALWAYS computed for every block.
-					// The candidate nonce (used in epoch nonce calc) is
-					// computed by iterating blocks from the blob store
-					// up to the stability window cutoff.
-					var blockNonce []byte
-					if snapshotEra.CalculateEtaVFunc != nil {
-						tmpEra, ok := ls.eraById(uint(next.Era().Id))
-						if ok && tmpEra != nil &&
-							tmpEra.CalculateEtaVFunc != nil {
-							tmpNonce, err := tmpEra.CalculateEtaVFunc(
-								ls.config.CardanoNodeConfig,
-								runningNonce,
+						if len(blockCbor) > 0 && len(next.Transactions()) > 0 {
+							indexer := database.NewBlockIndexer(
+								tmpPoint.Slot,
+								tmpPoint.Hash,
+							)
+							var offsetErr error
+							blockOffsets, offsetErr = indexer.ComputeOffsets(
+								blockCbor,
 								next,
 							)
-							if err != nil {
+							if offsetErr != nil {
 								deltaBatch.Release()
-								return fmt.Errorf("calculate etaV: %w", err)
+								return fmt.Errorf(
+									"compute CBOR offsets for block at slot %d: %w",
+									tmpPoint.Slot,
+									offsetErr,
+								)
 							}
-							blockNonce = tmpNonce
-							runningNonce = tmpNonce
 						}
-					}
-					// The loop exits before processing blocks from the next
-					// epoch, so every block that reaches this point belongs
-					// to snapshotEpoch.
-					// First block we persist in the current epoch becomes the checkpoint.
-					isCheckpoint := false
-					if !localCheckpointWritten {
-						isCheckpoint = true
-						localCheckpointWritten = true
-					}
-					// Store block nonce in the DB
-					if len(blockNonce) > 0 {
-						err = ls.db.SetBlockNonce(
-							tmpPoint.Hash,
-							tmpPoint.Slot,
-							blockNonce,
-							isCheckpoint,
+						// Skip full block processing for blocks
+						// already handled during Mithril gap closure.
+						// Their transaction metadata was recorded by
+						// SetGapBlockTransaction; re-processing them
+						// via SetTransaction would fail with "UTxO
+						// already spent" since the Mithril snapshot's
+						// UTxO set already reflects the spent state.
+						if snapshotMithrilSlot > 0 &&
+							tmpPoint.Slot <= snapshotMithrilSlot {
+							// Load stored nonce so the rolling nonce
+							// stays correct across the gap boundary.
+							if storedNonce, nonceErr := ls.db.GetBlockNonce(
+								tmpPoint, txn,
+							); nonceErr == nil && len(storedNonce) > 0 {
+								runningNonce = storedNonce
+								pendingNonce = storedNonce
+							}
+							pendingTip = ochainsync.Tip{
+								Point:       tmpPoint,
+								BlockNumber: next.BlockNumber(),
+							}
+							expectedPrevHash = tmpPoint.Hash
+							parentEnvelope = envelopeParentFromBlock(next)
+							blocksProcessed++
+							continue
+						}
+						// Process block
+						skipPhase2Validation := shouldValidateBlock &&
+							ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
+								next.BlockNumber(),
+								snapshotEra.Id,
+							)
+						delta, err = ls.ledgerProcessBlock(
 							txn,
+							tmpPoint,
+							next,
+							shouldValidateBlock,
+							// wantEnableValidation is the same flag that stores
+							// reachedTip after this batch commits; passing it here
+							// guards the transition batch too (issue #3005 P1).
+							wantEnableValidation,
+							skipPhase2Validation,
+							expectedPrevHash,
+							parentEnvelope,
+							blockOffsets,
+							snapshotEra,
+							snapshotPParams,
+							snapshotPrevEraPParams,
 						)
 						if err != nil {
 							deltaBatch.Release()
 							return err
 						}
-						// Track pending nonce (will be committed after txn succeeds)
-						pendingNonce = blockNonce
+						if delta != nil {
+							deltaBatch.addDelta(delta)
+						}
+						// Update expected prev hash for next block in batch
+						expectedPrevHash = tmpPoint.Hash
+						parentEnvelope = envelopeParentFromBlock(next)
+						// Track pending tip (will be committed after txn succeeds)
+						pendingTip = ochainsync.Tip{
+							Point:       tmpPoint,
+							BlockNumber: next.BlockNumber(),
+						}
+						blocksProcessed++
+						// Calculate block rolling nonce (evolving nonce η_v).
+						// The evolving nonce is ALWAYS computed for every block.
+						// The candidate nonce (used in epoch nonce calc) is
+						// computed by iterating blocks from the blob store
+						// up to the stability window cutoff.
+						var blockNonce []byte
+						if snapshotEra.CalculateEtaVFunc != nil {
+							tmpEra, ok := ls.eraById(uint(next.Era().Id))
+							if ok && tmpEra != nil &&
+								tmpEra.CalculateEtaVFunc != nil {
+								tmpNonce, err := tmpEra.CalculateEtaVFunc(
+									ls.config.CardanoNodeConfig,
+									runningNonce,
+									next,
+								)
+								if err != nil {
+									deltaBatch.Release()
+									return fmt.Errorf("calculate etaV: %w", err)
+								}
+								blockNonce = tmpNonce
+								runningNonce = tmpNonce
+							}
+						}
+						// The loop exits before processing blocks from the next
+						// epoch, so every block that reaches this point belongs
+						// to snapshotEpoch.
+						// First block we persist in the current epoch becomes the checkpoint.
+						isCheckpoint := false
+						if !localCheckpointWritten {
+							isCheckpoint = true
+							localCheckpointWritten = true
+						}
+						// Store block nonce in the DB
+						if len(blockNonce) > 0 {
+							err = ls.db.SetBlockNonce(
+								tmpPoint.Hash,
+								tmpPoint.Slot,
+								blockNonce,
+								isCheckpoint,
+								txn,
+							)
+							if err != nil {
+								deltaBatch.Release()
+								return err
+							}
+							// Track pending nonce (will be committed after txn succeeds)
+							pendingNonce = blockNonce
+						}
 					}
-				}
-				// Apply delta batch
-				if err := deltaBatch.apply(ls, txn); err != nil {
+					// Apply delta batch
+					if err := deltaBatch.apply(ls, txn); err != nil {
+						deltaBatch.Release()
+						return err
+					}
 					deltaBatch.Release()
-					return err
-				}
-				deltaBatch.Release()
-				// Update tip in database only if blocks were processed
-				if blocksProcessed > 0 {
-					if err := ls.db.SetTip(pendingTip, txn); err != nil {
-						return fmt.Errorf("failed to set tip: %w", err)
+					// Update tip in database only if blocks were processed
+					if blocksProcessed > 0 {
+						if err := ls.db.SetTip(pendingTip, txn); err != nil {
+							return fmt.Errorf("failed to set tip: %w", err)
+						}
 					}
-				}
-				return nil
-			}, true)
+					return nil
+				},
+				true,
+			)
 			if err != nil {
-				recovered, recoverErr := ls.tryRecoverFromTxValidationError(
+				// Undo events published down this recovery path are
+				// bounded by ls.publishCtx, not this loop's ctx, for the
+				// same reason as the apply path above.
+				recovered, recoverErr := ls.tryRecoverFromTxValidationError( //nolint:contextcheck
 					err,
 				)
 				if recoverErr != nil {
@@ -4543,7 +5157,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// the same block and fails identically. Rewind past it so
 				// chain selection can offer another candidate. The block is
 				// still rejected.
-				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError(
+				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
 					err,
 				)
 				if recoverErr != nil {
@@ -4703,11 +5317,8 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
 //
-// Note what this flag does *not* decide: whether a Dijkstra validation failure
-// rejects the block. That is trustDijkstraTxValidationError, which is
-// profile-independent — so on the Dijkstra path the accept/reject outcome is
-// the same either way, and this flag only governs whether the rules are run at
-// all (CPU cost and disagreement logging).
+// The same prototype flag also scopes trustDijkstraTxValidationError. Standard
+// Dijkstra/Leios profiles run the rules and reject any disagreement.
 func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -4716,23 +5327,12 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //
-// This is deliberately *not* gated on the network profile or on
-// SkipDijkstraTxValidation: a Dijkstra block reaches here only because it was
-// admitted to the chain by its Leios certificate, an endorser block may be only
-// partially resolvable, and the certificate/validation surface is still
-// evolving — so rewinding a certified chain on a disagreement is not yet the
-// right response on any profile. Dijkstra is only in the active era table when
-// EnableDijkstra is set (Musashi, runMode "leios", or startEra "dijkstra"), so
-// a default preview/preprod/mainnet node never reaches this path.
-//
-// The consequence for the trust boundary is worth stating plainly:
-// SkipDijkstraTxValidation changes whether the rules run, not whether a bad
-// Dijkstra transaction is rejected. Tightening this to enforce was item 5 of
-// #2587, which was closed without that item being done; it needs its own
-// change, with DevNet/Leios validation, rather than riding along with a
-// configuration-boundary fix.
+// Trust is limited to the explicit Musashi prototype bypass. Standard
+// Dijkstra/Leios profiles have complete endorser-block fetch/apply support and
+// must reject invalid ranking-block transactions just like every other era.
 func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
-	return eraId == dijkstra.EraIdDijkstra
+	return eraId == dijkstra.EraIdDijkstra &&
+		ls.config.SkipDijkstraTxValidation
 }
 
 func (ls *LedgerState) ledgerProcessBlock(
@@ -5003,31 +5603,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 				delta.Release()
 				return nil, err
 			}
-			// Dijkstra/Leios: per-tx UTxO validation is run only when the
-			// ranking block's endorser block was applied above, so the
-			// endorser-resident inputs these txs spend are now present in the
-			// UTxO set and the rules can resolve them. When the endorser block
-			// was not applied — e.g. it has not been fetched, or the prototype
-			// does not diffuse it (historical endorser blocks) — validation is
-			// skipped: the rules could only fail (BadInputsUtxo /
-			// ValueNotConserved), the network already admitted the block via
-			// its Leios certificate, and running the full rule set per tx on
-			// dense near-tip blocks otherwise holds throughput down to the
-			// block-production rate and prevents convergence. A validation
-			// disagreement on an endorser-applied block is trusted (logged)
-			// below rather than rewinding, since the prototype's
-			// endorser-block availability and certificate surface are still
-			// evolving.
-			// Skip Dijkstra per-tx validation only on the Haskell-conformant
-			// prototype path (Musashi, SkipDijkstraTxValidation): there endorser
-			// txs are stored but never applied, so ranking-block txs that spend
-			// endorser-resident outputs are unresolvable and disagree on
-			// essentially every tx and are then trusted anyway (the prototype
-			// does not validate endorser txs either). Running that always-failing
-			// rule set per tx on dense Leios blocks pegs a core and holds
-			// throughput below the block-production rate, so skip it. The normal
-			// CIP-conformant / Dijkstra path applies endorser txs (complete UTxO)
-			// and validates normally — it is never skipped here.
+			// Standard Dijkstra/CIP profiles validate ranking-block transactions
+			// even when the referenced endorser block is unavailable; missing
+			// endorser-resident inputs then produce a validation error. Skip
+			// Dijkstra validation only on the Haskell-conformant prototype path
+			// (Musashi, SkipDijkstraTxValidation), where endorser transactions
+			// are stored but not applied and the Leios certificate is trusted.
 			skipDijkstraValidation := ls.skipDijkstraTxValidation(
 				validationEra.Id,
 			)
@@ -5053,12 +5634,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 					pp,
 				)
 				// When a TX has isValid=true, the block producer's
-				// Plutus evaluator verified the script passed. If our
-				// evaluator disagrees, the fault is in our VM (known
-				// gouroboros CEK machine limitations), not in the block.
-				// Log the disagreement but trust the block producer.
+				// Plutus evaluator verified the script passed. For
+				// pre-Dijkstra eras, log a local evaluator disagreement
+				// and trust the block producer. Standard Dijkstra keeps
+				// the validation error so invalid Leios blocks are rejected;
+				// the Musashi prototype retains its explicit trust bypass.
 				var plutusErr conway.PlutusScriptFailedError
-				if err != nil && errors.As(err, &plutusErr) {
+				if err != nil && errors.As(err, &plutusErr) &&
+					(validationEra.Id != dijkstra.EraIdDijkstra ||
+						ls.trustDijkstraTxValidationError(validationEra.Id)) {
 					ls.config.Logger.Warn(
 						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
 						"component",
@@ -5078,15 +5662,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 					)
 					err = nil
 				}
-				// Dijkstra/Leios: the block was admitted to the chain via its
-				// Leios certificate. An endorser block may be only partially
-				// resolvable (e.g. an endorser-resident input from an endorser
-				// block the prototype did not diffuse), and the prototype's
-				// certificate/validation surface is still evolving, so a
-				// remaining validation disagreement is logged and trusted
-				// rather than rewinding the certified chain. Tracked by #2587:
-				// tighten to enforce once endorser-block availability and
-				// Leios certificate validation are complete.
+				// The Musashi prototype trusts remaining Dijkstra validation
+				// disagreements because its certificate-driven closure is still
+				// evolving. Standard profiles leave the error intact and reject
+				// the block below.
 				if err != nil &&
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
 					ls.config.Logger.Warn(
@@ -6466,18 +7045,40 @@ func (ls *LedgerState) primaryChainContainsPoint(
 		}
 		return false, err
 	}
+	return ls.primaryChainContainsBlock(block, point)
+}
+
+// primaryChainContainsBlock checks whether block's internal ID currently maps
+// to point on the authoritative primary chain. The block itself may come from
+// an abandoned fork retained in the append-only blob store, so blob presence
+// alone is not authoritative.
+func (ls *LedgerState) primaryChainContainsBlock(
+	block models.Block,
+	point ocommon.Point,
+) (bool, error) {
+	if block.Slot != point.Slot || !bytes.Equal(block.Hash, point.Hash) {
+		return false, nil
+	}
+	return ls.primaryChainContainsBlockID(block.ID, point)
+}
+
+func (ls *LedgerState) primaryChainContainsBlockID(
+	blockID uint64,
+	point ocommon.Point,
+) (bool, error) {
 	// Blob presence by point is not authoritative: abandoned-fork blocks remain
 	// in the append-only blob store. The current primary chain is identified by
-	// its block-index entry, so compare the indexed block at this ID with the
-	// requested point.
-	indexedBlock, err := ls.db.BlockByIndex(block.ID, nil)
+	// its block-index entry, so compare the point encoded at this ID with the
+	// requested point. Reading only the index value avoids loading the indexed
+	// block's CBOR a second time while chainsyncMutex is held.
+	indexedPoint, err := ls.db.BlockPointByIndex(blockID, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil
 		}
 		return false, err
 	}
-	return bytes.Equal(indexedBlock.Hash, point.Hash), nil
+	return pointMatches(indexedPoint, point), nil
 }
 
 // durableAppliedFloor returns the point of the highest block whose ledger
@@ -7608,7 +8209,10 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 		return 0, errors.New("byron protocol magic is negative")
 	}
 	if protocolMagic > math.MaxUint32 {
-		return 0, fmt.Errorf("byron protocol magic exceeds uint32: %d", protocolMagic)
+		return 0, fmt.Errorf(
+			"byron protocol magic exceeds uint32: %d",
+			protocolMagic,
+		)
 	}
 	// #nosec G115 -- the protocol magic is checked against the uint32 range above.
 	return uint32(protocolMagic), nil

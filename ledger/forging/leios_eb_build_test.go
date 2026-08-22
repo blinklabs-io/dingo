@@ -15,10 +15,14 @@
 package forging
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,4 +70,103 @@ func TestBuildLeiosEBNoValidRefs(t *testing.T) {
 	})
 	require.ErrorIs(t, err, errNoValidTxRefs)
 	require.Nil(t, bodies)
+}
+
+type leiosOverlayValidator struct {
+	base   map[string]struct{}
+	reject map[string]struct{}
+}
+
+func (v *leiosOverlayValidator) ValidateTx(tx ledger.Transaction) error {
+	return v.ValidateTxWithOverlay(tx, nil, nil)
+}
+
+func (v *leiosOverlayValidator) ValidateTxWithOverlay(
+	tx ledger.Transaction,
+	consumed map[string]struct{},
+	created map[string]lcommon.Utxo,
+) error {
+	if _, reject := v.reject[tx.Hash().String()]; reject {
+		return errors.New("rejected parent")
+	}
+	for _, input := range tx.Inputs() {
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		if _, spent := consumed[key]; spent {
+			return errors.New("already consumed")
+		}
+		if _, ok := created[key]; ok {
+			continue
+		}
+		if _, ok := v.base[key]; !ok {
+			return errors.New("missing input")
+		}
+	}
+	return nil
+}
+
+func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
+	parentCbor := makeMinimalTxCbor(t, 0x41, 29)
+	parent, err := conway.NewConwayTransactionFromCbor(parentCbor)
+	require.NoError(t, err)
+	childCbor := makeMinimalTxCborWithInput(t, parent.Hash().Bytes(), 0)
+	child, err := conway.NewConwayTransactionFromCbor(childCbor)
+	require.NoError(t, err)
+	baseInput := parent.Inputs()[0]
+	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
+	txs := []MempoolTransaction{
+		{Hash: parent.Hash().String(), Cbor: parentCbor, Type: conway.TxTypeConway},
+		{Hash: child.Hash().String(), Cbor: childCbor, Type: conway.TxTypeConway},
+	}
+
+	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
+		base:   map[string]struct{}{baseKey: {}},
+		reject: map[string]struct{}{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, txs, selected)
+}
+
+func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
+	parentCbor := makeMinimalTxCbor(t, 0x42, 29)
+	parent, err := conway.NewConwayTransactionFromCbor(parentCbor)
+	require.NoError(t, err)
+	childCbor := makeMinimalTxCborWithInput(t, parent.Hash().Bytes(), 0)
+	child, err := conway.NewConwayTransactionFromCbor(childCbor)
+	require.NoError(t, err)
+	baseInput := parent.Inputs()[0]
+	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
+	txs := []MempoolTransaction{
+		{Hash: parent.Hash().String(), Cbor: parentCbor, Type: conway.TxTypeConway},
+		{Hash: child.Hash().String(), Cbor: childCbor, Type: conway.TxTypeConway},
+	}
+
+	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
+		base: map[string]struct{}{baseKey: {}},
+		reject: map[string]struct{}{
+			parent.Hash().String(): {},
+		},
+	})
+	require.NoError(t, err)
+	require.Empty(t, selected, "a rejected parent must not expose its output")
+}
+
+func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(t *testing.T) {
+	parentCbor := makeMinimalTxCbor(t, 0x43, 29)
+	parent, err := conway.NewConwayTransactionFromCbor(parentCbor)
+	require.NoError(t, err)
+	childCbor := makeMinimalTxCborWithInput(t, parent.Hash().Bytes(), 0)
+	child, err := conway.NewConwayTransactionFromCbor(childCbor)
+	require.NoError(t, err)
+	baseInput := parent.Inputs()[0]
+	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
+
+	selected, err := selectValidLeiosTransactions(
+		[]MempoolTransaction{
+			{Hash: "not-hex", Cbor: parentCbor, Type: conway.TxTypeConway},
+			{Hash: child.Hash().String(), Cbor: childCbor, Type: conway.TxTypeConway},
+		},
+		&leiosOverlayValidator{base: map[string]struct{}{baseKey: {}}},
+	)
+	require.NoError(t, err)
+	require.Empty(t, selected)
 }

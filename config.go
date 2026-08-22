@@ -113,6 +113,12 @@ type KoiosParityConfig struct {
 	// value (false) can't be distinguished from an explicit opt-out. Pass a
 	// pointer to false to disable account-level checking explicitly.
 	Accounts *bool
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request issued by the Accounts phase above, by
+	// both address count and encoded body size. 0 for either selects the
+	// package default. Unused when Accounts resolves to false.
+	AccountChunkSize     int
+	AccountChunkMaxBytes int
 }
 
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
@@ -125,6 +131,23 @@ type OffchainMetadataConfig struct {
 	IPFSGatewayURL        string
 	BatchSize             int
 	MaxBytes              int64
+	AllowPrivateAddresses bool
+}
+
+// TokenRegistryConfig controls the API-mode CIP-26 token registry sync, which
+// populates the `metadata` field of GET /assets/{asset}. Zero values use the
+// internal syncer defaults. Disabled unless Enabled is set: the mainnet
+// registry is a roughly 240MB download.
+type TokenRegistryConfig struct {
+	HTTPClient            *http.Client
+	SourceURL             string
+	UserAgent             string
+	Interval              time.Duration
+	RequestTimeout        time.Duration
+	MaxBytes              int64
+	MaxEntryBytes         int64
+	Enabled               bool
+	StoreLogos            bool
 	AllowPrivateAddresses bool
 }
 
@@ -171,6 +194,8 @@ type Config struct {
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
 	offchainMetadata OffchainMetadataConfig
+	// Runtime-only, programmatic token registry config (preserves HTTPClient)
+	tokenRegistry TokenRegistryConfig
 	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
@@ -221,6 +246,7 @@ type Config struct {
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
+	blockPipelineValidateEnabled                                                        bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -563,6 +589,14 @@ func (n *Node) configValidate() error {
 				"sync Musashi",
 		)
 	}
+	if n.config.cfg.BlockPipelineValidateEnabled &&
+		!n.config.cfg.BlockPipelineEnabled {
+		return errors.New(
+			"block-pipeline-validate-enabled (blockPipelineValidateEnabled) " +
+				"requires block-pipeline-enabled (blockPipelineEnabled) to " +
+				"also be set",
+		)
+	}
 	if n.config.cfg.FullPotRewardsEnabled &&
 		!n.config.cfg.UnsafeFullPotRewardsOnStandardNetworks {
 		if network, ok := internalconfig.FullPotRewardsStandardNetwork(n.config.cfg.Network, n.config.cfg.NetworkMagic); ok {
@@ -714,13 +748,32 @@ func (c *Config) syncCompatFields() {
 	// so the mirror always carries a non-nil pointer.
 	koiosParityAccounts := c.cfg.KoiosParity.Accounts
 	c.koiosParity = KoiosParityConfig{
-		Enabled:    c.cfg.KoiosParity.Enabled,
-		Network:    c.cfg.KoiosParity.Network,
-		CachePath:  c.cfg.KoiosParity.CachePath,
-		APIKey:     c.cfg.KoiosParity.APIKey,
-		Strict:     c.cfg.KoiosParity.Strict,
-		GraceHours: c.cfg.KoiosParity.GraceHours,
-		Accounts:   &koiosParityAccounts,
+		Enabled:              c.cfg.KoiosParity.Enabled,
+		Network:              c.cfg.KoiosParity.Network,
+		CachePath:            c.cfg.KoiosParity.CachePath,
+		APIKey:               c.cfg.KoiosParity.APIKey,
+		Strict:               c.cfg.KoiosParity.Strict,
+		GraceHours:           c.cfg.KoiosParity.GraceHours,
+		Accounts:             &koiosParityAccounts,
+		AccountChunkSize:     c.cfg.KoiosParity.AccountChunkSize,
+		AccountChunkMaxBytes: c.cfg.KoiosParity.AccountChunkMaxBytes,
+	}
+	// The token registry syncer reads this runtime mirror, so YAML, env, and
+	// CLI values -- which only ever land on c.cfg -- have to be carried
+	// across here. HTTPClient is runtime-only and has no internal-config
+	// counterpart, so it is preserved rather than overwritten:
+	// syncCompatFields runs after WithTokenRegistryConfig has applied.
+	c.tokenRegistry = TokenRegistryConfig{
+		HTTPClient:            c.tokenRegistry.HTTPClient,
+		SourceURL:             c.cfg.TokenRegistry.SourceURL,
+		UserAgent:             c.cfg.TokenRegistry.UserAgent,
+		Interval:              c.cfg.TokenRegistry.Interval,
+		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
+		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
+		MaxEntryBytes:         c.cfg.TokenRegistry.MaxEntryBytes,
+		Enabled:               c.cfg.TokenRegistry.Enabled,
+		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
+		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
@@ -762,6 +815,7 @@ func (c *Config) syncCompatFields() {
 	c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
+	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1525,13 +1579,15 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			accounts = *cfg.Accounts
 		}
 		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
-			Enabled:    cfg.Enabled,
-			Network:    cfg.Network,
-			CachePath:  cfg.CachePath,
-			APIKey:     cfg.APIKey,
-			Strict:     cfg.Strict,
-			GraceHours: cfg.GraceHours,
-			Accounts:   accounts,
+			Enabled:              cfg.Enabled,
+			Network:              cfg.Network,
+			CachePath:            cfg.CachePath,
+			APIKey:               cfg.APIKey,
+			Strict:               cfg.Strict,
+			GraceHours:           cfg.GraceHours,
+			Accounts:             accounts,
+			AccountChunkSize:     cfg.AccountChunkSize,
+			AccountChunkMaxBytes: cfg.AccountChunkMaxBytes,
 		}
 	}
 }
@@ -1558,6 +1614,26 @@ func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
 			IPFSGatewayURL:        cfg.IPFSGatewayURL,
 			BatchSize:             cfg.BatchSize,
 			MaxBytes:              cfg.MaxBytes,
+			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+		}
+	}
+}
+
+// WithTokenRegistryConfig configures the API-mode CIP-26 token registry sync.
+// Zero values use the syncer's internal defaults.
+func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		// Preserve the programmatic runtime-only HTTPClient and full cfg
+		c.tokenRegistry = cfg
+		c.cfg.TokenRegistry = internalconfig.TokenRegistryConfig{
+			Enabled:               cfg.Enabled,
+			SourceURL:             cfg.SourceURL,
+			Interval:              cfg.Interval,
+			RequestTimeout:        cfg.RequestTimeout,
+			UserAgent:             cfg.UserAgent,
+			MaxBytes:              cfg.MaxBytes,
+			MaxEntryBytes:         cfg.MaxEntryBytes,
+			StoreLogos:            cfg.StoreLogos,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 		}
 	}
@@ -2056,6 +2132,11 @@ func (c *Config) HistoryExpiry() internalconfig.HistoryExpiryConfig {
 // OffchainMetadata returns the off-chain metadata fetcher configuration.
 func (c *Config) OffchainMetadata() internalconfig.OffchainMetadataConfig {
 	return c.cfg.OffchainMetadata
+}
+
+// TokenRegistry returns the CIP-26 token registry sync configuration.
+func (c *Config) TokenRegistry() internalconfig.TokenRegistryConfig {
+	return c.cfg.TokenRegistry
 }
 
 // Logging returns the logging configuration.

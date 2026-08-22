@@ -14,13 +14,16 @@ concurrency:
 
 env:
   APPLICATION_NAME: 'dingo'
+  RELEASE_TAG: ${{ github.ref_name }}
 
 jobs:
   # Release validation happens before creating the draft release. Main pushes
   # publish images and binaries without paying for the full test suite.
   ci:
     name: ci (Linux)
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -83,7 +86,7 @@ jobs:
           curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
           unzip -q awscliv2.zip
           sudo ./aws/install --update
-          aws --endpoint-url $AWS_ENDPOINT s3api create-bucket --bucket $DINGO_TEST_S3_BUCKET
+          aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
@@ -93,46 +96,73 @@ jobs:
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 20m ./...
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 20m ./...
 
   create-draft-release:
     runs-on: ubuntu-latest
     needs: [ci]
-    if: always() && (github.ref_type != 'tag' || needs.ci.result == 'success')
+    if: github.ref_type == 'tag' && needs.ci.result == 'success'
     permissions:
       contents: write
     outputs:
       RELEASE_ID: ${{ steps.create-release.outputs.result }}
     steps:
-      - run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 https://github.com/actions/github-script/releases/tag/v9.0.0
         id: create-release
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           result-encoding: string
           script: |
-            try {
-              const response = await github.rest.repos.createRelease({
-                draft: true,
-                generate_release_notes: true,
-                name: process.env.RELEASE_TAG,
-                owner: context.repo.owner,
-                prerelease: false,
-                repo: context.repo.repo,
-                tag_name: process.env.RELEASE_TAG,
-              });
+            const release = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            };
+            const releases = await github.paginate(
+              github.rest.repos.listReleases,
+              {...release, per_page: 100},
+            );
+            const matching = releases.filter(
+              candidate => candidate.tag_name === process.env.RELEASE_TAG,
+            );
+            const published = matching.find(candidate => !candidate.draft);
 
-              return response.data.id;
-            } catch (error) {
-              core.setFailed(error.message);
+            if (published) {
+              throw new Error(
+                `release ${process.env.RELEASE_TAG} is already published; ` +
+                'refusing to delete it',
+              );
             }
+
+            for (const draft of matching) {
+              await github.rest.repos.deleteRelease({
+                owner: release.owner,
+                repo: release.repo,
+                release_id: draft.id,
+              });
+            }
+
+            const response = await github.rest.repos.createRelease({
+              draft: true,
+              generate_release_notes: true,
+              name: process.env.RELEASE_TAG,
+              owner: release.owner,
+              prerelease: false,
+              repo: release.repo,
+              tag_name: process.env.RELEASE_TAG,
+            });
+
+            return response.data.id;
 
   # Run the platform-specific suite only after Linux release validation and
   # draft creation have succeeded.
   go-test-other:
     name: go-test (${{ matrix.platform }}) (${{ matrix.go-version }})
     needs: [ci, create-draft-release]
+    # The only job in this workflow without an explicit grant, so it inherited
+    # repository or organization defaults. It builds and runs tests and needs
+    # nothing else; matches build-image-manifest's read-only grant.
+    permissions:
+      contents: read
     if: always() && github.ref_type == 'tag' && needs.ci.result == 'success' && needs.create-draft-release.result == 'success'
     strategy:
       matrix:
@@ -144,6 +174,14 @@ jobs:
           - platform: windows-latest
             cache_path: ~\AppData\Local\go-build
     runs-on: ${{ matrix.platform }}
+    # Generous on purpose. Hang protection comes from the per-package
+    # `-timeout 20m` below; this cap only has to exceed a legitimate full-suite
+    # run, which here means checkout, setup-go, a build, and `go test ./...`
+    # across 100+ packages on a slower runner. The equivalent Linux job sets no
+    # job cap at all, so a tight one here is the outlier and would fail
+    # `go-test-other` with no single stuck package, blocking build-binaries and
+    # finalize-release.
+    timeout-minutes: 90
     env:
       CGO_ENABLED: 0
     steps:
@@ -162,7 +200,11 @@ jobs:
       - name: go-build
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test ./...
+        # Windows runners are substantially slower for this suite. Keep the
+        # same link-size optimization and explicit package timeout used by the
+        # Linux release validation job, and cap the job so a stuck test cannot
+        # hold the release indefinitely.
+        run: go test -ldflags="-s -w" -timeout 20m ./...
 
   build-binaries:
     strategy:
@@ -193,18 +235,11 @@ jobs:
     needs: [create-draft-release, go-test-other]
     if: always() && (github.ref_type != 'tag' || (needs.create-draft-release.result == 'success' && needs.go-test-other.result == 'success'))
     permissions:
-      actions: write
       attestations: write
-      checks: write
       contents: write
       id-token: write
-      packages: write
-      statuses: write
     steps:
-      - name: Set RELEASE_TAG
-        run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
-        shell: bash
-      - run: git config --global --add safe.directory $PWD
+      - run: git config --global --add safe.directory "$PWD"
         shell: bash
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
         with:
@@ -225,18 +260,24 @@ jobs:
         shell: bash
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_OS: ${{ matrix.os }}
+          RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          _binary_name=${{ env.APPLICATION_NAME }}
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            _binary_name="${{ env.APPLICATION_NAME }}.exe"
+          _binary_name="$APPLICATION_NAME"
+          if [ "$MATRIX_OS" = "windows" ]; then
+            _binary_name="${APPLICATION_NAME}.exe"
           fi
-          _filename=${{ env.APPLICATION_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-          tar czf ${_filename} ${_binary_name}
+          _filename="${APPLICATION_NAME}-${RELEASE_TAG}-${MATRIX_OS}-${MATRIX_ARCH}.tar.gz"
+          tar czf "$_filename" "$_binary_name"
           curl \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: token $RELEASE_UPLOAD_TOKEN" \
             -H "Content-Type: application/octet-stream" \
-            --data-binary @${_filename} \
-            https://uploads.github.com/repos/${{ github.repository_owner }}/${{ env.APPLICATION_NAME }}/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}
+            --data-binary "@${_filename}" \
+            "https://uploads.github.com/repos/${REPOSITORY_OWNER}/${APPLICATION_NAME}/releases/${RELEASE_ID}/assets?name=${_filename}"
         shell: bash
       - name: Attest binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -257,16 +298,12 @@ jobs:
     needs: [create-draft-release, go-test-other]
     if: always() && (github.ref_type != 'tag' || (needs.create-draft-release.result == 'success' && needs.go-test-other.result == 'success'))
     permissions:
-      actions: write
       attestations: write
-      checks: write
-      contents: write
+      contents: read
       id-token: write
       packages: write
-      statuses: write
     steps:
-      - run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
-      - run: git config --global --add safe.directory $PWD
+      - run: git config --global --add safe.directory "$PWD"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
         with:
           fetch-depth: 0
@@ -380,12 +417,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
         with:
           username: blinklabs
           password: ${{ secrets.DOCKER_PASSWORD }} # uses token
       - name: Login to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
         with:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -407,16 +444,36 @@ jobs:
             type=semver,pattern={{version}}
       - name: manifest-create
         shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          for t in `echo '${{ steps.meta.outputs.tags }}'`; do
-            # Extract the underlying manifests from each manifests list and create a new single manifest list
-            docker manifest create ${t} \
-              $(docker manifest inspect ${t}-amd64 | jq -r '.manifests[] | .digest' | sed -e "s|^|${t%:*}@|") \
-              $(docker manifest inspect ${t}-arm64 | jq -r '.manifests[] | .digest' | sed -e "s|^|${t%:*}@|")
-            docker manifest push ${t}
-          done
+          set -euo pipefail
+          while IFS= read -r image_tag; do
+            [ -n "$image_tag" ] || continue
+            image_repository="${image_tag%:*}"
+            amd64_refs="$(
+              docker manifest inspect "${image_tag}-amd64" |
+                jq -er --arg repository "$image_repository" \
+                  '.manifests[] | select(.digest | type == "string" and length > 0) | "\($repository)@\(.digest)"'
+            )"
+            arm64_refs="$(
+              docker manifest inspect "${image_tag}-arm64" |
+                jq -er --arg repository "$image_repository" \
+                  '.manifests[] | select(.digest | type == "string" and length > 0) | "\($repository)@\(.digest)"'
+            )"
+            mapfile -t amd64_manifests <<< "$amd64_refs"
+            mapfile -t arm64_manifests <<< "$arm64_refs"
+            if (( ${#amd64_manifests[@]} == 0 || ${#arm64_manifests[@]} == 0 )); then
+              echo "both amd64 and arm64 manifests are required" >&2
+              exit 1
+            fi
+            docker manifest create "$image_tag" \
+              "${amd64_manifests[@]}" \
+              "${arm64_manifests[@]}"
+            docker manifest push "$image_tag"
+          done <<< "$IMAGE_TAGS"
       # Checkout repo so README.md is available for next step
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
       # Update Docker Hub from README
       - name: Docker Hub Description
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0 https://github.com/peter-evans/dockerhub-description/releases/tag/v5.0.0
@@ -432,10 +489,9 @@ jobs:
     permissions:
       contents: write
     needs: [create-draft-release, go-test-other, build-binaries, build-images, build-image-manifest]
-    if: always() && (github.ref_type != 'tag' || (needs.create-draft-release.result == 'success' && needs.go-test-other.result == 'success' && needs.build-binaries.result == 'success' && needs.build-images.result == 'success' && needs.build-image-manifest.result == 'success'))
+    if: always() && github.ref_type == 'tag' && needs.create-draft-release.result == 'success' && needs.go-test-other.result == 'success' && needs.build-binaries.result == 'success' && needs.build-images.result == 'success' && needs.build-image-manifest.result == 'success'
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 https://github.com/actions/github-script/releases/tag/v9.0.0
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

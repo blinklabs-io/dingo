@@ -37,7 +37,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check gorm-check test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check gorm-check test bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -123,10 +123,14 @@ $(PROTOC):
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
-	go test $(GO_TAG_FLAGS) -v -race ./...
+	go test $(GO_TAG_FLAGS) -v -race -timeout 20m ./...
 
 bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
+
+bench-ci: mod-tidy ## Run mod-tidy, then the curated CI benchmark suite (count=10) plus a GOMAXPROCS lock-contention sweep
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockProcessingThroughput|BlockProcessingThroughputPredecoded|BlockBatchProcessingThroughput|RawBlockBatchProcessingThroughput|VerifyBlockHeader|TransactionValidation|ChainSyncFromGenesis|RealBlockProcessing|EraTransitionPerformanceRealData|TestLoad|BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipFlushOnlyPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchVerifiedHeaderDispatch|BlockfetchClientBlockMetrics|UpdateConnectionMetrics|HasInboundPeerAddress|Reconcile|PublishSubscribers|BlockMemoryUsage|HotCacheGet|HotCachePut|HotCacheGetMiss|BlockLRUCacheGet|BlockLRUCachePut|TieredCacheHotHit|CachedBlockExtract|CborOffsetEncode|CborOffsetDecode|StorageModeIngest|StorageModeIngestSteadyState)$$' -benchmem -count=10 -timeout=90m ./...
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockLRUParallelReadHeavy|BlockLRUParallelBalanced|BlockLRUParallelReadOnly|HotCacheParallelGet|TryReserveInboundSlotParallel|ConcurrentQueries|TipSnapshotReadOnly|TipSnapshotReadUnderWriter)$$' -benchmem -count=10 -cpu=1,4,8,16 -timeout=30m ./...
 
 bench-mempool-revalidation: ## Benchmark FIFO admission during normal and degenerate rebuilds
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkFIFO(AdmissionNoRevalidation|Revalidation)$$' -benchmem ./mempool

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -142,6 +143,68 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+// TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown verifies
+// that a chainsync subscriber does not remain in the prior-request drain
+// while the node is shutting down. EventBus.Close waits for an in-flight
+// subscriber callback, so ignoring the ledger context here can leave node
+// shutdown blocked while the blockfetch connection is being torn down.
+func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
+	t *testing.T,
+) {
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("shutdown-header")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+	connId := testChainsyncConnId(6114, 3001)
+	ctx, cancel := context.WithCancel(t.Context())
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   ctx,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) error {
+				t.Fatal("blockfetch request started before shutdown wait was canceled")
+				return nil
+			},
+		},
+		blockfetchRequestsInFlight: map[string]chan struct{}{
+			connIdKey(connId): make(chan struct{}),
+		},
+	}
+
+	waitStarted := make(chan struct{})
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- startQueuedBlockfetchWithWaitSignalForTest(
+			ls,
+			connId,
+			nil,
+			waitStarted,
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		waitStarted,
+		time.Second,
+		"blockfetch request drain did not start",
+	)
+	cancel()
+
+	select {
+	case err := <-startDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("blockfetch request drain ignored shutdown cancellation")
+	}
 }
 
 // TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse verifies
@@ -286,6 +349,177 @@ func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+// TestBlockfetchContinuationRetargetsSelection covers the continuation path's
+// two starts. handleEventBlockfetchBatchDone hands this function a connection
+// chosen by selectRetryBlockfetchConn, which need not be the current selection,
+// and nextBlockfetchConnId prefers the selection when picking the next batch's
+// connection. So a selection left behind here sends the following batch back to
+// the connection the continuation just moved away from.
+func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// fail reports whether a request on this connection should fail,
+		// letting the subtest drive the primary start, its retry, or neither.
+		fail func(ouroboros.ConnectionId, ouroboros.ConnectionId) bool
+		want func(
+			stale, primary, retry ouroboros.ConnectionId,
+		) ouroboros.ConnectionId
+	}{
+		{
+			name: "primary start",
+			fail: func(ouroboros.ConnectionId, ouroboros.ConnectionId) bool {
+				return false
+			},
+			want: func(
+				_, primary, _ ouroboros.ConnectionId,
+			) ouroboros.ConnectionId {
+				return primary
+			},
+		},
+		{
+			// Pins the other half of the contract: a failed attempt must not
+			// move the selection. Without this case a regression that
+			// retargeted on the attempt would still pass, because the
+			// following successful retry puts the expected value back.
+			name: "neither the primary nor its retry succeeds",
+			fail: func(ouroboros.ConnectionId, ouroboros.ConnectionId) bool {
+				return true
+			},
+			want: func(
+				stale, _, _ ouroboros.ConnectionId,
+			) ouroboros.ConnectionId {
+				return stale
+			},
+		},
+		{
+			name: "retry after the primary fails",
+			fail: func(connId, primary ouroboros.ConnectionId) bool {
+				return sameConnectionId(connId, primary)
+			},
+			want: func(
+				_, _, retry ouroboros.ConnectionId,
+			) ouroboros.ConnectionId {
+				return retry
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stale := testChainsyncConnId(6200, 3001)
+			primary := testChainsyncConnId(6200, 3002)
+			retry := testChainsyncConnId(6200, 3003)
+
+			testChain := &chain.Chain{}
+			require.NoError(t, testChain.AddBlockHeader(mockHeader{
+				hash:        lcommon.NewBlake2b256([]byte("cont-retarget")),
+				prevHash:    lcommon.NewBlake2b256(nil),
+				blockNumber: 1,
+				slot:        1,
+			}))
+
+			ls := &LedgerState{
+				chain: testChain,
+				// The selection starts on a connection this continuation is
+				// moving away from, so neither expected value can be reached
+				// without the retarget.
+				selectedBlockfetchConnId: stale,
+				config: LedgerStateConfig{
+					Logger: slog.New(
+						slog.NewJSONHandler(io.Discard, nil),
+					),
+					GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+						return &retry
+					},
+					BlockfetchRequestRangeFunc: func(
+						connId ouroboros.ConnectionId,
+						_ ocommon.Point,
+						_ ocommon.Point,
+					) error {
+						if test.fail(connId, primary) {
+							return errors.New("request failed")
+						}
+						return nil
+					},
+				},
+			}
+
+			ls.chainsyncBlockfetchMutex.Lock()
+			ls.startQueuedBlockfetchFromEventLocked(
+				primary,
+				primary,
+				"test continuation",
+			)
+			ls.chainsyncBlockfetchMutex.Unlock()
+
+			ls.blockfetchContinuationMu.Lock()
+			ls.blockfetchContinuationWG.Wait()
+			ls.blockfetchContinuationMu.Unlock()
+
+			ls.chainsyncBlockfetchMutex.Lock()
+			got := ls.selectedBlockfetchConnId
+			ls.blockfetchRequestRangeCleanup()
+			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+			ls.chainsyncBlockfetchMutex.Unlock()
+
+			assert.True(
+				t, sameConnectionId(got, test.want(stale, primary, retry)),
+				"the selection must name the connection that served the "+
+					"continuation, got %s", got.String(),
+			)
+		})
+	}
+}
+
+// TestBlockfetchRetargetPreservesConcurrentSelection asserts the retarget does
+// not overwrite a newer selection installed while the start was outside the
+// mutex. startQueuedBlockfetchLocked releases chainsyncBlockfetchMutex around
+// the network request, so a connection switch or close can land in that window;
+// its choice is the current one and has to win. The request callback stands in
+// for that concurrent writer, since it runs with the mutex released.
+func TestBlockfetchRetargetPreservesConcurrentSelection(t *testing.T) {
+	stale := testChainsyncConnId(6300, 3001)
+	starting := testChainsyncConnId(6300, 3002)
+	switched := testChainsyncConnId(6300, 3003)
+
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("concurrent-switch")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+
+	ls := &LedgerState{
+		chain:                    testChain,
+		selectedBlockfetchConnId: stale,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) error {
+		// Runs with the mutex released, exactly where a real connection
+		// switch would install its own selection.
+		ls.selectedBlockfetchConnId = switched
+		return nil
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	require.NoError(t, ls.startQueuedBlockfetchOnLocked(starting, nil))
+	got := ls.selectedBlockfetchConnId
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	assert.True(
+		t, sameConnectionId(got, switched),
+		"a selection installed while the request was outside the mutex must "+
+			"survive the retarget, got %s", got.String(),
+	)
 }
 
 // newNoBlocksLedgerState builds a LedgerState with one queued header whose
@@ -807,4 +1041,72 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+}
+
+// TestStartQueuedBlockfetchSkipsDispatchWhenCanceledBeforeDispatch covers
+// startQueuedBlockfetchLockedWithWaitSignal's own ls.ctx.Err() check, which
+// sits between the prior-request drain returning and the blockfetch
+// dispatch.
+//
+// Reaching that check deliberately takes a zero-valued connId. For any real
+// connId, waitForBlockfetchRequestLockedWithSignal checks ls.ctx itself
+// before its wait loop and returns the cancellation first, so the check
+// under test never runs and a test written the obvious way passes with it
+// removed. connIdKey returns "" only when both addresses are nil, and the
+// drain returns nil on that before consulting ls.ctx -- so this is the one
+// path where the check below is what stops the dispatch. Verified by
+// reverting it: this test then reaches BlockfetchRequestRangeFunc and fails.
+//
+// What this does not cover: cancellation after that check but before
+// BlockfetchRequestRangeFunc returns. That window cannot be closed at this
+// boundary -- the mutex must be released around the external request (see
+// the lock-cycle comment in startQueuedBlockfetchLockedWithWaitSignal) and
+// BlockfetchRequestRangeFunc takes no context -- so it is not tested here
+// rather than being covered by a test that only appears to.
+func TestStartQueuedBlockfetchSkipsDispatchWhenCanceledBeforeDispatch(
+	t *testing.T,
+) {
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("pre-dispatch-header")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   ctx,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) error {
+				t.Fatal(
+					"blockfetch request dispatched after the ledger context was canceled",
+				)
+				return nil
+			},
+		},
+		blockfetchRequestsInFlight: map[string]chan struct{}{},
+	}
+
+	// Zero connId: connIdKey is "", so the drain returns nil without
+	// consulting ls.ctx and the check under test is reached.
+	err := startQueuedBlockfetchWithWaitSignalForTest(
+		ls,
+		ouroboros.ConnectionId{},
+		nil,
+		nil,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(
+		t,
+		ouroboros.ConnectionId{},
+		ls.activeBlockfetchConnId,
+		"a canceled start must not claim the active blockfetch connection",
+	)
 }

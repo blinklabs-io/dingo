@@ -79,23 +79,14 @@ type BatchedTxIngestOpts struct {
 	// replay paths where producer rows may be absent.
 	SkipConsumedInputRecovery bool
 
-	// StrictAppliedInputConservation, when true, treats a consumed input whose
-	// producer row is absent from the metadata store as a hard error for blocks
-	// past the Mithril trust boundary, instead of recovering it from the
-	// append-only blob store (which retains abandoned-fork blocks) or silently
-	// skipping it. Set only by the ledger's steady-state, at-tip, validated
-	// block application: there every consumed input's producer must already be
-	// applied and live in the metadata store, so needing blob recovery signals
-	// that the applied ledger has diverged from the header chain (issue #3005).
-	// Recovering a producer from a retained fork block the applied chain never
-	// followed would bake an input-conservation violation into the persisted
-	// chain and, once it accumulates past K, wedge the node behind the security
-	// parameter guard. Erroring here instead aborts the block's transaction so
-	// the inconsistent state is never persisted and the node stalls loudly for
-	// resync. Left false for bootstrap, Mithril gap-closure, historical/trusted
-	// replay, and Leios endorser-block apply, where absent producer rows are
-	// legitimately recovered. Only takes effect when StrictUtxoValidation is
-	// also enabled on the Database.
+	// StrictAppliedInputConservation marks the steady-state, at-tip, validated
+	// path. Past the Mithril trust boundary, a missing producer row is recovered
+	// only when the producer block is still on the applied primary chain. This
+	// allows rollback recovery after core-mode cleanup removed a spent row
+	// (issue #3170), while refusing recovery from a retained abandoned-fork block
+	// (issue #3005). The option is retained for callers that identify this path;
+	// the primary-chain check also protects validated catch-up paths. It takes
+	// effect only when StrictUtxoValidation is enabled on the Database.
 	StrictAppliedInputConservation bool
 
 	// Stats receives hot-path timings and row-ish counts for operator

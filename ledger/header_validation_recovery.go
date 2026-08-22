@@ -23,11 +23,10 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// headerValidationError marks a stateful header check that failed while
-// applying a block the chain store already holds — the deferred
-// registered-VRF-key and Praos leader-eligibility checks that blockfetch
-// could not run because the facts they need were still ahead of the apply
-// cursor.
+// headerValidationError marks a header check that failed after the chain
+// store already persisted the block. This includes deferred registered-VRF-
+// key and Praos leader-eligibility checks at ledger apply, plus stateless
+// VRF/KES/OpCert rejection by the block pipeline's validate path.
 //
 // It exists to make that failure recoverable in the same sense transaction
 // validation failures already are. Rejecting the block is correct and stays
@@ -56,8 +55,8 @@ func (e *headerValidationError) Error() string {
 
 func (e *headerValidationError) Unwrap() error { return e.Cause }
 
-// tryRecoverFromHeaderValidationError rewinds past a block whose deferred
-// stateful header checks failed, so the pipeline stops re-reading it.
+// tryRecoverFromHeaderValidationError rewinds past a block whose header
+// checks failed after persistence, so the pipeline stops re-reading it.
 //
 // This does not accept the block and does not soften the check: the block is
 // dropped from the primary chain and the ledger is rolled back to the last
@@ -163,7 +162,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 
 	if ls.config.Logger != nil {
 		ls.config.Logger.Warn(
-			"deferred header validation rejected a block already on the primary chain; rewinding so chain selection can offer another candidate",
+			"header validation rejected a block already on the primary chain; rewinding so chain selection can offer another candidate",
 			"component",
 			"ledger",
 			"failing_block_slot",

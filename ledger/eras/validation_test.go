@@ -89,6 +89,7 @@ type mockConwayFeeTx struct {
 	certificates       []lcommon.Certificate
 	withdrawals        map[*lcommon.Address]*big.Int
 	assetMint          *lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
+	outputs            []lcommon.TransactionOutput
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
 }
@@ -110,7 +111,7 @@ func (m *mockConwayFeeTx) Produced() []lcommon.Utxo {
 }
 
 func (m *mockConwayFeeTx) Outputs() []lcommon.TransactionOutput {
-	return nil
+	return m.outputs
 }
 
 func (m *mockConwayFeeTx) TTL() uint64 {
@@ -179,6 +180,49 @@ func (o testAddressScriptOutput) Address() lcommon.Address {
 
 func (o testAddressScriptOutput) ScriptRef() lcommon.Script {
 	return o.scriptRef
+}
+
+// newTestKeyAddress returns a testnet payment address with a key credential and
+// no staking part, so no script purpose ever resolves to it.
+func newTestKeyAddress(t *testing.T) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	return addr
+}
+
+// newTestScriptAddress returns the testnet payment address that locks a UTxO
+// with the given script, so spending it creates a script purpose needing s.
+func newTestScriptAddress(t *testing.T, s lcommon.Script) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		s.Hash().Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+	return addr
+}
+
+// newTestScriptStakeAddress returns the testnet reward address whose stake
+// credential is the given script, so withdrawing from it creates a rewarding
+// purpose needing s.
+func newTestScriptStakeAddress(t *testing.T, s lcommon.Script) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneScript,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		s.Hash().Bytes(),
+	)
+	require.NoError(t, err)
+	return addr
 }
 
 // mockWitnessSet implements TransactionWitnessSet for
@@ -437,6 +481,13 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 	requireRuleIndexResolvesToFunc(
 		t,
 		conway.UtxoValidationRules,
+		conwayUtxoValidateConwayFeaturesRuleIndex,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
+		"conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
 		conwayUtxoValidateFeeTooSmallRuleIndex,
 		conway.UtxoValidateFeeTooSmallUtxo,
 		"conway.UtxoValidateFeeTooSmallUtxo",
@@ -449,6 +500,18 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		"conway.UtxoValidatePlutusScripts",
 	)
 	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
+		"Conway validation must count only needed PlutusV1/V2 scripts",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		validateConwayFeaturesWithNeededPlutusV1V2,
+		"Conway validation must install Dingo's needed-script rule",
+	)
 	requireIndexedRulesExcludeFunc(
 		t,
 		conwayUtxoValidationRules,
