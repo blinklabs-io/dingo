@@ -20,10 +20,12 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
@@ -228,6 +230,125 @@ func TestRollbackTxEventsPrecedeLaterForwardTxEvents(t *testing.T) {
 			pos++
 		}
 	}
+}
+
+// TestRollbackWaitsForCommittedApplyPublication pins the post-commit race:
+// storage becomes visible before database.Txn starts draining AfterCommit
+// callbacks. A rollback in that window can read the new block and enqueue Undo
+// before its Apply unless block-apply commit and rollback emission share a
+// serializer.
+func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+
+	commitReached := make(chan struct{})
+	allowPublish := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePublish := func() { releaseOnce.Do(func() { close(allowPublish) }) }
+	ls.beforeTransactionApplyPublish = func() {
+		close(commitReached)
+		<-allowPublish
+	}
+
+	delta := newTransactionEventTestDelta(t, 7, 0)
+	defer delta.Release()
+	applyDone := make(chan error, 1)
+	applyFinished := false
+	defer func() {
+		releasePublish()
+		if !applyFinished {
+			select {
+			case <-applyDone:
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}()
+	go func() {
+		applyDone <- ls.submitBlockApplyDBTxn(
+			fixture.currentTip,
+			fixture.currentTip.Point,
+			func(txn *database.Txn) error {
+				return delta.apply(ls, txn)
+			},
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		commitReached,
+		2*time.Second,
+		"database commit before Apply publication",
+	)
+
+	rollbackDone := make(chan error, 1)
+	go func() {
+		rollbackDone <- ls.rollbackChainAndState(fixture.ancestorTip.Point)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		rollbackDone,
+		100*time.Millisecond,
+		"rollback while committed Apply publication is pending",
+	)
+	require.Equal(t, fixture.currentTip, ls.chain.Tip())
+	testutil.RequireNoReceive(
+		t,
+		txCh,
+		100*time.Millisecond,
+		"Apply while after-commit callback is held",
+	)
+
+	releasePublish()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		applyDone,
+		2*time.Second,
+		"block apply transaction",
+	))
+	applyFinished = true
+	applyEvt := testutil.RequireReceive(
+		t,
+		txCh,
+		2*time.Second,
+		"committed Apply event",
+	)
+	txEvt, ok := applyEvt.Data.(TransactionEvent)
+	require.True(t, ok, "unexpected payload %T", applyEvt.Data)
+	require.False(t, txEvt.Rollback)
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		rollbackDone,
+		2*time.Second,
+		"rollback after Apply publication",
+	))
+	require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
+}
+
+func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	rolledBackCandidate := fixture.currentTip.Point
+	require.NoError(
+		t,
+		fixture.ls.rollbackChainAndState(fixture.ancestorTip.Point),
+	)
+
+	operationCalled := false
+	err := fixture.ls.submitBlockApplyDBTxn(
+		fixture.ancestorTip,
+		rolledBackCandidate,
+		func(*database.Txn) error {
+			operationCalled = true
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, errStaleChainIterator)
+	require.False(t, operationCalled)
 }
 
 // TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles guards the

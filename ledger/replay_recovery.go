@@ -419,6 +419,10 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if securityParam <= 0 {
 		return chain.ErrSecurityParamNotConfigured
 	}
+	// Keep every Undo enqueue and its corresponding chain truncation atomic
+	// with respect to a block-apply commit's AfterCommit Apply publication.
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
 
 	targetIndex := uint64(0)
 	if point.Slot > 0 || len(point.Hash) > 0 {
