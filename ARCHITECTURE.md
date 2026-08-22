@@ -6416,6 +6416,107 @@ sqlite is opened per-process, and the default blob plugin's exclusive
 per-directory lock already rules out two full database opens racing at
 once regardless of metadata plugin.
 
+### Redacted Configuration Logging
+
+`internal/node`'s `logStartupConfig` debug-logs the whole effective
+configuration at startup, which means the configuration is the one place
+where a Koios API key, an inline API auth token, or a storage provider
+password or DSN would be persisted into an operator's log files. It logs
+through `Config.LogValue` (`internal/config/redact.go`), the explicit
+`slog.LogValuer` representation of a `Config`, rather than formatting the
+struct: unexported fields are never rendered, and every rendered value is
+classified first.
+
+Classification is a fail-safe allow-list, not a deny-list. Each dotted
+`Config` field path is listed in exactly one of four groups -- plain,
+secret, URI, or provider config -- and an unlisted path resolves to the
+zero `logClass`, which is `logSecret`. A field added without a
+classification is therefore redacted rather than leaked, and
+`TestConfigLogClassesCoverEveryConfigField` fails on it, so the silent
+over-redaction that fail-safe default produces turns into a required
+explicit decision instead of a surprise in production logs. The same test
+rejects a classification whose field no longer exists, catching a rename.
+
+Two classes are not simple pass/redact. A URI field -- `barkBaseUrl`,
+`barkBlockDownloadHosts`, `mithril.aggregatorUrl`,
+`tokenRegistry.sourceUrl`, `offchainMetadata.ipfsGatewayUrl`, and
+`databaseLifecycle.snapshotCloudDestination` -- keeps its scheme, host,
+port, path, and non-credential parameters and loses only its userinfo
+password and the value of every credential-named parameter, because "which
+host and database was this node pointed at" is most of the reason the
+configuration is logged at all; the same handling covers both URL-form and
+keyword-form database DSNs. A provider-config field (`plugins.*.config`, a
+free-form `map[string]any` whose keys belong to the selected provider, not
+to `Config`) is walked recursively and classified per key name, so a
+secret nested at any depth under a provider section is still redacted;
+unrecognized keys default to redacted, which means an out-of-tree
+provider's benign key is over-redacted until it is added to the key table.
+A secret classification -- including the unrecognized-key default --
+covers the whole subtree beneath the key and is applied before any
+recursion, because walking into it would reclassify the inner keys by
+their own names and an inner key classified plain (`host`, `mode`) would
+then render part of a secret-bearing value. The API providers nest their
+`tls` and `auth` policies, so those two keys carry a container
+classification of their own: the section beneath them is walked and its
+policy keys are classified individually, while a value of any other shape
+at the same key -- a scalar, a slice, a map this walk cannot key into --
+is redacted whole. The key says only that a container belongs there, so it
+classifies nothing about what a scalar there would hold. The key's class
+and the value's shape are reconciled in one place, which is what keeps
+every container key from needing its own shape check. The URI class is
+held to the same rule: only a shape that holds strings can have its
+credentials removed, so any other shape under a URI field is redacted
+rather than rendered untransformed.
+
+Both the URI parameters and the provider keys are decided by one
+credential classifier, `isCredentialKeyName`, which works per key-name
+word rather than per substring. A `\b`-anchored pattern over a raw key
+name is the wrong shape for this: `_` is a word character, so `\bsecret`
+cannot match `client_secret` and `\btoken` cannot match `api_token`, and
+`access[-_]?key` cannot reach the `=` of `accessKeyId=` past the `Id`
+suffix. Enumerating spellings instead only moves the next miss further
+out. So a key name is split into words at separators, at camelCase and
+acronym boundaries (`accessKeyId`, `IPFSGatewayURL`), and -- for a
+run-together spelling such as `apikey` -- by segmenting the word against
+the classifier's own vocabulary, which succeeds only when known words
+cover the word completely, so `monkey` and `keyspace` do not become
+credentials. The verdict is then set membership over four small word
+groups: words that name a credential outright (`password`, `secret`,
+`token`, `signature`, ...), `key`/`keys`, the qualifiers that make a key a
+credential (`api`, `access`, `private`, `client`, `shared`, ...), and the
+location words (`path`, `file`, `dir`, ...) that mean the value is where a
+credential is kept rather than the credential -- `tokenFilePath` and
+`signingKeyFile` name paths an operator needs to see. A name is also
+decoded before it is split, so a percent- or plus-encoded spelling
+classifies as the name it decodes to, and an encoding cannot move a term
+out of reach either.
+`TestIsCredentialKeyName` holds the term set against a table of camelCase,
+snake_case, kebab-case, prefixed, suffixed, run-together, and encoded
+spellings.
+
+Query strings are located with `net/url` and then scanned pair by pair, so
+the decision is per parameter name. A query name carries its percent- and
+plus-escape bytes into the scan, because without them `api%5Fkey` would be
+scanned as the two fragments `api` and `5Fkey` and neither reads as a
+credential; only the classification decodes, so the rendered URI keeps the
+operator's own bytes, and a name whose escapes are malformed decodes
+nowhere and fails closed. Keyword-form DSNs are scanned by the same
+routine with whitespace separators, optional whitespace around `=`, quoted
+values -- so a quoted password containing whitespace is redacted whole --
+and literal keywords, since no DSN parser percent-decodes them.
+
+The two classification tables and the classifier are held to one
+answer by tests: no provider key or `Config` field path classified
+renderable may read as a credential, apart from an explicitly listed
+review exception (`midnight.authTokenPolicyId` and
+`midnight.authTokenAssetName` name public on-chain data, not a token), and
+every path classified secret must read as one.
+
+The walk is deliberately uniform and does not defer to a nested type's own
+`slog.LogValuer` (`apiconfig.AuthPolicy` has one). One table with one
+exhaustiveness test decides what a configuration log contains, so a nested
+`LogValue` cannot become a second, untested source of truth.
+
 ## Stake Snapshots
 
 Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
