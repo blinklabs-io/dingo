@@ -51,6 +51,7 @@ import (
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -746,16 +747,20 @@ func requireGenesisDeepForkWins(
 		)
 	}
 
-	require.Eventually(
+	require.EventuallyWithT(
 		t,
-		func() bool {
-			return n.ledgerState.Tip().Point.Slot == ancestor.Slot
+		func(collect *assert.CollectT) {
+			assert.Equal(
+				collect,
+				ancestor.Slot,
+				n.ledgerState.Tip().Point.Slot,
+				"current ledger tip slot",
+			)
 		},
 		10*time.Second,
 		20*time.Millisecond,
-		"ledger did not roll back to the Genesis-selected fork intersection at slot %d (tip is %d)",
+		"ledger did not roll back to the Genesis-selected fork intersection at slot %d",
 		ancestor.Slot,
-		n.ledgerState.Tip().Point.Slot,
 	)
 }
 

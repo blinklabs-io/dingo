@@ -1320,10 +1320,12 @@ func (n *Node) Snapshot(
 // Restore replaces this running node's database with the snapshot at
 // snapshotDir, quiescing and reinitializing every storage-dependent
 // subsystem in-process (see this file's package comment for exactly what
-// stays running and what gets rebuilt). Manifest compatibility is checked
-// before storage mutation. The node is then quiesced while restore validates
-// the complete archives and, for external providers, captures rollback copies
-// before replacing either configured target.
+// stays running and what gets rebuilt). The node is quiesced and its storage
+// handles are closed first, because external providers cannot be reset while
+// the node holds their connections. Restore then checks manifest compatibility,
+// validates the complete archives and, for external providers, captures
+// rollback copies before replacing either configured target. An incompatible
+// snapshot is therefore rejected after the quiesce, not before it.
 //
 // A bad snapshot is rejected with both original stores intact. A failure after
 // a live external reset automatically restores the original metadata and blob

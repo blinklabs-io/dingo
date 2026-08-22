@@ -18,8 +18,14 @@ package aws
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
 )
 
@@ -50,5 +56,48 @@ func (d *BlobStoreS3) ValidateBackup(ctx context.Context, r io.Reader) error {
 // Reset removes the configured prefix after lifecycle restore has retained a
 // rollback backup of it.
 func (d *BlobStoreS3) Reset(ctx context.Context) error {
-	return blobbackup.Reset(ctx, d, "s3 reset")
+	return blobbackup.Reset(ctx, d, d.resetBatch, "s3 reset")
+}
+
+// resetBatch uses S3's native multi-object delete instead of the ordinary
+// transaction path. Restore has already retained a complete rollback backup,
+// so downloading every prior value into a second per-transaction compensation
+// log would double the full-prefix transfer without improving recoverability.
+func (d *BlobStoreS3) resetBatch(ctx context.Context, keys [][]byte) error {
+	if len(keys) > blobbackup.DefaultRestoreBatchRecords {
+		return fmt.Errorf(
+			"S3 reset batch has %d keys; maximum is %d",
+			len(keys), blobbackup.DefaultRestoreBatchRecords,
+		)
+	}
+	objects := make([]s3types.ObjectIdentifier, 0, len(keys))
+	for _, key := range keys {
+		objects = append(objects, s3types.ObjectIdentifier{
+			Key: aws.String(d.fullKey(string(key))),
+		})
+	}
+
+	timeout := d.timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	deleteCtx, cancel := context.WithTimeout(ctx, timeout)
+	output, err := d.client.DeleteObjects(deleteCtx, &s3.DeleteObjectsInput{
+		Bucket: aws.String(d.bucket),
+		Delete: &s3types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+	})
+	cancel()
+	if err != nil {
+		return err
+	}
+	deleteErrs := make([]error, 0, len(output.Errors))
+	for _, deleteErr := range output.Errors {
+		deleteErrs = append(deleteErrs, fmt.Errorf(
+			"delete %q: %s: %s",
+			aws.ToString(deleteErr.Key),
+			aws.ToString(deleteErr.Code),
+			aws.ToString(deleteErr.Message),
+		))
+	}
+	return errors.Join(deleteErrs...)
 }

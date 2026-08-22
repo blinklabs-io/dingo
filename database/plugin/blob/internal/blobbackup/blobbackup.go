@@ -481,13 +481,17 @@ func Validate(
 	}
 }
 
-// Reset removes every key from store in bounded transactions. It is used only
-// by live restore after a complete rollback backup has been written. Restarting
-// the iterator after each committed batch keeps iterator state independent of
-// the writes and makes a retry continue from the remaining keys.
+// Reset removes every key from store in bounded batches. It is used only by
+// live restore after a complete rollback backup has been written. A provider
+// supplies deleteBatch when it can delete the collected keys without the
+// ordinary transaction path's per-key compensation work; nil retains that
+// path for stores without a provider-native reset operation. Restarting the
+// iterator after every successful batch keeps iterator state independent of
+// the deletes and makes a retry continue from the remaining keys.
 func Reset(
 	ctx context.Context,
 	store Store,
+	deleteBatch func(context.Context, [][]byte) error,
 	errPrefix string,
 ) error {
 	for {
@@ -527,6 +531,13 @@ func Reset(
 		}
 		if len(keys) == 0 {
 			return nil
+		}
+
+		if deleteBatch != nil {
+			if err := deleteBatch(ctx, keys); err != nil {
+				return fmt.Errorf("%s: delete batch: %w", errPrefix, err)
+			}
+			continue
 		}
 
 		writeTxn := store.NewTransaction(true)

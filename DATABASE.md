@@ -218,7 +218,11 @@ CI.
   CRC32 checksum, and the absence of trailing data before either live store is
   reset. For a live replacement of a populated remote target it also captures
   rollback backups of both stores. S3/GCS implement `blob.Resettable` with
-  bounded delete transactions; any metadata/blob reset or restore failure,
+  provider-native bounded deletion: S3 uses `DeleteObjects` batches of at most
+  1,000 keys, while GCS issues direct object deletes. Both bypass the ordinary
+  transaction commit path because its existence probes and per-key
+  compensation downloads would duplicate the complete rollback backup already
+  retained for this operation. Any metadata/blob reset or restore failure,
   final consistency failure, or cancellation after mutation restores both
   original backups under `context.WithoutCancel`. Rollback errors are joined
   with the original restore error and preserve the backup directory named in

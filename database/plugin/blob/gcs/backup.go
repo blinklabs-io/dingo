@@ -18,9 +18,12 @@ package gcs
 
 import (
 	"context"
+	"errors"
 	"io"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // Backup streams every key/value currently in the store to w. GCS has no
@@ -50,5 +53,29 @@ func (d *BlobStoreGCS) ValidateBackup(ctx context.Context, r io.Reader) error {
 // Reset removes the configured prefix after lifecycle restore has retained a
 // rollback backup of it.
 func (d *BlobStoreGCS) Reset(ctx context.Context) error {
-	return blobbackup.Reset(ctx, d, "gcs reset")
+	return blobbackup.Reset(ctx, d, d.resetBatch, "gcs reset")
+}
+
+// resetBatch deletes objects directly instead of routing through gcsTxn.Commit.
+// Restore has already retained the prefix's complete rollback backup, so the
+// transaction path's per-key existence probes and compensation downloads are
+// redundant here. GCS exposes no equivalent of S3 DeleteObjects; keep the
+// shared 1,000-key memory bound while issuing direct deletes.
+func (d *BlobStoreGCS) resetBatch(ctx context.Context, keys [][]byte) error {
+	timeout := d.timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	deleteCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for _, key := range keys {
+		if err := deleteCtx.Err(); err != nil {
+			return err
+		}
+		if err := d.deleteObject(deleteCtx, key); err != nil &&
+			!errors.Is(err, types.ErrBlobKeyNotFound) {
+			return err
+		}
+	}
+	return nil
 }

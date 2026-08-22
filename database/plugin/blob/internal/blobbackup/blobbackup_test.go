@@ -268,7 +268,8 @@ func (t *fakeTxn) Commit() error {
 func (t *fakeTxn) Rollback() error { return nil }
 
 type fakeStore struct {
-	data map[string][]byte
+	data      map[string][]byte
+	writeTxns int
 	// failCommitErr, when set, is returned by every fakeTxn.Commit instead
 	// of actually applying that transaction's pending writes -- used to
 	// simulate a cloud store's Commit reporting failure (e.g. wrapping
@@ -280,7 +281,10 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{data: map[string][]byte{}}
 }
 
-func (s *fakeStore) NewTransaction(bool) types.Txn {
+func (s *fakeStore) NewTransaction(readWrite bool) types.Txn {
+	if readWrite {
+		s.writeTxns++
+	}
 	return &fakeTxn{
 		store:   s,
 		pending: map[string][]byte{},
@@ -410,7 +414,32 @@ func TestResetRemovesEveryKeyInBoundedBatches(t *testing.T) {
 	}
 	require.NoError(t, txn.Commit())
 
-	require.NoError(t, Reset(context.Background(), store, "test reset"))
+	require.NoError(t, Reset(context.Background(), store, nil, "test reset"))
+	require.Empty(t, store.data)
+}
+
+func TestResetUsesProviderBatchDeleteWithoutWriteTransactions(t *testing.T) {
+	store := newFakeStore()
+	for i := range DefaultRestoreBatchRecords + 7 {
+		store.data[string(fmt.Appendf(nil, "key-%04d", i))] = []byte("value")
+	}
+
+	batchSizes := []int{}
+	err := Reset(
+		context.Background(),
+		store,
+		func(_ context.Context, keys [][]byte) error {
+			batchSizes = append(batchSizes, len(keys))
+			for _, key := range keys {
+				delete(store.data, string(key))
+			}
+			return nil
+		},
+		"test reset",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []int{DefaultRestoreBatchRecords, 7}, batchSizes)
+	require.Zero(t, store.writeTxns)
 	require.Empty(t, store.data)
 }
 
@@ -419,7 +448,7 @@ func TestResetCommitFailurePreservesOriginalBatch(t *testing.T) {
 	store.data["original"] = []byte("value")
 	store.failCommitErr = errors.New("injected commit failure")
 
-	err := Reset(context.Background(), store, "test reset")
+	err := Reset(context.Background(), store, nil, "test reset")
 	require.Error(t, err)
 	require.Equal(t, map[string][]byte{"original": []byte("value")}, store.data)
 }
