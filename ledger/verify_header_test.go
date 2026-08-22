@@ -388,11 +388,16 @@ type mockBabbageBlock struct {
 }
 
 type mockBoundaryAlonzoBlock struct {
-	mockBabbageBlock
+	gledger.Block
+	slot uint64
 }
 
 func (m *mockBoundaryAlonzoBlock) Era() lcommon.Era {
 	return alonzo.EraAlonzo
+}
+
+func (m *mockBoundaryAlonzoBlock) SlotNumber() uint64 {
+	return m.slot
 }
 
 func (m *mockBabbageBlock) Era() lcommon.Era {
@@ -1342,8 +1347,12 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 	// epoch-1's d=1 and returning genesisOverlayNonActive.
 	require.True(t, ls.genesisDelegationActiveForSlot(172_780))
 	require.False(t, ls.genesisDelegationActiveForSlot(172_836))
-	_, status, err := ls.genesisOverlayDelegationForSlot(
-		172_836,
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 172_836},
+		slot:  172_836,
+	}
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		block,
 		genesisCfg.ShelleyGenesis(),
 	)
 	require.NoError(t, err)
@@ -1351,6 +1360,13 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 }
 
 func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
+	delegateHash := tb.block.IssuerVkey().Hash()
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	vrfHash := lcommon.Blake2b256Hash(vrfKey)
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -1390,15 +1406,27 @@ func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
 				EraId:         eras.BabbageEraDesc.Id,
 			},
 		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newGenesisDelegateShelleyGenesisCfg(
+				t,
+				hex.EncodeToString(delegateHash.Bytes()),
+				hex.EncodeToString(vrfHash.Bytes()),
+			),
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
 	}
 	ls.publishSnapshotsLocked()
 
 	block := &mockBoundaryAlonzoBlock{
-		mockBabbageBlock: mockBabbageBlock{slot: 86_400},
+		Block: tb.block,
+		slot:  86_400,
 	}
 	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
 	require.NotNil(t, pparams)
 	assert.Equal(t, big.NewRat(1, 1), decentralizationParamRat(pparams))
+	handled, err := ls.verifyGenesisDelegateHeader(block, false)
+	require.NoError(t, err)
+	assert.True(t, handled)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(

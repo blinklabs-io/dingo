@@ -486,9 +486,9 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 	// Blockfetch can verify a header ahead of ledger apply, while the
 	// in-memory parameters still describe the previous epoch. Defer any
 	// state-dependent overlay decision until the rollover has installed the
-	// target epoch's parameters. This must precede genesisDelegationActiveForSlot
-	// and genesisOverlayDelegationForSlot because stale parameters can otherwise
-	// classify a future slot as having no overlay and return early.
+	// target epoch's parameters. This must precede
+	// genesisOverlayDelegationForBlock because stale parameters can otherwise
+	// classify a future slot as having no overlay.
 	if allowStateDefer && ls.ledgerTipBehindSlot(block.SlotNumber()) {
 		return true, fmt.Errorf(
 			"%w: genesis overlay state for slot %d is not yet authoritative",
@@ -554,17 +554,6 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 		)
 	}
 	return true, nil
-}
-
-func (ls *LedgerState) genesisOverlayDelegationForSlot(
-	slot uint64,
-	shelleyGenesis *shelley.ShelleyGenesis,
-) (genesisDelegation, genesisOverlaySlotStatus, error) {
-	return ls.genesisOverlayDelegationForSlotWithParams(
-		slot,
-		shelleyGenesis,
-		ls.genesisOverlayProtocolParamsForSlot(slot),
-	)
 }
 
 // genesisOverlayDelegationForBlock resolves the overlay parameters using the
@@ -775,21 +764,6 @@ func (ls *LedgerState) genesisDelegationActiveForSlot(slot uint64) bool {
 		return false
 	}
 	return shelleyGenesis.ProtocolParameters.Decentralization.Sign() > 0
-}
-
-func (ls *LedgerState) decentralizationParamRatForSlot(slot uint64) *big.Rat {
-	if pparams := ls.genesisOverlayProtocolParamsForSlot(slot); pparams != nil {
-		return decentralizationParamRat(pparams)
-	}
-	if ls.config.CardanoNodeConfig == nil {
-		return nil
-	}
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil ||
-		shelleyGenesis.ProtocolParameters.Decentralization == nil {
-		return nil
-	}
-	return shelleyGenesis.ProtocolParameters.Decentralization.Rat
 }
 
 // genesisOverlayProtocolParamsForSlot resolves the protocol parameters that
