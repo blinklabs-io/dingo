@@ -36,6 +36,23 @@ const (
 	maxPort             = 65535
 )
 
+// ValidateKESKeySources rejects a block producer that names both a local KES
+// signing key file and a KES agent socket.
+//
+// It lives here, rather than inline in Validate, because both the CLI path and
+// the programmatic Node path have to enforce it. Only the CLI path used to: a
+// library consumer that set both got kesAgentEnabled() true, the agent silently
+// preferred, and the local key file ignored — the operator's explicit choice of
+// key source discarded without a word.
+func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
+	if kesKeyPath != "" && kesAgentSocket != "" {
+		return errors.New(
+			"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		)
+	}
+	return nil
+}
+
 // AcceptedChainsyncStrategies mirrors
 // chainsync.AcceptedHeaderSyncStrategyNames (the accepted-name list
 // chainsync.ParseHeaderSyncStrategy is derived from). internal/config
@@ -486,10 +503,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
 			missing = append(missing, "shelleyKesKey")
 		}
-		if c.ShelleyKESKey != "" && c.ShelleyKESAgentSocket != "" {
-			errs = append(errs, errors.New(
-				"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
-			))
+		if err := ValidateKESKeySources(
+			c.ShelleyKESKey,
+			c.ShelleyKESAgentSocket,
+		); err != nil {
+			errs = append(errs, err)
 		}
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
@@ -507,6 +525,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid shelleyKesAgentMode %q: must be \"serve-key\" or \"sign\"",
 			c.ShelleyKESAgentMode,
+		))
+	}
+	if c.ShelleyKESAgentSignTimeout < 0 {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentSignTimeout (%s) must not be negative",
+			c.ShelleyKESAgentSignTimeout,
 		))
 	}
 

@@ -604,16 +604,22 @@ type Config struct {
 	// instead of a local --shelley-kes-key file. The VRF key and operational
 	// certificate flags still apply. Mirrors cardano-node's
 	// --shelley-kes-agent-socket.
-	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket" envconfig:"SHELLEY_KES_AGENT_SOCKET"`
+	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"         envconfig:"SHELLEY_KES_AGENT_SOCKET"`
 	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
 	// agent pushes the evolving KES sign key and the node signs headers
 	// locally) or "sign" (the node forwards header bodies and the agent
 	// returns signatures; the key never enters the node). Defaults to
 	// "serve-key" when a socket is set.
-	ShelleyKESAgentMode         string `yaml:"shelleyKesAgentMode"           envconfig:"SHELLEY_KES_AGENT_MODE"`
-	ForgeSyncToleranceSlots     uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	ValidateForgedBlock         bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	ShelleyKESAgentMode string `yaml:"shelleyKesAgentMode"           envconfig:"SHELLEY_KES_AGENT_MODE"`
+	// ShelleyKESAgentSignTimeout bounds one sign-mode round trip to the KES
+	// agent. It must stay below a slot: block production calls the signer
+	// synchronously on the slot-aligned loop, so a longer timeout parks forging
+	// for several slots when the agent stops answering. Zero uses the client
+	// default (500ms).
+	ShelleyKESAgentSignTimeout  time.Duration `yaml:"shelleyKesAgentSignTimeout"    envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	ForgeSyncToleranceSlots     uint64        `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64        `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	ValidateForgedBlock         bool          `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting

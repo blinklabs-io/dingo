@@ -231,6 +231,12 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
+// kesAgentReadyTimeout bounds how long block-producer startup waits for the
+// KES agent to deliver a key (serve-key) or accept a session (sign) before
+// logging that forging cannot proceed. Long enough to cover a slow agent
+// start, short enough not to stall the rest of node startup.
+const kesAgentReadyTimeout = 10 * time.Second
+
 // kesAgentEnabled reports whether the KES signing key should be sourced from
 // an external bursa KES agent rather than a local --shelley-kes-key file.
 func (n *Node) kesAgentEnabled() bool {
@@ -277,15 +283,38 @@ func (n *Node) newKESAgentSigner(
 		return nil, err
 	}
 	client, err := kesagent.New(kesagent.Config{
-		SocketPath: n.config.shelleyKESAgentSocket,
-		Mode:       mode,
-		OpCert:     opCert,
-		Logger:     n.config.logger,
+		SocketPath:   n.config.shelleyKESAgentSocket,
+		Mode:         mode,
+		OpCert:       opCert,
+		Logger:       n.config.logger,
+		SignTimeout:  n.config.shelleyKESAgentSignTimeout,
+		PromRegistry: n.config.promRegistry,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create KES agent client: %w", err)
 	}
 	client.Start(ctx)
+	// Wait for the agent before declaring the key sourced. A wrong socket path
+	// is otherwise silent: the node logs a healthy producer, forges nothing,
+	// and the first symptom is a lost slot, which on a real pool is hours away.
+	// The wait is bounded and non-fatal because the agent is a separate process
+	// that may legitimately start after the node; the Error record and
+	// dingo_kes_agent_connected are what make the misconfiguration visible.
+	if err := client.WaitForReady(ctx, kesAgentReadyTimeout); err != nil {
+		n.config.logger.Error(
+			"KES agent not ready; the node will not forge until it is reachable",
+			"component",
+			"node",
+			"socket",
+			n.config.shelleyKESAgentSocket,
+			"mode",
+			mode,
+			"waited",
+			kesAgentReadyTimeout.String(),
+			"error",
+			err,
+		)
+	}
 	n.config.logger.Info(
 		"KES signing key sourced from agent",
 		"component", "node",

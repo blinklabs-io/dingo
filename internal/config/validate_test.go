@@ -359,6 +359,19 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid shelleyKesAgentMode",
 		},
 		{
+			name: "negative KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = -time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "explicit KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 300 * time.Millisecond
+			},
+		},
+		{
 			name: "no network and no magic",
 			modify: func(c *Config) {
 				c.Network = ""
