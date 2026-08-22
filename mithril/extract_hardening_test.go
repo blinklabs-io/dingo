@@ -72,12 +72,13 @@ func requireDirectorySwap(t *testing.T, oldpath, newpath string) {
 // requireDirectorySwapSupport reports the same constraint as
 // requireDirectorySwap without performing the caller's swap.
 //
-// A test that stages its swap from another goroutine — the download
-// transport's, say — cannot use requireDirectorySwap, because t.Skip is only
-// valid on the goroutine running the test. Probing the capability here, before
-// the scenario is armed, keeps the skip on the test goroutine and keeps the
-// reason identical: where the platform refuses the rename, the manoeuvre cannot
-// be staged at all, which bounds the attack rather than the guarantee.
+// The archive swap tests stage their swap from a response-body Read callback.
+// io.Copy calls that Read synchronously on the calling test goroutine. Probing
+// the capability here, before the scenario is armed, lets a platform limitation
+// skip cleanly; once armed, the callback records any failure as scenario
+// evidence instead of using testing APIs. Where the platform refuses the
+// rename, the manoeuvre cannot be staged at all, which bounds the attack rather
+// than the guarantee.
 func requireDirectorySwapSupport(t *testing.T) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "swap-probe")
