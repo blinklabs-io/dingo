@@ -594,6 +594,59 @@ func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 	}
 }
 
+// TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch drives the
+// production guard at the one epoch where stakeRewardEpochsForApplication and
+// stakeRewardEpochsForNewEpoch differ. Without the application helper in the
+// guard, the bootstrap round reaches rewardParameters and fails because Byron
+// legitimately has no persisted protocol parameters.
+func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
+	t *testing.T,
+) {
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetEpoch(
+		0,
+		0,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ByronEraDesc.Id,
+		1,
+		21_600,
+		nil,
+	))
+	require.NoError(t, meta.SetEpoch(
+		21_600,
+		1,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ByronEraDesc.Id,
+		1,
+		21_600,
+		nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        1,
+		Reserves:     100_000_000,
+		CapturedSlot: 21_600,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		CapturedSlot: 0,
+		BoundarySlot: 0,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 2, 43_200)
+	}))
+}
+
 // TestApplyStakeRewardsGuardsExpiredRewardAccount is the Task 10 reward-crediting
 // guard test: a pool reward (leader) account expired as of the reward snapshot
 // epoch must not be credited, and its reward must be routed to undistributed ->
