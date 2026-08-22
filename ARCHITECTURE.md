@@ -2030,6 +2030,30 @@ bridge the gap, the ledger emits `chainsync.resync` with reason
 for a fresh intersect from the current local tip instead of waiting for a cursor
 that has already moved past the missing blocks.
 
+Each peer has two distinct frontiers. `PeerChainTip.Tip` is the remote peer's
+untrusted advertised network tip; `PeerChainTip.ObservedTip` is the latest
+header that peer actually delivered locally. Plausibility checks, Praos
+comparison, and behind-peer filtering use the delivered frontier. A
+`ChainSwitchEvent` preserves the advertised tips in `NewTip`/`PreviousTip` for
+protocol compatibility and carries the decision frontiers separately in
+`NewObservedTip`/`PreviousObservedTip`; ledger resync decisions use the observed
+field (falling back to `NewTip` for legacy/direct event producers). Before the
+node has applied any local block, new peers' advertisements remain bounded
+against the first bootstrap peer; after a local tip exists, the delivered
+frontier is the authority. This lets a node resume when the honest advertised
+tip is arbitrarily far ahead: the next delivered header is still checked
+incrementally against the previous delivered frontier (with the local-tip
+catch-up allowance). It also prevents a peer's unbounded advertisement from
+suppressing other peers or forcing a chain-switch resync. A tip update that
+carries no delivered frontier at all is recorded as having delivered nothing:
+the advertised tip is never substituted for a missing observed frontier, and
+the peer is bounded and compared as block 0 until it delivers a header.
+Genesis exit may consult the advertised slot only through the separately
+documented delivered-frontier gate below. A RollBackward restores the
+delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
+selector uses the rollback point with a conservative zero block number and
+never promotes the accompanying advertised tip into the observed frontier.
+
 A queued header range that no peer will serve is bounded by a failure count,
 `blockfetchRangeFailure`, capped at `blockfetchMaxSameRangeFailures`. Failing
 to obtain the range has two shapes and both count against the same range,
@@ -2213,9 +2237,9 @@ real network tip.
 The exit horizon (`bestKnownGenesisSlotLocked`) is the highest advertised tip
 slot among **corroborated (selectable)** peers that have **actually delivered
 headers up to within the window of that advertised tip**
-(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded —
-the implausible-tip check bounds the advertised *block number* but not the
-*slot*, and the first peer is accepted with no reference — and corroboration
+(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded;
+the implausible-tip check deliberately bounds the delivered frontier instead,
+because an honest advertisement can be far ahead during catch-up. Corroboration
 alone does not fix this, because it validates the *delivered* headers (the
 observed frontier), not the advertised claim: a peer that delivers one shared
 early header (passing corroboration) can still advertise a slot near

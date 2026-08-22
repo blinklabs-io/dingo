@@ -548,6 +548,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	defer pending.flush()
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
+	var effectiveObservedTip ochainsync.Tip
 	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
@@ -599,6 +600,10 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		}
 	}
 	if err == nil {
+		effectiveObservedTip, _ = ls.chainSwitchObservedTipForConnection(
+			e,
+			effectiveConnId,
+		)
 		requestFreshCursor = ls.chainSwitchNeedsFreshCursorLocked(
 			e,
 			effectiveConnId,
@@ -620,7 +625,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"local_tip_slot",
 			ls.PrimaryChainTip().Point.Slot,
 			"peer_tip_slot",
-			e.NewTip.Point.Slot,
+			effectiveObservedTip.Point.Slot,
 		)
 		ls.requestChainsyncResync(
 			effectiveConnId,
@@ -916,12 +921,48 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
 		return false
 	}
+	newObservedTip, ok := ls.chainSwitchObservedTipForConnection(e, connId)
+	if !ok {
+		return false
+	}
 	localTip := ls.PrimaryChainTip()
-	if e.NewTip.BlockNumber > localTip.BlockNumber {
+	if newObservedTip.BlockNumber > localTip.BlockNumber {
 		return true
 	}
-	return e.NewTip.BlockNumber == localTip.BlockNumber &&
-		e.NewTip.Point.Slot > localTip.Point.Slot
+	return newObservedTip.BlockNumber == localTip.BlockNumber &&
+		newObservedTip.Point.Slot > localTip.Point.Slot
+}
+
+func (ls *LedgerState) chainSwitchObservedTipForConnection(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	if sameConnectionId(connId, e.NewConnectionId) {
+		return chainSwitchNewObservedTip(e), true
+	}
+	if ls.config.GetPeerObservedTipFunc == nil {
+		return ochainsync.Tip{}, false
+	}
+	return ls.config.GetPeerObservedTipFunc(connId)
+}
+
+// chainSwitchNewObservedTip returns the peer frontier that chain selection
+// actually compared.
+//
+// The fallback is keyed on NewObservedTipSet, not on the frontier being
+// zero-valued. A zero frontier is a real observation meaning the peer delivered
+// nothing, which is exactly the advertising-only peer this path must not trust:
+// inferring "absent" from it handed such a peer's advertised outlier to ledger
+// cursor recovery. Only a producer that never populated the field -- an older
+// event, or a direct unit-test or integration constructor -- falls back to the
+// advertised tip.
+func chainSwitchNewObservedTip(
+	e chainselection.ChainSwitchEvent,
+) ochainsync.Tip {
+	if e.NewObservedTipSet {
+		return e.NewObservedTip
+	}
+	return e.NewTip
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
