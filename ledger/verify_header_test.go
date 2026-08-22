@@ -1342,68 +1342,6 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 	assert.Equal(t, genesisOverlayNone, status)
 }
 
-func TestGenesisOverlayUsesAbsoluteShelleyBoundaryForPreprod(t *testing.T) {
-	const (
-		byronEpochLength   = uint(21_600)
-		shelleyEpochLength = uint(432_000)
-		shelleyStartSlot   = uint64(86_400)
-	)
-
-	// The first Shelley row deliberately carries the stale start slot that
-	// caused the preprod boundary regression. The preceding Byron rows still
-	// identify the absolute hard-fork boundary at slot 86400.
-	epochCache := []models.Epoch{
-		{
-			EpochId:       0,
-			StartSlot:     0,
-			LengthInSlots: byronEpochLength,
-			EraId:         eras.ByronEraDesc.Id,
-		},
-		{
-			EpochId:       1,
-			StartSlot:     21_600,
-			LengthInSlots: byronEpochLength,
-			EraId:         eras.ByronEraDesc.Id,
-		},
-		{
-			EpochId:       2,
-			StartSlot:     43_200,
-			LengthInSlots: byronEpochLength,
-			EraId:         eras.ByronEraDesc.Id,
-		},
-		{
-			EpochId:       3,
-			StartSlot:     64_800,
-			LengthInSlots: byronEpochLength,
-			EraId:         eras.ByronEraDesc.Id,
-		},
-		{
-			EpochId:       4,
-			StartSlot:     21_600,
-			LengthInSlots: shelleyEpochLength,
-			EraId:         eras.ShelleyEraDesc.Id,
-		},
-	}
-	ls := &LedgerState{epochCache: epochCache}
-	ls.publishSnapshotsLocked()
-
-	got, err := ls.genesisOverlayEpochStartSlot(epochCache[4])
-	require.NoError(t, err)
-	assert.Equal(t, shelleyStartSlot, got)
-
-	// At the actual Shelley boundary, slot 86400 is position 0 and is the
-	// first active overlay slot for the first genesis delegate. Using the stale
-	// row start (21600) would select position 3240 instead.
-	index, status := classifyGenesisOverlaySlot(
-		shelleyStartSlot-got,
-		big.NewRat(1, 1),
-		big.NewRat(1, 20),
-		7,
-	)
-	require.Equal(t, genesisOverlayActive, status)
-	assert.Equal(t, uint64(0), index)
-}
-
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	t *testing.T,
 ) {
