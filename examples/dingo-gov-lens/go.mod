@@ -2,6 +2,8 @@ module github.com/blinklabs-io/dingo/examples/dingo-gov-lens
 
 go 1.26.0
 
+toolchain go1.26.7
+
 require github.com/jackc/pgx/v5 v5.10.0
 
 require (

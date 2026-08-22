@@ -21,8 +21,9 @@ PROTOC_ZIP=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARC
 PROTOC=$(PROTOC_DIR)/bin/protoc
 SQLC_VERSION=v1.31.1
 SQLC=go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
-GOVULNCHECK_VERSION=v1.7.0
-GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+# The scanner floats along with the advisory database it reads; a pin parks a
+# new advisory behind a stale version instead of forcing it to be fixed.
+GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@latest
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
 PROTOC_SHA256_linux_aarch_64=4a802ed23d70f7bad7eb19e5a3e724b3aa967250d572cadfd537c1ba939aee6a

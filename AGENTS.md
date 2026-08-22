@@ -27,6 +27,7 @@ make docs-parity
 make golines
 make sql-check    # only when database/sql queries or sqlc.yaml changed
 make gorm-check
+make govulncheck  # reachable Go vulnerabilities; needs network
 ```
 
 ## Testing rules
