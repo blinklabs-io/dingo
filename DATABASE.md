@@ -226,11 +226,10 @@ CI.
   retained for this operation. Any metadata/blob reset or restore failure,
   final consistency failure, or cancellation after mutation restores both
   original backups under `context.WithoutCancel`. Rollback errors are joined
-  with the original restore error as `ErrRestoreRollbackPending`, preserve a
-  retryable `RestoreRecovery` handle for recoverable callers, and preserve the
-  backup directory named in
-  the error. Offline restore removes the rollback copy only after both
-  replacement stores pass `validateRestoredDatabase`; live node restore uses
+  with the original restore error as `ErrRestoreRollbackPending`, while a
+  retryable `RestoreRecovery` handle and the backup directory named in the
+  error remain available. Offline restore removes the rollback copy only after
+  both replacement stores pass `validateRestoredDatabase`; live node restore uses
   `RestoreRecoverable` to retain it through the local directory swap and node
   reinitialization as well.
 

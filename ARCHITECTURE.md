@@ -1690,9 +1690,9 @@ restoring the original blob state and then the original metadata state. A
 rollback failure is joined with, rather than substituted for, the initiating
 restore error as `ErrRestoreRollbackPending`; its message names the retained
 rollback directory, and recoverable callers retain a retry handle. A live node
-stays stopped rather than reopening an uncertain provider pair. Ordinary
-restore removes rollback files only after both
-incoming stores pass `validateRestoredDatabase`. Live node restore uses
+stays stopped rather than reopening an uncertain provider pair. Ordinary restore
+removes rollback files only after both incoming stores pass
+`validateRestoredDatabase`. Live node restore uses
 `RestoreRecoverable` to retain them through the local directory swap and node
 reinitialization, then calls `Commit`; a later swap failure can still call
 `Rollback` and restore the external pair before the node resumes.
