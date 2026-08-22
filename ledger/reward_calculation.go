@@ -57,7 +57,16 @@ func (ls *LedgerState) applyStakeRewards(
 	// its performance epoch is still Byron. There are no stake rewards to
 	// apply for that epoch, so continue the rollover without entering the
 	// Shelley reward calculation path.
-	if rewardEpochs, ok := stakeRewardEpochsForNewEpoch(newEpoch); ok {
+	//
+	// Resolved through stakeRewardEpochsForApplication, the same helper the
+	// guarded path uses (calculateStakeRewardApplication,
+	// precomputedStakeRewardApplication). The two helpers agree everywhere
+	// except newEpoch == 2, where stakeRewardEpochsForNewEpoch reports
+	// ok=false for being below 3 while the application path resolves the
+	// bootstrap round against performance epoch 0. Guarding on the narrower
+	// helper skipped exactly the round this guard exists to catch, and epoch 2
+	// is inside the Byron prefix on every network this affects.
+	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
 		performanceEpoch, err := ls.db.Metadata().GetEpoch(
 			rewardEpochs.performance,
 			txn.Metadata(),
