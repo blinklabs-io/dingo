@@ -391,6 +391,7 @@ func TestTransactionWitnessCleanupCostFlatAcrossCardinality(t *testing.T) {
 	fixed := witnessCleanupSweep(t, fixedDB, steps, repetitions)
 	control := witnessCleanupSweep(t, controlDB, steps, repetitions)
 	t.Logf("rows=%v fixed=%v control=%v", steps, fixed, control)
+	requireResolvableTimings(t, steps, fixed, control)
 
 	ratio := func(medians []time.Duration) float64 {
 		return float64(medians[len(medians)-1]) / float64(medians[0])
@@ -506,6 +507,7 @@ func TestSetTransactionCostFlatAfterDeferredIndexDrop(t *testing.T) {
 		t, controlStore, controlDB, steps, timed, timedSlotBase, "control",
 	)
 	t.Logf("rows=%v fixed=%v control=%v", steps, fixed, control)
+	requireResolvableTimings(t, steps, fixed, control)
 
 	growth := float64(slices.Max(steps)) / float64(slices.Min(steps))
 	controlLast := control[len(control)-1]
@@ -608,6 +610,42 @@ func setTransactionSweep(
 		medians = append(medians, samples[len(samples)/2])
 	}
 	return medians
+}
+
+// requireResolvableTimings skips when the clock cannot resolve the work being
+// measured.
+//
+// Both sweeps in this file compare durations, and every assertion they make is
+// meaningless once a sample is zero: a ratio of two zeroes is NaN, which an
+// ordering assertion reports as "Can not compare type float64" rather than as a
+// failure, and a zero difference makes a separation check trivially false. That
+// is a property of the platform's timer granularity, not of the indexes under
+// test -- windows-latest leaves the smaller cardinalities at 0s while the same
+// code resolves to hundreds of microseconds on Linux.
+//
+// Skipping states that the measurement could not be made. Raising the row
+// counts until every platform clears its floor would slow the sweep everywhere
+// to keep one platform honest, and asserting on the samples anyway would report
+// a timer resolution as an index regression.
+func requireResolvableTimings(
+	t *testing.T,
+	steps []int,
+	sweeps ...[]time.Duration,
+) {
+	t.Helper()
+	for _, medians := range sweeps {
+		for i, median := range medians {
+			if median <= 0 {
+				t.Skipf(
+					"clock cannot resolve this workload: median at %d rows "+
+						"measured %v, so the sweep carries no signal (%v)",
+					steps[i],
+					median,
+					medians,
+				)
+			}
+		}
+	}
 }
 
 // preChangeDeferredWitnessIndexes names the witness transaction_id indexes a
