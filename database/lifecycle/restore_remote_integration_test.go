@@ -78,6 +78,12 @@ func (s *remoteIntegrationBlobStore) Restore(
 			return s.BlobStoreS3.Restore(ctx, r)
 		}
 		if s.control.failRestores.CompareAndSwap(remaining, remaining-1) {
+			// Fail only after the replacement is durably loaded so the test
+			// exercises compensation of a mutated remote target, not merely
+			// an error returned before Restore performs its first write.
+			if err := s.BlobStoreS3.Restore(ctx, r); err != nil {
+				return err
+			}
 			return errInjectedRemoteBlobRestore
 		}
 	}
@@ -447,6 +453,7 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 		failRestores      int32
 		wantError         string
 		wantPreflightOnly bool
+		wantReset         bool
 		wantIncoming      bool
 	}{
 		{
@@ -483,6 +490,7 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 			name:         "blob restore failure",
 			failRestores: 1,
 			wantError:    errInjectedRemoteBlobRestore.Error(),
+			wantReset:    true,
 		},
 		{name: "success", wantIncoming: true},
 	}
@@ -538,6 +546,9 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 			}
 			if tt.wantPreflightOnly {
 				require.Zero(t, control.resetCalls.Load())
+			}
+			if tt.wantReset {
+				require.NotZero(t, control.resetCalls.Load())
 			}
 
 			network := "mainnet"
