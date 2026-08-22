@@ -387,6 +387,14 @@ type mockBabbageBlock struct {
 	slot uint64
 }
 
+type mockBoundaryAlonzoBlock struct {
+	mockBabbageBlock
+}
+
+func (m *mockBoundaryAlonzoBlock) Era() lcommon.Era {
+	return alonzo.EraAlonzo
+}
+
 func (m *mockBabbageBlock) Era() lcommon.Era {
 	return babbage.EraBabbage
 }
@@ -1340,6 +1348,57 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, genesisOverlayNone, status)
+}
+
+func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	previousPParams := &alonzo.AlonzoProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	previousPParamsCbor, err := cbor.Encode(previousPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		previousPParamsCbor,
+		0,
+		0,
+		eras.AlonzoEraDesc.Id,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.BabbageEraDesc.Id,
+		},
+		currentEra: eras.BabbageEraDesc,
+		currentPParams: &babbage.BabbageProtocolParameters{
+			ProtocolMajor: eras.BabbageEraDesc.MinMajorVersion,
+		},
+		epochCache: []models.Epoch{
+			{
+				EpochId:       1,
+				StartSlot:     86_400,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.BabbageEraDesc.Id,
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		mockBabbageBlock: mockBabbageBlock{slot: 86_400},
+	}
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	require.NotNil(t, pparams)
+	assert.Equal(t, big.NewRat(1, 1), decentralizationParamRat(pparams))
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(

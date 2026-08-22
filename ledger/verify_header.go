@@ -496,12 +496,8 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 			block.SlotNumber(),
 		)
 	}
-	if !ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
-		return false, nil
-	}
-
-	genesisDeleg, status, err := ls.genesisOverlayDelegationForSlot(
-		block.SlotNumber(),
+	genesisDeleg, status, err := ls.genesisOverlayDelegationForBlock(
+		block,
 		shelleyGenesis,
 	)
 	if err != nil {
@@ -564,6 +560,34 @@ func (ls *LedgerState) genesisOverlayDelegationForSlot(
 	slot uint64,
 	shelleyGenesis *shelley.ShelleyGenesis,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	return ls.genesisOverlayDelegationForSlotWithParams(
+		slot,
+		shelleyGenesis,
+		ls.genesisOverlayProtocolParamsForSlot(slot),
+	)
+}
+
+// genesisOverlayDelegationForBlock resolves the overlay parameters using the
+// era that encoded the block. At a hard-fork boundary, the boundary block can
+// be encoded in the predecessor era while its header announces the successor.
+// In that case the epoch cache already describes the successor era, but the
+// block's leader was selected under the predecessor-era parameters.
+func (ls *LedgerState) genesisOverlayDelegationForBlock(
+	block ledger.Block,
+	shelleyGenesis *shelley.ShelleyGenesis,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	return ls.genesisOverlayDelegationForSlotWithParams(
+		block.SlotNumber(),
+		shelleyGenesis,
+		ls.genesisOverlayProtocolParamsForBlock(block),
+	)
+}
+
+func (ls *LedgerState) genesisOverlayDelegationForSlotWithParams(
+	slot uint64,
+	shelleyGenesis *shelley.ShelleyGenesis,
+	pparams lcommon.ProtocolParameters,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
 	genesisDelegs, err := parseShelleyGenesisDelegations(shelleyGenesis)
 	if err != nil {
 		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
@@ -593,7 +617,7 @@ func (ls *LedgerState) genesisOverlayDelegationForSlot(
 		)
 	}
 
-	decentralization := ls.decentralizationParamRatForSlot(slot)
+	decentralization := decentralizationParamRat(pparams)
 	overlayIndex, status := classifyGenesisOverlaySlot(
 		slot-epoch.StartSlot,
 		decentralization,
@@ -794,6 +818,50 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForSlot(
 				); pparamsErr == nil && pparams != nil {
 					return pparams
 				}
+			}
+		}
+	}
+	return ls.ProtocolParamsForSlot(slot)
+}
+
+// genesisOverlayProtocolParamsForBlock resolves protocol parameters for the
+// block body era rather than only the epoch's current era. A hard-fork
+// boundary block may be encoded in the predecessor era while its header
+// announces the successor; using the successor-era parameters would disable
+// a still-active genesis overlay and incorrectly send the genesis delegate
+// through the registered-pool lookup.
+func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
+	block ledger.Block,
+) lcommon.ProtocolParameters {
+	slot := block.SlotNumber()
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return ls.ProtocolParamsForSlot(slot)
+	}
+
+	paramsEpoch := epoch.EpochId
+	paramsEraID := epoch.EraId
+	blockEraID := uint(block.Era().Id)
+	if blockEraID < epoch.EraId && paramsEpoch > 0 {
+		paramsEpoch--
+		paramsEraID = blockEraID
+	}
+
+	snapshot := ls.loadConsensusSnapshot()
+	if paramsEpoch == snapshot.currentEpoch.EpochId &&
+		paramsEraID == snapshot.currentEpoch.EraId {
+		return snapshot.currentPParams
+	}
+	if ls.db != nil {
+		era, ok := ls.eraById(paramsEraID)
+		if ok && era != nil && era.DecodePParamsFunc != nil {
+			if pparams, pparamsErr := ls.db.GetPParams(
+				paramsEpoch,
+				paramsEraID,
+				era.DecodePParamsFunc,
+				nil,
+			); pparamsErr == nil && pparams != nil {
+				return pparams
 			}
 		}
 	}
