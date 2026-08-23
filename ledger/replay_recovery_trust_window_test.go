@@ -42,7 +42,7 @@ type trustWindowLedger struct {
 	ls        *LedgerState
 	ledgerTip ochainsync.Tip
 	failing   *txValidationError
-	resyncs   chan event.ChainsyncResyncEvent
+	resyncs   <-chan event.Event
 }
 
 // newTrustWindowLedger builds the shape of issue #3261: the applied ledger tip
@@ -83,20 +83,15 @@ func newTrustWindowLedger(
 
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
-	resyncs := make(chan event.ChainsyncResyncEvent, 64)
-	subId := bus.SubscribeFunc(
+	// Observe the bus-owned subscriber channel directly. Publish hands an
+	// event to this channel before it returns, so draining after a recovery
+	// attempt cannot race a SubscribeFunc dispatch goroutine that has not yet
+	// copied an already-published resync into a second test-only channel.
+	subId, resyncs := bus.SubscribeWithBuffer(
 		event.ChainsyncResyncEventType,
-		func(evt event.Event) {
-			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
-			if !ok {
-				return
-			}
-			select {
-			case resyncs <- resync:
-			default:
-			}
-		},
+		64,
 	)
+	require.NotZero(t, subId)
 	t.Cleanup(func() {
 		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
 	})
