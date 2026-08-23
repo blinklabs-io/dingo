@@ -98,6 +98,7 @@ func TestAdvanceEpochCacheRejectsHardForkBoundary(t *testing.T) {
 
 			err := ls.advanceEpochCache()
 			require.ErrorContains(t, err, "hard-fork boundary")
+			require.ErrorIs(t, err, errEpochCacheForecastBoundary)
 			require.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
 				"forecast must not publish a previous-era boundary row")
 
@@ -136,4 +137,29 @@ func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
 	got, err := ls.epochForSlot(forecast.StartSlot)
 	require.NoError(t, err)
 	require.Equal(t, forecast, got)
+}
+
+func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {
+	lastByronEpoch := models.Epoch{
+		EpochId:       forecastBoundaryEpoch - 1,
+		StartSlot:     forecastBoundaryStartSlot,
+		LengthInSlots: forecastByronEpochLength,
+		SlotLength:    20_000,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls := newEpochCacheForecastLedger(
+		t,
+		lastByronEpoch,
+		hardfork.NewTransitionKnown(forecastBoundaryEpoch),
+		false,
+	)
+
+	_, err := ls.headerVerificationEpoch(
+		lastByronEpoch.StartSlot+uint64(lastByronEpoch.LengthInSlots),
+		true,
+	)
+	require.ErrorContains(t, err, "hard-fork boundary")
+	require.ErrorIs(t, err, errHeaderVerificationDeferred,
+		"boundary wait must not be classified as an honest-peer fault")
+	require.Len(t, ls.loadConsensusSnapshot().epochCache, 1)
 }

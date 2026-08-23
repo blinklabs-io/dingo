@@ -59,6 +59,9 @@ var (
 	errHeaderVerificationDeferred = errors.New(
 		"header verification deferred",
 	)
+	errEpochCacheForecastBoundary = errors.New(
+		"epoch cache forecast crosses era boundary",
+	)
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
 	)
@@ -398,6 +401,15 @@ func (ls *LedgerState) headerVerificationEpoch(
 		// compute the next epoch(s) so verification can proceed.
 		epoch, err = ls.ensureEpochForSlot(blockSlot)
 		if err != nil {
+			if errors.Is(err, errEpochCacheForecastBoundary) {
+				return models.Epoch{}, fmt.Errorf(
+					"%w: block header verification deferred at hard-fork "+
+						"boundary for slot %d: %w",
+					errHeaderVerificationDeferred,
+					blockSlot,
+					err,
+				)
+			}
 			return models.Epoch{}, fmt.Errorf(
 				"block header verification rejected: no epoch data for slot %d: %w",
 				blockSlot,
@@ -1589,7 +1601,8 @@ func (ls *LedgerState) validateEpochCacheForecast(
 		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
 		if nextEpochID >= entry.NextEraTrigger.Epoch {
 			return fmt.Errorf(
-				"cannot forecast epoch %d from era %d across configured hard-fork boundary at epoch %d",
+				"%w: cannot forecast epoch %d from era %d across configured hard-fork boundary at epoch %d",
+				errEpochCacheForecastBoundary,
 				nextEpochID,
 				lastEpoch.EraId,
 				entry.NextEraTrigger.Epoch,
@@ -1603,7 +1616,8 @@ func (ls *LedgerState) validateEpochCacheForecast(
 		return nil
 	}
 	return fmt.Errorf(
-		"cannot forecast epoch %d from era %d across confirmed hard-fork boundary at epoch %d",
+		"%w: cannot forecast epoch %d from era %d across confirmed hard-fork boundary at epoch %d",
+		errEpochCacheForecastBoundary,
 		nextEpochID,
 		lastEpoch.EraId,
 		transition.KnownEpoch,
