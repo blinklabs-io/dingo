@@ -471,14 +471,25 @@ func DefaultLoggingConfig() LoggingConfig {
 // optional gRPC API surface. Indexing is only active when Enabled is true
 // AND Dingo is running in API storage mode -- both are required, since the
 // indexer depends on the API-mode indexes to function; Validate rejects
-// Enabled without API storage mode. Port 0 disables only the gRPC server.
+// Enabled without API storage mode. ServerEnabled independently opts into
+// serving the stored Midnight state; when enabled, Port must be non-zero.
 type MidnightConfig struct {
 	// Enabled opts into running the Midnight indexer. Default false: an
 	// api-mode deployment that wants Midnight indexing must set this
 	// explicitly.
-	Enabled bool   `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
-	Port    uint   `yaml:"port"    envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host    string `yaml:"host"    envconfig:"DINGO_MIDNIGHT_HOST"`
+	Enabled bool `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	// ServerEnabled independently opts into the Midnight gRPC listener.
+	// Indexing and serving persisted Midnight rows are separate operations.
+	ServerEnabled bool `yaml:"serverEnabled" envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
+	// ReflectionEnabled exposes gRPC service discovery when the server is
+	// enabled. It defaults off because reflection broadens the public surface.
+	ReflectionEnabled bool `yaml:"reflectionEnabled" envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	// AllowInsecureRemote permits a plaintext listener on a non-loopback
+	// address. It is an explicit escape hatch for deployments that provide
+	// transport security outside Dingo.
+	AllowInsecureRemote bool   `yaml:"allowInsecureRemote" envconfig:"DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE"`
+	Port                uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host                string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -497,7 +508,7 @@ type MidnightConfig struct {
 func DefaultMidnightConfig() MidnightConfig {
 	return MidnightConfig{
 		Port: 50051,
-		Host: "0.0.0.0",
+		Host: "127.0.0.1",
 	}
 }
 

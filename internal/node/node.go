@@ -318,7 +318,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
-		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
+		"midnight_grpc", storageMode.IsAPI() &&
+			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
 	d, err := dingo.New(
@@ -572,6 +573,9 @@ func buildDingoConfig(
 		),
 		dingo.WithMidnightConfig(dingo.MidnightConfig{
 			Enabled:                     cfg.Midnight.Enabled,
+			ServerEnabled:               cfg.Midnight.ServerEnabled,
+			ReflectionEnabled:           cfg.Midnight.ReflectionEnabled,
+			AllowInsecureRemote:         cfg.Midnight.AllowInsecureRemote,
 			Port:                        cfg.Midnight.Port,
 			Host:                        cfg.Midnight.Host,
 			CNightPolicyID:              cfg.Midnight.CNightPolicyID,

@@ -319,10 +319,25 @@ var flagSpecs = []flagSpec{
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
 	),
+	boolFlag(
+		"Midnight.ServerEnabled",
+		"midnight-server-enabled",
+		`enable the Midnight gRPC server (requires storageMode "api")`,
+	),
+	boolFlag(
+		"Midnight.ReflectionEnabled",
+		"midnight-reflection-enabled",
+		"enable Midnight gRPC reflection",
+	),
+	boolFlag(
+		"Midnight.AllowInsecureRemote",
+		"midnight-allow-insecure-remote",
+		"allow plaintext Midnight gRPC on a non-loopback address",
+	),
 	uintFlag(
 		"Midnight.Port",
 		"midnight-port",
-		"Midnight gRPC port (0 disables gRPC server)",
+		"Midnight gRPC port (must be non-zero when the server is enabled)",
 	),
 	stringFlag(
 		"Midnight.Host",

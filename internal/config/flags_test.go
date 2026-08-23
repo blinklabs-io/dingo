@@ -544,6 +544,39 @@ func TestApplyFlags_MidnightEnabledFlag(t *testing.T) {
 	})
 }
 
+func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "false")
+	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "false")
+	t.Setenv("DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE", "false")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(
+		"midnight:\n"+
+			"  serverEnabled: true\n"+
+			"  reflectionEnabled: true\n"+
+			"  allowInsecureRemote: true\n",
+	), 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.False(t, cfg.Midnight.ServerEnabled, "environment overrides YAML")
+	require.False(t, cfg.Midnight.ReflectionEnabled, "environment overrides YAML")
+	require.False(t, cfg.Midnight.AllowInsecureRemote, "environment overrides YAML")
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--midnight-server-enabled=true",
+		"--midnight-reflection-enabled=true",
+		"--midnight-allow-insecure-remote=true",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.True(t, cfg.Midnight.ServerEnabled, "CLI overrides environment")
+	require.True(t, cfg.Midnight.ReflectionEnabled, "CLI overrides environment")
+	require.True(t, cfg.Midnight.AllowInsecureRemote, "CLI overrides environment")
+}
+
 func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
 	resetGlobalConfig()
 

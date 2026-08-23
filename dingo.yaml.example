@@ -584,18 +584,31 @@ genesisBootstrap:
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
-# not enough. Setting port to 0 disables the Midnight gRPC server while
-# leaving indexing eligible to run.
-# CLI: --midnight-enabled, --midnight-port, --midnight-host
-# Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
-# Address and policy fields are YAML only.
+# not enough. The gRPC server is a separate, explicit opt-in and also requires
+# API storage mode. It can serve persisted Midnight rows without running the
+# indexer. Plaintext is loopback-only unless allowInsecureRemote is set; use
+# tlsCertFilePath/tlsKeyFilePath for a protected remote listener.
+# CLI: --midnight-enabled, --midnight-server-enabled,
+#   --midnight-reflection-enabled, --midnight-allow-insecure-remote,
+#   --midnight-port, --midnight-host
+# Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_SERVER_ENABLED,
+#   DINGO_MIDNIGHT_REFLECTION_ENABLED, DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE,
+#   DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
+# Midnight chain addresses and policy-ID/asset-name constants are YAML only.
 midnight:
   # Enable the Midnight indexer. Default: false.
   enabled: false
-  # gRPC listen port
+  # Enable the Midnight gRPC server. Default: false.
+  serverEnabled: false
+  # Expose gRPC service discovery. Requires serverEnabled. Default: false.
+  reflectionEnabled: false
+  # Allow plaintext on a wildcard, hostname, or concrete non-loopback bind.
+  # Use only when transport security is supplied outside Dingo. Default: false.
+  allowInsecureRemote: false
+  # gRPC listen port. Must be non-zero when serverEnabled is true.
   port: 50051
-  # gRPC listen address
-  host: "0.0.0.0"
+  # gRPC listen address. Plaintext defaults to loopback-only.
+  host: "127.0.0.1"
   # Midnight network constants. Known network defaults are applied when
   # available; set these explicitly for custom networks or overrides.
   cnightPolicyId: ""

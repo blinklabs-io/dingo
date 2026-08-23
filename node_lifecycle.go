@@ -954,7 +954,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	return nil
 }
 
-// reinitializeAPIServers rebuilds the optional, storage-mode/port-gated API
+// reinitializeAPIServers rebuilds the optional, storage-mode/config-gated API
 // servers (utxorpc, midnightServer, blockfrostAPI, meshAPI,
 // offchainMetadataFetcher), matching Run()'s gating exactly. The Bark blob-
 // store client (n.config.barkBaseUrl) is handled in reinitializeCoreStorage
@@ -998,7 +998,7 @@ func (n *Node) reinitializeAPIServers() error {
 		n.bark.ResumeDB(n.db)
 	}
 
-	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
+	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
@@ -1014,14 +1014,16 @@ func (n *Node) reinitializeAPIServers() error {
 					}
 					return block.Number, true, nil
 				},
-				Host:            n.config.midnight.Host,
-				Port:            n.config.midnight.Port,
-				TLSCertFilePath: n.config.tlsCertFilePath,
-				TLSKeyFilePath:  n.config.tlsKeyFilePath,
-				ShutdownTimeout: n.config.shutdownTimeout,
-				Database:        midnightserver.NewDatabase(n.db),
-				SlotTimer:       n.ledgerState,
-				PromRegistry:    n.config.promRegistry,
+				Host:                n.config.midnight.Host,
+				Port:                n.config.midnight.Port,
+				TLSCertFilePath:     n.config.tlsCertFilePath,
+				TLSKeyFilePath:      n.config.tlsKeyFilePath,
+				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
+				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:     n.config.shutdownTimeout,
+				Database:            midnightserver.NewDatabase(n.db),
+				SlotTimer:           n.ledgerState,
+				PromRegistry:        n.config.promRegistry,
 			},
 		)
 		if err != nil {
