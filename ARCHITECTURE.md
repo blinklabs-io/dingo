@@ -6705,12 +6705,12 @@ for issue #3165: a node three reward rounds short ran 0.042% low in sigma
 and rejected a canonical block whose leader value sat between its own
 threshold and the reference's.
 
-The inputs are absent chiefly after a Mithril bootstrap, whose preceding
-epochs the node never saw, so the first rounds after import have nothing to
-compute from. The ledger-state import closes the pots half of that gap: it
-seeds a `RewardAdaPots` row for the snapshot's own epoch from the state it
-already decodes -- treasury and reserves from `AccountState`, the fee pot
-from `UTxOState` -- so the round at the first boundary after import is not
+The inputs can be absent after a Mithril bootstrap, either because an epoch
+predates the imported state or because an imported basis could not be derived
+without understating stake. The ledger-state import closes the pots half of
+that gap by seeding a `RewardAdaPots` row for the snapshot's own epoch from the
+state it already decodes -- treasury and reserves from `AccountState`, the fee
+pot from `UTxOState` -- so the round at the first boundary after import is not
 skipped for want of pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
@@ -6756,6 +6756,20 @@ different boundary slot and epoch length. An epoch it cannot place at all is
 skipped rather than seeded from a guessed window. Block counts are not seeded and
 do not need to be — `rewardBlockCounts` derives them by scanning the imported
 chain for the performance epoch.
+
+The registration lookup is prepared from the union of pool keys delegated to
+by mark, set and go, but its result is intersected with each target snapshot's
+positive-stake delegated pool set before derivation. The target snapshot's
+complete parameters then overlay that scoped fallback. This separation is
+required because the three snapshots describe different epochs: a
+retired-but-scheduled pool can be present only in set while its synthesized
+registration, which intentionally has no historical reward account or
+economics, appears in the shared lookup. It must not become a zero-stake pool
+input that invalidates mark or go. A pool actually delegated to by the target
+snapshot is never removed by this scoping; if neither source can describe it
+completely, the reconciliation gate still rejects the whole basis rather than
+persisting a partial reward share. That rejection reports every incomplete
+pool and its delegated stake deterministically.
 
 Each epoch's derived basis is gated before it is written
 (`rewardInputBundle.validate`), and a basis that does not reconcile is dropped

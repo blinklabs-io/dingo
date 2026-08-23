@@ -2379,9 +2379,10 @@ func stakeRewardEpochsForApplication(
 // counted, because a node in this state is silently diverging from the
 // network and only says so when it eventually rejects a block.
 //
-// The inputs are absent chiefly after a Mithril bootstrap: applying the round
-// at the boundary into N needs this node's own reward snapshot for N-3 and
-// ADA pots for N-1, and those epochs predate the import.
+// The inputs can be absent after a Mithril bootstrap, but the cause is not
+// necessarily that they predate the import: an imported reward basis can also
+// have failed reconciliation and therefore never been persisted. The warning
+// stays factual and points to the earlier diagnostics rather than guessing.
 func (ls *LedgerState) reportSkippedStakeRewards(
 	newEpoch uint64,
 	reason string,
@@ -2396,8 +2397,8 @@ func (ls *LedgerState) reportSkippedStakeRewards(
 		"skipping stake rewards: "+reason+
 			"; this epoch's rewards will never be credited, leaving reward"+
 			" balances and the leadership stake distribution permanently"+
-			" short (expected after a Mithril bootstrap, whose preceding"+
-			" epochs this node never saw)",
+			" short (the required basis was never persisted; inspect earlier"+
+			" bootstrap and ledgerstate import warnings for the cause)",
 		"component", "ledger",
 		"new_epoch", newEpoch,
 		epochKey, epochValue,
