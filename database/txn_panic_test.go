@@ -17,6 +17,7 @@ package database
 import (
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,25 +78,51 @@ func TestTxnDoCommitPanicReleasesLockAndBarrier(t *testing.T) {
 		time.Second,
 		"PauseCommits must acquire after panic cleanup",
 	)
+	var resumeOnce sync.Once
+	safeResume := func() { resumeOnce.Do(resume) }
 
-	writerOpened := make(chan *Txn, 1)
+	writerOpened := make(chan struct{})
+	writerRelease := make(chan struct{})
+	writerDone := make(chan struct{})
 	go func() {
+		defer close(writerDone)
 		next := &Txn{db: db, readWrite: true}
 		acquireCommitBarrier(next, true)
-		writerOpened <- next
+		close(writerOpened)
+		<-writerRelease
+		_ = next.Rollback()
 	}()
+	var writerReleaseOnce sync.Once
+	safeReleaseWriter := func() {
+		writerReleaseOnce.Do(func() { close(writerRelease) })
+	}
+	t.Cleanup(func() {
+		safeResume()
+		safeReleaseWriter()
+		select {
+		case <-writerDone:
+		case <-time.After(time.Second):
+			t.Errorf("timeout cleaning up queued writer")
+		}
+	})
 	testutil.RequireNoReceive(
 		t,
 		writerOpened,
 		100*time.Millisecond,
 		"the pause must still exclude a new writer",
 	)
-	resume()
-	next := testutil.RequireReceive(
+	safeResume()
+	testutil.RequireReceive(
 		t,
 		writerOpened,
 		time.Second,
 		"the next writer must open after resume",
 	)
-	require.NoError(t, next.Rollback())
+	safeReleaseWriter()
+	testutil.RequireReceive(
+		t,
+		writerDone,
+		time.Second,
+		"the next writer must roll back during cleanup",
+	)
 }
