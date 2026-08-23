@@ -368,6 +368,10 @@ When a run fails, `run-tests.sh` keeps `DEVNET_ARTIFACT_DIR` (a temp
 directory it creates, or one you set) and prints its path instead of
 deleting it. On success the directory is removed.
 
+Teardown is best-effort and never replaces the test exit status. In dingo
+mode, the temporary stake-key copy is written with the host uid/gid so the
+runner can remove its own temporary tree after either result.
+
 | Path | Contents |
 |------|----------|
 | `network/container-status.txt` | `docker compose ps --all` for the profile |

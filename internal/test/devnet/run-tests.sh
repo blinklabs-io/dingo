@@ -154,10 +154,15 @@ collect_failure_artifacts() {
 
 cleanup() {
   local exit_code=$?
+  # Cleanup is best-effort and must never replace the test result. Disable the
+  # trap before the explicit exit below, and disable errexit so one failed
+  # cleanup step cannot skip the rest of the teardown.
+  trap - EXIT
+  set +e
   if [[ "${KEEP_UP}" == "true" ]] && [[ ${exit_code} -eq 0 ]]; then
     log "Tests passed. DevNet left running (--keep-up)."
     log "To stop:  docker compose -f ${COMPOSE_FILE} down -v"
-    return
+    exit "${exit_code}"
   fi
   if [[ ${exit_code} -ne 0 ]]; then
     log "Collecting logs before teardown..."
@@ -171,6 +176,7 @@ cleanup() {
   if [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
     rm -rf "${STAKE_KEYS_HOST_DIR}"
   fi
+  exit "${exit_code}"
 }
 trap cleanup EXIT
 
@@ -267,7 +273,10 @@ if [[ "${MODE}" == "dingo" ]]; then
   else
     # Never let a copy failure abort the run. Missing stake keys are handled
     # below by disabling the opt-in CIP-50 scenario for this invocation.
+    # Match the host user so the runner can remove its own temporary tree.
+    # The source volume is world-readable by configurator.sh.
     docker run --rm \
+      --user "$(id -u):$(id -g)" \
       -v "${UTXO_KEYS_VOLUME}:/k:ro" \
       -v "${STAKE_KEYS_HOST_DIR}:/out" \
       alpine sh -c 'cp -r /k/stake /out/stake' 2>/dev/null || true
