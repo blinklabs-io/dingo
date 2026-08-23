@@ -4328,12 +4328,13 @@ without one.
   upgrade for any deployment that had set them only for UTxO RPC, which
   they never protected. An operator opting Blockfrost/Mesh into TLS does so
   explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
-  `bindAddr` and `corsAllowedOrigins` are unaffected by any of this and
-  stay at the `Config` root exactly as before: `bindAddr` is not
-  API-specific (the relay/NtN and metrics/debug listeners use it too), and
-  `corsAllowedOrigins`'s single shared value already applies uniformly to
-  all three API providers today, so duplicating either field under `api:`
-  would only add a second source of truth with no behavioral gain.
+  `bindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are unaffected by any
+  of this and stay at the `Config` root: `bindAddr` is not API-specific (the
+  relay/NtN and metrics listeners use it too), `debugBindAddr` controls the
+  separate pprof listener, and `corsAllowedOrigins`'s single shared value
+  already applies uniformly to all three API providers today. Duplicating
+  these fields under `api:` would only add a second source of truth with no
+  behavioral gain.
   Authentication has no legacy root field at all — its default is simply
   `"disabled"` everywhere, so existing reverse-proxy/no-auth deployments
   are unaffected regardless.
@@ -6265,6 +6266,12 @@ checks: mode enums, listener port ranges (privileged/out-of-range/duplicate),
 load-mode `immutableDbPath` requirement, path-traversal guards, TLS cert/key
 pairing, mempool implementation and watermarks, block-producer credential paths, and
 duration/strategy strings that are otherwise only parsed at their point of use.
+The unauthenticated pprof listener has its own `debugBindAddr` setting
+(`--debug-bind-addr` / `DINGO_DEBUG_BIND_ADDR`) and defaults to
+`127.0.0.1`, independently of the public `bindAddr` and private
+`privateBindAddr`. A wildcard pprof listener therefore requires an explicit
+override of the dedicated setting; both serving modes and Mithril snapshot
+sync use the same resolved address.
 Port checks apply only to the listeners a given invocation actually starts,
 derived from the *effective* run mode plus the storage mode: the serving modes
 start the relay, private, metrics, debug, and bark listeners (and, under `api`

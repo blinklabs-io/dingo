@@ -94,6 +94,31 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 	}
 }
 
+func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
+	cfg := &config.Config{
+		BindAddr:      "0.0.0.0",
+		DebugBindAddr: "127.0.0.1",
+		DebugPort:     6060,
+	}
+
+	srv := newPprofDebugServer(cfg)
+	if srv == nil {
+		t.Fatal("expected enabled pprof debug server")
+	}
+	if got, want := srv.Addr, "127.0.0.1:6060"; got != want {
+		t.Fatalf("pprof address = %q, want %q", got, want)
+	}
+
+	cfg.DebugBindAddr = "0.0.0.0"
+	srv = newPprofDebugServer(cfg)
+	if srv == nil {
+		t.Fatal("expected explicitly exposed pprof debug server")
+	}
+	if got, want := srv.Addr, "0.0.0.0:6060"; got != want {
+		t.Fatalf("explicit wildcard pprof address = %q, want %q", got, want)
+	}
+}
+
 func TestWaitForSignalOrErrorReturnsSignalWithoutQueuedError(t *testing.T) {
 	t.Parallel()
 

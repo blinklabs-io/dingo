@@ -141,6 +141,23 @@ func serveAuxiliaryListener(
 	}
 }
 
+func newPprofDebugServer(cfg *config.Config) *http.Server {
+	if cfg.DebugPort == 0 {
+		return nil
+	}
+	debugMux := http.NewServeMux()
+	debugMux.HandleFunc("/debug/pprof/", pprof.Index)
+	debugMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return &http.Server{
+		Addr:              cfg.DebugListenAddress(),
+		Handler:           debugMux,
+		ReadHeaderTimeout: 60 * time.Second,
+	}
+}
+
 // logStartupConfig debug-logs the effective node configuration through
 // Config's redacted representation (Config.LogValue), so a debug log never
 // persists a Koios API key, an inline API auth token, or a storage provider
@@ -360,24 +377,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
-	var debugServer *http.Server
-	if cfg.DebugPort != 0 {
-		debugMux := http.NewServeMux()
-		debugMux.HandleFunc("/debug/pprof/", pprof.Index)
-		debugMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-		debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		debugAddr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.DebugPort)
+	debugServer := newPprofDebugServer(cfg)
+	if debugServer != nil {
 		logger.Info(
-			"serving pprof debug endpoints on "+debugAddr,
+			"serving pprof debug endpoints on "+debugServer.Addr,
 			"component", "node",
 		)
-		debugServer = &http.Server{
-			Addr:              debugAddr,
-			Handler:           debugMux,
-			ReadHeaderTimeout: 60 * time.Second,
-		}
 	}
 	// Wait for interrupt/termination signal
 	signalCtx, signalCtxStop := signal.NotifyContext(

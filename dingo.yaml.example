@@ -155,6 +155,12 @@ metricsPort: 12798
 # CLI: --debug-port  Env: DINGO_DEBUG_PORT
 debugPort: 0
 
+# Address for the unauthenticated pprof listener. This is deliberately
+# independent of bindAddr and privateBindAddr and stays on loopback by default.
+# Set a wildcard address only when an external network control protects it.
+# CLI: --debug-bind-addr  Env: DINGO_DEBUG_BIND_ADDR
+debugBindAddr: "127.0.0.1"
+
 # Enable OpenTelemetry tracing. Disabled by default: with no collector
 # listening, the OTLP exporter logs noisy connection errors. When enabled,
 # spans are sent via OTLP HTTP; configure the destination with the standard

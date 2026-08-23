@@ -125,6 +125,47 @@ func TestPledgeLeverageEnvBinding(t *testing.T) {
 	}
 }
 
+func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(t, "0.0.0.0", cfg.BindAddr)
+	require.Equal(t, DefaultDebugBindAddr, cfg.DebugBindAddr)
+	require.Equal(t, "127.0.0.1:0", cfg.DebugListenAddress())
+	require.Equal(t, "127.0.0.1:6060", (&Config{DebugPort: 6060}).DebugListenAddress())
+}
+
+func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("debugBindAddr: 127.0.0.2\ndebugPort: 6060\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.2", cfg.DebugBindAddr)
+
+	t.Setenv("DINGO_DEBUG_BIND_ADDR", "127.0.0.3")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.3", cfg.DebugBindAddr)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--debug-bind-addr=0.0.0.0",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "0.0.0.0", cfg.DebugBindAddr)
+	require.Equal(t, "0.0.0.0:6060", cfg.DebugListenAddress())
+}
+
 func TestFullPotRewardsEnvBinding(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

@@ -168,6 +168,12 @@ var flagSpecs = []flagSpec{
 	),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
+	stringFlag(
+		"DebugBindAddr",
+		"debug-bind-addr",
+		"",
+		"pprof bind address (wildcard exposure requires an explicit override)",
+	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
 	boolPtrFlag(
 		"PeerSharing",
