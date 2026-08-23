@@ -101,7 +101,7 @@ const maxReplayRecoveryNoProgress = 2
 // maxMithrilBoundaryRecoveryRejections bounds how many successful validation
 // recovery attempts may refuse a rewind at the Mithril trust boundary without
 // advancing the applied ledger tip before the failure is declared
-// unrepairable (issues #3261 and #3301).
+// unrepairable (issues #3261, #3301, and #3318).
 //
 // The bound covers the whole legal rewind space. A boundary rejection rewinds
 // to the applied ledger tip -- the deepest point recovery may reach without
@@ -560,9 +560,10 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 // the ledger has made forward progress past the failing region. Called from the
 // block-apply success path when the tip advances beyond the last recorded
 // at-tip failure slot, so a later, unrelated at-tip failure starts with a fresh
-// recovery budget instead of inheriting a stale hold. Runs on the ledger
-// pipeline goroutine, the same goroutine that mutates these fields during
-// recovery, so no additional locking is required.
+// recovery budget instead of inheriting a stale hold or same-failure rewind
+// depth. Same-tip replay preserves both schedules. Runs on the ledger pipeline
+// goroutine, the same goroutine that mutates these fields during recovery, so
+// no additional locking is required.
 func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 	if ls.atTipRecoveryLastFailSlot == 0 {
 		return
@@ -573,6 +574,7 @@ func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 	ls.atTipRecoveryLastFailSlot = 0
 	ls.atTipRecoveryDescentCount = 0
 	ls.atTipRecoveryHolding = false
+	ls.lastAtTipRecovery = nil
 }
 
 func (ls *LedgerState) recoverAtTipFromTxValidationError(
@@ -830,7 +832,8 @@ func (ls *LedgerState) rejectAtTipRecoveryAtMithrilBoundary(
 // The applied tip is the convergence signal rather than the failing block or
 // transaction identity. Replay can encounter different, slowly advancing
 // failures while rebuilding to the same applied tip; rearming the budget on
-// each identity would let that sequence retry forever (issue #3301).
+// each identity would let that sequence retry forever (issues #3301 and
+// #3318).
 //
 // Runs on the ledger pipeline goroutine, like its at-tip and replay siblings,
 // so the tally needs no additional locking. Callers record an attempt only

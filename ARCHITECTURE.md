@@ -3075,18 +3075,21 @@ window deeper every cycle and the node would fall unboundedly behind the wall
 clock, recoverable only by restart. `maxAtTipRecoveryDescents` consecutive
 distinct failures that fail to advance latch recovery into a hold-at-tip mode
 that suppresses deep rewinds — rewinding only to the ledger tip so ChainSync
-re-delivers rather than descending. The latch clears when the ledger makes
-forward progress past the failing region (`resetAtTipRecoveryDescent`, called
-from the block-apply success path). Because a hold usually indicates local
-ledger validation diverging from the network (a false-positive rejection that
-no rewind can fix) rather than a peer/fork problem, it surfaces the
+re-delivers rather than descending. The latch and the same-`(block, tx)` rewind
+depth both clear only when the ledger makes forward progress past the failing
+region (`resetAtTipRecoveryDescent`, called from the post-commit block-apply
+success path); replaying back to the same tip preserves both. Because a hold
+usually indicates local ledger validation diverging from the network (a
+false-positive rejection that no rewind can fix) rather than a peer/fork
+problem, it surfaces the
 `dingo_ledger_attip_recovery_nonconverging_total` metric and a throttled
 operator warning; a node in this state needs the underlying validation
 divergence resolved.
 
 Both recovery paths refuse a rewind target below the Mithril anchor, and that
-refusal has its own terminal bound (issues #3261 and #3301). Refusing rewinds
-instead to the applied ledger tip and asks ChainSync for a fresh intersection,
+refusal has its own terminal bound (issues #3261, #3301, and #3318). A refusal
+rewinds instead to the applied ledger tip and asks ChainSync for a fresh
+intersection,
 which is an escape only while some peer offers a different chain; for a
 canonical block every peer offers the same one. When the failing block sits a
 short distance past the anchor, every target the rewind schedule produces falls

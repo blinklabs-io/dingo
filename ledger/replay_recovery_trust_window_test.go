@@ -278,11 +278,11 @@ func TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering(t *testing.T) {
 }
 
 // TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState covers the
-// post-bootstrap replay path from issue #3301. The producer is canonical but
-// below the imported anchor, so its parent can never be a legal local rewind
-// target. Changing failing block/transaction identities must not rearm the
-// budget while the applied tip remains fixed; replay failures can creep
-// forward in exactly that shape.
+// post-bootstrap replay path from issues #3301 and #3318. The producer is
+// canonical but below the imported anchor, so its parent can never be a legal
+// local rewind target. Changing failing block/transaction identities must not
+// rearm the budget while the applied tip remains fixed; replay failures can
+// creep forward in exactly that shape.
 func TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState(
 	t *testing.T,
 ) {
