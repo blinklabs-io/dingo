@@ -1464,20 +1464,30 @@ func (ls *LedgerState) ensureEpochForSlot(
 	)
 }
 
-// advanceEpochCache computes the next epoch's parameters and nonce from
-// chain data and appends it to the in-memory epoch cache. This is a
+// advanceEpochCache computes the next same-era epoch's parameters and nonce
+// from chain data and appends it to the in-memory epoch cache. This is a
 // lightweight alternative to the full processEpochRollover — it only
 // populates the nonce and epoch boundaries needed for header verification,
-// without running pparam updates, snapshot rotation, or DB writes.
-// The full rollover will run later in ledgerProcessBlocks and replace
-// the cache with the authoritative DB-backed version.
+// without running pparam updates, snapshot rotation, or DB writes. It refuses
+// to cross a confirmed or configured hard-fork boundary because only the full
+// rollover owns the successor era's parameters and snapshot rotation. The full
+// rollover will run later in ledgerProcessBlocks and replace the cache with the
+// authoritative DB-backed version.
 func (ls *LedgerState) advanceEpochCache() error {
 	// Read last epoch from the lock-free consensus snapshot
-	cache := ls.loadConsensusSnapshot().epochCache
+	snapshot := ls.loadConsensusSnapshot()
+	cache := snapshot.epochCache
 	if len(cache) == 0 {
 		return errors.New("epoch cache is empty")
 	}
 	lastEpoch := cache[len(cache)-1]
+	if err := ls.validateEpochCacheForecast(
+		lastEpoch,
+		snapshot.currentEra.Id,
+		snapshot.transitionInfo,
+	); err != nil {
+		return err
+	}
 
 	if lastEpoch.LengthInSlots == 0 {
 		return errors.New("last epoch has zero length")
@@ -1533,6 +1543,18 @@ func (ls *LedgerState) advanceEpochCache() error {
 		ls.Unlock()
 		return nil
 	}
+	// TransitionInfo can become known without changing the cache tail while
+	// nonce computation is in flight. Recheck under the writer lock so that
+	// publication cannot race a newly-confirmed boundary and append a row with
+	// the source era's parameters on the other side.
+	if err := ls.validateEpochCacheForecast(
+		lastCached,
+		ls.currentEra.Id,
+		ls.transitionInfo,
+	); err != nil {
+		ls.Unlock()
+		return err
+	}
 	newCache := make([]models.Epoch, len(ls.epochCache), len(ls.epochCache)+1)
 	copy(newCache, ls.epochCache)
 	ls.epochCache = append(newCache, newEpoch)
@@ -1550,6 +1572,42 @@ func (ls *LedgerState) advanceEpochCache() error {
 	)
 
 	return nil
+}
+
+// validateEpochCacheForecast rejects an eager cache advance that would cross
+// an era boundary. A configured TriggerAtEpoch is authoritative for the cache
+// tail's era. Otherwise TransitionKnown applies only when the tail still
+// belongs to the current era whose transition state was published.
+func (ls *LedgerState) validateEpochCacheForecast(
+	lastEpoch models.Epoch,
+	currentEraID uint,
+	transition hardfork.TransitionInfo,
+) error {
+	nextEpochID := lastEpoch.EpochId + 1
+	shape := ls.eraShape()
+	if entry, ok := shape.EraForID(lastEpoch.EraId); ok &&
+		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+		if nextEpochID >= entry.NextEraTrigger.Epoch {
+			return fmt.Errorf(
+				"cannot forecast epoch %d from era %d across configured hard-fork boundary at epoch %d",
+				nextEpochID,
+				lastEpoch.EraId,
+				entry.NextEraTrigger.Epoch,
+			)
+		}
+		return nil
+	}
+	if lastEpoch.EraId != currentEraID ||
+		transition.State != hardfork.TransitionKnown ||
+		nextEpochID < transition.KnownEpoch {
+		return nil
+	}
+	return fmt.Errorf(
+		"cannot forecast epoch %d from era %d across confirmed hard-fork boundary at epoch %d",
+		nextEpochID,
+		lastEpoch.EraId,
+		transition.KnownEpoch,
+	)
 }
 
 // computeEpochNonceForSlot computes the epoch nonce, evolving nonce,
