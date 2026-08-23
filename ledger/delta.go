@@ -241,23 +241,34 @@ func (d *LedgerDelta) applyWithDonationRecording(
 		d.accumulateNetworkDonations(appliedTxs)
 	}
 
-	// Emit transaction events only after all processing succeeds,
-	// so subscribers never see an "applied" event for a transaction
-	// whose governance processing failed and caused the apply to abort.
-	// Emitted on the ledger.tx ordered lane so a subscriber sees this
-	// block's transactions in index order, and sees them after the undo
-	// events of any rollback that preceded them. See
+	// Stage transaction events only after all delta processing succeeds, then
+	// publish them once the database transaction commits durably. A later delta
+	// failure, rollback, or commit failure discards the callback, so subscribers
+	// never derive state from an Apply that did not persist. AfterCommit runs
+	// callbacks in registration order, and this callback walks transactions in
+	// index order before handing each event to the ledger.tx ordered lane. See
 	// publishTransactionEvent.
+	applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
 	for i, tr := range d.Transactions {
 		if !appliedTxs[i] {
 			continue
 		}
-		ls.publishTransactionEvent(TransactionEvent{
+		applyEvents = append(applyEvents, TransactionEvent{
 			Transaction: tr.Tx,
 			Point:       d.Point,
 			BlockNumber: d.BlockNumber,
 			TxIndex:     uint32(tr.Index), //nolint:gosec
 			Rollback:    false,
+		})
+	}
+	if len(applyEvents) > 0 {
+		txn.AfterCommit(func() {
+			if ls.beforeTransactionApplyPublish != nil {
+				ls.beforeTransactionApplyPublish()
+			}
+			for _, evt := range applyEvents {
+				ls.publishTransactionEvent(evt)
+			}
 		})
 	}
 
