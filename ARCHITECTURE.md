@@ -4039,16 +4039,19 @@ that. That cap does NOT extend to manual header-reading APIs
 (`DecodeMapHeader`, `NewStreamDecoder` combined with manual iteration): those
 read a raw count/byte off the wire with no built-in bound from the decoder
 itself, so every such call site enforces its own explicit check.
-`ledgerstate`'s hand-rolled map/array walkers (`decodeMapEntries`) and the
-UTxO-map streaming decoder enforce the same 10,000,000-entry cap
-independently — the definite-length UTxO map's `DecodeMapHeader`-reported
-count is checked up front (`checkUTxOMapEntryCount`), and the
-indefinite-length UTxO map, which has no header count to check up front, is
-capped with an equivalent running check against every streamed entry
-(`checkUTxOMapRunningEntryCount`). Because there is no upfront count, entries
-below the cap are already streamed to the UTxO import batch callback (and
-therefore committed to the database) by the time the running check rejects
-entry `maxMapEntries`+1 — this is safe rather than a partial-import bug:
+`ledgerstate`'s hand-rolled map/array walkers (`decodeMapEntries`) retain the
+generic 10,000,000-entry cap. The streaming UTxO decoder instead has an
+explicit 100,000,000-entry cap because a valid chain UTxO set can exceed the
+generic map limit; the larger bound still limits work on malformed or
+adversarial input. The definite-length UTxO map's
+`DecodeMapHeader`-reported count is checked up front
+(`checkUTxOMapEntryCount`), and the indefinite-length UTxO map, which has no
+header count to check up front, is capped with an equivalent running check
+against every streamed entry (`checkUTxOMapRunningEntryCount`). Because there
+is no upfront count, entries below the cap are already streamed to the UTxO
+import batch callback (and therefore committed to the database) by the time
+the running check rejects entry `maxUTxOMapEntries`+1 — this is safe rather
+than a partial-import bug:
 every UTxO write is an idempotent "insert if absent" upsert, and
 `ImportLedgerState` never marks the UTxO import phase checkpoint or advances
 the chain tip when this check fails, so a later re-run (checkpoint-resumed or
