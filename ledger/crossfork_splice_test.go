@@ -274,6 +274,8 @@ func TestContinuationAuditReportsUnresolvableProducer(t *testing.T) {
 func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "prior rollback")
+	require.NotNil(t, ls.continuationAudit.Load())
 
 	ls.Lock()
 	ls.currentTip = fixture.ancestorTip
@@ -287,7 +289,7 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 	assert.Nil(
 		t,
 		ls.continuationAudit.Load(),
-		"a rollback ahead of the applied ledger must not arm the audit",
+		"a rollback ahead of the applied ledger must disarm any prior audit",
 	)
 	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
 }

@@ -3041,9 +3041,12 @@ hold and restores the normal fallback budget.
 
 That hold bounds the damage but cannot explain where an unresolvable producer
 came from, so a bounded diagnostic attributes it
-(`ledger/continuation_audit.go`). A local rollback — chainsync rollback via
+(`ledger/continuation_audit.go`). A local rollback that leaves the primary chain
+and applied ledger at the same point — chainsync rollback via
 `rollbackChainAndState`, or a replay-recovery rewind — arms a
-`continuationAuditWindow` at the rollback point. While armed, every body
+`continuationAuditWindow` there. A chainsync rollback point ahead of the applied
+ledger instead disarms any prior window because its fork point no longer
+describes the continuation being fetched. While armed, every body
 delivered by blockfetch above that point is checked input by input: an input
 resolves when its producing transaction was created by a block already seen in
 the window (fetched and on the chain, not yet applied), when the ledger still
@@ -3054,10 +3057,10 @@ and the fork point the node had rolled back to, and increments
 `dingo_ledger_continuation_input_unresolved_total`. The audit never rejects a
 block; the splice it detects is prevented upstream in the chain layer, and
 bodies that still fail reach the ordinary validation and recovery guards
-unchanged. Arming on rollback is both the cost gate — a healthy node never runs
-the per-input probes on the steady-state blockfetch path — and what makes the
-check sound, since a rollback leaves the chain and the ledger at the same point
-so every later block arrives through the window. Each arming inspects at most
+unchanged. Arming only after an aligned rollback is both the cost gate — a
+healthy node never runs the per-input probes on the steady-state blockfetch
+path — and what makes the check sound, since every later block then arrives
+through the window. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers. The audit is also skipped
 while block validation is off, which is how historical catch-up runs: the splice

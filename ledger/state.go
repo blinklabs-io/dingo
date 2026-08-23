@@ -3042,9 +3042,12 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	// snapshot catch-up. In that case ls.rollback intentionally leaves the
 	// ledger at its existing tip, so arming the audit at the primary-chain
 	// rollback point would report every unapplied continuation as missing a
-	// producer. Arm only when both sides actually reached the rollback point.
+	// producer. Arm only when both sides actually reached the rollback point,
+	// and discard any window left by an earlier rollback when they did not.
 	if pointMatches(ls.Tip().Point, point) {
 		ls.armContinuationAudit(point, "chainsync rollback")
+	} else {
+		ls.continuationAudit.Store(nil)
 	}
 	return nil
 }
