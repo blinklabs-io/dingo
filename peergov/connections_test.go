@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
 
 func TestIsExpectedConnectionCloseError(t *testing.T) {
@@ -240,6 +241,224 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsPermanentNetworkMagicMismatch(t *testing.T) {
+	mismatchMessage := "version data mismatch: " +
+		"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 764824073}, diffusionMode = InitiatorOnlyDiffusionMode} " +
+		"/= NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 2}, diffusionMode = InitiatorAndResponderDiffusionMode}"
+	sameMagicMessage := "version data mismatch: " +
+		"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 2}, peerSharing = PeerSharingDisabled} " +
+		"/= NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 2}, peerSharing = PeerSharingEnabled}"
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "wrapped typed refusal with different magic",
+			err: fmt.Errorf(
+				"outbound handshake: %w",
+				&handshake.RefusedError{Version: 13, Message: mismatchMessage},
+			),
+			want: true,
+		},
+		{
+			name: "same magic version data mismatch",
+			err:  &handshake.RefusedError{Version: 13, Message: sameMagicMessage},
+			want: false,
+		},
+		{
+			name: "untyped lookalike",
+			err:  errors.New(mismatchMessage),
+			want: false,
+		},
+		{
+			name: "sanitized refusal without both values",
+			err: &handshake.RefusedError{
+				Version: 13,
+				Message: "network magic mismatch",
+			},
+			want: false,
+		},
+		{
+			name: "other refusal containing two magic fields",
+			err: &handshake.RefusedError{
+				Version: 13,
+				Message: strings.Replace(
+					mismatchMessage,
+					"version data mismatch",
+					"connection not allowed",
+					1,
+				),
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPermanentNetworkMagicMismatch(tc.err); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart(
+	t *testing.T,
+) {
+	const address = "44.0.0.10:3001"
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pg := NewPeerGovernor(PeerGovernorConfig{Logger: logger})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 764824073}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.permanentlyDenyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	pg.mu.Lock()
+	pg.denyList[address] = time.Now().Add(-time.Minute)
+	pg.cleanupDenyList()
+	deniedAfterTransientExpiry := pg.isDeniedLocked(address)
+	peerCount := len(pg.peers)
+	pg.mu.Unlock()
+	if !deniedAfterTransientExpiry {
+		t.Fatal("permanent denial expired with the transient deny list")
+	}
+	if peerCount != 0 {
+		t.Fatalf("ledger peer count = %d, want 0 after permanent denial", peerCount)
+	}
+
+	if pg.addLedgerPeer(address) {
+		t.Fatal("ledger discovery reported adding permanently denied peer")
+	}
+	pg.mu.Lock()
+	peerCount = len(pg.peers)
+	pg.mu.Unlock()
+	if peerCount != 0 {
+		t.Fatalf("ledger rediscovery re-added permanently denied peer")
+	}
+
+	restarted := NewPeerGovernor(PeerGovernorConfig{Logger: logger})
+	if !restarted.addLedgerPeer(address) {
+		t.Fatal("ledger discovery did not add peer after restart")
+	}
+	restarted.mu.Lock()
+	restartedPeerCount := len(restarted.peers)
+	restarted.mu.Unlock()
+	if restartedPeerCount != 1 {
+		t.Fatalf(
+			"peer count after restart = %d, want 1",
+			restartedPeerCount,
+		)
+	}
+}
+
+func TestPermanentNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
+	t *testing.T,
+) {
+	const (
+		configuredAddress = "relay.invalid:3001"
+		dialAddress       = "44.0.0.12:3001"
+	)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	stalePeer := &Peer{
+		Address:           configuredAddress,
+		NormalizedAddress: dialAddress,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	// Model removal while CreateOutboundConn is still completing its handshake.
+	pg.mu.Lock()
+	pg.peers = nil
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 1}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.permanentlyDenyNetworkMagicMismatch(stalePeer, dialAddress, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	pg.mu.Lock()
+	_, configuredDenied := pg.permanentDenyList[configuredAddress]
+	_, normalizedDenied := pg.permanentDenyList[dialAddress]
+	pg.mu.Unlock()
+	if !configuredDenied || !normalizedDenied {
+		t.Fatalf(
+			"stale refusal keys: configured=%v normalized=%v, want both true",
+			configuredDenied,
+			normalizedDenied,
+		)
+	}
+	if pg.addLedgerPeer(dialAddress) {
+		t.Fatal("ledger discovery re-added peer removed during its handshake")
+	}
+}
+
+func TestSameMagicVersionDataMismatchRemainsTransient(t *testing.T) {
+	const address = "44.0.0.11:3001"
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}, peerSharing = PeerSharingDisabled} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}, peerSharing = PeerSharingEnabled}",
+	}
+	if pg.permanentlyDenyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("same-magic negotiation mismatch was treated as permanent")
+	}
+	pg.mu.Lock()
+	_, permanentlyDenied := pg.permanentDenyList[address]
+	peerCount := len(pg.peers)
+	pg.mu.Unlock()
+	if permanentlyDenied {
+		t.Fatal("same-magic mismatch populated permanent deny list")
+	}
+	if peerCount != 1 {
+		t.Fatalf("same-magic mismatch removed peer, count = %d", peerCount)
 	}
 }
 

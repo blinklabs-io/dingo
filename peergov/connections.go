@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,7 +29,44 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
+
+var networkMagicFieldPattern = regexp.MustCompile(
+	`\bunNetworkMagic\s*=\s*([0-9]+)\b`,
+)
+
+// isPermanentNetworkMagicMismatch reports whether err is a typed handshake
+// refusal whose Haskell version-data rendering proves the two peers use
+// different network magic values. Other version-data mismatches remain
+// transient because diffusion mode, peer sharing, and query mode can be
+// negotiated without changing networks.
+func isPermanentNetworkMagicMismatch(err error) bool {
+	var refusedErr *handshake.RefusedError
+	if !errors.As(err, &refusedErr) ||
+		!strings.Contains(
+			strings.ToLower(refusedErr.Message),
+			"version data mismatch",
+		) {
+		return false
+	}
+	matches := networkMagicFieldPattern.FindAllStringSubmatch(
+		refusedErr.Message,
+		-1,
+	)
+	if len(matches) != 2 {
+		return false
+	}
+	left, err := strconv.ParseUint(matches[0][1], 10, 32)
+	if err != nil {
+		return false
+	}
+	right, err := strconv.ParseUint(matches[1][1], 10, 32)
+	if err != nil {
+		return false
+	}
+	return left != right
+}
 
 func isConnectionCancellationError(err error) bool {
 	if err == nil {
@@ -489,6 +528,9 @@ func (p *PeerGovernor) createOutboundConnection(
 			case <-time.After(reconnectDelay):
 			}
 			continue
+		}
+		if p.permanentlyDenyNetworkMagicMismatch(peer, dialTarget, err) {
+			return
 		}
 		failMsg := fmt.Sprintf(
 			"outbound: failed to establish connection to %s: %s",
@@ -1042,6 +1084,9 @@ func (p *PeerGovernor) IsDenied(address string) bool {
 // isDeniedLocked checks if a peer is on the deny list.
 // This method assumes the mutex is already held by the caller.
 func (p *PeerGovernor) isDeniedLocked(address string) bool {
+	if _, exists := p.permanentDenyList[address]; exists {
+		return true
+	}
 	expiry, exists := p.denyList[address]
 	if !exists {
 		return false
@@ -1052,6 +1097,92 @@ func (p *PeerGovernor) isDeniedLocked(address string) bool {
 		return false
 	}
 	return true
+}
+
+// permanentlyDenyNetworkMagicMismatch records an address-scoped denial for a
+// peer that proved it belongs to another Cardano network. The denial is held
+// only in PeerGovernor memory and therefore clears when the node restarts.
+func (p *PeerGovernor) permanentlyDenyNetworkMagicMismatch(
+	peer *Peer,
+	dialTarget string,
+	err error,
+) bool {
+	if !isPermanentNetworkMagicMismatch(err) {
+		return false
+	}
+
+	p.mu.Lock()
+	if p.permanentDenyList == nil {
+		p.permanentDenyList = make(map[string]struct{})
+	}
+	// The peer can be removed or replaced while its dial and handshake run.
+	// Record the immutable attempt identity first so that a stale completion
+	// still suppresses rediscovery of the proven wrong-network address.
+	p.addPermanentPeerDenyKeysLocked(
+		peer,
+		connmanager.NormalizePeerAddr(dialTarget),
+		p.normalizeAddress(dialTarget),
+	)
+	peerAddress := dialTarget
+	peerSource := PeerSource(PeerSourceUnknown)
+	if peer != nil {
+		peerAddress = peer.Address
+		peerSource = peer.Source
+	}
+	peerIdx := -1
+	if peer != nil {
+		peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
+	}
+	removed := false
+	if peerIdx != -1 && p.peers[peerIdx] != nil {
+		currentPeer := p.peers[peerIdx]
+		p.addPermanentPeerDenyKeysLocked(currentPeer)
+		peerAddress = currentPeer.Address
+		peerSource = currentPeer.Source
+		removed = dropIfNeverConnected(peerSource)
+		if removed {
+			p.peers = append(p.peers[:peerIdx], p.peers[peerIdx+1:]...)
+			p.updatePeerMetrics()
+		}
+	}
+	p.mu.Unlock()
+
+	p.config.Logger.Info(
+		"outbound: permanently denying peer on a different Cardano network",
+		"address", peerAddress,
+		"source", peerSource.String(),
+		"error", err,
+	)
+	if removed {
+		p.publishEvent(
+			PeerRemovedEventType,
+			PeerStateChangeEvent{
+				Address: peerAddress,
+				Reason:  "network magic mismatch",
+			},
+		)
+	}
+	return true
+}
+
+func (p *PeerGovernor) addPermanentPeerDenyKeysLocked(
+	peer *Peer,
+	addresses ...string,
+) {
+	for _, address := range addresses {
+		if address != "" {
+			p.permanentDenyList[address] = struct{}{}
+		}
+	}
+	if peer == nil {
+		return
+	}
+	if peer.NormalizedAddress != "" {
+		p.permanentDenyList[peer.NormalizedAddress] = struct{}{}
+	}
+	if peer.Address != "" {
+		p.permanentDenyList[p.normalizeAddress(peer.Address)] = struct{}{}
+	}
 }
 
 func (p *PeerGovernor) peerIndexByConnectionRemoteAddressLocked(
