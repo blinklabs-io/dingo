@@ -3392,9 +3392,17 @@ certificate authenticates the immutable database, while the ancillary
 verification key signs the ledger-state and in-progress immutable payload.
 The latter is ancillary-key-signed data, not stake-certified data. Normal
 Ouroboros validation resumes at the imported point and covers the gap and all
-future network blocks. Two artifact backends are
-supported, selected by `mithril.backend` (`--mithril-backend`,
-`DINGO_MITHRIL_BACKEND`):
+future network blocks.
+
+The container entrypoint installs its SIGINT/SIGTERM handlers before deciding
+whether to run a first or resumed Mithril sync. Both that bootstrap command and
+the later `serve` command run as one tracked direct child: the handler forwards
+the same signal to the active child, waits for it, and exits with its status.
+Successful bootstrap clears the tracked PID before the entrypoint hands off to
+`serve`, so the same lifecycle contract applies on both sides of startup.
+
+Two artifact backends are supported, selected by `mithril.backend`
+(`--mithril-backend`, `DINGO_MITHRIL_BACKEND`):
 
 - `v2` (default): the incremental Cardano database backend
   (`CardanoDatabase` signed entity, `/artifact/cardano-database`). The

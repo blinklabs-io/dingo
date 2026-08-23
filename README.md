@@ -485,6 +485,11 @@ Or use the subcommand form for more control:
 ./dingo -n preview mithril sync
 ```
 
+The Docker entrypoint manages both a first-run or resumed Mithril sync and the
+subsequent `serve` process as direct children. It forwards SIGINT and SIGTERM
+to whichever child is active, waits for that child to finish, and returns the
+child's exit status instead of masking an interrupted bootstrap as success.
+
 The default `v2` backend restores incremental per-immutable-file archives only
 after checking the genesis-rooted certificate chain, certified Merkle root, and
 each immutable-file digest. It also requires the ancillary archive: its
