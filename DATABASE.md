@@ -817,6 +817,15 @@ process the same pointer unless the claim expires before a result is recorded.
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
 | `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
 
+For Mithril imports, the certified `NewEpochState.SnapShots` Mark/Set/Go
+members are stored as Mark rows for their rotation epochs. Their
+`captured_slot` is the SNAP slot immediately before each target epoch, not the
+later ledger-state export tip. Databases created by the older importer carry
+the exact Mithril anchor instead; header validation treats that as equivalent
+certified provenance. Startup-reconstructed historical rows retain their
+post-boundary capture slot so they remain distinguishable and are not used for
+hard leader-threshold rejection.
+
 #### Snapshot and Reward-State Retention
 
 Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four

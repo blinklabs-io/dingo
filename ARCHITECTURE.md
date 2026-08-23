@@ -4074,11 +4074,14 @@ Those rows store the consensus stake fraction as `total_stake /
 stake_denominator` and are required for block-header leader eligibility checks
 until the node leaves the imported epoch. The regular Mark snapshot window is
 kept for epoch-offset consumers, but it does not substitute for `"actv"` rows in
-the imported epoch. Historical Mark rows imported from the same ledger-state
-bundle can have a `captured_slot` after their target epoch's boundary; inbound
-header validation recognizes that shape as unsuitable for hard stake-threshold
-rejection and skips that portion of validation until live boundary-captured Mark
-rows are available.
+the imported epoch. The importer preserves the certified
+`NewEpochState.SnapShots` provenance on that window: each Dingo Mark row records
+the SNAP slot immediately before its target epoch, regardless of the later slot
+that exported the ledger-state file. Existing databases from the older importer
+carry the exact Mithril anchor instead; inbound header validation recognizes
+that legacy provenance as the same certified bundle. Only historical Mark rows
+reconstructed from current live state after their target boundary remain
+unsuitable for hard stake-threshold rejection and keep the conservative bypass.
 
 Mithril sync only uses a ledger state as the local trust anchor when its point
 is at or below the certificate-backed ImmutableDB tip. Ancillary archives can
