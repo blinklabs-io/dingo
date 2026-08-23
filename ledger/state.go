@@ -786,6 +786,13 @@ type LedgerState struct {
 	replayRecoveryHighWaterSlot   uint64
 	replayRecoveryNoProgressCount int
 	replayRecoveryHolding         bool
+	// Records the one fresh-intersection request already spent on a
+	// deterministic transaction rejection, keyed on the failing block and
+	// the applied tip. Chain selection gets one alternate-branch
+	// opportunity per failing block; after that the branch is still
+	// rejected, but peers are no longer rotated for it. See
+	// deterministicTxRecoveryLatch in ledger/replay_recovery.go.
+	deterministicTxRecoveryResync *deterministicTxRecoveryLatch
 	// Consecutive successful recovery attempts refused at the Mithril trust
 	// boundary without advancing the applied tip (issues #3261 and #3301).
 	// The refusal's only escape is peer rotation, which cannot help for a
@@ -5542,6 +5549,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// failure gets a fresh recovery budget (issues #2939, #3005).
 				ls.resetAtTipRecoveryDescent(pendingTip.Point.Slot)
 				ls.resetReplayRecoveryNonProgress(pendingTip.Point.Slot)
+				ls.resetDeterministicTxRecovery(pendingTip.Point.Slot)
 				ls.resetMithrilBoundaryRejections(pendingTip.Point.Slot)
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				if wantEnableValidation {
