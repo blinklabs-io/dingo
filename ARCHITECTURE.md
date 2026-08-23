@@ -892,6 +892,18 @@ When `Node.Run()` is called, components are initialized in this order:
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.
+    For networks with a real Byron genesis, an empty database retains a Byron
+    epoch cache until the on-chain Shelley boundary is observed. A configured
+    experimental Shelley hard-fork epoch is the explicit exception used by
+    Shelley-at-slot-zero test profiles; this keeps absolute slots aligned for
+    genesis-overlay delegation on networks with a Byron prefix.
+    This applies to the empty-database branch only, which is what keeps an
+    already-synced node's data untouched. A database written before the Byron
+    prefix was retained still has epoch 0 tagged with a post-Byron era and
+    Shelley-relative slots, and is not repaired in place: startup logs
+    `database predates Byron prefix preservation and cannot be repaired in
+    place`, and the remedy is a resync from an empty database, which is the
+    operator's decision.
 10. Snapshot manager creation, then `LedgerState.SetEpochBoundarySnapshotHook`
     wiring (authoritative epoch-boundary capture), then genesis snapshot capture
     (or reuse of an existing post-Mithril Mark snapshot window), then manager
@@ -1855,6 +1867,67 @@ because prior pot transitions cannot be repaired safely without replay.
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
+
+An empty from-genesis database therefore does not infer a hard-fork epoch from
+the Shelley protocol version alone. The version identifies the target era, but
+the absolute Byron-to-Shelley boundary is part of the observed chain unless a
+test profile explicitly configures it.
+
+Byron epochs carry no protocol-parameter CBOR or Shelley reward schedule;
+their rollovers preserve timing and nonce state, and delayed rewards skip a
+Byron performance epoch until Shelley parameters exist. So
+`GetCurrentPParams` returns nil for the whole Byron prefix: 4 epochs on
+preprod, 208 on mainnet. Any consumer that reads protocol parameters during a
+from-genesis replay must tolerate that, and the eras that follow are unaffected
+because the transition installs Shelley parameters before the first
+post-Byron block is validated.
+
+That ordering is what lets the block-size envelope check stay strict. The first
+block of the fork epoch is a Shelley block on both networks that have a Byron
+prefix, so `ledgerProcessBlocksFromSource` ends its batch at that block, reads
+Shelley from its era, and runs the transition before the block is processed. A
+Byron epoch boundary block would not do this — it carries the Byron era and its
+parent's block number — but no EBB sits at either fork boundary: preprod block
+45 at slot 84242 is followed directly by Shelley block 46 at slot 86400, and
+mainnet block 4490510 at slot 4492799 by Shelley block 4490511 at slot
+4492800. `TestByronShelleyBoundaryHasNoEpochBoundaryBlock` pins both from the
+on-chain bytes in `ledger/testdata/`.
+
+Consequently `validateInboundBlockEnvelope` requires protocol parameters for
+every non-Byron block, including the first Shelley one. Exempting it would drop
+`maxBlockHeaderSize` and `maxBlockBodySize` for a real Shelley block, and the
+Haskell ledger has the Shelley ledger view available before that block is
+applied.
+
+Both validation steps in `ledgerProcessBlock` key that decision on the block or
+header in hand rather than on the ledger's era plus a nil check, so the two stay
+consistent as the boundary is crossed:
+
+- `validateInboundBlockEnvelope` returns before the size checks when
+  `block.Era().Id` is Byron.
+- `validateBlockHeaderProtocolVersion` returns before reading pparams when
+  `HeaderProtocolMajor` reports no version, which is Byron -- headers there have
+  no `ProtVer` field. This matters because the Byron prefix is the one era
+  validated while pparams is legitimately nil; reading them first rejects every
+  block of the prefix under `ValidateHistorical`.
+
+Byron's own transaction rules need no parameters either: `eras.ValidateTxByron`
+runs `byronValidateBadInputs`, `byronValidateValueConserved` and
+`byronValidateWitnesses`, each of which discards the argument.
+
+The Byron start applies to an empty database only. `setEpochCache` returns as
+soon as `epochCache` is populated, which is what keeps an already-synced node
+untouched — and equally what means a database created by an earlier binary keeps
+epoch 0 tagged with a post-Byron era at slot 0. Upgrading does not repair it:
+its Shelley-relative slots stay shifted, and it fails with the same
+genesis-overlay rejection as before.
+
+`warnOnPreByronPrefixEpochCache` detects that shape at startup and logs a
+warning naming the epoch, the era found, the era expected, and that a resync
+from an empty database is the remedy. It does not act on the data. The condition
+is the same one that chooses a Byron start — a Byron genesis is configured, the
+network does not declare Shelley at genesis, and Dijkstra was not forced — so
+the detection cannot disagree with the startup path it reports on.
 
 The Musashi prototype (prototype-2026w29) tags its early chain as Conway (NtN block type 7) but its block headers carry a Leios-extended header body — the 10 standard Babbage fields plus `leios_certified` and `leios_announcement` — that gouroboros' strict Conway decoder rejects. Rather than loosen the shared gouroboros Conway decoder that every real Conway network relies on, dingo decodes these blocks itself, scoped to the Musashi network magic (164) and block type 7, at three entry points:
 
@@ -3320,7 +3393,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 
 ### Leader Election (`ledger/leader/`)
 
-`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. The epoch provider supplies the era-aware absolute slot range for the epoch from `LedgerState.EpochInfo`, which is backed by the hard-fork summary; leader schedules must not derive the range as `epoch * slotsPerEpoch`, because Byron-era prefixes make that value wrong on preprod and mainnet. For each slot in the resolved range, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures are hard validation rejects once the decentralization parameter is inactive, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. Because that reject is hard while the stake feeding it is reconstructed locally rather than taken from the reference node, every eligibility decision — not only the failures — records `(threshold - leaderValue) / threshold` in the `dingo_ledger_leader_threshold_margin` histogram, and rejections also carry that margin in the error message and increment `dingo_ledger_leader_threshold_rejections_total`. A threshold comparison turns a relative stake error of eps into a flipped decision with probability about eps per block, so the margin distribution is what makes that error measurable: decisions clustering just above zero mean the local stake distribution is close enough to the boundary for a small discrepancy to reject a canonical block, whereas a rejection whose margin is not marginal indicates a genuinely ineligible producer or a derivation bug rather than a stake gap. While TPraos decentralization is still active (`d > 0`), header validation resolves the overlay schedule from Shelley genesis, checks that a genesis-delegate header is assigned to that overlay slot, and uses the latest on-chain genesis-key delegation row before the block slot before falling back to Shelley genesis. Normal pool headers still bind the header VRF key to the registered pool; local stake-threshold checks remain skipped until `d` is inactive. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
+`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. The epoch provider supplies the era-aware absolute slot range for the epoch from `LedgerState.EpochInfo`, which is backed by the hard-fork summary; leader schedules must not derive the range as `epoch * slotsPerEpoch`, because Byron-era prefixes make that value wrong on preprod and mainnet. For each slot in the resolved range, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures are hard validation rejects once the decentralization parameter is inactive, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. Because that reject is hard while the stake feeding it is reconstructed locally rather than taken from the reference node, every eligibility decision — not only the failures — records `(threshold - leaderValue) / threshold` in the `dingo_ledger_leader_threshold_margin` histogram, and rejections also carry that margin in the error message and increment `dingo_ledger_leader_threshold_rejections_total`. A threshold comparison turns a relative stake error of eps into a flipped decision with probability about eps per block, so the margin distribution is what makes that error measurable: decisions clustering just above zero mean the local stake distribution is close enough to the boundary for a small discrepancy to reject a canonical block, whereas a rejection whose margin is not marginal indicates a genuinely ineligible producer or a derivation bug rather than a stake gap. While TPraos decentralization is still active (`d > 0`), header validation resolves the overlay schedule from Shelley genesis, checks that a genesis-delegate header is assigned to that overlay slot, and uses the latest on-chain genesis-key delegation row before the block slot before falling back to Shelley genesis. For Byron-prefixed networks, the first post-Byron overlay epoch's absolute start is repaired from the preceding era's end when a stale forecast row points earlier; this keeps preprod's first Shelley epoch anchored at slot 86400 without adding a network-specific hard-fork field to config. Normal pool headers still bind the header VRF key to the registered pool; local stake-threshold checks remain skipped until `d` is inactive. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
 
 Both halves of sigma come from the same Mark row set for the same snapshot epoch, and the active slot coefficient `f` comes from the exact Shelley genesis rational (`LedgerState.ActiveSlotCoeffRat`), never from `ActiveSlotCoeff()`'s float64 form. `epochInfoAdapter` supplies it through the optional `leader.ActiveSlotCoeffRatProvider` interface, which `computeSchedule` prefers over the float64 accessor; header validation already used the exact rational, so the two paths now derive identical thresholds. The float64 round trip is one-sided: the nearest binary64 value to a genesis `0.05` is strictly greater than 1/20, so a threshold derived from it strictly contains the reference node's acceptance region and can only over-claim leader slots. `ScheduleFormatVersion` is bumped whenever the compute path changes, because `validatePersistedSchedule` re-checks the epoch nonce and both sigma inputs but not `f`. Each computed schedule logs one `leader schedule calculated` record carrying every leader-check input — snapshot epoch and type, epoch slot range, epoch nonce, pool and total stake, `f`, consensus mode, and the certified-natural threshold — so a schedule that disagrees with `cardano-cli query leadership-schedule` can be diffed against the reference node's `query stake-snapshot` and `query protocol-state` from logs alone.
 
