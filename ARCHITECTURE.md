@@ -4076,10 +4076,12 @@ until the node leaves the imported epoch. The regular Mark snapshot window is
 kept for epoch-offset consumers, but it does not substitute for `"actv"` rows in
 the imported epoch. The importer preserves the certified
 `NewEpochState.SnapShots` provenance on that window: each Dingo Mark row records
-the SNAP slot immediately before its target epoch, regardless of the later slot
-that exported the ledger-state file. Existing databases from the older importer
-carry the exact Mithril anchor instead; inbound header validation recognizes
-that legacy provenance as the same certified bundle. Only historical Mark rows
+the SNAP slot immediately before its target epoch when that boundary can be
+resolved from the imported era telescope, regardless of the later slot that
+exported the ledger-state file. If the boundary cannot be resolved, the importer
+retains the exact certified import anchor; existing databases from the older
+importer carry that same anchor. Inbound header validation recognizes this
+anchor provenance as the same certified bundle. Only historical Mark rows
 reconstructed from current live state after their target boundary remain
 unsuitable for hard stake-threshold rejection and keep the conservative bypass.
 

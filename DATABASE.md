@@ -819,12 +819,14 @@ process the same pointer unless the claim expires before a result is recorded.
 
 For Mithril imports, the certified `NewEpochState.SnapShots` Mark/Set/Go
 members are stored as Mark rows for their rotation epochs. Their
-`captured_slot` is the SNAP slot immediately before each target epoch, not the
-later ledger-state export tip. Databases created by the older importer carry
-the exact Mithril anchor instead; header validation treats that as equivalent
-certified provenance. Startup-reconstructed historical rows retain their
-post-boundary capture slot so they remain distinguishable and are not used for
-hard leader-threshold rejection.
+`captured_slot` is the SNAP slot immediately before each target epoch when the
+imported era telescope can resolve that boundary, not the later ledger-state
+export tip. If it cannot, the importer retains the exact certified import
+anchor; databases created by the older importer carry that same anchor. Header
+validation treats anchor provenance as equivalent to the certified boundary
+provenance. Startup-reconstructed historical rows retain their post-boundary
+capture slot so they remain distinguishable and are not used for hard
+leader-threshold rejection.
 
 #### Snapshot and Reward-State Retention
 
