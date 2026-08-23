@@ -2785,6 +2785,13 @@ The `ConnectionManager` (`connmanager/connection_manager.go`) handles connection
     -------------------------------------------------
 ```
 
+Before binding a filesystem-backed Unix listener, the connection manager uses
+non-following metadata and a local connection probe to distinguish a stale
+socket from a live listener. It removes only a socket that refuses the probe
+and still has the same file identity when rechecked. Regular files, symlinks,
+directories, live sockets, ambiguous probe failures, and removal errors all
+fail startup without removing the path.
+
 ### Multi-Client Chainsync
 
 The `chainsync.State` tracks multiple concurrent chainsync clients:

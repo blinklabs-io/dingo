@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -29,9 +30,10 @@ import (
 
 // Accept loop backoff constants
 const (
-	acceptBackoffMin = 10 * time.Millisecond // Initial backoff duration
-	acceptBackoffMax = 1 * time.Second       // Maximum backoff duration
-	acceptBackoffCap = 6                     // Max consecutive errors before capping (2^6 * 10ms = 640ms)
+	acceptBackoffMin       = 10 * time.Millisecond // Initial backoff duration
+	acceptBackoffMax       = 1 * time.Second       // Maximum backoff duration
+	acceptBackoffCap       = 6                     // Max consecutive errors before capping (2^6 * 10ms = 640ms)
+	unixSocketProbeTimeout = 250 * time.Millisecond
 )
 
 type ListenerConfig struct {
@@ -48,6 +50,68 @@ func (c *ConnectionManager) startListeners(ctx context.Context) error {
 		if err := c.startListener(ctx, l); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func prepareUnixSocketPath(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to check socket file %s: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf(
+			"listen address %s exists and is not a unix socket",
+			path,
+		)
+	}
+
+	conn, dialErr := net.DialTimeout("unix", path, unixSocketProbeTimeout)
+	if dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf(
+			"listen address %s is already in use by a live unix socket",
+			path,
+		)
+	}
+	if errors.Is(dialErr, os.ErrNotExist) {
+		// The path disappeared after Lstat. There is nothing left to remove;
+		// the subsequent bind remains authoritative.
+		return nil
+	}
+	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		return fmt.Errorf(
+			"failed to determine whether unix socket %s is stale: %w",
+			path,
+			dialErr,
+		)
+	}
+
+	// Re-read non-following metadata after the failed connection attempt. A
+	// replacement at the path must never inherit the stale verdict from the
+	// socket that was probed.
+	currentFi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to recheck socket file %s: %w", path, err)
+	}
+	if currentFi.Mode()&os.ModeSocket == 0 || !os.SameFile(fi, currentFi) {
+		return fmt.Errorf(
+			"listen address %s changed while checking for a stale unix socket",
+			path,
+		)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf(
+			"failed to remove existing socket file %s: %w",
+			path,
+			err,
+		)
 	}
 	return nil
 }
@@ -77,28 +141,11 @@ func (c *ConnectionManager) startListener(
 			}
 			l.Listener = listener
 		} else {
-			// For Unix domain sockets, remove any stale socket file before binding
+			// For Unix domain sockets, remove only a confirmed stale socket file
+			// before binding.
 			if l.ListenNetwork == "unix" {
-				if fi, err := os.Lstat(l.ListenAddress); err == nil {
-					if fi.Mode()&os.ModeSocket == 0 {
-						return fmt.Errorf(
-							"listen address %s exists and is not a unix socket",
-							l.ListenAddress,
-						)
-					}
-					if err := os.Remove(l.ListenAddress); err != nil {
-						return fmt.Errorf(
-							"failed to remove existing socket file %s: %w",
-							l.ListenAddress,
-							err,
-						)
-					}
-				} else if !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf(
-						"failed to check socket file %s: %w",
-						l.ListenAddress,
-						err,
-					)
+				if err := prepareUnixSocketPath(l.ListenAddress); err != nil {
+					return err
 				}
 			}
 			listenConfig := net.ListenConfig{}
