@@ -1141,10 +1141,10 @@ func (ls *LedgerState) leaderEligibilityStake(
 				diag,
 			)
 	}
-	if ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch) {
+	if ls.shouldSkipPostMithrilMarkEligibility(snapshot, snapshotEpoch) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
-				"skipping leader eligibility check: Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary",
+				"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary",
 				"slot",
 				block.SlotNumber(),
 				"epoch",
@@ -1180,7 +1180,14 @@ func (ls *LedgerState) leaderEligibilityStake(
 		false, nil
 }
 
-func (ls *LedgerState) isMithrilImportedMarkSnapshot(
+// shouldSkipPostMithrilMarkEligibility reports whether a mark row was
+// reconstructed from live state after its target boundary and therefore cannot
+// safely drive hard leader-threshold rejection. New imports retain the
+// certified NewEpochState.SnapShots boundary slot. Older imports used the
+// Mithril anchor itself as CapturedSlot, so that exact legacy provenance is
+// accepted too; startup-synthesized historical rows use another post-boundary
+// slot and remain conservative.
+func (ls *LedgerState) shouldSkipPostMithrilMarkEligibility(
 	snapshot *models.PoolStakeSnapshot,
 	snapshotEpoch uint64,
 ) bool {
@@ -1194,6 +1201,9 @@ func (ls *LedgerState) isMithrilImportedMarkSnapshot(
 	defer ls.RUnlock()
 
 	if ls.mithrilLedgerSlot == 0 {
+		return false
+	}
+	if snapshot.CapturedSlot == ls.mithrilLedgerSlot {
 		return false
 	}
 	for _, ep := range ls.epochCache {
