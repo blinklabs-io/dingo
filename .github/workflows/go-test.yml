@@ -104,7 +104,16 @@ jobs:
         env:
           DINGO_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/dingo_test?sslmode=disable
           DINGO_MYSQL_DSN: root:mysql@tcp(127.0.0.1:3306)/dingo_test?parseTime=true
-        run: go test -tags 'dingo_extra_plugins dingo_db_integration' ./database/plugin/metadata/sqlstore -timeout 10m
+        # database/plugin/metadata/{postgres,mysql} carry their own
+        # dingo_db_integration-tagged tests (backup/restore/reset round
+        # trips, timeout enforcement) reading these same DINGO_*_DSN vars --
+        # include them here, not just sqlstore, or they never compile in CI.
+        run: >-
+          go test -tags 'dingo_extra_plugins dingo_db_integration'
+          ./database/plugin/metadata/sqlstore
+          ./database/plugin/metadata/postgres
+          ./database/plugin/metadata/mysql
+          -timeout 10m
       - name: go-test
         # Keep PR feedback fast by omitting race instrumentation. Release
         # validation runs in the publish workflow before draft creation.

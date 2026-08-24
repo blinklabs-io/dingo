@@ -41,6 +41,27 @@ connections negotiate TLS unless an operator explicitly selects another mode
 security-sensitive default change for existing deployments that omit
 `sslMode`; remote PostgreSQL deployments must support TLS before upgrading.
 
+Both PostgreSQL and MySQL also accept `statementTimeout` and `lockTimeout`,
+bounding how long the server will run a single statement or wait for a row
+lock before erroring. Both default to zero (the server's own default, i.e.
+unbounded) rather than an opinionated non-zero value, so an existing
+deployment that never configures them keeps today's unbounded behavior; an
+operator opts in explicitly. They are applied as session-level settings on
+every new connection, not just the first one in the pool -- for Postgres, as
+`statement_timeout`/`lock_timeout` DSN runtime parameters (values in
+milliseconds, Postgres's own unit for these GUCs); for MySQL, as
+`max_execution_time` (milliseconds; a MySQL server-side limit on top-level
+read-only `SELECT` statements only, not writes) and
+`innodb_lock_wait_timeout` (whole seconds -- that variable's native
+resolution, so a configured value under one second rounds up rather than
+silently becoming zero/unbounded) session variables, issued via the
+`go-sql-driver/mysql` `Config.Params` mechanism that re-applies them on every
+new physical connection. Both are ignored when `dsn` is set explicitly,
+consistent with `sslMode`/`timeZone`. MySQL additionally accepts
+`readTimeout`/`writeTimeout`, the driver's own transport-level I/O deadlines
+per socket read/write -- not a statement-level bound, and also zero/disabled
+by default.
+
 The providers open their direct database/sql drivers and return the shared
 `database/plugin/metadata/sqlstore.Store`. Schema ownership is explicit:
 versioned DDL lives under `database/plugin/metadata/sqlstore/migrations`,

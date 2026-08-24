@@ -43,6 +43,15 @@ type Config struct {
 	PoolMaxOpenConns    int           `yaml:"poolMaxOpenConns"`
 	PoolMaxIdleConns    int           `yaml:"poolMaxIdleConns"`
 	PoolConnMaxLifetime time.Duration `yaml:"poolConnMaxLifetime"`
+	// StatementTimeout bounds how long the server will run a single
+	// statement (Postgres GUC statement_timeout, applied in
+	// milliseconds). Zero leaves the server default in effect. Ignored
+	// when DSN is set explicitly, same as SSLMode/TimeZone.
+	StatementTimeout time.Duration `yaml:"statementTimeout"`
+	// LockTimeout bounds how long a statement will wait to acquire a
+	// lock before erroring (Postgres GUC lock_timeout, milliseconds).
+	// Zero leaves the server default (no limit) in effect.
+	LockTimeout time.Duration `yaml:"lockTimeout"`
 }
 
 func defaultConfig() Config {
@@ -53,6 +62,11 @@ func defaultConfig() Config {
 		Database: "postgres",
 		SSLMode:  "require",
 		TimeZone: "UTC",
+		// StatementTimeout/LockTimeout default to zero (server default,
+		// i.e. unbounded) rather than an opinionated value: an aggressive
+		// default could abort a legitimate long-running migration or
+		// backfill query for existing deployments that never asked for a
+		// bound. Operators opt in explicitly via config.
 	}
 }
 
@@ -92,6 +106,9 @@ func openStore(
 		cfg.PoolMaxIdleConns < 0 ||
 		cfg.PoolConnMaxLifetime < 0 {
 		return nil, errors.New("PostgreSQL pool limits must not be negative")
+	}
+	if cfg.StatementTimeout < 0 || cfg.LockTimeout < 0 {
+		return nil, errors.New("PostgreSQL timeouts must not be negative")
 	}
 	dsn := assembleDSN(cfg)
 	db, err := sqlstore.OpenDB("pgx", dsn, "postgresql")
@@ -170,6 +187,22 @@ func assembleDSN(cfg Config) string {
 	}
 	if cfg.TimeZone != "" {
 		query.Set("timezone", cfg.TimeZone)
+	}
+	// statement_timeout and lock_timeout are ordinary session GUCs; pgx
+	// applies any DSN query key it doesn't recognize as a libpq connection
+	// key as a runtime parameter set on every new connection, in the units
+	// Postgres itself expects (milliseconds).
+	if cfg.StatementTimeout > 0 {
+		query.Set(
+			"statement_timeout",
+			strconv.FormatInt(cfg.StatementTimeout.Milliseconds(), 10),
+		)
+	}
+	if cfg.LockTimeout > 0 {
+		query.Set(
+			"lock_timeout",
+			strconv.FormatInt(cfg.LockTimeout.Milliseconds(), 10),
+		)
 	}
 	connectionURL.RawQuery = query.Encode()
 	return connectionURL.String()
