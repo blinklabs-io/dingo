@@ -83,6 +83,46 @@ func openRelativeForDeletion(
 	name string,
 	typeOption uint32,
 ) (windows.Handle, error) {
+	// FILE_OPEN_FOR_BACKUP_INTENT is what makes a minimal-access, handle-
+	// relative open like this one work at all: without it, NtCreateFile
+	// applies the normal traversal/listing access check a directory open
+	// otherwise needs, which DELETE (and, for a directory, FILE_DIRECTORY_FILE
+	// alone) does not satisfy. FILE_READ_ATTRIBUTES is requested alongside
+	// DELETE so rejectReparsePoint's GetFileInformationByHandle call below has
+	// what it needs. This mirrors the recipe Go's own os.Root uses internally
+	// on Windows for the same operations (internal/syscall/windows,
+	// Deleteat/Renameat) -- unimportable from here, but the reference this was
+	// built against. Every entry this touches is one extraction created or is
+	// about to replace, so the restrictive-ACL case that recipe's own
+	// DELETE-only fallback exists for does not apply here.
+	handle, err := openRelative(
+		dir, name,
+		windows.FILE_READ_ATTRIBUTES|windows.DELETE,
+		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|typeOption,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if err := rejectReparsePoint(handle); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, err
+	}
+	return handle, nil
+}
+
+// openRelative opens name as a single component relative to dir using
+// NtCreateFile, addressing the entry through dir's handle rather than
+// resolving any part of a path. FILE_OPEN_FOR_BACKUP_INTENT and
+// OBJ_CASE_INSENSITIVE are always applied: the former is required for a
+// minimal-access open like this to succeed at all (see
+// openRelativeForDeletion), and NT native APIs are case-sensitive by default,
+// unlike every Win32 path-based API this replaces.
+func openRelative(
+	dir windows.Handle,
+	name string,
+	access uint32,
+	options uint32,
+) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -97,25 +137,19 @@ func openRelativeForDeletion(
 	var iosb windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(
 		&handle,
-		windows.DELETE|windows.SYNCHRONIZE,
+		access,
 		&oa,
 		&iosb,
 		nil,
 		windows.FILE_ATTRIBUTE_NORMAL,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		windows.FILE_OPEN,
-		windows.FILE_SYNCHRONOUS_IO_NONALERT|
-			windows.FILE_OPEN_REPARSE_POINT|
-			typeOption,
+		options,
 		0,
 		0,
 	)
 	if err != nil {
 		return 0, ntStatusErrno(err)
-	}
-	if err := rejectReparsePoint(handle); err != nil {
-		_ = windows.CloseHandle(handle)
-		return 0, err
 	}
 	return handle, nil
 }
@@ -168,13 +202,31 @@ type fileDispositionInformation struct {
 }
 
 // openRelativeForRename opens name as a single component relative to dir,
-// with the access NtSetInformationFile's FileRenameInformation requires, and
-// refuses a reparse point at the leaf for the same reason
-// openRelativeForDeletion does. The rename always moves a directory here
-// (renameExtractedDirectory's only callers move the staging directory), so
-// the open requires FILE_DIRECTORY_FILE.
+// with the access and options NtSetInformationFile's FileRenameInformation
+// requires of the handle it renames, and refuses a reparse point at the leaf
+// for the same reason openRelativeForDeletion does. The rename always moves a
+// directory here (renameExtractedDirectory's only callers move the staging
+// directory), so the open requires FILE_DIRECTORY_FILE. SYNCHRONIZE alongside
+// DELETE, and FILE_SYNCHRONOUS_IO_NONALERT alongside
+// FILE_OPEN_FOR_BACKUP_INTENT, mirror the access Renameat opens its rename
+// source with.
 func openRelativeForRename(dir windows.Handle, name string) (windows.Handle, error) {
-	return openRelativeForDeletion(dir, name, windows.FILE_DIRECTORY_FILE)
+	handle, err := openRelative(
+		dir, name,
+		windows.DELETE|windows.SYNCHRONIZE,
+		windows.FILE_OPEN_REPARSE_POINT|
+			windows.FILE_OPEN_FOR_BACKUP_INTENT|
+			windows.FILE_SYNCHRONOUS_IO_NONALERT|
+			windows.FILE_DIRECTORY_FILE,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if err := rejectReparsePoint(handle); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, err
+	}
+	return handle, nil
 }
 
 // renameRelativeHandle renames the object source refers to, using
