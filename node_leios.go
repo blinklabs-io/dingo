@@ -260,11 +260,14 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	n.leiosVoteReceivedSubId = n.eventBus.SubscribeFunc(
 		leios.VoteReceivedEventType,
 		func(evt event.Event) {
-			data, ok := evt.Data.(leios.VoteEmittedEvent)
+			data, ok := evt.Data.(leios.VoteReceivedEvent)
 			if !ok {
 				return
 			}
-			n.ouroboros().EnqueueLeiosPrototypeVote(data.Vote)
+			n.ouroboros().EnqueueLeiosPrototypeVoteFromPeer(
+				data.Vote,
+				data.OriginConnKey,
+			)
 		},
 	)
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
