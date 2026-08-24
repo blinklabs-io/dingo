@@ -229,6 +229,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			return ledger.ChainsyncEvent{
 				ConnectionId: h.ConnectionId,
 				BlockHeader:  h.BlockHeader,
+				ArrivalTime:  h.ArrivalTime,
 				Point:        h.Point,
 				Tip:          h.Tip,
 				BlockNumber:  h.BlockNumber,
