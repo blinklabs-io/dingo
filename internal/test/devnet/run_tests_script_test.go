@@ -88,6 +88,16 @@ const fakeGoScript = `#!/usr/bin/env bash
 exit "${FAKE_GO_EXIT}"
 `
 
+const fakeIDScript = `#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  -u) printf '1234\n' ;;
+  -g) printf '5678\n' ;;
+  *) exit 2 ;;
+esac
+`
+
 const failingRmScript = `#!/usr/bin/env bash
 exit 42
 `
@@ -134,9 +144,9 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			result := runFakeDevnet(t, test.testExit, false)
 			assert.Equal(t, test.testExit, result.exitCode, result.output)
-			assert.Contains(t, result.dockerLog, fmt.Sprintf(
-				"run --rm --user %d:%d", os.Getuid(), os.Getgid(),
-			), "stake-key copy did not use the host uid:gid")
+			assert.Contains(t, result.dockerLog,
+				"run --rm --user 1234:5678",
+				"stake-key copy did not use the host uid:gid")
 			assert.Empty(t, result.stakeDirs,
 				"runner left its stake-key temp tree behind\n%s", result.output)
 			assert.Len(t, result.artifactDirs, test.wantArtifactCount,
@@ -170,6 +180,7 @@ func runFakeDevnet(
 	require.NoError(t, os.Mkdir(fakeBin, 0o700))
 	writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerScript)
 	writeExecutable(t, filepath.Join(fakeBin, "go"), fakeGoScript)
+	writeExecutable(t, filepath.Join(fakeBin, "id"), fakeIDScript)
 	if failRm {
 		writeExecutable(t, filepath.Join(fakeBin, "rm"), failingRmScript)
 	}
