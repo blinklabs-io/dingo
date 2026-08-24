@@ -300,6 +300,64 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	)
 }
 
+func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
+	ls, db := newBoundaryRolloverLedger(t)
+
+	sourceEra := ls.currentEra
+	sourceEra.EpochLengthFunc = func(
+		*cardano.CardanoNodeConfig,
+	) (uint, uint, error) {
+		return 20_000, 21_600, nil
+	}
+	ls.currentEra = sourceEra
+
+	var result *EpochRolloverResult
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		result, err = ls.processEpochRollover(
+			txn,
+			ls.currentEpoch,
+			sourceEra,
+			ls.currentPParams,
+			true,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = ls.applyBoundaryEraTransitions(
+			txn,
+			ls.currentEpoch,
+			[]uint{eras.AllegraEraDesc.Id},
+			result,
+		)
+		return err
+	}))
+
+	wantSlotLength, wantEpochLength, err := eras.AllegraEraDesc.EpochLengthFunc(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.Equal(t, wantSlotLength, result.NewCurrentEpoch.SlotLength)
+	require.Equal(t, wantEpochLength, result.NewCurrentEpoch.LengthInSlots)
+	require.Equal(t, wantSlotLength, result.SchedulerIntervalMs)
+
+	var cachedEpoch *models.Epoch
+	for i := range result.NewEpochCache {
+		if result.NewEpochCache[i].EpochId == result.NewCurrentEpoch.EpochId {
+			cachedEpoch = &result.NewEpochCache[i]
+			break
+		}
+	}
+	require.NotNil(t, cachedEpoch)
+	require.Equal(t, wantSlotLength, cachedEpoch.SlotLength)
+	require.Equal(t, wantEpochLength, cachedEpoch.LengthInSlots)
+
+	persistedEpoch, err := db.GetEpoch(result.NewCurrentEpoch.EpochId, nil)
+	require.NoError(t, err)
+	require.NotNil(t, persistedEpoch)
+	require.Equal(t, wantSlotLength, persistedEpoch.SlotLength)
+	require.Equal(t, wantEpochLength, persistedEpoch.LengthInSlots)
+}
+
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common
 // path: with no era transitions deferred, the rollover still captures the mark
 // snapshot itself, at its own era's protocol version.

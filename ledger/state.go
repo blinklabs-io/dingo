@@ -3420,7 +3420,23 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	}
 
 	newEpoch := rolloverResult.NewCurrentEpoch
+	finalEra, ok := ls.eraById(workingEraId)
+	if !ok || finalEra == nil {
+		return nil, fmt.Errorf(
+			"unknown transitioned era ID %d", workingEraId,
+		)
+	}
+	slotLength, epochLength, err := finalEra.EpochLengthFunc(
+		ls.config.CardanoNodeConfig,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve transitioned era timing: %w", err,
+		)
+	}
 	newEpoch.EraId = workingEraId
+	newEpoch.SlotLength = slotLength
+	newEpoch.LengthInSlots = epochLength
 	if err := ls.db.SetEpoch(
 		newEpoch.StartSlot,
 		newEpoch.EpochId,
@@ -3454,16 +3470,13 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	}
 	rolloverResult.NewCurrentEpoch = newEpoch
 	rolloverResult.NewCurrentPParams = workingPParams
-	finalEra, ok := ls.eraById(workingEraId)
-	if !ok || finalEra == nil {
-		return nil, fmt.Errorf(
-			"unknown transitioned era ID %d", workingEraId,
-		)
-	}
 	rolloverResult.NewCurrentEra = *finalEra
+	rolloverResult.SchedulerIntervalMs = slotLength
 	for i := range rolloverResult.NewEpochCache {
 		if rolloverResult.NewEpochCache[i].EpochId == newEpoch.EpochId {
 			rolloverResult.NewEpochCache[i].EraId = workingEraId
+			rolloverResult.NewEpochCache[i].SlotLength = slotLength
+			rolloverResult.NewEpochCache[i].LengthInSlots = epochLength
 		}
 	}
 
