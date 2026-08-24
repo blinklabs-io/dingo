@@ -175,6 +175,11 @@ type PeerGovernor struct {
 	// rounds since the node last had enough upstreams. It drives the
 	// escalating emergency refresh interval and resets on recovery.
 	emergencyRefreshRounds atomic.Uint32
+	// ledgerDiscoveryInFlight holds the generation of the discovery currently
+	// querying or processing ledger relays. Zero means idle. A generation keeps
+	// deferred release ownership explicit across cancellation and panic paths.
+	ledgerDiscoveryInFlight   atomic.Uint64
+	ledgerDiscoveryGeneration atomic.Uint64
 	// negativeDNS caches ledger relay hostnames that failed to resolve,
 	// keyed by lowercased hostname, valued by cache expiry. Guarded by
 	// negativeDNSMu rather than mu: resolution happens outside the peer
