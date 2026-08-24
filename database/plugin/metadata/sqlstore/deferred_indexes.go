@@ -37,18 +37,19 @@ var _ metadata.DeferredIndexManager = (*Store)(nil)
 // recorded complete, so restoring it here is its only way back. Enforcing that
 // once, on the path every drop and rebuild takes, is what keeps a rebuild path
 // from being added without it.
-func (s *Store) withDeferredIndexWrite(fn func(db queryer) error) error {
+func (s *Store) withDeferredIndexWrite(
+	fn func(db queryer, ctx context.Context) error,
+) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		nil,
-		func(db queryer) error {
-			if err := s.ensureRetainedIndexes(db); err != nil {
+		func(db queryer, ctx context.Context) error {
+			if err := s.ensureRetainedIndexes(ctx, db); err != nil {
 				return err
 			}
-			return fn(db)
+			return fn(db, ctx)
 		},
 	)
 }
@@ -57,9 +58,9 @@ func (s *Store) withDeferredIndexWrite(fn func(db queryer) error) error {
 // manifest in one SQLite transaction.
 func (s *Store) DropDeferredIndexes() error {
 	return s.withDeferredIndexWrite(
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
-				context.Background(),
+				ctx,
 				`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
 				 ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`,
 				deferred.SyncStateKey,
@@ -71,7 +72,7 @@ func (s *Store) DropDeferredIndexes() error {
 				if !s.dialect.CanDropIndex(index.Name, index.Table) {
 					continue
 				}
-				exists, err := s.deferredIndexExists(db, index)
+				exists, err := s.deferredIndexExists(ctx, db, index)
 				if err != nil {
 					return fmt.Errorf(
 						"check deferred index %s: %w",
@@ -84,7 +85,7 @@ func (s *Store) DropDeferredIndexes() error {
 				}
 				statement := s.dialect.DropIndexSQL(index.Name, index.Table)
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					statement,
 				); err != nil {
 					// InnoDB requires an index for every foreign-key child
@@ -136,9 +137,9 @@ func (s *Store) buildDeferredIndexes(
 	clearPending bool,
 ) error {
 	return s.withDeferredIndexWrite(
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			for _, index := range indexes {
-				exists, err := s.deferredIndexExists(db, index)
+				exists, err := s.deferredIndexExists(ctx, db, index)
 				if err != nil {
 					return fmt.Errorf(
 						"check deferred index %s: %w",
@@ -155,7 +156,7 @@ func (s *Store) buildDeferredIndexes(
 					index.Columns,
 				)
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					statement,
 				); err != nil {
 					return fmt.Errorf(
@@ -167,7 +168,7 @@ func (s *Store) buildDeferredIndexes(
 			}
 			if clearPending {
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					"DELETE FROM sync_state WHERE sync_key = ?",
 					deferred.SyncStateKey,
 				); err != nil {
@@ -184,9 +185,12 @@ func (s *Store) buildDeferredIndexes(
 
 // ensureRetainedIndexes creates any deferred.Retained index missing from the
 // schema. Present indexes cost one catalog lookup each and are left alone.
-func (s *Store) ensureRetainedIndexes(db queryer) error {
+func (s *Store) ensureRetainedIndexes(
+	ctx context.Context,
+	db queryer,
+) error {
 	for _, index := range deferred.Retained {
-		exists, err := s.deferredIndexExists(db, index)
+		exists, err := s.deferredIndexExists(ctx, db, index)
 		if err != nil {
 			return fmt.Errorf(
 				"check retained index %s: %w",
@@ -203,7 +207,7 @@ func (s *Store) ensureRetainedIndexes(db queryer) error {
 			index.Columns,
 		)
 		if _, err := db.ExecContext(
-			context.Background(),
+			ctx,
 			statement,
 		); err != nil {
 			return fmt.Errorf(
@@ -217,6 +221,7 @@ func (s *Store) ensureRetainedIndexes(db queryer) error {
 }
 
 func (s *Store) deferredIndexExists(
+	ctx context.Context,
 	db queryer,
 	index deferred.Index,
 ) (bool, error) {
@@ -237,7 +242,7 @@ WHERE schemaname = current_schema() AND tablename = ? AND indexname = ? LIMIT 1`
 WHERE type = 'index' AND name = ? LIMIT 1`
 		args = []any{index.Name}
 	}
-	err := db.QueryRowContext(context.Background(), query, args...).Scan(&found)
+	err := db.QueryRowContext(ctx, query, args...).Scan(&found)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

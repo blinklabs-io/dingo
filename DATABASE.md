@@ -41,6 +41,35 @@ connections negotiate TLS unless an operator explicitly selects another mode
 security-sensitive default change for existing deployments that omit
 `sslMode`; remote PostgreSQL deployments must support TLS before upgrading.
 
+Both PostgreSQL and MySQL also accept `statementTimeout` and `lockTimeout`,
+bounding how long the server will run a single statement or wait for a row
+lock before erroring. Both default to zero rather than an opinionated
+non-zero value, so an existing deployment that never configures them keeps
+today's behavior; an operator opts in explicitly. A zero value leaves the
+underlying server setting at whatever its own default already is, which is
+not uniformly "unbounded": for Postgres, `statement_timeout`/`lock_timeout`
+both default to 0 (genuinely unbounded), so zero here matches that exactly;
+for MySQL, `max_execution_time` likewise defaults to 0 (unbounded), but
+`innodb_lock_wait_timeout` defaults to 50 seconds, so a zero `lockTimeout`
+leaves MySQL's own 50-second wait in effect rather than making lock waits
+unbounded. They are applied as session-level settings on every new
+connection, not just the first one in the pool -- for Postgres, as
+`statement_timeout`/`lock_timeout` DSN runtime parameters (values in
+milliseconds, Postgres's own unit for these GUCs); for MySQL, as
+`max_execution_time` (milliseconds; a MySQL server-side limit on top-level
+read-only `SELECT` statements only, not writes) and
+`innodb_lock_wait_timeout` (whole seconds -- that variable's native
+resolution, so a configured value under one second rounds up rather than
+silently becoming zero) session variables, issued via the
+`go-sql-driver/mysql` `Config.Params` mechanism that re-applies them on every
+new physical connection. Both are ignored when `dsn` is set explicitly,
+consistent with `sslMode`/`timeZone`. A configured sub-millisecond
+`statementTimeout`/`lockTimeout` (Postgres) or `statementTimeout` (MySQL)
+rounds up to 1ms rather than truncating to zero (indistinguishable from
+unset). MySQL additionally accepts `readTimeout`/`writeTimeout`, the
+driver's own transport-level I/O deadlines per socket read/write -- not a
+statement-level bound, and also zero/disabled by default.
+
 The providers open their direct database/sql drivers and return the shared
 `database/plugin/metadata/sqlstore.Store`. Schema ownership is explicit:
 versioned DDL lives under `database/plugin/metadata/sqlstore/migrations`,

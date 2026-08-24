@@ -29,6 +29,7 @@ import (
 )
 
 func (s *Store) applyTransactionMetadataLabels(
+	ctx context.Context,
 	db queryer,
 	transactionID int64,
 	slot uint64,
@@ -38,7 +39,7 @@ func (s *Store) applyTransactionMetadataLabels(
 		return nil
 	}
 	for _, label := range labels {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO transaction_metadata_label (
     transaction_id, label, slot, cbor_value, json_value
 ) VALUES (?, ?, ?, ?, ?)
@@ -63,6 +64,7 @@ ON CONFLICT (transaction_id, label) DO UPDATE SET
 }
 
 func (s *Store) applyTransactionAssetMintBurn(
+	ctx context.Context,
 	db queryer,
 	transaction lcommon.Transaction,
 	hash []byte,
@@ -78,7 +80,7 @@ func (s *Store) applyTransactionAssetMintBurn(
 		slot,
 		index,
 	) {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO asset_mint_burn (
     tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -98,6 +100,7 @@ ON CONFLICT (tx_hash, policy_id, name) DO NOTHING`,
 }
 
 func (s *Store) applyTransactionAPIDetails(
+	ctx context.Context,
 	db queryer,
 	transactionID int64,
 	transaction lcommon.Transaction,
@@ -110,6 +113,7 @@ func (s *Store) applyTransactionAPIDetails(
 	}
 	hash := transaction.Hash().Bytes()
 	if err := markTransactionUtxoReferences(
+		ctx,
 		db,
 		transaction.Collateral(),
 		"collateral_by_tx_id",
@@ -118,6 +122,7 @@ func (s *Store) applyTransactionAPIDetails(
 		return fmt.Errorf("mark collateral inputs: %w", err)
 	}
 	if err := markTransactionUtxoReferences(
+		ctx,
 		db,
 		transaction.ReferenceInputs(),
 		"referenced_by_tx_id",
@@ -126,6 +131,7 @@ func (s *Store) applyTransactionAPIDetails(
 		return fmt.Errorf("mark reference inputs: %w", err)
 	}
 	if err := indexTransactionAddresses(
+		ctx,
 		db,
 		transactionID,
 		transaction,
@@ -137,6 +143,7 @@ func (s *Store) applyTransactionAPIDetails(
 		return err
 	}
 	if err := storeTransactionWitnesses(
+		ctx,
 		db,
 		transactionID,
 		transaction,
@@ -144,13 +151,14 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return err
 	}
-	if err := storeTransactionDatumIndex(db, transaction, slot); err != nil {
+	if err := storeTransactionDatumIndex(ctx, db, transaction, slot); err != nil {
 		return err
 	}
 	return nil
 }
 
 func markTransactionUtxoReferences(
+	ctx context.Context,
 	db queryer,
 	inputs []lcommon.TransactionInput,
 	column string,
@@ -163,7 +171,7 @@ func markTransactionUtxoReferences(
 	for _, input := range inputs {
 		if column == "referenced_by_tx_id" {
 			if _, err := db.ExecContext(
-				context.Background(),
+				ctx,
 				`INSERT INTO utxo_reference_input (utxo_id, transaction_hash)
 SELECT u.id, ? FROM utxo AS u
 WHERE u.tx_id = ? AND u.output_idx = ?
@@ -182,7 +190,7 @@ WHERE u.tx_id = ? AND u.output_idx = ?
 		query := "UPDATE utxo SET " + column +
 			" = ? WHERE tx_id = ? AND output_idx = ?"
 		if _, err := db.ExecContext(
-			context.Background(),
+			ctx,
 			query,
 			hash,
 			input.Id().Bytes(),
@@ -201,6 +209,7 @@ type addressIndexKey struct {
 }
 
 func indexTransactionAddresses(
+	ctx context.Context,
 	db queryer,
 	transactionID int64,
 	transaction lcommon.Transaction,
@@ -209,7 +218,7 @@ func indexTransactionAddresses(
 	produced []models.Utxo,
 	parameterLimit int,
 ) error {
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 DELETE FROM address_transaction WHERE transaction_id = ?`,
 		transactionID,
 	); err != nil {
@@ -265,7 +274,7 @@ DELETE FROM address_transaction WHERE transaction_id = ?`,
 			predicates = append(predicates, "(tx_id = ? AND output_idx = ?)")
 			args = append(args, []byte(key.txID), key.index)
 		}
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
 FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 		if err != nil {
@@ -301,7 +310,7 @@ FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 		}
 	}
 	for address := range addresses {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO address_transaction (
     payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
 ) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -348,6 +357,7 @@ func TransactionWitnessCleanupSQL(table string) string {
 }
 
 func storeTransactionWitnesses(
+	ctx context.Context,
 	db queryer,
 	transactionID int64,
 	transaction lcommon.Transaction,
@@ -355,7 +365,7 @@ func storeTransactionWitnesses(
 ) error {
 	for _, table := range transactionWitnessTables {
 		if _, err := db.ExecContext(
-			context.Background(),
+			ctx,
 			TransactionWitnessCleanupSQL(table),
 			transactionID,
 		); err != nil {
@@ -367,7 +377,7 @@ func storeTransactionWitnesses(
 		return nil
 	}
 	for _, witness := range witnesses.Vkey() {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO key_witness (
     vkey, signature, transaction_id, type
 ) VALUES (?, ?, ?, ?)`,
@@ -380,7 +390,7 @@ INSERT INTO key_witness (
 		}
 	}
 	for _, witness := range witnesses.Bootstrap() {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO key_witness (
     signature, public_key, chain_code, attributes, transaction_id, type
 ) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -395,6 +405,7 @@ INSERT INTO key_witness (
 		}
 	}
 	if err := storeWitnessScripts(
+		ctx,
 		db,
 		transactionID,
 		uint8(lcommon.ScriptRefTypeNativeScript),
@@ -404,6 +415,7 @@ INSERT INTO key_witness (
 		return err
 	}
 	if err := storeWitnessScripts(
+		ctx,
 		db,
 		transactionID,
 		uint8(lcommon.ScriptRefTypePlutusV1),
@@ -413,6 +425,7 @@ INSERT INTO key_witness (
 		return err
 	}
 	if err := storeWitnessScripts(
+		ctx,
 		db,
 		transactionID,
 		uint8(lcommon.ScriptRefTypePlutusV2),
@@ -422,6 +435,7 @@ INSERT INTO key_witness (
 		return err
 	}
 	if err := storeWitnessScripts(
+		ctx,
 		db,
 		transactionID,
 		uint8(lcommon.ScriptRefTypePlutusV3),
@@ -432,7 +446,7 @@ INSERT INTO key_witness (
 	}
 	if transaction.IsValid() {
 		for _, datum := range witnesses.PlutusData() {
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 INSERT INTO plutus_data (data, transaction_id) VALUES (?, ?)`,
 				datum.Cbor(),
 				transactionID,
@@ -443,7 +457,7 @@ INSERT INTO plutus_data (data, transaction_id) VALUES (?, ?)`,
 	}
 	if witnesses.Redeemers() != nil {
 		for key, value := range witnesses.Redeemers().Iter() {
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 INSERT INTO redeemer (
     data, transaction_id, ex_units_memory, ex_units_cpu, "index", tag
 ) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -462,6 +476,7 @@ INSERT INTO redeemer (
 }
 
 func storeWitnessScripts[T lcommon.Script](
+	ctx context.Context,
 	db queryer,
 	transactionID int64,
 	scriptType uint8,
@@ -470,7 +485,7 @@ func storeWitnessScripts[T lcommon.Script](
 ) error {
 	for _, script := range scripts {
 		hash := script.Hash().Bytes()
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO witness_scripts (script_hash, transaction_id, type)
 VALUES (?, ?, ?)`,
 			hash,
@@ -479,7 +494,7 @@ VALUES (?, ?, ?)`,
 		); err != nil {
 			return fmt.Errorf("create witness script: %w", err)
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO script (hash, content, created_slot, type)
 VALUES (?, ?, ?, ?)
 ON CONFLICT (hash) DO NOTHING`,
@@ -495,12 +510,13 @@ ON CONFLICT (hash) DO NOTHING`,
 }
 
 func storeTransactionDatumIndex(
+	ctx context.Context,
 	db queryer,
 	transaction lcommon.Transaction,
 	slot uint64,
 ) error {
 	for _, output := range transaction.Produced() {
-		if err := storeDatumIndexRow(db, output.Output.Datum(), slot); err != nil {
+		if err := storeDatumIndexRow(ctx, db, output.Output.Datum(), slot); err != nil {
 			return err
 		}
 	}
@@ -510,7 +526,7 @@ func storeTransactionDatumIndex(
 	}
 	for _, datum := range witnesses.PlutusData() {
 		copy := datum
-		if err := storeDatumIndexRow(db, &copy, slot); err != nil {
+		if err := storeDatumIndexRow(ctx, db, &copy, slot); err != nil {
 			return err
 		}
 	}
@@ -518,6 +534,7 @@ func storeTransactionDatumIndex(
 }
 
 func storeDatumIndexRow(
+	ctx context.Context,
 	db queryer,
 	datum *lcommon.Datum,
 	slot uint64,
@@ -537,7 +554,7 @@ func storeDatumIndexRow(
 		return nil
 	}
 	hash := lcommon.Blake2b256Hash(raw)
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 INSERT INTO datum (hash, raw_datum, added_slot)
 VALUES (?, ?, ?)
 ON CONFLICT (hash) DO NOTHING`,

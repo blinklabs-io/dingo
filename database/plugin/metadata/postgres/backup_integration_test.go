@@ -110,7 +110,7 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = srcStore.Close() })
 	require.NoError(t, srcStore.Start(context.Background()))
 
-	txn := srcStore.Transaction()
+	txn := srcStore.Transaction(t.Context())
 	require.NoError(t, srcStore.SetCommitTimestamp(4242, txn))
 	require.NoError(t, txn.Commit())
 	require.NoError(t, srcStore.SetNodeSettings(&types.NodeSettings{
@@ -213,7 +213,7 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srcStore.Close() })
 	require.NoError(t, srcStore.Start(context.Background()))
-	txn := srcStore.Transaction()
+	txn := srcStore.Transaction(t.Context())
 	require.NoError(t, srcStore.SetCommitTimestamp(777, txn))
 	require.NoError(t, txn.Commit())
 	dumpPath := filepath.Join(t.TempDir(), "backup.dump")
@@ -252,7 +252,7 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	require.NoError(t, store.Start(context.Background()))
 
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(999, txn))
 	require.NoError(t, txn.Commit())
 

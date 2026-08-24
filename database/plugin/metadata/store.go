@@ -113,15 +113,21 @@ type SettingsStore interface {
 // chain-transaction domain, which is a different thing entirely.
 type TxnStore interface {
 	// Transaction creates a new metadata transaction on the write
-	// connection pool. Use ReadTransaction for read-only access to
-	// avoid contending with writers.
-	Transaction() types.Txn
+	// connection pool, bound to ctx. Per database/sql's own BeginTx
+	// contract, canceling ctx rolls the transaction back instead of
+	// leaving it to a caller's eventual Commit/Rollback -- see the
+	// sqlstore implementation's doc comment for exactly which
+	// statements that covers today. Use ReadTransaction for read-only
+	// access to avoid contending with writers. A nil ctx is treated as
+	// context.Background().
+	Transaction(ctx context.Context) types.Txn
 
 	// ReadTransaction creates a read-only metadata transaction using
-	// the read connection pool (when available). This avoids blocking
-	// on the write connection, which is critical for operations like
-	// FindIntersect that must complete within protocol timeouts.
-	ReadTransaction() types.Txn
+	// the read connection pool (when available), bound to ctx the same
+	// way Transaction is. This avoids blocking on the write connection,
+	// which is critical for operations like FindIntersect that must
+	// complete within protocol timeouts.
+	ReadTransaction(ctx context.Context) types.Txn
 }
 
 // SlotRangeStats is the canonical block coverage for an inclusive slot range.
