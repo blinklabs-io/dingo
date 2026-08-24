@@ -403,6 +403,31 @@ const (
 	SyncingChainsyncState  ChainsyncState = "syncing"
 )
 
+func historicalBlockValidationDecision(
+	validationEnabled bool,
+	trustedReplay bool,
+	chainsyncState ChainsyncState,
+	blockSlot uint64,
+	cutoffSlot uint64,
+	mithrilLedgerSlot uint64,
+) (shouldValidate bool, reachedTipRegion bool) {
+	if validationEnabled {
+		coveredByMithril := mithrilLedgerSlot > 0 &&
+			blockSlot <= mithrilLedgerSlot
+		return !coveredByMithril,
+			chainsyncState == SyncingChainsyncState && blockSlot >= cutoffSlot
+	}
+	if trustedReplay ||
+		chainsyncState != SyncingChainsyncState ||
+		blockSlot < cutoffSlot {
+		return false, false
+	}
+	if mithrilLedgerSlot > 0 && blockSlot <= mithrilLedgerSlot {
+		return false, true
+	}
+	return true, true
+}
+
 // FatalErrorFunc is a callback invoked when a fatal error occurs that requires
 // the node to shut down. The callback should trigger graceful shutdown.
 type FatalErrorFunc func(err error)
@@ -787,6 +812,7 @@ type LedgerState struct {
 	epochSnapshotStakeHook             atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
 	reachedTip                         atomic.Bool
 	currentTip                         ochainsync.Tip
+	byronPBFT                          byronPBFTCache
 	currentEpoch                       models.Epoch
 	dbWorkerPool                       *DatabaseWorkerPool
 	slotClock                          *SlotClock
@@ -1113,6 +1139,10 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.StartInDijkstra && !cfg.EnableDijkstra {
 		return nil, errors.New("StartInDijkstra requires EnableDijkstra")
 	}
+	byronPBFT, err := newByronPBFTCache(cfg)
+	if err != nil {
+		return nil, err
+	}
 	// Initialize database worker pool config with defaults if not set
 	if cfg.DatabaseWorkerPoolConfig.WorkerPoolSize == 0 &&
 		cfg.DatabaseWorkerPoolConfig.TaskQueueSize == 0 {
@@ -1126,6 +1156,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		chain:              cfg.ChainManager.PrimaryChain(),
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
+		byronPBFT:          byronPBFT,
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -5314,6 +5345,24 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var pendingNonce []byte
 			var blocksProcessed int
 			runningNonce := snapshotNonce
+			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
+			var runningByronPBFTState byronPBFTState
+			if trackByronPBFT {
+				runningByronPBFTState, err = ls.byronPBFTStateAtTip(
+					ctx,
+					snapshotTip,
+				)
+				if err != nil {
+					completeReadResult()
+					return fmt.Errorf(
+						"reconstruct Byron PBFT state: %w",
+						err,
+					)
+				}
+			}
+			var pendingByronPBFTState byronPBFTState
+			var pendingByronPBFTTip ocommon.Point
+			var pendingByronPBFT bool
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
 			if !parentEnvelopeSet {
@@ -5392,39 +5441,16 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// ValidateHistorical=false, as they were already
 						// validated by the network. Validate blocks within
 						// the stability window near the tip.
-						var shouldValidateBlock bool
-						if snapshotValidationEnabled {
-							shouldValidateBlock = true
-							// When validation was already enabled from
-							// config (ValidateHistorical), we still need
-							// to detect reaching the chain tip for
-							// metrics gating (IsAtTip).
-							if !wantEnableValidation &&
-								snapshotChainsyncState == SyncingChainsyncState &&
-								next.SlotNumber() >= cutoffSlot {
-								wantEnableValidation = true
-							}
-						} else if !ls.config.TrustedReplay &&
-							snapshotChainsyncState == SyncingChainsyncState &&
-							next.SlotNumber() >= cutoffSlot {
-							// Do not validate blocks covered by the
-							// Mithril snapshot. These were already
-							// verified by the certificate chain during
-							// import; re-validating them fails because
-							// the UTxO set from the snapshot does not
-							// contain intermediate states for volatile
-							// blocks fetched during gap closure.
-							if snapshotMithrilSlot > 0 &&
-								next.SlotNumber() <= snapshotMithrilSlot {
-								// Still within Mithril trust boundary —
-								// skip validation but mark that we've
-								// reached the tip region so catch-up mode
-								// and bulk-load pragmas are disabled.
-								wantEnableValidation = true
-							} else {
-								wantEnableValidation = true
-								shouldValidateBlock = true
-							}
+						shouldValidateBlock, reachedTipRegion := historicalBlockValidationDecision(
+							snapshotValidationEnabled,
+							ls.config.TrustedReplay,
+							snapshotChainsyncState,
+							next.SlotNumber(),
+							cutoffSlot,
+							snapshotMithrilSlot,
+						)
+						if reachedTipRegion {
+							wantEnableValidation = true
 						}
 						// Flush accumulated deltas before the first validated
 						// block so that UTxOs created by earlier non-validated
@@ -5467,6 +5493,26 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 									offsetErr,
 								)
 							}
+						}
+						if trackByronPBFT &&
+							next.Era().Id == byron.EraIdByron {
+							nextPBFTState, pbftErr := ls.advanceByronPBFTState(
+								runningByronPBFTState,
+								next,
+								shouldValidateBlock,
+							)
+							if pbftErr != nil {
+								deltaBatch.Release()
+								return classifyByronPBFTApplyError(
+									tmpPoint,
+									pbftErr,
+									shouldValidateBlock,
+								)
+							}
+							runningByronPBFTState = nextPBFTState
+							pendingByronPBFTState = nextPBFTState
+							pendingByronPBFTTip = tmpPoint
+							pendingByronPBFT = true
 						}
 						// Skip full block processing for blocks
 						// already handled during Mithril gap closure.
@@ -5665,6 +5711,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// Brief lock to ensure readers see consistent state.
 				ls.Lock()
 				ls.currentTip = pendingTip
+				if pendingByronPBFT {
+					ls.byronPBFT.state = pendingByronPBFTState
+					ls.byronPBFT.tip = pendingByronPBFTTip
+					ls.byronPBFT.initialized = true
+				}
 				if len(pendingNonce) > 0 {
 					ls.currentTipBlockNonce = pendingNonce
 				}

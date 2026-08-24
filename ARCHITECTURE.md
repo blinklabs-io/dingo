@@ -2154,9 +2154,26 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 ### Block Header Validation
 
 `ledger/verify_header.go` performs cryptographic validation of block headers:
+- Byron PBFT signature, active-delegation, slot-bound, and issuer-window checks
 - VRF proof verification against the epoch nonce
 - KES signature verification with period checks
 - Slot leader eligibility checking
+
+Byron main-block validation derives its configured genesis issuers and initial
+heavy delegations from the Byron genesis file. Stateless validation verifies
+the protocol magic, genesis issuer, proxy certificate, exact header signature,
+and current-slot bound. Ordered ledger application then ticks the active
+delegation view, validates the signing delegate, and charges the resolved
+genesis issuer against the rolling `k`-signature PBFT window. Each main block's
+delegation payload is signature-checked and scheduled for activation after
+`2k` slots; activation replaces the issuer's delegate, while self-delegation
+revokes the prior delegate. The in-memory delegation and issuer-window states
+are updated only after the block transaction commits. On startup or after a
+rollback, the delegation view is reconstructed from the canonical Byron chain
+through the applied tip, while the issuer window retains only its last `k`
+main-block issuers. Byron epoch boundary blocks still enforce the current-slot
+bound and tick due delegations, but do not carry a PBFT issuer signature or
+advance the issuer window.
 
 Before resolving or eagerly forecasting an epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
@@ -7851,6 +7868,27 @@ required because blockfetch persistence advances `ls.chain` before the
 ledger reader reaches the validate stage, and `ls.chain` is consumed by the
 downstream blockfetch server and UTxO RPC sync/watch readers. A block that has
 not passed admission crypto must therefore never enter that chain.
+
+ChainSync admission also enforces the Ouroboros future-header rule before a
+header enters that queue. The raw network callback records `ChainsyncEvent`'s
+`ArrivalTime` immediately, before header decoding, chain-selection, and
+EventBus work can delay delivery. The per-peer protocol callback asks ledger
+admission to convert the header slot to its wall-clock onset using the active
+hard-fork summary before observed-tip, dedup, or ledger state changes. A header
+received no more than two seconds early (the `ouroboros-consensus` default
+clock-skew allowance) waits on that peer callback until its slot begins; it
+never sleeps under the node-wide ChainSync dispatch mutex. A resolvable header
+received earlier is dropped without recycling or penalizing the peer, because
+the node cannot distinguish peer skew from a slow local clock. One coalesced
+timer per connection re-intersects the mini-protocol at the earliest dropped
+header's onset so the remote cursor cannot strand the accepted chain; later
+headers from that peer remain withheld until the old mini-protocol has stopped
+and the re-intersection can replay from ledger-accepted points. A slot
+past the hard-fork forecast is deferred to the normal header-verification path,
+which already treats `ErrPastHorizon` as unavailable state rather than peer
+fault. Judging the recorded arrival rather than the later handler time means
+local decode, EventBus, or scheduler delay cannot make an invalid early header
+appear timely.
 
 `blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
 it does not forecast, mutate the cache, or rebuild `HardForkSummary` per

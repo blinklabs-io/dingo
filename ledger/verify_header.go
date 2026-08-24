@@ -144,8 +144,9 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 
 // verifyBlockHeader performs cryptographic verification of a block header.
 // This includes VRF proof verification and KES signature verification.
-// Byron-era blocks are skipped because they use a different consensus
-// mechanism (PBFT) and do not have VRF/KES fields.
+// Byron-era blocks are skipped here because this helper has only Praos
+// parameters. LedgerState.verifyBlockHeaderStatelessCrypto validates their
+// PBFT signatures and issuer state through the configured Byron genesis.
 //
 // Parameters:
 //   - block: the block whose header to verify
@@ -153,7 +154,7 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 //   - slotsPerKesPeriod: number of slots per KES period from Shelley genesis
 //
 // Returns an error if verification fails, nil if the block passes
-// verification or is a Byron-era block.
+// verification or is a Byron-era block (validated by the LedgerState wrapper).
 func verifyBlockHeaderHex(
 	block ledger.Block,
 	epochNonceHex string,
@@ -286,9 +287,14 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
 ) (models.Epoch, error) {
-	// Skip Byron-era blocks early to avoid parameter lookups
+	// Byron uses PBFT rather than Praos. Validate its exact signature,
+	// configured genesis issuer, protocol magic, and current-slot bound before
+	// avoiding the Praos epoch/nonce lookups below. Ordered active-delegation
+	// and issuer-window checks run during ledger application because parallel
+	// pre-validation cannot see earlier blocks in the same batch.
 	if block.Era().Id == byron.EraIdByron {
-		return models.Epoch{}, nil
+		err := ls.validateByronPBFTHeaderCrypto(block)
+		return models.Epoch{}, err
 	}
 
 	blockSlot := block.SlotNumber()

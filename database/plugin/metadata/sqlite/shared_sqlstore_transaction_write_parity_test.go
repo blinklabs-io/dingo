@@ -60,6 +60,23 @@ type transactionWriteState struct {
 	Outputs          int
 }
 
+func requireTransactionWriteAccount(
+	t *testing.T,
+	store transactionWriteStore,
+	credentialTag uint8,
+	stakingKey []byte,
+) *models.Account {
+	t.Helper()
+	account, err := store.GetAccountByCredential(
+		credentialTag, stakingKey, true, nil,
+	)
+	require.NoError(t, err)
+	if account == nil {
+		t.Fatal("account lookup returned nil without an error")
+	}
+	return account
+}
+
 func TestSharedSQLStoreTransactionWriteParity(t *testing.T) {
 	t.Parallel()
 	store, raw := newSharedSQLStore(t)
@@ -148,8 +165,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "reward withdrawal amount 1235 exceeds")
 
-	account, err := store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
+	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 	var deltas int
 	require.NoError(t, raw.QueryRow(
@@ -180,8 +196,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "reward withdrawal amount 1236 exceeds")
-	account, err = store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 }
 
@@ -224,9 +239,8 @@ func TestSharedSQLStoreWithdrawalCredentialTagsRemainDistinct(t *testing.T) {
 			nil,
 		))
 	}
-	for tag := uint8(0); tag < 2; tag++ {
-		account, err := store.GetAccountByCredential(tag, stakeKey, true, nil)
-		require.NoError(t, err)
+	for tag := range uint8(2) {
+		account := requireTransactionWriteAccount(t, store, tag, stakeKey)
 		require.Zero(t, account.Reward)
 	}
 }
@@ -260,8 +274,7 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 		true,
 		nil,
 	))
-	account, err := store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
+	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 	transactionHash := lcommon.Blake2b256{0xf2}
 	transaction := &mockTransaction{
@@ -273,16 +286,14 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 	require.NoError(t, store.SetTransaction(
 		transaction, point, 0, nil, true, nil,
 	))
-	account, err = store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1000), uint64(account.Reward))
 
 	// Replaying the same transaction must not debit the remaining balance again.
 	require.NoError(t, store.SetTransaction(
 		transaction, point, 0, nil, true, nil,
 	))
-	account, err = store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1000), uint64(account.Reward))
 
 	excessive := &mockTransaction{
@@ -300,14 +311,12 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "exceeds account balance 1000")
-	account, err = store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1000), uint64(account.Reward))
 
 	// Rollback restores the pre-withdrawal balance from the journal.
 	require.NoError(t, store.DeleteAccountRewardsAfterSlot(29, nil))
-	account, err = store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 	var deltas int
 	require.NoError(t, raw.QueryRow(
@@ -390,10 +399,7 @@ func TestSharedSQLStoreZeroWithdrawalValidatesAccountAndBalance(t *testing.T) {
 			if !tc.create {
 				return
 			}
-			account, accountErr := store.GetAccountByCredential(
-				0, stakeKey, true, nil,
-			)
-			require.NoError(t, accountErr)
+			account := requireTransactionWriteAccount(t, store, 0, stakeKey)
 			require.Equal(t, tc.wantReward, uint64(account.Reward))
 		})
 	}
@@ -701,9 +707,7 @@ func exerciseTransactionWriteStore(
 	produced, err := store.GetUtxo(transactionHash.Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, produced)
-	account, err := store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
-	require.NotNil(t, account)
+	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
 	deltas, witnesses := counts()
 	return transactionWriteState{
 		Slot:             stored.Slot,
