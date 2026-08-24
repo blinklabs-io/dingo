@@ -3782,14 +3782,16 @@ Destinations come in two shapes, selected by the caller:
   it unlinks a regular file as readily as it removes a directory, which is
   exactly the behaviour that made such a swap costly.
 
-  Both platforms have a directory-only primitive, reached differently. Unix
-  uses `unlinkat` with `AT_REMOVEDIR`, addressed through the parent handle, so
-  neither the entry nor the parent can be redirected. Windows uses
-  `RemoveDirectory`, which fails on a file and on a populated directory but
-  addresses the entry by name, because Windows has no handle-relative removal;
-  a substituted parent could redirect it, which Windows makes hard by refusing
-  to move a directory while handles are open beneath it, and the parent is held
-  open for the whole extraction.
+  Both platforms have a directory-only primitive, addressed through the parent
+  handle so neither the entry nor the parent can be redirected. Unix uses
+  `unlinkat` with `AT_REMOVEDIR`. Windows has no directory-only removal in the
+  standard library, but `NtSetInformationFile`'s `FileDispositionInformation`
+  applied to a handle opened relative to the verified parent gets the same
+  guarantee: the entry is opened as a single component under that handle,
+  NTFS enforces emptiness the same way it does for `RemoveDirectory`, and
+  nothing here resolves the parent's name again the way the older
+  `RemoveDirectory`-by-path implementation did (`extract_handlerelative_windows.go`;
+  issue #3228).
 
   `WithReplaceDestination` remains the only path that removes a destination
   holding content, which is what that option exists to authorise.
@@ -3933,10 +3935,12 @@ stays inside it, which is enough to unlink a different file in the tree — and
 extraction's symlink checks run once, before the work, so the window is real.
 `openVerifiedParent` therefore opens each component through the one above it
 and confirms the handle refers to the entry the name denotes, holding those
-handles across the removal. On Windows only the immediate parent's own name is
-resolved a second time, since it has no handle-relative removal; that is the
-same residue `removeEmptyExtractDir` carries, now narrowed to one component and
-mitigated by the handle held on it.
+handles across the removal. Windows has no handle-relative rename or unlink
+through the standard library, but does through `NtSetInformationFile`: the
+final component is opened relative to the verified parent's own handle rather
+than resolved from a path, and the rename or deletion is applied to that open
+handle, so nothing here resolves any component's name a second time on either
+platform (`extract_handlerelative_windows.go`; issue #3228).
 
 After that, an in-place write needs write permission on a `0640` file owned by
 the node's user — which is the node's own user, and no filesystem check defends
