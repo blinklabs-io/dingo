@@ -2192,10 +2192,12 @@ eligibility are read from that intersection state.
 
 Genesis-overlay activity is resolved separately from the forward protocol-
 parameter forecast: header validation first uses the epoch containing the
-slot and reads that epoch's effective parameter row, so an epoch-boundary
-decentralization update cannot be mistaken for the prior epoch's overlay
-schedule. When the target epoch's parameter row is not persisted yet (a
-from-genesis node still one epoch behind the header it is checking),
+slot and reads that epoch's effective parameter row. At a hard-fork boundary,
+when the block body still uses the predecessor-era encoding while the header
+announces the successor, it instead uses the predecessor era's parameter row.
+This keeps either boundary from mistaking an epoch-boundary decentralization
+update for the wrong overlay schedule. When the target epoch's parameter row
+is not persisted yet (a from-genesis node still one epoch behind the header),
 `ProtocolParamsForSlot` forecasts it: for a slot one epoch ahead it applies,
 on top of any era `HardForkFunc`, the pending in-era protocol-parameter update
 the rollover will enact at that boundary. The forecast mirrors the rollover's
