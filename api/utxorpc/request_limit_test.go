@@ -17,6 +17,7 @@ package utxorpc
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -124,6 +125,46 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(t *testing.T) 
 	body = protowire.AppendBytes(body, bytes.Repeat([]byte{'a'}, DefaultMaxRequestBody))
 	compressed := gzipRequestBody(t, body)
 	require.Less(t, len(compressed), DefaultMaxRequestBody)
+
+	req, err := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		"http://example.test/grpc.health.v1.Health/Check",
+		bytes.NewReader(compressed),
+	)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/proto")
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	require.Equal(t, http.StatusTooManyRequests, response.Code)
+}
+
+func TestConnectRequestBodyLimitRejectsOversizedCompressedWireBody(t *testing.T) {
+	u := NewUtxorpc(UtxorpcConfig{})
+	verifier, err := apiauth.NewVerifier(apiconfig.EffectiveAuth{
+		Enabled: true,
+		Token:   "shared-secret",
+	})
+	require.NoError(t, err)
+	u.verifier = verifier
+	handler := u.newServeMux()
+
+	// Connect bounds the raw request bytes before it decompresses them, which
+	// is a separate limit from the decompressed-size check above. Random
+	// payload bytes do not compress, so gzip expands the message: the decoded
+	// body stays within DefaultMaxRequestBody while the compressed wire body
+	// exceeds it. Only the pre-decompression limit can reject this request.
+	// The tag and length prefix for a bytes field this size occupy five bytes.
+	payload := make([]byte, DefaultMaxRequestBody-5)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+	body := protowire.AppendTag(nil, 100, protowire.BytesType)
+	body = protowire.AppendBytes(body, payload)
+	compressed := gzipRequestBody(t, body)
+	require.LessOrEqual(t, len(body), DefaultMaxRequestBody)
+	require.Greater(t, len(compressed), DefaultMaxRequestBody)
 
 	req, err := http.NewRequestWithContext(
 		t.Context(),
