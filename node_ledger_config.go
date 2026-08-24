@@ -20,6 +20,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -180,6 +181,18 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return nil
 		},
+		GetPeerObservedTipFunc: func(
+			connId ouroboros.ConnectionId,
+		) (ochainsync.Tip, bool) {
+			if n.chainSelector == nil {
+				return ochainsync.Tip{}, false
+			}
+			peerTip := n.chainSelector.GetPeerTip(connId)
+			if peerTip == nil {
+				return ochainsync.Tip{}, false
+			}
+			return peerTip.SelectionTip(), true
+		},
 		ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil
@@ -216,6 +229,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			return ledger.ChainsyncEvent{
 				ConnectionId: h.ConnectionId,
 				BlockHeader:  h.BlockHeader,
+				ArrivalTime:  h.ArrivalTime,
 				Point:        h.Point,
 				Tip:          h.Tip,
 				BlockNumber:  h.BlockNumber,

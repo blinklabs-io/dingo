@@ -65,6 +65,11 @@ func TestSkippedStakeRewardsIsReportedLoudly(t *testing.T) {
 	// The consequence, not just the event: whoever reads this needs to know
 	// the balances stay short rather than catching up on their own.
 	assert.Contains(t, logs, "permanently")
+	assert.Contains(t, logs, "basis was never persisted")
+	assert.Contains(t, logs, "ledgerstate import warnings")
+	assert.NotContains(t, logs, "expected after a Mithril bootstrap",
+		"a failed imported-basis seed must not be misreported as an "+
+			"inherent bootstrap limitation")
 }
 
 // The reporting path must tolerate a LedgerState with no logger and no

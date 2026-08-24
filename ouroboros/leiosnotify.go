@@ -1470,8 +1470,9 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	}
 }
 
-// EnqueueLeiosPrototypeVote queues a locally emitted vote for diffusion over
-// the same LeiosNotify stream used by the reference implementation.
+// EnqueueLeiosPrototypeVote queues a vote -- locally emitted, or newly
+// accepted from a peer and re-diffused -- for diffusion over the same
+// LeiosNotify stream used by the reference implementation.
 func (o *Ouroboros) EnqueueLeiosPrototypeVote(vote lcommon.LeiosPrototypeVote) {
 	o.leiosVoteEnqueueCount.Add(1)
 	copyVote := vote

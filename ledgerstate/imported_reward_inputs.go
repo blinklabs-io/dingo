@@ -18,8 +18,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"maps"
 	"math/big"
+	"sort"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -266,6 +267,28 @@ func (b *rewardInputBundle) validate() error {
 			len(b.poolInputs), b.snapshot.TotalPoolCount,
 		)
 	}
+	missingRewardAccounts := make([]string, 0)
+	for _, pool := range b.poolInputs {
+		if pool == nil || len(pool.RewardAccount) != 0 {
+			continue
+		}
+		missingRewardAccounts = append(
+			missingRewardAccounts,
+			fmt.Sprintf(
+				"derived pool input for %x has no reward account "+
+					"(%d lovelace delegated stake)",
+				pool.PoolKeyHash,
+				uint64(pool.DelegatedStake),
+			),
+		)
+	}
+	if len(missingRewardAccounts) > 0 {
+		// Parameter maps are unordered. A deterministic aggregate makes a
+		// repeated import report the same complete offender list and avoids
+		// hiding all but whichever pool happened to be visited first.
+		sort.Strings(missingRewardAccounts)
+		return errors.New(strings.Join(missingRewardAccounts, "; "))
+	}
 
 	poolStake := make(map[string]uint64, len(b.poolInputs))
 	var totalStake, totalDelegators uint64
@@ -277,12 +300,6 @@ func (b *rewardInputBundle) validate() error {
 			return fmt.Errorf(
 				"derived pool input has %d-byte pool key hash",
 				len(pool.PoolKeyHash),
-			)
-		}
-		if len(pool.RewardAccount) == 0 {
-			return fmt.Errorf(
-				"derived pool input for %x has no reward account",
-				pool.PoolKeyHash,
 			)
 		}
 		if pool.Margin == nil || pool.Margin.Rat == nil {
@@ -589,14 +606,21 @@ func rewardPoolParamsFromRegistrations(
 // effectiveRewardPoolParams picks, per pool, the parameters the reward round
 // for this epoch should be computed from.
 //
-// The snapshot's own parameters win wherever it has them. They are the ones
+// Parameters are first scoped to pools that have positive stake delegated to
+// them in this target snapshot. The registration resolver deliberately sees
+// the union of mark, set and go, but each snapshot describes a different
+// epoch. Letting a pool referenced only by set leak into mark or go creates a
+// zero-stake reward input there; a synthesized registration without historical
+// economics then makes an otherwise complete epoch fail validation.
+//
+// The snapshot's own parameters win within that scoped set. They are the ones
 // that were in force during the epoch it captured, which is what the round
 // needs, and -- the reason issue #3165 stayed open -- the snapshot describes
-// every pool that held stake then, including pools that have since retired.
-// A retired pool is gone from cert state and from the current pool
-// distribution, so nothing else in an imported database can describe it; its
-// delegators' stake could not be attributed, and the gate dropped that whole
-// epoch's basis rather than seed a partial one.
+// every pool that held stake then, including pools that have since retired. A
+// retired pool is gone from cert state and from the current pool distribution,
+// so nothing else in an imported database can describe it; its delegators'
+// stake could not be attributed, and the gate dropped that whole epoch's basis
+// rather than seed a partial one.
 //
 // Registration parameters remain the fallback, for a snapshot whose pool
 // entries are the compact shape carrying only a VRF key. Usability is decided
@@ -607,11 +631,28 @@ func effectiveRewardPoolParams(
 	snap *ParsedSnapShot,
 	registered map[string]*ParsedPool,
 ) map[string]*ParsedPool {
-	effective := make(
-		map[string]*ParsedPool, len(registered)+len(snap.PoolParams),
-	)
-	maps.Copy(effective, registered)
+	referenced := make(map[string]struct{}, len(snap.Delegations))
+	for credential, stake := range snap.Stake {
+		if stake == 0 {
+			continue
+		}
+		poolKey := snap.Delegations[credential]
+		if len(poolKey) == 0 {
+			continue
+		}
+		referenced[hex.EncodeToString(poolKey)] = struct{}{}
+	}
+
+	effective := make(map[string]*ParsedPool, len(referenced))
+	for key := range referenced {
+		if pool, ok := registered[key]; ok {
+			effective[key] = pool
+		}
+	}
 	for key, pool := range snap.PoolParams {
+		if _, ok := referenced[key]; !ok {
+			continue
+		}
 		if pool == nil || len(pool.RewardAccount) == 0 {
 			continue
 		}

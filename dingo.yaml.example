@@ -40,6 +40,15 @@ plugins:
     #     database: "postgres"
     #     sslMode: "require"
     #     timeZone: "UTC"
+    #     # Both bound a single statement/lock wait server-side; zero (the
+    #     # default) leaves Postgres's own default -- no limit -- in
+    #     # effect. Values are milliseconds, matching Postgres's own GUC
+    #     # units. The mysql provider has the same two fields plus
+    #     # readTimeout/writeTimeout, but lockTimeout there is whole
+    #     # seconds (innodb_lock_wait_timeout's native unit) -- see
+    #     # DATABASE.md.
+    #     statementTimeout: "30s"
+    #     lockTimeout: "10s"
   mempool:
     # "fifo" preserves successful-admission order. "dag" additionally indexes
     # transaction dependencies and uses deterministic topological ordering.
@@ -154,6 +163,12 @@ metricsPort: 12798
 # endpoints expose internal state and run on a separate listener from metrics.
 # CLI: --debug-port  Env: DINGO_DEBUG_PORT
 debugPort: 0
+
+# Address for the unauthenticated pprof listener. This is deliberately
+# independent of bindAddr and privateBindAddr and stays on loopback by default.
+# Set a wildcard address only when an external network control protects it.
+# CLI: --debug-bind-addr  Env: DINGO_DEBUG_BIND_ADDR
+debugBindAddr: "127.0.0.1"
 
 # Enable OpenTelemetry tracing. Disabled by default: with no collector
 # listening, the OTLP exporter logs noisy connection errors. When enabled,
@@ -508,9 +523,10 @@ blockPipelineValidateEnabled: false
 strictUtxoValidation: true
 
 # Peer targets - target number of peers in each state
-# These are goals the system works toward, not hard limits.
+# Known, established, and active peer targets are goals, not hard limits.
+# A positive root target limits newly selected public roots; local roots remain.
 # Use 0 for default values, -1 for unlimited
-# Default: known=150, established=50, active=20
+# Default: known=150, established=50, active=20, root=60
 #
 # Target number of known (cold) peers
 # CLI: --target-known-peers
@@ -521,6 +537,9 @@ targetNumberOfEstablishedPeers: 0
 # Target number of active (hot) peers
 # CLI: --target-active-peers
 targetNumberOfActivePeers: 0
+# Target number of root peers selected from topology
+# CLI: --target-root-peers
+targetNumberOfRootPeers: 0
 
 # Per-source quotas for active peers
 # These specify how active peer slots are distributed by source.

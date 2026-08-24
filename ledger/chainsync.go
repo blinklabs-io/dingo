@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -152,6 +154,12 @@ const (
 	headerMismatchResyncThreshold = 20
 
 	maxPeerHeaderHistoryPerConn = 256
+
+	// Match ouroboros-consensus' default maximum permissible clock skew. A
+	// header within this window is held until its slot begins; an earlier
+	// resolvable header is dropped and recovered by a peer-local re-intersection
+	// without treating ambiguous local clock skew as a peer fault.
+	defaultHeaderClockSkew = 2 * time.Second
 )
 
 // ErrRollbackLoopDetected is returned by handleEventChainsyncRollback when
@@ -554,6 +562,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	defer pending.flush()
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
+	var effectiveObservedTip ochainsync.Tip
 	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
@@ -605,6 +614,10 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		}
 	}
 	if err == nil {
+		effectiveObservedTip, _ = ls.chainSwitchObservedTipForConnection(
+			e,
+			effectiveConnId,
+		)
 		requestFreshCursor = ls.chainSwitchNeedsFreshCursorLocked(
 			e,
 			effectiveConnId,
@@ -626,7 +639,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"local_tip_slot",
 			ls.PrimaryChainTip().Point.Slot,
 			"peer_tip_slot",
-			e.NewTip.Point.Slot,
+			effectiveObservedTip.Point.Slot,
 		)
 		ls.requestChainsyncResync(
 			effectiveConnId,
@@ -925,12 +938,48 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
 		return false
 	}
+	newObservedTip, ok := ls.chainSwitchObservedTipForConnection(e, connId)
+	if !ok {
+		return false
+	}
 	localTip := ls.PrimaryChainTip()
-	if e.NewTip.BlockNumber > localTip.BlockNumber {
+	if newObservedTip.BlockNumber > localTip.BlockNumber {
 		return true
 	}
-	return e.NewTip.BlockNumber == localTip.BlockNumber &&
-		e.NewTip.Point.Slot > localTip.Point.Slot
+	return newObservedTip.BlockNumber == localTip.BlockNumber &&
+		newObservedTip.Point.Slot > localTip.Point.Slot
+}
+
+func (ls *LedgerState) chainSwitchObservedTipForConnection(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	if sameConnectionId(connId, e.NewConnectionId) {
+		return chainSwitchNewObservedTip(e), true
+	}
+	if ls.config.GetPeerObservedTipFunc == nil {
+		return ochainsync.Tip{}, false
+	}
+	return ls.config.GetPeerObservedTipFunc(connId)
+}
+
+// chainSwitchNewObservedTip returns the peer frontier that chain selection
+// actually compared.
+//
+// The fallback is keyed on NewObservedTipSet, not on the frontier being
+// zero-valued. A zero frontier is a real observation meaning the peer delivered
+// nothing, which is exactly the advertising-only peer this path must not trust:
+// inferring "absent" from it handed such a peer's advertised outlier to ledger
+// cursor recovery. Only a producer that never populated the field -- an older
+// event, or a direct unit-test or integration constructor -- falls back to the
+// advertised tip.
+func chainSwitchNewObservedTip(
+	e chainselection.ChainSwitchEvent,
+) ochainsync.Tip {
+	if e.NewObservedTipSet {
+		return e.NewObservedTip
+	}
+	return e.NewTip
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
@@ -1107,10 +1156,14 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 		if localErr != nil {
 			ls.config.Logger.Debug(
 				"could not check legacy historical header against primary chain",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"error", localErr,
+				"component",
+				"ledger",
+				"slot",
+				e.Point.Slot,
+				"hash",
+				hex.EncodeToString(e.Point.Hash),
+				"error",
+				localErr,
 			)
 			return false
 		}
@@ -2721,6 +2774,69 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		return nil
 	}
 	return nil
+}
+
+// AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
+// rule against the timestamp recorded at network ingress. It must run from the
+// per-peer ChainSync callback before the header updates observed-tip, dedup, or
+// ledger state; callers must not invoke it while holding the node-wide
+// chainsync dispatch mutex.
+//
+// A header received no more than defaultHeaderClockSkew before its slot waits
+// for slot onset and is accepted. A header received earlier is deliberately
+// dropped by returning (false, nil): local clock skew cannot by itself justify
+// penalizing the peer. ErrPastHorizon is also accepted as a deferred decision,
+// matching headerVerificationEpoch; without a forecast the header cannot be
+// proven future. Other conversion failures fail closed. A zero timestamp is
+// retained for compatibility with synthetic/internal events that never crossed
+// the network ingress path. As with other Go APIs that accept a context, ctx
+// must not be nil.
+func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
+	ctx context.Context,
+	e ChainsyncEvent,
+) (bool, error) {
+	if e.ArrivalTime.IsZero() || ls.slotClock == nil || e.BlockHeader == nil {
+		return true, nil
+	}
+	headerSlot := e.BlockHeader.SlotNumber()
+	slotTime, err := ls.slotClock.SlotToTime(headerSlot)
+	if err != nil {
+		if errors.Is(err, hardfork.ErrPastHorizon) {
+			return true, nil
+		}
+		return false, fmt.Errorf("resolve header slot onset: %w", err)
+	}
+	earlyBy := slotTime.Sub(e.ArrivalTime)
+	if earlyBy <= 0 {
+		return true, nil
+	}
+	if earlyBy > defaultHeaderClockSkew {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"dropping chainsync header received before permitted clock-skew window",
+				"component",
+				"ledger",
+				"connection_id",
+				connIdKey(e.ConnectionId),
+				"slot",
+				headerSlot,
+				"early_by",
+				earlyBy,
+				"permitted_clock_skew",
+				defaultHeaderClockSkew,
+				"possible_local_clock_skew",
+				true,
+			)
+		}
+		return false, nil
+	}
+	if ctx == nil {
+		return false, errors.New("chainsync header admission context is nil")
+	}
+	if err := ls.slotClock.waitUntil(ctx, slotTime); err != nil {
+		return false, fmt.Errorf("wait for header slot onset: %w", err)
+	}
+	return true, nil
 }
 
 func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
@@ -4654,6 +4770,12 @@ func cloneProtocolParametersForEra(
 	if pparams == nil {
 		return nil, nil
 	}
+	// Byron does not persist or decode protocol parameters. A Shelley-shaped
+	// fallback can still be present during startup/recovery, but it must not be
+	// carried through a Byron rollover or treated as a Byron-owned snapshot.
+	if era.Id == eras.ByronEraDesc.Id {
+		return nil, nil
+	}
 	if era.DecodePParamsFunc == nil {
 		return nil, fmt.Errorf(
 			"era %d has no protocol parameter decoder",
@@ -4676,11 +4798,24 @@ func cloneProtocolParametersForEra(
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
+//
+// deferBoundarySnapshot suppresses the authoritative mark-snapshot capture so
+// the caller can take it after applying era transitions that this rollover does
+// not perform itself. Only the multi-era boundary path sets it: a boundary block
+// encoded in the era before the era its header announces needs the rollover to
+// enact source-era pparam updates first, so the final era and protocol
+// parameters do not exist yet when the capture would normally run. Capturing
+// then would durably record the source era's protocol major for an epoch that
+// runs at the successor era's, and disagree with the post-commit
+// EpochTransitionEvent. When set and the rollover reaches the capture point, the
+// result reports BoundarySnapshotDeferred so exactly one capture is taken —
+// re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
+	deferBoundarySnapshot bool,
 ) (*EpochRolloverResult, error) {
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
@@ -4954,7 +5089,14 @@ func (ls *LedgerState) processEpochRollover(
 	// triggers a hard fork (era transition)
 	oldVer, oldErr := GetProtocolVersion(currentPParams)
 	newVer, newErr := GetProtocolVersion(newPParams)
-	if oldErr != nil {
+	// Only warn when parameters are present but yield no version. Byron holds
+	// nil parameters by design, so a nil value is the expected shape for every
+	// rollover in the prefix rather than a fault: warning on it emitted both
+	// lines below on each one, 416 of them on a mainnet sync from genesis. A
+	// non-nil value that still yields no version is a real anomaly and keeps
+	// its warning. Hard-fork detection is skipped either way by the error
+	// check below, so nothing here changes which rollovers are examined.
+	if oldErr != nil && currentPParams != nil {
 		ls.config.Logger.Warn(
 			"could not extract protocol version from "+
 				"current pparams, skipping hard fork "+
@@ -4965,7 +5107,7 @@ func (ls *LedgerState) processEpochRollover(
 			"component", "ledger",
 		)
 	}
-	if newErr != nil {
+	if newErr != nil && newPParams != nil {
 		ls.config.Logger.Warn(
 			"could not extract protocol version from "+
 				"new pparams, skipping hard fork "+
@@ -5097,12 +5239,30 @@ func (ls *LedgerState) processEpochRollover(
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
-	// CaptureGenesisSnapshot at startup.
-	if err := ls.captureEpochBoundarySnapshot(txn, currentEpoch, result); err != nil {
+	// CaptureGenesisSnapshot at startup. A multi-era boundary defers the capture
+	// to the caller, which takes it once the remaining era transitions have
+	// produced the era and protocol parameters the new epoch actually runs at.
+	if deferBoundarySnapshot {
+		result.BoundarySnapshotDeferred = true
+	} else if err := ls.captureEpochBoundarySnapshot(
+		txn, currentEpoch, result,
+	); err != nil {
 		return nil, err
 	}
 
 	return result, nil
+}
+
+// splitEraTransitionsForRollover keeps epoch-boundary protocol-parameter
+// enactment in the source era. A proposal submitted in the source era is
+// enacted at the boundary before the successor-era hard fork transforms the
+// protocol parameters. This matters for fields removed by the successor era,
+// such as Alonzo's decentralization parameter, which remains present in the
+// legacy update CBOR but is not a valid Babbage update field.
+func splitEraTransitionsForRollover(
+	transitionPath []uint,
+) (before, after []uint) {
+	return nil, transitionPath
 }
 
 // epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot

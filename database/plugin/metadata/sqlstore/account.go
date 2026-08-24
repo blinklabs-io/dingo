@@ -40,16 +40,15 @@ func (s *Store) CreateAccount(
 		return errors.New("create account: account is nil")
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
 			params, err := accountParams(account)
 			if err != nil {
 				return err
 			}
 			id, err := q.CreateAccount(
-				context.Background(),
+				ctx,
 				sqlitequery.CreateAccountParams(params),
 			)
 			if err != nil {
@@ -58,6 +57,7 @@ func (s *Store) CreateAccount(
 			account.ID = uint(id)
 			account.Active = params.Active.Bool
 			return s.refreshRewardLiveStakeAggregate(
+				ctx,
 				db,
 				models.NewStakeCredentialRef(
 					account.CredentialTag,
@@ -83,21 +83,20 @@ func (s *Store) ImportAccount(
 		return errors.New("import account: account is nil")
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			params, err := accountParams(account)
 			if err != nil {
 				return err
 			}
 			id, err := s.operationalQueries(db).ImportAccount(
-				context.Background(),
+				ctx,
 				sqlitequery.ImportAccountParams(params),
 			)
 			if err != nil {
 				return fmt.Errorf("import account: %w", err)
 			}
-			if err := writeAccountImportBaseline(db, account); err != nil {
+			if err := writeAccountImportBaseline(ctx, db, account); err != nil {
 				return fmt.Errorf("import account: %w", err)
 			}
 			account.ID = uint(id)
@@ -145,6 +144,7 @@ func requireAccountBaselineTransaction(db queryer) error {
 // it, because the newer snapshot is then the earliest state this database can
 // reach.
 func writeAccountImportBaseline(
+	ctx context.Context,
 	db queryer,
 	account *models.Account,
 ) error {
@@ -166,7 +166,7 @@ func writeAccountImportBaseline(
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 INSERT INTO account_import_baseline (
     credential_tag, staking_key, pool, drep, drep_type, active, added_slot
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -190,6 +190,7 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 }
 
 func readAccountImportBaseline(
+	ctx context.Context,
 	db queryer,
 	credentialTag uint8,
 	stakingKey []byte,
@@ -199,7 +200,7 @@ func readAccountImportBaseline(
 		drepType  sql.NullInt64
 		addedSlot int64
 	)
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 SELECT pool, drep, drep_type, active, added_slot
 FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -234,6 +235,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 }
 
 func deleteAccountImportBaseline(
+	ctx context.Context,
 	db queryer,
 	credentialTag uint8,
 	stakingKey []byte,
@@ -241,7 +243,7 @@ func deleteAccountImportBaseline(
 	if err := requireAccountBaselineTransaction(db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 DELETE FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
 		credentialTag,
@@ -258,7 +260,7 @@ func (s *Store) GetAccountByCredential(
 	includeInactive bool,
 	txn types.Txn,
 ) (*models.Account, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -270,12 +272,12 @@ func (s *Store) GetAccountByCredential(
 	var row sqlitequery.Account
 	if includeInactive {
 		row, err = q.GetAccountByCredential(
-			context.Background(),
+			ctx,
 			sqlitequery.GetAccountByCredentialParams(params),
 		)
 	} else {
 		row, err = q.GetActiveAccountByCredential(
-			context.Background(),
+			ctx,
 			params,
 		)
 	}
@@ -297,7 +299,7 @@ func (s *Store) GetAccountsByCredential(
 	if len(refs) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +322,7 @@ func (s *Store) GetAccountsByCredential(
 			query += " AND active = TRUE"
 		}
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			args...,
 		)
@@ -362,7 +364,7 @@ func (s *Store) RenewAccountExpirations(
 	if len(refs) == 0 {
 		return nil
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -386,7 +388,7 @@ func (s *Store) RenewAccountExpirations(
 		query := "UPDATE account SET expiration_epoch = ? WHERE " +
 			strings.Join(predicates, " OR ")
 		if _, err := db.ExecContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			args...,
 		); err != nil {
@@ -406,10 +408,9 @@ func (s *Store) StampAllActiveAccountExpirations(
 	}
 	var affected int64
 	err = s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			if _, err := db.ExecContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
 INSERT INTO account_inactivity_activation (credential_tag, staking_key)
 SELECT credential_tag, staking_key
 FROM account
@@ -417,7 +418,7 @@ WHERE active = TRUE
 ON CONFLICT (credential_tag, staking_key) DO NOTHING`); err != nil {
 				return err
 			}
-			result, err := db.ExecContext(context.Background(), `
+			result, err := db.ExecContext(ctx, `
 UPDATE account SET expiration_epoch = ? WHERE active = TRUE`,
 				expiration,
 			)
@@ -439,7 +440,7 @@ func (s *Store) AccountInactivityActivationMembership(
 	if len(refs) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +457,7 @@ func (s *Store) AccountInactivityActivationMembership(
 			args = append(args, ref.Tag, ref.Key)
 		}
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(`
 SELECT credential_tag, staking_key
 FROM account_inactivity_activation
@@ -491,10 +492,9 @@ func (s *Store) ResetAccountExpirationActivation(
 ) ([]models.StakeCredentialRef, error) {
 	ret := []models.StakeCredentialRef{}
 	err := s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			rows, err := db.QueryContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key
 FROM account_inactivity_activation`)
 			if err != nil {
@@ -518,7 +518,7 @@ FROM account_inactivity_activation`)
 			if err := rows.Err(); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 UPDATE account
 SET expiration_epoch = 0
 WHERE EXISTS (
@@ -529,7 +529,7 @@ WHERE EXISTS (
 				return err
 			}
 			_, err = db.ExecContext(
-				context.Background(),
+				ctx,
 				"DELETE FROM account_inactivity_activation",
 			)
 			return err
@@ -541,14 +541,14 @@ WHERE EXISTS (
 func (s *Store) GetActiveAccountCredentials(
 	txn types.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"GetActiveAccountCredentials: resolve db: %w",
 			err,
 		)
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key FROM account WHERE active = TRUE`)
 	if err != nil {
 		return nil, fmt.Errorf("GetActiveAccountCredentials: %w", err)
@@ -573,6 +573,7 @@ SELECT credential_tag, staking_key FROM account WHERE active = TRUE`)
 // baseline active would let a later rollback restore the account the caller
 // just tombstoned.
 func (s *Store) clearAccountImportBaselines(
+	ctx context.Context,
 	db queryer,
 	predicate string,
 	args ...any,
@@ -581,7 +582,7 @@ func (s *Store) clearAccountImportBaselines(
 		return err
 	}
 	if _, err := db.ExecContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(`
 UPDATE account_import_baseline SET active = FALSE, pool = NULL, drep = NULL,
     drep_type = 0
@@ -605,9 +606,8 @@ func (s *Store) DeactivateAccounts(
 		return nil
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			chunkSize := s.dialect.ParameterLimit() / 2
 			for start := 0; start < len(refs); start += chunkSize {
 				end := min(start+chunkSize, len(refs))
@@ -622,7 +622,7 @@ func (s *Store) DeactivateAccounts(
 				}
 				predicate := strings.Join(predicates, " OR ")
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					s.dialect.Rebind(`
 UPDATE account SET active = FALSE
 WHERE active = TRUE AND (`+predicate+")"),
@@ -631,6 +631,7 @@ WHERE active = TRUE AND (`+predicate+")"),
 					return fmt.Errorf("DeactivateAccounts: %w", err)
 				}
 				if err := s.clearAccountImportBaselines(
+					ctx,
 					db,
 					predicate,
 					args...,
@@ -652,12 +653,12 @@ func (s *Store) GetAccountSumsByCredential(
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return ret, fmt.Errorf("resolve read DB for account sums: %w", err)
 	}
 	sum := func(query string, args ...any) (uint64, error) {
-		return sumUint64Rows(db, s.dialect.Rebind(query), args...)
+		return sumUint64Rows(ctx, db, s.dialect.Rebind(query), args...)
 	}
 	ret.WithdrawalsSum, err = sum(`
 SELECT amount
@@ -710,10 +711,9 @@ func (s *Store) RestoreAccountStateAtSlot(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			rows, err := db.QueryContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key, created_slot
 FROM account WHERE added_slot > ?`,
 				slot,
@@ -748,6 +748,7 @@ FROM account WHERE added_slot > ?`,
 			refs := make([]models.StakeCredentialRef, 0, len(accounts))
 			for _, account := range accounts {
 				registration, hasRegistration, err := latestAccountEvent(
+					ctx,
 					db,
 					accountRegistrationStateTables,
 					account.tag,
@@ -764,7 +765,7 @@ FROM account WHERE added_slot > ?`,
 				hasBaseline := false
 				if !hasRegistration {
 					if account.createdSlot > slot {
-						if _, err := db.ExecContext(context.Background(), `
+						if _, err := db.ExecContext(ctx, `
 DELETE FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
 							account.tag,
@@ -773,6 +774,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 							return err
 						}
 						if err := deleteAccountImportBaseline(
+							ctx,
 							db,
 							account.tag,
 							account.key,
@@ -789,6 +791,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					// derivation below then applies whichever certificates do
 					// survive the rollback.
 					baseline, hasBaseline, err = readAccountImportBaseline(
+						ctx,
 						db,
 						account.tag,
 						account.key,
@@ -801,6 +804,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					}
 				}
 				deregistration, hasDeregistration, err := latestAccountEvent(
+					ctx,
 					db,
 					accountDeregistrationStateTables,
 					account.tag,
@@ -812,6 +816,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					return err
 				}
 				pool, hasPool, err := latestAccountEvent(
+					ctx,
 					db,
 					[]string{
 						"stake_delegation",
@@ -828,6 +833,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					return err
 				}
 				drep, hasDrep, err := latestAccountEvent(
+					ctx,
 					db,
 					[]string{
 						"vote_delegation",
@@ -936,7 +942,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					)
 				}
 				args = append(args, account.tag, account.key)
-				if _, err := db.ExecContext(context.Background(),
+				if _, err := db.ExecContext(ctx,
 					"UPDATE account SET "+strings.Join(assignments, ", ")+
 						" WHERE credential_tag = ? AND staking_key = ?",
 					args...,
@@ -944,7 +950,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					return err
 				}
 			}
-			return s.refreshRewardLiveStakeRefs(db, refs, slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
 }
@@ -956,6 +962,7 @@ type accountRestoreEvent struct {
 }
 
 func latestAccountEvent(
+	ctx context.Context,
 	db queryer,
 	tables []string,
 	tag uint8,
@@ -975,7 +982,7 @@ func latestAccountEvent(
 			typeExpr = "event.drep_type"
 		}
 		var event accountRestoreEvent
-		err := db.QueryRowContext(context.Background(), `
+		err := db.QueryRowContext(ctx, `
 SELECT event.added_slot, COALESCE(tx.block_index, 0),
        COALESCE(certs.cert_index, 0), `+valueExpr+`, `+typeExpr+`
 FROM `+table+` event
@@ -1032,12 +1039,11 @@ func (s *Store) AddAccountRewardByCredential(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			var accountID int64
 			var reward sql.NullString
-			err := db.QueryRowContext(context.Background(), `
+			err := db.QueryRowContext(ctx, `
 SELECT id, reward FROM account
 WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 				credentialTag,
@@ -1059,7 +1065,7 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 					stakeKey,
 				)
 			}
-			result, err := db.ExecContext(context.Background(), `
+			result, err := db.ExecContext(ctx, `
 INSERT INTO account_reward_delta (
     staking_key, credential_tag, tx_hash, amount, previous_reward,
     added_slot, withdrawal
@@ -1083,7 +1089,7 @@ ON CONFLICT (
 			if affected == 0 {
 				return nil
 			}
-			result, err = db.ExecContext(context.Background(), `
+			result, err = db.ExecContext(ctx, `
 UPDATE account SET reward = ? WHERE id = ?`,
 				strconv.FormatUint(current+amount, 10),
 				accountID,
@@ -1099,6 +1105,7 @@ UPDATE account SET reward = ? WHERE id = ?`,
 				return models.ErrAccountNotFound
 			}
 			return s.refreshRewardLiveStakeAggregate(
+				ctx,
 				db,
 				models.NewStakeCredentialRef(credentialTag, stakeKey),
 				slot,
@@ -1131,10 +1138,9 @@ func (s *Store) AddPostSnapshotAccountRewardByCredential(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			_, err := db.ExecContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			_, err := db.ExecContext(ctx, `
 UPDATE account_reward_delta
 SET post_snapshot = TRUE
 WHERE withdrawal = FALSE AND tx_hash = ?
@@ -1165,12 +1171,11 @@ func (s *Store) ApplyAccountRewardWithdrawal(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			var accountID int64
 			var reward sql.NullString
-			err := db.QueryRowContext(context.Background(), `
+			err := db.QueryRowContext(ctx, `
 SELECT id, reward FROM account
 WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 				credentialTag,
@@ -1183,7 +1188,7 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 				return err
 			}
 			var exists bool
-			if err := db.QueryRowContext(context.Background(), `
+			if err := db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM account_reward_delta
     WHERE withdrawal = TRUE AND tx_hash = ?
@@ -1202,13 +1207,13 @@ SELECT EXISTS (
 			if err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 UPDATE account SET reward = '0' WHERE id = ?`,
 				accountID,
 			); err != nil {
 				return err
 			}
-			result, err := db.ExecContext(context.Background(), `
+			result, err := db.ExecContext(ctx, `
 INSERT INTO account_reward_delta (
     staking_key, credential_tag, tx_hash, amount, previous_reward,
     added_slot, withdrawal
@@ -1234,6 +1239,7 @@ ON CONFLICT (
 				return nil
 			}
 			return s.refreshRewardLiveStakeAggregate(
+				ctx,
 				db,
 				models.NewStakeCredentialRef(credentialTag, stakeKey),
 				slot,
@@ -1251,10 +1257,9 @@ func (s *Store) DeleteAccountRewardsAfterSlot(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			rows, err := db.QueryContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			rows, err := db.QueryContext(ctx, `
 SELECT staking_key, credential_tag, amount, previous_reward, withdrawal
 FROM account_reward_delta
 WHERE added_slot > ?
@@ -1313,7 +1318,7 @@ ORDER BY added_slot DESC, id DESC`,
 			for _, item := range deltas {
 				var id int64
 				var reward sql.NullString
-				err := db.QueryRowContext(context.Background(), `
+				err := db.QueryRowContext(ctx, `
 SELECT id, reward FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
 					item.tag,
@@ -1344,7 +1349,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					}
 					value = current - item.amount
 				}
-				if _, err := db.ExecContext(context.Background(), `
+				if _, err := db.ExecContext(ctx, `
 UPDATE account SET reward = ? WHERE id = ?`,
 					strconv.FormatUint(value, 10),
 					id,
@@ -1352,13 +1357,13 @@ UPDATE account SET reward = ? WHERE id = ?`,
 					return err
 				}
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM account_reward_delta WHERE added_slot > ?`,
 				slotValue,
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM account_withdrawal_witness WHERE added_slot > ?`,
 				slotValue,
 			); err != nil {
@@ -1366,6 +1371,7 @@ DELETE FROM account_withdrawal_witness WHERE added_slot > ?`,
 			}
 			for _, ref := range refs {
 				if err := s.refreshRewardLiveStakeAggregate(
+					ctx,
 					db,
 					ref,
 					slot,

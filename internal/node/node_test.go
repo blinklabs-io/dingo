@@ -94,6 +94,31 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 	}
 }
 
+func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
+	cfg := &config.Config{
+		BindAddr:      "0.0.0.0",
+		DebugBindAddr: "127.0.0.1",
+		DebugPort:     6060,
+	}
+
+	srv := newPprofDebugServer(cfg)
+	if srv == nil {
+		t.Fatal("expected enabled pprof debug server")
+	}
+	if got, want := srv.Addr, "127.0.0.1:6060"; got != want {
+		t.Fatalf("pprof address = %q, want %q", got, want)
+	}
+
+	cfg.DebugBindAddr = "0.0.0.0"
+	srv = newPprofDebugServer(cfg)
+	if srv == nil {
+		t.Fatal("expected explicitly exposed pprof debug server")
+	}
+	if got, want := srv.Addr, "0.0.0.0:6060"; got != want {
+		t.Fatalf("explicit wildcard pprof address = %q, want %q", got, want)
+	}
+}
+
 func TestWaitForSignalOrErrorReturnsSignalWithoutQueuedError(t *testing.T) {
 	t.Parallel()
 
@@ -220,5 +245,51 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 			"expected api.auth.token to flow through, got %+v",
 			got.Auth,
 		)
+	}
+}
+
+// TestRootPeerTargetComposition verifies Cardano fallback values and Dingo's
+// higher-precedence root-peer setting reach the top-level Dingo configuration.
+func TestRootPeerTargetComposition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		dingoTarget   int
+		cardanoTarget int
+		want          int
+	}{
+		{name: "cardano explicit", cardanoTarget: 12, want: 12},
+		{name: "default", want: 0},
+		{name: "unlimited", cardanoTarget: -1, want: -1},
+		{
+			name:          "dingo config takes precedence",
+			dingoTarget:   7,
+			cardanoTarget: 12,
+			want:          7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{TargetNumberOfRootPeers: tt.dingoTarget}
+			applyRootPeerTargetFallback(cfg, tt.cardanoTarget)
+
+			built := buildDingoConfig(
+				cfg,
+				slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+				nil,
+				nil,
+				false,
+				dingo.StorageModeCore,
+				30*time.Second,
+				chainsync.DefaultStallTimeout,
+				chainsync.HeaderSyncStrategyPrimary,
+			)
+
+			if got := built.TargetNumberOfRootPeers(); got != tt.want {
+				t.Fatalf("expected root-peer target %d, got %d", tt.want, got)
+			}
+		})
 	}
 }

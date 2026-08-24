@@ -296,8 +296,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
 	// Each entry's host is the bind address the listener actually uses
-	// at runtime: bindAddr for most, privateBindAddr for the private
-	// listener, midnight.host for Midnight, and BarkHost for bark.
+	// at runtime: bindAddr for public listeners, privateBindAddr for the
+	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
+	// and BarkHost for bark.
 	ports := []struct {
 		setting  string
 		host     string
@@ -308,7 +309,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
-		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
+		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
 			"plugins.api.utxorpc.config.port",

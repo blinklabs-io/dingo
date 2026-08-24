@@ -467,8 +467,7 @@ func runMithrilSync(
 	}
 	debugServer, debugErr := startDebugPprofServer(
 		logger,
-		cfg.BindAddr,
-		cfg.DebugPort,
+		cfg,
 		"mithril",
 	)
 	if debugErr != nil {

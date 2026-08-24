@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime/debug"
@@ -142,10 +143,20 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		// avoid contending with the SQLite write connection. This
 		// prevents chainsync FindIntersect and snapshot calculations
 		// from blocking on concurrent block processing.
+		//
+		// context.Background(): NewTxn itself takes no ctx, and none of
+		// its own callers (Database.Transaction and its ~100 call sites
+		// across ledger/api/mempool) have one to offer yet either -- this
+		// is the current propagation boundary between the metadata
+		// store's own ctx-aware Transaction/ReadTransaction and the rest
+		// of the node, not a gap within the metadata store itself.
+		// Threading a real ctx from callers into this boundary is a
+		// separate, distinctly larger change than this metadata-store
+		// specific one.
 		if readWrite {
-			t.metadataTxn = ms.Transaction()
+			t.metadataTxn = ms.Transaction(context.Background())
 		} else {
-			t.metadataTxn = ms.ReadTransaction()
+			t.metadataTxn = ms.ReadTransaction(context.Background())
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -169,10 +180,12 @@ func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	if ms := db.Metadata(); ms != nil {
+		// See NewTxn's matching comment: context.Background() here is the
+		// current propagation boundary, not a metadata-store-internal gap.
 		if readWrite {
-			t.metadataTxn = ms.Transaction()
+			t.metadataTxn = ms.Transaction(context.Background())
 		} else {
-			t.metadataTxn = ms.ReadTransaction()
+			t.metadataTxn = ms.ReadTransaction(context.Background())
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -342,21 +355,32 @@ func (t *Txn) Do(fn func(*Txn) error) error {
 
 func (t *Txn) Commit() error {
 	t.lock.Lock()
-	if t.finished {
+	dispatchAfterUnlock := false
+	defer func() {
+		// A provider may panic while updating the commit timestamp or
+		// committing either store. Release both synchronization primitives
+		// before that panic reaches Txn.Do's recovery handler, so its Rollback
+		// can reacquire t.lock and finish the underlying transactions. Do not
+		// mark the transaction finished here: the recovery rollback still owns
+		// that transition. releaseCommitBarrierLocked is idempotent, so normal
+		// terminal paths may already have released it through finishLocked.
+		t.releaseCommitBarrierLocked()
 		t.lock.Unlock()
+		if dispatchAfterUnlock {
+			t.dispatchAfterCommit()
+		}
+	}()
+	if t.finished {
 		return nil
 	}
 	// Fail fast if neither store is available for a read-write transaction
 	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
 		t.finishLocked()
-		t.lock.Unlock()
 		return types.ErrNoStoreAvailable
 	}
 	// No need to commit for read-only, but we do want to free up resources
 	if !t.readWrite {
-		err := t.rollback()
-		t.lock.Unlock()
-		return err
+		return t.rollback()
 	}
 	// Update the commit timestamp in both DBs if using both.
 	// Track timestamp for error reporting if partial commit occurs.
@@ -368,7 +392,6 @@ func (t *Txn) Commit() error {
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
 			t.finishLocked()
-			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
@@ -381,7 +404,6 @@ func (t *Txn) Commit() error {
 				_ = t.metadataTxn.Rollback()
 			}
 			t.finishLocked()
-			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
 		}
 		// Make the blob commit durable before the metadata commit that
@@ -418,7 +440,6 @@ func (t *Txn) Commit() error {
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
-				t.lock.Unlock()
 				return ret
 			}
 		}
@@ -443,18 +464,15 @@ func (t *Txn) Commit() error {
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
-				t.lock.Unlock()
 				return ret
 			}
-			t.lock.Unlock()
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
 	t.committed = true
 	t.dispatching = true
 	t.finishLocked()
-	t.lock.Unlock()
-	t.dispatchAfterCommit()
+	dispatchAfterUnlock = true
 	return nil
 }
 

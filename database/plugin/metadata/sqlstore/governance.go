@@ -43,12 +43,12 @@ func (s *Store) GetGovernanceProposal(
 	actionIndex uint32,
 	txn types.Txn,
 ) (*models.GovernanceProposal, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	proposal, err := scanGovernanceProposal(db.QueryRowContext(
-		context.Background(),
+		ctx,
 		"SELECT "+governanceProposalColumns+`
  FROM governance_proposal
  WHERE tx_hash = ? AND action_index = ? AND deleted_slot IS NULL
@@ -152,7 +152,7 @@ func (s *Store) GetLastEnactedGovernanceProposal(
 	if len(actionTypes) == 0 {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (s *Store) GetLastEnactedGovernanceProposal(
 		args[i] = actionType
 	}
 	proposal, err := scanGovernanceProposal(db.QueryRowContext(
-		context.Background(),
+		ctx,
 		"SELECT "+governanceProposalColumns+`
  FROM governance_proposal
  WHERE action_type IN (`+bindPlaceholders(len(args))+`)
@@ -184,11 +184,10 @@ func (s *Store) SetGovernanceProposal(
 		return errors.New("set governance proposal: nil proposal")
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			var id uint
-			err := db.QueryRowContext(context.Background(), `
+			err := db.QueryRowContext(ctx, `
 INSERT INTO governance_proposal (
     tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
     parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
@@ -262,11 +261,11 @@ func (s *Store) GetGovernanceVotes(
 	proposalID uint,
 	txn types.Txn,
 ) ([]*models.GovernanceVote, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT id, proposal_id, voter_type, voter_credential_tag, voter_credential,
        vote, anchor_url, anchor_hash, added_slot, vote_updated_slot,
        deleted_slot
@@ -297,11 +296,10 @@ func (s *Store) SetGovernanceVote(
 		return errors.New("set governance vote: nil vote")
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			var id uint
-			err := db.QueryRowContext(context.Background(), `
+			err := db.QueryRowContext(ctx, `
 INSERT INTO governance_vote (
     proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
     anchor_url, anchor_hash, added_slot, vote_updated_slot, deleted_slot
@@ -339,9 +337,8 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := []string{
 				"DELETE FROM governance_proposal WHERE added_slot > ?",
 				`UPDATE governance_proposal SET deleted_slot = NULL
@@ -358,7 +355,7 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 			}
 			for _, query := range queries {
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					query,
 					slot,
 				); err != nil {
@@ -375,10 +372,9 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			if _, err := db.ExecContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM governance_vote
 WHERE added_slot > ? OR vote_updated_slot > ?`,
 				slot,
@@ -386,7 +382,7 @@ WHERE added_slot > ? OR vote_updated_slot > ?`,
 			); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(context.Background(), `
+			_, err := db.ExecContext(ctx, `
 UPDATE governance_vote SET deleted_slot = NULL
 WHERE deleted_slot > ?`,
 				slot,
@@ -402,12 +398,12 @@ func (s *Store) queryGovernanceProposals(
 	order string,
 	args ...any,
 ) ([]*models.GovernanceProposal, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		"SELECT "+governanceProposalColumns+
 			" FROM governance_proposal WHERE "+predicate+" ORDER BY "+order,
 		args...,
@@ -488,12 +484,12 @@ func (s *Store) GetCommitteeMember(
 	coldKey []byte,
 	txn types.Txn,
 ) (*models.AuthCommitteeHot, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	var member models.AuthCommitteeHot
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 SELECT cold_credential, host_credential, id, certificate_id, added_slot
 FROM auth_committee_hot
 WHERE cold_credential = ?
@@ -516,11 +512,11 @@ LIMIT 1`,
 func (s *Store) GetActiveCommitteeMembers(
 	txn types.Txn,
 ) ([]*models.AuthCommitteeHot, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT auth.cold_credential, auth.host_credential, auth.id,
        auth.certificate_id, auth.added_slot
 FROM (
@@ -566,12 +562,12 @@ func (s *Store) IsCommitteeMemberResigned(
 	coldKey []byte,
 	txn types.Txn,
 ) (bool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, err
 	}
 	var resigned bool
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 WITH latest_auth AS (
     SELECT added_slot, certificate_id
     FROM auth_committee_hot
@@ -607,7 +603,7 @@ func (s *Store) GetResignedCommitteeMembers(
 	if len(coldKeys) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +613,7 @@ func (s *Store) GetResignedCommitteeMembers(
 		for _, key := range coldKeys[start:end] {
 			args = append(args, key)
 		}
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 WITH latest_auth AS (
     SELECT cold_credential, added_slot, certificate_id,
            ROW_NUMBER() OVER (

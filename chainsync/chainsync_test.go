@@ -1530,6 +1530,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	prev := []byte("prev-hash")
 	point := ocommon.NewPoint(200, hash)
 	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
+	arrivalTime := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	hdr := testBlockHeader{
 		hash:        lcommon.NewBlake2b256(hash),
 		prevHash:    lcommon.NewBlake2b256(prev),
@@ -1542,6 +1543,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 		BlockHeader:  hdr,
 		Point:        point,
 		Tip:          tip,
+		ArrivalTime:  arrivalTime,
 		BlockNumber:  5,
 		Type:         1,
 	})
@@ -1550,6 +1552,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, point, got.Point)
 	require.Equal(t, tip, got.Tip)
+	require.Equal(t, arrivalTime, got.ArrivalTime)
 	require.Equal(t, uint64(5), got.BlockNumber)
 	require.Equal(t, uint(1), got.Type)
 	require.Equal(t, hdr.PrevHash().Bytes(), gotPrev)
