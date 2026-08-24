@@ -16,7 +16,6 @@
 package sqlstore
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -37,12 +36,12 @@ func (s *Store) operationalQueries(db queryer) *sqlitequery.Queries {
 
 func (s *Store) GetTip(txn types.Txn) (ochainsync.Tip, error) {
 	var tip ochainsync.Tip
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return tip, err
 	}
 	queries := s.operationalQueries(db)
-	row, err := queries.GetTip(context.Background())
+	row, err := queries.GetTip(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tip, nil
 	}
@@ -56,7 +55,7 @@ func (s *Store) GetTip(txn types.Txn) (ochainsync.Tip, error) {
 }
 
 func (s *Store) SetTip(tip ochainsync.Tip, txn types.Txn) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -70,7 +69,7 @@ func (s *Store) SetTip(tip ochainsync.Tip, txn types.Txn) error {
 		return fmt.Errorf("set tip block number: %w", err)
 	}
 	if err := queries.SetTip(
-		context.Background(),
+		ctx,
 		sqlitequery.SetTipParams{
 			Hash: tip.Point.Hash,
 			Slot: sql.NullInt64{Int64: slot, Valid: true},
@@ -90,7 +89,7 @@ func (s *Store) SetNetworkState(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("set network state: %w", err)
 	}
@@ -100,7 +99,7 @@ func (s *Store) SetNetworkState(
 		return fmt.Errorf("set network state: %w", err)
 	}
 	err = queries.SetNetworkState(
-		context.Background(),
+		ctx,
 		sqlitequery.SetNetworkStateParams{
 			Treasury: strconv.FormatUint(treasury, 10),
 			Reserves: strconv.FormatUint(reserves, 10),
@@ -117,7 +116,7 @@ func (s *Store) DeleteNetworkStateAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("delete network state after slot: %w", err)
 	}
@@ -127,7 +126,7 @@ func (s *Store) DeleteNetworkStateAfterSlot(
 		return err
 	}
 	if err := queries.DeleteNetworkStateAfterSlot(
-		context.Background(),
+		ctx,
 		sqlSlot,
 	); err != nil {
 		return fmt.Errorf("delete network state after slot %d: %w", slot, err)
@@ -138,12 +137,12 @@ func (s *Store) DeleteNetworkStateAfterSlot(
 func (s *Store) GetNetworkState(
 	txn types.Txn,
 ) (*models.NetworkState, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get network state: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	row, err := queries.GetLatestNetworkState(context.Background())
+	row, err := queries.GetLatestNetworkState(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -167,12 +166,12 @@ func (s *Store) GetNetworkState(
 }
 
 func (s *Store) GetSyncState(key string, txn types.Txn) (string, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return "", fmt.Errorf("get sync state: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	value, err := queries.GetSyncState(context.Background(), key)
+	value, err := queries.GetSyncState(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -186,13 +185,13 @@ func (s *Store) SetSyncState(
 	key, value string,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("set sync state: %w", err)
 	}
 	queries := s.operationalQueries(db)
 	if err := queries.SetSyncState(
-		context.Background(),
+		ctx,
 		sqlitequery.SetSyncStateParams{SyncKey: key, Value: value},
 	); err != nil {
 		return fmt.Errorf("set sync state: %w", err)
@@ -201,24 +200,24 @@ func (s *Store) SetSyncState(
 }
 
 func (s *Store) DeleteSyncState(key string, txn types.Txn) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("delete sync state: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	if err := queries.DeleteSyncState(context.Background(), key); err != nil {
+	if err := queries.DeleteSyncState(ctx, key); err != nil {
 		return fmt.Errorf("delete sync state: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) ClearSyncState(txn types.Txn) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("clear sync state: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	if err := queries.ClearSyncState(context.Background()); err != nil {
+	if err := queries.ClearSyncState(ctx); err != nil {
 		return fmt.Errorf("clear sync state: %w", err)
 	}
 	return nil
@@ -228,7 +227,7 @@ func (s *Store) GetEpoch(
 	epochID uint64,
 	txn types.Txn,
 ) (*models.Epoch, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get epoch: %w", err)
 	}
@@ -238,7 +237,7 @@ func (s *Store) GetEpoch(
 		return nil, err
 	}
 	row, err := queries.GetEpoch(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: id, Valid: true},
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -265,7 +264,7 @@ func (s *Store) GetEpochsByEra(
 	eraID uint,
 	txn types.Txn,
 ) ([]models.Epoch, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get epochs by era: %w", err)
 	}
@@ -275,7 +274,7 @@ func (s *Store) GetEpochsByEra(
 		return nil, err
 	}
 	rows, err := queries.GetEpochsByEra(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: sqlEraID, Valid: true},
 	)
 	if err != nil {
@@ -300,12 +299,12 @@ func (s *Store) GetEpochsByEra(
 }
 
 func (s *Store) GetEpochs(txn types.Txn) ([]models.Epoch, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get epochs: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	rows, err := queries.GetEpochs(context.Background())
+	rows, err := queries.GetEpochs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get epochs: %w", err)
 	}
@@ -331,7 +330,7 @@ func (s *Store) GetEpochBySlot(
 	slot uint64,
 	txn types.Txn,
 ) (*models.Epoch, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get epoch by slot: %w", err)
 	}
@@ -341,7 +340,7 @@ func (s *Store) GetEpochBySlot(
 		return nil, err
 	}
 	row, err := queries.GetEpochBySlot(
-		context.Background(),
+		ctx,
 		sqlitequery.GetEpochBySlotParams{
 			StartSlot: sql.NullInt64{Int64: sqlSlot, Valid: true},
 			StartSlot_2: sql.NullInt64{
@@ -371,7 +370,7 @@ func (s *Store) GetEpochBySlot(
 }
 
 func (s *Store) DeleteEpochsAfterSlot(slot uint64, txn types.Txn) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("delete epochs after slot: %w", err)
 	}
@@ -381,7 +380,7 @@ func (s *Store) DeleteEpochsAfterSlot(slot uint64, txn types.Txn) error {
 		return err
 	}
 	if err := queries.DeleteEpochsAfterSlot(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: sqlSlot, Valid: true},
 	); err != nil {
 		return fmt.Errorf("delete epochs after slot: %w", err)
@@ -395,7 +394,7 @@ func (s *Store) SetEpoch(
 	era, slotLength, lengthInSlots uint,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("set epoch: %w", err)
 	}
@@ -421,7 +420,7 @@ func (s *Store) SetEpoch(
 		return err
 	}
 	if err := queries.SetEpoch(
-		context.Background(),
+		ctx,
 		sqlitequery.SetEpochParams{
 			EpochID: sql.NullInt64{Int64: sqlEpoch, Valid: true},
 			StartSlot: sql.NullInt64{
@@ -458,7 +457,7 @@ func (s *Store) SetBlockNonce(
 	isCheckpoint bool,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -468,7 +467,7 @@ func (s *Store) SetBlockNonce(
 		return err
 	}
 	return queries.SetBlockNonce(
-		context.Background(),
+		ctx,
 		sqlitequery.SetBlockNonceParams{
 			Hash:  blockHash,
 			Slot:  sql.NullInt64{Int64: slot, Valid: true},
@@ -485,7 +484,7 @@ func (s *Store) GetBlockNonce(
 	point ocommon.Point,
 	txn types.Txn,
 ) ([]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +494,7 @@ func (s *Store) GetBlockNonce(
 		return nil, err
 	}
 	nonce, err := queries.GetBlockNonce(
-		context.Background(),
+		ctx,
 		sqlitequery.GetBlockNonceParams{
 			Hash: point.Hash,
 			Slot: sql.NullInt64{Int64: slot, Valid: true},
@@ -512,7 +511,7 @@ func (s *Store) GetBlockNoncesInSlotRange(
 	endSlot uint64,
 	txn types.Txn,
 ) ([]models.BlockNonce, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +525,7 @@ func (s *Store) GetBlockNoncesInSlotRange(
 		return nil, err
 	}
 	rows, err := queries.GetBlockNoncesInSlotRange(
-		context.Background(),
+		ctx,
 		sqlitequery.GetBlockNoncesInSlotRangeParams{
 			Slot:   sql.NullInt64{Int64: start, Valid: true},
 			Slot_2: sql.NullInt64{Int64: end, Valid: true},
@@ -553,7 +552,7 @@ func (s *Store) GetLastBlockNonceInRange(
 	endSlot uint64,
 	txn types.Txn,
 ) ([]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -567,7 +566,7 @@ func (s *Store) GetLastBlockNonceInRange(
 		return nil, err
 	}
 	nonce, err := queries.GetLastBlockNonceInRange(
-		context.Background(),
+		ctx,
 		sqlitequery.GetLastBlockNonceInRangeParams{
 			Slot:   sql.NullInt64{Int64: start, Valid: true},
 			Slot_2: sql.NullInt64{Int64: end, Valid: true},
@@ -585,11 +584,11 @@ func (s *Store) GetLastBlockNonceInRange(
 func (s *Store) GetLatestBlockNonce(
 	txn types.Txn,
 ) (models.BlockNonce, bool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return models.BlockNonce{}, false, err
 	}
-	row := db.QueryRowContext(context.Background(),
+	row := db.QueryRowContext(ctx,
 		`SELECT hash, nonce, id, slot, is_checkpoint
 		 FROM block_nonce
 		 ORDER BY slot DESC, hash DESC
@@ -618,7 +617,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -628,7 +627,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlot(
 		return err
 	}
 	return queries.DeleteBlockNoncesBeforeSlot(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: slot, Valid: true},
 	)
 }
@@ -637,7 +636,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	slotNumber uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -647,7 +646,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 		return err
 	}
 	return queries.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: slot, Valid: true},
 	)
 }
@@ -656,7 +655,7 @@ func (s *Store) DeleteBlockNoncesAfterPoint(
 	point ocommon.Point,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -667,12 +666,12 @@ func (s *Store) DeleteBlockNoncesAfterPoint(
 	}
 	if len(point.Hash) == 0 {
 		return queries.DeleteBlockNoncesAfterOrigin(
-			context.Background(),
+			ctx,
 			sql.NullInt64{Int64: slot, Valid: true},
 		)
 	}
 	return queries.DeleteBlockNoncesAfterPoint(
-		context.Background(),
+		ctx,
 		sqlitequery.DeleteBlockNoncesAfterPointParams{
 			Slot:   sql.NullInt64{Int64: slot, Valid: true},
 			Slot_2: sql.NullInt64{Int64: slot, Valid: true},
@@ -685,12 +684,12 @@ func (s *Store) GetDatum(
 	hash lcommon.Blake2b256,
 	txn types.Txn,
 ) (*models.Datum, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	queries := s.operationalQueries(db)
-	row, err := queries.GetDatum(context.Background(), hash[:])
+	row, err := queries.GetDatum(ctx, hash[:])
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -711,7 +710,7 @@ func (s *Store) SetDatum(
 	addedSlot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -721,7 +720,7 @@ func (s *Store) SetDatum(
 		return err
 	}
 	if err := queries.SetDatum(
-		context.Background(),
+		ctx,
 		sqlitequery.SetDatumParams{
 			Hash:      hash[:],
 			RawDatum:  rawDatum,
@@ -737,12 +736,12 @@ func (s *Store) GetScript(
 	hash lcommon.ScriptHash,
 	txn types.Txn,
 ) (*models.Script, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	queries := s.operationalQueries(db)
-	row, err := queries.GetScript(context.Background(), hash[:])
+	row, err := queries.GetScript(ctx, hash[:])
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -763,7 +762,7 @@ func (s *Store) GetPParams(
 	eraID uint,
 	txn types.Txn,
 ) ([]models.PParams, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -777,7 +776,7 @@ func (s *Store) GetPParams(
 		return nil, err
 	}
 	rows, err := queries.GetPParams(
-		context.Background(),
+		ctx,
 		sqlitequery.GetPParamsParams{
 			Epoch: sql.NullInt64{Int64: sqlEpoch, Valid: true},
 			EraID: sql.NullInt64{Int64: sqlEraID, Valid: true},
@@ -803,7 +802,7 @@ func (s *Store) GetPParamUpdates(
 	epoch uint64,
 	txn types.Txn,
 ) ([]models.PParamUpdate, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -817,7 +816,7 @@ func (s *Store) GetPParamUpdates(
 		previousEpoch--
 	}
 	rows, err := queries.GetPParamUpdates(
-		context.Background(),
+		ctx,
 		sqlitequery.GetPParamUpdatesParams{
 			Epoch: sql.NullInt64{
 				Int64: sqlEpoch,
@@ -851,7 +850,7 @@ func (s *Store) SetPParams(
 	eraID uint,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -865,7 +864,7 @@ func (s *Store) SetPParams(
 		return err
 	}
 	return queries.SetPParams(
-		context.Background(),
+		ctx,
 		sqlitequery.SetPParamsParams{
 			Cbor: params,
 			AddedSlot: sql.NullInt64{
@@ -889,7 +888,7 @@ func (s *Store) SetPParamUpdate(
 	slot, epoch uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -903,7 +902,7 @@ func (s *Store) SetPParamUpdate(
 		return err
 	}
 	return queries.SetPParamUpdate(
-		context.Background(),
+		ctx,
 		sqlitequery.SetPParamUpdateParams{
 			GenesisHash: genesis,
 			Cbor:        update,
@@ -923,7 +922,7 @@ func (s *Store) DeletePParamsAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -933,7 +932,7 @@ func (s *Store) DeletePParamsAfterSlot(
 		return err
 	}
 	return queries.DeletePParamsAfterSlot(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: sqlSlot, Valid: true},
 	)
 }
@@ -942,7 +941,7 @@ func (s *Store) DeletePParamUpdatesAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -952,7 +951,7 @@ func (s *Store) DeletePParamUpdatesAfterSlot(
 		return err
 	}
 	return queries.DeletePParamUpdatesAfterSlot(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: sqlSlot, Valid: true},
 	)
 }
@@ -961,7 +960,7 @@ func (s *Store) AddNetworkDonation(
 	slot, epoch, amount uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("add network donation: %w", err)
 	}
@@ -979,7 +978,7 @@ func (s *Store) AddNetworkDonation(
 		return err
 	}
 	if err := queries.AddNetworkDonation(
-		context.Background(),
+		ctx,
 		sqlitequery.AddNetworkDonationParams{
 			Slot:   sqlSlot,
 			Epoch:  sqlEpoch,
@@ -995,7 +994,7 @@ func (s *Store) SumNetworkDonationsForEpoch(
 	epoch uint64,
 	txn types.Txn,
 ) (uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, fmt.Errorf("sum network donations: %w", err)
 	}
@@ -1003,7 +1002,7 @@ func (s *Store) SumNetworkDonationsForEpoch(
 	if err != nil {
 		return 0, err
 	}
-	total, err := sumUint64Rows(db, s.dialect.Rebind(`
+	total, err := sumUint64Rows(ctx, db, s.dialect.Rebind(`
 SELECT amount FROM network_donation WHERE epoch = ?`), sqlEpoch)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -1019,7 +1018,7 @@ func (s *Store) DeleteNetworkDonationsAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("delete network donations after slot: %w", err)
 	}
@@ -1029,7 +1028,7 @@ func (s *Store) DeleteNetworkDonationsAfterSlot(
 		return err
 	}
 	if err := queries.DeleteNetworkDonationsAfterSlot(
-		context.Background(),
+		ctx,
 		sqlSlot,
 	); err != nil {
 		return fmt.Errorf(
@@ -1045,13 +1044,13 @@ func (s *Store) GetImportCheckpoint(
 	importKey string,
 	txn types.Txn,
 ) (*models.ImportCheckpoint, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get import checkpoint: %w", err)
 	}
 	queries := s.operationalQueries(db)
 	row, err := queries.GetImportCheckpoint(
-		context.Background(),
+		ctx,
 		importKey,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1074,13 +1073,13 @@ func (s *Store) SetImportCheckpoint(
 	if checkpoint == nil {
 		return errors.New("set import checkpoint: checkpoint is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("set import checkpoint: %w", err)
 	}
 	queries := s.operationalQueries(db)
 	if err := queries.SetImportCheckpoint(
-		context.Background(),
+		ctx,
 		sqlitequery.SetImportCheckpointParams{
 			ImportKey: checkpoint.ImportKey,
 			Phase:     checkpoint.Phase,

@@ -21,6 +21,7 @@ package indexer
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -1119,7 +1120,13 @@ func (idx *Indexer) processBlock(
 	// commit, or not at all. Without this, a paginated reader that saw one
 	// row for a key and advanced its cursor past it would permanently miss
 	// a sibling row for that same key committed moments later.
-	txn := idx.config.Metadata.Transaction()
+	// context.Background(): processBlock runs off an EventBus subscriber
+	// callback (handleBlockEvent) with no ctx of its own, and Indexer has
+	// no stored lifecycle context to derive one from -- the same
+	// propagation boundary documented on database.NewTxn, not a gap
+	// within the metadata store itself. Giving Indexer its own
+	// Start/Stop-scoped context is a separate change.
+	txn := idx.config.Metadata.Transaction(context.Background())
 	defer txn.Rollback() //nolint:errcheck
 
 	// processTx/processOutput (and the epoch-advance/pruning steps below)

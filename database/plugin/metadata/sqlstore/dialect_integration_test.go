@@ -122,7 +122,7 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	require.NoError(t, store.Start(context.Background()))
 	require.True(t, store.Ready())
 
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(42, txn))
 	require.NoError(t, store.SetNetworkState(11, 22, 33, txn))
 	require.NoError(t, txn.Commit())

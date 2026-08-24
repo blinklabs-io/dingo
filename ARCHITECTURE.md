@@ -104,6 +104,46 @@ startup and passes its lifecycle context through maintenance cancellation;
 bulk-load tuning is scoped to a dedicated write connection and restored before
 the connection is released.
 
+**Context propagation and cancellation**: `TxnStore.Transaction(ctx)`/
+`ReadTransaction(ctx)` are `sqlstore`'s propagation boundary. The `ctx` passed
+there governs the whole transaction, not just the `BeginTx` call: `sqlTxn`
+stores it alongside its `*sql.Tx`, and `dbFromTxn`/`readDBFromTxn` hand it
+back next to the transaction's `queryer` so every statement a domain method
+(`CreateAccount(txn, ...)` and the like) issues through that `txn` is bound to
+it -- without adding a `ctx` parameter to any of those ~40 domain methods,
+which instead pick the caller's `ctx` up locally from the `txn` they already
+take. Canceling or timing out that `ctx` while `BeginTx` is blocked waiting
+for a pooled connection aborts the wait rather than stalling for whoever
+holds the connection; canceling it mid-transaction triggers `database/sql`'s
+documented auto-rollback of the underlying `*sql.Tx`, which is asynchronous
+to the `cancel()` call and (for `database/sql`'s pooling) discards rather
+than idles the aborted connection. `cancellation_test.go` covers both.
+
+Two gaps in that propagation are deliberate:
+- The nil-`txn` "autocommit" path (`dbFromTxn(nil)`/`readDBFromTxn(nil)`, used
+  when a domain method is called with no open transaction) still issues its
+  one-off statement against `context.Background()`: there is no caller
+  transaction to carry a `ctx` on. Exposure there is bounded server-side
+  instead, by the PostgreSQL/MySQL providers' statement/lock timeout
+  configuration (`StatementTimeout`/`LockTimeout` in
+  `database/plugin/metadata/{postgres,mysql}/provider.go`).
+- A handful of methods that take no `txn` parameter at all -- the
+  `SettingsStore` family, `HasDeferredIndexesPending`,
+  `FindUnspentMidnightAssetCreates`/`FindUnspentMidnightRegistrations` --
+  remain on `context.Background()`. Giving them a `ctx` means changing their
+  exported signatures and every external caller (`node.go`,
+  `internal/settingsresolve`, `database/commit_timestamp.go`,
+  `database/lifecycle/snapshot.go`, `bark/blob.go`,
+  `midnight/indexer/indexer.go`), which reaches outside `sqlstore`'s own
+  package boundary.
+
+`database/txn.go`'s `NewTxn`/`NewMetadataOnlyTxn` are, today, where that
+propagation stops short of `database.Database`'s own callers: both still pass
+`context.Background()` into `Transaction`/`ReadTransaction` rather than a
+caller-supplied `ctx`, so a `ctx` cancellation reaching `database.Database`'s
+facade methods does not yet cancel the metadata-store transaction underneath
+them.
+
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
 ## Table of Contents

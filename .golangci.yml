@@ -54,6 +54,18 @@ linters:
       - third_party$
       - builtin$
       - examples$
+    rules:
+      # database/txn.go's NewTxn/NewMetadataOnlyTxn are the documented,
+      # deliberate propagation boundary between the sqlstore metadata store
+      # (which now threads a caller ctx through Transaction/ReadTransaction)
+      # and database.Database's own callers, which do not yet thread a ctx
+      # into MetadataTxn/Transaction/BlocksRecent/etc. Extending ctx
+      # propagation through database.Database's public API and its ~45
+      # external callers is out of scope here; see ARCHITECTURE.md's
+      # "Context propagation and cancellation" section.
+      - linters:
+          - contextcheck
+        text: "->NewTxn` should pass the context parameter|->NewMetadataOnlyTxn` should pass the context parameter"
   settings:
     recvcheck:
       # UnmarshalJSON has to take a pointer to mutate the receiver, while
