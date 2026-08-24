@@ -1348,18 +1348,18 @@ func (ls *LedgerState) eraTransitionPath(
 }
 
 // boundaryEraForBlock determines the era that a boundary block requires.
-// The chainsync era identifies the block body, while its header protocol
-// major can identify the successor era during a hard-fork boundary. Only the
-// immediately following header era is accepted, so an arbitrary future
-// protocol version cannot turn into an era transition accidentally. The
-// boolean result records whether that validated elevation justifies a
-// two-transition boundary path.
+// The chainsync era identifies the block body. Once that body has advanced
+// from the current era, its header protocol major can identify one additional
+// successor era during a hard-fork boundary. A header version alone never
+// advances an unchanged body era: source-era blocks can advertise the next
+// protocol major before the hard fork. The boolean result records whether the
+// validated body-plus-header elevation justifies a two-transition path.
 func (ls *LedgerState) boundaryEraForBlock(
 	currentEraID, blockEraID, headerMajor uint,
 	headerMajorKnown bool,
 ) (uint, bool) {
 	targetEraID := blockEraID
-	if !headerMajorKnown {
+	if blockEraID == currentEraID || !headerMajorKnown {
 		return targetEraID, false
 	}
 	headerEraID, ok := ls.eraForVersion(headerMajor)
@@ -3420,7 +3420,23 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	}
 
 	newEpoch := rolloverResult.NewCurrentEpoch
+	finalEra, ok := ls.eraById(workingEraId)
+	if !ok || finalEra == nil {
+		return nil, fmt.Errorf(
+			"unknown transitioned era ID %d", workingEraId,
+		)
+	}
+	slotLength, epochLength, err := finalEra.EpochLengthFunc(
+		ls.config.CardanoNodeConfig,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve transitioned era timing: %w", err,
+		)
+	}
 	newEpoch.EraId = workingEraId
+	newEpoch.SlotLength = slotLength
+	newEpoch.LengthInSlots = epochLength
 	if err := ls.db.SetEpoch(
 		newEpoch.StartSlot,
 		newEpoch.EpochId,
@@ -3454,16 +3470,13 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	}
 	rolloverResult.NewCurrentEpoch = newEpoch
 	rolloverResult.NewCurrentPParams = workingPParams
-	finalEra, ok := ls.eraById(workingEraId)
-	if !ok || finalEra == nil {
-		return nil, fmt.Errorf(
-			"unknown transitioned era ID %d", workingEraId,
-		)
-	}
 	rolloverResult.NewCurrentEra = *finalEra
+	rolloverResult.SchedulerIntervalMs = slotLength
 	for i := range rolloverResult.NewEpochCache {
 		if rolloverResult.NewEpochCache[i].EpochId == newEpoch.EpochId {
 			rolloverResult.NewEpochCache[i].EraId = workingEraId
+			rolloverResult.NewEpochCache[i].SlotLength = slotLength
+			rolloverResult.NewEpochCache[i].LengthInSlots = epochLength
 		}
 	}
 
@@ -4833,18 +4846,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						snapshotEra.Id, nextEpochEraId,
 					)
 				}
-				// When two eras are crossed at one boundary, let the epoch
-				// rollover enact pending protocol updates in the source era
-				// first. Applying both transitions before the rollover would
-				// let an old-era update overwrite the successor era's pparams
-				// (Prime's epoch-9 major-5 update otherwise regresses Babbage
-				// major 7).
-				transitionsBeforeRollover := transitionPath
-				var transitionsAfterRollover []uint
-				if len(transitionPath) == 2 {
-					transitionsBeforeRollover = nil
-					transitionsAfterRollover = transitionPath
-				}
+				// Let the epoch rollover enact pending protocol updates in
+				// the source era first. Applying a successor transition before
+				// the rollover would decode an update using the successor's
+				// shape; fields removed by that era (for example Alonzo's
+				// decentralization field in Babbage) then fail to decode.
+				transitionsBeforeRollover,
+					transitionsAfterRollover := splitEraTransitionsForRollover(
+					transitionPath,
+				)
 				for _, transitionEraID := range transitionsBeforeRollover {
 					result, err := ls.transitionToEraFrom(
 						txn,
