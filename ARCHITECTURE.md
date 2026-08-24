@@ -142,7 +142,10 @@ propagation stops short of `database.Database`'s own callers: both still pass
 `context.Background()` into `Transaction`/`ReadTransaction` rather than a
 caller-supplied `ctx`, so a `ctx` cancellation reaching `database.Database`'s
 facade methods does not yet cancel the metadata-store transaction underneath
-them.
+them. Threading a `ctx` through `database.Database`'s own public API and its
+~100 call sites is tracked separately (issue #3377); `golangci-lint`'s
+`contextcheck` is disabled repo-wide until then, since it reports at each of
+those callers, not at this boundary itself.
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 

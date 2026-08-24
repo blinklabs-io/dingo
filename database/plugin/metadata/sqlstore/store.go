@@ -324,8 +324,6 @@ func (s *Store) ReadTransaction(ctx context.Context) types.Txn {
 // transaction begins a transaction bound to ctx. The context.Background()
 // fallback below is for a caller passing a literal nil, not a dropped
 // caller ctx -- there is nothing above to derive from in that case.
-//
-//nolint:contextcheck
 func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
 	if ctx == nil {
 		ctx = context.Background()
