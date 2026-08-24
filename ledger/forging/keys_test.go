@@ -296,6 +296,28 @@ func TestKESPeriodUpdateExhaustedKey(t *testing.T) {
 	assert.True(t, ok, "key should still be usable after failed evolution")
 }
 
+func TestKESPeriodUpdatePartialFailureRetainsNewestKey(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.UpdateKESPeriod(62))
+
+	// The update to period 64 first succeeds from 62 to 63, then fails
+	// because a depth-6 key cannot evolve beyond period 63. The successful
+	// successor is the only key that remains usable after forward evolution.
+	err := pc.UpdateKESPeriod(64)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "key is exhausted at period 63")
+	require.Equal(t, uint64(63), pc.kesSKey.Period)
+	require.NotEmpty(t, pc.kesSKey.Data)
+
+	message := []byte("test message after partial evolution failure")
+	signature, err := pc.KESSign(63, message)
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(pc.kesVKey, 63, message, signature))
+}
+
 func TestKESPeriodUpdateBackward(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 
