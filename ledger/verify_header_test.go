@@ -387,6 +387,19 @@ type mockBabbageBlock struct {
 	slot uint64
 }
 
+type mockBoundaryAlonzoBlock struct {
+	gledger.Block
+	slot uint64
+}
+
+func (m *mockBoundaryAlonzoBlock) Era() lcommon.Era {
+	return alonzo.EraAlonzo
+}
+
+func (m *mockBoundaryAlonzoBlock) SlotNumber() uint64 {
+	return m.slot
+}
+
 func (m *mockBabbageBlock) Era() lcommon.Era {
 	return babbage.EraBabbage
 }
@@ -1334,12 +1347,145 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 	// epoch-1's d=1 and returning genesisOverlayNonActive.
 	require.True(t, ls.genesisDelegationActiveForSlot(172_780))
 	require.False(t, ls.genesisDelegationActiveForSlot(172_836))
-	_, status, err := ls.genesisOverlayDelegationForSlot(
-		172_836,
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 172_836},
+		slot:  172_836,
+	}
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		block,
 		genesisCfg.ShelleyGenesis(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, genesisOverlayNone, status)
+}
+
+func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
+	delegateHash := tb.block.IssuerVkey().Hash()
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	vrfHash := lcommon.Blake2b256Hash(vrfKey)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	previousPParams := &alonzo.AlonzoProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	previousPParamsCbor, err := cbor.Encode(previousPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		previousPParamsCbor,
+		0,
+		0,
+		eras.AlonzoEraDesc.Id,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.BabbageEraDesc.Id,
+		},
+		currentEra: eras.BabbageEraDesc,
+		currentPParams: &babbage.BabbageProtocolParameters{
+			ProtocolMajor: eras.BabbageEraDesc.MinMajorVersion,
+		},
+		epochCache: []models.Epoch{
+			{
+				EpochId:       1,
+				StartSlot:     86_400,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.BabbageEraDesc.Id,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newGenesisDelegateShelleyGenesisCfg(
+				t,
+				hex.EncodeToString(delegateHash.Bytes()),
+				hex.EncodeToString(vrfHash.Bytes()),
+			),
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		Block: tb.block,
+		slot:  86_400,
+	}
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	require.NotNil(t, pparams)
+	assert.Equal(t, big.NewRat(1, 1), decentralizationParamRat(pparams))
+	handled, err := ls.verifyGenesisDelegateHeader(block, false)
+	require.NoError(t, err)
+	assert.True(t, handled)
+}
+
+func TestGenesisOverlayBoundaryBlockUsesBoundaryEpochPredecessorPParams(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	for _, tc := range []struct {
+		epoch uint64
+		d     *big.Rat
+	}{
+		{epoch: 0, d: big.NewRat(1, 2)},
+		{epoch: 1, d: big.NewRat(1, 1)},
+	} {
+		encoded, encodeErr := cbor.Encode(&alonzo.AlonzoProtocolParameters{
+			Decentralization: &cbor.Rat{Rat: tc.d},
+		})
+		require.NoError(t, encodeErr)
+		require.NoError(t, db.SetPParams(
+			encoded,
+			86_400*tc.epoch,
+			tc.epoch,
+			eras.AlonzoEraDesc.Id,
+			nil,
+		))
+	}
+
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.BabbageEraDesc.Id,
+		},
+		currentEra: eras.BabbageEraDesc,
+		currentPParams: &babbage.BabbageProtocolParameters{
+			ProtocolMajor: eras.BabbageEraDesc.MinMajorVersion,
+		},
+		epochCache: []models.Epoch{{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.BabbageEraDesc.Id,
+		}},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 86_400},
+		slot:  86_400,
+	}
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	require.NotNil(t, pparams)
+	require.Equal(t, big.NewRat(1, 1), decentralizationParamRat(pparams))
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
@@ -2035,7 +2181,7 @@ func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
 	assert.Contains(t, err.Error(), "has no stake in epoch")
 }
 
-func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
+func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{38}, 0, tamperNone)
@@ -2051,10 +2197,11 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 	ls.mithrilLedgerSlot = importedCaptureSlot
 	tb.block.slot = ls.epochCache[2].StartSlot + 50
 
-	// Leader election in epoch 5 uses mark[StakeSnapshotEpoch(5)] = mark[4]
-	// (the end-of-epoch-3 "set" distribution), so the imported mark is seeded
-	// at epoch 4. importedCaptureSlot (epoch4-start+50) is past epoch 4's start,
-	// which is what marks it as Mithril-imported.
+	// Leader election in epoch 5 uses mark[StakeSnapshotEpoch(5)] = mark[4].
+	// Older Dingo imports stamped the certified NewEpochState SnapShots.Mark
+	// row with the mid-epoch Mithril anchor. That provenance is still
+	// authoritative even though the stored capture slot is after epoch 4's
+	// start, so existing databases must run the threshold check.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshotOfTypeAtSlot(
 		t,
@@ -2085,17 +2232,75 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 		nil,
 	)
 	require.NoError(t, err)
-	require.True(t, ls.isMithrilImportedMarkSnapshot(snapshot, 4))
+	require.False(t, ls.shouldSkipPostMithrilMarkEligibility(snapshot, 4))
 	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err)
+	require.Error(t, err)
 	assert.Contains(
 		t,
-		logBuf.String(),
-		"Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary",
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
 	)
-	assert.NotContains(t, logBuf.String(), "total active stake is zero")
+	assert.NotContains(t, logBuf.String(), "skipping leader eligibility check")
+}
+
+func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	var logBuf bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+	tb.block.slot = ls.epochCache[2].StartSlot + 50
+
+	// The startup fallback derives historical rows from current live state and
+	// stamps them with the current epoch start. Unlike a certified imported
+	// row, this capture is neither the target boundary nor the Mithril anchor,
+	// so hard threshold rejection remains unsafe.
+	reconstructedCaptureSlot := ls.epochCache[1].StartSlot
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		1,
+		0,
+		reconstructedCaptureSlot,
+	)
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		dummyHash,
+		1_000_000_000_000_000_000,
+		0,
+		reconstructedCaptureSlot,
+	)
+	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, ls.shouldSkipPostMithrilMarkEligibility(snapshot, 4))
+	ls.publishSnapshotsLocked()
+
+	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.NoError(t, err)
+	assert.Contains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
 func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
@@ -2140,7 +2345,10 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 		nil,
 	)
 	require.NoError(t, err)
-	require.False(t, ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch))
+	require.False(t, ls.shouldSkipPostMithrilMarkEligibility(
+		snapshot,
+		snapshotEpoch,
+	))
 	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)

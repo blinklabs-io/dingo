@@ -251,6 +251,7 @@ func (it *fakeIterator) Item() types.BlobItem {
 type fakeTxn struct {
 	store   *fakeStore
 	pending map[string][]byte
+	deleted map[string]struct{}
 }
 
 func (t *fakeTxn) Commit() error {
@@ -258,13 +259,17 @@ func (t *fakeTxn) Commit() error {
 		return t.store.failCommitErr
 	}
 	maps.Copy(t.store.data, t.pending)
+	for key := range t.deleted {
+		delete(t.store.data, key)
+	}
 	return nil
 }
 
 func (t *fakeTxn) Rollback() error { return nil }
 
 type fakeStore struct {
-	data map[string][]byte
+	data      map[string][]byte
+	writeTxns int
 	// failCommitErr, when set, is returned by every fakeTxn.Commit instead
 	// of actually applying that transaction's pending writes -- used to
 	// simulate a cloud store's Commit reporting failure (e.g. wrapping
@@ -276,8 +281,15 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{data: map[string][]byte{}}
 }
 
-func (s *fakeStore) NewTransaction(bool) types.Txn {
-	return &fakeTxn{store: s, pending: map[string][]byte{}}
+func (s *fakeStore) NewTransaction(readWrite bool) types.Txn {
+	if readWrite {
+		s.writeTxns++
+	}
+	return &fakeTxn{
+		store:   s,
+		pending: map[string][]byte{},
+		deleted: map[string]struct{}{},
+	}
 }
 
 func (s *fakeStore) NewIterator(
@@ -313,6 +325,16 @@ func (s *fakeStore) Set(txn types.Txn, key, value []byte) error {
 	return nil
 }
 
+func (s *fakeStore) Delete(txn types.Txn, key []byte) error {
+	ft, ok := txn.(*fakeTxn)
+	if !ok {
+		return errors.New("blobbackup test: wrong txn type")
+	}
+	delete(ft.pending, string(key))
+	ft.deleted[string(key)] = struct{}{}
+	return nil
+}
+
 // TestBackupRestoreRoundTripFake validates a full Backup-then-Restore round
 // trip against the fake store, confirming Restore accepts a genuine
 // terminator (correct record count and checksum) produced by a real Backup
@@ -341,6 +363,94 @@ func TestBackupRestoreRoundTripFake(t *testing.T) {
 		),
 	)
 	require.Equal(t, []byte("value-a"), dst.data["key-a"])
+}
+
+func TestValidateBackupRoundTripAndCorruption(t *testing.T) {
+	src := newFakeStore()
+	txn := src.NewTransaction(true)
+	require.NoError(t, src.Set(txn, []byte("key-a"), []byte("value-a")))
+	require.NoError(t, txn.Commit())
+
+	var backup bytes.Buffer
+	require.NoError(
+		t,
+		Backup(
+			context.Background(), src, &backup, testMaxValueLen, "test backup",
+		),
+	)
+	valid := append([]byte(nil), backup.Bytes()...)
+	require.NoError(t, Validate(
+		context.Background(),
+		bytes.NewReader(valid),
+		testMaxValueLen,
+		"test validation",
+	))
+
+	require.Error(t, Validate(
+		context.Background(),
+		bytes.NewReader(valid[:len(valid)-1]),
+		testMaxValueLen,
+		"test validation",
+	))
+
+	corrupt := append([]byte(nil), valid...)
+	corrupt[len(corrupt)-1] ^= 0xff
+	err := Validate(
+		context.Background(),
+		bytes.NewReader(corrupt),
+		testMaxValueLen,
+		"test validation",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "corrupted")
+}
+
+func TestResetRemovesEveryKeyInBoundedBatches(t *testing.T) {
+	store := newFakeStore()
+	txn := store.NewTransaction(true)
+	for i := range DefaultRestoreBatchRecords + 7 {
+		key := fmt.Appendf(nil, "key-%04d", i)
+		require.NoError(t, store.Set(txn, key, []byte("value")))
+	}
+	require.NoError(t, txn.Commit())
+
+	require.NoError(t, Reset(context.Background(), store, nil, "test reset"))
+	require.Empty(t, store.data)
+}
+
+func TestResetUsesProviderBatchDeleteWithoutWriteTransactions(t *testing.T) {
+	store := newFakeStore()
+	for i := range DefaultRestoreBatchRecords + 7 {
+		store.data[string(fmt.Appendf(nil, "key-%04d", i))] = []byte("value")
+	}
+
+	batchSizes := []int{}
+	err := Reset(
+		context.Background(),
+		store,
+		func(_ context.Context, keys [][]byte) error {
+			batchSizes = append(batchSizes, len(keys))
+			for _, key := range keys {
+				delete(store.data, string(key))
+			}
+			return nil
+		},
+		"test reset",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []int{DefaultRestoreBatchRecords, 7}, batchSizes)
+	require.Zero(t, store.writeTxns)
+	require.Empty(t, store.data)
+}
+
+func TestResetCommitFailurePreservesOriginalBatch(t *testing.T) {
+	store := newFakeStore()
+	store.data["original"] = []byte("value")
+	store.failCommitErr = errors.New("injected commit failure")
+
+	err := Reset(context.Background(), store, nil, "test reset")
+	require.Error(t, err)
+	require.Equal(t, map[string][]byte{"original": []byte("value")}, store.data)
 }
 
 // TestRestoreRejectsTerminatorWithMismatchedChecksum guards the exact gap a

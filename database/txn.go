@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime/debug"
@@ -142,10 +143,20 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		// avoid contending with the SQLite write connection. This
 		// prevents chainsync FindIntersect and snapshot calculations
 		// from blocking on concurrent block processing.
+		//
+		// context.Background(): NewTxn itself takes no ctx, and none of
+		// its own callers (Database.Transaction and its ~100 call sites
+		// across ledger/api/mempool) have one to offer yet either -- this
+		// is the current propagation boundary between the metadata
+		// store's own ctx-aware Transaction/ReadTransaction and the rest
+		// of the node, not a gap within the metadata store itself.
+		// Threading a real ctx from callers into this boundary is a
+		// separate, distinctly larger change than this metadata-store
+		// specific one.
 		if readWrite {
-			t.metadataTxn = ms.Transaction()
+			t.metadataTxn = ms.Transaction(context.Background())
 		} else {
-			t.metadataTxn = ms.ReadTransaction()
+			t.metadataTxn = ms.ReadTransaction(context.Background())
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -169,10 +180,12 @@ func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	if ms := db.Metadata(); ms != nil {
+		// See NewTxn's matching comment: context.Background() here is the
+		// current propagation boundary, not a metadata-store-internal gap.
 		if readWrite {
-			t.metadataTxn = ms.Transaction()
+			t.metadataTxn = ms.Transaction(context.Background())
 		} else {
-			t.metadataTxn = ms.ReadTransaction()
+			t.metadataTxn = ms.ReadTransaction(context.Background())
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(

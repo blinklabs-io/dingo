@@ -108,7 +108,7 @@ func (s *Store) GetMidnightCandidates(
 	address ledger.Address,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (s *Store) GetMidnightCandidates(
 		return nil, nil
 	}
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(`
 SELECT utxo.tx_id, utxo.output_idx, datum.raw_datum
 FROM utxo
@@ -159,7 +159,7 @@ func (s *Store) CreateMidnightAssetCreate(
 	if row == nil {
 		return errors.New("create Midnight asset: row is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (s *Store) CreateMidnightAssetCreate(
 	if err != nil {
 		return err
 	}
-	id, err := q.CreateMidnightAssetCreate(context.Background(), params)
+	id, err := q.CreateMidnightAssetCreate(ctx, params)
 	return applyIgnoredInsertID(&row.ID, id, err)
 }
 
@@ -179,7 +179,7 @@ func (s *Store) CreateMidnightAssetSpend(
 	if row == nil {
 		return errors.New("create Midnight asset spend: row is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func (s *Store) CreateMidnightAssetSpend(
 	if err != nil {
 		return err
 	}
-	id, err := q.CreateMidnightAssetSpend(context.Background(), params)
+	id, err := q.CreateMidnightAssetSpend(ctx, params)
 	return applyIgnoredInsertID(&row.ID, id, err)
 }
 
@@ -199,7 +199,7 @@ func (s *Store) CreateMidnightRegistration(
 	if row == nil {
 		return errors.New("create Midnight registration: row is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -208,7 +208,7 @@ func (s *Store) CreateMidnightRegistration(
 	if err != nil {
 		return err
 	}
-	id, err := q.CreateMidnightRegistration(context.Background(), params)
+	id, err := q.CreateMidnightRegistration(ctx, params)
 	return applyIgnoredInsertID(&row.ID, id, err)
 }
 
@@ -219,7 +219,7 @@ func (s *Store) CreateMidnightDeregistration(
 	if row == nil {
 		return errors.New("create Midnight deregistration: row is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func (s *Store) CreateMidnightDeregistration(
 	if err != nil {
 		return err
 	}
-	id, err := q.CreateMidnightDeregistration(context.Background(), params)
+	id, err := q.CreateMidnightDeregistration(ctx, params)
 	return applyIgnoredInsertID(&row.ID, id, err)
 }
 
@@ -237,6 +237,9 @@ func (s *Store) FindUnspentMidnightAssetCreates() (
 	error,
 ) {
 	q := s.operationalQueries(s.readDB)
+	// No txn parameter on this method, so no caller-managed ctx is
+	// available -- same accepted autocommit-path gap as dbFromTxn/
+	// readDBFromTxn document for a nil txn.
 	rows, err := q.FindUnspentMidnightAssetCreates(context.Background())
 	if err != nil {
 		return nil, err
@@ -249,6 +252,7 @@ func (s *Store) FindUnspentMidnightRegistrations() (
 	error,
 ) {
 	q := s.operationalQueries(s.readDB)
+	// See FindUnspentMidnightAssetCreates: no txn parameter, no ctx to use.
 	rows, err := q.FindUnspentMidnightRegistrations(context.Background())
 	if err != nil {
 		return nil, err
@@ -260,13 +264,13 @@ func (s *Store) DeleteMidnightAssetCreatesByBlock(
 	txn types.Txn,
 	blockNumber uint64,
 ) ([]models.MidnightAssetCreate, error) {
-	db, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
+	db, ctx, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightAssetCreatesByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	)
 	if err != nil {
@@ -276,7 +280,7 @@ func (s *Store) DeleteMidnightAssetCreatesByBlock(
 		return nil, nil
 	}
 	if err := q.DeleteMidnightAssetCreatesByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	); err != nil {
 		return nil, err
@@ -288,13 +292,13 @@ func (s *Store) DeleteMidnightAssetSpendsByBlock(
 	txn types.Txn,
 	blockNumber uint64,
 ) ([]models.MidnightAssetSpend, error) {
-	db, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
+	db, ctx, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightAssetSpendsByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	)
 	if err != nil {
@@ -304,7 +308,7 @@ func (s *Store) DeleteMidnightAssetSpendsByBlock(
 		return nil, nil
 	}
 	if err := q.DeleteMidnightAssetSpendsByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	); err != nil {
 		return nil, err
@@ -316,13 +320,13 @@ func (s *Store) DeleteMidnightRegistrationsByBlock(
 	txn types.Txn,
 	blockNumber uint64,
 ) ([]models.MidnightRegistration, error) {
-	db, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
+	db, ctx, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightRegistrationsByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	)
 	if err != nil {
@@ -332,7 +336,7 @@ func (s *Store) DeleteMidnightRegistrationsByBlock(
 		return nil, nil
 	}
 	if err := q.DeleteMidnightRegistrationsByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	); err != nil {
 		return nil, err
@@ -344,13 +348,13 @@ func (s *Store) DeleteMidnightDeregistrationsByBlock(
 	txn types.Txn,
 	blockNumber uint64,
 ) ([]models.MidnightDeregistration, error) {
-	db, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
+	db, ctx, sqlBlock, err := s.midnightWriteDB(txn, blockNumber)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightDeregistrationsByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	)
 	if err != nil {
@@ -360,7 +364,7 @@ func (s *Store) DeleteMidnightDeregistrationsByBlock(
 		return nil, nil
 	}
 	if err := q.DeleteMidnightDeregistrationsByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	); err != nil {
 		return nil, err
@@ -375,7 +379,7 @@ func (s *Store) InsertMidnightGovernanceDatum(
 	if datum == nil {
 		return errors.New("insert Midnight governance datum: datum is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -389,7 +393,7 @@ func (s *Store) InsertMidnightGovernanceDatum(
 		return err
 	}
 	id, err := q.InsertMidnightGovernanceDatum(
-		context.Background(),
+		ctx,
 		sqlitequery.InsertMidnightGovernanceDatumParams{
 			DatumType:   datum.DatumType,
 			TxHash:      datum.TxHash,
@@ -408,9 +412,9 @@ func (s *Store) DeleteMidnightGovernanceDatumsByBlock(
 	return s.deleteMidnightByUint64(
 		txn,
 		blockNumber,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightGovernanceDatumsByBlock(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -422,7 +426,7 @@ func (s *Store) GetLatestMidnightGovernanceDatum(
 	blockNumber uint64,
 	txn types.Txn,
 ) (*models.MidnightGovernanceDatum, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +436,7 @@ func (s *Store) GetLatestMidnightGovernanceDatum(
 		return nil, err
 	}
 	row, err := q.GetLatestMidnightGovernanceDatum(
-		context.Background(),
+		ctx,
 		sqlitequery.GetLatestMidnightGovernanceDatumParams{
 			DatumType:   datumType,
 			BlockNumber: sqlBlock,
@@ -453,8 +457,11 @@ func (s *Store) GetLatestMidnightAriadneParams(
 ) (*models.MidnightAriadneParams, error) {
 	return s.getMidnightAriadneParams(
 		txn,
-		func(q *sqlitequery.Queries) (sqlitequery.MidnightAriadneParam, error) {
-			return q.GetLatestMidnightAriadneParams(context.Background())
+		func(
+			q *sqlitequery.Queries,
+			ctx context.Context,
+		) (sqlitequery.MidnightAriadneParam, error) {
+			return q.GetLatestMidnightAriadneParams(ctx)
 		},
 	)
 }
@@ -466,12 +473,12 @@ func (s *Store) GetMidnightAriadneParamsByEpoch(
 	return s.getMidnightAriadneParamsByEpoch(
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) (
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) (
 			sqlitequery.MidnightAriadneParam,
 			error,
 		) {
 			return q.GetMidnightAriadneParamsByEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -485,12 +492,12 @@ func (s *Store) GetMidnightAriadneParamsAtOrBeforeEpoch(
 	return s.getMidnightAriadneParamsByEpoch(
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) (
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) (
 			sqlitequery.MidnightAriadneParam,
 			error,
 		) {
 			return q.GetMidnightAriadneParamsAtOrBeforeEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -504,7 +511,7 @@ func (s *Store) UpsertMidnightAriadneParams(
 	if params == nil {
 		return errors.New("upsert Midnight Ariadne params: params are nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -514,7 +521,7 @@ func (s *Store) UpsertMidnightAriadneParams(
 		return err
 	}
 	id, err := q.UpsertMidnightAriadneParams(
-		context.Background(),
+		ctx,
 		sqlitequery.UpsertMidnightAriadneParamsParams{
 			Epoch: epoch,
 			Datum: params.Datum,
@@ -533,9 +540,9 @@ func (s *Store) DeleteMidnightAriadneParamsByEpoch(
 	return s.deleteMidnightByUint64(
 		txn,
 		epoch,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightAriadneParamsByEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -549,7 +556,7 @@ func (s *Store) CreateMidnightAriadneRollback(
 	if rollback == nil {
 		return errors.New("create Midnight Ariadne rollback: row is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -563,7 +570,7 @@ func (s *Store) CreateMidnightAriadneRollback(
 		return err
 	}
 	id, err := q.CreateMidnightAriadneRollback(
-		context.Background(),
+		ctx,
 		sqlitequery.CreateMidnightAriadneRollbackParams{
 			BlockNumber:    blockNumber,
 			Epoch:          epoch,
@@ -578,7 +585,7 @@ func (s *Store) FindMidnightAriadneRollbacksByBlock(
 	txn types.Txn,
 	blockNumber uint64,
 ) ([]models.MidnightAriadneRollback, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +595,7 @@ func (s *Store) FindMidnightAriadneRollbacksByBlock(
 		return nil, err
 	}
 	rows, err := q.FindMidnightAriadneRollbacksByBlock(
-		context.Background(),
+		ctx,
 		sqlBlock,
 	)
 	if err != nil {
@@ -614,9 +621,9 @@ func (s *Store) DeleteMidnightAriadneRollbacksByBlock(
 	return s.deleteMidnightByUint64(
 		txn,
 		blockNumber,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightAriadneRollbacksByBlock(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -630,9 +637,9 @@ func (s *Store) DeleteMidnightAriadneRollbacksBeforeBlock(
 	return s.deleteMidnightByUint64(
 		txn,
 		blockNumber,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightAriadneRollbacksBeforeBlock(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -646,7 +653,7 @@ func (s *Store) UpsertMidnightEpochCandidates(
 	if epochCandidates == nil {
 		return errors.New("upsert Midnight epoch candidates: row is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -660,7 +667,7 @@ func (s *Store) UpsertMidnightEpochCandidates(
 		return err
 	}
 	id, err := q.UpsertMidnightEpochCandidates(
-		context.Background(),
+		ctx,
 		sqlitequery.UpsertMidnightEpochCandidatesParams{
 			Epoch:          epoch,
 			BlockNumber:    blockNumber,
@@ -680,9 +687,9 @@ func (s *Store) DeleteMidnightEpochCandidatesByBlock(
 	return s.deleteMidnightByUint64(
 		txn,
 		blockNumber,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightEpochCandidatesByBlock(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -693,7 +700,7 @@ func (s *Store) GetMidnightEpochCandidatesByEpoch(
 	epoch uint64,
 	txn types.Txn,
 ) (*models.MidnightEpochCandidates, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -703,7 +710,7 @@ func (s *Store) GetMidnightEpochCandidatesByEpoch(
 		return nil, err
 	}
 	row, err := q.GetMidnightEpochCandidatesByEpoch(
-		context.Background(),
+		ctx,
 		sqlEpoch,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -727,7 +734,7 @@ func (s *Store) InsertMidnightCommitteeCandidateRegistration(
 	if row == nil {
 		return errors.New("insert Midnight candidate registration: row is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -749,7 +756,7 @@ func (s *Store) InsertMidnightCommitteeCandidateRegistration(
 		return err
 	}
 	id, err := q.InsertMidnightCommitteeCandidateRegistration(
-		context.Background(),
+		ctx,
 		sqlitequery.InsertMidnightCommitteeCandidateRegistrationParams{
 			TxHash:       row.TxHash,
 			OutputIndex:  outputIndex,
@@ -769,9 +776,9 @@ func (s *Store) DeleteMidnightCommitteeCandidateRegistrationsByBlock(
 	return s.deleteMidnightByUint64(
 		txn,
 		blockNumber,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightCommitteeCandidateRegistrationsByBlock(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -785,7 +792,7 @@ func (s *Store) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 	if len(txHashes) == 0 {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -804,7 +811,7 @@ func (s *Store) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 			"WHERE tx_hash IN (" + bindPlaceholders(len(chunk)) + ") " +
 			"ORDER BY id"
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			args...,
 		)
@@ -840,38 +847,41 @@ func (s *Store) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 func (s *Store) midnightWriteDB(
 	txn types.Txn,
 	value uint64,
-) (queryer, int64, error) {
-	db, err := s.dbFromTxn(txn)
+) (queryer, context.Context, int64, error) {
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	sqlValue, err := checkedInt64(value)
-	return db, sqlValue, err
+	return db, ctx, sqlValue, err
 }
 
 func (s *Store) deleteMidnightByUint64(
 	txn types.Txn,
 	value uint64,
-	deleteFn func(*sqlitequery.Queries, int64) error,
+	deleteFn func(*sqlitequery.Queries, context.Context, int64) error,
 ) error {
-	db, sqlValue, err := s.midnightWriteDB(txn, value)
+	db, ctx, sqlValue, err := s.midnightWriteDB(txn, value)
 	if err != nil {
 		return err
 	}
 	q := s.operationalQueries(db)
-	return deleteFn(q, sqlValue)
+	return deleteFn(q, ctx, sqlValue)
 }
 
 func (s *Store) getMidnightAriadneParams(
 	txn types.Txn,
-	get func(*sqlitequery.Queries) (sqlitequery.MidnightAriadneParam, error),
+	get func(
+		*sqlitequery.Queries,
+		context.Context,
+	) (sqlitequery.MidnightAriadneParam, error),
 ) (*models.MidnightAriadneParams, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
-	row, err := get(q)
+	row, err := get(q, ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -890,6 +900,7 @@ func (s *Store) getMidnightAriadneParamsByEpoch(
 	txn types.Txn,
 	get func(
 		*sqlitequery.Queries,
+		context.Context,
 		int64,
 	) (sqlitequery.MidnightAriadneParam, error),
 ) (*models.MidnightAriadneParams, error) {
@@ -899,8 +910,11 @@ func (s *Store) getMidnightAriadneParamsByEpoch(
 	}
 	return s.getMidnightAriadneParams(
 		txn,
-		func(q *sqlitequery.Queries) (sqlitequery.MidnightAriadneParam, error) {
-			return get(q, sqlEpoch)
+		func(
+			q *sqlitequery.Queries,
+			ctx context.Context,
+		) (sqlitequery.MidnightAriadneParam, error) {
+			return get(q, ctx, sqlEpoch)
 		},
 	)
 }
@@ -1159,7 +1173,7 @@ func findMidnightPage[T midnightPageRow](
 	limit int,
 	scan midnightRowScanner[T],
 ) ([]T, error) {
-	db, err := store.readDBFromTxn(txn)
+	db, ctx, err := store.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1178,6 +1192,7 @@ func findMidnightPage[T midnightPageRow](
 		args = append(args, limit)
 	}
 	ret, err := queryMidnightRows(
+		ctx,
 		db,
 		store.dialect.Rebind(query),
 		args,
@@ -1192,6 +1207,7 @@ func findMidnightPage[T midnightPageRow](
 		" WHERE block_number = ? AND tx_index = ? AND id > ?" +
 		" ORDER BY id ASC"
 	extra, err := queryMidnightRows(
+		ctx,
 		db,
 		store.dialect.Rebind(extraQuery),
 		[]any{lastBlock, lastTxIndex, lastID},
@@ -1204,12 +1220,13 @@ func findMidnightPage[T midnightPageRow](
 }
 
 func queryMidnightRows[T midnightPageRow](
+	ctx context.Context,
 	db queryer,
 	query string,
 	args []any,
 	scan midnightRowScanner[T],
 ) ([]T, error) {
-	rows, err := db.QueryContext(context.Background(), query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

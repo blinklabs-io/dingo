@@ -40,6 +40,15 @@ plugins:
     #     database: "postgres"
     #     sslMode: "require"
     #     timeZone: "UTC"
+    #     # Both bound a single statement/lock wait server-side; zero (the
+    #     # default) leaves Postgres's own default -- no limit -- in
+    #     # effect. Values are milliseconds, matching Postgres's own GUC
+    #     # units. The mysql provider has the same two fields plus
+    #     # readTimeout/writeTimeout, but lockTimeout there is whole
+    #     # seconds (innodb_lock_wait_timeout's native unit) -- see
+    #     # DATABASE.md.
+    #     statementTimeout: "30s"
+    #     lockTimeout: "10s"
   mempool:
     # "fifo" preserves successful-admission order. "dag" additionally indexes
     # transaction dependencies and uses deterministic topological ordering.

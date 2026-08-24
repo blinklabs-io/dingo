@@ -132,6 +132,7 @@ type Node struct {
 	chainsyncClientRemoveSubId event.EventSubscriberId
 	connManagerRecycleSubId    event.EventSubscriberId
 	leiosVoteEmittedSubId      event.EventSubscriberId
+	leiosVoteReceivedSubId     event.EventSubscriberId
 	// koiosParitySubId is tracked for the same reason: observer.
 	// HandleEpochTransitionEvent is bound to the *koiosparity.Observer
 	// instance startKoiosParityObserver creates, which a live database
@@ -580,8 +581,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.db = db
 	started = append(started, func() { n.db.Close() })
 	if err != nil {
-		var dbErr database.CommitTimestampError
-		if !errors.As(err, &dbErr) {
+		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
 			return fmt.Errorf("failed to open database: %w", err)
 		}
 		n.config.logger.Warn(

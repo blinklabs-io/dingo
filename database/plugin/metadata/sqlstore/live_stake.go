@@ -27,6 +27,7 @@ import (
 )
 
 func (s *Store) refreshRewardLiveStakeAggregate(
+	ctx context.Context,
 	db queryer,
 	ref models.StakeCredentialRef,
 	slot uint64,
@@ -38,7 +39,7 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 	var pool []byte
 	var active sql.NullBool
 	var addedSlot sql.NullInt64
-	accountErr := db.QueryRowContext(context.Background(), `
+	accountErr := db.QueryRowContext(ctx, `
 SELECT reward, pool, active, added_slot
 FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -48,7 +49,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	if accountErr != nil && !errors.Is(accountErr, sql.ErrNoRows) {
 		return fmt.Errorf("query reward live stake account: %w", accountErr)
 	}
-	utxoStake, err := sumUint64Rows(db, `
+	utxoStake, err := sumUint64Rows(ctx, db, `
 SELECT amount
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
@@ -78,7 +79,7 @@ WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
 	}
 	total := utxoValue + rewardStake
 	if errors.Is(accountErr, sql.ErrNoRows) && total == 0 {
-		_, err := db.ExecContext(context.Background(), `
+		_, err := db.ExecContext(ctx, `
 DELETE FROM reward_live_stake
 WHERE credential_tag = ? AND staking_key = ?`,
 			ref.Tag,
@@ -97,7 +98,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(context.Background(), `
+	_, err = db.ExecContext(ctx, `
 INSERT INTO reward_live_stake (
     credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
     total_stake, registered, pool_delegation_slot,
@@ -141,18 +142,17 @@ func (s *Store) RebuildRewardLiveStake(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
-				context.Background(),
+				ctx,
 				"DELETE FROM reward_live_stake",
 			); err != nil {
 				return fmt.Errorf("clear reward live stake: %w", err)
 			}
 			// Keep amount arithmetic in Go. SQL INTEGER is signed and cannot
 			// represent every valid lovelace value.
-			utxoRows, err := db.QueryContext(context.Background(),
+			utxoRows, err := db.QueryContext(ctx,
 				`SELECT credential_tag, staking_key, amount FROM utxo
 WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
 			if err != nil {
@@ -201,7 +201,7 @@ WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
 				return fmt.Errorf("close reward live stake UTxOs: %w", err)
 			}
 
-			rows, err := db.QueryContext(context.Background(), `
+			rows, err := db.QueryContext(ctx, `
 WITH latest_delegation AS (
     SELECT credential_tag, staking_key, pool_key_hash, added_slot,
            block_index, cert_index
@@ -368,7 +368,7 @@ LEFT JOIN latest_delegation
 					delegationCert:  certIndex,
 				})
 			}
-			if err := s.insertRewardLiveStakeRows(db, values, slotValue); err != nil {
+			if err := s.insertRewardLiveStakeRows(ctx, db, values, slotValue); err != nil {
 				return err
 			}
 			return nil
@@ -391,6 +391,7 @@ type rewardLiveStakeRow struct {
 }
 
 func (s *Store) insertRewardLiveStakeRows(
+	ctx context.Context,
 	db queryer,
 	rows []rewardLiveStakeRow,
 	updatedSlot int64,
@@ -434,7 +435,7 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
  pool_delegation_block_index = excluded.pool_delegation_block_index,
  pool_delegation_cert_index = excluded.pool_delegation_cert_index,
  updated_slot = excluded.updated_slot, calculation_version = excluded.calculation_version`
-		if _, err := db.ExecContext(context.Background(), query, args...); err != nil {
+		if _, err := db.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("populate reward live stake: %w", err)
 		}
 	}
@@ -444,7 +445,7 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 func (s *Store) RewardLiveStakeNeedsBackfill(
 	txn types.Txn,
 ) (bool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, fmt.Errorf(
 			"reward live stake needs backfill: resolve db: %w",
@@ -457,7 +458,7 @@ func (s *Store) RewardLiveStakeNeedsBackfill(
 	}
 	utxoStakes := make(map[credentialKey]uint64)
 	utxoRows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		`SELECT credential_tag, staking_key, amount FROM utxo WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`,
 	)
 	if err != nil {
@@ -493,7 +494,7 @@ func (s *Store) RewardLiveStakeNeedsBackfill(
 	if err := utxoRows.Close(); err != nil {
 		return false, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT canonical.credential_tag, canonical.staking_key,
        account.reward, account.active, account.pool,
        reward_live_stake.id, reward_live_stake.calculation_version,
@@ -586,7 +587,7 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 		return false, err
 	}
 	var orphan bool
-	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM reward_live_stake r WHERE NOT EXISTS (SELECT 1 FROM account a WHERE a.credential_tag = r.credential_tag AND a.staking_key = r.staking_key) AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.credential_tag = r.credential_tag AND u.staking_key = r.staking_key AND u.deleted_slot = 0))`).Scan(&orphan); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM reward_live_stake r WHERE NOT EXISTS (SELECT 1 FROM account a WHERE a.credential_tag = r.credential_tag AND a.staking_key = r.staking_key) AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.credential_tag = r.credential_tag AND u.staking_key = r.staking_key AND u.deleted_slot = 0))`).Scan(&orphan); err != nil {
 		return false, err
 	}
 	return orphan, nil
@@ -595,7 +596,7 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 func (s *Store) StaleConsensusStakeSnapshotsExist(
 	txn types.Txn,
 ) (bool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, fmt.Errorf(
 			"stale consensus stake snapshots: resolve db: %w",
@@ -603,7 +604,7 @@ func (s *Store) StaleConsensusStakeSnapshotsExist(
 		)
 	}
 	var stale bool
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM pool_stake_snapshot
     WHERE snapshot_type IN ('mark', 'set', 'go')
@@ -634,7 +635,7 @@ func (s *Store) GetLiveStakeInputsForPools(
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"GetLiveStakeInputsForPools: resolve db: %w",
@@ -676,7 +677,7 @@ WHERE rls.pool_key_hash IN (` + bindPlaceholders(len(chunk)) + `)
 ORDER BY rls.pool_key_hash ASC, rls.credential_tag ASC,
          rls.staking_key ASC`
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			args...,
 		)

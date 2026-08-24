@@ -395,6 +395,7 @@ func TestWriteAccountImportBaselineRequiresTransaction(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	require.Error(t, writeAccountImportBaseline(
+		t.Context(),
 		newDialectQueryer(store.writeDB, store.dialect.Name()),
 		&models.Account{
 			StakingKey:    snapshotStakingKey(0x74),

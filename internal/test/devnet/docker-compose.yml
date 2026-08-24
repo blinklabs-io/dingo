@@ -245,8 +245,10 @@ services:
       TXPUMP_NETWORK_MAGIC: "42"
       TXPUMP_TX_COUNT_MIN: "10"
       TXPUMP_TX_COUNT_MAX: "50"
-      TXPUMP_COOLDOWN_MIN: "5"
-      TXPUMP_COOLDOWN_MAX: "15"
+      # txpump interprets cooldowns as milliseconds. Keep this at the
+      # 5-15 second cadence documented in README.md.
+      TXPUMP_COOLDOWN_MIN: "5000"
+      TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
@@ -370,8 +372,10 @@ services:
       TXPUMP_NETWORK_MAGIC: "42"
       TXPUMP_TX_COUNT_MIN: "10"
       TXPUMP_TX_COUNT_MAX: "50"
-      TXPUMP_COOLDOWN_MIN: "5"
-      TXPUMP_COOLDOWN_MAX: "15"
+      # txpump interprets cooldowns as milliseconds. Keep this at the
+      # 5-15 second cadence documented in README.md.
+      TXPUMP_COOLDOWN_MIN: "5000"
+      TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"

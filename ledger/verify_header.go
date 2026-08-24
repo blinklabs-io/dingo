@@ -59,6 +59,9 @@ var (
 	errHeaderVerificationDeferred = errors.New(
 		"header verification deferred",
 	)
+	errEpochCacheForecastBoundary = errors.New(
+		"epoch cache forecast crosses era boundary",
+	)
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
 	)
@@ -398,6 +401,15 @@ func (ls *LedgerState) headerVerificationEpoch(
 		// compute the next epoch(s) so verification can proceed.
 		epoch, err = ls.ensureEpochForSlot(blockSlot)
 		if err != nil {
+			if errors.Is(err, errEpochCacheForecastBoundary) {
+				return models.Epoch{}, fmt.Errorf(
+					"%w: block header verification deferred at hard-fork "+
+						"boundary for slot %d: %w",
+					errHeaderVerificationDeferred,
+					blockSlot,
+					err,
+				)
+			}
 			return models.Epoch{}, fmt.Errorf(
 				"block header verification rejected: no epoch data for slot %d: %w",
 				blockSlot,
@@ -486,9 +498,9 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 	// Blockfetch can verify a header ahead of ledger apply, while the
 	// in-memory parameters still describe the previous epoch. Defer any
 	// state-dependent overlay decision until the rollover has installed the
-	// target epoch's parameters. This must precede genesisDelegationActiveForSlot
-	// and genesisOverlayDelegationForSlot because stale parameters can otherwise
-	// classify a future slot as having no overlay and return early.
+	// target epoch's parameters. This must precede
+	// genesisOverlayDelegationForBlock because stale parameters can otherwise
+	// classify a future slot as having no overlay.
 	if allowStateDefer && ls.ledgerTipBehindSlot(block.SlotNumber()) {
 		return true, fmt.Errorf(
 			"%w: genesis overlay state for slot %d is not yet authoritative",
@@ -496,12 +508,8 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 			block.SlotNumber(),
 		)
 	}
-	if !ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
-		return false, nil
-	}
-
-	genesisDeleg, status, err := ls.genesisOverlayDelegationForSlot(
-		block.SlotNumber(),
+	genesisDeleg, status, err := ls.genesisOverlayDelegationForBlock(
+		block,
 		shelleyGenesis,
 	)
 	if err != nil {
@@ -560,9 +568,26 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 	return true, nil
 }
 
-func (ls *LedgerState) genesisOverlayDelegationForSlot(
+// genesisOverlayDelegationForBlock resolves the overlay parameters using the
+// era that encoded the block. At a hard-fork boundary, the boundary block can
+// be encoded in the predecessor era while its header announces the successor.
+// In that case the epoch cache already describes the successor era, but the
+// block's leader was selected under the predecessor-era parameters.
+func (ls *LedgerState) genesisOverlayDelegationForBlock(
+	block ledger.Block,
+	shelleyGenesis *shelley.ShelleyGenesis,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	return ls.genesisOverlayDelegationForSlotWithParams(
+		block.SlotNumber(),
+		shelleyGenesis,
+		ls.genesisOverlayProtocolParamsForBlock(block),
+	)
+}
+
+func (ls *LedgerState) genesisOverlayDelegationForSlotWithParams(
 	slot uint64,
 	shelleyGenesis *shelley.ShelleyGenesis,
+	pparams lcommon.ProtocolParameters,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
 	genesisDelegs, err := parseShelleyGenesisDelegations(shelleyGenesis)
 	if err != nil {
@@ -593,7 +618,7 @@ func (ls *LedgerState) genesisOverlayDelegationForSlot(
 		)
 	}
 
-	decentralization := ls.decentralizationParamRatForSlot(slot)
+	decentralization := decentralizationParamRat(pparams)
 	overlayIndex, status := classifyGenesisOverlaySlot(
 		slot-epoch.StartSlot,
 		decentralization,
@@ -753,21 +778,6 @@ func (ls *LedgerState) genesisDelegationActiveForSlot(slot uint64) bool {
 	return shelleyGenesis.ProtocolParameters.Decentralization.Sign() > 0
 }
 
-func (ls *LedgerState) decentralizationParamRatForSlot(slot uint64) *big.Rat {
-	if pparams := ls.genesisOverlayProtocolParamsForSlot(slot); pparams != nil {
-		return decentralizationParamRat(pparams)
-	}
-	if ls.config.CardanoNodeConfig == nil {
-		return nil
-	}
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil ||
-		shelleyGenesis.ProtocolParameters.Decentralization == nil {
-		return nil
-	}
-	return shelleyGenesis.ProtocolParameters.Decentralization.Rat
-}
-
 // genesisOverlayProtocolParamsForSlot resolves the protocol parameters that
 // govern the slot's epoch. ProtocolParamsForSlot intentionally forecasts from
 // the current state for forging, but that is not a historical lookup: at an
@@ -794,6 +804,49 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForSlot(
 				); pparamsErr == nil && pparams != nil {
 					return pparams
 				}
+			}
+		}
+	}
+	return ls.ProtocolParamsForSlot(slot)
+}
+
+// genesisOverlayProtocolParamsForBlock resolves protocol parameters for the
+// block body era rather than only the epoch's current era. A hard-fork
+// boundary block may be encoded in the predecessor era while its header
+// announces the successor; using the successor-era parameters would disable
+// a still-active genesis overlay and incorrectly send the genesis delegate
+// through the registered-pool lookup.
+func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
+	block ledger.Block,
+) lcommon.ProtocolParameters {
+	slot := block.SlotNumber()
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return ls.ProtocolParamsForSlot(slot)
+	}
+
+	paramsEpoch := epoch.EpochId
+	paramsEraID := epoch.EraId
+	blockEraID := uint(block.Era().Id)
+	if blockEraID < epoch.EraId {
+		paramsEraID = blockEraID
+	}
+
+	snapshot := ls.loadConsensusSnapshot()
+	if paramsEpoch == snapshot.currentEpoch.EpochId &&
+		paramsEraID == snapshot.currentEpoch.EraId {
+		return snapshot.currentPParams
+	}
+	if ls.db != nil {
+		era, ok := ls.eraById(paramsEraID)
+		if ok && era != nil && era.DecodePParamsFunc != nil {
+			if pparams, pparamsErr := ls.db.GetPParams(
+				paramsEpoch,
+				paramsEraID,
+				era.DecodePParamsFunc,
+				nil,
+			); pparamsErr == nil && pparams != nil {
+				return pparams
 			}
 		}
 	}
@@ -1141,10 +1194,10 @@ func (ls *LedgerState) leaderEligibilityStake(
 				diag,
 			)
 	}
-	if ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch) {
+	if ls.shouldSkipPostMithrilMarkEligibility(snapshot, snapshotEpoch) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
-				"skipping leader eligibility check: Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary",
+				"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary",
 				"slot",
 				block.SlotNumber(),
 				"epoch",
@@ -1180,7 +1233,14 @@ func (ls *LedgerState) leaderEligibilityStake(
 		false, nil
 }
 
-func (ls *LedgerState) isMithrilImportedMarkSnapshot(
+// shouldSkipPostMithrilMarkEligibility reports whether a mark row was
+// reconstructed from live state after its target boundary and therefore cannot
+// safely drive hard leader-threshold rejection. New imports retain the
+// certified NewEpochState.SnapShots boundary slot. Older imports used the
+// Mithril anchor itself as CapturedSlot, so that exact legacy provenance is
+// accepted too; startup-synthesized historical rows use another post-boundary
+// slot and remain conservative.
+func (ls *LedgerState) shouldSkipPostMithrilMarkEligibility(
 	snapshot *models.PoolStakeSnapshot,
 	snapshotEpoch uint64,
 ) bool {
@@ -1194,6 +1254,9 @@ func (ls *LedgerState) isMithrilImportedMarkSnapshot(
 	defer ls.RUnlock()
 
 	if ls.mithrilLedgerSlot == 0 {
+		return false
+	}
+	if snapshot.CapturedSlot == ls.mithrilLedgerSlot {
 		return false
 	}
 	for _, ep := range ls.epochCache {
@@ -1464,20 +1527,30 @@ func (ls *LedgerState) ensureEpochForSlot(
 	)
 }
 
-// advanceEpochCache computes the next epoch's parameters and nonce from
-// chain data and appends it to the in-memory epoch cache. This is a
+// advanceEpochCache computes the next same-era epoch's parameters and nonce
+// from chain data and appends it to the in-memory epoch cache. This is a
 // lightweight alternative to the full processEpochRollover — it only
 // populates the nonce and epoch boundaries needed for header verification,
-// without running pparam updates, snapshot rotation, or DB writes.
-// The full rollover will run later in ledgerProcessBlocks and replace
-// the cache with the authoritative DB-backed version.
+// without running pparam updates, snapshot rotation, or DB writes. It refuses
+// to cross a confirmed or configured hard-fork boundary because only the full
+// rollover owns the successor era's parameters and snapshot rotation. The full
+// rollover will run later in ledgerProcessBlocks and replace the cache with the
+// authoritative DB-backed version.
 func (ls *LedgerState) advanceEpochCache() error {
 	// Read last epoch from the lock-free consensus snapshot
-	cache := ls.loadConsensusSnapshot().epochCache
+	snapshot := ls.loadConsensusSnapshot()
+	cache := snapshot.epochCache
 	if len(cache) == 0 {
 		return errors.New("epoch cache is empty")
 	}
 	lastEpoch := cache[len(cache)-1]
+	if err := ls.validateEpochCacheForecast(
+		lastEpoch,
+		snapshot.currentEra.Id,
+		snapshot.transitionInfo,
+	); err != nil {
+		return err
+	}
 
 	if lastEpoch.LengthInSlots == 0 {
 		return errors.New("last epoch has zero length")
@@ -1533,6 +1606,18 @@ func (ls *LedgerState) advanceEpochCache() error {
 		ls.Unlock()
 		return nil
 	}
+	// TransitionInfo can become known without changing the cache tail while
+	// nonce computation is in flight. Recheck under the writer lock so that
+	// publication cannot race a newly-confirmed boundary and append a row with
+	// the source era's parameters on the other side.
+	if err := ls.validateEpochCacheForecast(
+		lastCached,
+		ls.currentEra.Id,
+		ls.transitionInfo,
+	); err != nil {
+		ls.Unlock()
+		return err
+	}
 	newCache := make([]models.Epoch, len(ls.epochCache), len(ls.epochCache)+1)
 	copy(newCache, ls.epochCache)
 	ls.epochCache = append(newCache, newEpoch)
@@ -1550,6 +1635,44 @@ func (ls *LedgerState) advanceEpochCache() error {
 	)
 
 	return nil
+}
+
+// validateEpochCacheForecast rejects an eager cache advance that would cross
+// an era boundary. A configured TriggerAtEpoch is authoritative for the cache
+// tail's era. Otherwise TransitionKnown applies only when the tail still
+// belongs to the current era whose transition state was published.
+func (ls *LedgerState) validateEpochCacheForecast(
+	lastEpoch models.Epoch,
+	currentEraID uint,
+	transition hardfork.TransitionInfo,
+) error {
+	nextEpochID := lastEpoch.EpochId + 1
+	shape := ls.eraShape()
+	if entry, ok := shape.EraForID(lastEpoch.EraId); ok &&
+		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+		if nextEpochID >= entry.NextEraTrigger.Epoch {
+			return fmt.Errorf(
+				"%w: cannot forecast epoch %d from era %d across configured hard-fork boundary at epoch %d",
+				errEpochCacheForecastBoundary,
+				nextEpochID,
+				lastEpoch.EraId,
+				entry.NextEraTrigger.Epoch,
+			)
+		}
+		return nil
+	}
+	if lastEpoch.EraId != currentEraID ||
+		transition.State != hardfork.TransitionKnown ||
+		nextEpochID < transition.KnownEpoch {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: cannot forecast epoch %d from era %d across confirmed hard-fork boundary at epoch %d",
+		errEpochCacheForecastBoundary,
+		nextEpochID,
+		lastEpoch.EraId,
+		transition.KnownEpoch,
+	)
 }
 
 // computeEpochNonceForSlot computes the epoch nonce, evolving nonce,
