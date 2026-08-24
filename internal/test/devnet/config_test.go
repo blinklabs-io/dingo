@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // TestCheckedInSpecsAreValid parses every network spec in this directory
@@ -143,30 +144,25 @@ func TestScriptsAndComposeAgreeOnSpecFiles(t *testing.T) {
 // TestComposeTxPumpCooldownUsesMilliseconds keeps the DevNet load profile in
 // agreement with txpump's millisecond-valued configuration contract and the
 // 5-15 second cadence documented in README.md. A value copied as seconds
-// makes txpump open a fresh NtC connection and submit 10-50 transactions every
-// 5-15 milliseconds. That saturates the mempool and can starve the persistent
-// ChainSync observers which drive the accelerated scenario.
+// makes txpump open a fresh NtC connection and submit each configured batch
+// every 5-15 milliseconds. That saturates the mempool and can starve the
+// persistent ChainSync observers which drive the accelerated scenario.
 func TestComposeTxPumpCooldownUsesMilliseconds(t *testing.T) {
-	compose, err := os.ReadFile("docker-compose.yml")
-	require.NoError(t, err)
+	environments := loadComposeTxPumpEnvironments(t)
 
-	for _, tc := range []struct {
-		name string
-		want int
-	}{
-		{name: "MIN", want: 5_000},
-		{name: "MAX", want: 15_000},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			re := regexp.MustCompile(
-				`TXPUMP_COOLDOWN_` + tc.name + `:\s*"(\d+)"`,
-			)
-			matches := re.FindAllStringSubmatch(string(compose), -1)
-			require.Len(t, matches, 2,
-				"both DevNet profiles must configure the txpump cooldown")
-			for _, match := range matches {
-				got, parseErr := strconv.Atoi(match[1])
-				require.NoError(t, parseErr)
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		t.Run(service, func(t *testing.T) {
+			environment := environments[service]
+			for _, tc := range []struct {
+				name string
+				want int
+			}{
+				{name: "MIN", want: 5_000},
+				{name: "MAX", want: 15_000},
+			} {
+				key := "TXPUMP_COOLDOWN_" + tc.name
+				got, parseErr := strconv.Atoi(environment[key])
+				require.NoError(t, parseErr, "%s must be an integer", key)
 				require.Equal(t, tc.want, got,
 					"txpump cooldown values are milliseconds; the DevNet"+
 						" profile documents a 5-15 second cadence")
@@ -175,28 +171,48 @@ func TestComposeTxPumpCooldownUsesMilliseconds(t *testing.T) {
 	}
 }
 
+func loadComposeTxPumpEnvironments(t *testing.T) map[string]map[string]string {
+	t.Helper()
+	composeData, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	var compose struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(composeData, &compose))
+
+	environments := make(map[string]map[string]string, 2)
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		definition, ok := compose.Services[service]
+		require.True(t, ok, "Compose service %s must exist", service)
+		require.NotNil(t, definition.Environment,
+			"Compose service %s must define an environment", service)
+		environments[service] = definition.Environment
+	}
+	return environments
+}
+
 // TestComposeTxPumpSubmitsOneTransactionPerBatch prevents the DevNet load
 // generator from immediately spending outputs created earlier in the same
 // batch. Those dependent transactions can become invalid when an early fork
 // removes their parent, leaving the accelerated scenario without a stable
 // transaction-bearing block.
 func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
-	compose, err := os.ReadFile("docker-compose.yml")
-	require.NoError(t, err)
+	environments := loadComposeTxPumpEnvironments(t)
 
-	for _, bound := range []string{"MIN", "MAX"} {
-		re := regexp.MustCompile(
-			`TXPUMP_TX_COUNT_` + bound + `:\s*"(\d+)"`,
-		)
-		matches := re.FindAllStringSubmatch(string(compose), -1)
-		require.Len(t, matches, 2,
-			"both DevNet profiles must configure the txpump batch size")
-		for _, match := range matches {
-			got, parseErr := strconv.Atoi(match[1])
-			require.NoError(t, parseErr)
-			require.Equal(t, 1, got,
-				"DevNet txpump batches must not create unconfirmed dependency chains")
-		}
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		t.Run(service, func(t *testing.T) {
+			environment := environments[service]
+			for _, bound := range []string{"MIN", "MAX"} {
+				key := "TXPUMP_TX_COUNT_" + bound
+				got, parseErr := strconv.Atoi(environment[key])
+				require.NoError(t, parseErr, "%s must be an integer", key)
+				require.Equal(t, 1, got,
+					"DevNet txpump batches must not create unconfirmed dependency chains")
+			}
+		})
 	}
 }
 
