@@ -3185,10 +3185,17 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)
 	}
-	// Chain and ledger now sit at the same point, so every block above it
-	// arrives through blockfetch and the continuation audit can resolve
-	// producers without a chain scan.
-	ls.armContinuationAudit(point, "chainsync rollback")
+	// A primary chain can be ahead of the applied ledger during genesis or
+	// snapshot catch-up. In that case ls.rollback intentionally leaves the
+	// ledger at its existing tip, so arming the audit at the primary-chain
+	// rollback point would report every unapplied continuation as missing a
+	// producer. Arm only when both sides actually reached the rollback point,
+	// and discard any window left by an earlier rollback when they did not.
+	if pointMatches(ls.Tip().Point, point) {
+		ls.armContinuationAudit(point, "chainsync rollback")
+	} else {
+		ls.continuationAudit.Store(nil)
+	}
 	return nil
 }
 
