@@ -508,7 +508,8 @@ blockPipelineValidateEnabled: false
 strictUtxoValidation: true
 
 # Peer targets - target number of peers in each state
-# These are goals the system works toward, not hard limits.
+# Known, established, and active peer targets are goals, not hard limits.
+# A positive root target limits newly selected public roots; local roots remain.
 # Use 0 for default values, -1 for unlimited
 # Default: known=150, established=50, active=20, root=60
 #
