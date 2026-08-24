@@ -913,6 +913,35 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 		state.delegationState.ActiveDelegations()[issuerHash],
 		"rollback must discard a cached delegate activation",
 	)
+
+	var cachedMarker lcommon.Blake2b224
+	cachedMarker[0] = 0xff
+	state.issuerState, err = byronconsensus.NewPBFTState(
+		[]lcommon.Blake2b224{cachedMarker},
+		securityParam,
+	)
+	require.NoError(t, err)
+	ls.Lock()
+	ls.byronPBFT = byronPBFTCache{
+		state:       state,
+		tip:         beforeActivation,
+		initialized: true,
+	}
+	ls.Unlock()
+	state, err = ls.byronPBFTStateAtTip(context.Background(), finalTip)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		[]lcommon.Blake2b224{
+			cachedMarker,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+		},
+		state.issuerState.SignatureHistory(),
+		"forward reconstruction must continue from the cached ancestor",
+	)
 }
 
 func TestValidateByronPBFTSlotRejectsFuture(t *testing.T) {

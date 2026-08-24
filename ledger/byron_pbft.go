@@ -19,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -233,14 +235,35 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 		)
 	}
 
-	iter, err := ls.chain.FromPointContext(ctx, ocommon.Point{}, false)
-	if err != nil {
-		return byronPBFTState{}, fmt.Errorf(
-			"rebuild Byron PBFT state through tip %d/%x: %w",
-			tip.Point.Slot,
-			tip.Point.Hash,
-			err,
-		)
+	rebuildStarted := time.Now()
+	rebuildStart := ocommon.Point{}
+	reusedCache := false
+	var iter *chain.ChainIterator
+	if cached && cachedTip.Slot < tip.Point.Slot {
+		iter, err = ls.chain.FromPointContext(ctx, cachedTip, false)
+		if err == nil {
+			state = cachedState
+			rebuildStart = cachedTip
+			reusedCache = true
+		} else if !errors.Is(err, models.ErrBlockNotFound) {
+			return byronPBFTState{}, fmt.Errorf(
+				"rebuild Byron PBFT state from cached tip %d/%x: %w",
+				cachedTip.Slot,
+				cachedTip.Hash,
+				err,
+			)
+		}
+	}
+	if iter == nil {
+		iter, err = ls.chain.FromPointContext(ctx, ocommon.Point{}, false)
+		if err != nil {
+			return byronPBFTState{}, fmt.Errorf(
+				"rebuild Byron PBFT state through tip %d/%x: %w",
+				tip.Point.Slot,
+				tip.Point.Hash,
+				err,
+			)
+		}
 	}
 	defer iter.Cancel()
 	for {
@@ -289,6 +312,15 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 		}
 		if result.Block.Slot == tip.Point.Slot &&
 			bytes.Equal(result.Block.Hash, tip.Point.Hash) {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Debug(
+					"rebuilt Byron PBFT state",
+					"start_slot", rebuildStart.Slot,
+					"tip_slot", tip.Point.Slot,
+					"cached", reusedCache,
+					"duration", time.Since(rebuildStarted),
+				)
+			}
 			return state, nil
 		}
 	}

@@ -233,6 +233,7 @@ func TestVerifyBlockHeaderStatelessCryptoRejectsTamperedByronSignature(
 		config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
 	}
 	_, err = ls.verifyBlockHeaderStatelessCrypto(block, false)
+	require.ErrorContains(t, err, "byron PBFT header verification failed")
 	require.ErrorContains(t, err, "signature")
 }
 
