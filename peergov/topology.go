@@ -238,6 +238,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 	// when they fill or exceed the overall root target. Public roots use any
 	// remaining slots; a zero target means unlimited after normalization.
 	selectedRootAddresses := make(map[string]struct{})
+	localRootAddresses := make(map[string]struct{})
 	for groupIdx, localRoot := range localRootsResolved {
 		groupID := fmt.Sprintf("local-root-%d", groupIdx)
 		for _, resolved := range localRoot.peers {
@@ -251,12 +252,16 @@ func (p *PeerGovernor) LoadTopologyConfig(
 				groupID,
 			)
 			selectedRootAddresses[resolved.normalized] = struct{}{}
+			localRootAddresses[resolved.normalized] = struct{}{}
 		}
 	}
 	// Add topology public roots
 	for groupIdx, publicRoot := range publicRootsResolved {
 		groupID := fmt.Sprintf("public-root-%d", groupIdx)
 		for _, resolved := range publicRoot.peers {
+			if _, isLocalRoot := localRootAddresses[resolved.normalized]; isLocalRoot {
+				continue
+			}
 			_, alreadySelected := selectedRootAddresses[resolved.normalized]
 			if p.config.TargetNumberOfRootPeers > 0 &&
 				!alreadySelected &&
