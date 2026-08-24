@@ -58,12 +58,15 @@ func withSessionParams(
 // cancellation. max_execution_time only bounds top-level read-only SELECT
 // statements, so the blocked statement here is a SELECT, not a write.
 //
-// The blocking statement selects SLEEP() from a derived table rather than a
-// bare "SELECT SLEEP(5)": a table-less SELECT has no rows to iterate, and
-// MySQL's periodic max_execution_time check runs from that per-row
-// iteration loop, so a bare SLEEP(5) can run to completion uninterrupted
-// even with the timeout configured. Selecting from "FROM (SELECT 1) t"
-// puts the statement through that same loop for its one row.
+// The blocking statement is a self-join over information_schema.columns,
+// not "SELECT SLEEP(n)": when max_execution_time interrupts SLEEP()
+// specifically, MySQL has SLEEP() return 1 and the statement complete
+// successfully rather than raising ER_QUERY_TIMEOUT -- confirmed live
+// against mysql:8 (see PR #3373 review). A statement doing real per-row
+// work is genuinely aborted with error 3024 instead. A 3-way cross join
+// over a system view large enough to take far longer than 200ms to
+// complete guarantees that regardless of how many rows this particular
+// server's information_schema.columns happens to hold.
 func TestStatementTimeoutIntegration(t *testing.T) {
 	baseDSN := mysqlIntegrationDSN(t)
 	dsn := createIsolatedDatabase(t, baseDSN, "mysqltimeout_stmt")
@@ -76,17 +79,19 @@ func TestStatementTimeoutIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	start := time.Now()
-	_, err = db.ExecContext(
+	var count int64
+	err = db.QueryRowContext(
 		context.Background(),
-		"SELECT SLEEP(5) FROM (SELECT 1) AS blocking_row",
-	)
+		"SELECT COUNT(*) FROM information_schema.columns a, "+
+			"information_schema.columns b, information_schema.columns c",
+	).Scan(&count)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
 	require.Less(
 		t, elapsed, 3*time.Second,
-		"max_execution_time=200ms must abort a 5s SELECT SLEEP well before "+
-			"it finishes",
+		"max_execution_time=200ms must abort the cross join well before it "+
+			"could ever finish",
 	)
 	var mysqlErr *mysqldriver.MySQLError
 	require.True(

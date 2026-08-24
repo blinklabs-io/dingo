@@ -100,6 +100,18 @@ jobs:
         run: make sql-check
       - name: gorm-dependency-absence
         run: make gorm-check
+      - name: install-mariadb-client
+        # database/plugin/metadata/mysql's backup/restore CLI arg mapping
+        # (mysqlSSLArgs) targets the mysqldump/mysql client this repo's own
+        # Docker image ships (Debian's default-mysql-client, which resolves
+        # to MariaDB's client), not real MySQL's -- ubuntu-latest's
+        # preinstalled mysqldump is real MySQL's and rejects that flag set
+        # outright. Installing the same client the runtime image uses keeps
+        # this job testing the actual deployed combination.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client
+          mysqldump --version
       - name: sqlstore-database-integration
         env:
           DINGO_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/dingo_test?sslmode=disable

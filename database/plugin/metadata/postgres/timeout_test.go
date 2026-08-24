@@ -43,6 +43,22 @@ func TestAssembledDSNSetsStatementAndLockTimeoutInMilliseconds(t *testing.T) {
 	require.Contains(t, dsn, "lock_timeout=1500")
 }
 
+// TestAssembledDSNRoundsUpSubMillisecondTimeouts guards a real gap:
+// time.Duration.Milliseconds() truncates, so a positive sub-millisecond
+// value (500us) would format as "0" -- indistinguishable from unset, and
+// so silently disabling the timeout instead of applying the shortest one
+// Postgres can express (1ms).
+func TestAssembledDSNRoundsUpSubMillisecondTimeouts(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.StatementTimeout = 500 * time.Microsecond
+	cfg.LockTimeout = 1500 * time.Microsecond
+
+	dsn := assembleDSN(cfg)
+
+	require.Contains(t, dsn, "statement_timeout=1")
+	require.Contains(t, dsn, "lock_timeout=2")
+}
+
 func TestAssembledDSNOmitsUnsetTimeouts(t *testing.T) {
 	dsn := assembleDSN(defaultConfig())
 

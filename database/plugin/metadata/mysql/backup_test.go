@@ -142,8 +142,8 @@ func TestConnArgsInheritsParentEnvironment(t *testing.T) {
 	)
 }
 
-// TestConnArgsMapsSSLModeMariaDB guards a real gap: connArgs used to drop
-// the DSN's TLS setting entirely, so mysqldump/mysql always connected in
+// TestConnArgsMapsSSLMode guards a real gap: connArgs used to drop the
+// DSN's TLS setting entirely, so mysqldump/mysql always connected in
 // plaintext (or failed outright against a server enforcing TLS) no matter
 // what the app's own connection pool was configured with. It then guarded
 // a second real gap found by actually running the Docker image's shipped
@@ -151,14 +151,8 @@ func TestConnArgsInheritsParentEnvironment(t *testing.T) {
 // "--ssl-mode" entirely ("unknown variable"), so the mapping must produce
 // MariaDB's older --ssl/--skip-ssl/--ssl-verify-server-cert flags instead
 // -- "true" (verify CA and hostname) in particular must not collapse to a
-// weaker, unverified mode. Pins mysqldumpIsMariaDB rather than letting it
-// exec the test runner's actual mysqldump, so this doesn't depend on
-// whichever client happens to be on PATH there.
-func TestConnArgsMapsSSLModeMariaDB(t *testing.T) {
-	original := mysqldumpIsMariaDB
-	t.Cleanup(func() { mysqldumpIsMariaDB = original })
-	mysqldumpIsMariaDB = func() bool { return true }
-
+// weaker, unverified mode.
+func TestConnArgsMapsSSLMode(t *testing.T) {
 	tests := []struct {
 		tlsConfig string
 		wantArgs  []string
@@ -179,46 +173,6 @@ func TestConnArgsMapsSSLModeMariaDB(t *testing.T) {
 			require.NoError(t, err)
 			for _, want := range tt.wantArgs {
 				require.Contains(t, args, want)
-			}
-		})
-	}
-}
-
-// TestConnArgsMapsSSLModeMySQL guards the gap found by finally running the
-// sqlstore-database-integration CI step against a plain CI runner's
-// mysqldump instead of this repo's own Docker image: that client is real
-// MySQL's, which rejects MariaDB's "--skip-ssl" outright ("unknown option"),
-// so mariaDB=false must produce MySQL's own --ssl-mode=X flag instead.
-func TestConnArgsMapsSSLModeMySQL(t *testing.T) {
-	original := mysqldumpIsMariaDB
-	t.Cleanup(func() { mysqldumpIsMariaDB = original })
-	mysqldumpIsMariaDB = func() bool { return false }
-
-	tests := []struct {
-		tlsConfig string
-		wantArgs  []string
-	}{
-		{"", []string{"--ssl-mode=DISABLED"}},
-		{"false", []string{"--ssl-mode=DISABLED"}},
-		{"true", []string{"--ssl-mode=VERIFY_IDENTITY"}},
-		{"skip-verify", []string{"--ssl-mode=REQUIRED"}},
-		{"preferred", []string{"--ssl-mode=PREFERRED"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.tlsConfig, func(t *testing.T) {
-			dsn := "alice@tcp(db.internal:3306)/mydb"
-			if tt.tlsConfig != "" {
-				dsn += "?tls=" + tt.tlsConfig
-			}
-			_, args, _, err := connArgs(dsn)
-			require.NoError(t, err)
-			for _, want := range tt.wantArgs {
-				require.Contains(t, args, want)
-			}
-			for _, mariaDBOnly := range []string{
-				"--skip-ssl", "--ssl", "--ssl-verify-server-cert",
-			} {
-				require.NotContains(t, args, mariaDBOnly)
 			}
 		})
 	}

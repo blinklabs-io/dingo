@@ -111,7 +111,7 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("parse address %q: %w", cfg.Addr, err)
 	}
-	sslArgs, err := mysqlSSLArgs(cfg.TLSConfig, mysqldumpIsMariaDB())
+	sslArgs, err := mysqlSSLArgs(cfg.TLSConfig)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -142,79 +142,35 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 	return env, args, cfg.DBName, nil
 }
 
-// mysqldumpIsMariaDB reports whether the mysqldump binary that will actually
-// run identifies itself as MariaDB's client rather than Oracle's own MySQL
-// client -- confirmed live to matter: this repo's own Docker image (Debian's
-// default-mysql-client package on bookworm) ships MariaDB's client
-// (mariadb-client-10.11), while a plain CI runner's mysqldump is real
-// MySQL's. The two forks' TLS CLI flags are mutually exclusive (mysqlSSLArgs
-// below), so which flag set to emit must be decided against the binary that
-// will actually run, not assumed from whichever image this was last
-// verified against. Indirected through a variable, like runMysqldump above,
-// so a test can inject either answer deterministically instead of depending
-// on whatever client happens to be on the test runner's PATH.
-var mysqldumpIsMariaDB = func() bool {
-	out, err := exec.Command("mysqldump", "--version").Output()
-	if err != nil {
-		// mysqlSSLArgs's original, only-ever-tested assumption. Preserved
-		// as the fallback so a detection failure (mysqldump missing, exec
-		// denied) doesn't change behavior for the one client this was
-		// actually verified against; connArgs' own callers already fail
-		// clearly afterward if mysqldump truly isn't runnable.
-		return true
-	}
-	return bytes.Contains(bytes.ToLower(out), []byte("mariadb"))
-}
-
 // mysqlSSLArgs maps go-sql-driver/mysql's TLSConfig setting (dingo's own
 // sslMode provider config field, per mysql/provider.go's openStore) to CLI
-// flags for the mysqldump/mysql client that will run, per mariaDB
-// (mysqldumpIsMariaDB's result, threaded through as a plain bool so this
-// stays unit-testable without depending on whatever client happens to be on
-// the test runner's PATH).
+// flags for the mysqldump/mysql client tools actually shipped in this
+// repo's Docker image: Debian's default-mysql-client package, confirmed
+// live (running the actual bookworm image) to be MariaDB's client
+// (mariadb-client-10.11), not real MySQL. MariaDB's mysql/mysqldump have
+// never adopted MySQL 5.7+'s --ssl-mode flag at all -- every value fails
+// outright with "unknown variable 'ssl-mode=...'" -- so this must speak
+// MariaDB's older, coarser --ssl/--skip-ssl/--ssl-verify-server-cert flags
+// instead of the newer --ssl-mode=X form.
 //
-// MariaDB's mysql/mysqldump have never adopted MySQL 5.7+'s --ssl-mode flag
-// at all -- every value fails outright with "unknown variable
-// 'ssl-mode=...'" -- so mariaDB=true must speak MariaDB's older, coarser
-// --ssl/--skip-ssl/--ssl-verify-server-cert flags instead of the newer
-// --ssl-mode=X form; mariaDB=false (real MySQL, e.g. a plain CI runner's
-// mysqldump, which does not recognize MariaDB's --skip-ssl either) must use
-// --ssl-mode=X.
-//
-// MariaDB's older flag set can only really express two things: whether TLS
-// is attempted at all, and whether the server's certificate is verified
-// once it is. There is no client-side flag to make an unverified TLS
-// attempt a hard requirement the way MySQL's own REQUIRED mode does, so
+// That older flag set can only really express two things: whether TLS is
+// attempted at all, and whether the server's certificate is verified once
+// it is. There is no client-side flag to make an unverified TLS attempt a
+// hard requirement the way MySQL's own REQUIRED mode does, so
 // "skip-verify" (required, unverified) and "preferred" (opportunistic)
 // necessarily collapse to the same "--ssl" here -- an accepted, documented
-// fidelity gap forced by that client, not a design choice. "true" (verify
-// CA and hostname, the driver's strictest mode) still maps to its own
-// distinct, fully verified flags, since that's the one case a silent
+// fidelity gap forced by the shipped client, not a design choice. "true"
+// (verify CA and hostname, the driver's strictest mode) still maps to its
+// own distinct, fully verified flags, since that's the one case a silent
 // weakening would be a real regression from what the app's own connection
-// pool is configured to require. Real MySQL's --ssl-mode has no such gap:
-// DISABLED/PREFERRED/REQUIRED/VERIFY_IDENTITY map onto the driver's TLS
-// settings one-to-one.
+// pool is configured to require.
 //
 // A custom registered TLS config name (via mysql.RegisterTLSConfig,
 // referencing an arbitrary *tls.Config) can't be mapped at all -- there is
 // no fixed meaning to translate, and guessing could just as easily under-
 // or over-verify relative to what that custom config actually does. This
 // fails loudly rather than silently picking flags that might weaken it.
-func mysqlSSLArgs(tlsConfig string, mariaDB bool) ([]string, error) {
-	if !mariaDB {
-		switch tlsConfig {
-		case "", "false":
-			return []string{"--ssl-mode=DISABLED"}, nil
-		case "true":
-			return []string{"--ssl-mode=VERIFY_IDENTITY"}, nil
-		case "skip-verify":
-			return []string{"--ssl-mode=REQUIRED"}, nil
-		case "preferred":
-			return []string{"--ssl-mode=PREFERRED"}, nil
-		default:
-			return nil, mysqlSSLArgsUnsupportedErr(tlsConfig)
-		}
-	}
+func mysqlSSLArgs(tlsConfig string) ([]string, error) {
 	switch tlsConfig {
 	case "", "false":
 		// Matches the driver's own default: no TLS is attempted at all
@@ -226,18 +182,14 @@ func mysqlSSLArgs(tlsConfig string, mariaDB bool) ([]string, error) {
 	case "skip-verify", "preferred":
 		return []string{"--ssl"}, nil
 	default:
-		return nil, mysqlSSLArgsUnsupportedErr(tlsConfig)
+		return nil, fmt.Errorf(
+			"mysql backup/restore: unsupported tls config %q -- mysqldump/"+
+				"mysql cannot be given a custom named TLS config "+
+				"(mysql.RegisterTLSConfig); only \"\", \"false\", \"true\", "+
+				"\"skip-verify\", or \"preferred\" are supported",
+			tlsConfig,
+		)
 	}
-}
-
-func mysqlSSLArgsUnsupportedErr(tlsConfig string) error {
-	return fmt.Errorf(
-		"mysql backup/restore: unsupported tls config %q -- mysqldump/"+
-			"mysql cannot be given a custom named TLS config "+
-			"(mysql.RegisterTLSConfig); only \"\", \"false\", \"true\", "+
-			"\"skip-verify\", or \"preferred\" are supported",
-		tlsConfig,
-	)
 }
 
 // backupMySQL writes a mysqldump SQL archive of the database dsn points at

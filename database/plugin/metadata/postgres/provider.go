@@ -195,15 +195,29 @@ func assembleDSN(cfg Config) string {
 	if cfg.StatementTimeout > 0 {
 		query.Set(
 			"statement_timeout",
-			strconv.FormatInt(cfg.StatementTimeout.Milliseconds(), 10),
+			strconv.FormatInt(millisecondsRoundUp(cfg.StatementTimeout), 10),
 		)
 	}
 	if cfg.LockTimeout > 0 {
 		query.Set(
 			"lock_timeout",
-			strconv.FormatInt(cfg.LockTimeout.Milliseconds(), 10),
+			strconv.FormatInt(millisecondsRoundUp(cfg.LockTimeout), 10),
 		)
 	}
 	connectionURL.RawQuery = query.Encode()
 	return connectionURL.String()
+}
+
+// millisecondsRoundUp converts d to whole milliseconds, rounding a
+// sub-millisecond remainder up rather than truncating it away like
+// time.Duration.Milliseconds() does. Truncating would silently turn any
+// positive sub-millisecond configured value (e.g. 500us) into "0", which
+// disables the timeout instead of applying the shortest one the server can
+// express. Only called for d > 0.
+func millisecondsRoundUp(d time.Duration) int64 {
+	ms := d / time.Millisecond
+	if d%time.Millisecond != 0 {
+		ms++
+	}
+	return int64(ms)
 }

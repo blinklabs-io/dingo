@@ -39,6 +39,20 @@ func TestAssembledDSNSetsStatementAndLockTimeoutParams(t *testing.T) {
 	require.Contains(t, dsn, "innodb_lock_wait_timeout=2")
 }
 
+// TestAssembledDSNRoundsUpSubMillisecondStatementTimeout guards a real gap:
+// time.Duration.Milliseconds() truncates, so a positive sub-millisecond
+// StatementTimeout (500us) would format as "0" -- indistinguishable from
+// unset, and so silently disabling the timeout instead of applying the
+// shortest one MySQL can express (1ms).
+func TestAssembledDSNRoundsUpSubMillisecondStatementTimeout(t *testing.T) {
+	dsn, err := assembleDSN(Config{
+		StatementTimeout: 500 * time.Microsecond,
+	})
+	require.NoError(t, err)
+
+	require.Contains(t, dsn, "max_execution_time=1")
+}
+
 func TestAssembledDSNOmitsUnsetTimeouts(t *testing.T) {
 	dsn, err := assembleDSN(Config{})
 	require.NoError(t, err)
