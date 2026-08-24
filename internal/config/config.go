@@ -985,7 +985,9 @@ type MithrilConfig struct {
 // replacement for it.
 type DatabaseLifecycleConfig struct {
 	// SnapshotEnabled controls whether automatic epoch-boundary database
-	// snapshots are captured. Manual snapshots via the CLI are always
+	// snapshots are captured. It is unsupported when the primary blob provider
+	// is s3 or gcs because their backup walk would hold the commit barrier for
+	// an unbounded remote-object read. Manual snapshots via the CLI are always
 	// available regardless of this setting.
 	SnapshotEnabled bool `yaml:"snapshotEnabled"                envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_ENABLED"`
 	// SnapshotDir is the local filesystem directory automatic snapshots

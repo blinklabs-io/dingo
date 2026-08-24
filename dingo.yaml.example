@@ -804,7 +804,10 @@ mithril:
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
 databaseLifecycle:
-  # Capture automatic database snapshots at epoch boundaries
+  # Capture automatic database snapshots at epoch boundaries. Unsupported
+  # when the primary blob provider is s3 or gcs: their remote-object backup
+  # walk can hold the commit barrier for an unbounded duration. Manual
+  # `dingo database snapshot` remains available in that configuration.
   # Default: false
   # CLI: --db-snapshot-enabled
   snapshotEnabled: false

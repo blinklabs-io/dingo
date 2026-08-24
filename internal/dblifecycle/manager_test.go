@@ -87,6 +87,56 @@ func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
 	}, 200*time.Millisecond, 10*time.Millisecond)
 }
 
+// TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAvailable
+// proves that an epoch-boundary snapshot cannot begin an unbounded remote
+// object walk while holding the commit barrier. The manager is the automatic
+// path only: manual lifecycle snapshots remain available for an operator who
+// deliberately accepts their duration.
+func TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAvailable(
+	t *testing.T,
+) {
+	for _, blobPluginName := range []string{"s3", "gcs"} {
+		t.Run(blobPluginName, func(t *testing.T) {
+			db := newManagerTestDB(t)
+			eb := event.NewEventBus(nil, nil)
+			t.Cleanup(eb.Stop)
+
+			m := dblifecycle.NewManager(
+				db,
+				eb,
+				config.DatabaseLifecycleConfig{
+					SnapshotEnabled: true,
+					SnapshotDir:     t.TempDir(),
+				},
+				blobPluginName,
+				"sqlite",
+				testDestinationRegistry,
+				nil,
+			)
+			err := m.Start(context.Background())
+			require.ErrorIs(t, err, dblifecycle.ErrCloudPrimaryAutomaticSnapshots)
+			require.ErrorContains(t, err, blobPluginName)
+
+			manualDir := filepath.Join(t.TempDir(), "manual")
+			manifest, err := lifecycle.Snapshot(
+				context.Background(),
+				db,
+				manualDir,
+				lifecycle.TriggerManual,
+				"test",
+				blobPluginName,
+				"sqlite",
+			)
+			require.NoError(t, err)
+			require.Equal(t, lifecycle.TriggerManual, manifest.Trigger)
+			require.FileExists(
+				t,
+				filepath.Join(manualDir, lifecycle.ManifestFileName),
+			)
+		})
+	}
+}
+
 // TestManagerCapturesSnapshotOnEpochBoundary verifies that an
 // epoch-transition event captures a real snapshot under epoch-<N>.
 func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
