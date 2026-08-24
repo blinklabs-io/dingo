@@ -383,13 +383,19 @@ func (o *Ouroboros) txsubmissionServerInit(
 					)
 					return
 				}
-				for _, txBody := range txs {
+				for txIdx, txBody := range txs {
 					// Decode TX from CBOR
 					tx, err := ledger.NewTransactionFromCbor(
 						uint(txBody.EraId),
 						txBody.TxBody,
 					)
 					if err != nil {
+						var txId string
+						if txIdx < len(requestTxIds) {
+							txId = hex.EncodeToString(
+								requestTxIds[txIdx].TxId[:],
+							)
+						}
 						o.config.Logger.Error(
 							fmt.Sprintf(
 								"failed to parse transaction CBOR: %s",
@@ -399,8 +405,9 @@ func (o *Ouroboros) txsubmissionServerInit(
 							"protocol", "tx-submission",
 							"role", "server",
 							"connection_id", ctx.ConnectionId.String(),
+							"tx_id", txId,
 						)
-						return
+						continue
 					}
 					o.config.Logger.Debug(
 						"received tx",
@@ -441,6 +448,9 @@ func (o *Ouroboros) txsubmissionServerInit(
 					) {
 						return
 					}
+					if errors.Is(err, mempool.ErrMempoolStopped) {
+						return
+					}
 					if errors.Is(
 						err,
 						errTxsubmissionAdmissionRetriesExhausted,
@@ -476,7 +486,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 							"role", "server",
 							"connection_id", ctx.ConnectionId.String(),
 						)
-						return
+						continue
 					}
 				}
 			}

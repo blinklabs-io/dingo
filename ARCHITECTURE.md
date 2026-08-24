@@ -3439,11 +3439,13 @@ watermark-evicts transactions. Its TxSubmission intake waits for sufficient
 admission headroom, while direct submissions receive `MempoolFullError` above
 the rejection watermark. A transaction that repeatedly loses the available
 headroom race to another peer is dropped after a bounded retry streak so that
-one offer cannot stall the connection indefinitely. DAG intake currently
-requests one transaction ID per TxSubmission round trip, which can reduce
-inbound throughput on high-latency peer links. This is required because
-gouroboros acknowledges every ID returned by a peer; support for acknowledging
-only the fetched prefix would permit batched requests.
+one offer cannot stall the connection indefinitely. Per-item CBOR decode and
+mempool validation rejections are likewise logged and dropped without stopping
+the peer's intake pump; peer, protocol, or mempool shutdown still terminates the
+pump. DAG intake currently requests one transaction ID per TxSubmission round
+trip, which can reduce inbound throughput on high-latency peer links. This is
+required because gouroboros acknowledges every ID returned by a peer; support
+for acknowledging only the fetched prefix would permit batched requests.
 
 The selected pool manages pending transactions:
 

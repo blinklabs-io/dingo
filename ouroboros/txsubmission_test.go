@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,22 +69,88 @@ func (txsubmissionTestValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-// txsubmissionRejectingValidator rejects every transaction, so that
-// AddTransaction fails the way it would for a real mempool policy
-// violation (e.g. an invalid or already-spent UTxO), letting tests observe
-// how txsubmissionServerInit handles a mempool error during relay.
-type txsubmissionRejectingValidator struct{}
-
-func (txsubmissionRejectingValidator) ValidateTx(gledger.Transaction) error {
-	return errors.New("txsubmissionRejectingValidator: rejected")
+// txsubmissionSelectiveRejectingValidator rejects one transaction while
+// allowing later offers from the same peer to exercise the relay pump.
+type txsubmissionSelectiveRejectingValidator struct {
+	rejectedHash string
 }
 
-func (txsubmissionRejectingValidator) ValidateTxWithOverlay(
-	gledger.Transaction,
-	map[string]struct{},
-	map[string]lcommon.Utxo,
+func (v txsubmissionSelectiveRejectingValidator) ValidateTx(
+	tx gledger.Transaction,
 ) error {
-	return errors.New("txsubmissionRejectingValidator: rejected")
+	if tx.Hash().String() == v.rejectedHash {
+		return errors.New("txsubmissionSelectiveRejectingValidator: rejected")
+	}
+	return nil
+}
+
+func (v txsubmissionSelectiveRejectingValidator) ValidateTxWithOverlay(
+	tx gledger.Transaction,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
+) error {
+	return v.ValidateTx(tx)
+}
+
+type txsubmissionCorruptingConsumer struct {
+	mempool.Consumer
+	corruptHash string
+}
+
+func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
+	hash string,
+) *mempool.MempoolTransaction {
+	tx := c.Consumer.GetTxFromCache(hash)
+	if tx == nil || hash != c.corruptHash {
+		return tx
+	}
+	corrupted := *tx
+	corrupted.Cbor = []byte{0xff}
+	return &corrupted
+}
+
+type txsubmissionCorruptingService struct {
+	mempool.Service
+	corruptHash string
+	mu          sync.Mutex
+	consumers   map[ouroboros.ConnectionId]mempool.Consumer
+}
+
+func (s *txsubmissionCorruptingService) NewConsumer(
+	connId ouroboros.ConnectionId,
+) mempool.Consumer {
+	consumer := s.Service.NewConsumer(connId)
+	if consumer == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.consumers[connId]; existing != nil {
+		return existing
+	}
+	wrapped := &txsubmissionCorruptingConsumer{
+		Consumer:    consumer,
+		corruptHash: s.corruptHash,
+	}
+	s.consumers[connId] = wrapped
+	return wrapped
+}
+
+func (s *txsubmissionCorruptingService) FindConsumer(
+	connId ouroboros.ConnectionId,
+) mempool.Consumer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.consumers[connId]
+}
+
+func (s *txsubmissionCorruptingService) RemoveConsumer(
+	connId ouroboros.ConnectionId,
+) {
+	s.mu.Lock()
+	delete(s.consumers, connId)
+	s.mu.Unlock()
+	s.Service.RemoveConsumer(connId)
 }
 
 func TestRetryTxsubmissionAdmissionBoundsContention(t *testing.T) {
@@ -547,11 +614,12 @@ func newTxSubmissionRelayHarness(t *testing.T) *txSubmissionRelayHarness {
 // original behavior (a shared discard logger and permissive validators on
 // both nodes).
 type txSubmissionRelayHarnessOpts struct {
-	logger     *slog.Logger
-	validatorA mempool.TxValidator
-	validatorB mempool.TxValidator
-	capacityA  int64
-	dagA       bool
+	logger           *slog.Logger
+	validatorA       mempool.TxValidator
+	validatorB       mempool.TxValidator
+	capacityA        int64
+	dagA             bool
+	corruptOfferHash string
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -614,7 +682,17 @@ func newTxSubmissionRelayHarnessWithOpts(
 	nodeA := newOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
 	nodeA.mempool = nodeAMempool
 	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
-	nodeB.mempool = &mempool.FIFO{Mempool: mB}
+	nodeBMempool := mempool.Service(&mempool.FIFO{Mempool: mB})
+	if opts.corruptOfferHash != "" {
+		nodeBMempool = &txsubmissionCorruptingService{
+			Service:     nodeBMempool,
+			corruptHash: opts.corruptOfferHash,
+			consumers: make(
+				map[ouroboros.ConnectionId]mempool.Consumer,
+			),
+		}
+	}
+	nodeB.mempool = nodeBMempool
 
 	serverPipe, clientPipe := net.Pipe()
 
@@ -883,15 +961,14 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 	require.Empty(t, bodies)
 }
 
-// TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly verifies
-// that a mempool error while admitting a relayed transaction -- e.g. a
-// validator rejection -- is logged and the relay goroutine returns cleanly
-// instead of panicking or wedging the connection. Node A's mempool rejects
-// every transaction so a real, well-formed relay reaches
-// Mempool.AddTransaction's error path inside txsubmissionServerInit.
-func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
+// TestTxSubmissionServerInitContinuesAfterMempoolRejection verifies a rejected
+// transaction does not stop later offers on the same connection.
+func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	t *testing.T,
 ) {
+	fixtures := txsubmissionTestFixtures(t)
+	rejected := fixtures[0]
+	accepted := fixtures[1]
 	logBuf := &lockedBuffer{}
 	logger := slog.New(
 		slog.NewJSONHandler(
@@ -901,14 +978,14 @@ func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
 	)
 
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:     logger,
-		validatorA: txsubmissionRejectingValidator{},
+		logger: logger,
+		validatorA: txsubmissionSelectiveRejectingValidator{
+			rejectedHash: rejected.hash,
+		},
 	})
 	defer h.close(t)
 
-	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
-	require.NoError(t, err)
-	require.NoError(t, h.mB.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+	addTxSubmissionTestFixtures(t, h.mB, rejected, accepted)
 
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
@@ -921,10 +998,68 @@ func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
 		10*time.Millisecond,
 		"expected the mempool rejection to be logged",
 	)
+	require.Contains(t, logBuf.String(), rejected.hash)
+	require.Contains(t, logBuf.String(), h.connA.Id().String())
 
-	require.Empty(
+	require.Eventually(
 		t,
-		h.mA.Transactions(),
-		"rejected transaction must not be admitted to the mempool",
+		func() bool {
+			_, ok := h.mA.GetTransaction(accepted.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected a valid transaction after a rejection to be processed on the same connection",
 	)
+	_, rejectedPresent := h.mA.GetTransaction(rejected.hash)
+	require.False(t, rejectedPresent)
+}
+
+// TestTxSubmissionServerInitContinuesAfterDecodeFailure verifies malformed
+// transaction CBOR does not stop later offers on the same connection.
+func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	malformed := fixtures[0]
+	accepted := fixtures[1]
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:           logger,
+		corruptOfferHash: malformed.hash,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, malformed, accepted)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"failed to parse transaction CBOR",
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the malformed transaction to be logged",
+	)
+	require.Eventually(
+		t,
+		func() bool {
+			_, ok := h.mA.GetTransaction(accepted.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected a valid transaction after malformed CBOR to be processed on the same connection",
+	)
+	require.Contains(t, logBuf.String(), malformed.hash)
+	require.Contains(t, logBuf.String(), h.connA.Id().String())
 }
