@@ -426,6 +426,12 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	return p
 }
 
+// TargetNumberOfRootPeers returns the effective root-peer target. A value of
+// zero means root peers are unlimited.
+func (p *PeerGovernor) TargetNumberOfRootPeers() int {
+	return p.config.TargetNumberOfRootPeers
+}
+
 func (p *PeerGovernor) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 

@@ -1118,39 +1118,36 @@ func (n *Node) Run(ctx context.Context) error {
 		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
 	}
 
-	n.peerGov = peergov.NewPeerGovernor(
-		peergov.PeerGovernorConfig{
-			Logger:          n.config.logger,
-			EventBus:        n.eventBus,
-			ConnManager:     n.connManager,
-			DisableOutbound: n.config.isDevMode(),
-			PromRegistry:    n.config.promRegistry,
-			PeerRequestFunc: func(peer *peergov.Peer) []string {
-				return n.ouroboros().RequestPeersFromPeer(peer)
-			},
-			LedgerPeerProvider:                   ledgerPeerProvider,
-			UseLedgerAfterSlot:                   useLedgerAfterSlot,
-			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
-			TargetNumberOfKnownPeers:             n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers:       n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:            n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
-			InboundWarmTarget:                    n.config.inboundWarmTarget,
-			InboundHotQuota:                      n.config.inboundHotQuota,
-			InboundMinTenure:                     n.config.inboundMinTenure,
-			InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
-			InboundPruneAfter:                    n.config.inboundPruneAfter,
-			InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
-			InboundCooldown:                      n.config.inboundCooldown,
-			MinHotPeers:                          n.config.minHotPeers,
-			ReconcileInterval:                    n.config.reconcileInterval,
-			InactivityTimeout:                    n.config.inactivityTimeout,
-			SyncProgressProvider:                 n.ledgerState,
-			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	peerGovConfig := peergov.PeerGovernorConfig{
+		Logger:          n.config.logger,
+		EventBus:        n.eventBus,
+		ConnManager:     n.connManager,
+		DisableOutbound: n.config.isDevMode(),
+		PromRegistry:    n.config.promRegistry,
+		PeerRequestFunc: func(peer *peergov.Peer) []string {
+			return n.ouroboros().RequestPeersFromPeer(peer)
 		},
-	)
+		LedgerPeerProvider:                   ledgerPeerProvider,
+		UseLedgerAfterSlot:                   useLedgerAfterSlot,
+		LedgerPeerTarget:                     n.config.ledgerPeerTarget,
+		ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
+		ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
+		ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
+		InboundWarmTarget:                    n.config.inboundWarmTarget,
+		InboundHotQuota:                      n.config.inboundHotQuota,
+		InboundMinTenure:                     n.config.inboundMinTenure,
+		InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
+		InboundPruneAfter:                    n.config.inboundPruneAfter,
+		InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
+		InboundCooldown:                      n.config.inboundCooldown,
+		MinHotPeers:                          n.config.minHotPeers,
+		ReconcileInterval:                    n.config.reconcileInterval,
+		InactivityTimeout:                    n.config.inactivityTimeout,
+		SyncProgressProvider:                 n.ledgerState,
+		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	}
+	applyPeerTargets(n.config, &peerGovConfig)
+	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
 	// Construct ouroboros now that every dependency exists. It takes them all
 	// up front and validates them, so it can never be observed partially
 	// wired. This is deliberately the last construction before the peer
@@ -1652,6 +1649,16 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wait for shutdown signal
 	<-n.ctx.Done()
 	return nil
+}
+
+// applyPeerTargets maps Dingo's composed peer targets into the peer governor.
+// Keeping this mapping shared prevents live networking reinitialization from
+// drifting from initial node startup.
+func applyPeerTargets(cfg Config, peerGovConfig *peergov.PeerGovernorConfig) {
+	peerGovConfig.TargetNumberOfKnownPeers = cfg.targetNumberOfKnownPeers
+	peerGovConfig.TargetNumberOfEstablishedPeers = cfg.targetNumberOfEstablishedPeers
+	peerGovConfig.TargetNumberOfActivePeers = cfg.targetNumberOfActivePeers
+	peerGovConfig.TargetNumberOfRootPeers = cfg.targetNumberOfRootPeers
 }
 
 // logErrIfNotNil logs err at Error level if non-nil, so a cleanup step run

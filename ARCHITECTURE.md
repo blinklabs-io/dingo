@@ -2904,6 +2904,12 @@ Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcom
 
 The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
 
+Peer targets configured directly by Dingo through YAML, environment variables,
+or CLI flags take precedence over the corresponding Cardano configuration.
+When Dingo's root-peer target is unset, composition applies
+`TargetNumberOfRootPeers` from the Cardano config; an absent value uses the
+peer-governor default of 60, and `-1` means unlimited.
+
 `Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop(ctx)` removes them with `UnsubscribeAndWaitContext`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects. The unsubscribe itself always happens; only the wait for a handler already in flight is bounded by `ctx`, so one stuck handler cannot overrun the shutdown deadline. A deadline expiry is returned as an error, unprefixed — every caller adds its own `peer governor shutdown:` prefix, as it does for the other components.
 
 Outbound-dial goroutines are registered with the governor's wait group while
@@ -2922,6 +2928,7 @@ overwhelm the connection-event subscribers.
     |   Known peers: 150                             |
     |   Established peers: 50                        |
     |   Active peers: 20                             |
+    |   Root peers: 60                               |
     |                                                |
     | Per-Source Quotas                               |
     |   Topology quota: 3 peers                      |
