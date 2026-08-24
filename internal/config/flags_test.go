@@ -127,6 +127,7 @@ func TestPledgeLeverageEnvBinding(t *testing.T) {
 
 func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
 	t.Setenv("HOME", t.TempDir())
 
 	cfg, err := LoadConfig("")
@@ -135,11 +136,16 @@ func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 	require.Equal(t, "0.0.0.0", cfg.BindAddr)
 	require.Equal(t, DefaultDebugBindAddr, cfg.DebugBindAddr)
 	require.Equal(t, "127.0.0.1:0", cfg.DebugListenAddress())
-	require.Equal(t, "127.0.0.1:6060", (&Config{DebugPort: 6060}).DebugListenAddress())
+	require.Equal(
+		t,
+		"127.0.0.1:6060",
+		(&Config{DebugPort: 6060}).DebugListenAddress(),
+	)
 }
 
 func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	require.NoError(t, os.WriteFile(

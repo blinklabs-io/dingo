@@ -74,8 +74,17 @@ func resetGlobalConfig() {
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
 
+func unsetDebugBindAddrEnv(t *testing.T) {
+	t.Helper()
+	// Preserve the caller's environment while ensuring config tests that
+	// exercise defaults or YAML precedence do not inherit this override.
+	t.Setenv("DINGO_DEBUG_BIND_ADDR", "")
+	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
+}
+
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -254,6 +263,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
