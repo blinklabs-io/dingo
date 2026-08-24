@@ -121,7 +121,18 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 	startHash []byte,
 	rollbackPoint ocommon.Point,
 	shouldSendTx func(ledger.Transaction) bool,
-) ([]*watch.WatchTxResponse, error) {
+) (msgs []*watch.WatchTxResponse, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.utxorpc.config.Logger.Error(
+				"WatchTx rollback block conversion failed",
+				"error", recovered,
+			)
+			msgs = nil
+			err = errors.New("WatchTx rollback block conversion failed")
+		}
+	}()
+
 	hash := append([]byte(nil), startHash...)
 	out := make([]*watch.WatchTxResponse, 0, 64)
 	const maxWalkBlocks = 2160
@@ -281,31 +292,9 @@ func (s *watchServiceServer) WatchTx(
 		}
 		var msgs []*watch.WatchTxResponse
 		if next.Rollback {
-			var fetchCh chan struct {
-				msgs []*watch.WatchTxResponse
-				err  error
-			}
+			var startHash []byte
 			if len(history) > 0 {
-				startHash := append([]byte(nil), history[0].prevHash...)
-				fetchCh = make(chan struct {
-					msgs []*watch.WatchTxResponse
-					err  error
-				}, 1)
-				go func() {
-					fetchedMsgs, fetchedErr := s.watchTxFetchRollbackUndoFromBlocks(
-						ctx,
-						startHash,
-						next.Point,
-						shouldSend,
-					)
-					fetchCh <- struct {
-						msgs []*watch.WatchTxResponse
-						err  error
-					}{
-						msgs: fetchedMsgs,
-						err:  fetchedErr,
-					}
-				}()
+				startHash = append([]byte(nil), history[0].prevHash...)
 			}
 
 			historyMsgs, found := watchTxBuildRollbackMessages(
@@ -313,16 +302,21 @@ func (s *watchServiceServer) WatchTx(
 				next.Point,
 			)
 			msgs = append(msgs, historyMsgs...)
-			if !found && fetchCh != nil {
-				fetched := <-fetchCh
-				if fetched.err != nil {
+			if !found && len(startHash) > 0 {
+				fetchedMsgs, err := s.watchTxFetchRollbackUndoFromBlocks(
+					ctx,
+					startHash,
+					next.Point,
+					shouldSend,
+				)
+				if err != nil {
 					s.utxorpc.config.Logger.Error(
 						"WatchTx rollback fetch failed",
-						"error", fetched.err,
+						"error", err,
 					)
-					return fetched.err
+					return err
 				}
-				msgs = append(msgs, fetched.msgs...)
+				msgs = append(msgs, fetchedMsgs...)
 			}
 			s.utxorpc.config.Logger.Debug(
 				"WatchTx processed rollback",
