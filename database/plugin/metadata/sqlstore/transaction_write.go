@@ -778,9 +778,6 @@ ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`,
 				return err
 			}
 		}
-		if amount.Sign() == 0 {
-			continue
-		}
 		var accountID uint
 		var reward sql.NullString
 		err := db.QueryRowContext(ctx, `
@@ -815,8 +812,20 @@ SELECT EXISTS (
 		if err != nil {
 			return err
 		}
+		if amount.Uint64() > previous {
+			return fmt.Errorf(
+				"reward withdrawal amount %s exceeds account balance %d",
+				amount.String(),
+				previous,
+			)
+		}
+		if amount.Sign() == 0 {
+			continue
+		}
+		rewardAfter := previous - amount.Uint64()
 		if _, err := db.ExecContext(ctx, `
-UPDATE account SET reward = '0' WHERE id = ?`,
+UPDATE account SET reward = ? WHERE id = ?`,
+			strconv.FormatUint(rewardAfter, 10),
 			accountID,
 		); err != nil {
 			return err

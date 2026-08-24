@@ -22,6 +22,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -84,6 +85,7 @@ func FromContext(ctx context.Context) *Config {
 
 const (
 	DefaultBlobPlugin                  = "badger"
+	DefaultDebugBindAddr               = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
 	DefaultEvictionWatermark           = 0.0
 	DefaultRejectionWatermark          = 1.0
@@ -541,8 +543,13 @@ type Config struct {
 	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath"         envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
 	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins"           envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
 	MetricsPort          uint     `yaml:"metricsPort"                                                                    split_words:"true"`
-	DebugPort            uint     `yaml:"debugPort"                    envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool     `yaml:"intersectTip"                                                                   split_words:"true"`
+	// DebugBindAddr is the interface used by the unauthenticated pprof
+	// listener. It defaults to loopback independently of BindAddr and
+	// PrivateBindAddr; operators must set this field explicitly to expose
+	// pprof on a wildcard or management-network address.
+	DebugBindAddr string `yaml:"debugBindAddr" envconfig:"DINGO_DEBUG_BIND_ADDR"`
+	DebugPort     uint   `yaml:"debugPort"                    envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip  bool   `yaml:"intersectTip"                                                                   split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.
@@ -755,12 +762,13 @@ type APIPluginsConfig struct {
 // internal/apiconfig for the merge/validation rules; composition (node.go)
 // performs the actual per-provider merge, not this package.
 //
-// bindAddr and corsAllowedOrigins deliberately stay at the Config root
-// rather than moving under this section: bindAddr is not API-specific
-// (the relay/NtN and metrics/debug listeners use it too), and
-// corsAllowedOrigins already applies uniformly to all three API providers
+// bindAddr, debugBindAddr, and corsAllowedOrigins deliberately stay at the
+// Config root rather than moving under this section: bindAddr is not
+// API-specific (the relay/NtN and metrics listeners use it too),
+// debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
+// already applies uniformly to all three API providers
 // today with no override need identified by dingo#2996/#2998, so
-// duplicating either here would only add a second source of truth for no
+// duplicating any of them here would only add a second source of truth for no
 // behavioral gain.
 type APIConfig struct {
 	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
@@ -1043,6 +1051,7 @@ var globalConfig = &Config{
 	Network:              "preview",
 	NetworkMagic:         0,
 	MetricsPort:          12798,
+	DebugBindAddr:        DefaultDebugBindAddr,
 	DebugPort:            0,
 	PrivateBindAddr:      "127.0.0.1",
 	PrivatePort:          3002,
@@ -1416,6 +1425,11 @@ func (c *Config) ApplyDefaults() {
 	if c.RunMode == "" {
 		c.RunMode = RunModeServe
 	}
+	// Never let an empty debug address inherit the public wildcard bind.
+	// This also keeps manually constructed Config values fail-safe.
+	if c.DebugBindAddr == "" {
+		c.DebugBindAddr = DefaultDebugBindAddr
+	}
 	if c.Plugins.Mempool.Config == nil {
 		c.Plugins.Mempool.Config = make(map[string]any)
 	}
@@ -1458,6 +1472,20 @@ func (c *Config) ApplyDefaults() {
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24
 	}
+}
+
+// DebugListenAddress returns the dedicated pprof TCP listen address. The
+// listener remains disabled when DebugPort is zero; callers check that before
+// binding.
+func (c *Config) DebugListenAddress() string {
+	host := c.DebugBindAddr
+	if host == "" {
+		host = DefaultDebugBindAddr
+	}
+	return net.JoinHostPort(
+		host,
+		strconv.FormatUint(uint64(c.DebugPort), 10),
+	)
 }
 
 func pluginInt64(value any) int64 {
