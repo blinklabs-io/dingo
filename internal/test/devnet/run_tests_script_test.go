@@ -123,6 +123,8 @@ func TestRunTestsKeepUpPreservesSuccess(t *testing.T) {
 }
 
 func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
+	wantUserMapping := bashUserMapping(t)
+
 	for _, test := range []struct {
 		name              string
 		testExit          int
@@ -134,9 +136,9 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			result := runFakeDevnet(t, test.testExit, false)
 			assert.Equal(t, test.testExit, result.exitCode, result.output)
-			assert.Contains(t, result.dockerLog, fmt.Sprintf(
-				"run --rm --user %d:%d", os.Getuid(), os.Getgid(),
-			), "stake-key copy did not use the host uid:gid")
+			assert.Contains(t, result.dockerLog,
+				"run --rm --user "+wantUserMapping,
+				"stake-key copy did not use the host uid:gid")
 			assert.Empty(t, result.stakeDirs,
 				"runner left its stake-key temp tree behind\n%s", result.output)
 			assert.Len(t, result.artifactDirs, test.wantArtifactCount,
@@ -220,6 +222,14 @@ func runFakeDevnet(
 		stakeDirs:    stakeDirs,
 		artifactDirs: artifactDirs,
 	}
+}
+
+func bashUserMapping(t *testing.T) string {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", `printf '%s:%s' "$(id -u)" "$(id -g)"`)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	return string(output)
 }
 
 func cleanRunnerEnv(overrides map[string]string) []string {
