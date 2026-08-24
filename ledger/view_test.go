@@ -100,8 +100,8 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 		cred lcommon.Credential
 		want *uint64
 	}{
-		{name: "key credential", cred: credential(0, key), want: ptrUint64(100)},
-		{name: "script credential", cred: credential(1, key), want: ptrUint64(101)},
+		{name: "key credential", cred: credential(0, key), want: new(uint64(100))},
+		{name: "script credential", cred: credential(1, key), want: new(uint64(101))},
 		{name: "missing credential", cred: credential(0, bytes.Repeat([]byte{0xa3}, 28))},
 		{name: "inactive credential", cred: credential(0, inactive)},
 	} {
@@ -135,8 +135,6 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 	_, err = lv.RewardAccountBalance(credential(0, key))
 	require.Error(t, err)
 }
-
-func ptrUint64(value uint64) *uint64 { return &value }
 
 func TestLedgerViewSkipPhase2Validation(t *testing.T) {
 	lv := &LedgerView{}
