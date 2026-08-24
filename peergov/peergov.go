@@ -145,6 +145,7 @@ type PeerGovernor struct {
 	ctx                   context.Context      // Context for cancellation
 	cancel                context.CancelFunc   // Cancels the context owned by Start
 	denyList              map[string]time.Time // address -> expiry time
+	permanentDenyList     map[string]struct{}  // address -> process-lifetime denial
 	peers                 []*Peer
 	config                PeerGovernorConfig
 	lastLedgerPeerRefresh atomic.Int64        // UnixNano timestamp of last ledger peer discovery
@@ -415,10 +416,11 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{
-		config:           cfg,
-		peers:            []*Peer{},
-		denyList:         make(map[string]time.Time),
-		ledgerKnownAddrs: make(map[string]struct{}),
+		config:            cfg,
+		peers:             []*Peer{},
+		denyList:          make(map[string]time.Time),
+		permanentDenyList: make(map[string]struct{}),
+		ledgerKnownAddrs:  make(map[string]struct{}),
 	}
 	if cfg.PromRegistry != nil {
 		p.initMetrics()

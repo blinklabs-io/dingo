@@ -3155,6 +3155,18 @@ trust-boundary reasons) place the peer on the deny list for a cooldown in
 addition to closing the connection, so the node does not redial a peer that
 will deterministically be rejected again moments later.
 
+An outbound handshake refusal that proves the remote address belongs to a
+different Cardano network is denied for the lifetime of the in-memory peer
+governor rather than the ordinary cooldown. The classifier requires the typed
+gouroboros `handshake.RefusedError` and two different `unNetworkMagic` values
+in cardano-node's `version data mismatch` rendering; a same-magic mismatch in
+diffusion mode, peer sharing, or query mode remains transient. The permanent
+keys cover both the configured relay address and its normalized dial address,
+so ledger discovery cannot re-offer the same peer after the timed deny list
+would have expired. The list is not persisted and clears when the governor is
+reconstructed or the node restarts, allowing a corrected relay to be tried in
+a later run.
+
 The per-connection rollback loop detector (`rollbackHistory` in
 `LedgerState`) records recent rollback points per connection and breaks a
 loop if the same point recurs past a threshold within a window. Two rules keep
