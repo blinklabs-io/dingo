@@ -851,6 +851,97 @@ func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
 	assert.Equal(t, vote.VoteSignature, resolved.VoteSignature)
 }
 
+// TestVoteManagerPeerPrototypeVoteRequeuedForRelay guards issue #3288: a
+// relay stored a peer's vote for its own tally but never queued it back up
+// for its other peers, so a block producer behind that relay never observed
+// quorum. A newly accepted peer vote must publish VoteReceivedEventType
+// (node_leios.go's subscriber feeds this straight into
+// EnqueueLeiosPrototypeVote, mirroring locally emitted votes) with the exact
+// signed fields the peer sent.
+func TestVoteManagerPeerPrototypeVoteRequeuedForRelay(t *testing.T) {
+	fixture := newManagerFixture(t)
+	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
+
+	requeued := testutil.RequireReceive(
+		t, receivedCh, 2*time.Second, "peer vote requeued for relay",
+	)
+	data, ok := requeued.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, vote, data.Vote)
+}
+
+// TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement
+// covers the other acceptance path into insertVote: a vote received before
+// its announcing ranking block is known is queued, then resolved and
+// inserted from ObserveAnnouncement's pending-vote flush rather than from
+// HandlePrototypeVote directly. That path must requeue for relay too.
+func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
+	t *testing.T,
+) {
+	fixture := newManagerFixture(t)
+	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
+	testutil.RequireNoReceive(
+		t,
+		receivedCh,
+		300*time.Millisecond,
+		"a vote pending its announcing ranking block must not be relayed yet",
+	)
+
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	requeued := testutil.RequireReceive(
+		t,
+		receivedCh,
+		2*time.Second,
+		"queued peer vote requeued for relay once its ranking block resolves",
+	)
+	data, ok := requeued.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, vote, data.Vote)
+}
+
+// TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay confirms the
+// requeue is gated by insertVote's dedup check, not fired unconditionally --
+// a resubmission of a vote already on record must not cause a second
+// diffusion round trip.
+func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(t *testing.T) {
+	fixture := newManagerFixture(t)
+	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
+	testutil.RequireReceive(
+		t, receivedCh, 2*time.Second, "first delivery requeued for relay",
+	)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-b", vote))
+	testutil.RequireNoReceive(
+		t,
+		receivedCh,
+		300*time.Millisecond,
+		"a resubmitted vote already on record must not be requeued again",
+	)
+}
+
 func TestVoteManagerQueuedInvalidPrototypeVoteDoesNotSuppressValidVote(
 	t *testing.T,
 ) {

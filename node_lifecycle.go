@@ -359,6 +359,13 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		)
 		n.leiosVoteEmittedSubId = 0
 	}
+	if n.leiosVoteReceivedSubId != 0 {
+		n.eventBus.UnsubscribeAndWait(
+			leios.VoteReceivedEventType,
+			n.leiosVoteReceivedSubId,
+		)
+		n.leiosVoteReceivedSubId = 0
+	}
 
 	// Last, now that connManager.Stop above has closed every connection —
 	// so no more inbound Leios fetch traffic can call enqueueLeiosPersist
@@ -504,8 +511,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	n.db = db
 	dbNeedsRecovery := false
 	if err != nil {
-		var dbErr database.CommitTimestampError
-		if !errors.As(err, &dbErr) {
+		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
 			return fmt.Errorf("failed to reopen database: %w", err)
 		}
 		n.config.logger.Warn(
