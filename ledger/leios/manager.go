@@ -1014,7 +1014,7 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		VoterId:           vote.VoterId,
 		VoteSignature:     vote.VoteSignature,
 	}
-	m.insertVote(
+	inserted := m.insertVote(
 		connKey,
 		resolved,
 		record.epoch,
@@ -1024,6 +1024,17 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		entry.tau,
 		vote.AnnouncingRbHash,
 	)
+	// Re-diffuse a newly accepted peer vote the same way a locally emitted
+	// one is diffused. insertVote's dedup/equivocation gate above means this
+	// fires exactly once per distinct vote, so a relay forwards it to its
+	// other peers instead of stopping it at the connection that delivered
+	// it, without re-broadcasting a resubmission or an equivocation attempt.
+	if inserted {
+		m.eventBus.Publish(VoteReceivedEventType, event.NewEvent(
+			VoteReceivedEventType,
+			VoteEmittedEvent{Vote: vote},
+		))
+	}
 	return nil
 }
 

@@ -53,7 +53,7 @@ func (s *Store) SetCommitTimestamp(
 	timestamp int64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func (s *Store) SetCommitTimestamp(
 		return err
 	}
 	if err := queries.setCommitTimestamp(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: timestamp, Valid: true},
 	); err != nil {
 		return fmt.Errorf("set commit timestamp: %w", err)
@@ -259,16 +259,15 @@ func (s *Store) InsertNodeSettingsGatesIfAbsent(
 	sort.Strings(names)
 	inserted := 0
 	err := s.withWriteTransaction(
-		context.Background(),
 		nil,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries, err := newManagementQueries(s.dialect.Name(), db)
 			if err != nil {
 				return err
 			}
 			for _, name := range names {
 				rows, err := queries.insertNodeSettingsGateIfAbsent(
-					context.Background(),
+					ctx,
 					name,
 					gates[name],
 					int64(recordedEpoch),

@@ -18,6 +18,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -137,6 +138,41 @@ func TestScriptsAndComposeAgreeOnSpecFiles(t *testing.T) {
 		"start.sh and run-tests.sh must select the same accelerated specs;"+
 			" if they drift, the harness and the running network resolve"+
 			" different timings")
+}
+
+// TestComposeTxPumpCooldownUsesMilliseconds keeps the DevNet load profile in
+// agreement with txpump's millisecond-valued configuration contract and the
+// 5-15 second cadence documented in README.md. A value copied as seconds
+// makes txpump open a fresh NtC connection and submit 10-50 transactions every
+// 5-15 milliseconds. That saturates the mempool and can starve the persistent
+// ChainSync observers which drive the accelerated scenario.
+func TestComposeTxPumpCooldownUsesMilliseconds(t *testing.T) {
+	compose, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		want int
+	}{
+		{name: "MIN", want: 5_000},
+		{name: "MAX", want: 15_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			re := regexp.MustCompile(
+				`TXPUMP_COOLDOWN_` + tc.name + `:\s*"(\d+)"`,
+			)
+			matches := re.FindAllStringSubmatch(string(compose), -1)
+			require.Len(t, matches, 2,
+				"both DevNet profiles must configure the txpump cooldown")
+			for _, match := range matches {
+				got, parseErr := strconv.Atoi(match[1])
+				require.NoError(t, parseErr)
+				require.Equal(t, tc.want, got,
+					"txpump cooldown values are milliseconds; the DevNet"+
+						" profile documents a 5-15 second cadence")
+			}
+		})
+	}
 }
 
 func TestLoadDevNetConfigFromMissingFile(t *testing.T) {

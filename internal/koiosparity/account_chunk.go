@@ -23,11 +23,10 @@ import (
 // koiosAccountChunkMaxBytesDefault is the default encoded-JSON byte bound
 // applied to a chunk's _stake_addresses array when the caller doesn't
 // configure one (chunkMaxBytes <= 0 — see fetchAccountRewardsForEpoch).
-// Generous enough that koiosAccountChunkSize (100) short bech32 addresses
-// never approach it under normal conditions, so existing count-driven
-// chunking behavior is unaffected unless an operator explicitly tunes
-// --account-chunk-max-bytes down.
-const koiosAccountChunkMaxBytesDefault = 32 * 1024
+// Koios's public endpoint rejects request bodies at 5120 bytes, so 4 KiB
+// leaves headroom while still packing dozens of normal stake addresses into
+// each request. The fixed JSON envelope is reserved separately below.
+const koiosAccountChunkMaxBytesDefault = 4 * 1024
 
 // koiosAccountRequestEnvelopeOverhead reserves space, out of a configured
 // --account-chunk-max-bytes budget, for the fixed JSON wrapper around

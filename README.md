@@ -102,6 +102,13 @@ The following environment variables modify Dingo's behavior:
   - Comma-separated HTTPS hostnames additionally allowed for Bark-supplied
     block download URLs. The allowlist always includes the
     `DINGO_BARK_BASE_URL` hostname.
+- `DINGO_DEBUG_BIND_ADDR`
+  - IP address to bind for unauthenticated pprof endpoints (default:
+    `127.0.0.1`)
+  - This is independent of the public and private node bind addresses; set a
+    wildcard address only when an external network control protects it
+- `DINGO_DEBUG_PORT`
+  - TCP port for pprof endpoints (default: `0`, disabled)
 - `DINGO_HISTORY_EXPIRY_ENABLED`
   - Enable local expiry of immutable block CBOR older than the ledger stability
     window (default: `false`)
@@ -203,6 +210,7 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 | 9090 | UTxO RPC (gRPC) | Disabled |
 | 50051 | Midnight state (gRPC) | Disabled |
 | — | Bark archive (gRPC) | Disabled (example when enabled: 9091) |
+| — | pprof debug endpoints | Disabled (`DINGO_DEBUG_PORT=0`; loopback when enabled) |
 
 ## Storage Modes
 
@@ -922,7 +930,17 @@ make test-load-profile
 # Analyze
 go tool pprof cpu.prof
 go tool pprof mem.prof
+
+# Enable live pprof on loopback for serve or Mithril sync
+DINGO_DEBUG_PORT=6060 ./dingo
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
 ```
+
+The live pprof server has no authentication or TLS. Its dedicated
+`debugBindAddr` defaults to `127.0.0.1` even when `bindAddr` or
+`privateBindAddr` uses a wildcard. External exposure therefore requires an
+explicit `--debug-bind-addr`, `DINGO_DEBUG_BIND_ADDR`, or `debugBindAddr`
+override and should be protected by a firewall or equivalent network policy.
 
 ## DevNet
 

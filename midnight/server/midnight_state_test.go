@@ -556,9 +556,9 @@ type spyEventStore struct {
 	seenTxns     []types.Txn
 }
 
-func (s *spyEventStore) ReadTransaction() types.Txn {
+func (s *spyEventStore) ReadTransaction(ctx context.Context) types.Txn {
 	s.readTxnCalls++
-	return s.Store.ReadTransaction()
+	return s.Store.ReadTransaction(ctx)
 }
 
 func (s *spyEventStore) FindMidnightAssetCreatesFrom(

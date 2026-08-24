@@ -66,6 +66,17 @@ func TestWithStorageMode(t *testing.T) {
 	assert.Equal(t, StorageModeCore, cfg.storageMode)
 }
 
+// TestWithRootPeerTarget verifies the public option preserves default,
+// explicit, and unlimited root-peer target representations.
+func TestWithRootPeerTarget(t *testing.T) {
+	for _, target := range []int{0, 12, -1} {
+		cfg := NewConfig(WithRootPeerTarget(target))
+		if got := cfg.TargetNumberOfRootPeers(); got != target {
+			t.Fatalf("expected root-peer target %d, got %d", target, got)
+		}
+	}
+}
+
 func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	tests := []struct {
 		name     string

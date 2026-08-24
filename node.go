@@ -113,6 +113,8 @@ type Node struct {
 	config                           Config
 	ctx                              context.Context
 	cancel                           context.CancelFunc
+	fatalErrMu                       sync.Mutex
+	fatalErr                         error
 	shutdownOnce                     sync.Once
 	shutdownErr                      error
 	chainsyncStallRecycler           *chainsyncrecycler.Recycler
@@ -130,6 +132,7 @@ type Node struct {
 	chainsyncClientRemoveSubId event.EventSubscriberId
 	connManagerRecycleSubId    event.EventSubscriberId
 	leiosVoteEmittedSubId      event.EventSubscriberId
+	leiosVoteReceivedSubId     event.EventSubscriberId
 	// koiosParitySubId is tracked for the same reason: observer.
 	// HandleEpochTransitionEvent is bound to the *koiosparity.Observer
 	// instance startKoiosParityObserver creates, which a live database
@@ -431,7 +434,7 @@ func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 }
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
-func (n *Node) Run(ctx context.Context) error {
+func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Configure tracing
 	n.warnIfTracingMisconfigured()
 	if n.config.tracing {
@@ -440,6 +443,9 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
+	defer func() {
+		runErr = n.resolveRunError(runErr)
+	}()
 
 	// Start the RTS metrics updater goroutine. It samples runtime.MemStats
 	// on a ticker and exits when n.ctx is cancelled by the existing
@@ -575,8 +581,7 @@ func (n *Node) Run(ctx context.Context) error {
 	n.db = db
 	started = append(started, func() { n.db.Close() })
 	if err != nil {
-		var dbErr database.CommitTimestampError
-		if !errors.As(err, &dbErr) {
+		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
 			return fmt.Errorf("failed to open database: %w", err)
 		}
 		n.config.logger.Warn(
@@ -1118,39 +1123,36 @@ func (n *Node) Run(ctx context.Context) error {
 		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
 	}
 
-	n.peerGov = peergov.NewPeerGovernor(
-		peergov.PeerGovernorConfig{
-			Logger:          n.config.logger,
-			EventBus:        n.eventBus,
-			ConnManager:     n.connManager,
-			DisableOutbound: n.config.isDevMode(),
-			PromRegistry:    n.config.promRegistry,
-			PeerRequestFunc: func(peer *peergov.Peer) []string {
-				return n.ouroboros().RequestPeersFromPeer(peer)
-			},
-			LedgerPeerProvider:                   ledgerPeerProvider,
-			UseLedgerAfterSlot:                   useLedgerAfterSlot,
-			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
-			TargetNumberOfKnownPeers:             n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers:       n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:            n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
-			InboundWarmTarget:                    n.config.inboundWarmTarget,
-			InboundHotQuota:                      n.config.inboundHotQuota,
-			InboundMinTenure:                     n.config.inboundMinTenure,
-			InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
-			InboundPruneAfter:                    n.config.inboundPruneAfter,
-			InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
-			InboundCooldown:                      n.config.inboundCooldown,
-			MinHotPeers:                          n.config.minHotPeers,
-			ReconcileInterval:                    n.config.reconcileInterval,
-			InactivityTimeout:                    n.config.inactivityTimeout,
-			SyncProgressProvider:                 n.ledgerState,
-			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	peerGovConfig := peergov.PeerGovernorConfig{
+		Logger:          n.config.logger,
+		EventBus:        n.eventBus,
+		ConnManager:     n.connManager,
+		DisableOutbound: n.config.isDevMode(),
+		PromRegistry:    n.config.promRegistry,
+		PeerRequestFunc: func(peer *peergov.Peer) []string {
+			return n.ouroboros().RequestPeersFromPeer(peer)
 		},
-	)
+		LedgerPeerProvider:                   ledgerPeerProvider,
+		UseLedgerAfterSlot:                   useLedgerAfterSlot,
+		LedgerPeerTarget:                     n.config.ledgerPeerTarget,
+		ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
+		ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
+		ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
+		InboundWarmTarget:                    n.config.inboundWarmTarget,
+		InboundHotQuota:                      n.config.inboundHotQuota,
+		InboundMinTenure:                     n.config.inboundMinTenure,
+		InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
+		InboundPruneAfter:                    n.config.inboundPruneAfter,
+		InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
+		InboundCooldown:                      n.config.inboundCooldown,
+		MinHotPeers:                          n.config.minHotPeers,
+		ReconcileInterval:                    n.config.reconcileInterval,
+		InactivityTimeout:                    n.config.inactivityTimeout,
+		SyncProgressProvider:                 n.ledgerState,
+		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	}
+	applyPeerTargets(n.config, &peerGovConfig)
+	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
 	// Construct ouroboros now that every dependency exists. It takes them all
 	// up front and validates them, so it can never be observed partially
 	// wired. This is deliberately the last construction before the peer
@@ -1650,9 +1652,51 @@ func (n *Node) Run(ctx context.Context) error {
 	// on why it must not be removed any earlier than this.
 	n.removeConfirmedRestoreBackup()
 
-	// Wait for shutdown signal
+	return n.waitForShutdown()
+}
+
+// cancelForFatal records the first component failure before cancelling the
+// node. Run returns that error after cancellation so supervisors and the CLI
+// can distinguish a fatal component stop from signal-driven shutdown.
+func (n *Node) cancelForFatal(err error) {
+	n.fatalErrMu.Lock()
+	if n.fatalErr == nil {
+		n.fatalErr = err
+	}
+	n.fatalErrMu.Unlock()
+	if n.cancel != nil {
+		n.cancel()
+	}
+}
+
+func (n *Node) waitForShutdown() error {
 	<-n.ctx.Done()
-	return nil
+	return n.resolveRunError(nil)
+}
+
+// resolveRunError preserves ordinary startup/runtime errors but replaces a
+// cancellation-shaped exit with the component fatal error that caused it.
+// The Run defer is necessary because an asynchronous component can fail after
+// it starts but before Run reaches waitForShutdown; a later startup step then
+// observes context.Canceled and would otherwise hide the original failure.
+func (n *Node) resolveRunError(runErr error) error {
+	n.fatalErrMu.Lock()
+	fatalErr := n.fatalErr
+	n.fatalErrMu.Unlock()
+	if fatalErr != nil && (runErr == nil || errors.Is(runErr, context.Canceled)) {
+		return fatalErr
+	}
+	return runErr
+}
+
+// applyPeerTargets maps Dingo's composed peer targets into the peer governor.
+// Keeping this mapping shared prevents live networking reinitialization from
+// drifting from initial node startup.
+func applyPeerTargets(cfg Config, peerGovConfig *peergov.PeerGovernorConfig) {
+	peerGovConfig.TargetNumberOfKnownPeers = cfg.targetNumberOfKnownPeers
+	peerGovConfig.TargetNumberOfEstablishedPeers = cfg.targetNumberOfEstablishedPeers
+	peerGovConfig.TargetNumberOfActivePeers = cfg.targetNumberOfActivePeers
+	peerGovConfig.TargetNumberOfRootPeers = cfg.targetNumberOfRootPeers
 }
 
 // midnightServerActive centralizes the startup and live-reinitialization gate.

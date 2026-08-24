@@ -463,7 +463,7 @@ func addAccountChunkFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("account-chunk-size", 0,
 		"max stake addresses per /account_reward_history request when --accounts is set (0 = package default, 100)")
 	cmd.Flags().Int("account-chunk-max-bytes", 0,
-		"max encoded body size per /account_reward_history request when --accounts is set (0 = package default, 32KiB)")
+		"max encoded body size per /account_reward_history request when --accounts is set (0 = package default, 4KiB)")
 }
 
 // resolveAccountChunkFlags reads --account-chunk-size/--account-chunk-max-bytes,

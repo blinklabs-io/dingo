@@ -36,12 +36,12 @@ func (s *Store) GetTransactionByHash(
 	hash []byte,
 	txn types.Txn,
 ) (*models.Transaction, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
-	row, err := q.GetTransactionByHash(context.Background(), hash)
+	row, err := q.GetTransactionByHash(ctx, hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -52,7 +52,7 @@ func (s *Store) GetTransactionByHash(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.hydrateTransaction(db, ret); err != nil {
+	if err := s.hydrateTransaction(ctx, db, ret); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -62,12 +62,12 @@ func (s *Store) GetTransactionSlotByHash(
 	hash []byte,
 	txn types.Txn,
 ) (uint64, bool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
 	}
 	q := s.operationalQueries(db)
-	slot, err := q.GetTransactionSlotByHash(context.Background(), hash)
+	slot, err := q.GetTransactionSlotByHash(ctx, hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -81,12 +81,12 @@ func (s *Store) GetTransactionIDByHash(
 	hash []byte,
 	txn types.Txn,
 ) (uint, bool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
 	}
 	q := s.operationalQueries(db)
-	id, err := q.GetTransactionIDByHash(context.Background(), hash)
+	id, err := q.GetTransactionIDByHash(ctx, hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -100,13 +100,13 @@ func (s *Store) GetTransactionMetadataByHash(
 	hash []byte,
 	txn types.Txn,
 ) ([]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	metadata, err := q.GetTransactionMetadataByHash(
-		context.Background(),
+		ctx,
 		hash,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -120,7 +120,7 @@ func (s *Store) SumTransactionFeesInSlotRange(
 	endSlot uint64,
 	txn types.Txn,
 ) (uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -132,7 +132,7 @@ func (s *Store) SumTransactionFeesInSlotRange(
 	if err != nil {
 		return 0, err
 	}
-	total, err := sumUint64Rows(db, s.dialect.Rebind(`
+	total, err := sumUint64Rows(ctx, db, s.dialect.Rebind(`
 SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
 FROM "transaction"
 WHERE slot >= ? AND slot <= ?`), validInt64(start), validInt64(end))
@@ -146,13 +146,13 @@ func (s *Store) GetTransactionsByBlockHash(
 	blockHash []byte,
 	txn types.Txn,
 ) ([]models.Transaction, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	rows, err := q.GetTransactionsByBlockHash(
-		context.Background(),
+		ctx,
 		blockHash,
 	)
 	if err != nil {
@@ -162,7 +162,7 @@ func (s *Store) GetTransactionsByBlockHash(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.hydrateTransactionSlice(db, ret); err != nil {
+	if err := s.hydrateTransactionSlice(ctx, db, ret); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -176,7 +176,7 @@ func (s *Store) GetTransactionsByHashes(
 	if len(hashes) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,7 @@ func (s *Store) GetTransactionsByHashes(
 			args[i] = chunk[i]
 		}
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(
 				`SELECT `+sqliteTransactionColumns+`
 FROM "transaction" WHERE hash IN (`+bindPlaceholders(len(chunk))+`)`,
@@ -218,7 +218,7 @@ FROM "transaction" WHERE hash IN (`+bindPlaceholders(len(chunk))+`)`,
 			return nil, err
 		}
 	}
-	if err := s.hydrateTransactionSlice(db, ret); err != nil {
+	if err := s.hydrateTransactionSlice(ctx, db, ret); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -228,7 +228,7 @@ func (s *Store) GetTransactionHashesAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) ([][]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +238,7 @@ func (s *Store) GetTransactionHashesAfterSlot(
 		return nil, err
 	}
 	ret, err := q.GetTransactionHashesAfterSlot(
-		context.Background(),
+		ctx,
 		validInt64(value),
 	)
 	if err != nil {
@@ -254,13 +254,13 @@ func (s *Store) CountTransactionsByPaymentCred(
 	if len(paymentKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	q := s.operationalQueries(db)
 	count, err := q.CountTransactionsByPaymentCred(
-		context.Background(),
+		ctx,
 		paymentKey,
 	)
 	if err != nil {
@@ -273,13 +273,13 @@ func (s *Store) CountTransactionsByMetadataLabel(
 	label uint64,
 	txn types.Txn,
 ) (int, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	q := s.operationalQueries(db)
 	count, err := q.CountTransactionsByMetadataLabel(
-		context.Background(),
+		ctx,
 		validString(strconv.FormatUint(label, 10)),
 	)
 	if err != nil {
@@ -300,7 +300,7 @@ func (s *Store) CountTransactionsInSlotRange(
 	if endSlot < startSlot {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -314,7 +314,7 @@ func (s *Store) CountTransactionsInSlotRange(
 		return 0, err
 	}
 	count, err := q.CountTransactionsInSlotRange(
-		context.Background(),
+		ctx,
 		sqlitequery.CountTransactionsInSlotRangeParams{
 			Slot:   sql.NullInt64{Int64: start, Valid: true},
 			Slot_2: sql.NullInt64{Int64: end, Valid: true},
@@ -334,7 +334,7 @@ func (s *Store) GetBlockSlotRangeStats(
 	if endSlot < startSlot {
 		return metadata.SlotRangeStats{}, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return metadata.SlotRangeStats{}, err
 	}
@@ -348,7 +348,7 @@ func (s *Store) GetBlockSlotRangeStats(
 		return metadata.SlotRangeStats{}, err
 	}
 	row, err := q.GetBlockSlotRangeStats(
-		context.Background(),
+		ctx,
 		sqlitequery.GetBlockSlotRangeStatsParams{
 			Slot:   sql.NullInt64{Int64: start, Valid: true},
 			Slot_2: sql.NullInt64{Int64: end, Valid: true},
@@ -371,7 +371,7 @@ func (s *Store) DeleteAddressTransactionsAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -381,7 +381,7 @@ func (s *Store) DeleteAddressTransactionsAfterSlot(
 		return err
 	}
 	if err := q.DeleteAddressTransactionsAfterSlot(
-		context.Background(),
+		ctx,
 		validInt64(value),
 	); err != nil {
 		return fmt.Errorf("delete address transactions after slot: %w", err)
@@ -393,7 +393,7 @@ func (s *Store) DeleteTransactionMetadataLabelsAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -403,7 +403,7 @@ func (s *Store) DeleteTransactionMetadataLabelsAfterSlot(
 		return err
 	}
 	if err := q.DeleteTransactionMetadataLabelsAfterSlot(
-		context.Background(),
+		ctx,
 		validInt64(value),
 	); err != nil {
 		return fmt.Errorf(
@@ -429,13 +429,13 @@ func (s *Store) CountTransactionsByAddress(
 	if predicate == "" {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	var count int64
 	err = db.QueryRowContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(`
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction WHERE `+predicate),
@@ -465,7 +465,7 @@ func (s *Store) GetTransactionsByAddress(
 	if predicate == "" {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +482,7 @@ WHERE id IN (
 ORDER BY slot ` + direction + `, block_index ` + direction + `,
          id ` + direction
 	query, args = appendLimitOffset(query, args, limit, offset)
-	return s.queryTransactions(db, query, args)
+	return s.queryTransactions(ctx, db, query, args)
 }
 
 func (s *Store) GetTransactionsByMetadataLabel(
@@ -492,7 +492,7 @@ func (s *Store) GetTransactionsByMetadataLabel(
 	descending bool,
 	txn types.Txn,
 ) ([]models.Transaction, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +509,7 @@ ORDER BY slot ` + direction + `, block_index ` + direction + `,
          id ` + direction
 	args := []any{strconv.FormatUint(label, 10)}
 	query, args = appendLimitOffset(query, args, limit, offset)
-	ret, err := s.queryTransactions(db, query, args)
+	ret, err := s.queryTransactions(ctx, db, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("get txs by metadata label %d: %w", label, err)
 	}
@@ -528,7 +528,7 @@ func (s *Store) GetAddressesByCredential(
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +545,7 @@ ORDER BY payment_key ` + direction
 	args := []any{credentialTag, stakingKey}
 	query, args = appendLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -581,12 +581,12 @@ func (s *Store) CountAddressesByCredential(
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	var count int64
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 SELECT COUNT(DISTINCT payment_key)
 FROM address_transaction
 WHERE credential_tag = ? AND staking_key = ?
@@ -617,7 +617,7 @@ func (s *Store) GetAddressTransactionsByCredential(
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -634,7 +634,7 @@ func (s *Store) GetAddressTransactionsByCredential(
 	}
 	query, args = appendLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -677,7 +677,7 @@ func (s *Store) CountAddressTransactionsByCredential(
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -689,7 +689,7 @@ func (s *Store) CountAddressTransactionsByCredential(
 	)
 	var count int
 	err = db.QueryRowContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(
 			"SELECT COUNT(*) FROM ("+query+") address_transaction_range",
 		),
@@ -728,12 +728,13 @@ WHERE at.credential_tag = ? AND at.staking_key = ?`
 }
 
 func (s *Store) queryTransactions(
+	ctx context.Context,
 	db queryer,
 	query string,
 	args []any,
 ) ([]models.Transaction, error) {
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -759,7 +760,7 @@ func (s *Store) queryTransactions(
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	if err := s.hydrateTransactionSlice(db, ret); err != nil {
+	if err := s.hydrateTransactionSlice(ctx, db, ret); err != nil {
 		return nil, err
 	}
 	return ret, nil

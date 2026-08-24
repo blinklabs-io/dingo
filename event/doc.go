@@ -57,7 +57,9 @@
 // ledger.tx uses PublishOrdered. A subscriber deriving state from it can
 // rely on a block's transactions arriving in index order, and on a
 // rollback's undo events (Rollback: true) arriving before any
-// transaction event the ledger emits afterwards. See
+// transaction event the ledger emits afterwards. Forward Apply events are
+// registered with the database transaction's AfterCommit hook, so a rollback
+// or failed commit publishes none. See
 // blinklabs-io/dingo#2287: while those undo events were emitted from a
 // detached goroutine, a subscriber could apply an undo after the redo
 // that followed it and stay wrong indefinitely.

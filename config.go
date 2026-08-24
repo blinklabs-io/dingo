@@ -231,6 +231,7 @@ type Config struct {
 	shutdownTimeout                                                                     time.Duration
 	DatabaseWorkerPoolConfig                                                            ledger.DatabaseWorkerPoolConfig
 	targetNumberOfKnownPeers, targetNumberOfEstablishedPeers, targetNumberOfActivePeers int
+	targetNumberOfRootPeers                                                             int
 	activePeersTopologyQuota, activePeersGossipQuota, activePeersLedgerQuota            int
 	minHotPeers                                                                         int
 	reconcileInterval, inactivityTimeout                                                time.Duration
@@ -798,6 +799,7 @@ func (c *Config) syncCompatFields() {
 		TaskQueueSize:  c.cfg.DatabaseQueueSize,
 	}
 	c.targetNumberOfKnownPeers, c.targetNumberOfEstablishedPeers, c.targetNumberOfActivePeers = c.cfg.TargetNumberOfKnownPeers, c.cfg.TargetNumberOfEstablishedPeers, c.cfg.TargetNumberOfActivePeers
+	c.targetNumberOfRootPeers = c.cfg.TargetNumberOfRootPeers
 	c.activePeersTopologyQuota, c.activePeersGossipQuota, c.activePeersLedgerQuota = c.cfg.ActivePeersTopologyQuota, c.cfg.ActivePeersGossipQuota, c.cfg.ActivePeersLedgerQuota
 	c.minHotPeers, c.reconcileInterval, c.inactivityTimeout = c.cfg.MinHotPeers, c.cfg.ReconcileInterval, c.cfg.InactivityTimeout
 	c.inboundWarmTarget, c.inboundHotQuota, c.inboundMinTenure = c.cfg.InboundWarmTarget, c.cfg.InboundHotQuota, c.cfg.InboundMinTenure
@@ -1224,6 +1226,14 @@ func WithPeerTargets(
 		c.cfg.TargetNumberOfKnownPeers = targetKnown
 		c.cfg.TargetNumberOfEstablishedPeers = targetEstablished
 		c.cfg.TargetNumberOfActivePeers = targetActive
+	}
+}
+
+// WithRootPeerTarget specifies the target number of root peers from topology.
+// Use 0 to use the default target, or -1 for unlimited.
+func WithRootPeerTarget(targetRoot int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.TargetNumberOfRootPeers = targetRoot
 	}
 }
 
@@ -1975,6 +1985,11 @@ func (c *Config) TargetNumberOfActivePeers() int {
 // This is used when applying cardano-node config fallbacks.
 func (c *Config) SetTargetNumberOfActivePeers(n int) {
 	c.cfg.TargetNumberOfActivePeers = n
+}
+
+// TargetNumberOfRootPeers returns the target number of root peers.
+func (c *Config) TargetNumberOfRootPeers() int {
+	return c.cfg.TargetNumberOfRootPeers
 }
 
 // ActivePeersTopologyQuota returns the per-source quota for topology peers.

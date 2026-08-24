@@ -18,9 +18,12 @@ package gcs
 
 import (
 	"context"
+	"errors"
 	"io"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // Backup streams every key/value currently in the store to w. GCS has no
@@ -37,4 +40,56 @@ func (d *BlobStoreGCS) Backup(ctx context.Context, w io.Writer) error {
 // contract common to every cloud blob plugin.
 func (d *BlobStoreGCS) Restore(ctx context.Context, r io.Reader) error {
 	return blobbackup.Restore(ctx, d, r, maxBlobReadBytes, "gcs restore")
+}
+
+// ValidateBackup verifies the complete shared cloud backup framing without
+// touching the configured bucket.
+func (d *BlobStoreGCS) ValidateBackup(ctx context.Context, r io.Reader) error {
+	return blobbackup.Validate(
+		ctx, r, maxBlobReadBytes, "gcs backup validation",
+	)
+}
+
+// Reset removes the configured prefix after lifecycle restore has retained a
+// rollback backup of it.
+func (d *BlobStoreGCS) Reset(ctx context.Context) error {
+	return blobbackup.Reset(ctx, d, d.resetBatch, "gcs reset")
+}
+
+// resetBatch deletes objects directly instead of routing through gcsTxn.Commit.
+// Restore has already retained the prefix's complete rollback backup, so the
+// transaction path's per-key existence probes and compensation downloads are
+// redundant here. GCS exposes no equivalent of S3 DeleteObjects; keep the
+// shared 1,000-key memory bound while issuing direct deletes.
+func (d *BlobStoreGCS) resetBatch(ctx context.Context, keys [][]byte) error {
+	timeout := d.timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	return deleteBatchIndividually(ctx, keys, timeout, d.deleteObject)
+}
+
+func deleteBatchIndividually(
+	ctx context.Context,
+	keys [][]byte,
+	timeout time.Duration,
+	deleteObject func(context.Context, []byte) error,
+) error {
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// GCS has no batch-delete RPC. Give each individual operation the
+		// provider timeout instead of sharing one deadline across as many as
+		// 1,000 sequential calls; the caller context still cancels the whole
+		// reset immediately.
+		deleteCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := deleteObject(deleteCtx, key)
+		cancel()
+		if err != nil &&
+			!errors.Is(err, types.ErrBlobKeyNotFound) {
+			return err
+		}
+	}
+	return nil
 }
