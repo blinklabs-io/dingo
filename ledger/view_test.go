@@ -15,9 +15,16 @@
 package ledger
 
 import (
+	"bytes"
+	"io"
+	"log/slog"
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -51,14 +58,85 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)
 
-	balance, err := lv.RewardAccountBalance(lcommon.Credential{})
-	require.ErrorIs(t, err, ErrNotImplemented)
-	require.Nil(t, balance)
-
 	treasury, err := lv.TreasuryValue()
 	require.ErrorIs(t, err, ErrNotImplemented)
 	require.Zero(t, treasury)
 }
+
+func TestLedgerViewRewardAccountBalance(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
+	for _, tag := range []uint8{0, 1} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey:    key,
+			CredentialTag: tag,
+			Reward:        types.Uint64(100 + uint64(tag)),
+			Active:        true,
+		}))
+	}
+	inactive := bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: inactive,
+		Reward:     55,
+		Active:     false,
+	}))
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+	credential := func(tag uint, value []byte) lcommon.Credential {
+		return lcommon.Credential{
+			CredType:   tag,
+			Credential: lcommon.NewBlake2b224(value),
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		cred lcommon.Credential
+		want *uint64
+	}{
+		{name: "key credential", cred: credential(0, key), want: ptrUint64(100)},
+		{name: "script credential", cred: credential(1, key), want: ptrUint64(101)},
+		{name: "missing credential", cred: credential(0, bytes.Repeat([]byte{0xa3}, 28))},
+		{name: "inactive credential", cred: credential(0, inactive)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := lv.RewardAccountBalance(tc.cred)
+			require.NoError(t, err)
+			if tc.want == nil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			require.Equal(t, *tc.want, *got)
+		})
+	}
+	zero := bytes.Repeat([]byte{0xa4}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: zero,
+		Reward:     0,
+		Active:     true,
+	}))
+	got, err := lv.RewardAccountBalance(credential(0, zero))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Zero(t, *got)
+
+	_, err = lv.RewardAccountBalance(lcommon.Credential{CredType: 2})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsupported stake credential tag")
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+	_, err = lv.RewardAccountBalance(credential(0, key))
+	require.Error(t, err)
+}
+
+func ptrUint64(value uint64) *uint64 { return &value }
 
 func TestLedgerViewSkipPhase2Validation(t *testing.T) {
 	lv := &LedgerView{}

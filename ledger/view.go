@@ -393,12 +393,33 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 }
 
 // RewardAccountBalance returns the current reward balance for a stake credential.
-// TODO: implement reward account balance retrieval. Requires per-account reward
-// balance tracking which is not yet stored in the database.
+// Missing and inactive reward accounts are represented by a nil balance, as
+// required by the gouroboros reward-state contract. A registered account with
+// a zero balance returns a non-nil pointer to zero.
 func (lv *LedgerView) RewardAccountBalance(
 	cred lcommon.Credential,
 ) (*uint64, error) {
-	return nil, ErrNotImplemented
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if account == nil {
+		return nil, nil
+	}
+	balance := uint64(account.Reward)
+	return &balance, nil
 }
 
 // CostModels returns which Plutus language versions have cost
