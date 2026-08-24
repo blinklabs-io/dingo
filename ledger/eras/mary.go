@@ -166,5 +166,6 @@ func ValidateTxMary(
 			validationFunc(tx, slot, ls, pp),
 		)
 	}
+	errs = append(errs, validateInvalidHereafter(tx, slot))
 	return errors.Join(errs...)
 }

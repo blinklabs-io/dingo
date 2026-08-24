@@ -188,6 +188,7 @@ func ValidateTxAlonzo(
 			)
 		}
 	}
+	errs = append(errs, validateInvalidHereafter(tx, slot))
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

@@ -188,14 +188,17 @@ func ValidateTxAllegra(
 	if !ok || tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
-	return validatePreAlonzoTx(
-		tx,
-		slot,
-		ls,
-		pp,
-		allegraUtxoValidationRules,
-		tmpPparams.MaxTxSize,
-		tmpPparams.MinFeeA,
-		tmpPparams.MinFeeB,
+	return errors.Join(
+		validatePreAlonzoTx(
+			tx,
+			slot,
+			ls,
+			pp,
+			allegraUtxoValidationRules,
+			tmpPparams.MaxTxSize,
+			tmpPparams.MinFeeA,
+			tmpPparams.MinFeeB,
+		),
+		validateInvalidHereafter(tx, slot),
 	)
 }
