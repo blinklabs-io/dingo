@@ -19,7 +19,7 @@ require (
 	github.com/aws/smithy-go v1.27.8
 	github.com/blinklabs-io/bark v0.1.0
 	github.com/blinklabs-io/bursa v0.16.1-0.20260817233527-1eb8b64db609
-	github.com/blinklabs-io/gouroboros v0.195.0
+	github.com/blinklabs-io/gouroboros v0.196.0
 	github.com/blinklabs-io/ouroboros-mock v0.16.0
 	github.com/blinklabs-io/plutigo v0.3.0
 	github.com/blockfrost/blockfrost-go v0.5.0
