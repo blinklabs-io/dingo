@@ -39,6 +39,7 @@ func validTestConfig() *Config {
 		RelayPort:            3001,
 		PrivatePort:          3002,
 		MetricsPort:          12798,
+		DebugBindAddr:        DefaultDebugBindAddr,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 		Cache:                DefaultCacheConfig(),
@@ -210,7 +211,7 @@ func TestValidate(t *testing.T) {
 			name: "distinct bind addresses may share a port",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.BindAddr = "127.0.0.1"
+				c.DebugBindAddr = "127.0.0.1"
 				c.PrivateBindAddr = "127.0.0.1"
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
@@ -230,7 +231,7 @@ func TestValidate(t *testing.T) {
 			name: "wildcard bind address collides with specific",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.BindAddr = "0.0.0.0"
+				c.DebugBindAddr = "0.0.0.0"
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
 				c.Midnight.Port = 13000
