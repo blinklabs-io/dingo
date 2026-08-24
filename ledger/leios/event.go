@@ -40,6 +40,14 @@ type VoteEmittedEvent struct {
 	Vote lcommon.LeiosPrototypeVote
 }
 
+// VoteReceivedEvent carries a newly accepted peer vote and the connection
+// that delivered it. The composition layer uses OriginConnKey to avoid
+// diffusing the vote back over that same LeiosNotify connection.
+type VoteReceivedEvent struct {
+	Vote          lcommon.LeiosPrototypeVote
+	OriginConnKey string
+}
+
 // EbQuorumEvent carries the certificate built when an endorser block
 // reached stake quorum.
 type EbQuorumEvent struct {
