@@ -120,22 +120,25 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			"cannot validate nil Byron PBFT block",
 		)
 	}
-	if block.Type() == ledgerbyron.BlockTypeByronEbb {
+	// Header-only blocks cannot preserve the enclosing block discriminator, so
+	// distinguish EBBs from main blocks by their concrete header type.
+	header := block.Header()
+	if _, ok := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader); ok {
 		return ls.validateByronPBFTCurrentSlot(block)
 	}
-	header, ok := block.Header().(*ledgerbyron.ByronMainBlockHeader)
+	mainHeader, ok := header.(*ledgerbyron.ByronMainBlockHeader)
 	if !ok || header == nil {
 		return fmt.Errorf(
 			"byron main block at slot %d has unexpected header type %T",
 			block.SlotNumber(),
-			block.Header(),
+			header,
 		)
 	}
 	config, err := ls.byronPBFTConfig()
 	if err != nil {
 		return err
 	}
-	_, err = byronconsensus.ValidatePBFTHeaderCrypto(header, config)
+	_, err = byronconsensus.ValidatePBFTHeaderCrypto(mainHeader, config)
 	if err != nil {
 		return fmt.Errorf(
 			"byron PBFT header verification failed at slot %d: %w",

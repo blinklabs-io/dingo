@@ -689,6 +689,37 @@ func TestVerifyBlockHeaderCrypto_ByronValidated(t *testing.T) {
 	assert.NoError(t, err, "valid Byron PBFT headers should pass")
 }
 
+func TestVerifyBlockHeaderOnlyCryptoRejectsTamperedByronSignature(
+	t *testing.T,
+) {
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	header, ok := block.Header().(*byron.ByronMainBlockHeader)
+	require.True(t, ok)
+	require.Len(t, header.ConsensusData.BlockSig, 2)
+	proxySignature, ok := header.ConsensusData.BlockSig[1].([]any)
+	require.True(t, ok)
+	require.Len(t, proxySignature, 2)
+	signature, ok := proxySignature[1].([]byte)
+	require.True(t, ok)
+	require.NotEmpty(t, signature)
+	signature[0] ^= 0xff
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newByronPBFTTestNodeConfig(t, block, 10),
+		},
+	}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(time.Unix(0, 0), time.Second, 100),
+		DefaultSlotClockConfig(),
+	)
+	err = ls.verifyBlockHeaderOnlyCrypto(header)
+	require.ErrorContains(t, err, "byron PBFT header verification failed")
+	require.ErrorContains(t, err, "signature")
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs verifies that
 // a block whose slot is beyond all known epochs is REJECTED rather than
 // silently skipped. This is the core of the LDG-08 security fix.
