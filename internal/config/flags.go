@@ -432,6 +432,11 @@ var flagSpecs = []flagSpec{
 		"target number of active peers",
 	),
 	intFlag(
+		"TargetNumberOfRootPeers",
+		"target-root-peers",
+		"target number of root peers",
+	),
+	intFlag(
 		"ActivePeersTopologyQuota",
 		"active-peers-topology-quota",
 		"active peers topology source quota",

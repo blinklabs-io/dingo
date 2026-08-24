@@ -189,10 +189,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"component", "node",
 	)
 	// Apply cardano-node config.json P2P targets as fallback when the
-	// Dingo-native config (dingo.yaml / env) does not specify them.
-	// Priority: dingo.yaml/env > cardano config.json > peergov defaults.
+	// Dingo-native config (YAML / env / CLI) does not specify them.
+	// Priority: Dingo config > cardano config.json > peergov defaults.
 	if nodeCfg != nil {
 		rp, kp, ep, ap := nodeCfg.P2PTargets()
+		applyRootPeerTargetFallback(cfg, rp)
 		if cfg.TargetNumberOfKnownPeers == 0 && kp > 0 {
 			cfg.TargetNumberOfKnownPeers = kp
 		}
@@ -202,7 +203,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		if cfg.TargetNumberOfActivePeers == 0 && ap > 0 {
 			cfg.TargetNumberOfActivePeers = ap
 		}
-		_ = rp // TargetNumberOfRootPeers not yet wired to peergov
 	}
 	var cardanoNodePeerSharing *bool
 	if nodeCfg != nil {
@@ -467,6 +467,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	return err
 }
 
+func applyRootPeerTargetFallback(cfg *config.Config, target int) {
+	if cfg.TargetNumberOfRootPeers == 0 && target != 0 {
+		cfg.TargetNumberOfRootPeers = target
+	}
+}
+
 // buildDingoConfig translates the loaded internal/config.Config, plus the
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
@@ -606,6 +612,7 @@ func buildDingoConfig(
 			cfg.TargetNumberOfEstablishedPeers,
 			cfg.TargetNumberOfActivePeers,
 		),
+		dingo.WithRootPeerTarget(cfg.TargetNumberOfRootPeers),
 		dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
 		dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
 		dingo.WithGenesisCorroborationPeers(

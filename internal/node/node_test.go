@@ -222,3 +222,49 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 		)
 	}
 }
+
+// TestRootPeerTargetComposition verifies Cardano fallback values and Dingo's
+// higher-precedence root-peer setting reach the top-level Dingo configuration.
+func TestRootPeerTargetComposition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		dingoTarget   int
+		cardanoTarget int
+		want          int
+	}{
+		{name: "cardano explicit", cardanoTarget: 12, want: 12},
+		{name: "default", want: 0},
+		{name: "unlimited", cardanoTarget: -1, want: -1},
+		{
+			name:          "dingo config takes precedence",
+			dingoTarget:   7,
+			cardanoTarget: 12,
+			want:          7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{TargetNumberOfRootPeers: tt.dingoTarget}
+			applyRootPeerTargetFallback(cfg, tt.cardanoTarget)
+
+			built := buildDingoConfig(
+				cfg,
+				slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+				nil,
+				nil,
+				false,
+				dingo.StorageModeCore,
+				30*time.Second,
+				chainsync.DefaultStallTimeout,
+				chainsync.HeaderSyncStrategyPrimary,
+			)
+
+			if got := built.TargetNumberOfRootPeers(); got != tt.want {
+				t.Fatalf("expected root-peer target %d, got %d", tt.want, got)
+			}
+		})
+	}
+}

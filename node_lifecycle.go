@@ -846,39 +846,36 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	if n.config.topologyConfig != nil {
 		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
 	}
-	n.peerGov = peergov.NewPeerGovernor(
-		peergov.PeerGovernorConfig{
-			Logger:          n.config.logger,
-			EventBus:        n.eventBus,
-			ConnManager:     n.connManager,
-			DisableOutbound: n.config.isDevMode(),
-			PromRegistry:    n.config.promRegistry,
-			PeerRequestFunc: func(peer *peergov.Peer) []string {
-				return n.ouroboros().RequestPeersFromPeer(peer)
-			},
-			LedgerPeerProvider:                   ledgerPeerProvider,
-			UseLedgerAfterSlot:                   useLedgerAfterSlot,
-			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
-			TargetNumberOfKnownPeers:             n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers:       n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:            n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
-			InboundWarmTarget:                    n.config.inboundWarmTarget,
-			InboundHotQuota:                      n.config.inboundHotQuota,
-			InboundMinTenure:                     n.config.inboundMinTenure,
-			InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
-			InboundPruneAfter:                    n.config.inboundPruneAfter,
-			InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
-			InboundCooldown:                      n.config.inboundCooldown,
-			MinHotPeers:                          n.config.minHotPeers,
-			ReconcileInterval:                    n.config.reconcileInterval,
-			InactivityTimeout:                    n.config.inactivityTimeout,
-			SyncProgressProvider:                 n.ledgerState,
-			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	peerGovConfig := peergov.PeerGovernorConfig{
+		Logger:          n.config.logger,
+		EventBus:        n.eventBus,
+		ConnManager:     n.connManager,
+		DisableOutbound: n.config.isDevMode(),
+		PromRegistry:    n.config.promRegistry,
+		PeerRequestFunc: func(peer *peergov.Peer) []string {
+			return n.ouroboros().RequestPeersFromPeer(peer)
 		},
-	)
+		LedgerPeerProvider:                   ledgerPeerProvider,
+		UseLedgerAfterSlot:                   useLedgerAfterSlot,
+		LedgerPeerTarget:                     n.config.ledgerPeerTarget,
+		ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
+		ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
+		ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
+		InboundWarmTarget:                    n.config.inboundWarmTarget,
+		InboundHotQuota:                      n.config.inboundHotQuota,
+		InboundMinTenure:                     n.config.inboundMinTenure,
+		InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
+		InboundPruneAfter:                    n.config.inboundPruneAfter,
+		InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
+		InboundCooldown:                      n.config.inboundCooldown,
+		MinHotPeers:                          n.config.minHotPeers,
+		ReconcileInterval:                    n.config.reconcileInterval,
+		InactivityTimeout:                    n.config.inactivityTimeout,
+		SyncProgressProvider:                 n.ledgerState,
+		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	}
+	applyPeerTargets(n.config, &peerGovConfig)
+	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
 	// Replace ouroboros. It takes its dependencies at construction and never
 	// reassigns them, so rebuilding those dependencies means rebuilding it
 	// too. Closing the old instance first is required, not merely tidy: it

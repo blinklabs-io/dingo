@@ -587,6 +587,7 @@ type Config struct {
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
 	TargetNumberOfEstablishedPeers int `yaml:"targetNumberOfEstablishedPeers" envconfig:"DINGO_TARGET_ESTABLISHED_PEERS"`
 	TargetNumberOfActivePeers      int `yaml:"targetNumberOfActivePeers"      envconfig:"DINGO_TARGET_ACTIVE_PEERS"`
+	TargetNumberOfRootPeers        int `yaml:"targetNumberOfRootPeers"        envconfig:"DINGO_TARGET_ROOT_PEERS"`
 
 	// Per-source quotas for active peers (0 = use default, negative = disable)
 	ActivePeersTopologyQuota int `yaml:"activePeersTopologyQuota" envconfig:"DINGO_ACTIVE_PEERS_TOPOLOGY_QUOTA"`

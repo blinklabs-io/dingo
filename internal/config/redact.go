@@ -235,6 +235,7 @@ var logPlainConfigFields = []string{
 	"TargetNumberOfActivePeers",
 	"TargetNumberOfEstablishedPeers",
 	"TargetNumberOfKnownPeers",
+	"TargetNumberOfRootPeers",
 	"TlsCertFilePath",
 	"TlsKeyFilePath",
 	"TokenRegistry.AllowPrivateAddresses",

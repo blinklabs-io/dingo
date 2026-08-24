@@ -517,9 +517,10 @@ blockPipelineValidateEnabled: false
 strictUtxoValidation: true
 
 # Peer targets - target number of peers in each state
-# These are goals the system works toward, not hard limits.
+# Known, established, and active peer targets are goals, not hard limits.
+# A positive root target limits newly selected public roots; local roots remain.
 # Use 0 for default values, -1 for unlimited
-# Default: known=150, established=50, active=20
+# Default: known=150, established=50, active=20, root=60
 #
 # Target number of known (cold) peers
 # CLI: --target-known-peers
@@ -530,6 +531,9 @@ targetNumberOfEstablishedPeers: 0
 # Target number of active (hot) peers
 # CLI: --target-active-peers
 targetNumberOfActivePeers: 0
+# Target number of root peers selected from topology
+# CLI: --target-root-peers
+targetNumberOfRootPeers: 0
 
 # Per-source quotas for active peers
 # These specify how active peer slots are distributed by source.
