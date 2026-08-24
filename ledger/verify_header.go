@@ -816,8 +816,7 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
 	paramsEpoch := epoch.EpochId
 	paramsEraID := epoch.EraId
 	blockEraID := uint(block.Era().Id)
-	if blockEraID < epoch.EraId && paramsEpoch > 0 {
-		paramsEpoch--
+	if blockEraID < epoch.EraId {
 		paramsEraID = blockEraID
 	}
 
