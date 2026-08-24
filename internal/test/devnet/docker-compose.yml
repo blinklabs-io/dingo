@@ -243,8 +243,10 @@ services:
       # via DINGO_PRIVATE_BIND_ADDR.
       TXPUMP_NODE_ADDR: "dingo-1:3002"
       TXPUMP_NETWORK_MAGIC: "42"
-      TXPUMP_TX_COUNT_MIN: "10"
-      TXPUMP_TX_COUNT_MAX: "50"
+      # Submit one transaction per round so txpump cannot immediately spend
+      # an unconfirmed output from an earlier transaction in the same batch.
+      TXPUMP_TX_COUNT_MIN: "1"
+      TXPUMP_TX_COUNT_MAX: "1"
       # txpump interprets cooldowns as milliseconds. Keep this at the
       # 5-15 second cadence documented in README.md.
       TXPUMP_COOLDOWN_MIN: "5000"
@@ -370,8 +372,10 @@ services:
       # antithesis dingo-praos TCP N2C path.
       TXPUMP_NODE_ADDR: "dingo-producer:3002"
       TXPUMP_NETWORK_MAGIC: "42"
-      TXPUMP_TX_COUNT_MIN: "10"
-      TXPUMP_TX_COUNT_MAX: "50"
+      # Submit one transaction per round so txpump cannot immediately spend
+      # an unconfirmed output from an earlier transaction in the same batch.
+      TXPUMP_TX_COUNT_MIN: "1"
+      TXPUMP_TX_COUNT_MAX: "1"
       # txpump interprets cooldowns as milliseconds. Keep this at the
       # 5-15 second cadence documented in README.md.
       TXPUMP_COOLDOWN_MIN: "5000"

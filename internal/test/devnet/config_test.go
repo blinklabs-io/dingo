@@ -175,6 +175,31 @@ func TestComposeTxPumpCooldownUsesMilliseconds(t *testing.T) {
 	}
 }
 
+// TestComposeTxPumpSubmitsOneTransactionPerBatch prevents the DevNet load
+// generator from immediately spending outputs created earlier in the same
+// batch. Those dependent transactions can become invalid when an early fork
+// removes their parent, leaving the accelerated scenario without a stable
+// transaction-bearing block.
+func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
+	compose, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	for _, bound := range []string{"MIN", "MAX"} {
+		re := regexp.MustCompile(
+			`TXPUMP_TX_COUNT_` + bound + `:\s*"(\d+)"`,
+		)
+		matches := re.FindAllStringSubmatch(string(compose), -1)
+		require.Len(t, matches, 2,
+			"both DevNet profiles must configure the txpump batch size")
+		for _, match := range matches {
+			got, parseErr := strconv.Atoi(match[1])
+			require.NoError(t, parseErr)
+			require.Equal(t, 1, got,
+				"DevNet txpump batches must not create unconfirmed dependency chains")
+		}
+	}
+}
+
 func TestLoadDevNetConfigFromMissingFile(t *testing.T) {
 	_, err := LoadDevNetConfigFrom("no-such-testnet.yaml")
 	require.Error(t, err)
