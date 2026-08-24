@@ -333,6 +333,9 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 		)
 		return err
 	}))
+	if result == nil {
+		t.Fatal("epoch rollover returned no result")
+	}
 
 	wantSlotLength, wantEpochLength, err := eras.AllegraEraDesc.EpochLengthFunc(ls.config.CardanoNodeConfig)
 	require.NoError(t, err)
