@@ -403,6 +403,31 @@ const (
 	SyncingChainsyncState  ChainsyncState = "syncing"
 )
 
+func historicalBlockValidationDecision(
+	validationEnabled bool,
+	trustedReplay bool,
+	chainsyncState ChainsyncState,
+	blockSlot uint64,
+	cutoffSlot uint64,
+	mithrilLedgerSlot uint64,
+) (shouldValidate bool, reachedTipRegion bool) {
+	if validationEnabled {
+		coveredByMithril := mithrilLedgerSlot > 0 &&
+			blockSlot <= mithrilLedgerSlot
+		return !coveredByMithril,
+			chainsyncState == SyncingChainsyncState && blockSlot >= cutoffSlot
+	}
+	if trustedReplay ||
+		chainsyncState != SyncingChainsyncState ||
+		blockSlot < cutoffSlot {
+		return false, false
+	}
+	if mithrilLedgerSlot > 0 && blockSlot <= mithrilLedgerSlot {
+		return false, true
+	}
+	return true, true
+}
+
 // FatalErrorFunc is a callback invoked when a fatal error occurs that requires
 // the node to shut down. The callback should trigger graceful shutdown.
 type FatalErrorFunc func(err error)
@@ -5406,39 +5431,16 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// ValidateHistorical=false, as they were already
 						// validated by the network. Validate blocks within
 						// the stability window near the tip.
-						var shouldValidateBlock bool
-						if snapshotValidationEnabled {
-							shouldValidateBlock = true
-							// When validation was already enabled from
-							// config (ValidateHistorical), we still need
-							// to detect reaching the chain tip for
-							// metrics gating (IsAtTip).
-							if !wantEnableValidation &&
-								snapshotChainsyncState == SyncingChainsyncState &&
-								next.SlotNumber() >= cutoffSlot {
-								wantEnableValidation = true
-							}
-						} else if !ls.config.TrustedReplay &&
-							snapshotChainsyncState == SyncingChainsyncState &&
-							next.SlotNumber() >= cutoffSlot {
-							// Do not validate blocks covered by the
-							// Mithril snapshot. These were already
-							// verified by the certificate chain during
-							// import; re-validating them fails because
-							// the UTxO set from the snapshot does not
-							// contain intermediate states for volatile
-							// blocks fetched during gap closure.
-							if snapshotMithrilSlot > 0 &&
-								next.SlotNumber() <= snapshotMithrilSlot {
-								// Still within Mithril trust boundary —
-								// skip validation but mark that we've
-								// reached the tip region so catch-up mode
-								// and bulk-load pragmas are disabled.
-								wantEnableValidation = true
-							} else {
-								wantEnableValidation = true
-								shouldValidateBlock = true
-							}
+						shouldValidateBlock, reachedTipRegion := historicalBlockValidationDecision(
+							snapshotValidationEnabled,
+							ls.config.TrustedReplay,
+							snapshotChainsyncState,
+							next.SlotNumber(),
+							cutoffSlot,
+							snapshotMithrilSlot,
+						)
+						if reachedTipRegion {
+							wantEnableValidation = true
 						}
 						// Flush accumulated deltas before the first validated
 						// block so that UTxOs created by earlier non-validated
@@ -5491,13 +5493,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							)
 							if pbftErr != nil {
 								deltaBatch.Release()
-								if shouldValidateBlock {
-									return &headerValidationError{
-										BlockPoint: tmpPoint,
-										Cause:      pbftErr,
-									}
-								}
-								return pbftErr
+								return classifyByronPBFTApplyError(
+									tmpPoint,
+									pbftErr,
+									shouldValidateBlock,
+								)
 							}
 							runningByronPBFTState = nextPBFTState
 							pendingByronPBFTState = nextPBFTState

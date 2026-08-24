@@ -39,6 +39,10 @@ type byronPBFTState struct {
 	delegationState byronconsensus.PBFTDelegationState
 }
 
+var errByronPBFTCurrentSlotUnavailable = errors.New(
+	"byron PBFT current slot unavailable",
+)
+
 func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 	if lsConfig.CardanoNodeConfig == nil ||
 		lsConfig.CardanoNodeConfig.ByronGenesis() == nil {
@@ -147,7 +151,8 @@ func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
 	currentSlot, err := ls.CurrentSlot()
 	if err != nil {
 		return fmt.Errorf(
-			"resolve current slot for Byron PBFT header at slot %d: %w",
+			"%w for header at slot %d: %w",
+			errByronPBFTCurrentSlotUnavailable,
 			block.SlotNumber(),
 			err,
 		)
@@ -156,6 +161,20 @@ func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
 		return err
 	}
 	return nil
+}
+
+func classifyByronPBFTApplyError(
+	point ocommon.Point,
+	err error,
+	shouldValidate bool,
+) error {
+	if shouldValidate && !errors.Is(err, errByronPBFTCurrentSlotUnavailable) {
+		return &headerValidationError{
+			BlockPoint: point,
+			Cause:      err,
+		}
+	}
+	return err
 }
 
 func validateByronPBFTSlot(blockSlot, currentSlot uint64) error {

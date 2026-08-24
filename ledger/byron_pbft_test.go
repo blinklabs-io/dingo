@@ -20,6 +20,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -917,6 +918,32 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 func TestValidateByronPBFTSlotRejectsFuture(t *testing.T) {
 	require.NoError(t, validateByronPBFTSlot(42, 42))
 	require.ErrorContains(t, validateByronPBFTSlot(43, 42), "current slot")
+}
+
+func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
+	ls := &LedgerState{}
+	err := ls.validateByronPBFTCurrentSlot(&mockByronBlock{})
+	require.ErrorIs(t, err, errByronPBFTCurrentSlotUnavailable)
+
+	err = classifyByronPBFTApplyError(
+		ocommon.NewPoint(100, []byte{0x01}),
+		err,
+		true,
+	)
+	var validationErr *headerValidationError
+	require.False(t, errors.As(err, &validationErr))
+}
+
+func TestByronPBFTConsensusFailureIsAHeaderRejection(t *testing.T) {
+	cause := errors.New("invalid signature")
+	err := classifyByronPBFTApplyError(
+		ocommon.NewPoint(100, []byte{0x01}),
+		cause,
+		true,
+	)
+	var validationErr *headerValidationError
+	require.ErrorAs(t, err, &validationErr)
+	require.ErrorIs(t, err, cause)
 }
 
 func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
