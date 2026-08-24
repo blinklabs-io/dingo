@@ -1164,7 +1164,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `forging.slot_battle` | SlotTracker | Competing blocks at same slot |
 | `leios.eb_quorum` | Leios VoteManager | Endorser block reached stake quorum; certificate built (consumed by the Leios PipelineManager for inclusion eligibility) |
 | `leios.vote_emitted` | Leios VoteManager | Locally signed prototype vote ready for node wiring to enqueue on each peer's LeiosNotify stream |
-| `leios.vote_received` | Leios VoteManager | Newly accepted prototype vote from a peer, re-queued for node wiring to enqueue on each *other* peer's LeiosNotify stream so a relay forwards it instead of stopping it at the connection that delivered it (issue #3288) |
+| `leios.vote_received` | Leios VoteManager | Newly accepted prototype vote from a peer, re-queued for node wiring to enqueue on each peer's LeiosNotify stream so a relay forwards it instead of stopping it at the connection that delivered it (issue #3288) |
 | `peergov.outbound_conn` | PeerGov | Outbound connection initiated |
 | `peergov.peer_demoted` | PeerGov | Peer demoted |
 | `peergov.peer_promoted` | PeerGov | Peer promoted |
