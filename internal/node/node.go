@@ -21,9 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
-	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -155,12 +153,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
 		"component", "node",
 	)
-	// TODO: make this safer, check PID, create parent, etc. (#276)
-	if runtime.GOOS != "windows" {
-		if _, err := os.Stat(cfg.SocketPath); err == nil {
-			os.Remove(cfg.SocketPath)
-		}
-	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
 	network := cfg.Network
