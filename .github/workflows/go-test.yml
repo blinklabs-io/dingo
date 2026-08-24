@@ -131,6 +131,46 @@ jobs:
         # validation runs in the publish workflow before draft creation.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 20m ./...
 
+  # windows-latest also runs the full ./... suite in publish.yml's
+  # go-test-other, but only at release-tag time, after a change has already
+  # merged -- which is why the Windows-specific extraction code this job
+  # targets (mithril's NtCreateFile/NtSetInformationFile handle-relative
+  # rename and removal, see extract_handlerelative_windows.go and issue
+  # #3228) went unverified on real Windows CI before now. This job runs it on
+  # every PR instead.
+  #
+  # It stays scoped to ./mithril/... rather than ./..., deliberately: the
+  # release job's full-suite run currently fails on windows-latest for
+  # unrelated reasons (internal/test/devnet asserts a Unix-only UID:GID
+  # mapping; tracked separately), and running the same full suite here would
+  # block every PR on that pre-existing, unrelated breakage rather than on
+  # anything this job is meant to check. Widening this job's scope is
+  # follow-up work gated on auditing and fixing the rest of the suite for
+  # Windows, not something to do incidentally here.
+  go-test-windows:
+    name: go-test (Windows)
+    strategy:
+      matrix:
+        go-version: [1.26.x]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: ${{ matrix.go-version }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~\AppData\Local\go-build
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+      - name: go-build
+        run: go build ./cmd/dingo
+      - name: go-test
+        run: go test -timeout 10m ./mithril/...
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
