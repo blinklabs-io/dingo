@@ -91,8 +91,9 @@ type PoolStateRestoredEvent struct {
 	Slot uint64 // The slot to which pool state was restored
 }
 
-// TransactionEvent is emitted when a transaction is applied or rolled back.
-// Check the Rollback field to determine direction.
+// TransactionEvent is emitted after a transaction Apply commits durably, or
+// before an applied transaction is rolled back. Check the Rollback field to
+// determine direction.
 type TransactionEvent struct {
 	Transaction ledger.Transaction
 	Point       ocommon.Point

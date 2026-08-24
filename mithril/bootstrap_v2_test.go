@@ -1194,6 +1194,10 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 ) {
 	probeLink := filepath.Join(t.TempDir(), "probe")
 	requireSymlinkSupport(t, t.TempDir(), probeLink)
+	// The response-body callback stages the swap synchronously through io.Copy
+	// on this calling test goroutine. Probe before arming it so an unsupported
+	// platform skips instead of reporting a scenario failure.
+	requireDirectorySwapSupport(t)
 
 	const num = 0
 	archiveContent := buildTarZst(t, map[string][]byte{
@@ -1298,6 +1302,10 @@ func TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure(
 ) {
 	probeLink := filepath.Join(t.TempDir(), "probe")
 	requireSymlinkSupport(t, t.TempDir(), probeLink)
+	// The response-body callback stages the swap synchronously through io.Copy
+	// on this calling test goroutine. Probe before arming it so an unsupported
+	// platform skips instead of reporting a scenario failure.
+	requireDirectorySwapSupport(t)
 
 	const num = 0
 	// Deliberately not a valid zstd stream, so extraction fails.

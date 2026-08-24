@@ -374,14 +374,44 @@ deleting it. On success the directory is removed.
 | `network/compose.log` | Full compose logs for every service |
 | `network/generated-configs/` | The genesis and node configuration the configurator generated |
 | `network/testnet*.yaml` | The network spec the run used |
-| `accelerated-timeline/observed-chains.json` | Every node's observed chain: tip, retained headers, roll-forward/roll-backward counts, deepest rollback, connect/disconnect churn |
-| `accelerated-timeline/container-status.txt` | Container status as the scenario saw it |
-| `accelerated-timeline/<service>.log` | Per-service logs captured by the scenario |
+| `<scenario>/observed-chains.json` | Every node's observed chain: tip, retained headers, roll-forward/roll-backward counts, deepest rollback, connect/disconnect churn |
+| `<scenario>/container-status.txt` | Container status as the scenario saw it |
+| `<scenario>/<service>.log` | Per-service logs captured by the scenario, capped at the last `CapturedLogTailLines` lines |
 
-The `accelerated-timeline/` entries are written by the scenario itself
-through `NodeControl.CaptureFailureArtifacts`, so the observed chain
-events survive even though the network is torn down immediately
-afterwards.
+`<scenario>` is `accelerated-timeline` for the accelerated timeline,
+which captures explicitly through `NodeControl.CaptureFailureArtifacts`,
+and the Go test name for every canonical scenario, which
+`NewTestHarness` wires up on its own. A subtest renders as
+`parent/child`, so the separator is percent-escaped to keep the evidence
+in one directory per test, as is anything a filesystem would reject or
+rewrite -- Windows refuses `: * ? " < > |` and strips a trailing dot or
+space, which would otherwise put two scenarios in one directory. A name
+built from Go identifiers is used as written. Case is left alone, so
+directories stay readable; on a filesystem that folds case, two scenario
+names differing only in case would share one.
+
+Observation and writing happen at different times. Chain observers run
+for the whole of a scenario, so `observed-chains.json` is a continuous
+record of what every node's chain did while that scenario was failing.
+The files themselves are written from the scenario's `t.Cleanup`, which
+runs once that test finishes and before the network is torn down, so
+container status and the service logs describe the network as it stood
+at the end of the failing scenario rather than at the instant of the
+failure.
+
+The `network/` entries, by contrast, are collected once after the whole
+run, by which point a chain that stalled and then recovered looks
+healthy again. That is the difference that separates a stall nobody
+forged through from one nobody propagated.
+
+The per-scenario service logs are capped, because a DevNet node logs at
+debug level and emits tens of megabytes a minute; `network/compose.log`
+is the complete, uncapped record for the whole run, so the per-scenario
+copy only carries the window around the failure.
+
+Capture stays off unless `DEVNET_ARTIFACT_DIR` is set and the topology
+names containers, so a harness built over endpoints that are never
+dialled does not reach for Docker.
 
 The harness reads endpoint addresses from mode-specific environment
 variables that `run-tests.sh` sets based on the host port mappings (dingo
@@ -542,12 +572,14 @@ harness and the compose port mappings always agree.
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full bring-up → test → tear-down cycle used by CI; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
-| `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, and the `WaitForChainStart` genesis gate (build tag `devnet`) |
+| `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (build tag `devnet`) |
 | `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (**no build tag** — its tests run in the ordinary `go test ./...`) |
 | `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (**no build tag**) |
 | `timeline.go`                | `ScenarioPlan`: derives the accelerated scenario's phases, deadlines, outage length, and hard timeout from the network spec (**no build tag**) |
 | `observer.go`                | Persistent per-node ChainSync sessions feeding `chainstate.go`, with automatic reconnect across container restarts (build tag `devnet`) |
-| `nodectl.go`                 | Stops/starts compose services for the disruption phases and captures failure artifacts (build tag `devnet`) |
+| `nodectl.go`                 | Stops/starts compose services for the disruption phases and supplies the Docker side of failure capture (build tag `devnet`) |
+| `artifacts.go`               | What a failed scenario preserves and where: capture planning and artifact writing (**no build tag** — its tests run in the ordinary `go test ./...`) |
+| `endpoints.go`               | The `NodeEndpoint` description shared by the harness, observers, and failure capture (**no build tag**) |
 | `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |
 | `endpoints_conformance.go`   | Conformance-mode node endpoints (`//go:build devnet && devnet_conformance`) |
 | `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (build tag `devnet`) |

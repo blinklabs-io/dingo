@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -52,11 +53,11 @@ type commitFailingMetadata struct {
 	err error
 }
 
-func (m *commitFailingMetadata) Transaction() types.Txn {
+func (m *commitFailingMetadata) Transaction(context.Context) types.Txn {
 	return &commitFailingTxn{err: m.err}
 }
 
-func (m *commitFailingMetadata) ReadTransaction() types.Txn {
+func (m *commitFailingMetadata) ReadTransaction(context.Context) types.Txn {
 	return &commitFailingTxn{}
 }
 

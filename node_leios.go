@@ -252,6 +252,21 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 			n.ouroboros().EnqueueLeiosPrototypeVote(data.Vote)
 		},
 	)
+	// Received votes are re-diffused the same way locally emitted ones are.
+	// Without this, a relay stores a peer's vote for its own tally but never
+	// forwards it, so a block producer behind that relay never observes
+	// quorum. Tracked and unsubscribed alongside leiosVoteEmittedSubId for
+	// the same live-lifecycle-reinit reason.
+	n.leiosVoteReceivedSubId = n.eventBus.SubscribeFunc(
+		leios.VoteReceivedEventType,
+		func(evt event.Event) {
+			data, ok := evt.Data.(leios.VoteEmittedEvent)
+			if !ok {
+				return
+			}
+			n.ouroboros().EnqueueLeiosPrototypeVote(data.Vote)
+		},
+	)
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",

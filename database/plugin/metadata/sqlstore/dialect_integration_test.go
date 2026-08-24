@@ -122,7 +122,7 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	require.NoError(t, store.Start(context.Background()))
 	require.True(t, store.Ready())
 
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(42, txn))
 	require.NoError(t, store.SetNetworkState(11, 22, 33, txn))
 	require.NoError(t, txn.Commit())
@@ -314,7 +314,7 @@ INSERT INTO redeemer (
 	catalog := newDialectQueryer(db, dialect.Name())
 	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
 	require.NoError(t, err)
-	exists, err := store.deferredIndexExists(catalog, retained)
+	exists, err := store.deferredIndexExists(t.Context(), catalog, retained)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -327,7 +327,7 @@ INSERT INTO redeemer (
 	// particular, MySQL requires `DROP INDEX ... ON table` and a non-IF-NOT-
 	// EXISTS CREATE form, while sync_state has no synthetic id column.
 	require.NoError(t, store.DropDeferredIndexes())
-	exists, err = store.deferredIndexExists(catalog, retained)
+	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
 	require.NoError(t, err)
 	require.True(
 		t,
@@ -347,7 +347,7 @@ INSERT INTO redeemer (
 	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
 	require.NoError(t, err)
 	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	exists, err = store.deferredIndexExists(catalog, retained)
+	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
 	require.NoError(t, err)
 	require.True(
 		t,

@@ -1061,7 +1061,7 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 	// database.New against this same data directory (Truncate's tmpDB, and
 	// later reinitializeCoreStorage's reopen) observes a mismatch and
 	// returns a recoverable CommitTimestampError.
-	metaTxn := n.db.Metadata().Transaction()
+	metaTxn := n.db.Metadata().Transaction(t.Context())
 	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
 	require.NoError(t, metaTxn.Commit())
 

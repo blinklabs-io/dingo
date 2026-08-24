@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -50,6 +51,38 @@ func (ls *LedgerState) applyStakeRewards(
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
+	// Byron has no Shelley-era reward parameters. During the Byron prefix,
+	// the delayed reward round reaches a boundary before its performance epoch
+	// can have pparams; the first Shelley boundary has the same shape because
+	// its performance epoch is still Byron. There are no stake rewards to
+	// apply for that epoch, so continue the rollover without entering the
+	// Shelley reward calculation path.
+	//
+	// Resolved through stakeRewardEpochsForApplication, the same helper the
+	// guarded path uses (calculateStakeRewardApplication,
+	// precomputedStakeRewardApplication). The two helpers agree everywhere
+	// except newEpoch == 2, where stakeRewardEpochsForNewEpoch reports
+	// ok=false for being below 3 while the application path resolves the
+	// bootstrap round against performance epoch 0. Guarding on the narrower
+	// helper skipped exactly the round this guard exists to catch, and epoch 2
+	// is inside the Byron prefix on every network this affects.
+	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
+		performanceEpoch, err := ls.db.Metadata().GetEpoch(
+			rewardEpochs.performance,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"get reward performance epoch %d: %w",
+				rewardEpochs.performance,
+				err,
+			)
+		}
+		if performanceEpoch != nil &&
+			performanceEpoch.EraId == eras.ByronEraDesc.Id {
+			return nil
+		}
+	}
 	app, ok, err := ls.precomputedStakeRewardApplication(
 		txn,
 		newEpoch,
@@ -2379,9 +2412,10 @@ func stakeRewardEpochsForApplication(
 // counted, because a node in this state is silently diverging from the
 // network and only says so when it eventually rejects a block.
 //
-// The inputs are absent chiefly after a Mithril bootstrap: applying the round
-// at the boundary into N needs this node's own reward snapshot for N-3 and
-// ADA pots for N-1, and those epochs predate the import.
+// The inputs can be absent after a Mithril bootstrap, but the cause is not
+// necessarily that they predate the import: an imported reward basis can also
+// have failed reconciliation and therefore never been persisted. The warning
+// stays factual and points to the earlier diagnostics rather than guessing.
 func (ls *LedgerState) reportSkippedStakeRewards(
 	newEpoch uint64,
 	reason string,
@@ -2396,8 +2430,8 @@ func (ls *LedgerState) reportSkippedStakeRewards(
 		"skipping stake rewards: "+reason+
 			"; this epoch's rewards will never be credited, leaving reward"+
 			" balances and the leadership stake distribution permanently"+
-			" short (expected after a Mithril bootstrap, whose preceding"+
-			" epochs this node never saw)",
+			" short (the required basis was never persisted; inspect earlier"+
+			" bootstrap and ledgerstate import warnings for the cause)",
 		"component", "ledger",
 		"new_epoch", newEpoch,
 		epochKey, epochValue,
