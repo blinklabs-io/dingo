@@ -22,10 +22,12 @@ import (
 	"reflect"
 	"runtime"
 
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 // ErrExUnitsOverflow is returned when ExUnits
@@ -110,6 +112,10 @@ const (
 	// UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// their runtime function names before filtering by index.
+	shelleyUtxoValidateFeeTooSmallRuleIndex    = 6
+	shelleyUtxoValidateMaxTxSizeRuleIndex      = 13
+	allegraUtxoValidateFeeTooSmallRuleIndex    = 6
+	allegraUtxoValidateMaxTxSizeRuleIndex      = 13
 	alonzoUtxoValidatePlutusScriptsRuleIndex   = 27
 	babbageUtxoValidatePlutusScriptsRuleIndex  = 31
 	conwayUtxoValidateConwayFeaturesRuleIndex  = 19
@@ -320,13 +326,117 @@ const txTypeAlonzo = 4
 // on-wire 4-element format is exactly the 1-byte IsValid
 // field. Pre-Alonzo transactions (Byron through Mary) do
 // not contain an IsValid byte, so their full CBOR length
-// is the fee-relevant size.
+// is the fee-relevant size — except when the transaction
+// was rebuilt from block components, which
+// preAlonzoRebuiltWireSize handles.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
+	if size, ok := preAlonzoRebuiltWireSize(tx); ok {
+		return size
+	}
 	fullSize := uint64(len(tx.Cbor()))
 	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
 		return fullSize - 1
 	}
 	return fullSize
+}
+
+// preAlonzoRebuiltWireSize returns the wire size of a Shelley or Allegra
+// transaction that was rebuilt from separately decoded components rather than
+// decoded from a complete transaction encoding.
+//
+// ShelleyBlock.Transactions and AllegraBlock.Transactions construct each
+// transaction from the block's parallel body, witness-set, and auxiliary-data
+// arrays, so the resulting value carries no stored transaction CBOR. Cbor()
+// then falls back to the generic encoder, and because neither
+// ShelleyTransactionBody nor AllegraTransactionBody implements MarshalCBOR the
+// body is re-encoded from its decoded fields instead of its preserved bytes.
+// ShelleyProtocolParameterUpdate tags none of its optional fields omitempty, so
+// that re-encoding emits an explicit CBOR null for every absent field. For
+// preprod transaction
+// a00696a0c2d70c381a265a845e43c55e1d00f96b27c06defc015dc92eb206240 that turns
+// 1156 wire bytes into 1366, raising the minimum fee from 206245 to 215485 and
+// rejecting a block cardano-node accepts.
+//
+// The size is rebuilt from the preserved component bytes: a 1-byte
+// definite-length 3-element array header, the body and witness-set bytes as
+// they appeared on the wire, and either the auxiliary data bytes or a 1-byte
+// CBOR null. A non-empty body or witness-set Cbor() is only ever set by that
+// component's UnmarshalCBOR, so these bytes are the ones that were decoded.
+//
+// Transactions that do carry stored transaction CBOR are left to the caller's
+// len(tx.Cbor()), so no size that a node observed on the wire is recomputed
+// here. MaryTransactionBody implements MarshalCBOR and returns its preserved
+// bytes, so Mary is unaffected by the defect and is not handled here.
+func preAlonzoRebuiltWireSize(tx lcommon.Transaction) (uint64, bool) {
+	var storedCbor, bodyCbor, witnessCbor []byte
+	var auxData lcommon.AuxiliaryData
+	var metadata lcommon.TransactionMetadatum
+	switch tmpTx := tx.(type) {
+	case *shelley.ShelleyTransaction:
+		storedCbor = tmpTx.DecodeStoreCbor.Cbor()
+		bodyCbor = tmpTx.Body.Cbor()
+		witnessCbor = tmpTx.WitnessSet.Cbor()
+		auxData = tmpTx.AuxiliaryData()
+		metadata = tmpTx.Metadata()
+	case *allegra.AllegraTransaction:
+		storedCbor = tmpTx.DecodeStoreCbor.Cbor()
+		bodyCbor = tmpTx.Body.Cbor()
+		witnessCbor = tmpTx.WitnessSet.Cbor()
+		auxData = tmpTx.AuxiliaryData()
+		metadata = tmpTx.Metadata()
+	default:
+		return 0, false
+	}
+	if len(storedCbor) > 0 {
+		// Decoded from a complete transaction encoding, so those are the
+		// bytes the node received.
+		return 0, false
+	}
+	if len(bodyCbor) == 0 || len(witnessCbor) == 0 {
+		return 0, false
+	}
+	// The third wire element is the auxiliary data, or CBOR null when the
+	// transaction has none. Bail out rather than guess when auxiliary data is
+	// present but its original bytes are not, so the caller falls back to
+	// len(tx.Cbor()).
+	auxSize := 1 // CBOR null auxiliary data
+	switch {
+	case auxData != nil && len(auxData.Cbor()) > 0:
+		auxSize = len(auxData.Cbor())
+	case auxData != nil || metadata != nil:
+		return 0, false
+	}
+	// 1 byte for the definite-length 3-element array header.
+	return uint64(1 + len(bodyCbor) + len(witnessCbor) + auxSize), true
+}
+
+// validatePreAlonzoTx runs a pre-Alonzo era's UTxO validation rules and then
+// applies Dingo's size and fee checks in place of the upstream fee and
+// max-size rules that buildIndexedUtxoValidationRulesWithSkips removed.
+//
+// Both replacements derive their size from TxSizeForFee. The upstream rules
+// size a transaction from len(tx.Cbor()), which is the rebuilt encoding for a
+// transaction that came out of a block. Keeping both checks on TxSizeForFee
+// also stops a transaction from being judged against two different sizes,
+// matching cardano-ledger, where validateMaxTxSizeUTxO and the minimum-fee
+// calculation both read sizeTxF.
+func validatePreAlonzoTx(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+	rules []indexedUtxoValidationRule,
+	maxTxSize uint,
+	minFeeA uint,
+	minFeeB uint,
+) error {
+	errs := make([]error, 0, len(rules)+2)
+	for _, rule := range rules {
+		errs = append(errs, rule.validationFunc(tx, slot, ls, pp))
+	}
+	errs = append(errs, ValidateTxSize(tx, maxTxSize))
+	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
+	return errors.Join(errs...)
 }
 
 // ValidateTxSize checks that the transaction size does

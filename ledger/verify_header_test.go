@@ -2181,7 +2181,7 @@ func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
 	assert.Contains(t, err.Error(), "has no stake in epoch")
 }
 
-func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
+func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{38}, 0, tamperNone)
@@ -2197,10 +2197,11 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 	ls.mithrilLedgerSlot = importedCaptureSlot
 	tb.block.slot = ls.epochCache[2].StartSlot + 50
 
-	// Leader election in epoch 5 uses mark[StakeSnapshotEpoch(5)] = mark[4]
-	// (the end-of-epoch-3 "set" distribution), so the imported mark is seeded
-	// at epoch 4. importedCaptureSlot (epoch4-start+50) is past epoch 4's start,
-	// which is what marks it as Mithril-imported.
+	// Leader election in epoch 5 uses mark[StakeSnapshotEpoch(5)] = mark[4].
+	// Older Dingo imports stamped the certified NewEpochState SnapShots.Mark
+	// row with the mid-epoch Mithril anchor. That provenance is still
+	// authoritative even though the stored capture slot is after epoch 4's
+	// start, so existing databases must run the threshold check.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshotOfTypeAtSlot(
 		t,
@@ -2231,17 +2232,75 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 		nil,
 	)
 	require.NoError(t, err)
-	require.True(t, ls.isMithrilImportedMarkSnapshot(snapshot, 4))
+	require.False(t, ls.shouldSkipPostMithrilMarkEligibility(snapshot, 4))
 	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err)
+	require.Error(t, err)
 	assert.Contains(
 		t,
-		logBuf.String(),
-		"Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary",
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
 	)
-	assert.NotContains(t, logBuf.String(), "total active stake is zero")
+	assert.NotContains(t, logBuf.String(), "skipping leader eligibility check")
+}
+
+func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	var logBuf bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+	tb.block.slot = ls.epochCache[2].StartSlot + 50
+
+	// The startup fallback derives historical rows from current live state and
+	// stamps them with the current epoch start. Unlike a certified imported
+	// row, this capture is neither the target boundary nor the Mithril anchor,
+	// so hard threshold rejection remains unsafe.
+	reconstructedCaptureSlot := ls.epochCache[1].StartSlot
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		1,
+		0,
+		reconstructedCaptureSlot,
+	)
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		dummyHash,
+		1_000_000_000_000_000_000,
+		0,
+		reconstructedCaptureSlot,
+	)
+	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, ls.shouldSkipPostMithrilMarkEligibility(snapshot, 4))
+	ls.publishSnapshotsLocked()
+
+	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.NoError(t, err)
+	assert.Contains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
 func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
@@ -2286,7 +2345,10 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 		nil,
 	)
 	require.NoError(t, err)
-	require.False(t, ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch))
+	require.False(t, ls.shouldSkipPostMithrilMarkEligibility(
+		snapshot,
+		snapshotEpoch,
+	))
 	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)

@@ -60,7 +60,7 @@ func seedCommitTimestampMismatch(t *testing.T, dir string) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
 	require.NoError(t, err)
-	metaTxn := db.Metadata().Transaction()
+	metaTxn := db.Metadata().Transaction(t.Context())
 	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
 	require.NoError(t, metaTxn.Commit())
 	require.NoError(t, dbtest.CloseDatabase(db))

@@ -262,7 +262,7 @@ func seedMetadataMigrationDataset(
 		gateName:        "storagetest-migration-gate",
 		gateValue:       "enabled",
 	}
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(dataset.commitTimestamp, txn))
 	require.NoError(t, txn.Commit())
 	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
@@ -294,7 +294,7 @@ func migrateMetadataDataset(
 	gates, err := src.GetNodeSettingsGates()
 	require.NoError(t, err)
 
-	txn := dest.Transaction()
+	txn := dest.Transaction(t.Context())
 	require.NoError(t, dest.SetCommitTimestamp(timestamp, txn))
 	require.NoError(t, txn.Commit())
 	require.NoError(t, dest.SetNodeSettings(settings))

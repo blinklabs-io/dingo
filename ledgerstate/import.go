@@ -1404,9 +1404,11 @@ func importSnapShots(
 	//   - Mark for epoch N-1   = imported set snapshot
 	//   - Mark for epoch N-2   = imported go snapshot
 	//
-	// Import the bundle into those historical epochs so leader
-	// schedule queries (which request epoch-2, "mark") work
-	// immediately after a Mithril restore.
+	// Import the bundle into those historical epochs so leader schedule
+	// queries can read mark[E-1], the stake captured at the end of E-2,
+	// immediately after a Mithril restore. Preserve the semantic boundary
+	// capture slot from NewEpochState.SnapShots rather than stamping the rows
+	// with the mid-epoch ledger-state tip.
 	for _, st := range snapshotImportTargets(epoch, snapshots) {
 		select {
 		case <-ctx.Done():
@@ -1416,11 +1418,16 @@ func importSnapShots(
 		default:
 		}
 
+		capturedSlot := importedSnapshotCaptureSlot(
+			cfg,
+			st.targetEpoch,
+			slot,
+		)
 		poolSnapshots := AggregatePoolStake(
 			st.snap,
 			st.targetEpoch,
 			"mark",
-			slot,
+			capturedSlot,
 		)
 
 		if err := persistImportedSnapshot(
@@ -1446,6 +1453,7 @@ func importSnapShots(
 			"snapshot", st.name,
 			"stored_as", "mark",
 			"target_epoch", st.targetEpoch,
+			"captured_slot", capturedSlot,
 			"pools", len(poolSnapshots),
 			"total_stake", totalStake,
 			"component", "ledgerstate",
@@ -2287,6 +2295,28 @@ func importedEpochStartSlot(
 	}
 	return cfg.State.EraBoundSlot +
 		(epoch-cfg.State.EraBoundEpoch)*uint64(lengthInSlots), true
+}
+
+// importedSnapshotCaptureSlot returns the semantic slot represented by one
+// member of NewEpochState.SnapShots. A Dingo mark row for epoch N records the
+// SNAP distribution taken immediately before the boundary into N, regardless
+// of which later slot exported the ledger-state file. When the imported era
+// history cannot place that boundary, retaining the import tip preserves the
+// older import encoding; header validation recognizes the exact Mithril anchor
+// as certified SnapShots provenance.
+func importedSnapshotCaptureSlot(
+	cfg ImportConfig,
+	epoch uint64,
+	importSlot uint64,
+) uint64 {
+	epochStart, ok := importedEpochStartSlot(cfg, epoch)
+	if !ok {
+		return importSlot
+	}
+	if epochStart == 0 {
+		return 0
+	}
+	return epochStart - 1
 }
 
 // generateAndSaveEpochs creates epoch records for every epoch from

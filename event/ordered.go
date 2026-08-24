@@ -19,12 +19,12 @@ import "context"
 // OrderedQueueSize is the per-event-type buffer behind PublishOrdered. It is
 // larger than AsyncQueueSize because an ordered lane is drained by exactly one
 // worker rather than by the shared pool, so it has to absorb the same bursts
-// with less drain throughput. The ledger publishes ledger.tx from inside its
-// block-apply database transaction, and a publisher that parks holds that
-// transaction open, so the buffer is sized to swallow a bulk-sync batch's
-// transactions rather than to bound memory tightly. It is still bounded:
-// past this point the publisher waits, exactly as it already did on a full
-// shared async queue.
+// with less drain throughput. The ledger publishes ledger.tx from an
+// after-commit callback, and a publisher that parks delays the block-apply
+// pipeline even though the transaction is already durable, so the buffer is
+// sized to swallow a bulk-sync batch's transactions rather than to bound
+// memory tightly. It is still bounded: past this point the publisher waits,
+// exactly as it already did on a full shared async queue.
 const OrderedQueueSize = 10000
 
 // orderedLane is one event type's FIFO plus the single worker that drains it.
