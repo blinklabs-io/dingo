@@ -224,7 +224,8 @@ func ValidateTxDijkstra(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	if _, ok := pp.(*gdijkstra.DijkstraProtocolParameters); !ok {
+	if tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters); !ok ||
+		tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)

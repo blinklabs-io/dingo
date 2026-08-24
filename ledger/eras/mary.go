@@ -159,6 +159,10 @@ func ValidateTxMary(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	tmpPparams, ok := pp.(*mary.MaryProtocolParameters)
+	if !ok || tmpPparams == nil {
+		return ErrIncompatibleProtocolParams
+	}
 	errs := make([]error, 0, len(mary.UtxoValidationRules))
 	for _, validationFunc := range mary.UtxoValidationRules {
 		errs = append(
@@ -166,6 +170,8 @@ func ValidateTxMary(
 			validationFunc(tx, slot, ls, pp),
 		)
 	}
-	errs = append(errs, validateInvalidHereafter(tx, slot))
+	if err := validateInvalidHereafter(tx, slot); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }

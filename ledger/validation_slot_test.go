@@ -2,10 +2,49 @@ package ledger
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateTxRejectsInvalidHereafterAtActiveConwaySlot(t *testing.T) {
+	const validationSlot = 200
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: &cardano.CardanoNodeConfig{},
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+
+	ls.Lock()
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = &conway.ConwayProtocolParameters{}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.NewPoint(validationSlot, []byte("tip")),
+	}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{Ttl: validationSlot},
+	}
+	err = ls.ValidateTx(tx)
+	var invalidHereafterErr eras.InvalidHereafterError
+	require.ErrorAs(t, err, &invalidHereafterErr)
+}
 
 func TestValidationReferenceSlotPrefersCurrentSlotWhenAhead(t *testing.T) {
 	t.Parallel()

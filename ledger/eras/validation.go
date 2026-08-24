@@ -59,7 +59,7 @@ func (e InvalidHereafterError) Error() string {
 
 func validateInvalidHereafter(tx lcommon.Transaction, slot uint64) error {
 	invalidHereafter := tx.TTL()
-	if invalidHereafter == 0 || invalidHereafter >= slot {
+	if invalidHereafter == 0 || slot < invalidHereafter {
 		return nil
 	}
 	return InvalidHereafterError{

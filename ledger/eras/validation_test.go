@@ -1598,6 +1598,49 @@ func TestValidateTxPreAlonzoRejectsWrongProtocolParams(t *testing.T) {
 	}
 }
 
+func TestValidateTxRejectsMissingProtocolParamsAcrossEras(t *testing.T) {
+	var nilAllegra *allegra.AllegraProtocolParameters
+	var nilMary *mary.MaryProtocolParameters
+	var nilAlonzo *alonzo.AlonzoProtocolParameters
+	var nilBabbage *babbage.BabbageProtocolParameters
+	var nilConway *conway.ConwayProtocolParameters
+	var nilDijkstra *dijkstra.DijkstraProtocolParameters
+
+	tests := []struct {
+		name       string
+		validateTx lcommon.UtxoValidationRuleFunc
+		typedNil   lcommon.ProtocolParameters
+	}{
+		{name: "allegra", validateTx: ValidateTxAllegra, typedNil: nilAllegra},
+		{name: "mary", validateTx: ValidateTxMary, typedNil: nilMary},
+		{name: "alonzo", validateTx: ValidateTxAlonzo, typedNil: nilAlonzo},
+		{name: "babbage", validateTx: ValidateTxBabbage, typedNil: nilBabbage},
+		{name: "conway", validateTx: ValidateTxConway, typedNil: nilConway},
+		{
+			name:       "dijkstra",
+			validateTx: ValidateTxDijkstra,
+			typedNil:   nilDijkstra,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{mockFeeTx: mockFeeTx{fee: big.NewInt(0)}}
+			ls := newMockLedgerState()
+
+			require.ErrorIs(
+				t,
+				tc.validateTx(tx, 0, ls, nil),
+				ErrIncompatibleProtocolParams,
+			)
+			require.ErrorIs(
+				t,
+				tc.validateTx(tx, 0, ls, tc.typedNil),
+				ErrIncompatibleProtocolParams,
+			)
+		})
+	}
+}
+
 func TestValidateTxRejectsExpiredInvalidHereafterAcrossEras(t *testing.T) {
 	const validationSlot = 200
 
@@ -1633,7 +1676,12 @@ func TestValidateTxRejectsExpiredInvalidHereafterAcrossEras(t *testing.T) {
 				slot uint64,
 				ls lcommon.LedgerState,
 			) error {
-				return ValidateTxMary(tx, slot, ls, &mary.MaryProtocolParameters{})
+				return ValidateTxMary(
+					tx,
+					slot,
+					ls,
+					&mary.MaryProtocolParameters{},
+				)
 			},
 			setup: func(t *testing.T) {
 				original := mary.UtxoValidationRules
@@ -1733,12 +1781,17 @@ func TestValidateTxRejectsExpiredInvalidHereafterAcrossEras(t *testing.T) {
 				invalidAfter uint64
 				shouldError  bool
 			}{
+				{name: "upper bound absent", invalidAfter: 0},
 				{
 					name:         "before validation slot",
 					invalidAfter: validationSlot - 1,
 					shouldError:  true,
 				},
-				{name: "at validation slot", invalidAfter: validationSlot},
+				{
+					name:         "at validation slot",
+					invalidAfter: validationSlot,
+					shouldError:  true,
+				},
 				{name: "after validation slot", invalidAfter: validationSlot + 1},
 			} {
 				t.Run(test.name, func(t *testing.T) {
@@ -1750,8 +1803,16 @@ func TestValidateTxRejectsExpiredInvalidHereafterAcrossEras(t *testing.T) {
 					if test.shouldError {
 						var invalidHereafter InvalidHereafterError
 						require.ErrorAs(t, err, &invalidHereafter)
-						require.Equal(t, test.invalidAfter, invalidHereafter.InvalidHereafter)
-						require.Equal(t, uint64(validationSlot), invalidHereafter.Slot)
+						require.Equal(
+							t,
+							test.invalidAfter,
+							invalidHereafter.InvalidHereafter,
+						)
+						require.Equal(
+							t,
+							uint64(validationSlot),
+							invalidHereafter.Slot,
+						)
 						return
 					}
 					require.NoError(t, err)
