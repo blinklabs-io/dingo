@@ -87,9 +87,9 @@ const (
 //
 // Setting currentPParams to Conway pparams with the supplied major
 // version exercises the post-Conway code path inside the helper.
-// Bootstrap (major <= 9) uses the simplest ratification semantics
-// (single yes vote suffices) so a typical test only needs one DRep
-// fixture.
+// Bootstrap (major <= 9) waives the DRep threshold but preserves the
+// action-specific SPO threshold, so ratifiable fixtures must include an
+// SPO stake snapshot and vote.
 func stabilityFixtureLedgerState(
 	t *testing.T,
 	major uint,
@@ -121,7 +121,7 @@ func stabilityFixtureLedgerState(
 // seedRatifiableBootstrapHardForkInitiation primes the DB so that the
 // governance ratifiability helper returns a non-nil result when the
 // bootstrap (major<=9) ratification rule is in effect — a HardForkInitiation
-// proposal in the active set plus a single DRep yes vote.
+// proposal in the active set plus the required SPO stake and yes vote.
 func seedRatifiableBootstrapHardForkInitiation(
 	t *testing.T,
 	db *database.Database,
@@ -178,6 +178,23 @@ func seedRatifiableBootstrapHardForkInitiation(
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: drepCred,
+		Vote:            models.VoteYes,
+		AddedSlot:       2,
+	}, nil))
+	poolCred := repeatByte(28, 0xDD)
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        currentEpoch - 2,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  poolCred,
+			TotalStake:   types.Uint64(1_000),
+		},
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      loaded.ID,
+		VoterType:       models.VoterTypeSPO,
+		VoterCredential: poolCred,
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))
