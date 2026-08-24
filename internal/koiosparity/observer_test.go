@@ -64,6 +64,22 @@ type fakeKoiosAccountFixtures struct {
 	rewardsByEpoch map[uint64][]KoiosAccountRewardHistoryItem
 }
 
+type countingNotFoundTransport struct {
+	requests *atomic.Int32
+}
+
+func (t countingNotFoundTransport) RoundTrip(
+	req *http.Request,
+) (*http.Response, error) {
+	t.requests.Add(1)
+	return &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+		Request:    req,
+	}, nil
+}
+
 // newFakeKoiosServer serves a minimal, epoch-keyed Koios API: /pool_list and
 // /pool_updates always report zero pools; /epoch_info and /totals serve
 // exactly the epochs present in epochs (any other epoch number 404s, which
@@ -177,6 +193,36 @@ func lookupFakeEpoch(
 	}
 	ref, ok := epochs[epoch]
 	return epoch, ref, ok
+}
+
+func TestFetchAccountsIfNeededSkipsPreStakingEpoch(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cache.Close() })
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        0,
+		PreStaking:   true,
+		EpochEndTime: time.Now().Add(-time.Hour),
+		FetchedAt:    time.Now(),
+	}, nil, nil))
+
+	var requests atomic.Int32
+	o := &Observer{
+		cfg:   ObserverConfig{Network: "preview"},
+		cache: cache,
+		koios: &KoiosClient{
+			baseURL: "https://koios.invalid",
+			http: &http.Client{Transport: countingNotFoundTransport{
+				requests: &requests,
+			}},
+			limiter: newBurstLimiter(1, time.Second),
+		},
+	}
+
+	require.NoError(t, o.fetchAccountsIfNeeded(context.Background(), 0))
+	require.Zero(t, requests.Load(),
+		"pre-staking account parity is empty by construction and must not call Koios")
 }
 
 // seedDingoEpochAggregate writes epoch_summary at koiosEpoch-1 (the "stake

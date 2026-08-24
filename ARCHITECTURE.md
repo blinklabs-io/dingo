@@ -1945,7 +1945,7 @@ because prior pot transitions cannot be repaired safely without replay.
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
-Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
+Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The boundary block body's era is authoritative for ordinary advancement: a source-era block can advertise the next protocol major in its header without activating that successor. Header elevation is used only after the body itself advances, where it can validate the exceptional two-consecutive-era boundary path. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
 An empty from-genesis database therefore does not infer a hard-fork epoch from
 the Shelley protocol version alone. The version identifies the target era, but
@@ -5222,13 +5222,20 @@ second sync:
     re-validated against that corrected state rather than trusting a stale
     prior `PASS`.
   - **Strict mode** (`ObserverConfig.Strict`, the default via
-    `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to `n.cancel`
-    — exactly once, on the first Koios/tool error or exact parity mismatch,
-    and stops processing the rest of the current batch; this is what makes a
-    mismatch "stop the node" rather than "log and continue as ordinary
-    operation." Non-strict mode (available, not the default) records the
-    same failure in the cache and keeps validating subsequent epochs — an
-    explicit opt-in for advisory/observability-only use.
+    `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to
+    `n.cancelForFatal` — exactly once, on the first Koios/tool error or exact
+    parity mismatch, and stops processing the rest of the current batch. The
+    node records that error before cancellation and returns it from `Run`, so
+    the CLI exits non-zero instead of mistaking the stop for a clean signal.
+    `Run` resolves that recorded fatal error on every return path, not only its
+    steady-state shutdown wait: if the observer fails while the rest of node
+    startup is still in progress, a later startup step can observe only
+    `context.Canceled`; that cancellation-shaped error is replaced by the
+    original parity failure so the outer runner neither drops it as a clean
+    cancellation nor waits forever for an error that will never be queued.
+    Non-strict mode (available, not the default) records the same failure in
+    the cache and keeps validating subsequent epochs — an explicit opt-in for
+    advisory/observability-only use.
   - **Fetch retry.** A single epoch's Koios fetch can fail transiently
     because Koios's own backend has not finished closing that epoch out yet
     (`fetchEpoch`'s `end_time==0` rejection) — expected mainly near live
@@ -5452,6 +5459,12 @@ never the reverse.
   filters `k.pre_staking = 0` — without it, epochs 0-1 (which do get a
   `koios_epoch_info` row via the `pre_staking` marker) would be
   re-proposed for account backfill on every future `fetch` run forever.
+  `Cache.GetEpochsNeedingCheck` applies the same filter to its account-
+  coverage staleness branch, and `Observer.fetchAccountsIfNeeded` returns as
+  soon as it sees the cached pre-staking marker. Together those gates prevent
+  both startup backlog replay and a live re-signal from issuing the full
+  Koios `/account_list` scan for an epoch whose account parity set is empty by
+  construction.
 - **Epoch selection is account-coverage-aware, not just pool/aggregate-aware.**
   `Cache.GetUncachedEpochs` (keyed on `koios_epoch_info` presence) and
   `Cache.GetEpochsNeedingCheck`/`check_epoch_status.last_checked_at` staleness
@@ -5568,7 +5581,8 @@ every one of #3097's own tests passes unmodified.
   bounding each `/account_reward_history` request by both address count
   (`--account-chunk-size`, default `koiosAccountChunkSize` = 100) and encoded
   body size (`--account-chunk-max-bytes`, default `koiosAccountChunkMaxBytesDefault`
-  = 32 KiB). The address universe is sorted before chunking — required so the
+  = 4 KiB, below Koios's 5120-byte public request limit). The address universe
+  is sorted before chunking — required so the
   same underlying address set always produces the same chunk boundaries
   (and therefore the same content-addressed chunk hash) regardless of
   `addressUniverse`'s incoming order, which `BuildAccountAddressUniverse`

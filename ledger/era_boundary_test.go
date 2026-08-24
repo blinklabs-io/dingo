@@ -48,6 +48,16 @@ func TestEraTransitionPathAllowsPrimeBoundaryPair(t *testing.T) {
 	)
 }
 
+func TestEraTransitionsRunAfterSourceEraPParamEnactment(t *testing.T) {
+	path := []uint{eras.BabbageEraDesc.Id}
+	before, after := splitEraTransitionsForRollover(path)
+
+	require.Empty(t, before,
+		"successor transitions must not replace the source era before rollover")
+	require.Equal(t, path, after,
+		"the successor transition must run after source-era pparam enactment")
+}
+
 func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
 	ls := &LedgerState{}
 	path, ok := ls.eraTransitionPath(
@@ -69,6 +79,19 @@ func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
 	)
 	require.Equal(t, eras.BabbageEraDesc.Id, target)
 	require.True(t, allowTwoTransitions)
+}
+
+func TestBoundaryEraForBlockDoesNotAdvanceFromHeaderAlone(t *testing.T) {
+	ls := &LedgerState{}
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
+		eras.AlonzoEraDesc.Id,
+		eras.AlonzoEraDesc.Id,
+		eras.BabbageEraDesc.MinMajorVersion,
+		true,
+	)
+	require.Equal(t, eras.AlonzoEraDesc.Id, target,
+		"an Alonzo block remains Alonzo even when its header advertises protocol major 7")
+	require.False(t, allowTwoTransitions)
 }
 
 func TestBoundaryEraForBlockRejectsNonAdjacentHeaderEra(t *testing.T) {
@@ -275,6 +298,67 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 			result.NewCurrentPParams, result.NewCurrentEra,
 		),
 	)
+}
+
+func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
+	ls, db := newBoundaryRolloverLedger(t)
+
+	sourceEra := ls.currentEra
+	sourceEra.EpochLengthFunc = func(
+		*cardano.CardanoNodeConfig,
+	) (uint, uint, error) {
+		return 20_000, 21_600, nil
+	}
+	ls.currentEra = sourceEra
+
+	var result *EpochRolloverResult
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		result, err = ls.processEpochRollover(
+			txn,
+			ls.currentEpoch,
+			sourceEra,
+			ls.currentPParams,
+			true,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = ls.applyBoundaryEraTransitions(
+			txn,
+			ls.currentEpoch,
+			[]uint{eras.AllegraEraDesc.Id},
+			result,
+		)
+		return err
+	}))
+	if result == nil {
+		t.Fatal("epoch rollover returned no result")
+	}
+
+	wantSlotLength, wantEpochLength, err := eras.AllegraEraDesc.EpochLengthFunc(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.Equal(t, wantSlotLength, result.NewCurrentEpoch.SlotLength)
+	require.Equal(t, wantEpochLength, result.NewCurrentEpoch.LengthInSlots)
+	require.Equal(t, wantSlotLength, result.SchedulerIntervalMs)
+
+	var cachedEpoch *models.Epoch
+	for i := range result.NewEpochCache {
+		if result.NewEpochCache[i].EpochId == result.NewCurrentEpoch.EpochId {
+			cachedEpoch = &result.NewEpochCache[i]
+			break
+		}
+	}
+	require.NotNil(t, cachedEpoch)
+	require.Equal(t, wantSlotLength, cachedEpoch.SlotLength)
+	require.Equal(t, wantEpochLength, cachedEpoch.LengthInSlots)
+
+	persistedEpoch, err := db.GetEpoch(result.NewCurrentEpoch.EpochId, nil)
+	require.NoError(t, err)
+	require.NotNil(t, persistedEpoch)
+	require.Equal(t, wantSlotLength, persistedEpoch.SlotLength)
+	require.Equal(t, wantEpochLength, persistedEpoch.LengthInSlots)
 }
 
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common

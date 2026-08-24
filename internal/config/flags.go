@@ -412,7 +412,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"KoiosParity.AccountChunkMaxBytes",
 		"koios-parity-account-chunk-max-bytes",
-		"max encoded body size per /account_reward_history request (0 = package default, 32KiB)",
+		"max encoded body size per /account_reward_history request (0 = package default, 4KiB)",
 	),
 
 	// Peer governance
