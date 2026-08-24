@@ -57,6 +57,13 @@ func withSessionParams(
 // explained by the server enforcing the variable, not by Go-level
 // cancellation. max_execution_time only bounds top-level read-only SELECT
 // statements, so the blocked statement here is a SELECT, not a write.
+//
+// The blocking statement selects SLEEP() from a derived table rather than a
+// bare "SELECT SLEEP(5)": a table-less SELECT has no rows to iterate, and
+// MySQL's periodic max_execution_time check runs from that per-row
+// iteration loop, so a bare SLEEP(5) can run to completion uninterrupted
+// even with the timeout configured. Selecting from "FROM (SELECT 1) t"
+// puts the statement through that same loop for its one row.
 func TestStatementTimeoutIntegration(t *testing.T) {
 	baseDSN := mysqlIntegrationDSN(t)
 	dsn := createIsolatedDatabase(t, baseDSN, "mysqltimeout_stmt")
@@ -69,7 +76,10 @@ func TestStatementTimeoutIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	start := time.Now()
-	_, err = db.ExecContext(context.Background(), "SELECT SLEEP(5)")
+	_, err = db.ExecContext(
+		context.Background(),
+		"SELECT SLEEP(5) FROM (SELECT 1) AS blocking_row",
+	)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
