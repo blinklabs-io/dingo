@@ -113,6 +113,8 @@ type Node struct {
 	config                           Config
 	ctx                              context.Context
 	cancel                           context.CancelFunc
+	fatalErrMu                       sync.Mutex
+	fatalErr                         error
 	shutdownOnce                     sync.Once
 	shutdownErr                      error
 	chainsyncStallRecycler           *chainsyncrecycler.Recycler
@@ -431,7 +433,7 @@ func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 }
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
-func (n *Node) Run(ctx context.Context) error {
+func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Configure tracing
 	n.warnIfTracingMisconfigured()
 	if n.config.tracing {
@@ -440,6 +442,9 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
+	defer func() {
+		runErr = n.resolveRunError(runErr)
+	}()
 
 	// Start the RTS metrics updater goroutine. It samples runtime.MemStats
 	// on a ticker and exits when n.ctx is cancelled by the existing
@@ -1649,9 +1654,41 @@ func (n *Node) Run(ctx context.Context) error {
 	// on why it must not be removed any earlier than this.
 	n.removeConfirmedRestoreBackup()
 
-	// Wait for shutdown signal
+	return n.waitForShutdown()
+}
+
+// cancelForFatal records the first component failure before cancelling the
+// node. Run returns that error after cancellation so supervisors and the CLI
+// can distinguish a fatal component stop from signal-driven shutdown.
+func (n *Node) cancelForFatal(err error) {
+	n.fatalErrMu.Lock()
+	if n.fatalErr == nil {
+		n.fatalErr = err
+	}
+	n.fatalErrMu.Unlock()
+	if n.cancel != nil {
+		n.cancel()
+	}
+}
+
+func (n *Node) waitForShutdown() error {
 	<-n.ctx.Done()
-	return nil
+	return n.resolveRunError(nil)
+}
+
+// resolveRunError preserves ordinary startup/runtime errors but replaces a
+// cancellation-shaped exit with the component fatal error that caused it.
+// The Run defer is necessary because an asynchronous component can fail after
+// it starts but before Run reaches waitForShutdown; a later startup step then
+// observes context.Canceled and would otherwise hide the original failure.
+func (n *Node) resolveRunError(runErr error) error {
+	n.fatalErrMu.Lock()
+	fatalErr := n.fatalErr
+	n.fatalErrMu.Unlock()
+	if fatalErr != nil && (runErr == nil || errors.Is(runErr, context.Canceled)) {
+		return fatalErr
+	}
+	return runErr
 }
 
 // logErrIfNotNil logs err at Error level if non-nil, so a cleanup step run

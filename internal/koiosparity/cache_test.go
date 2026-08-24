@@ -23,6 +23,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
+	t *testing.T,
+) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        0,
+		PreStaking:   true,
+		EpochEndTime: now.Add(-time.Hour),
+		FetchedAt:    now.Add(-time.Minute),
+	}, nil, nil))
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:       "preview",
+		Epoch:         0,
+		LastCheckedAt: now,
+		Status:        StatusPass,
+	}))
+
+	epochs, err := cache.GetEpochsNeedingCheck("preview", true)
+	require.NoError(t, err)
+	require.Empty(t, epochs,
+		"pre-staking epochs never have account coverage and must not be requeued for its absence")
+}
+
 // TestCommitEpochDataWithTotals exercises the actual SQL generated for the
 // koios_totals upsert against a real SQLite file — a pure-Go struct test
 // cannot catch a column-name mismatch (e.g. DepositsDRep versus the persisted

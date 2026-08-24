@@ -5178,6 +5178,18 @@ func (ls *LedgerState) processEpochRollover(
 	return result, nil
 }
 
+// splitEraTransitionsForRollover keeps epoch-boundary protocol-parameter
+// enactment in the source era. A proposal submitted in the source era is
+// enacted at the boundary before the successor-era hard fork transforms the
+// protocol parameters. This matters for fields removed by the successor era,
+// such as Alonzo's decentralization parameter, which remains present in the
+// legacy update CBOR but is not a valid Babbage update field.
+func splitEraTransitionsForRollover(
+	transitionPath []uint,
+) (before, after []uint) {
+	return nil, transitionPath
+}
+
 // epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot
 // of the ended epoch, i.e. one before the boundary.
 func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {

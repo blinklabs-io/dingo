@@ -966,10 +966,12 @@ func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
 // either have no check result yet, OR whose Koios data was refreshed
 // (fetched_at updated) after the last check, OR — when accountsEnabled is
 // true — whose #3097 per-account reference data (koios_account_coverage) is
-// absent, incomplete, or was refreshed after the last check. This ensures a
-// forced re-fetch (pool-level or account-level) is always followed by an
-// automatic re-check rather than leaving stale PASS/FAIL/ERROR rows in the
-// cache.
+// absent, incomplete, or was refreshed after the last check. Pre-staking
+// epochs are excluded from that account-coverage branch because they have no
+// account parity surface and intentionally never receive a coverage row. This
+// ensures a forced re-fetch (pool-level or account-level) is always followed
+// by an automatic re-check rather than leaving stale PASS/FAIL/ERROR rows in
+// the cache.
 //
 // The accountsEnabled parameter exists because koios_account_coverage
 // freshness is only ever a meaningful recheck trigger when the caller
@@ -987,8 +989,8 @@ func (c *Cache) GetEpochsNeedingCheck(
 ) ([]uint64, error) {
 	// LEFT JOINs so we pick up epochs with no status row (NULL
 	// last_checked_at), epochs where fetched_at > last_checked_at (stale pool
-	// check), and — when accountsEnabled — epochs with no/incomplete/stale
-	// account coverage relative to the last check.
+	// check), and — when accountsEnabled — non-pre-staking epochs with
+	// no/incomplete/stale account coverage relative to the last check.
 	query := `
 		SELECT k.epoch
 		FROM koios_epoch_info k
@@ -1004,7 +1006,7 @@ func (c *Cache) GetEpochsNeedingCheck(
 		  AND (s.epoch IS NULL OR k.fetched_at > s.last_checked_at`
 	if accountsEnabled {
 		query += `
-		       OR a.epoch IS NULL OR a.complete = 0 OR a.fetched_at > s.last_checked_at`
+		       OR (k.pre_staking = 0 AND (a.epoch IS NULL OR a.complete = 0 OR a.fetched_at > s.last_checked_at))`
 	}
 	query += `)
 		ORDER BY k.epoch ASC`

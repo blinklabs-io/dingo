@@ -48,6 +48,16 @@ func TestEraTransitionPathAllowsPrimeBoundaryPair(t *testing.T) {
 	)
 }
 
+func TestEraTransitionsRunAfterSourceEraPParamEnactment(t *testing.T) {
+	path := []uint{eras.BabbageEraDesc.Id}
+	before, after := splitEraTransitionsForRollover(path)
+
+	require.Empty(t, before,
+		"successor transitions must not replace the source era before rollover")
+	require.Equal(t, path, after,
+		"the successor transition must run after source-era pparam enactment")
+}
+
 func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
 	ls := &LedgerState{}
 	path, ok := ls.eraTransitionPath(
@@ -69,6 +79,19 @@ func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
 	)
 	require.Equal(t, eras.BabbageEraDesc.Id, target)
 	require.True(t, allowTwoTransitions)
+}
+
+func TestBoundaryEraForBlockDoesNotAdvanceFromHeaderAlone(t *testing.T) {
+	ls := &LedgerState{}
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
+		eras.AlonzoEraDesc.Id,
+		eras.AlonzoEraDesc.Id,
+		eras.BabbageEraDesc.MinMajorVersion,
+		true,
+	)
+	require.Equal(t, eras.AlonzoEraDesc.Id, target,
+		"an Alonzo block remains Alonzo even when its header advertises protocol major 7")
+	require.False(t, allowTwoTransitions)
 }
 
 func TestBoundaryEraForBlockRejectsNonAdjacentHeaderEra(t *testing.T) {
