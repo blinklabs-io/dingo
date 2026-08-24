@@ -19,10 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -75,6 +75,12 @@ func checkNoDataDirOverride(pluginKind string, cfg map[string]any) error {
 // surfaces it, instead of silently activating (or reporting success for) a
 // restore whose durability on disk was never confirmed.
 var syncDir = fsyncdir.Sync
+
+// ErrRestoreRollbackPending means restore mutated an external store and its
+// automatic compensation did not complete. The error includes the retained
+// backup directory. A live caller must not reopen or serve the target until
+// recovery succeeds.
+var ErrRestoreRollbackPending = errors.New("automatic restore rollback failed")
 
 // syncDirTree fsyncs every directory under root, so a file written into
 // any of them has a durable directory entry, not just durable content --
@@ -227,6 +233,64 @@ func RestoreValidated(
 	targetDataDir string,
 	validate func(Manifest) error,
 	storageConfig RestoreStorageConfig,
+) (Manifest, error) {
+	return restoreValidated(
+		ctx,
+		host,
+		registry,
+		snapshotDir,
+		targetDataDir,
+		validate,
+		storageConfig,
+		nil,
+	)
+}
+
+// RestoreRecoverable performs the same validated restore but retains any
+// original external-store backups after the replacement passes lifecycle
+// validation. The caller must call Commit after its own enclosing operation
+// succeeds, or Rollback if a later step fails. This is used by live node
+// restore so a local directory-swap failure cannot strand new remote metadata
+// beside the original local blob store (or the inverse).
+//
+// The supplied plugin host must remain active until Commit or Rollback returns;
+// Rollback resolves the same providers through it to reload the retained copy.
+// If automatic compensation fails, this returns both
+// ErrRestoreRollbackPending and a non-nil recovery handle so a caller can
+// recognize that the target is unsafe and retry Rollback while the host is
+// still active.
+func RestoreRecoverable(
+	ctx context.Context,
+	host *plugin.Host,
+	registry *DestinationRegistry,
+	snapshotDir string,
+	targetDataDir string,
+	validate func(Manifest) error,
+	storageConfig RestoreStorageConfig,
+) (Manifest, *RestoreRecovery, error) {
+	var recovery *RestoreRecovery
+	manifest, err := restoreValidated(
+		ctx,
+		host,
+		registry,
+		snapshotDir,
+		targetDataDir,
+		validate,
+		storageConfig,
+		&recovery,
+	)
+	return manifest, recovery, err
+}
+
+func restoreValidated(
+	ctx context.Context,
+	host *plugin.Host,
+	registry *DestinationRegistry,
+	snapshotDir string,
+	targetDataDir string,
+	validate func(Manifest) error,
+	storageConfig RestoreStorageConfig,
+	retainRecovery **RestoreRecovery,
 ) (m Manifest, err error) {
 	manifest, snapshotDir, cleanup, err := resolveManifest(
 		ctx,
@@ -292,13 +356,81 @@ func RestoreValidated(
 		}
 	}()
 
+	rollback, err := prepareRestore(
+		ctx, host, manifest, snapshotDir, stagingDir, storageConfig,
+	)
+	if err != nil {
+		return Manifest{}, err
+	}
+	retainRollback := func() {
+		if retainRecovery != nil {
+			*retainRecovery = &RestoreRecovery{
+				rollback:      rollback,
+				host:          host,
+				manifest:      manifest,
+				targetDataDir: targetDataDir,
+				storageConfig: storageConfig,
+			}
+		}
+	}
+	defer func() {
+		if err == nil {
+			if retainRecovery != nil {
+				retainRollback()
+				return
+			}
+			_ = os.RemoveAll(rollback.dir)
+			return
+		}
+		if !rollback.metadataMutated && !rollback.blobMutated {
+			_ = os.RemoveAll(rollback.dir)
+			return
+		}
+		rollbackErr := rollback.restore(
+			context.WithoutCancel(
+				ctx,
+			),
+			host,
+			manifest,
+			stagingDir,
+			storageConfig,
+		)
+		if rollbackErr == nil {
+			_ = os.RemoveAll(rollback.dir)
+			return
+		}
+		retainRollback()
+		err = errors.Join(
+			err,
+			fmt.Errorf(
+				"%w; original backups preserved at %q: %w",
+				ErrRestoreRollbackPending,
+				rollback.dir,
+				rollbackErr,
+			),
+		)
+	}()
+
+	rollback.metadataMutated = rollback.metadataPath != ""
 	if err := restoreMetadataStore(
-		ctx, host, manifest, snapshotDir, stagingDir, storageConfig.Metadata,
+		ctx,
+		host,
+		manifest,
+		filepath.Join(snapshotDir, MetadataBackupFileName),
+		stagingDir,
+		storageConfig.Metadata,
 	); err != nil {
 		return Manifest{}, err
 	}
+	rollback.blobMutated = rollback.blobPath != ""
 	if err := restoreBlobStore(
-		ctx, host, manifest, snapshotDir, stagingDir, storageConfig.Blob,
+		ctx,
+		host,
+		manifest,
+		filepath.Join(snapshotDir, BlobBackupFileName),
+		stagingDir,
+		storageConfig.Blob,
+		rollback.blobPath != "",
 	); err != nil {
 		return Manifest{}, err
 	}
@@ -442,50 +574,321 @@ func requireEmptyOrAbsent(dir string) error {
 	return nil
 }
 
-// blobBackupMagic/blobBackupVersion mirror blobbackup.Magic/blobbackup.
-// Version (database/plugin/blob/internal/blobbackup) exactly, duplicated
-// here rather than imported: that package is internal to
-// database/plugin/blob, and Go's internal-package visibility rules block
-// importing it from this package's own, separate tree. Kept in sync by
-// hand -- if blobbackup's header format ever changes, this must change
-// with it.
-var blobBackupMagic = [4]byte{'D', 'B', 'L', 'B'}
+// restoreRollback records pre-mutation backups for remote stores. Local
+// Badger/SQLite restores need no entry here because their entire replacement
+// remains inside the disposable staging directory until the final rename.
+type restoreRollback struct {
+	dir             string
+	metadataPath    string
+	blobPath        string
+	metadataMutated bool
+	blobMutated     bool
+}
 
-const blobBackupVersion = 2
+// RestoreRecovery retains the original external stores after a successful
+// RestoreRecoverable call until its caller completes the enclosing live-node
+// operation. It is also returned with ErrRestoreRollbackPending so the caller
+// can retry an unsuccessful automatic rollback while the plugin host remains
+// active. It is safe to call Commit or Rollback more than once; the first
+// successful disposition wins.
+type RestoreRecovery struct {
+	mu            sync.Mutex
+	rollback      restoreRollback
+	host          *plugin.Host
+	manifest      Manifest
+	targetDataDir string
+	storageConfig RestoreStorageConfig
+	done          bool
+}
 
-// validateBlobBackupHeader confirms path's first 5 bytes are a recognized
-// blobbackup magic+version header, without needing a real blob store (or
-// resolving the blob plugin at all) to check it. A corrupted, truncated,
-// or simply wrong file at this path would otherwise only be discovered by
-// restoreBlobStore, which runs after restoreMetadataStore's Resettable.
-// Reset has already destroyed a live remote metadata target's real
-// tables -- see metadata.BackupValidator's doc comment for the same
-// concern on the metadata side. This is necessarily shallow (only the
-// fixed 5-byte header, not the full stream's per-record framing or its
-// terminator checksum) since this package cannot reach blobbackup's own
-// deeper validation logic across that internal-package boundary. Callers
-// must only use this for a snapshotDir whose manifest actually recorded a
-// blobbackup-format blob plugin (s3 or gcs) -- badger's native format
-// starts with different bytes entirely.
-func validateBlobBackupHeader(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open %q: %w", path, err)
+// BackupDir returns the directory holding the original external-store backups.
+// It remains useful in an error message if automatic rollback cannot complete.
+func (r *RestoreRecovery) BackupDir() string {
+	if r == nil {
+		return ""
 	}
-	defer f.Close() //nolint:errcheck
-	var header [5]byte
-	if _, err := io.ReadFull(f, header[:]); err != nil {
-		return fmt.Errorf("read %q header: %w", path, err)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rollback.dir
+}
+
+// Commit accepts the replacement and removes the retained original backups.
+func (r *RestoreRecovery) Commit() error {
+	if r == nil {
+		return nil
 	}
-	if [4]byte(header[:4]) != blobBackupMagic {
-		return fmt.Errorf("%q is not a recognized blob backup stream", path)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.done {
+		return nil
 	}
-	if header[4] != blobBackupVersion {
+	if err := os.RemoveAll(r.rollback.dir); err != nil {
+		return fmt.Errorf("remove restore rollback directory: %w", err)
+	}
+	r.done = true
+	return nil
+}
+
+// Rollback rejects the replacement and restores both original external stores.
+// Cancellation of the initiating operation is deliberately detached so it
+// cannot interrupt compensation after a destructive reset has begun.
+func (r *RestoreRecovery) Rollback(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.done {
+		return nil
+	}
+	if err := r.rollback.restore(
+		context.WithoutCancel(ctx),
+		r.host,
+		r.manifest,
+		r.targetDataDir,
+		r.storageConfig,
+	); err != nil {
 		return fmt.Errorf(
-			"%q has unsupported blob backup version %d", path, header[4],
+			"automatic restore rollback failed; original backups preserved at %q: %w",
+			r.rollback.dir,
+			err,
 		)
 	}
+	r.done = true
+	_ = os.RemoveAll(r.rollback.dir)
 	return nil
+}
+
+// prepareRestore validates both incoming archives before either live store is
+// reset. When the live-node call path explicitly permits replacement of a
+// populated remote target, it also captures both original stores first. This
+// makes every later error recoverable by restoreRollback.restore.
+func prepareRestore(
+	ctx context.Context,
+	host *plugin.Host,
+	manifest Manifest,
+	snapshotDir string,
+	targetDataDir string,
+	storageConfig RestoreStorageConfig,
+) (restoreRollback, error) {
+	rollbackDir, err := os.MkdirTemp(
+		filepath.Dir(targetDataDir), ".dingo-restore-rollback-",
+	)
+	if err != nil {
+		return restoreRollback{}, fmt.Errorf(
+			"create restore rollback directory: %w", err,
+		)
+	}
+	rollback := restoreRollback{dir: rollbackDir}
+	cleanupOnError := func(err error) (restoreRollback, error) {
+		_ = os.RemoveAll(rollbackDir)
+		return restoreRollback{}, err
+	}
+
+	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageMetadata,
+		manifest.MetadataPlugin,
+		storageConfig.Metadata,
+		metadata.ProviderDependencies{
+			DataDir:     targetDataDir,
+			StorageMode: manifest.StorageMode,
+		},
+	)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf(
+			"resolve metadata plugin %q for restore preflight: %w",
+			manifest.MetadataPlugin, err,
+		))
+	}
+	metadataBackupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
+	if _, ok := metadataStore.(metadata.Restorer); !ok {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+		return cleanupOnError(fmt.Errorf(
+			"metadata plugin %q does not support restore",
+			manifest.MetadataPlugin,
+		))
+	}
+	if _, err := os.Stat(metadataBackupPath); err != nil {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+		return cleanupOnError(fmt.Errorf(
+			"backup %q: %w", metadataBackupPath, err,
+		))
+	}
+	if validator, ok := metadataStore.(metadata.BackupValidator); ok {
+		if err := validator.ValidateBackup(ctx, metadataBackupPath); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return cleanupOnError(fmt.Errorf(
+				"validate metadata backup %q: %w", metadataBackupPath, err,
+			))
+		}
+	}
+	metadataDestructive := false
+	if destructive, ok := metadataStore.(interface {
+		HasDestructiveReset() bool
+	}); ok {
+		metadataDestructive = destructive.HasDestructiveReset()
+	}
+	if metadataDestructive && metadata.ResetOfPopulatedTargetAllowed(ctx) {
+		backuper, ok := metadataStore.(metadata.Backuper)
+		if !ok {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return cleanupOnError(fmt.Errorf(
+				"metadata plugin %q cannot retain a rollback backup",
+				manifest.MetadataPlugin,
+			))
+		}
+		rollback.metadataPath = filepath.Join(
+			rollbackDir, MetadataBackupFileName,
+		)
+		if err := backuper.BackupTo(ctx, rollback.metadataPath); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return cleanupOnError(fmt.Errorf(
+				"backup original metadata store before restore: %w", err,
+			))
+		}
+	}
+	if err := host.StopCapability(
+		ctx, plugin.CapabilityStorageMetadata,
+	); err != nil {
+		return cleanupOnError(fmt.Errorf(
+			"stop metadata plugin after restore preflight: %w", err,
+		))
+	}
+
+	blobStore, err := plugin.Resolve[blob.BlobStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageBlob,
+		manifest.BlobPlugin,
+		storageConfig.Blob,
+		blob.ProviderDependencies{DataDir: targetDataDir, RunMode: "load"},
+	)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf(
+			"resolve blob plugin %q for restore preflight: %w",
+			manifest.BlobPlugin, err,
+		))
+	}
+	if _, ok := blobStore.(blob.Restorer); !ok {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		return cleanupOnError(fmt.Errorf(
+			"blob plugin %q does not support restore", manifest.BlobPlugin,
+		))
+	}
+	blobBackupPath := filepath.Join(snapshotDir, BlobBackupFileName)
+	blobBackupFile, err := os.Open(blobBackupPath)
+	if err != nil {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		return cleanupOnError(fmt.Errorf("open %q: %w", blobBackupPath, err))
+	}
+	if validator, ok := blobStore.(blob.BackupValidator); ok {
+		err = validator.ValidateBackup(ctx, blobBackupFile)
+	}
+	closeErr := blobBackupFile.Close()
+	if err != nil {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		return cleanupOnError(fmt.Errorf(
+			"validate blob backup %q: %w", blobBackupPath, err,
+		))
+	}
+	if closeErr != nil {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		return cleanupOnError(fmt.Errorf(
+			"close blob backup %q after validation: %w",
+			blobBackupPath,
+			closeErr,
+		))
+	}
+	if _, resettable := blobStore.(blob.Resettable); resettable &&
+		metadata.ResetOfPopulatedTargetAllowed(ctx) {
+		backuper, ok := blobStore.(blob.Backuper)
+		if !ok {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			return cleanupOnError(fmt.Errorf(
+				"blob plugin %q cannot retain a rollback backup",
+				manifest.BlobPlugin,
+			))
+		}
+		rollback.blobPath = filepath.Join(rollbackDir, BlobBackupFileName)
+		rollbackFile, openErr := os.OpenFile(
+			rollback.blobPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600,
+		)
+		if openErr != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			return cleanupOnError(fmt.Errorf(
+				"create original blob rollback backup: %w", openErr,
+			))
+		}
+		backupErr := backuper.Backup(ctx, rollbackFile)
+		if backupErr == nil {
+			backupErr = rollbackFile.Sync()
+		}
+		backupCloseErr := rollbackFile.Close()
+		if backupErr != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			return cleanupOnError(fmt.Errorf(
+				"backup original blob store before restore: %w", backupErr,
+			))
+		}
+		if backupCloseErr != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			return cleanupOnError(fmt.Errorf(
+				"close original blob rollback backup: %w", backupCloseErr,
+			))
+		}
+	}
+	if err := host.StopCapability(ctx, plugin.CapabilityStorageBlob); err != nil {
+		return cleanupOnError(fmt.Errorf(
+			"stop blob plugin after restore preflight: %w", err,
+		))
+	}
+	return rollback, nil
+}
+
+func (r *restoreRollback) restore(
+	ctx context.Context,
+	host *plugin.Host,
+	manifest Manifest,
+	targetDataDir string,
+	storageConfig RestoreStorageConfig,
+) error {
+	var errs []error
+	if r.blobMutated && r.blobPath != "" {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		if err := restoreBlobStore(
+			ctx,
+			host,
+			manifest,
+			r.blobPath,
+			targetDataDir,
+			storageConfig.Blob,
+			true,
+		); err != nil {
+			errs = append(
+				errs,
+				fmt.Errorf("restore original blob store: %w", err),
+			)
+		}
+	}
+	if r.metadataMutated && r.metadataPath != "" {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+		rollbackCtx := metadata.AllowResetOfPopulatedTarget(ctx)
+		if err := restoreMetadataStore(
+			rollbackCtx,
+			host,
+			manifest,
+			r.metadataPath,
+			targetDataDir,
+			storageConfig.Metadata,
+		); err != nil {
+			errs = append(
+				errs, fmt.Errorf("restore original metadata store: %w", err),
+			)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // restoreMetadataStore resolves the manifest-recorded metadata plugin
@@ -512,7 +915,7 @@ func restoreMetadataStore(
 	ctx context.Context,
 	host *plugin.Host,
 	manifest Manifest,
-	snapshotDir string,
+	backupPath string,
 	targetDataDir string,
 	providerConfig map[string]any,
 ) error {
@@ -542,65 +945,7 @@ func restoreMetadataStore(
 			manifest.MetadataPlugin,
 		)
 	}
-	backupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
 	if resettable, ok := store.(metadata.Resettable); ok {
-		// Resettable.Reset destroys a live client/server target's actual
-		// tables directly, with no staging copy and no rollback -- unlike
-		// the file-based (sqlite/badger) path, which only ever mutates a
-		// disposable stagingDir that RestoreValidated's caller-side defer
-		// discards on any later failure. Confirm both backups this restore
-		// intends to load actually exist before paying that cost -- not
-		// just the metadata one: restoreBlobStore opens BlobBackupFileName
-		// later, after this Reset has already run, so a missing blob
-		// backup would otherwise still leave a live remote metadata target
-		// reset with no way back, even though the overall restore is
-		// guaranteed to fail moments later. Existence only, deliberately
-		// not also requiring a regular file: TestRestoreInterruptedByProcess
-		// KillLeavesTargetUntouched (database/lifecycle/restore_interrupt_
-		// test.go) legitimately replaces the metadata backup with a FIFO to
-		// get a deterministic, timing-guess-free synchronization point for
-		// its own real-SIGKILL test, and os.Stat (unlike os.Open) never
-		// blocks on a FIFO either way, so this check doesn't interfere with
-		// that regardless.
-		for _, name := range []string{MetadataBackupFileName, BlobBackupFileName} {
-			path := filepath.Join(snapshotDir, name)
-			if _, err := os.Stat(path); err != nil {
-				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-				return fmt.Errorf("backup %q: %w", path, err)
-			}
-		}
-		// Existence alone doesn't catch a corrupt or truncated backup --
-		// RestoreFrom's own parsing eventually would, but only after this
-		// Reset has already destroyed the live target's real tables. Where
-		// a plugin can check its own backup's structural integrity cheaply
-		// without touching any database (see metadata.BackupValidator's doc
-		// comment), do that first.
-		if validator, ok := store.(metadata.BackupValidator); ok {
-			if err := validator.ValidateBackup(ctx, backupPath); err != nil {
-				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-				return fmt.Errorf(
-					"validate metadata backup %q: %w", backupPath, err,
-				)
-			}
-		}
-		// The blob backup gets the same treatment, shallower: this package
-		// cannot import database/plugin/blob/internal/blobbackup (Go's
-		// internal-package visibility blocks it from outside that tree), so
-		// this only confirms the blobbackup-format header (magic + version)
-		// that s3/gcs both use, not the full per-record framing or its
-		// terminator checksum blobbackup.Restore itself verifies. badger
-		// uses an entirely different native format, not blobbackup's, so
-		// this only applies when the manifest actually recorded one of the
-		// plugins that writes it.
-		if manifest.BlobPlugin == "s3" || manifest.BlobPlugin == "gcs" {
-			blobBackupPath := filepath.Join(snapshotDir, BlobBackupFileName)
-			if err := validateBlobBackupHeader(blobBackupPath); err != nil {
-				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-				return fmt.Errorf(
-					"validate blob backup %q: %w", blobBackupPath, err,
-				)
-			}
-		}
 		if err := resettable.Reset(ctx); err != nil {
 			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
 			return fmt.Errorf(
@@ -647,9 +992,10 @@ func restoreBlobStore(
 	ctx context.Context,
 	host *plugin.Host,
 	manifest Manifest,
-	snapshotDir string,
+	backupPath string,
 	targetDataDir string,
 	providerConfig map[string]any,
+	replacePopulated bool,
 ) error {
 	store, err := plugin.Resolve[blob.BlobStore](
 		ctx,
@@ -674,7 +1020,23 @@ func restoreBlobStore(
 			manifest.BlobPlugin,
 		)
 	}
-	backupPath := filepath.Join(snapshotDir, BlobBackupFileName)
+	if replacePopulated {
+		resettable, ok := store.(blob.Resettable)
+		if !ok {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			return fmt.Errorf(
+				"blob plugin %q does not support replacing a populated store",
+				manifest.BlobPlugin,
+			)
+		}
+		if err := resettable.Reset(ctx); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			return fmt.Errorf(
+				"reset blob plugin %q before restore: %w",
+				manifest.BlobPlugin, err,
+			)
+		}
+	}
 	backupFile, err := os.Open(backupPath)
 	if err != nil {
 		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)

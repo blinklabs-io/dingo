@@ -51,6 +51,7 @@ import (
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -130,6 +131,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 	db, err := database.New(&database.Config{
 		DataDir: tmpDir,
 		Logger:  logger,
+		Network: "preview",
 	}, stores)
 	require.NoError(t, err)
 
@@ -745,11 +747,20 @@ func requireGenesisDeepForkWins(
 		)
 	}
 
-	require.Eventually(t, func() bool {
-		return n.ledgerState.Tip().Point.Slot == ancestor.Slot
-	}, 10*time.Second, 20*time.Millisecond,
-		"ledger did not roll back to the Genesis-selected fork intersection at slot %d (tip is %d)",
-		ancestor.Slot, n.ledgerState.Tip().Point.Slot,
+	require.EventuallyWithT(
+		t,
+		func(collect *assert.CollectT) {
+			assert.Equal(
+				collect,
+				ancestor.Slot,
+				n.ledgerState.Tip().Point.Slot,
+				"current ledger tip slot",
+			)
+		},
+		10*time.Second,
+		20*time.Millisecond,
+		"ledger did not roll back to the Genesis-selected fork intersection at slot %d",
+		ancestor.Slot,
 	)
 }
 
@@ -1137,6 +1148,19 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	}
 }
 
+func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{ctx: ctx, cancel: cancel}
+	pendingErr := errors.Join(
+		lifecycle.ErrRestoreRollbackPending,
+		errors.New("injected remote rollback failure"),
+	)
+
+	err := n.stopForPendingRestoreRollback(pendingErr, nil)
+	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
+	require.Error(t, n.ctx.Err(), "node must stop instead of reopening unsafe stores")
+}
+
 // TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a
 // severe regression found via manual live testing (dingo#1651 follow-up):
 // a Restore that failed because the blob backup was corrupted used to
@@ -1205,8 +1229,8 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 
 // TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss confirms the other
 // half of the same fix: restoring a snapshot from a genuinely different
-// network onto a running node must be rejected — caught by
-// validateRestoredAgainstNodeConfig before the swap — with the node's own
+// network onto a running node must be rejected by the manifest compatibility
+// callback before restore preflight can reset either remote store, with the node's own
 // data and tip left completely untouched and the node still usable,
 // rather than the node being torn down (dingo#1651 follow-up).
 func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
@@ -1246,12 +1270,12 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	oldCtx := n.ctx
 	_, err = n.Restore(context.Background(), snapshotDir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "node settings mismatch")
+	require.Contains(t, err.Error(), "manifest network")
 
 	// n.db is deliberately not asserted to be the same pointer here --
 	// see TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss's
 	// identical comment: Restore now quiesces and closes storage before
-	// validateRestoredAgainstNodeConfig runs at all, so a rejected restore
+	// the manifest compatibility callback runs, so a rejected restore
 	// still ends up with a freshly reopened *database.Database over the
 	// same untouched data, not the original pointer.
 	require.Same(t, oldCtx, n.ctx)
