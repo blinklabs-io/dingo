@@ -355,21 +355,32 @@ func (t *Txn) Do(fn func(*Txn) error) error {
 
 func (t *Txn) Commit() error {
 	t.lock.Lock()
-	if t.finished {
+	dispatchAfterUnlock := false
+	defer func() {
+		// A provider may panic while updating the commit timestamp or
+		// committing either store. Release both synchronization primitives
+		// before that panic reaches Txn.Do's recovery handler, so its Rollback
+		// can reacquire t.lock and finish the underlying transactions. Do not
+		// mark the transaction finished here: the recovery rollback still owns
+		// that transition. releaseCommitBarrierLocked is idempotent, so normal
+		// terminal paths may already have released it through finishLocked.
+		t.releaseCommitBarrierLocked()
 		t.lock.Unlock()
+		if dispatchAfterUnlock {
+			t.dispatchAfterCommit()
+		}
+	}()
+	if t.finished {
 		return nil
 	}
 	// Fail fast if neither store is available for a read-write transaction
 	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
 		t.finishLocked()
-		t.lock.Unlock()
 		return types.ErrNoStoreAvailable
 	}
 	// No need to commit for read-only, but we do want to free up resources
 	if !t.readWrite {
-		err := t.rollback()
-		t.lock.Unlock()
-		return err
+		return t.rollback()
 	}
 	// Update the commit timestamp in both DBs if using both.
 	// Track timestamp for error reporting if partial commit occurs.
@@ -381,7 +392,6 @@ func (t *Txn) Commit() error {
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
 			t.finishLocked()
-			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
@@ -394,7 +404,6 @@ func (t *Txn) Commit() error {
 				_ = t.metadataTxn.Rollback()
 			}
 			t.finishLocked()
-			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
 		}
 		// Make the blob commit durable before the metadata commit that
@@ -431,7 +440,6 @@ func (t *Txn) Commit() error {
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
-				t.lock.Unlock()
 				return ret
 			}
 		}
@@ -456,18 +464,15 @@ func (t *Txn) Commit() error {
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
-				t.lock.Unlock()
 				return ret
 			}
-			t.lock.Unlock()
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
 	t.committed = true
 	t.dispatching = true
 	t.finishLocked()
-	t.lock.Unlock()
-	t.dispatchAfterCommit()
+	dispatchAfterUnlock = true
 	return nil
 }
 
