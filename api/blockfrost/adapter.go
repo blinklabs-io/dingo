@@ -1268,15 +1268,24 @@ func drepStatus(
 	if lastActive == 0 {
 		lastActive = registrationEpoch
 	}
+	// Track whether an expiry is known separately from its value. A derived
+	// expiry of 0 is legitimate — drep_activity 0 on a DRep that last acted
+	// in epoch 0 — so testing the number for zero would read a real expiry as
+	// "none known" and report that DRep active forever.
+	//
+	// A stored expiry_epoch of 0 still means "not recorded": the column has
+	// no null, and that convention predates this function.
 	expiry := expiryEpoch
+	expiryKnown := expiry > 0
 	// Derive an expiry only when the era actually reports drep_activity.
 	// Gating on "inactivityPeriod > 0" instead would conflate an era with no
 	// DRep semantics against a chain that set drep_activity to 0, where a
 	// DRep expires the epoch it last acted.
-	if expiry == 0 && inactivityKnown {
+	if !expiryKnown && inactivityKnown {
 		expiry = lastActive + inactivityPeriod
+		expiryKnown = true
 	}
-	expired = !retired && expiry > 0 && expiry <= currentEpoch
+	expired = !retired && expiryKnown && expiry <= currentEpoch
 	return retired, expired, lastActive
 }
 
