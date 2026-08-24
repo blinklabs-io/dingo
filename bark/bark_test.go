@@ -40,6 +40,43 @@ func TestBarkListenAddrSupportsIPv6(t *testing.T) {
 	require.Equal(t, "127.0.0.1:9091", barkListenAddr("127.0.0.1", 9091))
 }
 
+func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
+	testCases := []struct {
+		name   string
+		useTLS bool
+	}{
+		{name: "cleartext"},
+		{name: "TLS", useTLS: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := BarkConfig{
+				DB:   newTestDB(t),
+				Host: "127.0.0.1",
+				Port: freeTCPPort(t),
+			}
+			if testCase.useTLS {
+				cfg.TlsCertFilePath, cfg.TlsKeyFilePath = writeTestTLSCertKey(t)
+			}
+
+			b, err := NewBark(cfg)
+			require.NoError(t, err)
+			require.NoError(t, b.Start(context.Background()))
+			t.Cleanup(func() { _ = b.Stop(context.Background()) })
+
+			b.mu.Lock()
+			server := b.server
+			b.mu.Unlock()
+			require.NotNil(t, server)
+			require.Zero(t, server.WriteTimeout,
+				"streaming responses must not have an overall write deadline")
+			require.Equal(t, 60*time.Second, server.ReadHeaderTimeout)
+			require.Equal(t, 120*time.Second, server.IdleTimeout)
+		})
+	}
+}
+
 // TestAcquireReturnsCurrentDB verifies the ordinary, uncontended path: a
 // database was set at construction time, so Acquire hands it back with a
 // working release func.
