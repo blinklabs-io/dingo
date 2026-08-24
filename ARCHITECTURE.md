@@ -4423,7 +4423,10 @@ network-block validation.
 for databases produced by older releases that advanced
 `mithril_ledger_slot` across an unvalidated gap. New imports do not create that
 shape: nonce folding and transaction effects after the stable anchor are
-produced by ordinary ledger replay.
+produced by ordinary ledger replay. Compatibility gap fetches accept a relay
+batch only when it is non-empty, hash-linked from the requested start point,
+and terminates at the exact requested end point; a mismatch falls through to
+the next bootstrap peer before any block is stored.
 
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce`, where the carried
