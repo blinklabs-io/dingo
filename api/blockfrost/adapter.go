@@ -706,10 +706,27 @@ func (a *NodeAdapter) EpochProtocolParams(
 		)
 	}
 	if len(pparamRows) == 0 {
+		// The epoch row resolved above, so the epoch itself exists; only
+		// its parameters do not. Byron is the era where that is the norm
+		// rather than a gap, and it stays reachable long after a sync
+		// completes via GET /epochs/0/parameters. Reporting "epoch not
+		// found" would tell the caller something false about what the node
+		// holds.
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"get protocol parameters for epoch %d: %w",
 			epoch,
-			ErrEpochNotFound,
+			ErrProtocolParamsUnavailable,
+		)
+	}
+	if era.DecodePParamsFunc == nil {
+		// ByronEraDesc defines no decoder because the era has no parameter
+		// CBOR to decode. Unreachable while the empty-rows check above
+		// runs first, but the nil call would panic if that ever reordered.
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: era %d: %w",
+			epoch,
+			era.Id,
+			ErrProtocolParamsUnavailable,
 		)
 	}
 	pparamRow := pparamRows[0]

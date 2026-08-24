@@ -15,7 +15,10 @@
 package blockfrost
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -304,4 +307,154 @@ VALUES (?, ?, ?, ?)`,
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)
 	assert.Nil(t, pparams)
+}
+
+// --- EpochProtocolParams: the Byron consumer that outlives the sync --------
+//
+// Unlike CurrentProtocolParams, this path stays reachable forever: GET
+// /api/v0/epochs/0/parameters on a fully synced mainnet node still resolves
+// the Byron epoch row and finds no parameter row. Raised by @wolf31o2 in
+// review.
+
+// insertByronEpoch records a Byron epoch row with no accompanying parameter
+// row, which is how a synced node genuinely stores the Byron prefix.
+func insertByronEpoch(t *testing.T, store *sql.DB, epochID uint64) {
+	t.Helper()
+	_, err := store.Exec(`
+INSERT INTO epoch (epoch_id, start_slot, length_in_slots, era_id)
+VALUES (?, ?, ?, ?)`,
+		epochID, epochID*100, 100, byron.EraIdByron,
+	)
+	require.NoError(t, err)
+}
+
+// TestEpochProtocolParams_ByronEpochReportsParamsNotEpoch separates the two
+// facts the old sentinel ran together. The epoch exists — the node holds it
+// and will answer other queries about it — and only its parameters do not.
+// Reporting "epoch not found" tells a caller something false about the node's
+// contents.
+func TestEpochProtocolParams_ByronEpochReportsParamsNotEpoch(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+	insertByronEpoch(t, store, 0)
+
+	info, err := adapter.EpochProtocolParams(0)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)
+	assert.NotErrorIs(
+		t,
+		err,
+		ErrEpochNotFound,
+		"the epoch exists; only its parameters do not",
+	)
+	assert.Equal(t, ProtocolParamsInfo{}, info)
+}
+
+// TestEpochProtocolParams_MissingEpochStillNotFound keeps the distinction
+// meaningful in the other direction: an epoch the node genuinely does not
+// hold must still report ErrEpochNotFound.
+func TestEpochProtocolParams_MissingEpochStillNotFound(t *testing.T) {
+	adapter, _, _ := newDBBackedAdapter(t)
+
+	_, err := adapter.EpochProtocolParams(999)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEpochNotFound)
+	assert.NotErrorIs(t, err, ErrProtocolParamsUnavailable)
+}
+
+// TestEpochProtocolParams_ByronRowDoesNotCallNilDecoder guards the decode
+// call. ByronEraDesc defines no DecodePParamsFunc, so reaching the decoder
+// with a Byron era would be a nil-func call. The empty-rows return covers
+// that today, which makes this a guard against a future reordering rather
+// than a live defect.
+func TestEpochProtocolParams_ByronRowDoesNotCallNilDecoder(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+	insertByronEpoch(t, store, 0)
+	// A Byron parameter row should never exist, but if one did the decode
+	// call must not be reached with a nil decoder.
+	_, err := store.Exec(`
+INSERT INTO pparams (cbor, added_slot, epoch, era_id)
+VALUES (?, ?, ?, ?)`,
+		[]byte{0xa0}, 0, 0, byron.EraIdByron,
+	)
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		_, err := adapter.EpochProtocolParams(0)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)
+	})
+}
+
+// TestHandleEpochParams_ByronEpochNotFoundNotLoggedAsError covers the
+// operator-facing half. handleLatestEpochParams logs the same expected
+// absence at Debug precisely so a from-genesis sync does not fill the log
+// with errors; this sibling handler logged every Byron-epoch query at Error
+// before reaching its not-found branch.
+func TestHandleEpochParams_ByronEpochNotFoundNotLoggedAsError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "byron params", err: ErrProtocolParamsUnavailable},
+		{name: "missing epoch", err: ErrEpochNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(
+				&buf,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			))
+			b := New(
+				BlockfrostConfig{ListenAddress: ":0"},
+				&mockNode{epochParamsErr: tc.err},
+				logger,
+			)
+
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v0/epochs/0/parameters",
+				nil,
+			)
+			req.SetPathValue("number", "0")
+			w := httptest.NewRecorder()
+			b.handleEpochParams(w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+			assert.NotContains(
+				t,
+				buf.String(),
+				`"level":"ERROR"`,
+				"an expected absence must not log at error level",
+			)
+		})
+	}
+}
+
+// TestHandleEpochParams_RealFailureStillLogsError keeps that carve-out
+// narrow: a genuine failure must still be a logged 500.
+func TestHandleEpochParams_RealFailureStillLogsError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(
+		&buf,
+		&slog.HandlerOptions{Level: slog.LevelDebug},
+	))
+	b := New(
+		BlockfrostConfig{ListenAddress: ":0"},
+		&mockNode{epochParamsErr: assert.AnError},
+		logger,
+	)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/epochs/5/parameters",
+		nil,
+	)
+	req.SetPathValue("number", "5")
+	w := httptest.NewRecorder()
+	b.handleEpochParams(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, buf.String(), `"level":"ERROR"`)
 }
