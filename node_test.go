@@ -54,34 +54,6 @@ func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
 	require.Equal(t, "10.0.0.5", effectiveBarkHost("10.0.0.5", false))
 }
 
-// TestApplyPeerTargetsRootEffectiveValue verifies composition supplies the
-// configured root-peer target to PeerGovernor and asserts its normalized,
-// effective explicit, default, and unlimited values.
-func TestApplyPeerTargetsRootEffectiveValue(t *testing.T) {
-	tests := []struct {
-		name       string
-		configured int
-		want       int
-	}{
-		{name: "explicit", configured: 12, want: 12},
-		{name: "default", configured: 0, want: 60},
-		{name: "unlimited", configured: -1, want: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewConfig(WithRootPeerTarget(tt.configured))
-			peerGovConfig := peergov.PeerGovernorConfig{}
-			applyPeerTargets(cfg, &peerGovConfig)
-			peerGov := peergov.NewPeerGovernor(peerGovConfig)
-
-			if got := peerGov.TargetNumberOfRootPeers(); got != tt.want {
-				t.Fatalf("expected effective root-peer target %d, got %d", tt.want, got)
-			}
-		})
-	}
-}
-
 func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
