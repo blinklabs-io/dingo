@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -188,6 +189,48 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 			want: true,
 		},
 		{
+			// ENETUNREACH: an IPv6 relay record on a host with no IPv6
+			// route. A local reachability fact, not a node fault.
+			name: "net op error wrapping ENETUNREACH",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: &os.SyscallError{
+					Syscall: "connect",
+					Err:     syscall.ENETUNREACH,
+				},
+			},
+			want: true,
+		},
+		{
+			// EAFNOSUPPORT: same cause, reported by the socket call
+			// instead of the route lookup.
+			name: "net op error wrapping EAFNOSUPPORT",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: &os.SyscallError{
+					Syscall: "socket",
+					Err:     syscall.EAFNOSUPPORT,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "network is unreachable string",
+			err: errors.New(
+				"dial tcp [2001:db8::1]:3001: connect: network is unreachable",
+			),
+			want: true,
+		},
+		{
+			name: "address family not supported string",
+			err: errors.New(
+				"dial tcp: connect: address family not supported by protocol family",
+			),
+			want: true,
+		},
+		{
 			name: "net op error wrapping no route",
 			err: &net.OpError{
 				Op:  "dial",
@@ -270,7 +313,10 @@ func TestIsPermanentNetworkMagicMismatch(t *testing.T) {
 		},
 		{
 			name: "same magic version data mismatch",
-			err:  &handshake.RefusedError{Version: 13, Message: sameMagicMessage},
+			err: &handshake.RefusedError{
+				Version: 13,
+				Message: sameMagicMessage,
+			},
 			want: false,
 		},
 		{
@@ -348,7 +394,10 @@ func TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart(
 		t.Fatal("permanent denial expired with the transient deny list")
 	}
 	if peerCount != 0 {
-		t.Fatalf("ledger peer count = %d, want 0 after permanent denial", peerCount)
+		t.Fatalf(
+			"ledger peer count = %d, want 0 after permanent denial",
+			peerCount,
+		)
 	}
 
 	if pg.addLedgerPeer(address) {
@@ -1034,6 +1083,63 @@ func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 		t.Fatalf(
 			"final ReconnectDelay = %s, want %s (emergency cap)",
 			got, emergencyReconnectDelay,
+		)
+	}
+}
+
+// The peergov logger already carries component=peergov, so a call site that
+// passes the attribute again emits it twice in every record. See issue #3262.
+func TestHandleConnectionClosedEvent_CriticalHotPeerLogHasSingleComponent(
+	t *testing.T,
+) {
+	var logBuf bytes.Buffer
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.102:3003",
+		NormalizedAddress: "192.168.12.102:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		// Suppress reconnect goroutine; this test only checks the log record.
+		Reconnecting: true,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	// Repeated short-lived closes escalate the backoff past
+	// emergencyReconnectDelay, which is what engages the critically-low cap
+	// and emits the log line under test.
+	for range 6 {
+		pg.mu.Lock()
+		peer.ReconnectDelay = 0
+		peer.Connection = &PeerConnection{Id: connId, IsClient: true}
+		peer.State = PeerStateWarm
+		peer.ConnectedAt = time.Now().Add(-600 * time.Millisecond)
+		pg.mu.Unlock()
+
+		pg.handleConnectionClosedEvent(event.NewEvent(
+			connmanager.ConnectionClosedEventType,
+			connmanager.ConnectionClosedEvent{ConnectionId: connId},
+		))
+	}
+
+	var found string
+	for line := range strings.SplitSeq(logBuf.String(), "\n") {
+		if strings.Contains(line, "hot peer pool critically low") {
+			found = line
+			break
+		}
+	}
+	if found == "" {
+		t.Fatal("expected the critically-low backoff cap log line")
+	}
+	if got := strings.Count(found, `"component"`); got != 1 {
+		t.Fatalf(
+			"component attribute appears %d times, want 1: %s",
+			got,
+			found,
 		)
 	}
 }
