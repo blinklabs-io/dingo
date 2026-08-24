@@ -75,8 +75,8 @@ RUN apt-get update -y && \
     postgresql-client-16 \
     sqlite3 && \
   rm -rf /var/lib/apt/lists/*
-ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
-ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+ENV LD_LIBRARY_PATH="/usr/local/lib"
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"
 COPY --from=build /code/dingo /bin/
 COPY --from=cardano-cli /usr/local/bin/cardano-cli /usr/local/bin/
 COPY --from=cardano-cli /usr/local/include/ /usr/local/include/
