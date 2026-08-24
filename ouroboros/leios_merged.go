@@ -111,6 +111,107 @@ func cloneRawMessages(in []cbor.RawMessage) []cbor.RawMessage {
 	return out
 }
 
+// validateLeiosEndorserBlockTxs binds fetched transaction wire values to the
+// manifest before the complete set is cached or applied. Leios transaction
+// references use the Cardano transaction ID (the hash of the transaction body)
+// and the complete transaction's encoded size, while leios-fetch carries each
+// transaction either directly or in a CBOR byte-string wrapper.
+func validateLeiosEndorserBlockTxs(
+	manifestRaw []byte,
+	txsRaw []cbor.RawMessage,
+) error {
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	if err != nil {
+		return fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if len(txsRaw) != len(block.TransactionReferences) {
+		return fmt.Errorf(
+			"leios endorser block transaction count mismatch: got %d, want %d",
+			len(txsRaw),
+			len(block.TransactionReferences),
+		)
+	}
+	for i, raw := range txsRaw {
+		if err := validateLeiosEndorserBlockTx(
+			i,
+			block.TransactionReferences[i],
+			raw,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateLeiosEndorserBlockTx(
+	index int,
+	ref lcommon.LeiosTransactionReference,
+	raw cbor.RawMessage,
+) error {
+	txCbor := []byte(raw)
+	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
+		var inner []byte
+		bytesRead, err := cbor.Decode(txCbor, &inner)
+		if err != nil {
+			return fmt.Errorf("unwrap endorser tx %d: %w", index, err)
+		}
+		if bytesRead != len(txCbor) {
+			return fmt.Errorf("endorser tx %d has trailing wrapper bytes", index)
+		}
+		txCbor = inner
+	}
+	var txElems []cbor.RawMessage
+	bytesRead, err := cbor.Decode(txCbor, &txElems)
+	if err != nil {
+		return fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
+	}
+	if bytesRead != len(txCbor) {
+		return fmt.Errorf("endorser tx %d has trailing envelope bytes", index)
+	}
+	if len(txElems) == 0 {
+		return fmt.Errorf("endorser tx %d has no body", index)
+	}
+	if len(txCbor) != int(ref.TransactionSize) {
+		return fmt.Errorf(
+			"endorser tx %d size mismatch: got %d, want %d",
+			index,
+			len(txCbor),
+			ref.TransactionSize,
+		)
+	}
+	if bodyHash := lcommon.Blake2b256Hash(txElems[0]); bodyHash != ref.TransactionHash {
+		return fmt.Errorf("endorser tx %d body hash mismatch", index)
+	}
+	return nil
+}
+
+func leiosEndorserBlockTxValidator(
+	manifestRaw []byte,
+	txCount int,
+) (func(int, cbor.RawMessage) error, error) {
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	if err != nil {
+		return nil, fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if len(block.TransactionReferences) != txCount {
+		return nil, fmt.Errorf(
+			"leios endorser block transaction count mismatch: got %d, want %d",
+			txCount,
+			len(block.TransactionReferences),
+		)
+	}
+	return func(index int, raw cbor.RawMessage) error {
+		if index < 0 || index >= len(block.TransactionReferences) {
+			return fmt.Errorf("endorser tx index %d out of range", index)
+		}
+		return validateLeiosEndorserBlockTx(
+			index,
+			block.TransactionReferences[index],
+			raw,
+		)
+	}, nil
+}
+
 func (o *Ouroboros) storeLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
