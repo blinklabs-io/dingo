@@ -118,7 +118,7 @@ func validImmutableFiles(
 		2, slot, firstPrev,
 	)
 	primary := make([]byte, 5)
-	primary[0] = 0
+	primary[0] = 1
 	binary.BigEndian.PutUint32(primary[1:], 0)
 	primary = append(primary, make([]byte, 4)...)
 	binary.BigEndian.PutUint32(primary[5:], 56)
