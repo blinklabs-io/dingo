@@ -588,6 +588,45 @@ func TestInboundConnectionLimit_OutboundNotCounted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAcceptLoopDoesNotBlockOnSilentHandshake(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	mockLn := newToggleMockListener()
+	cfg := ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: 2,
+		Listeners: []ListenerConfig{{
+			Listener: mockLn,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+			},
+		}},
+	}
+
+	cm := NewConnectionManager(cfg)
+	ctx := t.Context()
+	require.NoError(t, cm.Start(ctx))
+	// Consume the signal for the initial Accept call. The next signal must
+	// come after the silent peer has been accepted and setup was dispatched.
+	require.True(t, mockLn.WaitForAcceptEntered(2*time.Second))
+
+	silent, peer := net.Pipe()
+	defer peer.Close()
+	mockLn.ProvideConnection(silent)
+	require.True(
+		t,
+		mockLn.WaitForAcceptEntered(2*time.Second),
+		"silent handshake must not serialize the listener accept loop",
+	)
+
+	// Stop must close pending handshakes instead of waiting for the production
+	// timeout. The accept worker is tracked and must exit cleanly.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	require.NoError(t, cm.Stop(stopCtx))
+}
+
 func TestAcceptLoopBackoffOnError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

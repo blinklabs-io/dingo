@@ -251,82 +251,29 @@ func (c *ConnectionManager) startListener(
 			// Successful accept - reset consecutive error count
 			consecutiveErrors = 0
 
-			// Bound socket writes before either path can hand the
-			// bearer to a protocol goroutine. This must cover NtC as
-			// well as N2N: a local client that stops reading wedges a
-			// write just like a remote peer does. Helpers below that
-			// need the concrete socket type (SO_LINGER, Unix peer
-			// credentials) unwrap through the wrapper.
+			// Bound socket writes before handing the bearer to the
+			// connection setup goroutine. This must cover NtC as well as
+			// N2N: a local client that stops reading wedges a write just
+			// like a remote peer does. Helpers below that need the concrete
+			// socket type (SO_LINGER, Unix peer credentials) unwrap through
+			// the wrapper.
 			conn = withSocketDeadlines(conn)
+			if !c.trackPendingConnection(conn) {
+				continue
+			}
 
-			// NtC (node-to-client) connections bypass the inbound
-			// slot budget and per-IP rate limiting — they are local
-			// clients (wallets, tools), not network peers.
+			// NtC connections bypass the inbound slot budget and per-IP
+			// limiting. Their handshake is still moved off the accept loop.
 			if l.UseNtC {
-				// Wrap UNIX connections
-				if uConn, ok := conn.(*net.UnixConn); ok {
-					tmpConn, err := NewUnixConn(uConn)
-					if err != nil {
-						c.config.Logger.Error(
-							fmt.Sprintf("listener: accept failed: %s", err),
-						)
-						// Close errors on this reject path are intentionally
-						// discarded throughout this loop: the connection is
-						// already being torn down, and the reason is the
-						// logged error above, not whatever Close() reports.
-						_ = conn.Close()
-						continue
-					}
-					conn = tmpConn
-				}
-				c.config.Logger.Info(
-					fmt.Sprintf(
-						"listener: accepted NtC connection from %s",
-						conn.RemoteAddr(),
-					),
-				)
-				connOpts := append(
-					defaultConnOpts,
-					ouroboros.WithConnection(conn),
-				)
-				oConn, err := ouroboros.NewConnection(connOpts...)
-				if err != nil {
-					c.config.Logger.Error(
-						fmt.Sprintf(
-							"listener: failed to setup NtC connection: %s",
-							err,
-						),
+				c.goroutineWg.Go(func() {
+					c.setupAcceptedConnection(
+						ctx,
+						conn,
+						l,
+						defaultConnOpts,
+						false,
 					)
-					_ = conn.Close()
-					continue
-				}
-				peerAddr := "unknown"
-				if conn.RemoteAddr() != nil {
-					peerAddr = conn.RemoteAddr().String()
-				}
-				if !c.addNtCConnectionWithIPKey(
-					oConn, true, peerAddr, "",
-				) {
-					continue
-				}
-				// Generate event
-				if c.config.EventBus != nil {
-					c.config.EventBus.Publish(
-						InboundConnectionEventType,
-						event.NewEvent(
-							InboundConnectionEventType,
-							InboundConnectionEvent{
-								ConnectionId: oConn.Id(),
-								LocalAddr:    conn.LocalAddr(),
-								RemoteAddr:   conn.RemoteAddr(),
-								NormalizedRemoteAddr: NormalizePeerAddr(
-									peerAddr,
-								),
-								IsNtC: true,
-							},
-						),
-					)
-				}
+				})
 				continue
 			}
 
@@ -347,7 +294,9 @@ func (c *ConnectionManager) startListener(
 				}
 			}
 
-			// N2N path: reserve an inbound slot before further processing
+			// N2N path: reserve an inbound slot before spawning setup. The
+			// handshake is intentionally outside this accept loop: one silent
+			// peer must not prevent the listener from accepting another peer.
 			if !c.tryReserveInboundSlot() {
 				c.config.Logger.Warn(
 					fmt.Sprintf(
@@ -359,100 +308,173 @@ func (c *ConnectionManager) startListener(
 				_ = conn.Close()
 				continue
 			}
-			// From here on, we hold a reserved inbound slot.
-			// If setup fails, we must release it.
-
-			// Wrap UNIX connections
-			if uConn, ok := conn.(*net.UnixConn); ok {
-				tmpConn, err := NewUnixConn(uConn)
-				if err != nil {
-					c.config.Logger.Error(
-						fmt.Sprintf("listener: accept failed: %s", err),
-					)
-					_ = conn.Close()
-					c.releaseInboundSlot()
-					continue
-				}
-				conn = tmpConn
-			}
-			// Per-IP rate limiting: reject if this IP has too many
-			// connections already
-			ipKey := ipKeyFromAddr(conn.RemoteAddr())
-			if !c.acquireIPSlot(ipKey) {
-				c.config.Logger.Warn(
-					fmt.Sprintf(
-						"listener: rejected connection from %s: per-IP limit (%d) reached",
-						conn.RemoteAddr(),
-						c.config.MaxConnectionsPerIP,
-					),
+			c.goroutineWg.Go(func() {
+				c.setupAcceptedConnection(
+					ctx,
+					conn,
+					l,
+					defaultConnOpts,
+					true,
 				)
-				_ = conn.Close()
-				c.releaseInboundSlot()
-				continue
-			}
-			// Setup Ouroboros connection
-			connOpts := append(
-				defaultConnOpts,
-				ouroboros.WithConnection(conn),
-			)
-			oConn, err := ouroboros.NewConnection(connOpts...)
-			if err != nil {
-				c.config.Logger.Info(
-					fmt.Sprintf(
-						"listener: inbound connection from %s failed: %s",
-						conn.RemoteAddr(),
-						err,
-					),
-				)
-				// Release the IP slot since the connection failed
-				c.releaseIPSlot(ipKey)
-				_ = conn.Close()
-				c.releaseInboundSlot()
-				continue
-			}
-			c.config.Logger.Info(
-				fmt.Sprintf(
-					"listener: inbound connection from %s",
-					conn.RemoteAddr(),
-				),
-			)
-			// Consume the reserved slot and add to connection manager.
-			// The reservation is released because AddConnection will
-			// add the actual connection entry to the map.
-			c.consumeInboundSlot()
-			peerAddr := "unknown"
-			if conn.RemoteAddr() != nil {
-				peerAddr = conn.RemoteAddr().String()
-			}
-			if !c.addConnectionWithIPKey(
-				oConn, true, peerAddr, ipKey,
-			) {
-				continue
-			}
-			// Generate event. IsDuplex is a best-effort snapshot of the
-			// negotiated diffusion mode at publish time; subscribers that
-			// need an authoritative answer should fall back to
-			// GetConnectionById, because on paths where the handshake has
-			// not yet completed the version data is still nil here.
-			if c.config.EventBus != nil {
-				c.config.EventBus.Publish(
-					InboundConnectionEventType,
-					event.NewEvent(
-						InboundConnectionEventType,
-						InboundConnectionEvent{
-							ConnectionId:         oConn.Id(),
-							LocalAddr:            conn.LocalAddr(),
-							RemoteAddr:           conn.RemoteAddr(),
-							NormalizedRemoteAddr: NormalizePeerAddr(peerAddr),
-							IsNtC:                l.UseNtC,
-							IsDuplex:             connectionIsDuplex(oConn),
-						},
-					),
-				)
-			}
+			})
 		}
 	})
 	return nil
+}
+
+// trackPendingConnection records a bearer accepted before its handshake has
+// completed. Stop closes these bearers as well as registered connections so a
+// shutdown does not wait for the handshake deadline to expire.
+func (c *ConnectionManager) trackPendingConnection(conn net.Conn) bool {
+	c.listenersMutex.Lock()
+	defer c.listenersMutex.Unlock()
+	if c.closing {
+		closeConnAndLog(
+			c.config.Logger,
+			conn,
+			"listener: close connection accepted during shutdown failed",
+		)
+		return false
+	}
+	c.pendingConns[conn] = struct{}{}
+	return true
+}
+
+func (c *ConnectionManager) untrackPendingConnection(conn net.Conn) {
+	c.listenersMutex.Lock()
+	delete(c.pendingConns, conn)
+	c.listenersMutex.Unlock()
+}
+
+// setupAcceptedConnection performs the potentially blocking handshake outside
+// the listener's accept loop. The absolute deadline is capped by
+// handshakeDeadlineConn so the muxer's longer segment deadline cannot extend
+// an unauthenticated connection's lifetime.
+func (c *ConnectionManager) setupAcceptedConnection(
+	ctx context.Context,
+	conn net.Conn,
+	l ListenerConfig,
+	defaultConnOpts []ouroboros.ConnectionOptionFunc,
+	inboundSlotReserved bool,
+) {
+	pendingConn := conn
+	defer c.untrackPendingConnection(pendingConn)
+	stopOnCancel := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
+	defer func() {
+		stopOnCancel()
+	}()
+
+	// Wrap UNIX connections before applying the handshake wrapper so peer
+	// credentials and the unique Unix remote address remain available.
+	if uConn, ok := conn.(*net.UnixConn); ok {
+		tmpConn, err := NewUnixConn(uConn)
+		if err != nil {
+			c.config.Logger.Error("listener: accept failed", "error", err)
+			closeConnAndLog(c.config.Logger, conn, "listener: close failed")
+			if inboundSlotReserved {
+				c.releaseInboundSlot()
+			}
+			return
+		}
+		conn = tmpConn
+	}
+
+	ipKey := ""
+	if inboundSlotReserved {
+		ipKey = ipKeyFromAddr(conn.RemoteAddr())
+		if !c.acquireIPSlot(ipKey) {
+			c.config.Logger.Warn(
+				"listener: inbound connection rejected by per-IP limit",
+				"remote_addr", conn.RemoteAddr(),
+				"limit", c.config.MaxConnectionsPerIP,
+			)
+			closeConnAndLog(c.config.Logger, conn, "listener: close rejected connection failed")
+			c.releaseInboundSlot()
+			return
+		}
+	}
+
+	deadlineConn := withHandshakeDeadline(conn)
+	if err := deadlineConn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		c.config.Logger.Info("listener: failed to set handshake deadline", "error", err)
+		closeConnAndLog(c.config.Logger, conn, "listener: close failed")
+		if ipKey != "" {
+			c.releaseIPSlot(ipKey)
+		}
+		if inboundSlotReserved {
+			c.releaseInboundSlot()
+		}
+		return
+	}
+	conn = deadlineConn
+
+	connOpts := append(defaultConnOpts, ouroboros.WithConnection(conn))
+	oConn, err := ouroboros.NewConnection(connOpts...)
+	if err != nil {
+		if l.UseNtC {
+			c.config.Logger.Error("listener: failed to setup NtC connection", "error", err)
+		} else {
+			c.config.Logger.Info("listener: inbound connection failed", "error", err)
+		}
+		closeConnAndLog(c.config.Logger, conn, "listener: close failed")
+		if ipKey != "" {
+			c.releaseIPSlot(ipKey)
+		}
+		if inboundSlotReserved {
+			c.releaseInboundSlot()
+		}
+		return
+	}
+
+	// The handshake is complete; return the bearer to normal protocol-managed
+	// deadlines before registering it with the connection manager.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		c.config.Logger.Warn("listener: failed to clear handshake deadline", "error", err)
+		closeConnAndLog(c.config.Logger, oConn, "listener: close failed")
+		if ipKey != "" {
+			c.releaseIPSlot(ipKey)
+		}
+		if inboundSlotReserved {
+			c.releaseInboundSlot()
+		}
+		return
+	}
+
+	peerAddr := "unknown"
+	if conn.RemoteAddr() != nil {
+		peerAddr = conn.RemoteAddr().String()
+	}
+	if l.UseNtC {
+		c.config.Logger.Info("listener: accepted NtC connection", "remote_addr", peerAddr)
+		if !c.addNtCConnectionWithIPKey(oConn, true, peerAddr, "") {
+			return
+		}
+	} else {
+		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)
+		c.consumeInboundSlot()
+		if !c.addConnectionWithIPKey(oConn, true, peerAddr, ipKey) {
+			return
+		}
+	}
+
+	if c.config.EventBus != nil {
+		c.config.EventBus.Publish(
+			InboundConnectionEventType,
+			event.NewEvent(
+				InboundConnectionEventType,
+				InboundConnectionEvent{
+					ConnectionId:         oConn.Id(),
+					LocalAddr:            conn.LocalAddr(),
+					RemoteAddr:           conn.RemoteAddr(),
+					NormalizedRemoteAddr: NormalizePeerAddr(peerAddr),
+					IsNtC:                l.UseNtC,
+					IsDuplex:             connectionIsDuplex(oConn),
+				},
+			),
+		)
+	}
 }
 
 // calculateAcceptBackoff computes an exponential backoff duration based on
