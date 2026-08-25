@@ -457,18 +457,21 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 		fixture  string
 		claimed  archive.BlockType
 		claimedN uint
+		wantErr  error
 	}{
 		{
 			name:     "babbage served as conway",
 			fixture:  "Block_Babbage",
 			claimed:  archive.BlockType_BLOCK_TYPE_CONWAY,
 			claimedN: gledger.BlockTypeConway,
+			wantErr:  ErrArchiveBlockUndecodable,
 		},
 		{
 			name:     "shelley served as mary",
 			fixture:  "Block_Shelley",
 			claimed:  archive.BlockType_BLOCK_TYPE_MARY,
 			claimedN: gledger.BlockTypeMary,
+			wantErr:  ErrArchiveBlockTypeMismatch,
 		},
 	}
 	for _, tc := range tests {
@@ -477,12 +480,17 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			require.NotEqual(t, trueType, tc.claimedN,
 				"fixture era must differ from the claimed era")
 
-			// The misreported era must still decode, otherwise the test
-			// would pass for the wrong reason.
-			decoded, err := gledger.NewBlockFromCbor(tc.claimedN, raw)
+			decoded, err := gledger.NewBlockFromCbor(trueType, raw)
 			require.NoError(t, err,
-				"cross-era decode must succeed for this test to be meaningful")
+				"fixture must decode in its genuine era")
 			hash := decoded.Hash()
+			if tc.wantErr == ErrArchiveBlockTypeMismatch {
+				// The misreported era must still decode, otherwise the test
+				// would pass for the wrong reason.
+				_, err = gledger.NewBlockFromCbor(tc.claimedN, raw)
+				require.NoError(t, err,
+					"cross-era decode must succeed for this test to be meaningful")
+			}
 
 			db := newTestDB(t)
 			baseURL, fakeArch, httpClient := startFakeArchive(
@@ -498,7 +506,7 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			t.Cleanup(func() { _ = rTxn.Rollback() })
 
 			_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-			require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
+			require.ErrorIs(t, err, tc.wantErr)
 		})
 	}
 }
