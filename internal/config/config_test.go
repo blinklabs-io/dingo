@@ -1318,6 +1318,10 @@ func TestLoad_MidnightConfig(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
 midnight:
+  enabled: true
+  serverEnabled: true
+  reflectionEnabled: true
+  allowInsecureRemote: true
   port: 50060
   host: "127.0.0.2"
   cnightPolicyId: "cnight-policy"
@@ -1347,6 +1351,10 @@ network: "preview"
 	}
 
 	expected := MidnightConfig{
+		Enabled:                     true,
+		ServerEnabled:               true,
+		ReflectionEnabled:           true,
+		AllowInsecureRemote:         true,
 		Port:                        50060,
 		Host:                        "127.0.0.2",
 		CNightPolicyID:              "cnight-policy",
@@ -1371,6 +1379,9 @@ network: "preview"
 
 func TestLoad_MidnightEnvOverridesYAML(t *testing.T) {
 	resetGlobalConfig()
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE", "true")
 	t.Setenv("DINGO_MIDNIGHT_PORT", "50070")
 	t.Setenv("DINGO_MIDNIGHT_HOST", "127.0.0.3")
 	yamlContent := `
@@ -1395,6 +1406,10 @@ network: "preview"
 
 	if cfg.Midnight.Port != 50070 {
 		t.Fatalf("expected env midnight port 50070, got %d", cfg.Midnight.Port)
+	}
+	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled ||
+		!cfg.Midnight.AllowInsecureRemote {
+		t.Fatalf("expected environment to enable Midnight server policy: %+v", cfg.Midnight)
 	}
 	if cfg.Midnight.Host != "127.0.0.3" {
 		t.Fatalf(
