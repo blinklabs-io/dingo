@@ -209,11 +209,14 @@ type fileDispositionInformation struct {
 // directory), so the open requires FILE_DIRECTORY_FILE. SYNCHRONIZE alongside
 // DELETE, and FILE_SYNCHRONOUS_IO_NONALERT alongside
 // FILE_OPEN_FOR_BACKUP_INTENT, mirror the access Renameat opens its rename
-// source with.
+// source with; that reference has no reparse-point check of its own, so
+// FILE_READ_ATTRIBUTES is added beyond it for the same reason
+// openRelativeForDeletion needs it: rejectReparsePoint's
+// GetFileInformationByHandle call below requires it.
 func openRelativeForRename(dir windows.Handle, name string) (windows.Handle, error) {
 	handle, err := openRelative(
 		dir, name,
-		windows.DELETE|windows.SYNCHRONIZE,
+		windows.DELETE|windows.SYNCHRONIZE|windows.FILE_READ_ATTRIBUTES,
 		windows.FILE_OPEN_REPARSE_POINT|
 			windows.FILE_OPEN_FOR_BACKUP_INTENT|
 			windows.FILE_SYNCHRONOUS_IO_NONALERT|
