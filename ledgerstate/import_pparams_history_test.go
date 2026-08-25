@@ -61,11 +61,11 @@ func TestImportPParamsPersistsPreviewRewardHistory(t *testing.T) {
 		"current parameters must not substitute for the historical epoch")
 }
 
-// If the imported Go reward basis is present, omitting previous pparams is an
-// incomplete import, not permission to stamp the current payload onto the
-// historical epoch. Repeating the failed phase must return the same error and
-// leave both rows absent, proving validation happens before the atomic write.
-func TestImportPParamsFailsClosedWithoutRequiredHistory(t *testing.T) {
+// An imported Go basis whose historical parameters are unavailable must be
+// left ineligible by snapshot seeding. The pparams phase still persists the
+// usable current parameters instead of turning one skipped reward round into a
+// permanently failing bootstrap.
+func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -76,11 +76,8 @@ func TestImportPParamsFailsClosedWithoutRequiredHistory(t *testing.T) {
 	current, _ := distinctConwayPParams(t)
 	cfg := previewPParamsImportConfig(db, current, nil)
 
-	want := "historical protocol parameters for epoch 1396 are required " +
-		"by the imported reward basis for epoch 1395"
 	for range 2 {
-		err := importPParams(context.Background(), cfg)
-		require.EqualError(t, err, want)
+		require.NoError(t, importPParams(context.Background(), cfg))
 
 		previousRows, queryErr := db.Metadata().GetPParams(
 			1396, EraConway, nil,
@@ -92,46 +89,55 @@ func TestImportPParamsFailsClosedWithoutRequiredHistory(t *testing.T) {
 			1397, EraConway, nil,
 		)
 		require.NoError(t, queryErr)
-		require.Empty(t, currentRows,
-			"the current row must not partially commit before history fails")
+		require.Len(t, currentRows, 1)
+		require.Equal(t, current, currentRows[0].Cbor)
 	}
 }
 
-func TestImportPParamsGoBasisRequiresCurrentParameters(t *testing.T) {
+func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
-	// The imported Go basis alone is enough to make both sides of the first
-	// post-import reward calculation mandatory: E-1 for performance and E for
-	// calculation. Deliberately omit the Set basis and current pparams.
+	// Model the first Conway epoch. GovState's previous field has already been
+	// translated to Conway, while reward performance for E-1 still needs a
+	// Babbage row. A prior pass stored that exact historical row.
 	seedRewardBasisMarkers(t, db, 1395)
-	_, previous := distinctConwayPParams(t)
-	cfg := previewPParamsImportConfig(db, nil, previous)
+	current, translatedPrevious := distinctConwayPParams(t)
+	storedPrevious, err := cbor.Encode(testBabbagePParams())
+	require.NoError(t, err)
+	require.NoError(t, db.Metadata().SetPParams(
+		storedPrevious, 99_999, 1396, EraBabbage, nil,
+	))
+	cfg := previewPParamsImportConfig(db, current, translatedPrevious)
+	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
+	cfg.State.EraBounds[EraConway] = EraBound{
+		Slot:  100_000,
+		Epoch: previewHistoricalPParamsSnapshotEpoch,
+	}
 
-	want := "protocol parameters for epoch 1397 are required " +
-		"by the imported reward basis for epoch 1395"
 	for range 2 {
-		err := importPParams(context.Background(), cfg)
-		require.EqualError(t, err, want)
+		require.NoError(t, importPParams(context.Background(), cfg))
 
 		previousRows, queryErr := db.Metadata().GetPParams(
-			1396, EraConway, nil,
+			1396, EraBabbage, nil,
 		)
 		require.NoError(t, queryErr)
-		require.Empty(t, previousRows,
-			"historical pparams must not partially commit before current fails")
+		require.Len(t, previousRows, 1)
+		require.Equal(t, storedPrevious, previousRows[0].Cbor)
 		currentRows, queryErr := db.Metadata().GetPParams(
 			1397, EraConway, nil,
 		)
 		require.NoError(t, queryErr)
-		require.Empty(t, currentRows)
+		require.Len(t, currentRows, 1,
+			"re-entry must not duplicate an already-satisfying current row")
+		require.Equal(t, current, currentRows[0].Cbor)
 	}
 }
 
-func TestImportPParamsValidatesHistoryAgainstItsEpochEra(t *testing.T) {
+func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -150,10 +156,7 @@ func TestImportPParamsValidatesHistoryAgainstItsEpochEra(t *testing.T) {
 		Epoch: previewHistoricalPParamsSnapshotEpoch,
 	}
 
-	err = importPParams(context.Background(), cfg)
-	require.ErrorContains(t, err,
-		"validating historical protocol parameters for epoch 1396")
-	require.ErrorContains(t, err, "Babbage")
+	require.NoError(t, importPParams(context.Background(), cfg))
 
 	previousRows, queryErr := db.Metadata().GetPParams(
 		1396, EraBabbage, nil,
@@ -164,8 +167,146 @@ func TestImportPParamsValidatesHistoryAgainstItsEpochEra(t *testing.T) {
 		1397, EraConway, nil,
 	)
 	require.NoError(t, queryErr)
-	require.Empty(t, currentRows,
-		"cross-era validation must happen before either row is written")
+	require.Len(t, currentRows, 1)
+	require.Equal(t, current, currentRows[0].Cbor)
+}
+
+func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, state.Epoch, uint64(2))
+	current, translatedPrevious := distinctConwayPParams(t)
+	state.PParamsData = current
+	state.PrevPParamsData = translatedPrevious
+	state.EraIndex = EraConway
+	state.EraBoundEpoch = state.Epoch
+	state.EraBoundSlot = state.Tip.Slot
+	state.EraBounds = previewEraBounds()
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: state,
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	noProgress := func(ImportProgress) {}
+	_, err = importCertState(
+		context.Background(), cfg, state.Tip.Slot, noProgress,
+	)
+	require.NoError(t, err)
+	// Reproduce the partial state left by the old importer: the provisional Go
+	// basis committed before the pparams phase discovered that its translated
+	// previous payload could not be decoded as the old era.
+	require.NoError(t, importSnapShots(
+		context.Background(), cfg, state.Tip.Slot, noProgress, false,
+	))
+	preexistingGo, err := db.Metadata().GetRewardSnapshot(
+		state.Epoch-2, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, preexistingGo)
+	require.False(t, preexistingGo.Authoritative)
+	preexistingPools, err := db.Metadata().GetRewardPoolInputs(
+		state.Epoch-2, nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, preexistingPools)
+
+	state.EraBounds[EraConway] = EraBound{
+		Slot:  state.Tip.Slot,
+		Epoch: state.Epoch,
+	}
+	require.NoError(t, importSnapShots(
+		context.Background(), cfg, state.Tip.Slot, noProgress, false,
+	))
+
+	goBasis, err := db.Metadata().GetRewardSnapshot(
+		state.Epoch-2, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, goBasis,
+		"the Go basis cannot be consumed without old-era historical pparams")
+	goPools, err := db.Metadata().GetRewardPoolInputs(state.Epoch-2, nil)
+	require.NoError(t, err)
+	require.Empty(t, goPools)
+	goStake, err := db.Metadata().GetRewardStakeInputs(state.Epoch-2, nil)
+	require.NoError(t, err)
+	require.Empty(t, goStake)
+	for _, epoch := range []uint64{state.Epoch - 1, state.Epoch} {
+		basis, queryErr := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		require.NoError(t, queryErr)
+		require.NotNil(t, basis,
+			"epoch %d does not depend on unavailable old-era history", epoch)
+	}
+
+	require.NoError(t, importPParams(context.Background(), cfg))
+	previousRows, err := db.Metadata().GetPParams(
+		state.Epoch-1, EraBabbage, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, previousRows)
+	currentRows, err := db.Metadata().GetPParams(
+		state.Epoch, EraConway, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, currentRows, 1)
+}
+
+func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: state,
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	noProgress := func(ImportProgress) {}
+	_, err = importCertState(
+		context.Background(), cfg, state.Tip.Slot, noProgress,
+	)
+	require.NoError(t, err)
+
+	const retainedPoolCount = uint64(999)
+	require.NoError(t, db.Metadata().SaveRewardSnapshot(
+		&models.RewardSnapshot{
+			Epoch:          state.Epoch - 2,
+			SnapshotType:   "mark",
+			TotalPoolCount: retainedPoolCount,
+			Authoritative:  true,
+		},
+		nil,
+	))
+	require.NoError(t, importSnapShots(
+		context.Background(), cfg, state.Tip.Slot, noProgress, false,
+	))
+
+	basis, err := db.Metadata().GetRewardSnapshot(
+		state.Epoch-2, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, basis)
+	require.True(t, basis.Authoritative)
+	require.Equal(t, retainedPoolCount, basis.TotalPoolCount)
 }
 
 func seedPreviewRewardBases(t *testing.T, db *database.Database) {
