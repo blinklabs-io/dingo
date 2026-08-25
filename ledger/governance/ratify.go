@@ -27,8 +27,9 @@ import (
 // bootstrapProtocolVersion is the Conway protocol major version during which
 // the bootstrap governance rules apply. Bootstrap changes the DRep threshold
 // and committee minimum-size behavior, but keeps the per-body SPO and CC
-// requirements for each eligible action. A missing CC is represented by its
-// NoVotingThreshold and therefore cannot block an eligible action.
+// requirements for each eligible action. Bootstrap waives the committee
+// minimum-size requirement, but an absent committee still cannot approve a
+// committee-gated action.
 const bootstrapProtocolVersion = 9
 
 // RatifyDecision holds the outcome of evaluating a proposal's tally
@@ -136,17 +137,11 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 		decision.CCApproved = false
 		decision.FailureReason = "cc in no-confidence state"
 	case in.ActiveCCCount == 0:
-		if inBootstrap {
-			// With no seated committee there is no CC voting body. Conway
-			// represents that body with NoVotingThreshold, so it does not
-			// block an otherwise eligible bootstrap action. A seated CC still
-			// follows the normal quorum path below.
-			decision.CCApproved = true
-			break
-		}
 		// Check zero-members before the min-size comparison so the
 		// failure reason distinguishes "no members" from "below
-		// minimum" even when MinCommitteeSize >= 1.
+		// minimum" even when MinCommitteeSize >= 1. Bootstrap bypasses
+		// only the minimum-size gate; it does not create committee approval
+		// when no active members exist.
 		decision.CCApproved = false
 		decision.FailureReason = "cc has no active members"
 	case !inBootstrap && in.ActiveCCCount < int(in.PParams.MinCommitteeSize): //nolint:gosec

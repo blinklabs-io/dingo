@@ -93,19 +93,19 @@ func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
 	assert.False(t, d.Ratified)
 }
 
-func TestShouldRatify_BootstrapNoVotingBodiesPassWithoutVotes(t *testing.T) {
+func TestShouldRatify_BootstrapMissingCommitteeDoesNotRatify(t *testing.T) {
 	pparams := conwayPParamsFixture(9)
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeParameterChange),
 	}
-	// Non-security parameter changes have NoVotingAllowed for SPOs. With
-	// no seated CC, its body is NoVotingThreshold, so the DRep's bootstrap
-	// zero threshold is enough even when the tally contains no votes.
+	// Non-security parameter changes have no SPO gate and bootstrap waives
+	// the DRep threshold, but an absent committee still cannot approve a
+	// committee-gated action.
 	d := ShouldRatify(ratifyInputs(tally, pparams, 5, 0, nil, 9, false))
-	assert.True(t, d.Ratified)
+	assert.False(t, d.Ratified)
 	assert.True(t, d.DRepApproved)
 	assert.True(t, d.SPOApproved)
-	assert.True(t, d.CCApproved)
+	assert.False(t, d.CCApproved)
 }
 
 func TestShouldRatify_BootstrapPerBodyRequirements(t *testing.T) {
@@ -418,8 +418,8 @@ func TestShouldRatify_BootstrapCCChecksRemainRequired(t *testing.T) {
 		}
 	}
 
-	assert.True(t, ShouldRatify(inputs(0, nil)).Ratified,
-		"bootstrap must not require a vote from a non-seated committee")
+	assert.False(t, ShouldRatify(inputs(0, nil)).Ratified,
+		"bootstrap must not approve an action without a seated committee")
 	assert.False(t, ShouldRatify(inputs(1, nil)).Ratified,
 		"a seated committee still requires a quorum")
 }

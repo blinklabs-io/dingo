@@ -337,12 +337,12 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
 }
 
-// TestProcessEpochBootstrapZeroVoteParameterChangeRatifies verifies that the
-// epoch-boundary caller uses PV9's per-body decision: an eligible,
-// non-security parameter change has no SPO gate, and with no seated committee
-// the CC body is NoVotingThreshold. The bootstrap DRep threshold is zero, so
-// the proposal can ratify with no votes at all.
-func TestProcessEpochBootstrapZeroVoteParameterChangeRatifies(t *testing.T) {
+// TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify
+// verifies that the epoch-boundary caller does not treat PV9's committee
+// minimum-size exception as approval from an absent committee.
+func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
+	t *testing.T,
+) {
 	db, _ := newTallyTestDB(t)
 	poolDeposit := uint(1234)
 	actionCbor, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
@@ -387,13 +387,11 @@ func TestProcessEpochBootstrapZeroVoteParameterChangeRatifies(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
 
-	assert.Equal(t, 1, out.RatifiedCount)
+	assert.Equal(t, 0, out.RatifiedCount)
 	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
 	require.NoError(t, err)
-	require.NotNil(t, proposal.RatifiedEpoch)
-	require.NotNil(t, proposal.RatifiedSlot)
-	assert.Equal(t, stabilityTestEpoch, *proposal.RatifiedEpoch)
-	assert.Equal(t, uint64(500), *proposal.RatifiedSlot)
+	assert.Nil(t, proposal.RatifiedEpoch)
+	assert.Nil(t, proposal.RatifiedSlot)
 }
 
 func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
