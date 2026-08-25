@@ -2380,8 +2380,9 @@ The `LedgerView` interface provides query access to ledger state:
   always-abstain and always-no-confidence DRep types), or nil when the account
   is absent or has no DRep delegation. This implements the
   `common.DRepDelegationState` capability used by Conway protocol versions 10
-  and 11 to reject reward withdrawals whose stake credential is not delegated
-  to a DRep.
+  and 11 to reject key-hash reward withdrawals whose stake credential is not
+  delegated to a DRep. Script-hash reward credentials are governed by script
+  validation and do not participate in this DRep-delegation gate.
 - Conway governance validation exposes the authoritative enacted root for each
   CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
   means those roots are known to be absent; lookup failures are propagated
