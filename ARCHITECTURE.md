@@ -2366,6 +2366,15 @@ The `LedgerView` interface provides query access to ledger state:
   `common.DRepDelegationState` capability used by Conway protocol versions 10
   and 11 to reject reward withdrawals whose stake credential is not delegated
   to a DRep.
+- Conway governance validation exposes the authoritative enacted root for each
+  CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
+  means those roots are known to be absent; lookup failures are propagated
+  instead of weakening ancestry checks. `GovActionById` exposes pending
+  actions and the current enacted roots, while excluding expired and superseded
+  enacted actions. It rehydrates their era-specific action CBOR and reports the
+  final slot of a pending action's inclusive expiry epoch so ancestry,
+  hard-fork succession, proposal expiry, and security-group voting use the
+  persisted Dingo state.
 
 ### Local State Query
 
