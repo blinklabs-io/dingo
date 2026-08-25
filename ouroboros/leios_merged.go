@@ -604,6 +604,21 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		)
 		return nil, false
 	}
+	if len(txsRaw) > 0 {
+		if err := validateLeiosEndorserBlockTxs(manifestRaw, txsRaw); err != nil {
+			// Transaction blobs written before manifest binding was enforced (or
+			// corrupted afterward) are only a historical-serving cache. Keep the
+			// content-addressed manifest, but discard the untrusted bodies so the
+			// normal by-point path fetches and persists a verified replacement.
+			o.config.Logger.Debug(
+				"discarding leios EB txs that mismatch persisted manifest",
+				"component", "network",
+				"hash", hex.EncodeToString(hash),
+				"error", err,
+			)
+			txsRaw = nil
+		}
+	}
 
 	cacheKeys := []string{leiosBlockKey(hash)}
 	data := &leiosEndorserBlockData{

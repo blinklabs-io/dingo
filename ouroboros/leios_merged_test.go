@@ -457,10 +457,19 @@ func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
 func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 	t *testing.T,
 ) {
-	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
+	tx0, ref0 := testLeiosManifestTx(t, 0)
+	tx1, ref1 := testLeiosManifestTx(t, 1)
+	blockRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref0, ref1},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		10,
+		lcommon.Blake2b256Hash(blockRaw).Bytes(),
+	)
 	txsRaw := []cbor.RawMessage{
-		mustCbor(t, "tx0"),
-		mustCbor(t, "tx1"),
+		tx0,
+		tx1,
 	}
 
 	o := newTestOuroborosWithLeiosDB(t)
@@ -780,6 +789,63 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(t *testing.T) 
 	cached, ok = o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.True(t, cached.completeTxCache())
+}
+
+func TestLoadLeiosEBFromDBRejectsTransactionsThatMismatchManifest(t *testing.T) {
+	_, ref := testLeiosManifestTx(t, 1)
+	mismatchedTx, _ := testLeiosManifestTx(t, 2)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		123,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	require.NoError(t, db.SetLeiosEB(
+		point.Slot,
+		point.Hash,
+		manifestRaw,
+		[]cbor.RawMessage{mismatchedTx},
+	))
+
+	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok, "the valid manifest should remain available")
+	require.False(
+		t,
+		cached.completeTxCache(),
+		"mismatched persisted transactions must be refetched",
+	)
+	require.Empty(t, cached.txsRaw)
+}
+
+func TestLoadLeiosEBFromDBAcceptsTransactionsThatMatchManifest(t *testing.T) {
+	validTx, ref := testLeiosManifestTx(t, 1)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		123,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	require.NoError(t, db.SetLeiosEB(
+		point.Slot,
+		point.Hash,
+		manifestRaw,
+		[]cbor.RawMessage{validTx},
+	))
+
+	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.True(t, cached.completeTxCache())
+	require.Equal(t, []cbor.RawMessage{validTx}, cached.txsRaw)
 }
 
 func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
