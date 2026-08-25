@@ -233,6 +233,12 @@ services:
     depends_on:
       dingo-1:
         condition: service_healthy
+      dingo-2:
+        condition: service_healthy
+      dingo-3:
+        condition: service_healthy
+      dingo-relay:
+        condition: service_healthy
     environment:
       # Connect over the node-to-client TCP port (3002) rather than the
       # in-container unix socket. The dingo node creates /ipc/dingo.socket
@@ -247,6 +253,7 @@ services:
       # an unconfirmed output from an earlier transaction in the same batch.
       TXPUMP_TX_COUNT_MIN: "1"
       TXPUMP_TX_COUNT_MAX: "1"
+      TXPUMP_CONFIRMATION_SLOTS: "600"
       # txpump interprets cooldowns as milliseconds. Keep this at the
       # 5-15 second cadence documented in README.md.
       TXPUMP_COOLDOWN_MIN: "5000"
@@ -363,6 +370,10 @@ services:
     depends_on:
       dingo-producer:
         condition: service_healthy
+      cardano-producer:
+        condition: service_healthy
+      cardano-relay:
+        condition: service_healthy
     environment:
       # Connect over the node-to-client TCP port (3002) rather than the
       # in-container unix socket. The dingo node creates the socket 0755
@@ -376,6 +387,7 @@ services:
       # an unconfirmed output from an earlier transaction in the same batch.
       TXPUMP_TX_COUNT_MIN: "1"
       TXPUMP_TX_COUNT_MAX: "1"
+      TXPUMP_CONFIRMATION_SLOTS: "600"
       # txpump interprets cooldowns as milliseconds. Keep this at the
       # 5-15 second cadence documented in README.md.
       TXPUMP_COOLDOWN_MIN: "5000"
