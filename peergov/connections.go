@@ -86,8 +86,26 @@ func isExpectedNetworkDialError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// ENETUNREACH and EAFNOSUPPORT are siblings of the cases below: on a
+	// host with no IPv6 route, every AAAA relay record the ledger publishes
+	// produces one. They are facts about local reachability, not node
+	// faults, and logging them at ERROR buries the genuine ones. Matched by
+	// errno first, like isAddrInUseError, so a wrapped *os.SyscallError is
+	// classified without depending on the message text. The errno and
+	// message forms below both target Unix-like platforms, matching the
+	// existing classifiers in this file; Windows reports these as WSA codes
+	// with different message text and is not covered.
+	if errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EAFNOSUPPORT) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such host") ||
+	return strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(
+			msg,
+			"address family not supported by protocol family",
+		) ||
+		strings.Contains(msg, "no such host") ||
 		strings.Contains(msg, "server misbehaving") ||
 		strings.Contains(msg, "connect: connection refused") ||
 		strings.Contains(msg, "no route to host") ||
@@ -993,7 +1011,6 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 							"hot peer pool critically low; capping reconnect backoff to replenish faster",
 							"address", peer.Address,
 							"capped_delay", peer.ReconnectDelay,
-							"component", "peergov",
 						)
 					} else {
 						p.config.Logger.Warn(

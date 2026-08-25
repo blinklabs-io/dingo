@@ -276,6 +276,7 @@ type mockRedeemers struct {
 		key lcommon.RedeemerKey
 		val lcommon.RedeemerValue
 	}
+	valueOverride *lcommon.RedeemerValue
 }
 
 func (m *mockRedeemers) Indexes(
@@ -288,6 +289,9 @@ func (m *mockRedeemers) Value(
 	_ uint,
 	_ lcommon.RedeemerTag,
 ) lcommon.RedeemerValue {
+	if m.valueOverride != nil {
+		return *m.valueOverride
+	}
 	return lcommon.RedeemerValue{}
 }
 
@@ -343,10 +347,11 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 
 func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// A zero declared budget is intentional: restrictive validation should
-	// execute this script with the enormous budget and classify the resulting
-	// overage as a Plutus disagreement. The script is small enough that its CEK
-	// steps remain in the trailing slippage batch. Haskell flushes that batch on
-	// a successful return, producing the complete 112100 CPU / 800 memory cost.
+	// execute this script with the protocol transaction budget and classify the
+	// resulting overage as a Plutus disagreement. The script is small enough
+	// that its CEK steps remain in the trailing slippage batch. Haskell flushes
+	// that batch on a successful return, producing the complete 112100 CPU / 800
+	// memory cost.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -364,18 +369,19 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		validate func(lcommon.Transaction, lcommon.LedgerState) error
+		validate func(lcommon.Transaction, lcommon.LedgerState, lcommon.ExUnits) error
 		reset    func()
 	}{
 		{
 			name: "alonzo",
-			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState, maxTxExUnits lcommon.ExUnits) error {
 				return ValidateTxAlonzo(
 					tx,
 					0,
 					ls,
 					&alonzo.AlonzoProtocolParameters{
 						ProtocolMajor: 5,
+						MaxTxExUnits:  maxTxExUnits,
 					},
 				)
 			},
@@ -385,13 +391,14 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		},
 		{
 			name: "babbage",
-			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState, maxTxExUnits lcommon.ExUnits) error {
 				return ValidateTxBabbage(
 					tx,
 					0,
 					ls,
 					&babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
+						MaxTxExUnits:  maxTxExUnits,
 					},
 				)
 			},
@@ -462,7 +469,10 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					addr:       addr,
 				},
 			)
-			err = tc.validate(tx, ls)
+			err = tc.validate(tx, ls, lcommon.ExUnits{
+				Steps:  1_000_000,
+				Memory: 1_000_000,
+			})
 			require.Error(t, err)
 
 			var plutusErr conway.PlutusScriptFailedError
@@ -475,6 +485,27 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 				plutusErr.Err.Error(),
 				"script exceeded declared budget: used (112100 cpu, 800 mem)",
 			)
+
+			t.Run("restrictive evaluation is capped by protocol transaction budget", func(t *testing.T) {
+				err := tc.validate(tx, ls, lcommon.ExUnits{
+					Steps:  1_000,
+					Memory: 100,
+				})
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "out of budget")
+			})
+
+			t.Run("valid execution remains accepted within both budgets", func(t *testing.T) {
+				value := lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
+					Steps:  112_100,
+					Memory: 800,
+				}}
+				witnesses.redeemers.(*mockRedeemers).valueOverride = &value
+				require.NoError(t, tc.validate(tx, ls, lcommon.ExUnits{
+					Steps:  1_000_000,
+					Memory: 1_000_000,
+				}))
+			})
 		})
 	}
 }

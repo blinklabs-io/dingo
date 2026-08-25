@@ -1403,10 +1403,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
-	// Configure the Midnight gRPC server (only in API mode with a non-zero
-	// port). Port 0 disables the server while leaving the indexer eligible to
-	// run.
-	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
+	// Configure the Midnight gRPC server only after the operator explicitly
+	// enables it in API mode. The indexer has an independent opt-in.
+	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
@@ -1422,14 +1421,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					}
 					return block.Number, true, nil
 				},
-				Host:            n.config.midnight.Host,
-				Port:            n.config.midnight.Port,
-				TLSCertFilePath: n.config.tlsCertFilePath,
-				TLSKeyFilePath:  n.config.tlsKeyFilePath,
-				ShutdownTimeout: n.config.shutdownTimeout,
-				Database:        midnightserver.NewDatabase(n.db),
-				SlotTimer:       n.ledgerState,
-				PromRegistry:    n.config.promRegistry,
+				Host:                n.config.midnight.Host,
+				Port:                n.config.midnight.Port,
+				TLSCertFilePath:     n.config.tlsCertFilePath,
+				TLSKeyFilePath:      n.config.tlsKeyFilePath,
+				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
+				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:     n.config.shutdownTimeout,
+				Database:            midnightserver.NewDatabase(n.db),
+				SlotTimer:           n.ledgerState,
+				PromRegistry:        n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1696,6 +1697,11 @@ func applyPeerTargets(cfg Config, peerGovConfig *peergov.PeerGovernorConfig) {
 	peerGovConfig.TargetNumberOfEstablishedPeers = cfg.targetNumberOfEstablishedPeers
 	peerGovConfig.TargetNumberOfActivePeers = cfg.targetNumberOfActivePeers
 	peerGovConfig.TargetNumberOfRootPeers = cfg.targetNumberOfRootPeers
+}
+
+// midnightServerActive centralizes the startup and live-reinitialization gate.
+func midnightServerActive(storageMode StorageMode, cfg MidnightConfig) bool {
+	return storageMode.IsAPI() && cfg.ServerEnabled && cfg.Port > 0
 }
 
 // logErrIfNotNil logs err at Error level if non-nil, so a cleanup step run

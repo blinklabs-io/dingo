@@ -48,6 +48,16 @@ const (
 	defaultEmergencyLedgerPeerRefreshInterval = 30 * time.Second
 	defaultEmergencyDiscoveryCheckInterval    = 30 * time.Second
 
+	// emergencyLedgerRefreshBackoffFactor escalates the emergency refresh
+	// interval once starvation stops being transient. The emergency cadence
+	// exists to recover a collapsed peer pool in seconds; a node that is
+	// still short of upstreams after many rounds is not going to be rescued
+	// by a faster cadence, and re-running discovery every base interval for
+	// hours re-walks the whole relay set each time. The escalated interval
+	// is capped at LedgerPeerRefreshInterval, so an urgent node never
+	// discovers less often than a healthy one.
+	emergencyLedgerRefreshBackoffFactor = 2
+
 	// Default peer targets match cardano-node config.json defaults.
 	defaultTargetNumberOfKnownPeers       = 150
 	defaultTargetNumberOfEstablishedPeers = 50
@@ -124,6 +134,17 @@ const (
 	// remain stale after interface or routing changes while avoiding a
 	// per-dial interface scan.
 	dialFamilyCacheTTL = 1 * time.Minute
+	// negativeDNSCacheTTL bounds how long a failed ledger-relay resolution
+	// suppresses further lookups for the same hostname. Ledger discovery
+	// re-offers the full relay set every round, and a pool that published a
+	// dead hostname usually keeps publishing it, so without this every dead
+	// entry is re-resolved on every round forever. The TTL keeps a hostname
+	// that starts resolving from being pinned as dead.
+	negativeDNSCacheTTL = 15 * time.Minute
+	// negativeDNSCacheMaxEntries bounds the negative cache. Relay hostnames
+	// come from on-chain pool registrations and are untrusted input, so the
+	// cache must not be able to grow without limit.
+	negativeDNSCacheMaxEntries = 1024
 )
 
 // Peer source priority values for removal decisions.
@@ -150,9 +171,19 @@ type PeerGovernor struct {
 	config                PeerGovernorConfig
 	lastLedgerPeerRefresh atomic.Int64        // UnixNano timestamp of last ledger peer discovery
 	ledgerKnownAddrs      map[string]struct{} // addresses seen from ledger discovery
-	bootstrapExited       bool                // Whether bootstrap peers have been exited
-	lastBootstrapExit     time.Time           // Timestamp of most recent bootstrap exit
-	inboundPruned         int                 // cumulative inbound prunes since start
+	// emergencyRefreshRounds counts consecutive emergency ledger-discovery
+	// rounds since the node last had enough upstreams. It drives the
+	// escalating emergency refresh interval and resets on recovery.
+	emergencyRefreshRounds atomic.Uint32
+	// negativeDNS caches ledger relay hostnames that failed to resolve,
+	// keyed by lowercased hostname, valued by cache expiry. Guarded by
+	// negativeDNSMu rather than mu: resolution happens outside the peer
+	// lock, and must stay that way.
+	negativeDNSMu     sync.Mutex
+	negativeDNS       map[string]time.Time
+	bootstrapExited   bool      // Whether bootstrap peers have been exited
+	lastBootstrapExit time.Time // Timestamp of most recent bootstrap exit
+	inboundPruned     int       // cumulative inbound prunes since start
 	// lastEligibleUpstreamSkipLogged edge-triggers the gossip-churn log
 	// that fires when the node is down to its last eligible upstream. The
 	// condition persists across churn intervals, so the INFO line is
@@ -421,6 +452,7 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		denyList:          make(map[string]time.Time),
 		permanentDenyList: make(map[string]struct{}),
 		ledgerKnownAddrs:  make(map[string]struct{}),
+		negativeDNS:       make(map[string]time.Time),
 	}
 	if cfg.PromRegistry != nil {
 		p.initMetrics()

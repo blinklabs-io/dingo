@@ -154,12 +154,17 @@ type TokenRegistryConfig struct {
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
 // Indexing is only active when Enabled is true AND Dingo is running in API
 // storage mode -- both are required, since the indexer depends on the
-// api-mode indexes to function. Port 0 disables the gRPC listener while
-// leaving indexing eligible to run.
+// api-mode indexes to function. ServerEnabled independently opts into the
+// listener so persisted Midnight data can be served without running the
+// indexer. Reflection and non-loopback plaintext exposure are separate,
+// default-off decisions.
 type MidnightConfig struct {
-	Enabled bool
-	Port    uint
-	Host    string
+	Enabled             bool
+	ServerEnabled       bool
+	ReflectionEnabled   bool
+	AllowInsecureRemote bool
+	Port                uint
+	Host                string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -764,6 +769,9 @@ func (c *Config) syncCompatFields() {
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
+		ServerEnabled:               c.cfg.Midnight.ServerEnabled,
+		ReflectionEnabled:           c.cfg.Midnight.ReflectionEnabled,
+		AllowInsecureRemote:         c.cfg.Midnight.AllowInsecureRemote,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -1602,6 +1610,9 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 		}
 		c.cfg.Midnight = internalconfig.MidnightConfig{
 			Enabled:                     cfg.Enabled,
+			ServerEnabled:               cfg.ServerEnabled,
+			ReflectionEnabled:           cfg.ReflectionEnabled,
+			AllowInsecureRemote:         cfg.AllowInsecureRemote,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,

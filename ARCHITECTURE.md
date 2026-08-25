@@ -979,7 +979,8 @@ When `Node.Run()` is called, components are initialized in this order:
 18. Chainsync stall recycler (`internal/chainsyncrecycler.Recycler.Start`)
 19. UTxO RPC server (if API storage mode and port configured)
 20. Bark C2/archive server (if port configured)
-21. Midnight gRPC server (if API storage mode and midnight port configured)
+21. Midnight gRPC server (if API storage mode and
+    `midnight.serverEnabled`, with a non-zero port)
 22. Blockfrost API (if API storage mode and port configured)
 23. Mesh API (if API storage mode and port configured)
 24. Off-chain metadata fetcher (if API storage mode)
@@ -1349,12 +1350,17 @@ window. Later runs continue the cleanup, keeping SQLite occupancy bounded.
 
 ### Midnight gRPC Server
 
-In `storageMode: api` with `midnight.port > 0`, `node.go` starts
+In `storageMode: api` with `midnight.serverEnabled: true` and a non-zero
+`midnight.port`, `node.go` starts
 `midnight/server.Server`, a native `google.golang.org/grpc` server (not
 ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
-`MidnightState` service, plus gRPC reflection and a `grpc_health_v1` health
-service reporting `SERVING`. The `MidnightState` service is backed by two
+`MidnightState` service and a `grpc_health_v1` health service reporting
+`SERVING`; gRPC reflection is registered only when
+`midnight.reflectionEnabled` is also true. The server flag is independent of
+`midnight.enabled`, which controls the indexer: an operator may index without
+serving or serve already-persisted rows without running the scanner. The
+`MidnightState` service is backed by two
 groups of injected dependencies, both wired in `node.go`. Per the
 composition-boundary principle (domain packages depend on narrow,
 constructor-injected interfaces, not concrete node/database types),
@@ -1429,9 +1435,17 @@ returns a clean `codes.FailedPrecondition` rather than nil-panicking. TLS is
 enabled when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start`
 binds the listener synchronously (so bind/cert errors surface immediately)
 and serves in a goroutine; a context watcher performs a bounded
-`GracefulStop`, escalating to a hard `Stop` on timeout. Setting
-`midnight.port` to `0` disables the server without affecting indexer
-eligibility.
+`GracefulStop`, escalating to a hard `Stop` on timeout. The listener defaults
+to `127.0.0.1:50051`; an explicitly empty host is normalized to that loopback
+default before validation. Without TLS, any wildcard, hostname other than
+`localhost`, or concrete non-loopback host is rejected unless the operator
+sets `midnight.allowInsecureRemote: true`; that override is intended only when
+transport security and access control are supplied outside Dingo. Dingo does
+not add authentication to this Acropolis-compatible native gRPC surface.
+`Config.Validate` rejects `serverEnabled` outside API storage mode, a zero port
+while enabled, and `reflectionEnabled` without the server. When the server is
+disabled, its host and port are inactive and do not participate in port
+validation or listener collision checks.
 
 ### Off-chain Metadata Fetching
 
@@ -1760,7 +1774,7 @@ reinitialization, then calls `Commit`; a later swap failure can still call
 `Rollback` and restore the external pair before the node resumes.
 
 - `dblifecycle.Service` is the single entry point the `dingo database snapshot|restore|truncate` CLI commands (`cmd/dingo/database.go`) call. By default it opens its own `*database.Database` against the configured data directory the same way `load`/`mithril` do (offline mode) — this must not run against a data directory a `dingo serve` process currently has open. `Service.SetLiveNode` (`internal/dblifecycle/service.go`) optionally binds it to a running `*dingo.Node` instead (see below), for restore/truncate against a live node.
-- `dblifecycle.Manager` (constructed in `node.go` alongside, and distinct from, the stake-snapshot `snapshot.Manager`) captures automatic snapshots at epoch boundaries when `databaseLifecycle.snapshotEnabled` is configured. It subscribes to `epoch.transition` on the EventBus rather than the ledger's synchronous epoch-boundary hook, since a multi-gigabyte backup must never run inside the ledger's write transaction; both Badger's backup and SQLite's `VACUUM INTO` are non-blocking for concurrent writers, so no node quiesce is needed for a snapshot. The two backup calls are not, however, atomic with respect to each other: each is independently MVCC-consistent as of whenever it runs, but a commit landing between the blob backup and the metadata backup would write its commit timestamp to one store's backup and not the other's, and the restored copy would fail `Database.checkCommitTimestamp`'s cross-store validation. `lifecycle.Snapshot` runs the two backup calls concurrently (in separate goroutines, joined via a `sync.WaitGroup`), not sequentially, bounding the pause below by the slower call rather than their sum. `database.Database.PauseCommitsContext` closes the consistency window — every read-write `Txn` that opens a metadata write transaction holds the shared side from construction through `Commit`/`Rollback`/`Release` (not just around `Commit`: the metadata plugin's single-connection write pool means an open-but-uncommitted transaction already holds the resource `Snapshot`'s `VACUUM INTO` needs, so guarding only `Commit` could let `PauseCommitsContext` acquire its lock mid-transaction and deadlock), `Snapshot` takes the exclusive side around both concurrent backup calls — pausing new such read-write transactions (not reads, and not a quiesce: nothing is torn down or disconnected) for that span. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does not participate: unlike SQLite, Badger natively supports concurrent read-write access, so a blob-only `Txn` never holds the single metadata connection the barrier protects and never writes the commit timestamp it keeps consistent, and it can still mutate the blob store while a `Snapshot`'s pause is in effect — safe because badger's own `Backup` is independently MVCC-consistent as of whenever it runs, so it does not depend on blob writes being paused the way the cross-store commit-timestamp check depends on metadata writes being paused. `PauseCommitsContext`, not the older non-cancellable `PauseCommits`, is what `Snapshot` calls, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction instead of blocking indefinitely. `pruneOldSnapshots` checks `lifecycle.IsCloudMirroredTo` before deleting a local directory past retention when a cloud destination is configured: a snapshot whose upload never actually succeeded (no valid `.cloud-mirrored` marker for the currently configured destination) is left in place for a later retry scan to heal, rather than deleted alongside a same-named remote object that was never actually written — retention no longer strictly bounds local disk for a never-mirrored snapshot, a deliberate tradeoff against silently losing its only copy. `databaseLifecycle.snapshotCloudDestinationPrefix` (optional) is joined onto `snapshotCloudDestination` for every automatic-snapshot cloud operation via `Manager.effectiveCloudDestination`; it must be one safe path segment (not `.`, `..`, or a value containing `/` or `\`) so it cannot escape to a sibling location. Multiple nodes sharing one configured cloud destination without distinct prefixes would otherwise upload the same epoch-N object concurrently, risking one node's manifest paired with another's blob/metadata backup — `Start` logs a warning when a cloud destination is configured with no prefix set.
+- `dblifecycle.Manager` (constructed in `node.go` alongside, and distinct from, the stake-snapshot `snapshot.Manager`) captures automatic snapshots at epoch boundaries when `databaseLifecycle.snapshotEnabled` is configured. It subscribes to `epoch.transition` on the EventBus rather than the ledger's synchronous epoch-boundary hook, since a multi-gigabyte backup must never run inside the ledger's write transaction; both Badger's backup and SQLite's `VACUUM INTO` are non-blocking for concurrent writers, so no node quiesce is needed for a snapshot. The two backup calls are not, however, atomic with respect to each other: each is independently MVCC-consistent as of whenever it runs, but a commit landing between the blob backup and the metadata backup would write its commit timestamp to one store's backup and not the other's, and the restored copy would fail `Database.checkCommitTimestamp`'s cross-store validation. `lifecycle.Snapshot` runs the two backup calls concurrently (in separate goroutines, joined via a `sync.WaitGroup`), not sequentially, bounding the pause below by the slower call rather than their sum. `database.Database.PauseCommitsContext` closes the consistency window — every read-write `Txn` that opens a metadata write transaction holds the shared side from construction through `Commit`/`Rollback`/`Release` (not just around `Commit`: the metadata plugin's single-connection write pool means an open-but-uncommitted transaction already holds the resource `Snapshot`'s `VACUUM INTO` needs, so guarding only `Commit` could let `PauseCommitsContext` acquire its lock mid-transaction and deadlock), `Snapshot` takes the exclusive side around both concurrent backup calls — pausing new such read-write transactions (not reads, and not a quiesce: nothing is torn down or disconnected) for that span. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does not participate: unlike SQLite, Badger natively supports concurrent read-write access, so a blob-only `Txn` never holds the single metadata connection the barrier protects and never writes the commit timestamp it keeps consistent, and it can still mutate the blob store while a `Snapshot`'s pause is in effect — safe because badger's own `Backup` is independently MVCC-consistent as of whenever it runs, so it does not depend on blob writes being paused the way the cross-store commit-timestamp check depends on metadata writes being paused. `PauseCommitsContext`, not the older non-cancellable `PauseCommits`, is what `Snapshot` calls, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction instead of blocking indefinitely. S3 and GCS blob providers have no equivalent version-capture primitive: their backup path walks remote objects, so the manager rejects `snapshotEnabled` with either as the primary blob provider rather than allowing an automatic epoch transition to hold the commit barrier for an unbounded time. This does not change the manual CLI/Bark snapshot path, whose caller explicitly chooses that operation. `pruneOldSnapshots` checks `lifecycle.IsCloudMirroredTo` before deleting a local directory past retention when a cloud destination is configured: a snapshot whose upload never actually succeeded (no valid `.cloud-mirrored` marker for the currently configured destination) is left in place for a later retry scan to heal, rather than deleted alongside a same-named remote object that was never actually written — retention no longer strictly bounds local disk for a never-mirrored snapshot, a deliberate tradeoff against silently losing its only copy. `databaseLifecycle.snapshotCloudDestinationPrefix` (optional) is joined onto `snapshotCloudDestination` for every automatic-snapshot cloud operation via `Manager.effectiveCloudDestination`; it must be one safe path segment (not `.`, `..`, or a value containing `/` or `\`) so it cannot escape to a sibling location. Multiple nodes sharing one configured cloud destination without distinct prefixes would otherwise upload the same epoch-N object concurrently, risking one node's manifest paired with another's blob/metadata backup — `Start` logs a warning when a cloud destination is configured with no prefix set.
 
 `Txn.Commit` owns its transaction lock and shared barrier hold through one
 function-scope cleanup. A storage-provider panic releases both before `Txn.Do`
@@ -2138,12 +2152,14 @@ For the current respun prototype, the notify vote dialect is specifically the th
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
-Restrictive Phase 2 validation runs the CEK machine against an enormous internal
-budget and compares the complete measured cost with the redeemer's declared
-ExUnits afterward. The measured cost includes the accumulated trailing
-slippage batch that the Haskell CEK machine spends on a successful return;
-omitting that batch under-reports script cost and can admit a transaction the
-reference node rejects.
+Restrictive Phase 2 validation runs the CEK machine against the protocol's
+per-transaction `MaxTxExUnits` limit and compares the complete measured cost
+with the redeemer's declared ExUnits afterward. This permits the machine's
+intermediate slippage batching without allowing evaluation beyond the
+transaction-wide protocol envelope. The measured cost includes the accumulated
+trailing slippage batch that the Haskell CEK machine spends on a successful
+return; omitting that batch under-reports script cost and can admit a
+transaction the reference node rejects.
 
 Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest, and `ValidateTxConway` already returned early for them. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
 
@@ -2366,6 +2382,15 @@ The `LedgerView` interface provides query access to ledger state:
   `common.DRepDelegationState` capability used by Conway protocol versions 10
   and 11 to reject reward withdrawals whose stake credential is not delegated
   to a DRep.
+- Conway governance validation exposes the authoritative enacted root for each
+  CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
+  means those roots are known to be absent; lookup failures are propagated
+  instead of weakening ancestry checks. `GovActionById` exposes pending
+  actions and the current enacted roots, while excluding expired and superseded
+  enacted actions. It rehydrates their era-specific action CBOR and reports the
+  final slot of a pending action's inclusive expiry epoch so ancestry,
+  hard-fork succession, proposal expiry, and security-group voting use the
+  persisted Dingo state.
 
 ### Local State Query
 
@@ -3814,14 +3839,16 @@ Destinations come in two shapes, selected by the caller:
   it unlinks a regular file as readily as it removes a directory, which is
   exactly the behaviour that made such a swap costly.
 
-  Both platforms have a directory-only primitive, reached differently. Unix
-  uses `unlinkat` with `AT_REMOVEDIR`, addressed through the parent handle, so
-  neither the entry nor the parent can be redirected. Windows uses
-  `RemoveDirectory`, which fails on a file and on a populated directory but
-  addresses the entry by name, because Windows has no handle-relative removal;
-  a substituted parent could redirect it, which Windows makes hard by refusing
-  to move a directory while handles are open beneath it, and the parent is held
-  open for the whole extraction.
+  Both platforms have a directory-only primitive, addressed through the parent
+  handle so neither the entry nor the parent can be redirected. Unix uses
+  `unlinkat` with `AT_REMOVEDIR`. Windows has no directory-only removal in the
+  standard library, but `NtSetInformationFile`'s `FileDispositionInformation`
+  applied to a handle opened relative to the verified parent gets the same
+  guarantee: the entry is opened as a single component under that handle,
+  NTFS enforces emptiness the same way it does for `RemoveDirectory`, and
+  nothing here resolves the parent's name again the way the older
+  `RemoveDirectory`-by-path implementation did (`extract_handlerelative_windows.go`;
+  issue #3228).
 
   `WithReplaceDestination` remains the only path that removes a destination
   holding content, which is what that option exists to authorise.
@@ -3965,10 +3992,12 @@ stays inside it, which is enough to unlink a different file in the tree — and
 extraction's symlink checks run once, before the work, so the window is real.
 `openVerifiedParent` therefore opens each component through the one above it
 and confirms the handle refers to the entry the name denotes, holding those
-handles across the removal. On Windows only the immediate parent's own name is
-resolved a second time, since it has no handle-relative removal; that is the
-same residue `removeEmptyExtractDir` carries, now narrowed to one component and
-mitigated by the handle held on it.
+handles across the removal. Windows has no handle-relative rename or unlink
+through the standard library, but does through `NtSetInformationFile`: the
+final component is opened relative to the verified parent's own handle rather
+than resolved from a path, and the rename or deletion is applied to that open
+handle, so nothing here resolves any component's name a second time on either
+platform (`extract_handlerelative_windows.go`; issue #3228).
 
 After that, an in-place write needs write permission on a `0640` file owned by
 the node's user — which is the node's own user, and no filesystem check defends
@@ -4850,6 +4879,12 @@ Two contracts follow from that boundary:
 
 ### UTxO RPC (`api/utxorpc/`)
 
+Each Connect message is bounded to `DefaultMaxRequestBody` (1 MiB) with
+Connect's `WithReadMaxBytes` option. The limit applies to both compressed wire
+bytes and decompressed message bytes before unary decoding reaches the
+authentication interceptor; streaming RPCs retain per-message rather than
+whole-stream bounds.
+
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. TLS and token authentication are configured through the shared `plugins.api.utxorpc.config.tls`/`config.auth` surface described in "API security" above (applied to every Connect/gRPC handler this listener serves, including health and reflection), not a UTxO RPC-specific mechanism; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that same `tls` policy.
 
 `WaitForTx` reports `STAGE_CONFIRMED` from current active-chain transaction
@@ -4866,6 +4901,13 @@ for a later committed apply. Event delivery is ordered, so a committed apply
 already queued ahead of an undo may still produce a confirmation; the undo is
 ignored because the UTxO RPC stage stream has no reversal message and does not
 retract a confirmation already sent.
+
+`WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
+rollback within that history builds its `Undo` responses without reading
+persisted blocks. A deeper rollback walks persisted predecessors synchronously
+inside the stream handler, keeping cancellation and conversion errors in the
+request lifecycle; an unexpected persisted-block conversion failure is
+returned as a stream error.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
@@ -6065,11 +6107,10 @@ panic (Badger) instead of a clean unavailable response.
 An optional block scanner that indexes Midnight chain events into multiple
 `midnight_*` metadata tables. Starting it requires BOTH `midnight.enabled`
 (`MidnightConfig.Enabled`, default false) AND API storage mode; storage mode
-alone is no longer sufficient. This is deliberately more restrictive than
-the Midnight gRPC server's own gate (`storageMode.IsAPI() && midnight.port
-> 0`, unchanged), which does not consult `midnight.enabled`: the server
-only serves whatever the `midnight_*` tables already hold, so it is not
-tied to the flag that starts the scanner writing to them.
+alone is no longer sufficient. The Midnight gRPC server has a separate
+`midnight.serverEnabled` gate and does not consult `midnight.enabled`: it only
+serves whatever the `midnight_*` tables already hold, so it is not tied to the
+flag that starts the scanner writing to them.
 
 **Breaking change**: before `midnight.enabled` existed, the indexer started
 automatically for every API-storage-mode node. An existing api-mode
@@ -6566,7 +6607,8 @@ Port checks apply only to the listeners a given invocation actually starts,
 derived from the *effective* run mode plus the storage mode: the serving modes
 start the relay, private, metrics, debug, and bark listeners (and, under `api`
 storage or a configured `dev` run mode — which forces `api` storage — the
-UTxORPC/Blockfrost/Mesh/Midnight listeners); the Mithril snapshot
+UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
+the Mithril snapshot
 sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
 and debug listeners; the read-only `mithril list`/`show` and `load` start none.
 A port configured for an inactive listener cannot bind, so it is neither

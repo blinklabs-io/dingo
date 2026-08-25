@@ -124,6 +124,9 @@ type Ouroboros struct {
 	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
 	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
 	chainsyncScheduleAt      chainsyncScheduleAtFunc
+	// chainsyncArrivalNow is an instance-local clock seam for deterministic
+	// arrival-order tests. Production instances use time.Now.
+	chainsyncArrivalNow      func() time.Time
 	futureHeaderResyncMu     sync.Mutex
 	futureHeaderResyncs      map[ouroboros.ConnectionId]*scheduledChainsyncResync
 	futureHeaderResyncCtx    context.Context
@@ -392,6 +395,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
 		chainsyncScheduleAt: defaultChainsyncScheduleAt,
+		chainsyncArrivalNow: time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),
