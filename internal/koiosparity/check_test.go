@@ -400,6 +400,8 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 		PoolKeyHash:    poolHash,
 		DelegatedStake: types.Uint64(5_000_000),
 		DelegatorCount: 7,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
 	}).Error)
 	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
 		Epoch:             9,
@@ -407,14 +409,15 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 		MemberRewardTotal: types.Uint64(123_456),
 	}).Error)
 
-	// Param epoch (11 = K+1).
+	// Param epoch (11 = K+1): blocks only. Its own stake and pool params
+	// belong to a later epoch and must not surface.
 	realBlocks := uint64(4)
 	require.NoError(t, gdb.Create(&models.RewardPoolInput{
 		Epoch:          11,
 		PoolKeyHash:    poolHash,
 		DelegatedStake: types.Uint64(2), // irrelevant at this epoch
-		Cost:           types.Uint64(340_000_000),
-		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+		Cost:           types.Uint64(999_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 2)},
 		BlocksProduced: &realBlocks,
 	}).Error)
 
@@ -974,6 +977,8 @@ func seedPoolPresenceFixture(
 		PoolKeyHash:    poolHash,
 		DelegatedStake: types.Uint64(5_000_000),
 		DelegatorCount: 7,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
 	}).Error)
 	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
 		Epoch:             stakeEpoch,
@@ -985,8 +990,8 @@ func seedPoolPresenceFixture(
 		Epoch:          paramEpoch,
 		PoolKeyHash:    poolHash,
 		DelegatedStake: types.Uint64(2),
-		Cost:           types.Uint64(340_000_000),
-		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+		Cost:           types.Uint64(999_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 2)},
 		BlocksProduced: &realBlocks,
 	}).Error)
 	require.NoError(t, gdb.Create(&models.RewardAdaPots{

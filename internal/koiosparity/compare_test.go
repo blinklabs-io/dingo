@@ -289,10 +289,15 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 		FixedCost:   "340000000",
 		Margin:      "0.1",
 	}
+	// FixedCost/Margin are stake-epoch fields (dingo #3484), so they are
+	// present here and match Koios: the only thing missing is the
+	// param-epoch row, and blocks_produced is the only field it still owns.
 	dingo := &DingoPoolEpochData{
 		StakePresent:   true,
 		DelegatedStake: "1000",
 		DelegatorCount: 3,
+		FixedCost:      "340000000",
+		Margin:         "1/10",
 		ParamsPresent:  false,
 	}
 

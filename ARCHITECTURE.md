@@ -5227,7 +5227,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koiosStakeEpoch`/`koiosParamEpoch` and reads each field group from the one
   that actually matches:
   - **stake epoch (K-1):** `epoch_summary.TotalActiveStake` and
-    `reward_pool_input`'s `DelegatedStake`/`DelegatorCount` are the mark stake
+    `reward_pool_input`'s `DelegatedStake`/`DelegatorCount`/`Margin`/`Cost`
+    are the mark stake
     distribution Praos actually used as K's active-stake/reward-calculation
     basis — derived from `ledger/reward_calculation.go`'s
     `stakeRewardEpochsForNewEpoch` (`epochs.snapshot = epochs.performance - 1`,
@@ -5244,12 +5245,19 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     `compareEpochAccounts` (`check.go`) reads Dingo's `reward_account_output`
     at `stakeEpoch`, reusing `koiosStakeEpoch` rather than deriving a second,
     possibly-diverging offset.
-  - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced`, `Margin`,
-    and `Cost` (fixed cost) describe the epoch *before* the row's own Epoch —
-    `ledger/snapshot/rotation.go`'s `buildRewardStateInputs` stamps them from
-    `evt.PreviousEpoch` onto the row captured for the new epoch at snapshot
-    time, independent of the stake-epoch offset above (which governs that
-    same row's `DelegatedStake`/`DelegatorCount` instead).
+  - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced` describes
+    the epoch *before* the row's own Epoch — `ledger/snapshot/rotation.go`'s
+    `buildRewardStateInputs` stamps it from `evt.PreviousEpoch` onto the row
+    captured for the new epoch at snapshot time, independent of the
+    stake-epoch offset above (which governs that same row's
+    `DelegatedStake`/`DelegatorCount` instead). `BlocksProduced` is the only
+    field read here. `Margin` and `Cost` were read at this epoch too until
+    dingo #3484: a mark snapshot records the pool parameters as of its own
+    boundary, and those are the ones in force for the epoch that snapshot is
+    the basis for, so they belong with the stake epoch. Both are constant for
+    most pools, which is why the wrong alignment stayed invisible until a
+    preview pool changed its cost and another changed its margin at epoch
+    13.
   - `reward_ada_pots` (treasury/reserves/fees, compared in
     `CompareEpochTotals`) is unaffected by either offset: it is a
     point-in-time ledger pot balance captured at the boundary into K itself,
