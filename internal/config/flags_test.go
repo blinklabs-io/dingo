@@ -811,6 +811,31 @@ func loadConfigThroughPipeline(
 	return cfg, nil
 }
 
+// TestPipeline_EmptyMidnightHostUsesLoopbackDefault pins the merged-config
+// defaulting contract: an explicitly empty higher-precedence environment value
+// must resolve to the same safe loopback host that the Midnight server uses.
+func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_HOST", "")
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"storageMode: \"api\"\n",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected empty Midnight host to use loopback default: %v", err)
+	}
+	wantHost := DefaultMidnightConfig().Host
+	if cfg.Midnight.Host != wantHost {
+		t.Errorf(
+			"Midnight.Host = %q, want %q",
+			cfg.Midnight.Host,
+			wantHost,
+		)
+	}
+}
+
 // TestPipeline_FlagOverridesInvalidYAMLRunMode is a precedence
 // regression test: a higher-precedence CLI flag must be able to replace
 // an invalid YAML runMode, so LoadConfig cannot reject the value before

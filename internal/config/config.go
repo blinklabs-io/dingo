@@ -1441,6 +1441,12 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
+	// Match the Midnight server's safe default before validation so an
+	// explicitly empty YAML or environment value does not look like a remote
+	// plaintext listener and require the insecure-remote escape hatch.
+	if c.Midnight.Host == "" {
+		c.Midnight.Host = DefaultMidnightConfig().Host
+	}
 	if c.Plugins.Mempool.Config == nil {
 		c.Plugins.Mempool.Config = make(map[string]any)
 	}
