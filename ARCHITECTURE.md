@@ -2152,12 +2152,14 @@ For the current respun prototype, the notify vote dialect is specifically the th
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
-Restrictive Phase 2 validation runs the CEK machine against an enormous internal
-budget and compares the complete measured cost with the redeemer's declared
-ExUnits afterward. The measured cost includes the accumulated trailing
-slippage batch that the Haskell CEK machine spends on a successful return;
-omitting that batch under-reports script cost and can admit a transaction the
-reference node rejects.
+Restrictive Phase 2 validation runs the CEK machine against the protocol's
+per-transaction `MaxTxExUnits` limit and compares the complete measured cost
+with the redeemer's declared ExUnits afterward. This permits the machine's
+intermediate slippage batching without allowing evaluation beyond the
+transaction-wide protocol envelope. The measured cost includes the accumulated
+trailing slippage batch that the Haskell CEK machine spends on a successful
+return; omitting that batch under-reports script cost and can admit a
+transaction the reference node rejects.
 
 Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest, and `ValidateTxConway` already returned early for them. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
 
