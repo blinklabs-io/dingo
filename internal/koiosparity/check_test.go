@@ -1149,3 +1149,124 @@ func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
 			"divergence and must stay flagged", koiosEpoch,
 	)
 }
+
+// TestCheckDepartedPoolDoesNotErrorEpoch is the end-to-end counterpart of
+// compare_test.go's TestComparePoolEpochDepartedPoolIsInformational: it proves
+// checkEpoch resolves the K+1 snapshot's readiness for itself, which the
+// ComparePoolEpoch unit tests cannot.
+//
+// The fixture mirrors preview epoch 14. The pool is in epoch K's stake basis
+// (a K-1 reward_pool_input row) and absent from the K+1 snapshot, which is
+// itself committed — a ready epoch_summary row at K+1. That combination means
+// the pool left the pool set, so the epoch must still report PASS rather than
+// halting a strict-mode node (dingo #3485).
+func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+	stakeEpoch := koiosEpoch - 1
+	paramEpoch := koiosEpoch + 1
+
+	poolHash := testPoolKeyHash(t, 0x09)
+	poolBech32, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolHash))
+	require.NoError(t, err)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	// The K+1 snapshot exists and simply does not contain this pool.
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            paramEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(5_000_000),
+		DelegatorCount: 7,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             stakeEpoch,
+		PoolKeyHash:       poolHash,
+		MemberRewardTotal: types.Uint64(123_456),
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		[]KoiosPoolEpoch{{
+			Network:       network,
+			Epoch:         koiosEpoch,
+			PoolBech32:    poolBech32,
+			ActiveStake:   "5000000",
+			BlockCnt:      15,
+			Delegators:    7,
+			Margin:        "0.1",
+			FixedCost:     "340000000",
+			MemberRewards: "123456",
+			FetchedAt:     fetchedAt,
+		}},
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			Treasury:  "1000",
+			Reserves:  "2000",
+			Fees:      "300",
+			FetchedAt: fetchedAt,
+		},
+	))
+	require.NoError(t, cache.Close())
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"a departed pool must not put epoch %d into ERROR", koiosEpoch,
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err = OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "reward_pool_input_params", mismatches[0].Field)
+	require.Equal(
+		t,
+		CategoryPoolDeparted,
+		mismatches[0].Category,
+		"the uncomparable block count is recorded, not silently skipped",
+	)
+}

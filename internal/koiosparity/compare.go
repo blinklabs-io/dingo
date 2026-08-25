@@ -30,6 +30,14 @@ const (
 	CategoryReferenceLag  = "reference_lag"
 	CategoryDBError       = "dingo_db_error"   // DB query returned an unexpected error
 	CategoryDBMissing     = "dingo_db_missing" // expected DB row is absent
+	// CategoryPoolDeparted marks a pool that was in epoch K's stake basis but
+	// is absent from the captured K+1 snapshot -- it left the pool set. Its
+	// epoch-K block count lives on the K+1 reward_pool_input row, which
+	// therefore never exists, so blocks_produced cannot be compared for that
+	// one epoch. Purely informational, like the account lifecycle categories
+	// below: both sides agree the pool departed, so it is a documented gap in
+	// coverage rather than a divergence (dingo #3485).
+	CategoryPoolDeparted = "pool_departed"
 
 	// CategoryAcctOnlyDingo/CategoryAcctOnlyKoios mirror
 	// CategoryPoolOnlyDingo/CategoryPoolOnlyKoios but at per-account
@@ -313,6 +321,11 @@ func CompareEpochTotals(
 // epochEndTime is the actual epoch close time (from KoiosEpochInfo.EpochEndTime);
 // zero means unknown. graceHours: if the epoch closed within this many hours and
 // Dingo has no reward_pool_input row, emit reference_lag instead of pool_only_koios.
+// paramEpochCaptured reports whether Dingo has committed the K+1 snapshot the
+// blocks_produced read depends on. It distinguishes a pool that left the pool
+// set -- absent from a snapshot that exists -- from one whose K+1 row simply
+// has not been written yet, which is a genuine gap. Resolved once per epoch by
+// checkEpoch rather than per pool, so every caller agrees on it.
 func ComparePoolEpoch(
 	network string,
 	epoch uint64,
@@ -321,6 +334,7 @@ func ComparePoolEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	paramEpochCaptured bool,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
@@ -449,8 +463,17 @@ func ComparePoolEpoch(
 	// in Dingo's own computation (dingo_db_missing).
 	if !dingoPool.ParamsPresent {
 		cat := CategoryDBMissing
-		if graceHours > 0 && !epochEndTime.IsZero() &&
-			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+		switch {
+		case dingoPool.StakePresent && paramEpochCaptured:
+			// The pool was in this epoch's stake basis and is absent from a
+			// K+1 snapshot that exists, so it left the pool set. Its epoch-K
+			// block count is stamped onto the K+1 row that will never be
+			// written, so blocks_produced is not comparable for this one
+			// epoch. Recorded rather than skipped, so the gap is visible,
+			// but informational: both sides agree the pool departed.
+			cat = CategoryPoolDeparted
+		case graceHours > 0 && !epochEndTime.IsZero() &&
+			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 			cat = CategoryReferenceLag
 		}
 		out = append(out, CheckMismatch{
@@ -836,7 +859,8 @@ func DetermineStatus(mismatches []CheckMismatch) string {
 			hasError = true
 		case CategoryAcctZeroReward,
 			CategoryAcctNewlyRegistered,
-			CategoryAcctDeregistered:
+			CategoryAcctDeregistered,
+			CategoryPoolDeparted:
 			// Purely informational — see these categories' doc comments.
 			// Deliberately not counted toward hasError or default's FAIL: a
 			// zero-reward or lifecycle-change mismatch must never turn an

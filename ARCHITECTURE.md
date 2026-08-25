@@ -5384,20 +5384,33 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   (`blocks_produced` alone, reported as `reward_pool_input_params` when
   absent) via `DingoPoolEpochData.ParamsPresent`, for the same reason: a
   not-yet-captured param-epoch row must not silently compare as zero blocks
-  against Koios's real value. The same split applies a third time to
-  `reward_pool_input`'s stake-epoch fields (`delegated_stake`/
-  `delegator_count`/`fixed_cost`/`margin`, reported together as
-  `reward_pool_input_stake` when absent) via `DingoPoolEpochData.
-  StakePresent` — a pool whose stake-epoch row hasn't landed yet (e.g. a
-  freshly registered pool captured first at the param epoch) must not
-  silently compare as zero stake/delegators/cost/margin against Koios's real
-  values either. `fixed_cost` and `margin` sit on this side of the split, not
-  with `blocks_produced`, because they are read at K-1 (dingo #3484).
+  against Koios's real value. That split has one exception. A pool that was in
+  epoch K's stake basis but is absent from a K+1 snapshot Dingo has already
+  committed did not fail to compute — it left the pool set, and the K+1 row
+  its epoch-K block count would have been stamped onto is never written.
+  `checkEpoch` resolves once per epoch whether the K+1 snapshot exists
+  (`GetEpochData` returns nil unless `epoch_summary.SnapshotReady` is set) and
+  passes that to `ComparePoolEpoch`, which then records `pool_departed`
+  instead. That category is informational, like the account lifecycle ones:
+  the uncomparable field is still reported so the coverage gap is visible, but
+  both sides agree the pool departed, so it neither fails nor errors the
+  epoch. A missing row with no committed K+1 snapshot keeps the stricter
+  classification. The same split applies a third time to `reward_pool_input`'s
+  stake-epoch fields (`delegated_stake`/`delegator_count`/`fixed_cost`/
+  `margin`, reported together as `reward_pool_input_stake` when absent) via
+  `DingoPoolEpochData.StakePresent` — a pool whose stake-epoch row hasn't
+  landed yet (e.g. a freshly registered pool captured first at the param
+  epoch) must not silently compare as zero stake/delegators/cost/margin
+  against Koios's real values either. `fixed_cost` and `margin` sit on this
+  side of the split, not with `blocks_produced`, because they are read at K-1
+  (dingo #3484).
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
-may be transient), plus #3097's per-account categories: `acct_only_dingo`,
+may be transient), `pool_departed` (informational: the pool left the pool set
+at K+1, so its epoch-K block count has no row to live on), plus #3097's
+per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
 reward_type) row within one side — a data-integrity problem, not a value
 disagreement), and `acct_coverage_incomplete` (the per-account Koios fetch for

@@ -494,6 +494,27 @@ func checkEpoch(
 	} else {
 		dingoPoolErr = epochErr
 	}
+
+	// Whether the K+1 snapshot blocks_produced is read from has been committed
+	// at all. A pool missing from a snapshot that exists has left the pool
+	// set; a pool missing because the snapshot itself is not written yet is a
+	// genuine gap. Resolved once here so every pool in this epoch is judged
+	// against the same answer. A lookup error leaves this false, which keeps
+	// the stricter dingo_db_missing classification (dingo #3485).
+	paramEpochCaptured := false
+	if paramEpochData, pErr := dingo.GetEpochData(ctx, paramEpoch); pErr != nil {
+		logger.Debug(
+			"koiosparity: could not resolve param-epoch snapshot readiness",
+			"network", network,
+			"epoch", epoch,
+			"param_epoch", paramEpoch,
+			"error", pErr,
+		)
+	} else if paramEpochData != nil {
+		// GetEpochData returns nil unless epoch_summary.SnapshotReady is set,
+		// so a non-nil result is exactly "the K+1 snapshot is committed".
+		paramEpochCaptured = true
+	}
 	if dingoPoolErr != nil {
 		// Record the DB failure and skip all per-pool comparisons.
 		// Continuing with dingoPoolMap == nil would make every Koios pool appear
@@ -550,6 +571,7 @@ func checkEpoch(
 				now,
 				graceHours,
 				epochEndTime,
+				paramEpochCaptured,
 			)
 			allMismatches = append(allMismatches, poolMismatches...)
 
