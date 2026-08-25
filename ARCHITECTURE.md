@@ -2692,8 +2692,11 @@ per-peer header ancestry for the active slot window while Genesis is active,
 then shrink back to their normal bounded history after exit. The ledger's
 peer-local ancestry stores compact header CBOR and prev-hash metadata rather
 than retaining decoded header objects, and enforces both the active window's
-entry bound and an 8 MiB per-connection byte budget. If a candidate fork path
-falls outside the retained suffix, recovery fails closed to a fresh
+entry bound and an 8 MiB per-connection byte budget. Rollback recovery
+memoizes resolved ancestry within one recovery pass, keeping missing-point
+fallback work linear in the retained history while the ChainSync mutex is
+held. If a candidate fork path falls outside the retained suffix, recovery
+fails closed to a fresh
 ChainSync intersection instead of making a density or rollback decision from
 an incomplete path.
 

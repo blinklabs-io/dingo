@@ -202,6 +202,25 @@ type peerHeaderChain struct {
 	retainedBytes int
 }
 
+// peerHeaderHistoryPathCacheEntry memoizes one retained header's walk toward
+// a locally known ancestor while replaying a rollback. The cache is scoped to
+// one recovery pass, so decoded headers are released with the pass and cannot
+// outlive the peer history budget.
+type peerHeaderHistoryPathCacheEntry struct {
+	ancestor  ocommon.Point
+	distance  int
+	hasRecord bool
+	ok        bool
+	event     ChainsyncEvent
+	nextHash  string
+}
+
+type peerHeaderHistoryPathStep struct {
+	event    ChainsyncEvent
+	key      string
+	nextHash string
+}
+
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	// Registered before the mutex is taken so defer's LIFO order runs it
 	// after the unlock: publishing under ls.chainsyncMutex deadlocks the
@@ -2289,6 +2308,181 @@ type LocalRollbackRecoveryResult struct {
 	PrimaryChainTipSlot uint64
 }
 
+func peerHeaderHistoryPathFromCache(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+	cachedKey string,
+	cachedDistance int,
+) ([]ChainsyncEvent, bool) {
+	pathReversed := make(
+		[]ChainsyncEvent,
+		0,
+		len(steps)+cachedDistance,
+	)
+	for _, step := range steps {
+		pathReversed = append(pathReversed, step.event)
+	}
+	key := cachedKey
+	for remaining := cachedDistance; remaining > 0; remaining-- {
+		entry, ok := cache[key]
+		if !ok || !entry.ok || !entry.hasRecord ||
+			entry.distance != remaining {
+			return nil, false
+		}
+		pathReversed = append(pathReversed, entry.event)
+		key = entry.nextHash
+	}
+	slices.Reverse(pathReversed)
+	return pathReversed, true
+}
+
+func cachePeerHeaderHistoryPath(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+	ancestor ocommon.Point,
+	suffixDistance int,
+) {
+	for i, step := range steps {
+		cache[step.key] = peerHeaderHistoryPathCacheEntry{
+			ancestor:  ancestor,
+			distance:  len(steps) - i + suffixDistance,
+			hasRecord: true,
+			ok:        true,
+			event:     step.event,
+			nextHash:  step.nextHash,
+		}
+	}
+}
+
+func markPeerHeaderHistoryPathUnavailable(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+	key string,
+) {
+	cache[key] = peerHeaderHistoryPathCacheEntry{}
+	for _, step := range steps {
+		cache[step.key] = peerHeaderHistoryPathCacheEntry{}
+	}
+}
+
+// findPeerForkPathCached resolves one retained history walk and memoizes each
+// visited link. Rollback recovery may try every retained suffix head when the
+// requested point is absent; sharing these links keeps that fallback linear in
+// the retained history instead of repeatedly walking the same suffix while
+// chainsyncMutex is held.
+func (ls *LedgerState) findPeerForkPathCached(
+	e ChainsyncEvent,
+	initialPrevHash []byte,
+	expectedAncestor ocommon.Point,
+	history *peerHeaderChain,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+) (*ocommon.Point, []ChainsyncEvent, error) {
+	if len(initialPrevHash) == 0 {
+		return nil, nil, nil
+	}
+	prevHash := append([]byte(nil), initialPrevHash...)
+	steps := make([]peerHeaderHistoryPathStep, 0)
+	visited := make(map[string]struct{})
+	limit := ls.peerHeaderHistoryLimit()
+	for depth := 0; depth < limit && len(prevHash) > 0; depth++ {
+		key := hex.EncodeToString(prevHash)
+		if _, seen := visited[key]; seen {
+			markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+			return nil, nil, nil
+		}
+		visited[key] = struct{}{}
+		if entry, ok := cache[key]; ok {
+			if !entry.ok || !entry.hasRecord || entry.distance <= 0 {
+				markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+				return nil, nil, nil
+			}
+			cachePeerHeaderHistoryPath(
+				steps,
+				cache,
+				entry.ancestor,
+				entry.distance,
+			)
+			if len(steps)+entry.distance >= limit {
+				return nil, nil, nil
+			}
+			if !pointMatches(entry.ancestor, expectedAncestor) {
+				return &entry.ancestor, nil, nil
+			}
+			path, ok := peerHeaderHistoryPathFromCache(
+				steps,
+				cache,
+				key,
+				entry.distance,
+			)
+			if !ok {
+				markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+				return nil, nil, nil
+			}
+			return &entry.ancestor, path, nil
+		}
+
+		ancestorBlock, err := ls.blockByHash(prevHash)
+		if err == nil {
+			ancestor := ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash)
+			cachePeerHeaderHistoryPath(steps, cache, ancestor, 0)
+			if !pointMatches(ancestor, expectedAncestor) {
+				return &ancestor, nil, nil
+			}
+			pathReversed := make([]ChainsyncEvent, 0, len(steps))
+			for _, step := range steps {
+				pathReversed = append(pathReversed, step.event)
+			}
+			slices.Reverse(pathReversed)
+			return &ancestor, pathReversed, nil
+		}
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil, fmt.Errorf(
+				"lookup ancestor hash %x: %w",
+				prevHash,
+				err,
+			)
+		}
+
+		var (
+			record peerHeaderRecord
+			found  bool
+		)
+		if history != nil {
+			record, found = history.byHash[key]
+		}
+		if !found && ls.config.PeerHeaderLookupFunc != nil {
+			lookupEvent, lookupPrevHash, ok := ls.config.PeerHeaderLookupFunc(
+				e.ConnectionId,
+				prevHash,
+			)
+			if ok {
+				record = peerHeaderRecord{
+					event:    lookupEvent,
+					prevHash: lookupPrevHash,
+				}
+				found = true
+			}
+		}
+		if !found {
+			markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+			return nil, nil, nil
+		}
+		recordEvent, ok := record.chainsyncEvent()
+		if !ok {
+			markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+			return nil, nil, nil
+		}
+		recordPrev := append([]byte(nil), record.prevHash...)
+		steps = append(steps, peerHeaderHistoryPathStep{
+			event:    recordEvent,
+			key:      key,
+			nextHash: hex.EncodeToString(recordPrev),
+		})
+		prevHash = recordPrev
+	}
+	return nil, nil, nil
+}
+
 func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
@@ -2297,6 +2491,8 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	if history == nil || len(history.order) == 0 {
 		return 0, nil
 	}
+	pathCache := make(map[string]peerHeaderHistoryPathCacheEntry,
+		len(history.order))
 	for _, v := range slices.Backward(history.order) {
 		record, ok := history.byHash[v]
 		if !ok {
@@ -2306,9 +2502,12 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if !ok || recordEvent.Point.Slot <= point.Slot {
 			continue
 		}
-		ancestorPoint, forkPath, err := ls.findPeerForkPath(
+		ancestorPoint, forkPath, err := ls.findPeerForkPathCached(
 			recordEvent,
 			record.prevHash,
+			point,
+			history,
+			pathCache,
 		)
 		if err != nil {
 			return 0, err
@@ -2316,6 +2515,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if ancestorPoint == nil || !pointMatches(*ancestorPoint, point) {
 			continue
 		}
+		forkPath = append(forkPath, recordEvent)
 		// Anything at or below the chain's current header tip is already
 		// applied. Without this guard, a forkPath entry whose hash equals
 		// the header tip causes AddBlockHeader to fail the prev-hash
