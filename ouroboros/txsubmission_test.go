@@ -95,11 +95,15 @@ func (v txsubmissionSelectiveRejectingValidator) ValidateTxWithOverlay(
 type txsubmissionCorruptingConsumer struct {
 	mempool.Consumer
 	corruptHash string
+	omitHash    string
 }
 
 func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
 	hash string,
 ) *mempool.MempoolTransaction {
+	if hash == c.omitHash {
+		return nil
+	}
 	tx := c.Consumer.GetTxFromCache(hash)
 	if tx == nil || hash != c.corruptHash {
 		return tx
@@ -112,8 +116,15 @@ func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
 type txsubmissionCorruptingService struct {
 	mempool.Service
 	corruptHash string
+	omitHash    string
 	mu          sync.Mutex
 	consumers   map[ouroboros.ConnectionId]mempool.Consumer
+}
+
+// txsubmissionServiceWithoutHeadroom limits the wrapped service's method set
+// to mempool.Service so the relay pump uses its batched-request path.
+type txsubmissionServiceWithoutHeadroom struct {
+	mempool.Service
 }
 
 func (s *txsubmissionCorruptingService) NewConsumer(
@@ -131,6 +142,7 @@ func (s *txsubmissionCorruptingService) NewConsumer(
 	wrapped := &txsubmissionCorruptingConsumer{
 		Consumer:    consumer,
 		corruptHash: s.corruptHash,
+		omitHash:    s.omitHash,
 	}
 	s.consumers[connId] = wrapped
 	return wrapped
@@ -620,6 +632,8 @@ type txSubmissionRelayHarnessOpts struct {
 	capacityA        int64
 	dagA             bool
 	corruptOfferHash string
+	omitOfferHash    string
+	batchRequestsA   bool
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -664,6 +678,11 @@ func newTxSubmissionRelayHarnessWithOpts(
 		require.NoError(t, err)
 		nodeAMempool = &mempool.FIFO{Mempool: mA}
 	}
+	if opts.batchRequestsA {
+		nodeAMempool = &txsubmissionServiceWithoutHeadroom{
+			Service: nodeAMempool,
+		}
+	}
 	mB, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
 		PromRegistry:    prometheus.NewRegistry(),
@@ -683,10 +702,11 @@ func newTxSubmissionRelayHarnessWithOpts(
 	nodeA.mempool = nodeAMempool
 	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
 	nodeBMempool := mempool.Service(&mempool.FIFO{Mempool: mB})
-	if opts.corruptOfferHash != "" {
+	if opts.corruptOfferHash != "" || opts.omitOfferHash != "" {
 		nodeBMempool = &txsubmissionCorruptingService{
 			Service:     nodeBMempool,
 			corruptHash: opts.corruptOfferHash,
+			omitHash:    opts.omitOfferHash,
 			consumers: make(
 				map[ouroboros.ConnectionId]mempool.Consumer,
 			),
@@ -1072,4 +1092,49 @@ func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
 		10*time.Millisecond,
 		"expected a valid transaction after malformed CBOR to be processed on the same connection",
 	)
+}
+
+// TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse verifies
+// a body shifted forward by an earlier cache miss is not labeled with the
+// missing transaction's ID when its CBOR cannot be decoded.
+func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
+	t *testing.T,
+) {
+	fixtures := txsubmissionTestFixtures(t)
+	omitted := fixtures[0]
+	malformed := fixtures[1]
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:           logger,
+		corruptOfferHash: malformed.hash,
+		omitOfferHash:    omitted.hash,
+		batchRequestsA:   true,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, omitted, malformed)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"failed to parse transaction CBOR",
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the partial malformed response to be logged",
+	)
+	logOutput := logBuf.String()
+	require.Contains(t, logOutput, `"tx_id":""`)
+	require.NotContains(t, logOutput, `"tx_id":"`+omitted.hash+`"`)
 }

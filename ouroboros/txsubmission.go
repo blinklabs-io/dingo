@@ -391,7 +391,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					)
 					if err != nil {
 						var txId string
-						if txIdx < len(requestTxIds) {
+						if len(txs) == len(requestTxIds) {
 							txId = hex.EncodeToString(
 								requestTxIds[txIdx].TxId[:],
 							)
