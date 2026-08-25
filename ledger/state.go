@@ -9138,6 +9138,14 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	}
 }
 
+// Both the block builder and the mempool discover the validation-session
+// capability with a runtime type assertion on the TxValidator they were handed
+// and silently fall back to unpinned per-transaction validation when it fails,
+// so drift in WithTxValidationSession would quietly drop the snapshot pinning
+// rather than break the build. The mempool's identical interface is guarded in
+// the root package, which is where *LedgerState is wired in as its validator.
+var _ forging.TxValidationSessionProvider = (*LedgerState)(nil)
+
 // WithTxValidationSession pins a mempool revalidation batch to one immutable
 // ledger publication, one validation slot/era/parameter set, and one
 // repeatable-read database transaction. stillCurrent lets the mempool reject

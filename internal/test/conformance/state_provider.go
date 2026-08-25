@@ -417,3 +417,10 @@ func extractCostModels(
 
 // Compile-time interface check
 var _ conformance.StateProvider = (*DingoStateProvider)(nil)
+
+// conformance.StateProvider does not include DRepDelegationState: the Conway
+// reward-withdrawal rule discovers it with a runtime type assertion instead.
+// Without this guard the harness would keep compiling after a signature drift
+// and stop exercising the protocol-version 10/11 withdrawal rule it exists to
+// cover, matching ledger.LedgerView's guard for the production path.
+var _ common.DRepDelegationState = (*DingoStateProvider)(nil)

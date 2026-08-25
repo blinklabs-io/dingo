@@ -433,6 +433,14 @@ func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 	return n.ouroborosRef.Load()
 }
 
+// Run wires *ledger.LedgerState in as the mempool's TxValidator, and the
+// mempool discovers the optional validation-session capability on it with a
+// runtime type assertion, silently falling back to unpinned per-transaction
+// validation when that fails. Guard the pairing here, in the package that
+// makes it, so drift cannot quietly unpin mempool revalidation from its
+// ledger snapshot.
+var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Configure tracing

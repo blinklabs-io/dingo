@@ -556,6 +556,13 @@ type epochInfoAdapter struct {
 	ledgerState *ledger.LedgerState
 }
 
+// computeSchedule discovers the exact-rational coefficient with a runtime type
+// assertion and silently falls back to the float64 accessor when it fails,
+// which yields a strictly larger leadership threshold than the reference node's
+// (dingo #2798). Make that drift a compile error;
+// TestEpochInfoAdapterProvidesExactActiveSlotCoeff covers the same pairing.
+var _ leader.ActiveSlotCoeffRatProvider = (*epochInfoAdapter)(nil)
+
 func (a *epochInfoAdapter) CurrentEpoch() uint64 {
 	return a.ledgerState.CurrentEpoch()
 }
