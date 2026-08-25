@@ -99,6 +99,7 @@ type utxorpcHarnessOptions struct {
 	numBlocks       int
 	maxHistoryItems int
 	serverTimeout   time.Duration
+	skipIndexTxHash []byte
 }
 
 func newConnectH2CClient() *http.Client {
@@ -177,7 +178,12 @@ func newUtxorpcConnectHarness(
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
-	indexedTxHashes := indexFixtureTransactionsForReadTx(t, db, blocks)
+	indexedTxHashes := indexFixtureTransactionsForReadTx(
+		t,
+		db,
+		blocks,
+		opts.skipIndexTxHash,
+	)
 	tip := blocks[len(blocks)-1]
 	require.NoError(
 		t,
@@ -262,6 +268,7 @@ func indexFixtureTransactionsForReadTx(
 	t *testing.T,
 	db *database.Database,
 	blocks []models.Block,
+	skipTxHash []byte,
 ) [][]byte {
 	t.Helper()
 	indexed := make([][]byte, 0, 64)
@@ -282,6 +289,9 @@ func indexFixtureTransactionsForReadTx(
 		}
 		point := ocommon.NewPoint(mb.Slot, mb.Hash)
 		for j, tx := range txs {
+			if bytes.Equal(tx.Hash().Bytes(), skipTxHash) {
+				continue
+			}
 			err := db.SetTransaction(
 				tx,
 				point,
@@ -1214,11 +1224,28 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 }
 
 func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
-	txA, blockA, txB, blockB := firstTwoTxsInFixtureBlocks(t, 40)
-	blk, err := gledger.NewBlockFromCbor(blockA.Type, blockA.Cbor)
+	committedTx, _, pendingTx, eventBlock := firstTwoTxsInFixtureBlocks(t, 40)
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:       40,
+		skipIndexTxHash: pendingTx.Hash().Bytes(),
+	})
+	committedHash := committedTx.Hash().Bytes()
+	committedRecord, err := h.LS.TransactionByHash(committedHash)
 	require.NoError(t, err)
-	require.NotEqual(t, txA.Hash(), txB.Hash())
+	require.NotNil(t, committedRecord, "committed fixture transaction must be indexed")
+	pendingRecord, err := h.LS.TransactionByHash(pendingTx.Hash().Bytes())
+	require.NoError(t, err)
+	require.Nil(t, pendingRecord, "pending fixture transaction must not be indexed")
+	blk, err := gledger.NewBlockFromCbor(eventBlock.Type, eventBlock.Cbor)
+	require.NoError(t, err)
+	requestedInBlock := false
+	for _, tx := range blk.Transactions() {
+		if tx.Hash() == pendingTx.Hash() {
+			requestedInBlock = true
+			break
+		}
+	}
+	require.True(t, requestedInBlock, "raw blockfetch must contain the pending transaction")
 
 	cli := submitconnect.NewSubmitServiceClient(
 		h.Client,
@@ -1233,8 +1260,8 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 		cli,
 		&submit.WaitForTxRequest{
 			Ref: [][]byte{
-				append([]byte(nil), txA.Hash().Bytes()...),
-				append([]byte(nil), txB.Hash().Bytes()...),
+				append([]byte(nil), committedHash...),
+				append([]byte(nil), pendingTx.Hash().Bytes()...),
 			},
 		},
 	)
@@ -1249,6 +1276,17 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 		h.EB.HasSubscribers(ledger.BlockfetchEventType),
 		"WaitForTx must not consume pre-validation blockfetch events",
 	)
+	committed := testutil.RequireReceive(
+		t,
+		eventCh,
+		5*time.Second,
+		"persisted WaitForTx stream event",
+	)
+	require.False(t, committed.terminal)
+	require.NoError(t, committed.err)
+	require.NotNil(t, committed.resp)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, committed.resp.GetStage())
+	require.Equal(t, committedHash, committed.resp.GetRef())
 
 	// Raw blockfetch precedes validation, while a rollback removes the
 	// transaction from the active chain. Neither is a confirmation source.
@@ -1258,8 +1296,8 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 			ledger.BlockfetchEventType,
 			ledger.BlockfetchEvent{
 				Block: blk,
-				Point: ocommon.NewPoint(blockA.Slot, blockA.Hash),
-				Type:  uint(blockA.Type),
+				Point: ocommon.NewPoint(eventBlock.Slot, eventBlock.Hash),
+				Type:  uint(eventBlock.Type),
 			},
 		),
 	)
@@ -1268,11 +1306,20 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 		event.NewEvent(
 			ledger.TransactionEventType,
 			ledger.TransactionEvent{
-				Transaction: txA,
-				Point:       ocommon.NewPoint(blockA.Slot, blockA.Hash),
-				Rollback:    true,
+				Transaction: pendingTx,
+				Point: ocommon.NewPoint(
+					eventBlock.Slot,
+					eventBlock.Hash,
+				),
+				Rollback: true,
 			},
 		),
+	)
+	testutil.RequireNoReceive(
+		t,
+		eventCh,
+		100*time.Millisecond,
+		"raw blockfetch and rollback must not confirm a pending transaction",
 	)
 
 	// Ledger emits the forward transaction event only after the active-chain
@@ -1282,25 +1329,27 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 		event.NewEvent(
 			ledger.TransactionEventType,
 			ledger.TransactionEvent{
-				Transaction: txB,
-				Point:       ocommon.NewPoint(blockB.Slot, blockB.Hash),
+				Transaction: pendingTx,
+				Point: ocommon.NewPoint(
+					eventBlock.Slot,
+					eventBlock.Hash,
+				),
 			},
 		),
 	)
 
-	first := testutil.RequireReceive(
+	confirmed := testutil.RequireReceive(
 		t,
 		eventCh,
 		5*time.Second,
-		"first WaitForTx stream event",
+		"post-commit WaitForTx stream event",
 	)
-	require.False(t, first.terminal)
-	require.NoError(t, first.err)
-	require.NotNil(t, first.resp)
-	require.Equal(t, submit.Stage_STAGE_CONFIRMED, first.resp.GetStage())
-	require.Equal(t, txB.Hash().Bytes(), first.resp.GetRef())
+	require.False(t, confirmed.terminal)
+	require.NoError(t, confirmed.err)
+	require.NotNil(t, confirmed.resp)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, confirmed.resp.GetStage())
+	require.Equal(t, pendingTx.Hash().Bytes(), confirmed.resp.GetRef())
 
-	cancel()
 	terminal := testutil.RequireReceive(
 		t,
 		eventCh,
@@ -1308,7 +1357,7 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 		"terminal WaitForTx stream event",
 	)
 	require.True(t, terminal.terminal)
-	require.Equal(t, connect.CodeCanceled, connect.CodeOf(terminal.err))
+	require.NoError(t, terminal.err)
 	_, open := <-eventCh
 	require.False(t, open)
 }
