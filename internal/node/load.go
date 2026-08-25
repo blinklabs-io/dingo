@@ -55,17 +55,76 @@ const (
 // be verified without replaying a full ImmutableDB fixture.
 var newLedgerStateForLoad = ledger.NewLedgerState
 
+type loadSecurityParam int
+
+func (k loadSecurityParam) SecurityParam() int {
+	return int(k)
+}
+
 func configureLoadChainSecurityParam(
 	cm *chain.ChainManager,
-	ledgerState interface{ SecurityParam() int },
+	nodeCfg *cardano.CardanoNodeConfig,
 ) error {
-	if err := cm.SetLedger(ledgerState); err != nil {
+	k, err := loadSecurityParamForConfig(nodeCfg)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to configure chain security parameter for load: %w",
+			err,
+		)
+	}
+	if err := cm.SetLedger(loadSecurityParam(k)); err != nil {
 		return fmt.Errorf(
 			"failed to configure chain security parameter for load: %w",
 			err,
 		)
 	}
 	return nil
+}
+
+// loadSecurityParamForConfig validates the raw genesis K values that replay
+// can reach and returns the one for the era where replay starts. It must not
+// use LedgerState.SecurityParam: before Start that method samples the
+// zero-value Byron era and intentionally substitutes its runtime fallback for
+// unavailable or invalid values.
+func loadSecurityParamForConfig(nodeCfg *cardano.CardanoNodeConfig) (int, error) {
+	if nodeCfg == nil {
+		return 0, fmt.Errorf(
+			"%w: cardano node config is required",
+			chain.ErrInvalidSecurityParam,
+		)
+	}
+
+	shelleyGenesis := nodeCfg.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return 0, fmt.Errorf(
+			"%w: Shelley genesis is required",
+			chain.ErrInvalidSecurityParam,
+		)
+	}
+	if shelleyGenesis.SecurityParam <= 0 {
+		return 0, fmt.Errorf(
+			"%w: Shelley security parameter K must be positive: got %d",
+			chain.ErrInvalidSecurityParam,
+			shelleyGenesis.SecurityParam,
+		)
+	}
+
+	shelleyAtGenesis := false
+	if epoch, declared := nodeCfg.HardForkEpoch("shelley"); declared {
+		shelleyAtGenesis = epoch == 0
+	}
+	byronGenesis := nodeCfg.ByronGenesis()
+	if byronGenesis == nil || shelleyAtGenesis {
+		return shelleyGenesis.SecurityParam, nil
+	}
+	if byronGenesis.ProtocolConsts.K <= 0 {
+		return 0, fmt.Errorf(
+			"%w: Byron security parameter K must be positive: got %d",
+			chain.ErrInvalidSecurityParam,
+			byronGenesis.ProtocolConsts.K,
+		)
+	}
+	return byronGenesis.ProtocolConsts.K, nil
 }
 
 // installEpochBoundarySnapshotHookForLoad is replaceable in tests so load-mode
@@ -499,7 +558,7 @@ func LoadWithDB(
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	if err := configureLoadChainSecurityParam(cm, ls); err != nil {
+	if err := configureLoadChainSecurityParam(cm, nodeCfg); err != nil {
 		return err
 	}
 	captureFailures := &loadCaptureFailureTracker{}

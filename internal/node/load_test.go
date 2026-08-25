@@ -505,93 +505,102 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.True(t, captured.ManualBlockProcessing)
 }
 
-func TestLoadWithDBConfiguresChainSecurityParamBeforeReplay(t *testing.T) {
-	db := newTestDB(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
+func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 	stopAfterRollbackValidation := errors.New(
 		"stop after load rollback validation",
 	)
-	var loadConfig ledger.LedgerStateConfig
-	var rollbackErr error
-	oldNewLedgerStateForLoad := newLedgerStateForLoad
-	oldInstallHook := installEpochBoundarySnapshotHookForLoad
-	newLedgerStateForLoad = func(
-		cfg ledger.LedgerStateConfig,
-	) (*ledger.LedgerState, error) {
-		loadConfig = cfg
-		state, err := ledger.NewLedgerState(cfg)
-		if state != nil {
-			t.Cleanup(func() {
-				require.NoError(t, state.Close())
-			})
-		}
-		return state, err
-	}
-	installEpochBoundarySnapshotHookForLoad = func(
-		_ *ledger.LedgerState,
-		_ func(*database.Txn, event.EpochTransitionEvent) error,
-	) error {
-		rollbackErr = loadConfig.ChainManager.PrimaryChain().ValidateRollback(
-			ocommon.NewPoint(0, nil),
-		)
-		return stopAfterRollbackValidation
-	}
-	t.Cleanup(func() {
-		newLedgerStateForLoad = oldNewLedgerStateForLoad
-		installEpochBoundarySnapshotHookForLoad = oldInstallHook
-	})
-
-	err := LoadWithDB(
-		context.Background(),
-		&config.Config{Network: "preview"},
-		logger,
-		"unused",
-		db,
-	)
-	require.ErrorIs(t, err, stopAfterRollbackValidation)
-	require.False(
-		t,
-		errors.Is(rollbackErr, chain.ErrSecurityParamNotConfigured),
-		"load replay reached rollback validation without configuring K: %v",
-		rollbackErr,
-	)
-	require.NoError(t, rollbackErr)
-}
-
-type loadSecurityParamLedger struct {
-	securityParam int
-}
-
-func (l loadSecurityParamLedger) SecurityParam() int {
-	return l.securityParam
-}
-
-func TestConfigureLoadChainSecurityParamRejectsNonPositiveK(t *testing.T) {
-	t.Parallel()
 
 	for _, test := range []struct {
-		name          string
-		securityParam int
+		name             string
+		mutate           func(*cardano.CardanoNodeConfig)
+		wantErr          string
+		wantHook         bool
+		wantRollbackOkay bool
 	}{
-		{name: "zero", securityParam: 0},
-		{name: "negative", securityParam: -1},
+		{
+			name:             "valid control",
+			wantHook:         true,
+			wantRollbackOkay: true,
+		},
+		{
+			name: "zero Byron K before Shelley",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				epoch := uint64(1)
+				nodeCfg.TestShelleyHardForkAtEpoch = &epoch
+				nodeCfg.ByronGenesis().ProtocolConsts.K = 0
+			},
+			wantErr: "Byron security parameter K must be positive: got 0",
+		},
+		{
+			name: "negative Shelley K at genesis",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				nodeCfg.ShelleyGenesis().SecurityParam = -1
+			},
+			wantErr: "Shelley security parameter K must be positive: got -1",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			cm, err := chain.NewManager(nil, nil)
-			require.NoError(t, err)
+			db := newTestDB(t)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			var loadConfig ledger.LedgerStateConfig
+			var rollbackErr error
+			hookCalled := false
+			oldNewLedgerStateForLoad := newLedgerStateForLoad
+			oldInstallHook := installEpochBoundarySnapshotHookForLoad
+			newLedgerStateForLoad = func(
+				cfg ledger.LedgerStateConfig,
+			) (*ledger.LedgerState, error) {
+				loadConfig = cfg
+				state, err := ledger.NewLedgerState(cfg)
+				if state != nil {
+					t.Cleanup(func() {
+						require.NoError(t, state.Close())
+					})
+				}
+				if err == nil && test.mutate != nil {
+					test.mutate(cfg.CardanoNodeConfig)
+				}
+				return state, err
+			}
+			installEpochBoundarySnapshotHookForLoad = func(
+				_ *ledger.LedgerState,
+				_ func(*database.Txn, event.EpochTransitionEvent) error,
+			) error {
+				hookCalled = true
+				rollbackErr = loadConfig.ChainManager.PrimaryChain().ValidateRollback(
+					ocommon.NewPoint(0, nil),
+				)
+				return stopAfterRollbackValidation
+			}
+			t.Cleanup(func() {
+				newLedgerStateForLoad = oldNewLedgerStateForLoad
+				installEpochBoundarySnapshotHookForLoad = oldInstallHook
+			})
 
-			err = configureLoadChainSecurityParam(
-				cm,
-				loadSecurityParamLedger{securityParam: test.securityParam},
+			err := LoadWithDB(
+				context.Background(),
+				&config.Config{Network: "preview"},
+				logger,
+				"unused",
+				db,
 			)
-			require.ErrorIs(t, err, chain.ErrInvalidSecurityParam)
-			require.ErrorContains(
-				t,
-				err,
-				"failed to configure chain security parameter for load",
-			)
+			if test.wantErr != "" {
+				require.ErrorIs(t, err, chain.ErrInvalidSecurityParam)
+				require.ErrorContains(t, err, test.wantErr)
+				require.False(t, hookCalled, "invalid K reached load hooks")
+				return
+			}
+			require.ErrorIs(t, err, stopAfterRollbackValidation)
+			require.Equal(t, test.wantHook, hookCalled)
+			if test.wantRollbackOkay {
+				require.False(
+					t,
+					errors.Is(rollbackErr, chain.ErrSecurityParamNotConfigured),
+					"load replay reached rollback validation without configuring K: %v",
+					rollbackErr,
+				)
+				require.NoError(t, rollbackErr)
+			}
 		})
 	}
 }
