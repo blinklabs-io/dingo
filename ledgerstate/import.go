@@ -71,6 +71,11 @@ type RawLedgerState struct {
 	GovStateData cbor.RawMessage
 	// PParamsData is the deferred CBOR for protocol parameters.
 	PParamsData cbor.RawMessage
+	// PrevPParamsData is the deferred CBOR for the protocol parameters that
+	// were in force during the preceding epoch. Cardano ledger state keeps
+	// this alongside the current parameters because delayed reward
+	// calculation consumes it after the epoch has ended.
+	PrevPParamsData cbor.RawMessage
 	// SnapShotsData is the deferred CBOR for mark/set/go stake snapshots.
 	SnapShotsData cbor.RawMessage
 	// PoolDistrData is the deferred CBOR for the active consensus pool
@@ -2592,10 +2597,6 @@ func importPParams(
 	ctx context.Context,
 	cfg ImportConfig,
 ) error {
-	if cfg.State.PParamsData == nil {
-		return nil
-	}
-
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf(
 			"pparams import cancelled: %w", err,
@@ -2607,37 +2608,156 @@ func importPParams(
 		"component", "ledgerstate",
 	)
 
-	pparamsCbor := []byte(cfg.State.PParamsData)
-	if err := validatePParamsData(
-		cfg.State.EraIndex,
-		pparamsCbor,
-	); err != nil {
-		return fmt.Errorf(
-			"validating protocol parameters: %w",
-			err,
-		)
-	}
-
 	store := cfg.Database.Metadata()
 	txn := cfg.Database.MetadataTxn(true)
 	defer txn.Release()
+
+	// An imported reward basis makes the corresponding protocol-parameter
+	// row mandatory. At the first boundary after a snapshot in epoch E, the
+	// imported Go basis for E-2 uses E-1 for performance and E for calculation.
+	// At the following boundary, Set for E-1 uses E for performance and the
+	// live boundary-produced E+1 parameters for calculation.
+	// Check the rows the snapshot phase actually persisted rather than merely
+	// checking that SnapShotsData was present: a basis that failed its
+	// reconciliation gate is deliberately ineligible and needs no parameters.
+	requiresCurrent := false
+	currentRequiredBy := uint64(0)
+	if cfg.State.Epoch > 0 {
+		rewardSnapshot, err := store.GetRewardSnapshot(
+			cfg.State.Epoch-1,
+			"mark",
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"checking imported reward basis for epoch %d: %w",
+				cfg.State.Epoch-1,
+				err,
+			)
+		}
+		requiresCurrent = rewardSnapshot != nil
+		if requiresCurrent {
+			currentRequiredBy = cfg.State.Epoch - 1
+		}
+	}
+	requiresPrevious := false
+	if cfg.State.Epoch > 1 {
+		rewardSnapshot, err := store.GetRewardSnapshot(
+			cfg.State.Epoch-2,
+			"mark",
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"checking imported reward basis for epoch %d: %w",
+				cfg.State.Epoch-2,
+				err,
+			)
+		}
+		requiresPrevious = rewardSnapshot != nil
+		if requiresPrevious {
+			// The first post-import round uses E-1 for performance but E
+			// for the reward calculation, so the Go basis requires both.
+			requiresCurrent = true
+			currentRequiredBy = cfg.State.Epoch - 2
+		}
+	}
+
+	pparamsCbor := []byte(cfg.State.PParamsData)
+	if len(pparamsCbor) == 0 {
+		if requiresCurrent {
+			return fmt.Errorf(
+				"protocol parameters for epoch %d are required by the imported reward basis for epoch %d",
+				cfg.State.Epoch,
+				currentRequiredBy,
+			)
+		}
+		if !requiresPrevious {
+			return nil
+		}
+	} else {
+		if err := validatePParamsData(
+			cfg.State.EraIndex,
+			pparamsCbor,
+		); err != nil {
+			return fmt.Errorf(
+				"validating protocol parameters for epoch %d: %w",
+				cfg.State.Epoch,
+				err,
+			)
+		}
+	}
+
+	var (
+		previousEpoch uint64
+		previousEra   int
+		previousCbor  = []byte(cfg.State.PrevPParamsData)
+	)
+	if requiresPrevious {
+		previousEpoch = cfg.State.Epoch - 1
+		if len(previousCbor) == 0 {
+			return fmt.Errorf(
+				"historical protocol parameters for epoch %d are required by the imported reward basis for epoch %d",
+				previousEpoch,
+				cfg.State.Epoch-2,
+			)
+		}
+		var ok bool
+		previousEra, ok = importedEraForEpoch(cfg.State, previousEpoch)
+		if !ok {
+			return fmt.Errorf(
+				"cannot determine era for historical protocol parameters epoch %d required by the imported reward basis for epoch %d",
+				previousEpoch,
+				cfg.State.Epoch-2,
+			)
+		}
+		if err := validatePParamsData(previousEra, previousCbor); err != nil {
+			return fmt.Errorf(
+				"validating historical protocol parameters for epoch %d required by the imported reward basis for epoch %d: %w",
+				previousEpoch,
+				cfg.State.Epoch-2,
+				err,
+			)
+		}
+	}
+
 	pparamsSlot := snapshotEpochAnchorSlot(
 		cfg,
 		cfg.State.Epoch,
 	)
+	if requiresPrevious {
+		previousSlot := snapshotEpochAnchorSlot(cfg, previousEpoch)
+		// #nosec G115 -- previousEra is a non-negative era index returned by
+		// importedEraForEpoch.
+		if err := store.SetPParams(
+			previousCbor,
+			previousSlot,
+			previousEpoch,
+			uint(previousEra),
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"storing historical protocol parameters for epoch %d: %w",
+				previousEpoch,
+				err,
+			)
+		}
+	}
 
-	// #nosec G115
-	if err := store.SetPParams(
-		pparamsCbor,
-		pparamsSlot,
-		cfg.State.Epoch,
-		uint(cfg.State.EraIndex),
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"storing protocol parameters: %w",
-			err,
-		)
+	if len(pparamsCbor) > 0 {
+		// #nosec G115
+		if err := store.SetPParams(
+			pparamsCbor,
+			pparamsSlot,
+			cfg.State.Epoch,
+			uint(cfg.State.EraIndex),
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"storing protocol parameters: %w",
+				err,
+			)
+		}
 	}
 
 	if err := txn.Commit(); err != nil {
@@ -2647,6 +2767,32 @@ func importPParams(
 		)
 	}
 	return nil
+}
+
+// importedEraForEpoch resolves an imported epoch against the era telescope
+// carried by the ledger state. The last bound at or before the epoch wins,
+// which also handles zero-epoch eras on Preview. Without the full telescope,
+// only epochs at or after the current era's known bound are defensible.
+func importedEraForEpoch(state *RawLedgerState, epoch uint64) (int, bool) {
+	if state == nil {
+		return 0, false
+	}
+	if len(state.EraBounds) > 0 {
+		if epoch < state.EraBounds[0].Epoch {
+			return 0, false
+		}
+		era := -1
+		for i := range state.EraBounds {
+			if state.EraBounds[i].Epoch <= epoch {
+				era = i
+			}
+		}
+		return era, era >= 0
+	}
+	if epoch < state.EraBoundEpoch {
+		return 0, false
+	}
+	return state.EraIndex, state.EraIndex >= 0
 }
 
 // importGovState imports governance state (constitution, committee

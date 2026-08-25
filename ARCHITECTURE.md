@@ -7072,6 +7072,18 @@ skipped rather than seeded from a guessed window. Block counts are not seeded an
 do not need to be — `rewardBlockCounts` derives them by scanning the imported
 chain for the performance epoch.
 
+The same imported reward window also makes protocol-parameter history part of
+the snapshot contract. The first boundary after a snapshot in epoch E consumes
+the imported Go basis for E-2, using E-1's parameters for performance and E's
+for calculation. The next boundary consumes Set for E-1 using the live E/E+1
+performance/calculation pair; it does not repeat the imported historical pair.
+The importer therefore extracts the ledger GovState's current and previous
+parameter payloads as distinct values, resolves the previous row against E-1's
+actual era, and writes both rows atomically. If an imported basis makes either
+payload mandatory and that exact payload is absent or incompatible with its
+epoch's era, bootstrap fails before either pparams row commits; current
+parameters are never relabeled as historical ones.
+
 The registration lookup is prepared from the union of pool keys delegated to
 by mark, set and go, but its result is intersected with each target snapshot's
 positive-stake delegated pool set before derivation. The target snapshot's
