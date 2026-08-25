@@ -235,6 +235,20 @@ func TestValidateCompleteGapBlocks(t *testing.T) {
 		"does not match immutable tip",
 	)
 
+	for _, slot := range []uint64{start.Slot, start.Slot - 1} {
+		nonIncreasingFirst := first
+		nonIncreasingFirst.Slot = slot
+		require.ErrorContains(
+			t,
+			validateCompleteGapBlocks(
+				[]models.Block{nonIncreasingFirst, second},
+				start,
+				end,
+			),
+			"does not follow start slot",
+		)
+	}
+
 	brokenSecond := second
 	brokenSecond.PrevHash = testGapHash32("wrong-link")
 	require.ErrorContains(
@@ -246,6 +260,20 @@ func TestValidateCompleteGapBlocks(t *testing.T) {
 		),
 		"does not match previous block",
 	)
+
+	for _, slot := range []uint64{first.Slot, first.Slot - 1} {
+		nonIncreasingSecond := second
+		nonIncreasingSecond.Slot = slot
+		require.ErrorContains(
+			t,
+			validateCompleteGapBlocks(
+				[]models.Block{first, nonIncreasingSecond},
+				start,
+				end,
+			),
+			"does not follow previous block slot",
+		)
+	}
 
 	require.ErrorContains(
 		t,
