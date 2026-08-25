@@ -970,10 +970,10 @@ type MithrilConfig struct {
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"       envconfig:"DINGO_MITHRIL_CLEANUP"`
-	// VerifyCertificates enables certificate chain verification
-	// during bootstrap. When true, the bootstrap process walks
-	// the Mithril certificate chain from the snapshot back to the
-	// genesis certificate to verify the chain is unbroken.
+	// VerifyCertificates enables STM certificate-chain verification during
+	// bootstrap. When true, bootstrap requires the Cardano network config's
+	// pinned Mithril genesis verification key and verifies the chain back to it.
+	// False explicitly selects the unverified bootstrap flow.
 	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
