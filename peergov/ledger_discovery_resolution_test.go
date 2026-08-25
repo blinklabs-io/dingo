@@ -87,6 +87,35 @@ func TestAddLedgerPeer_KnownPeerSkipsDNSResolution(t *testing.T) {
 		"skipping resolution must still record the peer as ledger-known")
 }
 
+// Peer.Address is stored verbatim, so a topology or gossip peer can hold the
+// same relay hostname under different casing. Matching it case-sensitively
+// adds a second peer for one relay, which AddPeer already avoids by
+// normalizing both sides.
+func TestAddLedgerPeer_KnownPeerMatchedCaseInsensitively(t *testing.T) {
+	// A different IP than the known peer's, so a missed match here is not
+	// rescued by the post-resolution check either.
+	calls := countingResolver(t, []net.IP{net.ParseIP("44.0.0.8")}, nil)
+	pg := discardGovernor()
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "Relay.Example.com:3001",
+		NormalizedAddress: "44.0.0.7:3001",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+	})
+	pg.mu.Unlock()
+
+	require.False(t, pg.addLedgerPeer("relay.example.com:3001"),
+		"the same relay under different casing must not be added twice")
+	assert.Equal(t, int64(0), calls.Load(),
+		"a case-insensitive match must be decided without DNS")
+
+	pg.mu.Lock()
+	peerCount := len(pg.peers)
+	pg.mu.Unlock()
+	assert.Equal(t, 1, peerCount, "no duplicate peer for the same relay")
+}
+
 // A relay hostname already on the deny list must not be resolved. Deny
 // entries for unresolvable hostnames are keyed on the lowercased hostname,
 // which is exactly what the pre-resolution check can compare against.

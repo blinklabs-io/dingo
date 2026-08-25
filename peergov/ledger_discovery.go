@@ -325,9 +325,11 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		return false
 	}
 
+	hostnameNormalized := p.normalizeAddress(address)
+
 	// Check deny list
 	if p.isDeniedLocked(normalized) ||
-		p.isDeniedLocked(p.normalizeAddress(address)) {
+		p.isDeniedLocked(hostnameNormalized) {
 		p.mu.Unlock()
 		return false
 	}
@@ -336,13 +338,17 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// sources at the same address count toward the ledger target.
 	p.ledgerKnownAddrs[normalized] = struct{}{}
 
-	// Check for existing peer using cached NormalizedAddress
+	// Check for existing peer using cached NormalizedAddress. The address
+	// comparison is normalized on both sides, as in AddPeer, so a peer
+	// holding the same hostname under different casing is not duplicated.
 	exists := false
 	for _, peer := range p.peers {
 		if peer == nil {
 			continue
 		}
-		if peer.NormalizedAddress == normalized || peer.Address == address {
+		if peer.NormalizedAddress == normalized ||
+			peer.NormalizedAddress == hostnameNormalized ||
+			p.normalizeAddress(peer.Address) == hostnameNormalized {
 			exists = true
 			break
 		}
@@ -426,8 +432,11 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
 		if peer == nil {
 			continue
 		}
-		if peer.Address != address &&
-			peer.NormalizedAddress != hostnameNormalized {
+		// Both sides are normalized, matching AddPeer: Peer.Address is
+		// stored verbatim, so a topology or gossip peer can hold the same
+		// relay hostname under different casing.
+		if peer.NormalizedAddress != hostnameNormalized &&
+			p.normalizeAddress(peer.Address) != hostnameNormalized {
 			continue
 		}
 		// Record the peer's own normalized address rather than a fresh
