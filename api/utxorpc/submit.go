@@ -124,11 +124,33 @@ func (s *submitServiceServer) waitForTx(
 	// Build a set of pending transaction hashes for O(1) lookup.
 	var pendingMu sync.Mutex
 	pending := make(map[string][]byte, len(ref))
+	uniqueRefs := make([][]byte, 0, len(ref))
 	for _, r := range ref {
-		pending[hex.EncodeToString(r)] = r
+		hash := hex.EncodeToString(r)
+		if _, exists := pending[hash]; exists {
+			continue
+		}
+		pending[hash] = r
+		uniqueRefs = append(uniqueRefs, r)
 	}
 	confirmationTarget := len(pending)
 	confirmations := make(chan waitForTxConfirmation, confirmationTarget)
+	queueConfirmation := func(hash string) {
+		pendingMu.Lock()
+		refBytes, found := pending[hash]
+		if !found {
+			pendingMu.Unlock()
+			return
+		}
+		// Each unique reference is queued at most once. The channel has one
+		// slot per unique reference, so this enqueue cannot block.
+		delete(pending, hash)
+		pendingMu.Unlock()
+		confirmations <- waitForTxConfirmation{
+			ref:  refBytes,
+			hash: hash,
+		}
+	}
 
 	subId := s.utxorpc.config.EventBus.SubscribeFunc(
 		ledger.TransactionEventType,
@@ -137,21 +159,7 @@ func (s *submitServiceServer) waitForTx(
 			if !ok {
 				return
 			}
-			txHash := tx.Hash().String()
-			pendingMu.Lock()
-			refBytes, found := pending[txHash]
-			if !found {
-				pendingMu.Unlock()
-				return
-			}
-			// Each unique reference is queued at most once. The channel has one
-			// slot per unique reference, so this enqueue cannot block.
-			delete(pending, txHash)
-			pendingMu.Unlock()
-			confirmations <- waitForTxConfirmation{
-				ref:  refBytes,
-				hash: txHash,
-			}
+			queueConfirmation(tx.Hash().String())
 		},
 	)
 	if subId == 0 {
@@ -163,6 +171,34 @@ func (s *submitServiceServer) waitForTx(
 	defer s.utxorpc.config.EventBus.UnsubscribeAndWait(
 		ledger.TransactionEventType, subId,
 	)
+
+	// The subscription must exist before this durable-state lookup. A
+	// transaction committed before subscription is found here, while one that
+	// commits during the lookup is queued by the event callback. Both paths use
+	// queueConfirmation so the same reference is emitted only once. Preserve
+	// first-request order for references that are already committed.
+	if !isNilInterface(s.utxorpc.config.LedgerState) {
+		for _, r := range uniqueRefs {
+			hash := hex.EncodeToString(r)
+			pendingMu.Lock()
+			_, stillPending := pending[hash]
+			pendingMu.Unlock()
+			if !stillPending {
+				continue
+			}
+			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(r)
+			if err != nil {
+				return fmt.Errorf(
+					"lookup committed transaction %x: %w",
+					r,
+					err,
+				)
+			}
+			if txRecord != nil {
+				queueConfirmation(hash)
+			}
+		}
+	}
 
 	serverTimeout := s.utxorpc.config.ServerTimeout
 	timeout := time.NewTimer(serverTimeout)

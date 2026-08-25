@@ -1313,6 +1313,46 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 	require.False(t, open)
 }
 
+func TestConnect_WaitForTx_AlreadyCommittedTransaction(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:     40,
+		serverTimeout: time.Second,
+	})
+	require.NotEmpty(t, h.IndexedTxHashes)
+	txHash := h.IndexedTxHashes[0]
+
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream, err := cli.WaitForTx(
+		ctx,
+		connect.NewRequest(&submit.WaitForTxRequest{
+			Ref: [][]byte{
+				append([]byte(nil), txHash...),
+				append([]byte(nil), txHash...),
+			},
+		}),
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		stream.Receive(),
+		"already-committed transaction should be confirmed: %v",
+		stream.Err(),
+	)
+	resp := stream.Msg()
+	require.NotNil(t, resp)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, resp.GetStage())
+	require.Equal(t, txHash, resp.GetRef())
+	require.False(t, stream.Receive(), "handler returns after confirming all refs")
+	require.NoError(t, stream.Err())
+}
+
 func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	txHash, txCbor, _ := firstTxInFixtureBlocks(t, 40)

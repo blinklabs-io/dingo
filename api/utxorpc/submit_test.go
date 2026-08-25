@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -229,6 +230,217 @@ func (e *controlledWaitForTxEventBus) Deliver(evt event.Event) {
 	e.inFlight--
 	e.cond.Broadcast()
 	e.mu.Unlock()
+}
+
+type waitForTxLedgerStub struct {
+	UtxorpcLedgerState
+	transactionByHash func([]byte) (*models.Transaction, error)
+}
+
+func (s *waitForTxLedgerStub) TransactionByHash(
+	hash []byte,
+) (*models.Transaction, error) {
+	return s.transactionByHash(hash)
+}
+
+func TestWaitForTxAlreadyCommittedPreservesFirstRequestOrder(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	var txHashA common.Blake2b256
+	txHashA[0] = 0xa1
+	var txHashB common.Blake2b256
+	txHashB[0] = 0xb2
+	var lookupOrder [][]byte
+	ledgerState := &waitForTxLedgerStub{
+		transactionByHash: func(hash []byte) (*models.Transaction, error) {
+			lookupOrder = append(lookupOrder, append([]byte(nil), hash...))
+			return &models.Transaction{}, nil
+		},
+	}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			LedgerState:   ledgerState,
+			ServerTimeout: time.Second,
+		}),
+	}
+
+	var responses []*submit.WaitForTxResponse
+	err := server.waitForTx(
+		context.Background(),
+		[][]byte{txHashB.Bytes(), txHashA.Bytes(), txHashB.Bytes()},
+		func(response *submit.WaitForTxResponse) error {
+			responses = append(responses, response)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{txHashB.Bytes(), txHashA.Bytes()}, lookupOrder)
+	require.Len(t, responses, 2)
+	require.Equal(t, txHashB.Bytes(), responses[0].GetRef())
+	require.Equal(t, txHashA.Bytes(), responses[1].GetRef())
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe",
+	)
+}
+
+func TestWaitForTxCommitDuringLookupIsConfirmedOnce(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		lookupResult *models.Transaction
+	}{
+		{
+			name: "lookup snapshot misses concurrent commit",
+		},
+		{
+			name:         "event and lookup both observe commit",
+			lookupResult: &models.Transaction{},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			eb := newControlledWaitForTxEventBus()
+			var txHash common.Blake2b256
+			txHash[0] = 0xa7
+			tx := &txPatternTestTx{hash: txHash}
+			lookupCount := 0
+			ledgerState := &waitForTxLedgerStub{
+				transactionByHash: func(
+					hash []byte,
+				) (*models.Transaction, error) {
+					lookupCount++
+					require.Equal(t, txHash.Bytes(), hash)
+					select {
+					case <-eb.subscribed:
+					default:
+						t.Fatal("durable lookup ran before event subscription")
+					}
+					eb.Deliver(event.NewEvent(
+						ledger.TransactionEventType,
+						ledger.TransactionEvent{Transaction: tx},
+					))
+					return testCase.lookupResult, nil
+				},
+			}
+			server := &submitServiceServer{
+				utxorpc: NewUtxorpc(UtxorpcConfig{
+					EventBus:      eb,
+					LedgerState:   ledgerState,
+					ServerTimeout: 100 * time.Millisecond,
+				}),
+			}
+
+			var responses []*submit.WaitForTxResponse
+			err := server.waitForTx(
+				context.Background(),
+				[][]byte{txHash.Bytes(), txHash.Bytes()},
+				func(response *submit.WaitForTxResponse) error {
+					responses = append(responses, response)
+					return nil
+				},
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, lookupCount)
+			require.Len(t, responses, 1)
+			require.Equal(
+				t,
+				submit.Stage_STAGE_CONFIRMED,
+				responses[0].GetStage(),
+			)
+			require.Equal(t, txHash.Bytes(), responses[0].GetRef())
+			testutil.RequireReceive(
+				t,
+				eb.unsubscribeAndWaitCalled,
+				time.Second,
+				"WaitForTx synchronous unsubscribe",
+			)
+		})
+	}
+}
+
+func TestWaitForTxCommittedLookupError(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	lookupErr := errors.New("lookup failed")
+	ledgerState := &waitForTxLedgerStub{
+		transactionByHash: func([]byte) (*models.Transaction, error) {
+			return nil, lookupErr
+		},
+	}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			LedgerState:   ledgerState,
+			ServerTimeout: time.Second,
+		}),
+	}
+	ref := bytes.Repeat([]byte{0xc3}, 32)
+
+	err := server.waitForTx(
+		context.Background(),
+		[][]byte{ref},
+		func(*submit.WaitForTxResponse) error {
+			t.Fatal("a failed durable lookup must not confirm the transaction")
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, lookupErr)
+	require.ErrorContains(t, err, "lookup committed transaction")
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe after lookup error",
+	)
+}
+
+func TestWaitForTxWithoutLedgerStateUsesCommittedEvents(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			ServerTimeout: time.Second,
+		}),
+	}
+	var txHash common.Blake2b256
+	txHash[0] = 0xd4
+	tx := &txPatternTestTx{hash: txHash}
+	responseCh := make(chan *submit.WaitForTxResponse, 1)
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- server.waitForTx(
+			context.Background(),
+			[][]byte{txHash.Bytes()},
+			func(response *submit.WaitForTxResponse) error {
+				responseCh <- response
+				return nil
+			},
+		)
+	}()
+	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+
+	eb.Deliver(event.NewEvent(
+		ledger.TransactionEventType,
+		ledger.TransactionEvent{Transaction: tx},
+	))
+	response := testutil.RequireReceive(
+		t,
+		responseCh,
+		time.Second,
+		"event-only confirmation",
+	)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, response.GetStage())
+	require.Equal(t, txHash.Bytes(), response.GetRef())
+	require.NoError(
+		t,
+		testutil.RequireReceive(t, resultCh, time.Second, "WaitForTx result"),
+	)
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe",
+	)
 }
 
 func TestWaitForTxBlockedSendDoesNotStallEventDelivery(t *testing.T) {
