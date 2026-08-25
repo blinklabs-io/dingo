@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -4189,6 +4190,19 @@ func (ls *LedgerState) createGenesisBlock() error {
 			return fmt.Errorf("set genesis network state: %w", err)
 		}
 
+		// The delayed reward calculation reads the ADA pots row for epoch
+		// newEpoch-1, so the boundary into epoch 1 reads epoch 0's. Every
+		// later epoch's row is written by saveRewardAdaPotsForEpoch at its
+		// own rollover; epoch 0 has no rollover, so its row is the same
+		// slot-0 baseline written above. Fees are 0 because no epoch
+		// precedes epoch 0.
+		if err := ls.saveGenesisRewardAdaPots(
+			genesisReserves,
+			txn.Metadata(),
+		); err != nil {
+			return err
+		}
+
 		ls.config.Logger.Info(
 			fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
 				len(txUtxos),
@@ -4266,7 +4280,11 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 	if err != nil {
 		return fmt.Errorf("get existing network state: %w", err)
 	}
-	if state != nil {
+	pots, err := ls.db.Metadata().GetRewardAdaPots(0, nil)
+	if err != nil {
+		return fmt.Errorf("get existing epoch 0 reward ADA pots: %w", err)
+	}
+	if state != nil && pots != nil {
 		return nil
 	}
 
@@ -4286,15 +4304,57 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 	if err != nil {
 		return fmt.Errorf("calculate genesis reserves: %w", err)
 	}
-	if err := ls.db.Metadata().SetNetworkState(0, reserves, 0, nil); err != nil {
-		return fmt.Errorf("set missing genesis network state: %w", err)
+	if state == nil {
+		if err := ls.db.Metadata().SetNetworkState(
+			0, reserves, 0, nil,
+		); err != nil {
+			return fmt.Errorf("set missing genesis network state: %w", err)
+		}
+		ls.config.Logger.Info(
+			"initialized missing genesis network state",
+			"component", "ledger",
+			"treasury", 0,
+			"reserves", reserves,
+		)
 	}
-	ls.config.Logger.Info(
-		"initialized missing genesis network state",
-		"component", "ledger",
-		"treasury", 0,
-		"reserves", reserves,
-	)
+	// Both rows describe the same slot-0 baseline, but they are written by
+	// different code paths and a database created before the epoch 0 ADA pots
+	// row existed can carry one without the other. Seeding it is not a repair
+	// of a mis-synced chain: the row is derived entirely from genesis
+	// configuration, and after the 0->1 boundary has passed nothing reads it.
+	if pots == nil {
+		if err := ls.saveGenesisRewardAdaPots(reserves, nil); err != nil {
+			return err
+		}
+		ls.config.Logger.Info(
+			"initialized missing genesis reward ADA pots",
+			"component", "ledger",
+			"epoch", 0,
+			"treasury", 0,
+			"reserves", reserves,
+		)
+	}
+	return nil
+}
+
+// saveGenesisRewardAdaPots writes the epoch 0 reward ADA pots row: the slot-0
+// treasury/reserves baseline with an empty fee pot. It is the pot input the
+// boundary into epoch 1 reads, so a network whose epoch 0 is already
+// Shelley-era applies that boundary's monetary expansion and treasury tax
+// instead of skipping it (dingo #3381).
+func (ls *LedgerState) saveGenesisRewardAdaPots(
+	reserves uint64,
+	txn types.Txn,
+) error {
+	if err := ls.db.Metadata().SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Treasury:     0,
+		Reserves:     types.Uint64(reserves),
+		Fees:         0,
+		CapturedSlot: 0,
+	}, txn); err != nil {
+		return fmt.Errorf("save genesis reward ADA pots: %w", err)
+	}
 	return nil
 }
 
