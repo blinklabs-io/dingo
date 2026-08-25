@@ -48,6 +48,22 @@ func TestWallet_AddAfterQuarantinesSubmittedOutputs(t *testing.T) {
 	require.Equal(t, "pending", selected[0].TxHash)
 }
 
+// TestWallet_ZeroValueRemainsUsable verifies that adding the injectable clock
+// does not break callers that construct Wallet using its zero value.
+func TestWallet_ZeroValueRemainsUsable(t *testing.T) {
+	var w Wallet
+	w.Add(makeUTxO("available", 0, 2_000_000))
+	w.AddAfter(time.Hour, makeUTxO("pending", 0, 3_000_000))
+
+	require.Equal(t, 1, w.Len())
+	require.Equal(t, uint64(2_000_000), w.Balance())
+	selected, change, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_000_000), change)
+	require.Equal(t, "available", selected[0].TxHash)
+	require.Zero(t, w.Len())
+}
+
 func TestWallet_EmptyBalance(t *testing.T) {
 	w := NewWallet()
 	assert.Equal(t, uint64(0), w.Balance())

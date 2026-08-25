@@ -49,6 +49,13 @@ func NewWallet() *Wallet {
 	return &Wallet{now: time.Now}
 }
 
+func (w *Wallet) currentTime() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
 // AddAfter appends UTxOs that become available for coin selection after the
 // supplied delay. It is used for outputs of submitted transactions so txpump
 // does not immediately build an unconfirmed dependency chain.
@@ -57,7 +64,7 @@ func (w *Wallet) AddAfter(delay time.Duration, utxos ...UTxO) {
 		w.Add(utxos...)
 		return
 	}
-	availableAt := w.now().Add(delay)
+	availableAt := w.currentTime().Add(delay)
 	for i := range utxos {
 		utxos[i].availableAt = availableAt
 	}
@@ -81,7 +88,7 @@ func (w *Wallet) Balance() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var total uint64
-	now := w.now()
+	now := w.currentTime()
 	for _, u := range w.utxos {
 		if !w.isAvailable(u, now) {
 			continue
@@ -98,7 +105,7 @@ func (w *Wallet) Balance() uint64 {
 func (w *Wallet) Len() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	now := w.now()
+	now := w.currentTime()
 	available := 0
 	for _, u := range w.utxos {
 		if w.isAvailable(u, now) {
@@ -124,7 +131,7 @@ func (w *Wallet) SelectCoins(targetAmount uint64) ([]UTxO, uint64, error) {
 	defer w.mu.Unlock()
 
 	// Sort descending by amount (largest first).
-	now := w.now()
+	now := w.currentTime()
 	sorted := make([]UTxO, 0, len(w.utxos))
 	for _, utxo := range w.utxos {
 		if w.isAvailable(utxo, now) {
