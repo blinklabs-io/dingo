@@ -563,7 +563,19 @@ func checkEpoch(
 	// Convert key-hash hex back to bech32 so PoolBech32 is consistently formatted.
 	var onlyDingo []string
 	if dingoPoolErr == nil {
-		for keyHex := range dingoPoolMap {
+		for keyHex, dingoPool := range dingoPoolMap {
+			// GetPoolEpochDataMap returns the union of the stake-epoch
+			// (K-1) and param-epoch (K+1) reads, so a pool that registered
+			// during K appears here through its param-epoch row alone: its
+			// first mark snapshot is captured at the boundary into K+1, and
+			// it is not part of K's active-stake basis at all. Koios has no
+			// pool_history row for it until K+2, so comparing presence at K
+			// would report a divergence where both sides agree the pool did
+			// not yet exist. Only a pool actually in K's stake basis can be
+			// present-only-in-Dingo (dingo #3483).
+			if !dingoPool.StakePresent {
+				continue
+			}
 			if _, inKoios := koiosKeySet[keyHex]; !inKoios {
 				poolBech32, bechErr := PoolKeyHashHexToBech32(keyHex)
 				if bechErr != nil {
