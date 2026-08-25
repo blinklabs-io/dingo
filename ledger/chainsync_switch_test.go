@@ -1103,6 +1103,51 @@ func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 	require.Empty(t, ls.bufferedHeaderEvents[connIdKey(connId2)])
 }
 
+func TestHandleEventChainsyncDoesNotRecordRejectedPeerTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	// Keep the test at header admission; no blockfetch worker is needed.
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	connID := fixture.connId
+
+	// This header is accepted and establishes the initial upstream tip.
+	accepted := mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("accepted-header-2")),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 1,
+	}
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connID,
+		BlockHeader:  accepted,
+		Point:        ocommon.NewPoint(accepted.slot, accepted.hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(100, []byte("accepted-tip")),
+			BlockNumber: 100,
+		},
+	}))
+	require.Equal(t, uint64(100), ls.syncUpstreamTipSlot.Load())
+
+	// The next header does not extend the queued chain. Its advertised tip
+	// must not advance shared progress state before fork handling rejects it.
+	rejected := mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("rejected-header")),
+		prevHash:    lcommon.NewBlake2b256([]byte("unknown-parent")),
+		blockNumber: 3,
+		slot:        3,
+	}
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connID,
+		BlockHeader:  rejected,
+		Point:        ocommon.NewPoint(rejected.slot, rejected.hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(999, []byte("untrusted-tip")),
+			BlockNumber: 999,
+		},
+	}))
+	assert.Equal(t, uint64(100), ls.syncUpstreamTipSlot.Load())
+}
+
 func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 	t *testing.T,
 ) {

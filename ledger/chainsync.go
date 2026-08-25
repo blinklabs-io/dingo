@@ -2434,11 +2434,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// still points to the old (dead) connection.
 	ls.detectConnectionSwitch(pending)
 
-	// Track upstream tip for sync progress reporting
-	if e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
-		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
-	}
-
 	// Verify header crypto before accepting it into the header queue.
 	// Skip during historical sync (validationEnabled=false) because
 	// historical blocks were already validated by the network and the
@@ -2447,7 +2442,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
 	headerCryptoVerified := false
-	if ls.shouldVerifyChainsyncHeaderCrypto(e.Point.Slot) {
+	headerValidationRequired := ls.shouldVerifyChainsyncHeaderCrypto(
+		e.Point.Slot,
+	)
+	if headerValidationRequired {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
 			if errors.Is(err, errHeaderVerificationDeferred) {
 				ls.config.Logger.Debug(
@@ -2647,6 +2645,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	// Reset mismatch counter on successful header addition
 	ls.headerMismatchCount = 0
+	// Track the peer tip only after the accompanying header has passed the
+	// applicable admission path and entered the local header queue. Recording
+	// e.Tip before validation, or after a deferred validation decision, lets a
+	// rejected header advance the shared catch-up/cleanup state with
+	// unauthenticated peer data.
+	if (!headerValidationRequired || headerCryptoVerified) &&
+		e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
+		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
+	}
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
