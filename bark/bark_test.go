@@ -51,6 +51,7 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			serverCtx, cancelServer := context.WithCancel(t.Context())
 			cfg := BarkConfig{
 				DB:   newTestDB(t),
 				Host: "127.0.0.1",
@@ -62,8 +63,15 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 
 			b, err := NewBark(cfg)
 			require.NoError(t, err)
-			require.NoError(t, b.Start(context.Background()))
-			t.Cleanup(func() { _ = b.Stop(context.Background()) })
+			t.Cleanup(func() {
+				cancelServer()
+				require.Eventually(t, func() bool {
+					return b.Addr() == ""
+				}, 5*time.Second, 10*time.Millisecond,
+					"Bark server must finish context-triggered shutdown")
+				require.NoError(t, b.Stop(context.Background()))
+			})
+			require.NoError(t, b.Start(serverCtx))
 
 			b.mu.Lock()
 			server := b.server
