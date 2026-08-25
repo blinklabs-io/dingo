@@ -1436,7 +1436,8 @@ enabled when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start`
 binds the listener synchronously (so bind/cert errors surface immediately)
 and serves in a goroutine; a context watcher performs a bounded
 `GracefulStop`, escalating to a hard `Stop` on timeout. The listener defaults
-to `127.0.0.1:50051`. Without TLS, any empty, wildcard, hostname other than
+to `127.0.0.1:50051`; an explicitly empty host is normalized to that loopback
+default before validation. Without TLS, any wildcard, hostname other than
 `localhost`, or concrete non-loopback host is rejected unless the operator
 sets `midnight.allowInsecureRemote: true`; that override is intended only when
 transport security and access control are supplied outside Dingo. Dingo does
