@@ -149,11 +149,15 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 		history.order[len(history.order)-1],
 	)
 	retainedBytes := 0
+	decodedHeaders := 0
 	for _, record := range history.byHash {
 		retainedBytes += record.bytes
-		assert.Nil(t, record.event.BlockHeader)
+		if record.event.BlockHeader != nil {
+			decodedHeaders++
+		}
 		assert.Len(t, record.headerCbor, 2048)
 	}
+	assert.Zero(t, decodedHeaders)
 	assert.Equal(t, retainedBytes, history.retainedBytes)
 	assert.LessOrEqual(t, history.retainedBytes, maxPeerHeaderHistoryBytesPerConn)
 }
