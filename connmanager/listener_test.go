@@ -627,6 +627,49 @@ func TestAcceptLoopDoesNotBlockOnSilentHandshake(t *testing.T) {
 	require.NoError(t, cm.Stop(stopCtx))
 }
 
+func TestInboundLimitRejectionUntracksPendingConnection(t *testing.T) {
+	mockLn := newToggleMockListener()
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: 1,
+		Listeners: []ListenerConfig{{
+			Listener: mockLn,
+		}},
+	})
+	t.Cleanup(func() { goleak.VerifyNone(t) })
+
+	// Occupy the only inbound slot so the accept loop rejects the next bearer
+	// before dispatching its handshake goroutine.
+	require.True(t, cm.tryReserveInboundSlot())
+	t.Cleanup(cm.releaseInboundSlot)
+	require.NoError(t, cm.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	require.True(t, mockLn.WaitForAcceptEntered(2*time.Second))
+
+	rejected, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	mockLn.ProvideConnection(rejected)
+	require.True(
+		t,
+		mockLn.WaitForAcceptEntered(2*time.Second),
+		"accept loop must continue after the inbound limit rejection",
+	)
+
+	cm.listenersMutex.Lock()
+	pending := len(cm.pendingConns)
+	cm.listenersMutex.Unlock()
+	require.Zero(
+		t,
+		pending,
+		"a connection closed during admission must not remain pending",
+	)
+}
+
 func TestAcceptLoopBackoffOnError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

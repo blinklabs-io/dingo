@@ -306,6 +306,7 @@ func (c *ConnectionManager) startListener(
 					),
 				)
 				_ = conn.Close()
+				c.untrackPendingConnection(conn)
 				continue
 			}
 			c.goroutineWg.Go(func() {
@@ -360,7 +361,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 	pendingConn := conn
 	defer c.untrackPendingConnection(pendingConn)
 	stopOnCancel := context.AfterFunc(ctx, func() {
-		_ = conn.Close()
+		_ = pendingConn.Close()
 	})
 	defer func() {
 		stopOnCancel()
