@@ -470,7 +470,13 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 		cfg ledger.LedgerStateConfig,
 	) (*ledger.LedgerState, error) {
 		captured = cfg
-		return &ledger.LedgerState{}, nil
+		state, err := ledger.NewLedgerState(cfg)
+		if state != nil {
+			t.Cleanup(func() {
+				require.NoError(t, state.Close())
+			})
+		}
+		return state, err
 	}
 	installEpochBoundarySnapshotHookForLoad = func(
 		_ *ledger.LedgerState,
@@ -497,6 +503,97 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.NotNil(t, capturedHook)
 	require.True(t, captured.TrustedReplay)
 	require.True(t, captured.ManualBlockProcessing)
+}
+
+func TestLoadWithDBConfiguresChainSecurityParamBeforeReplay(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	stopAfterRollbackValidation := errors.New(
+		"stop after load rollback validation",
+	)
+	var loadConfig ledger.LedgerStateConfig
+	var rollbackErr error
+	oldNewLedgerStateForLoad := newLedgerStateForLoad
+	oldInstallHook := installEpochBoundarySnapshotHookForLoad
+	newLedgerStateForLoad = func(
+		cfg ledger.LedgerStateConfig,
+	) (*ledger.LedgerState, error) {
+		loadConfig = cfg
+		state, err := ledger.NewLedgerState(cfg)
+		if state != nil {
+			t.Cleanup(func() {
+				require.NoError(t, state.Close())
+			})
+		}
+		return state, err
+	}
+	installEpochBoundarySnapshotHookForLoad = func(
+		_ *ledger.LedgerState,
+		_ func(*database.Txn, event.EpochTransitionEvent) error,
+	) error {
+		rollbackErr = loadConfig.ChainManager.PrimaryChain().ValidateRollback(
+			ocommon.NewPoint(0, nil),
+		)
+		return stopAfterRollbackValidation
+	}
+	t.Cleanup(func() {
+		newLedgerStateForLoad = oldNewLedgerStateForLoad
+		installEpochBoundarySnapshotHookForLoad = oldInstallHook
+	})
+
+	err := LoadWithDB(
+		context.Background(),
+		&config.Config{Network: "preview"},
+		logger,
+		"unused",
+		db,
+	)
+	require.ErrorIs(t, err, stopAfterRollbackValidation)
+	require.False(
+		t,
+		errors.Is(rollbackErr, chain.ErrSecurityParamNotConfigured),
+		"load replay reached rollback validation without configuring K: %v",
+		rollbackErr,
+	)
+	require.NoError(t, rollbackErr)
+}
+
+type loadSecurityParamLedger struct {
+	securityParam int
+}
+
+func (l loadSecurityParamLedger) SecurityParam() int {
+	return l.securityParam
+}
+
+func TestConfigureLoadChainSecurityParamRejectsNonPositiveK(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		securityParam int
+	}{
+		{name: "zero", securityParam: 0},
+		{name: "negative", securityParam: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cm, err := chain.NewManager(nil, nil)
+			require.NoError(t, err)
+
+			err = configureLoadChainSecurityParam(
+				cm,
+				loadSecurityParamLedger{securityParam: test.securityParam},
+			)
+			require.ErrorIs(t, err, chain.ErrInvalidSecurityParam)
+			require.ErrorContains(
+				t,
+				err,
+				"failed to configure chain security parameter for load",
+			)
+		})
+	}
 }
 
 // TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot

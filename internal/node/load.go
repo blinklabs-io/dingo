@@ -55,6 +55,19 @@ const (
 // be verified without replaying a full ImmutableDB fixture.
 var newLedgerStateForLoad = ledger.NewLedgerState
 
+func configureLoadChainSecurityParam(
+	cm *chain.ChainManager,
+	ledgerState interface{ SecurityParam() int },
+) error {
+	if err := cm.SetLedger(ledgerState); err != nil {
+		return fmt.Errorf(
+			"failed to configure chain security parameter for load: %w",
+			err,
+		)
+	}
+	return nil
+}
+
 // installEpochBoundarySnapshotHookForLoad is replaceable in tests so load-mode
 // composition can verify the hook is installed without starting ledger workers.
 var installEpochBoundarySnapshotHookForLoad = func(
@@ -485,6 +498,9 @@ func LoadWithDB(
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
+	}
+	if err := configureLoadChainSecurityParam(cm, ls); err != nil {
+		return err
 	}
 	captureFailures := &loadCaptureFailureTracker{}
 	// SNAP-point stake read: runs after MIR and before POOLREAP/enactment so the

@@ -7461,6 +7461,13 @@ after replay completes, returns it — failing the load loudly so the operator
 knows the resulting database is incomplete and must be re-imported, rather than
 finishing "successfully".
 
+Before installing those hooks, starting the ledger, or replaying a trusted
+batch, `LoadWithDB` configures the `ChainManager` security parameter from the
+constructed load ledger. This matches normal serve and live-reinitialization
+composition and ensures replay recovery can validate and apply bounded primary-
+chain rollbacks. A non-positive parameter fails load startup with load-specific
+context instead of leaving recovery to fail later as unconfigured.
+
 Because the capture is staged inside the still-open rollover transaction, its
 success metrics (`capture_success_total`, `last_successful_epoch`, and the
 latest-snapshot pool/stake gauges) are published through `database.Txn.AfterCommit`
