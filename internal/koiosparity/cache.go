@@ -1170,7 +1170,10 @@ func (c *Cache) InsertCheckRun(run CheckRun) error {
 // write never leaves the cache with less evidence than before the check ran.
 // Callers must call this only once every fallible read for the epoch has
 // already succeeded, so prior evidence is never cleared ahead of a
-// still-incomplete replacement.
+// still-incomplete replacement. Each row's Network and Epoch are normalised
+// from the network/epoch parameters before insertion, mirroring
+// CommitEpochData, so a mismatched caller cannot corrupt a different epoch's
+// data.
 func (c *Cache) CommitEpochMismatches(
 	network string,
 	epoch uint64,
@@ -1201,7 +1204,9 @@ func (c *Cache) CommitEpochMismatches(
 			return err
 		}
 		defer stmt.Close()
-		for _, m := range mismatches {
+		for i := range mismatches {
+			mismatches[i].Network, mismatches[i].Epoch = network, epoch
+			m := mismatches[i]
 			if _, err = stmt.Exec(m.Network, m.Epoch, m.PoolBech32, m.StakeAddress, m.Field, m.DingoValue, m.KoiosValue, m.Category, m.CheckedAt); err != nil {
 				return err
 			}
