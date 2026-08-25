@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -26,7 +27,10 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -35,6 +39,7 @@ import (
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/require"
 	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
+	submit "github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
 )
 
 // TestWaitForTx_PendingSetTracking verifies the pending transaction tracking
@@ -74,17 +79,17 @@ func TestWaitForTx_PendingSetTracking(t *testing.T) {
 }
 
 // TestWaitForTx_EventBusSubscriptionLifecycle verifies that the WaitForTx
-// event subscription pattern correctly subscribes and unsubscribes from the
-// event bus. This is the fix for U5/U19 (subscription leak).
+// event subscription pattern synchronously unsubscribes without retaining the
+// subscriber after the request ends.
 func TestWaitForTx_EventBusSubscriptionLifecycle(t *testing.T) {
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
 	// Subscribe and track the subscription ID
 	subId := eb.SubscribeFunc(
-		ledger.BlockfetchEventType,
+		ledger.TransactionEventType,
 		func(evt event.Event) {
-			// Handler would process block events
+			// Handler would process committed transaction events
 		},
 	)
 	require.NotEqual(
@@ -94,14 +99,631 @@ func TestWaitForTx_EventBusSubscriptionLifecycle(t *testing.T) {
 		"subscription should return valid ID",
 	)
 
-	// Unsubscribe (this is what the fixed defer does)
-	eb.Unsubscribe(ledger.BlockfetchEventType, subId)
+	eb.UnsubscribeAndWait(ledger.TransactionEventType, subId)
 
 	// Publishing after unsubscribe should not panic or deadlock
 	eb.Publish(
-		ledger.BlockfetchEventType,
-		event.NewEvent(ledger.BlockfetchEventType, nil),
+		ledger.TransactionEventType,
+		event.NewEvent(ledger.TransactionEventType, nil),
 	)
+}
+
+func TestWaitForTxConfirmedTransaction(t *testing.T) {
+	tx := &txPatternTestTx{}
+	testCases := []struct {
+		name      string
+		eventData any
+		wantTx    gledger.Transaction
+		wantOk    bool
+	}{
+		{
+			name:      "raw blockfetch event",
+			eventData: ledger.BlockfetchEvent{},
+		},
+		{
+			name: "rollback event",
+			eventData: ledger.TransactionEvent{
+				Transaction: tx,
+				Rollback:    true,
+			},
+		},
+		{
+			name: "committed apply event",
+			eventData: ledger.TransactionEvent{
+				Transaction: tx,
+			},
+			wantTx: tx,
+			wantOk: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			gotTx, gotOk := waitForTxConfirmedTransaction(testCase.eventData)
+			require.Equal(t, testCase.wantOk, gotOk)
+			if testCase.wantOk {
+				require.Same(t, testCase.wantTx, gotTx)
+			} else {
+				require.Nil(t, gotTx)
+			}
+		})
+	}
+}
+
+type controlledWaitForTxEventBus struct {
+	mu                        sync.Mutex
+	cond                      *sync.Cond
+	handler                   event.EventHandlerFunc
+	subID                     event.EventSubscriberId
+	inFlight                  int
+	subscribed                chan struct{}
+	unsubscribeAndWaitEntered chan struct{}
+	unsubscribeAndWaitCalled  chan struct{}
+	subscribeOnce             sync.Once
+	unsubscribeEnteredOnce    sync.Once
+	unsubscribeOnce           sync.Once
+}
+
+func newControlledWaitForTxEventBus() *controlledWaitForTxEventBus {
+	eb := &controlledWaitForTxEventBus{
+		subID:                     1,
+		subscribed:                make(chan struct{}),
+		unsubscribeAndWaitEntered: make(chan struct{}),
+		unsubscribeAndWaitCalled:  make(chan struct{}),
+	}
+	eb.cond = sync.NewCond(&eb.mu)
+	return eb
+}
+
+func (e *controlledWaitForTxEventBus) SubscribeFunc(
+	_ event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	e.mu.Lock()
+	if e.subID != 0 {
+		e.handler = handler
+	}
+	subID := e.subID
+	e.mu.Unlock()
+	e.subscribeOnce.Do(func() { close(e.subscribed) })
+	return subID
+}
+
+func (e *controlledWaitForTxEventBus) Unsubscribe(
+	_ event.EventType,
+	_ event.EventSubscriberId,
+) {
+	e.mu.Lock()
+	e.handler = nil
+	e.mu.Unlock()
+}
+
+func (e *controlledWaitForTxEventBus) UnsubscribeAndWait(
+	_ event.EventType,
+	_ event.EventSubscriberId,
+) {
+	e.mu.Lock()
+	e.handler = nil
+	e.unsubscribeEnteredOnce.Do(func() {
+		close(e.unsubscribeAndWaitEntered)
+	})
+	for e.inFlight > 0 {
+		e.cond.Wait()
+	}
+	e.mu.Unlock()
+	e.unsubscribeOnce.Do(func() { close(e.unsubscribeAndWaitCalled) })
+}
+
+func (e *controlledWaitForTxEventBus) Deliver(evt event.Event) {
+	e.mu.Lock()
+	handler := e.handler
+	if handler == nil {
+		e.mu.Unlock()
+		return
+	}
+	e.inFlight++
+	e.mu.Unlock()
+
+	handler(evt)
+
+	e.mu.Lock()
+	e.inFlight--
+	e.cond.Broadcast()
+	e.mu.Unlock()
+}
+
+type waitForTxLedgerStub struct {
+	UtxorpcLedgerState
+	transactionByHash func([]byte) (*models.Transaction, error)
+}
+
+func (s *waitForTxLedgerStub) TransactionByHash(
+	hash []byte,
+) (*models.Transaction, error) {
+	return s.transactionByHash(hash)
+}
+
+func TestWaitForTxAlreadyCommittedPreservesFirstRequestOrder(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	var txHashA common.Blake2b256
+	txHashA[0] = 0xa1
+	var txHashB common.Blake2b256
+	txHashB[0] = 0xb2
+	var lookupOrder [][]byte
+	ledgerState := &waitForTxLedgerStub{
+		transactionByHash: func(hash []byte) (*models.Transaction, error) {
+			lookupOrder = append(lookupOrder, append([]byte(nil), hash...))
+			return &models.Transaction{}, nil
+		},
+	}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			LedgerState:   ledgerState,
+			ServerTimeout: time.Second,
+		}),
+	}
+
+	var responses []*submit.WaitForTxResponse
+	err := server.waitForTx(
+		context.Background(),
+		[][]byte{txHashB.Bytes(), txHashA.Bytes(), txHashB.Bytes()},
+		func(response *submit.WaitForTxResponse) error {
+			responses = append(responses, response)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{txHashB.Bytes(), txHashA.Bytes()}, lookupOrder)
+	require.Len(t, responses, 2)
+	require.Equal(t, txHashB.Bytes(), responses[0].GetRef())
+	require.Equal(t, txHashA.Bytes(), responses[1].GetRef())
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe",
+	)
+}
+
+func TestWaitForTxCommitDuringLookupIsConfirmedOnce(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		lookupResult *models.Transaction
+	}{
+		{
+			name: "lookup snapshot misses concurrent commit",
+		},
+		{
+			name:         "event and lookup both observe commit",
+			lookupResult: &models.Transaction{},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			eb := newControlledWaitForTxEventBus()
+			var txHash common.Blake2b256
+			txHash[0] = 0xa7
+			tx := &txPatternTestTx{hash: txHash}
+			lookupCount := 0
+			ledgerState := &waitForTxLedgerStub{
+				transactionByHash: func(
+					hash []byte,
+				) (*models.Transaction, error) {
+					lookupCount++
+					require.Equal(t, txHash.Bytes(), hash)
+					select {
+					case <-eb.subscribed:
+					default:
+						t.Fatal("durable lookup ran before event subscription")
+					}
+					eb.Deliver(event.NewEvent(
+						ledger.TransactionEventType,
+						ledger.TransactionEvent{Transaction: tx},
+					))
+					return testCase.lookupResult, nil
+				},
+			}
+			server := &submitServiceServer{
+				utxorpc: NewUtxorpc(UtxorpcConfig{
+					EventBus:      eb,
+					LedgerState:   ledgerState,
+					ServerTimeout: 100 * time.Millisecond,
+				}),
+			}
+
+			var responses []*submit.WaitForTxResponse
+			err := server.waitForTx(
+				context.Background(),
+				[][]byte{txHash.Bytes(), txHash.Bytes()},
+				func(response *submit.WaitForTxResponse) error {
+					responses = append(responses, response)
+					return nil
+				},
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, lookupCount)
+			require.Len(t, responses, 1)
+			require.Equal(
+				t,
+				submit.Stage_STAGE_CONFIRMED,
+				responses[0].GetStage(),
+			)
+			require.Equal(t, txHash.Bytes(), responses[0].GetRef())
+			testutil.RequireReceive(
+				t,
+				eb.unsubscribeAndWaitCalled,
+				time.Second,
+				"WaitForTx synchronous unsubscribe",
+			)
+		})
+	}
+}
+
+func TestWaitForTxCommittedLookupError(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	lookupErr := errors.New("lookup failed")
+	ledgerState := &waitForTxLedgerStub{
+		transactionByHash: func([]byte) (*models.Transaction, error) {
+			return nil, lookupErr
+		},
+	}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			LedgerState:   ledgerState,
+			ServerTimeout: time.Second,
+		}),
+	}
+	ref := bytes.Repeat([]byte{0xc3}, 32)
+
+	err := server.waitForTx(
+		context.Background(),
+		[][]byte{ref},
+		func(*submit.WaitForTxResponse) error {
+			t.Fatal("a failed durable lookup must not confirm the transaction")
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, lookupErr)
+	require.ErrorContains(t, err, "lookup committed transaction")
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe after lookup error",
+	)
+}
+
+func TestWaitForTxWithoutLedgerStateUsesCommittedEvents(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			ServerTimeout: time.Second,
+		}),
+	}
+	var txHash common.Blake2b256
+	txHash[0] = 0xd4
+	tx := &txPatternTestTx{hash: txHash}
+	responseCh := make(chan *submit.WaitForTxResponse, 1)
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- server.waitForTx(
+			context.Background(),
+			[][]byte{txHash.Bytes()},
+			func(response *submit.WaitForTxResponse) error {
+				responseCh <- response
+				return nil
+			},
+		)
+	}()
+	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+
+	eb.Deliver(event.NewEvent(
+		ledger.TransactionEventType,
+		ledger.TransactionEvent{Transaction: tx},
+	))
+	response := testutil.RequireReceive(
+		t,
+		responseCh,
+		time.Second,
+		"event-only confirmation",
+	)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, response.GetStage())
+	require.Equal(t, txHash.Bytes(), response.GetRef())
+	require.NoError(
+		t,
+		testutil.RequireReceive(t, resultCh, time.Second, "WaitForTx result"),
+	)
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe",
+	)
+}
+
+func TestWaitForTxBlockedSendDoesNotStallEventDelivery(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			ServerTimeout: time.Hour,
+		}),
+	}
+	var txHashA common.Blake2b256
+	txHashA[0] = 0xa1
+	var txHashB common.Blake2b256
+	txHashB[0] = 0xb2
+	txA := &txPatternTestTx{hash: txHashA}
+	txB := &txPatternTestTx{hash: txHashB}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sendStarted := make(chan struct{})
+	var sendOnce sync.Once
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- server.waitForTx(
+			ctx,
+			[][]byte{txHashA.Bytes(), txHashB.Bytes()},
+			func(*submit.WaitForTxResponse) error {
+				sendOnce.Do(func() { close(sendStarted) })
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		)
+	}()
+	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+
+	delivered := make(chan struct{})
+	go func() {
+		eb.Deliver(event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{Transaction: txA},
+		))
+		close(delivered)
+	}()
+	testutil.RequireReceive(t, sendStarted, time.Second, "blocked stream send")
+	testutil.RequireReceive(
+		t,
+		delivered,
+		time.Second,
+		"EventBus callback return while stream send is blocked",
+	)
+	secondDelivered := make(chan struct{})
+	go func() {
+		eb.Deliver(event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{Transaction: txB},
+		))
+		close(secondDelivered)
+	}()
+	testutil.RequireReceive(
+		t,
+		secondDelivered,
+		time.Second,
+		"second EventBus callback while stream send is blocked",
+	)
+	duplicateDelivered := make(chan struct{})
+	go func() {
+		eb.Deliver(event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{Transaction: txB},
+		))
+		close(duplicateDelivered)
+	}()
+	testutil.RequireReceive(
+		t,
+		duplicateDelivered,
+		time.Second,
+		"duplicate EventBus callback while stream send is blocked",
+	)
+
+	cancel()
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, resultCh, time.Second, "WaitForTx result"),
+		context.Canceled,
+	)
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe",
+	)
+}
+
+func TestWaitForTxTimeoutUsesSynchronousUnsubscribe(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			ServerTimeout: time.Millisecond,
+		}),
+	}
+
+	err := server.waitForTx(
+		context.Background(),
+		[][]byte{bytes.Repeat([]byte{0xb2}, 32)},
+		func(*submit.WaitForTxResponse) error {
+			t.Fatal("timeout path must not send a response")
+			return nil
+		},
+	)
+	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx timeout synchronous unsubscribe",
+	)
+}
+
+func TestWaitForTxSendErrorUnsubscribesAfterOneSend(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			ServerTimeout: time.Hour,
+		}),
+	}
+	var txHash common.Blake2b256
+	txHash[0] = 0xd4
+	tx := &txPatternTestTx{hash: txHash}
+	sendStarted := make(chan struct{})
+	releaseSend := make(chan struct{})
+	sendErr := errors.New("send failed")
+	var sendCount atomic.Int32
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- server.waitForTx(
+			context.Background(),
+			[][]byte{txHash.Bytes()},
+			func(*submit.WaitForTxResponse) error {
+				sendCount.Add(1)
+				close(sendStarted)
+				<-releaseSend
+				return sendErr
+			},
+		)
+	}()
+	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+
+	eb.Deliver(event.NewEvent(
+		ledger.TransactionEventType,
+		ledger.TransactionEvent{Transaction: tx},
+	))
+	testutil.RequireReceive(t, sendStarted, time.Second, "WaitForTx send")
+	eb.Deliver(event.NewEvent(
+		ledger.TransactionEventType,
+		ledger.TransactionEvent{Transaction: tx},
+	))
+	close(releaseSend)
+
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, resultCh, time.Second, "WaitForTx send error"),
+		sendErr,
+	)
+	require.Equal(t, int32(1), sendCount.Load())
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx send-error synchronous unsubscribe",
+	)
+}
+
+type blockingHashTx struct {
+	*txPatternTestTx
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (t *blockingHashTx) Hash() common.Blake2b256 {
+	t.once.Do(func() { close(t.entered) })
+	<-t.release
+	return t.txPatternTestTx.Hash()
+}
+
+func TestWaitForTxUnsubscribeWaitsForInFlightCallback(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			ServerTimeout: time.Hour,
+		}),
+	}
+	var txHash common.Blake2b256
+	txHash[0] = 0xe5
+	hashEntered := make(chan struct{})
+	releaseHash := make(chan struct{})
+	tx := &blockingHashTx{
+		txPatternTestTx: &txPatternTestTx{hash: txHash},
+		entered:         hashEntered,
+		release:         releaseHash,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var sendCalled atomic.Bool
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- server.waitForTx(
+			ctx,
+			[][]byte{txHash.Bytes()},
+			func(*submit.WaitForTxResponse) error {
+				sendCalled.Store(true)
+				return errors.New("unexpected send")
+			},
+		)
+	}()
+	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+
+	delivered := make(chan struct{})
+	go func() {
+		eb.Deliver(event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{Transaction: tx},
+		))
+		close(delivered)
+	}()
+	testutil.RequireReceive(t, hashEntered, time.Second, "transaction hash callback")
+	cancel()
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitEntered,
+		time.Second,
+		"WaitForTx entering synchronous unsubscribe",
+	)
+	select {
+	case err := <-resultCh:
+		t.Fatalf("WaitForTx returned before callback completed: %v", err)
+	default:
+	}
+
+	close(releaseHash)
+	testutil.RequireReceive(t, delivered, time.Second, "in-flight callback completion")
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx synchronous unsubscribe completion",
+	)
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, resultCh, time.Second, "canceled WaitForTx result"),
+		context.Canceled,
+	)
+	require.False(t, sendCalled.Load())
+}
+
+func TestWaitForTxRejectsFailedSubscription(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	eb.subID = 0
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{EventBus: eb}),
+	}
+
+	err := server.waitForTx(
+		context.Background(),
+		[][]byte{bytes.Repeat([]byte{0xc3}, 32)},
+		func(*submit.WaitForTxResponse) error {
+			t.Fatal("failed subscription must not send a response")
+			return nil
+		},
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"failed to subscribe to committed transaction events",
+	)
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+	select {
+	case <-eb.unsubscribeAndWaitCalled:
+		t.Fatal("zero subscription ID must not be unsubscribed")
+	default:
+	}
 }
 
 // TestWatchMempool_EventDrivenNotBusyPoll verifies that the fixed
@@ -330,6 +952,7 @@ const (
 // txPatternTestTx is a minimal gledger.Transaction for TxPattern tests.
 type txPatternTestTx struct {
 	common.TransactionBodyBase
+	hash     common.Blake2b256
 	consumed []common.TransactionInput
 	outs     []common.TransactionOutput
 	collRet  common.TransactionOutput
@@ -358,7 +981,7 @@ func (t *txPatternTestTx) Type() int { return 0 }
 
 func (t *txPatternTestTx) Cbor() []byte { return nil }
 
-func (t *txPatternTestTx) Hash() common.Blake2b256 { return common.Blake2b256{} }
+func (t *txPatternTestTx) Hash() common.Blake2b256 { return t.hash }
 
 func (t *txPatternTestTx) LeiosHash() common.Blake2b256 { return common.Blake2b256{} }
 

@@ -39,9 +39,9 @@ import (
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -99,6 +99,7 @@ type utxorpcHarnessOptions struct {
 	numBlocks       int
 	maxHistoryItems int
 	serverTimeout   time.Duration
+	skipIndexTxHash []byte
 }
 
 func newConnectH2CClient() *http.Client {
@@ -177,7 +178,12 @@ func newUtxorpcConnectHarness(
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
-	indexedTxHashes := indexFixtureTransactionsForReadTx(t, db, blocks)
+	indexedTxHashes := indexFixtureTransactionsForReadTx(
+		t,
+		db,
+		blocks,
+		opts.skipIndexTxHash,
+	)
 	tip := blocks[len(blocks)-1]
 	require.NoError(
 		t,
@@ -262,6 +268,7 @@ func indexFixtureTransactionsForReadTx(
 	t *testing.T,
 	db *database.Database,
 	blocks []models.Block,
+	skipTxHash []byte,
 ) [][]byte {
 	t.Helper()
 	indexed := make([][]byte, 0, 64)
@@ -282,6 +289,9 @@ func indexFixtureTransactionsForReadTx(
 		}
 		point := ocommon.NewPoint(mb.Slot, mb.Hash)
 		for j, tx := range txs {
+			if bytes.Equal(tx.Hash().Bytes(), skipTxHash) {
+				continue
+			}
 			err := db.SetTransaction(
 				tx,
 				point,
@@ -321,6 +331,32 @@ func firstTxInFixtureBlocks(
 	}
 	t.Fatal("no transaction found in fixture blocks")
 	return nil, nil, models.Block{}
+}
+
+func firstTwoTxsInFixtureBlocks(
+	t *testing.T,
+	numBlocks int,
+) (gledger.Transaction, models.Block, gledger.Transaction, models.Block) {
+	t.Helper()
+	blocks := loadTestChainBlocks(t, numBlocks)
+	var firstTx gledger.Transaction
+	var firstBlock models.Block
+	for _, mb := range blocks {
+		blk, err := gledger.NewBlockFromCbor(mb.Type, mb.Cbor)
+		require.NoError(t, err)
+		for _, tx := range blk.Transactions() {
+			if firstTx == nil {
+				firstTx = tx
+				firstBlock = mb
+				continue
+			}
+			if tx.Hash() != firstTx.Hash() {
+				return firstTx, firstBlock, tx, mb
+			}
+		}
+	}
+	t.Fatal("fewer than two distinct transactions found in fixture blocks")
+	return nil, models.Block{}, nil, models.Block{}
 }
 
 // --- tests ------------------------------------------------------------------
@@ -881,6 +917,38 @@ type waitForTxResult struct {
 	err  error
 }
 
+type waitForTxStreamEvent struct {
+	resp     *submit.WaitForTxResponse
+	err      error
+	terminal bool
+}
+
+// receiveWaitForTxStream exposes every response and the terminal stream result
+// in wire order.
+func receiveWaitForTxStream(
+	ctx context.Context,
+	cli submitconnect.SubmitServiceClient,
+	req *submit.WaitForTxRequest,
+) <-chan waitForTxStreamEvent {
+	eventCh := make(chan waitForTxStreamEvent, len(req.GetRef())+1)
+	go func() {
+		defer close(eventCh)
+		stream, err := cli.WaitForTx(ctx, connect.NewRequest(req))
+		if err != nil {
+			eventCh <- waitForTxStreamEvent{err: err, terminal: true}
+			return
+		}
+		for stream.Receive() {
+			eventCh <- waitForTxStreamEvent{resp: stream.Msg()}
+		}
+		eventCh <- waitForTxStreamEvent{
+			err:      stream.Err(),
+			terminal: true,
+		}
+	}()
+	return eventCh
+}
+
 // Run WaitForTx in the background so the test can cancel the request while
 // the stream is still open.
 func receiveWaitForTx(
@@ -972,7 +1040,7 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 		5*time.Second,
 	)
 	defer waitCancel()
-	waitForEventSubscriber(t, waitCtx, h.EB, ledger.BlockfetchEventType)
+	waitForEventSubscriber(t, waitCtx, h.EB, ledger.TransactionEventType)
 
 	cancel()
 
@@ -1155,69 +1223,183 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	cancel()
 }
 
-func TestConnect_WaitForTx_ConfirmsOnBlockfetchEvent(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
-	txHash, _, mb := firstTxInFixtureBlocks(t, 40)
-	blk, err := gledger.NewBlockFromCbor(mb.Type, mb.Cbor)
+func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
+	committedTx, _, pendingTx, eventBlock := firstTwoTxsInFixtureBlocks(t, 40)
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:       40,
+		skipIndexTxHash: pendingTx.Hash().Bytes(),
+	})
+	committedHash := committedTx.Hash().Bytes()
+	committedRecord, err := h.LS.TransactionByHash(committedHash)
 	require.NoError(t, err)
+	require.NotNil(t, committedRecord, "committed fixture transaction must be indexed")
+	pendingRecord, err := h.LS.TransactionByHash(pendingTx.Hash().Bytes())
+	require.NoError(t, err)
+	require.Nil(t, pendingRecord, "pending fixture transaction must not be indexed")
+	blk, err := gledger.NewBlockFromCbor(eventBlock.Type, eventBlock.Cbor)
+	require.NoError(t, err)
+	requestedInBlock := false
+	for _, tx := range blk.Transactions() {
+		if tx.Hash() == pendingTx.Hash() {
+			requestedInBlock = true
+			break
+		}
+	}
+	require.True(t, requestedInBlock, "raw blockfetch must contain the pending transaction")
 
 	cli := submitconnect.NewSubmitServiceClient(
 		h.Client,
 		h.Server.URL,
 		connect.WithGRPC(),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
-	stopPublish := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopPublish:
-				return
-			case <-ticker.C:
-				h.EB.Publish(
-					ledger.BlockfetchEventType,
-					event.NewEvent(
-						ledger.BlockfetchEventType,
-						ledger.BlockfetchEvent{
-							ConnectionId: ouroboros.ConnectionId{},
-							Block:        blk,
-							Point:        ocommon.NewPoint(mb.Slot, mb.Hash),
-							Type:         uint(mb.Type),
-							BatchDone:    false,
-						},
-					),
-				)
-			}
-		}
-	}()
-	defer close(stopPublish)
+	eventCh := receiveWaitForTxStream(
+		ctx,
+		cli,
+		&submit.WaitForTxRequest{
+			Ref: [][]byte{
+				append([]byte(nil), committedHash...),
+				append([]byte(nil), pendingTx.Hash().Bytes()...),
+			},
+		},
+	)
+	waitCtx, waitCancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer waitCancel()
+	waitForEventSubscriber(t, waitCtx, h.EB, ledger.TransactionEventType)
+	require.False(
+		t,
+		h.EB.HasSubscribers(ledger.BlockfetchEventType),
+		"WaitForTx must not consume pre-validation blockfetch events",
+	)
+	committed := testutil.RequireReceive(
+		t,
+		eventCh,
+		5*time.Second,
+		"persisted WaitForTx stream event",
+	)
+	require.False(t, committed.terminal)
+	require.NoError(t, committed.err)
+	require.NotNil(t, committed.resp)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, committed.resp.GetStage())
+	require.Equal(t, committedHash, committed.resp.GetRef())
+
+	// Raw blockfetch precedes validation, while a rollback removes the
+	// transaction from the active chain. Neither is a confirmation source.
+	h.EB.Publish(
+		ledger.BlockfetchEventType,
+		event.NewEvent(
+			ledger.BlockfetchEventType,
+			ledger.BlockfetchEvent{
+				Block: blk,
+				Point: ocommon.NewPoint(eventBlock.Slot, eventBlock.Hash),
+				Type:  uint(eventBlock.Type),
+			},
+		),
+	)
+	h.EB.Publish(
+		ledger.TransactionEventType,
+		event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{
+				Transaction: pendingTx,
+				Point: ocommon.NewPoint(
+					eventBlock.Slot,
+					eventBlock.Hash,
+				),
+				Rollback: true,
+			},
+		),
+	)
+	testutil.RequireNoReceive(
+		t,
+		eventCh,
+		100*time.Millisecond,
+		"raw blockfetch and rollback must not confirm a pending transaction",
+	)
+
+	// Ledger emits the forward transaction event only after the active-chain
+	// database transaction commits.
+	h.EB.Publish(
+		ledger.TransactionEventType,
+		event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{
+				Transaction: pendingTx,
+				Point: ocommon.NewPoint(
+					eventBlock.Slot,
+					eventBlock.Hash,
+				),
+			},
+		),
+	)
+
+	confirmed := testutil.RequireReceive(
+		t,
+		eventCh,
+		5*time.Second,
+		"post-commit WaitForTx stream event",
+	)
+	require.False(t, confirmed.terminal)
+	require.NoError(t, confirmed.err)
+	require.NotNil(t, confirmed.resp)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, confirmed.resp.GetStage())
+	require.Equal(t, pendingTx.Hash().Bytes(), confirmed.resp.GetRef())
+
+	terminal := testutil.RequireReceive(
+		t,
+		eventCh,
+		5*time.Second,
+		"terminal WaitForTx stream event",
+	)
+	require.True(t, terminal.terminal)
+	require.NoError(t, terminal.err)
+	_, open := <-eventCh
+	require.False(t, open)
+}
+
+func TestConnect_WaitForTx_AlreadyCommittedTransaction(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:     40,
+		serverTimeout: time.Second,
+	})
+	require.NotEmpty(t, h.IndexedTxHashes)
+	txHash := h.IndexedTxHashes[0]
+
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	stream, err := cli.WaitForTx(
 		ctx,
 		connect.NewRequest(&submit.WaitForTxRequest{
-			Ref: [][]byte{append([]byte(nil), txHash...)},
+			Ref: [][]byte{
+				append([]byte(nil), txHash...),
+				append([]byte(nil), txHash...),
+			},
 		}),
 	)
 	require.NoError(t, err)
-	if !stream.Receive() {
-		require.NoError(t, stream.Err())
-		t.Fatal("WaitForTx stream closed without confirmation frame")
-	}
+	require.True(
+		t,
+		stream.Receive(),
+		"already-committed transaction should be confirmed: %v",
+		stream.Err(),
+	)
 	resp := stream.Msg()
 	require.NotNil(t, resp)
 	require.Equal(t, submit.Stage_STAGE_CONFIRMED, resp.GetStage())
 	require.Equal(t, txHash, resp.GetRef())
-	require.False(
-		t,
-		stream.Receive(),
-		"handler returns after confirming all refs",
-	)
+	require.False(t, stream.Receive(), "handler returns after confirming all refs")
 	require.NoError(t, stream.Err())
-	cancel()
 }
 
 func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
