@@ -915,9 +915,22 @@ When `Node.Run()` is called, components are initialized in this order:
     BlockActionApply events are missed. The epoch cache is prepared first,
     inside a startup-only transaction, so backfill can resolve
     Ariadne/candidate epoch keys without falling back to epoch 0. Backfill
-    iterates stored blocks from the last checkpoint slot onward; inserts are
-    idempotent (ON CONFLICT DO NOTHING) so a
-    crash-restart replay is safe.
+    iterates stored blocks from the last checkpoint slot through the applied
+    ledger tip read from metadata (`Config.LedgerTipSlot`, wired to
+    `database.Database.GetTip`; `LedgerState.Tip()` is not usable here because
+    it is only loaded inside LedgerState.Start, which runs after this step).
+    Blocks stored above that tip are deliberately left out of the sweep: a
+    Mithril bootstrap imports raw blocks up to the certified immutable tip
+    while leaving the ledger cursor at the earlier imported ledger state, and
+    LedgerState.Start replays that whole suffix as ordinary BlockActionApply
+    events, so the indexer sees those blocks once through the live path
+    instead of scanning them here as well. A failure to resolve the tip aborts
+    startup rather than falling back to an unbounded sweep. Inserts are
+    idempotent (ON CONFLICT DO NOTHING) so a crash-restart replay is safe.
+    Progress is observable through `dingo_midnight_indexer_checkpoint_slot`,
+    `dingo_midnight_backfill_target_slot`, and
+    `dingo_midnight_backfill_in_progress`; the first two also give the
+    remaining catch-up gap, which is logged once when the sweep starts.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
     `healEmptyLabNonces`: in ascending epoch order over the most recent eight
     epochs plus one predecessor (or the full cache when shorter), it repairs

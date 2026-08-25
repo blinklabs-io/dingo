@@ -804,6 +804,20 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					fn,
 				)
 			},
+			// Read the applied ledger tip straight from metadata rather than
+			// from n.ledgerState.Tip(): LedgerState only loads its in-memory
+			// tip inside Start, which runs after this indexer has already
+			// backfilled, so Tip() would still be the zero value here. Blocks
+			// stored above this slot -- the whole post-snapshot suffix on a
+			// Mithril-bootstrapped node -- are replayed by LedgerState.Start
+			// and reach the indexer as live block events instead.
+			LedgerTipSlot: func() (uint64, error) {
+				tip, err := n.db.GetTip(nil)
+				if err != nil {
+					return 0, err
+				}
+				return tip.Point.Slot, nil
+			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
 					"fatal midnight indexer error, initiating shutdown",
