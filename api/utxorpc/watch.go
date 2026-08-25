@@ -271,6 +271,7 @@ func (s *watchServiceServer) WatchTx(
 		return s.utxorpc.matchTxPredicateNode(tx, predTree)
 	}
 	history := make([]watchTxHistoryEntry, 0, 256)
+	cursorHash := append([]byte(nil), point.Hash...)
 
 	for {
 		next, err := chainIter.Next(true)
@@ -292,7 +293,7 @@ func (s *watchServiceServer) WatchTx(
 		}
 		var msgs []*watch.WatchTxResponse
 		if next.Rollback {
-			var startHash []byte
+			startHash := append([]byte(nil), cursorHash...)
 			if len(history) > 0 {
 				startHash = append([]byte(nil), history[0].prevHash...)
 			}
@@ -318,6 +319,7 @@ func (s *watchServiceServer) WatchTx(
 				}
 				msgs = append(msgs, fetchedMsgs...)
 			}
+			cursorHash = append([]byte(nil), next.Point.Hash...)
 			s.utxorpc.config.Logger.Debug(
 				"WatchTx processed rollback",
 				"slot", next.Point.Slot,
@@ -349,6 +351,7 @@ func (s *watchServiceServer) WatchTx(
 			if len(history) > watchTxUndoHistoryBlocks {
 				history = history[len(history)-watchTxUndoHistoryBlocks:]
 			}
+			cursorHash = append([]byte(nil), next.Block.Hash...)
 		}
 		for _, resp := range msgs {
 			if err := stream.Send(resp); err != nil {

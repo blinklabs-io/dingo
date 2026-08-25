@@ -15,6 +15,7 @@
 package utxorpc
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -151,6 +152,93 @@ func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
 		5*time.Millisecond,
 		"an in-history rollback must not read persisted blocks",
 	)
+}
+
+func requireFixtureWatchTxAppliedCount(t *testing.T, block models.Block) int {
+	t.Helper()
+	applied, _, err := watchTxBuildForwardMessages(
+		block.Type,
+		block.Cbor,
+		block.Slot,
+		block.Number,
+		block.Hash,
+		func(gledger.Transaction) bool { return true },
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, applied)
+	return len(applied)
+}
+
+func requireWatchTxUndos(
+	t *testing.T,
+	stream *connect.ServerStreamForClient[watch.WatchTxResponse],
+	count int,
+) {
+	t.Helper()
+	for range count {
+		require.True(t, stream.Receive(), "WatchTx stream ended: %v", stream.Err())
+		_, ok := stream.Msg().Action.(*watch.WatchTxResponse_Undo)
+		require.True(t, ok, "expected Undo, got %T", stream.Msg().Action)
+	}
+}
+
+func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
+	scan := loadTestChainBlocks(t, 80)
+	start := findEmptyFixtureRun(t, scan, 4)
+	require.GreaterOrEqual(t, start, 3)
+	blocks := scan[:start+1]
+	txPayload := scan[3]
+	undoCount := requireFixtureWatchTxAppliedCount(t, txPayload)
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: len(blocks),
+	})
+
+	// Reuse one known-convertible transaction payload for two persisted block
+	// identities. The wrapper preserves each requested block's hash, previous
+	// hash, slot, and number so this test isolates rollback traversal state
+	// without changing the immutable fixture or the live chain.
+	persistedWithTxPayload := func(block models.Block) models.Block {
+		block.Type = txPayload.Type
+		block.Cbor = txPayload.Cbor
+		return block
+	}
+	h.U.config.LedgerState = &watchTxLedgerStateProbe{
+		UtxorpcLedgerState: h.LS,
+		blockByHash: func(hash []byte) (models.Block, error) {
+			switch {
+			case bytes.Equal(hash, blocks[start-1].Hash):
+				return persistedWithTxPayload(blocks[start-1]), nil
+			case bytes.Equal(hash, blocks[start-2].Hash):
+				return persistedWithTxPayload(blocks[start-2]), nil
+			default:
+				return h.LS.BlockByHash(hash)
+			}
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stream := startWatchTxAt(t, ctx, h, blocks[start-1])
+	requireWatchTxIdle(t, stream)
+
+	require.NoError(t, h.LS.Chain().Rollback(ocommon.NewPoint(
+		blocks[start-2].Slot,
+		blocks[start-2].Hash,
+	)))
+	requireWatchTxUndos(t, stream, undoCount)
+
+	require.NoError(t, h.LS.Chain().Rollback(ocommon.NewPoint(
+		blocks[start-3].Slot,
+		blocks[start-3].Hash,
+	)))
+	readded, err := gledger.NewBlockFromCbor(
+		blocks[start-2].Type,
+		blocks[start-2].Cbor,
+	)
+	require.NoError(t, err)
+	require.NoError(t, h.LS.Chain().AddBlock(readded, nil))
+	requireWatchTxUndos(t, stream, undoCount)
+	requireWatchTxIdle(t, stream)
 }
 
 func TestConnect_WatchTx_RollbackPanicBecomesStreamError(t *testing.T) {
