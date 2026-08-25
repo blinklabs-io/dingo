@@ -511,16 +511,40 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 	)
 
 	for _, test := range []struct {
-		name             string
-		mutate           func(*cardano.CardanoNodeConfig)
-		wantErr          string
-		wantHook         bool
-		wantRollbackOkay bool
+		name              string
+		mutate            func(*cardano.CardanoNodeConfig)
+		wantErr           string
+		wantHook          bool
+		wantRollbackOkay  bool
+		wantSecurityParam int
 	}{
 		{
-			name:             "valid control",
-			wantHook:         true,
-			wantRollbackOkay: true,
+			name: "Shelley at genesis uses Shelley K",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				enabled := false
+				epoch := uint64(0)
+				nodeCfg.ExperimentalHardForksEnabled = &enabled
+				nodeCfg.TestShelleyHardForkAtEpoch = &epoch
+				nodeCfg.ByronGenesis().ProtocolConsts.K = 2160
+				nodeCfg.ShelleyGenesis().SecurityParam = 432
+			},
+			wantHook:          true,
+			wantRollbackOkay:  true,
+			wantSecurityParam: 432,
+		},
+		{
+			name: "Shelley at genesis ignores unused zero Byron K",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				enabled := false
+				epoch := uint64(0)
+				nodeCfg.ExperimentalHardForksEnabled = &enabled
+				nodeCfg.TestShelleyHardForkAtEpoch = &epoch
+				nodeCfg.ByronGenesis().ProtocolConsts.K = 0
+				nodeCfg.ShelleyGenesis().SecurityParam = 432
+			},
+			wantHook:          true,
+			wantRollbackOkay:  true,
+			wantSecurityParam: 432,
 		},
 		{
 			name: "zero Byron K before Shelley",
@@ -544,6 +568,7 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 			var loadConfig ledger.LedgerStateConfig
 			var rollbackErr error
+			var selectedSecurityParam int
 			hookCalled := false
 			oldNewLedgerStateForLoad := newLedgerStateForLoad
 			oldInstallHook := installEpochBoundarySnapshotHookForLoad
@@ -559,6 +584,11 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 				}
 				if err == nil && test.mutate != nil {
 					test.mutate(cfg.CardanoNodeConfig)
+				}
+				if err == nil {
+					selectedSecurityParam, _ = loadSecurityParamForConfig(
+						cfg.CardanoNodeConfig,
+					)
 				}
 				return state, err
 			}
@@ -592,6 +622,11 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 			}
 			require.ErrorIs(t, err, stopAfterRollbackValidation)
 			require.Equal(t, test.wantHook, hookCalled)
+			require.Equal(
+				t,
+				test.wantSecurityParam,
+				selectedSecurityParam,
+			)
 			if test.wantRollbackOkay {
 				require.False(
 					t,

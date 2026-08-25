@@ -110,7 +110,7 @@ func loadSecurityParamForConfig(nodeCfg *cardano.CardanoNodeConfig) (int, error)
 	}
 
 	shelleyAtGenesis := false
-	if epoch, declared := nodeCfg.HardForkEpoch("shelley"); declared {
+	if epoch, declared := nodeCfg.DeclaredHardForkEpoch("shelley"); declared {
 		shelleyAtGenesis = epoch == 0
 	}
 	byronGenesis := nodeCfg.ByronGenesis()

@@ -7463,10 +7463,13 @@ finishing "successfully".
 
 Before installing those hooks, starting the ledger, or replaying a trusted
 batch, `LoadWithDB` configures the `ChainManager` security parameter from the
-constructed load ledger. This matches normal serve and live-reinitialization
-composition and ensures replay recovery can validate and apply bounded primary-
-chain rollbacks. A non-positive parameter fails load startup with load-specific
-context instead of leaving recovery to fail later as unconfigured.
+validated raw genesis values used to construct the load ledger. A configuration
+that declares Shelley at epoch zero uses Shelley K even when experimental fork
+overrides are disabled; a configuration with a Byron prefix uses Byron K. This
+ensures replay recovery can validate and apply bounded primary-chain rollbacks.
+A non-positive parameter for any era replay can reach fails load startup with
+load-specific context instead of leaving recovery to fail later as
+unconfigured.
 
 Because the capture is staged inside the still-open rollover transaction, its
 success metrics (`capture_success_total`, `last_successful_epoch`, and the
