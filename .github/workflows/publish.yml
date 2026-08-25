@@ -425,6 +425,8 @@ jobs:
       packages: write
     runs-on: ubuntu-latest
     steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
       - name: Login to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
@@ -459,27 +461,10 @@ jobs:
           set -euo pipefail
           while IFS= read -r image_tag; do
             [ -n "$image_tag" ] || continue
-            image_repository="${image_tag%:*}"
-            amd64_refs="$(
-              docker manifest inspect "${image_tag}-amd64" |
-                jq -er --arg repository "$image_repository" \
-                  '.manifests[] | select(.digest | type == "string" and length > 0) | "\($repository)@\(.digest)"'
-            )"
-            arm64_refs="$(
-              docker manifest inspect "${image_tag}-arm64" |
-                jq -er --arg repository "$image_repository" \
-                  '.manifests[] | select(.digest | type == "string" and length > 0) | "\($repository)@\(.digest)"'
-            )"
-            mapfile -t amd64_manifests <<< "$amd64_refs"
-            mapfile -t arm64_manifests <<< "$arm64_refs"
-            if (( ${#amd64_manifests[@]} == 0 || ${#arm64_manifests[@]} == 0 )); then
-              echo "both amd64 and arm64 manifests are required" >&2
-              exit 1
-            fi
-            docker manifest create "$image_tag" \
-              "${amd64_manifests[@]}" \
-              "${arm64_manifests[@]}"
-            docker manifest push "$image_tag"
+            docker buildx imagetools create \
+              --tag "$image_tag" \
+              "${image_tag}-amd64" \
+              "${image_tag}-arm64"
           done <<< "$IMAGE_TAGS"
       # Checkout repo so README.md is available for next step
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
