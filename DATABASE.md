@@ -804,17 +804,22 @@ PostgreSQL/MySQL repeatable-read read-only transactions.
 
 #### Reward Withdrawal Persistence
 
-For every positive reward withdrawal in a phase-2-valid transaction,
-transaction ingestion reads the active account's current reward balance,
-rejects an amount greater than that balance, sets `account.reward` to
-`previous_reward - amount`, and inserts the matching `account_reward_delta` row
-in the same metadata transaction. A zero withdrawal in a phase-2-valid
+Protocol validation reads the active account's current reward balance before
+transaction ingestion. Before Dijkstra, a withdrawal must equal that balance
+and drain the account. In Dijkstra, transactions that do not use Plutus V1-V3
+may withdraw only part of the balance; transactions using those legacy Plutus
+versions retain the exact-drain rule. No withdrawal may exceed the balance.
+
+For every accepted positive withdrawal in a phase-2-valid transaction,
+transaction ingestion independently checks the era-neutral upper bound,
+subtracts the amount from `account.reward`, and inserts the matching
+`account_reward_delta` row in the same metadata transaction. A zero withdrawal
+in a phase-2-valid
 transaction does not change the balance or create a reward-delta row; when
 delegator inactivity tracking is enabled, it can still create an
 `account_withdrawal_witness` row because witnessing and balance mutation are
 separate concerns. Phase-2-invalid transactions persist neither the reward
-debit nor the witness. The ledger's era-specific validation decides whether a
-partial amount is permitted; storage enforces the era-neutral upper bound.
+debit nor the witness.
 
 Re-ingesting an already-applied withdrawal checks for the existing logical
 withdrawal row by transaction hash and full stake credential before changing

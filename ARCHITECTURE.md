@@ -2391,6 +2391,12 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
+- `RewardAccountBalance` lookup for a full, tag-aware stake credential. It
+  returns the active account's current reward balance, including zero, or nil
+  for an absent or inactive account. This implements the ledger-state
+  capability used by transaction validation to enforce exact withdrawals
+  before Dijkstra and Dijkstra's script-sensitive partial-withdrawal rule,
+  while always rejecting amounts above the balance before storage ingestion.
 
 ### Local State Query
 

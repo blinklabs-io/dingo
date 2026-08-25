@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
 // ErrNotFound is returned when a requested item is not found
@@ -90,7 +91,7 @@ func (p *DingoStateProvider) StakeRegistration(
 func (p *DingoStateProvider) IsStakeCredentialRegistered(
 	cred common.Credential,
 ) bool {
-	_, exists := p.manager.stakeRegistrations[cred.Credential]
+	_, exists := p.manager.stakeRegistrations[mockledger.NewRewardAccountKey(cred)]
 	return exists
 }
 
@@ -195,7 +196,7 @@ func (p *DingoStateProvider) IsRewardAccountRegistered(
 func (p *DingoStateProvider) RewardAccountBalance(
 	cred common.Credential,
 ) (*uint64, error) {
-	balance, exists := p.manager.stakeRegistrations[cred.Credential]
+	balance, exists := p.manager.stakeRegistrations[mockledger.NewRewardAccountKey(cred)]
 	if !exists {
 		return nil, nil
 	}
@@ -313,7 +314,10 @@ func (p *DingoStateProvider) DRepRegistration(
 func (p *DingoStateProvider) DRepDelegation(
 	cred common.Credential,
 ) (*common.Drep, error) {
-	delegation, ok := p.manager.govState.DRepDelegations[cred.Credential]
+	delegation, ok := p.manager.govState.DRepDelegationsByCredential[mockledger.NewRewardAccountKey(cred)]
+	if !ok && len(p.manager.govState.DRepDelegationsByCredential) == 0 {
+		delegation, ok = p.manager.govState.DRepDelegations[cred.Credential]
+	}
 	if !ok {
 		return nil, nil
 	}
