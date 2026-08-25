@@ -2689,7 +2689,13 @@ Node composition injects an atomic Genesis-mode/window query from
 `ChainSelector` into ledger, so the same resolver automatically returns to
 Praos once the selector exits Genesis mode. Chainsync and ledger retain enough
 per-peer header ancestry for the active slot window while Genesis is active,
-then shrink back to their normal bounded history after exit.
+then shrink back to their normal bounded history after exit. The ledger's
+peer-local ancestry stores compact header CBOR and prev-hash metadata rather
+than retaining decoded header objects, and enforces both the active window's
+entry bound and an 8 MiB per-connection byte budget. If a candidate fork path
+falls outside the retained suffix, recovery fails closed to a fresh
+ChainSync intersection instead of making a density or rollback decision from
+an incomplete path.
 
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks

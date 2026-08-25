@@ -154,6 +154,16 @@ const (
 	headerMismatchResyncThreshold = 20
 
 	maxPeerHeaderHistoryPerConn = 256
+	// Genesis fork resolution can need more than the normal K-sized history to
+	// compare a candidate's density, but retaining decoded headers for an
+	// entire slot window makes memory proportional to an attacker-controlled
+	// number of blocks. Store wire header bytes lazily and cap each peer's
+	// retained history independently of the configured slot window. The default
+	// Genesis quorum is one fast source plus two corroborators, so this leaves a
+	// bounded 24 MiB wire-history allowance across the three required peers.
+	// A path that does not fit this budget falls back to a fresh intersection.
+	maxPeerHeaderHistoryBytesPerConn = 8 << 20
+	peerHeaderHistoryRecordOverhead  = 512
 
 	// Match ouroboros-consensus' default maximum permissible clock skew. A
 	// header within this window is held until its slot begins; an earlier
@@ -175,13 +185,21 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 )
 
 type peerHeaderRecord struct {
-	event    ChainsyncEvent
-	prevHash []byte
+	// event carries only the metadata needed to reconstruct a ChainsyncEvent.
+	// Production records leave BlockHeader nil and decode headerCbor only when
+	// recovery actually needs it. In-package synthetic headers may provide an
+	// event with a header and use that fallback when no CBOR is available.
+	event      ChainsyncEvent
+	headerCbor []byte
+	prevHash   []byte
+	decodeType uint
+	bytes      int
 }
 
 type peerHeaderChain struct {
-	order  []string
-	byHash map[string]peerHeaderRecord
+	order         []string
+	byHash        map[string]peerHeaderRecord
+	retainedBytes int
 }
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -1044,17 +1062,71 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	if _, ok := history.byHash[hashKey]; ok {
 		return
 	}
-	history.order = append(history.order, hashKey)
-	history.byHash[hashKey] = peerHeaderRecord{
-		event:    e,
-		prevHash: append([]byte(nil), e.BlockHeader.PrevHash().Bytes()...),
+	headerCbor := append([]byte(nil), e.BlockHeader.Cbor()...)
+	prevHash := append([]byte(nil), e.BlockHeader.PrevHash().Bytes()...)
+	decodeType := e.Type
+	// Musashi carries the Dijkstra header extension under the Conway wire
+	// block type. Preserve the decoder selected by the protocol callback when
+	// the compact record is rehydrated after a fork.
+	if e.BlockHeader.Era().Id == gledger.EraIdDijkstra {
+		decodeType = gledger.BlockTypeDijkstra
 	}
-	limit := ls.peerHeaderHistoryLimit()
-	for len(history.order) > limit {
+	recordBytes := peerHeaderHistoryRecordOverhead +
+		len(headerCbor) + len(prevHash) + len(e.Point.Hash)
+	if recordBytes > maxPeerHeaderHistoryBytesPerConn {
+		return
+	}
+	for len(history.order) > 0 &&
+		(history.retainedBytes+recordBytes > maxPeerHeaderHistoryBytesPerConn ||
+			len(history.order) >= ls.peerHeaderHistoryLimit()) {
 		evictKey := history.order[0]
 		history.order = history.order[1:]
-		delete(history.byHash, evictKey)
+		if evicted, ok := history.byHash[evictKey]; ok {
+			history.retainedBytes -= evicted.bytes
+			delete(history.byHash, evictKey)
+		}
 	}
+	metadata := ChainsyncEvent{
+		ConnectionId: e.ConnectionId,
+		Point: ocommon.Point{
+			Slot: e.Point.Slot,
+			Hash: append([]byte(nil), e.Point.Hash...),
+		},
+		BlockNumber: e.BlockNumber,
+		Type:        e.Type,
+	}
+	if len(headerCbor) == 0 {
+		// Synthetic headers used by some in-package callers do not expose CBOR.
+		// Keep their decoded value, but charge the same conservative record
+		// overhead so this compatibility path cannot bypass the bound.
+		metadata.BlockHeader = e.BlockHeader
+	}
+	record := peerHeaderRecord{
+		event:      metadata,
+		headerCbor: headerCbor,
+		prevHash:   prevHash,
+		decodeType: decodeType,
+		bytes:      recordBytes,
+	}
+	history.order = append(history.order, hashKey)
+	history.byHash[hashKey] = record
+	history.retainedBytes += recordBytes
+}
+
+func (r peerHeaderRecord) chainsyncEvent() (ChainsyncEvent, bool) {
+	if r.event.BlockHeader != nil {
+		return r.event, true
+	}
+	decodeType := r.decodeType
+	if decodeType == 0 {
+		decodeType = r.event.Type
+	}
+	header, err := gledger.NewBlockHeaderFromCbor(decodeType, r.headerCbor)
+	if err != nil {
+		return ChainsyncEvent{}, false
+	}
+	r.event.BlockHeader = header
+	return r.event, true
 }
 
 func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
@@ -1251,11 +1323,18 @@ func (ls *LedgerState) findPeerForkPath(
 		if !ok {
 			return nil, nil, nil
 		}
+		recordEvent, ok := record.chainsyncEvent()
+		if !ok {
+			// A retained header that cannot be reconstructed is treated like a
+			// missing history entry. Re-intersection is safer than comparing or
+			// replaying an incomplete candidate path.
+			return nil, nil, nil
+		}
 		if _, seen := visited[hashKey]; seen {
 			return nil, nil, nil
 		}
 		visited[hashKey] = struct{}{}
-		pathReversed = append(pathReversed, record.event)
+		pathReversed = append(pathReversed, recordEvent)
 		prevHash = append(prevHash[:0], record.prevHash...)
 	}
 	return nil, nil, nil
@@ -2220,11 +2299,15 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	}
 	for _, v := range slices.Backward(history.order) {
 		record, ok := history.byHash[v]
-		if !ok || record.event.Point.Slot <= point.Slot {
+		if !ok {
+			continue
+		}
+		recordEvent, ok := record.chainsyncEvent()
+		if !ok || recordEvent.Point.Slot <= point.Slot {
 			continue
 		}
 		ancestorPoint, forkPath, err := ls.findPeerForkPath(
-			record.event,
+			recordEvent,
 			record.prevHash,
 		)
 		if err != nil {

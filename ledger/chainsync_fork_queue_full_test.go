@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"testing"
@@ -23,6 +25,9 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -31,6 +36,13 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
+
+type encodedHeader struct {
+	lcommon.BlockHeader
+	cbor []byte
+}
+
+func (h encodedHeader) Cbor() []byte { return h.cbor }
 
 // buildOverflowForkPath constructs a chain of headerCount headers extending
 // directly from the fixture's committed tip and records all but the last
@@ -85,6 +97,104 @@ func buildOverflowForkPath(
 		prevBlockNumber = h.BlockNumber()
 	}
 	return trigger
+}
+
+func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		return true, ^uint64(0)
+	}
+	connId := testChainsyncConnId(6201, 3001)
+	const headerCount = 5000
+	for i := range headerCount {
+		hash := testHashBytes(fmt.Sprintf("budget-header-%d", i))
+		prevHash := fixture.currentTip.Point.Hash
+		if i > 0 {
+			prevHash = testHashBytes(fmt.Sprintf("budget-header-%d", i-1))
+		}
+		header := sizedMockHeader{
+			mockHeader: mockHeader{
+				hash:        lcommon.NewBlake2b256(hash),
+				prevHash:    lcommon.NewBlake2b256(prevHash),
+				blockNumber: fixture.currentTip.BlockNumber + uint64(i) + 1,
+				slot:        fixture.currentTip.Point.Slot + uint64(i) + 1,
+			},
+			cbor: bytes.Repeat([]byte{0x01}, 2048),
+		}
+		fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+			ConnectionId: connId,
+			Point:        ocommon.NewPoint(header.SlotNumber(), hash),
+			Type:         7,
+			BlockHeader:  header,
+		})
+	}
+
+	history := fixture.ls.peerHeaderHistory[connIdKey(connId)]
+	require.NotNil(t, history)
+	expectedBytes := peerHeaderHistoryRecordOverhead + 2048 + 32 + 32
+	expectedCount := maxPeerHeaderHistoryBytesPerConn / expectedBytes
+	assert.Equal(t, expectedCount, len(history.order))
+	assert.Equal(
+		t,
+		hex.EncodeToString(testHashBytes(fmt.Sprintf(
+			"budget-header-%d", headerCount-expectedCount,
+		))),
+		history.order[0],
+	)
+	assert.Equal(
+		t,
+		hex.EncodeToString(testHashBytes(fmt.Sprintf(
+			"budget-header-%d", headerCount-1,
+		))),
+		history.order[len(history.order)-1],
+	)
+	retainedBytes := 0
+	for _, record := range history.byHash {
+		retainedBytes += record.bytes
+		assert.Nil(t, record.event.BlockHeader)
+		assert.Len(t, record.headerCbor, 2048)
+	}
+	assert.Equal(t, retainedBytes, history.retainedBytes)
+	assert.LessOrEqual(t, history.retainedBytes, maxPeerHeaderHistoryBytesPerConn)
+}
+
+func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	connId := testChainsyncConnId(6202, 3002)
+	const slot = 500
+	const blockNumber = 42
+	header := &babbage.BabbageBlockHeader{
+		Body: babbage.BabbageBlockHeaderBody{
+			BlockNumber:   blockNumber,
+			Slot:          slot,
+			PrevHash:      lcommon.NewBlake2b256([]byte("parent")),
+			BlockBodyHash: lcommon.NewBlake2b256([]byte("body")),
+			ProtoVersion:  babbage.BabbageProtoVersion{Major: 8},
+		},
+	}
+	headerCbor, err := cbor.Encode(header)
+	require.NoError(t, err)
+	header.SetCbor(headerCbor)
+	encoded := encodedHeader{BlockHeader: header, cbor: headerCbor}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: connId,
+		Point:        ocommon.NewPoint(slot, header.Hash().Bytes()),
+		BlockNumber:  blockNumber,
+		Type:         gledger.BlockTypeBabbage,
+		BlockHeader:  encoded,
+	})
+
+	history := fixture.ls.peerHeaderHistory[connIdKey(connId)]
+	require.NotNil(t, history)
+	record := history.byHash[hex.EncodeToString(header.Hash().Bytes())]
+	assert.Nil(t, record.event.BlockHeader)
+	rehydrated, ok := record.chainsyncEvent()
+	require.True(t, ok)
+	require.NotNil(t, rehydrated.BlockHeader)
+	assert.Equal(t, header.Hash(), rehydrated.BlockHeader.Hash())
+	assert.Equal(t, header.PrevHash(), rehydrated.BlockHeader.PrevHash())
+	assert.Equal(t, header.BlockNumber(), rehydrated.BlockHeader.BlockNumber())
+	assert.Equal(t, header.SlotNumber(), rehydrated.BlockHeader.SlotNumber())
 }
 
 // TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow pins the
