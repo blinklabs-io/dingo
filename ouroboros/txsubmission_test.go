@@ -985,7 +985,7 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	})
 	defer h.close(t)
 
-	addTxSubmissionTestFixtures(t, h.mB, rejected, accepted)
+	addTxSubmissionTestFixtures(t, h.mB, rejected)
 
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
@@ -1000,6 +1000,13 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	)
 	require.Contains(t, logBuf.String(), rejected.hash)
 	require.Contains(t, logBuf.String(), h.connA.Id().String())
+	_, rejectedPresent := h.mA.GetTransaction(rejected.hash)
+	require.False(t, rejectedPresent)
+
+	// Offer the valid transaction only after the rejected item completed its
+	// own round trip. This proves the same per-peer pump requests another batch
+	// instead of merely processing a later item from the first batch.
+	addTxSubmissionTestFixtures(t, h.mB, accepted)
 
 	require.Eventually(
 		t,
@@ -1011,8 +1018,6 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 		10*time.Millisecond,
 		"expected a valid transaction after a rejection to be processed on the same connection",
 	)
-	_, rejectedPresent := h.mA.GetTransaction(rejected.hash)
-	require.False(t, rejectedPresent)
 }
 
 // TestTxSubmissionServerInitContinuesAfterDecodeFailure verifies malformed
@@ -1035,7 +1040,7 @@ func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
 	})
 	defer h.close(t)
 
-	addTxSubmissionTestFixtures(t, h.mB, malformed, accepted)
+	addTxSubmissionTestFixtures(t, h.mB, malformed)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
 	require.Eventually(
@@ -1050,6 +1055,13 @@ func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
 		10*time.Millisecond,
 		"expected the malformed transaction to be logged",
 	)
+	require.Contains(t, logBuf.String(), malformed.hash)
+	require.Contains(t, logBuf.String(), h.connA.Id().String())
+
+	// Offer the valid transaction only after the malformed item completed its
+	// own round trip. This proves the same per-peer pump requests another batch.
+	addTxSubmissionTestFixtures(t, h.mB, accepted)
+
 	require.Eventually(
 		t,
 		func() bool {
@@ -1060,6 +1072,4 @@ func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
 		10*time.Millisecond,
 		"expected a valid transaction after malformed CBOR to be processed on the same connection",
 	)
-	require.Contains(t, logBuf.String(), malformed.hash)
-	require.Contains(t, logBuf.String(), h.connA.Id().String())
 }
