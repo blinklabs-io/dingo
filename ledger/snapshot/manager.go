@@ -846,16 +846,33 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	// Also remember the latest epoch so we can seed the Mark/Set/Go
 	// window below.
 	var currentEpochId uint64
+	// latestEpochKnown records that the lookup below actually determined the
+	// database's current epoch. currentEpochId's zero value is also a valid
+	// answer -- a fresh sync -- so it cannot itself distinguish "epoch 0"
+	// from "not determined", and the fresh-sync classification further down
+	// must not read a failed lookup as a stakeless genesis.
+	latestEpochKnown := false
 	if distribution.TotalPools == 0 {
 		epochs, epErr := m.db.GetEpochs(nil)
 		if epErr != nil {
-			m.logger.Warn(
-				"failed to load epochs for genesis stake fallback",
-				"component", "snapshot",
-				"error", epErr,
-				"total_pools", distribution.TotalPools,
+			// Returned rather than logged: the classification below decides
+			// whether to persist an epoch-0 mark snapshot, and doing that for
+			// a post-Mithril database would hand later reward calculation a
+			// fabricated basis. Every caller routes this through
+			// HandleGenesisSnapshotError, which is fatal for a block producer
+			// and a warning otherwise.
+			if m.metrics != nil {
+				m.metrics.captureFailureTotal.Inc()
+				m.metrics.captureDurationSeconds.Observe(
+					time.Since(start).Seconds(),
+				)
+			}
+			return fmt.Errorf(
+				"load epochs for genesis stake fallback: %w",
+				epErr,
 			)
 		} else if len(epochs) > 0 {
+			latestEpochKnown = true
 			lastEpoch := epochs[len(epochs)-1]
 			currentEpochId = lastEpoch.EpochId
 			m.logger.Debug(
@@ -889,15 +906,19 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	// import and is simply not visible at slot 0. There is no trustworthy
 	// epoch-0 basis to persist, so the capture is skipped as before.
 	//
-	// On a true fresh sync (currentEpochId == 0) it means the network's
-	// Shelley genesis registers no pools and the first ones register on chain
-	// during epoch 0 -- preview is such a network. cardano-ledger's Go stake
-	// distribution is empty at genesis there, so the epoch-0 mark snapshot is
-	// empty rather than absent, and it is still persisted below: the reward
-	// rounds at the boundaries into epochs 1, 2 and 3 all resolve against
-	// snapshot epoch 0, and without the row every one of them skips for a
-	// missing reward snapshot and the ADA pots never move (dingo #3381).
-	if distribution.TotalPools == 0 && currentEpochId > 0 {
+	// On a true fresh sync it means the network's Shelley genesis registers no
+	// pools and the first ones register on chain during epoch 0 -- preview is
+	// such a network. cardano-ledger's Go stake distribution is empty at
+	// genesis there, so the epoch-0 mark snapshot is empty rather than absent,
+	// and it is still persisted below: the reward rounds at the boundaries
+	// into epochs 1, 2 and 3 all resolve against snapshot epoch 0, and without
+	// the row every one of them skips for a missing reward snapshot and the
+	// ADA pots never move (dingo #3381).
+	//
+	// That branch is taken only when the lookup above positively determined
+	// the current epoch to be 0. An undetermined epoch is not a fresh sync.
+	freshSync := latestEpochKnown && currentEpochId == 0
+	if distribution.TotalPools == 0 && !freshSync {
 		if m.metrics != nil {
 			m.metrics.captureDurationSeconds.Observe(
 				time.Since(start).Seconds(),

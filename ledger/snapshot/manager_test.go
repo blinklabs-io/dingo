@@ -2265,3 +2265,57 @@ func TestCaptureGenesisSnapshot_PostMithrilNoPoolsSkipsGenesisRow(
 			"import, not a stakeless genesis",
 	)
 }
+
+// TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync covers the
+// error path of the epoch lookup that classifies an empty slot-0
+// distribution.
+//
+// The fresh-sync branch is keyed on the latest epoch being 0, and a failed
+// GetEpochs would otherwise leave that variable at its zero value — making a
+// post-Mithril database indistinguishable from a stakeless genesis and
+// persisting a fabricated empty epoch-0 mark snapshot that later reward
+// calculation could consume as its basis.
+//
+// The lookup only runs when the distribution is empty, so this cannot make a
+// node with genesis pools fail. Every caller routes the returned error
+// through HandleGenesisSnapshotError, which is fatal only for a block
+// producer and a warning otherwise.
+func TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 86400},
+	})
+
+	// Make GetEpochs fail while leaving the stake-distribution queries
+	// working: slot_length is scanned by GetEpochs and by nothing the
+	// genesis distribution reads, so a non-numeric value there fails that
+	// lookup alone. Dropping the epoch table would instead fail
+	// calculateSnapshotDistribution first and never reach the branch under
+	// test.
+	raw := snapshotSQLDB(t, db)
+	_, err := raw.Exec(`UPDATE epoch SET slot_length = 'not-a-number'`)
+	require.NoError(t, err)
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	err = mgr.CaptureGenesisSnapshot(context.Background())
+	require.Error(
+		t,
+		err,
+		"a failed epoch lookup must be reported, not silently treated as a "+
+			"fresh sync",
+	)
+
+	rewardSnapshot, sErr := db.Metadata().GetRewardSnapshot(0, "mark", nil)
+	require.NoError(t, sErr)
+	require.Nil(
+		t,
+		rewardSnapshot,
+		"no epoch-0 mark snapshot may be persisted when the database's "+
+			"current epoch could not be determined",
+	)
+}
