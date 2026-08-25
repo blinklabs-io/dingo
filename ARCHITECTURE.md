@@ -1681,7 +1681,7 @@ CBOR Data Request
 Tier 1: Hot Cache (in-memory)
   - UTxO entries: configurable count (HotUtxoEntries)
   - Transaction entries: configurable count + byte limit
-  - O(1) access, LRU eviction
+  - Sharded O(1) access, approximate LFU eviction
        | miss
        v
 Tier 2: Block LRU Cache
@@ -1700,7 +1700,37 @@ Tier 3: Cold Extraction
   - Extract CBOR at stored offset
 ```
 
-Tier 1 (`HotCache`, `database/hot_cache.go`) is a lock-free, copy-on-write cache: writers build a new snapshot and `CompareAndSwap` it in without ever taking a mutex. There are two CAS loops — `Put` and probabilistic access-count tracking — each bounded (`maxCASAttempts`, default 16) with yield-then-jittered-backoff between retries; a writer that exhausts its budget under sustained contention drops the update rather than spinning or falling back to a lock — the cache is strictly best-effort, so a dropped write only costs a future miss recomputed from Tier 2/3. LFU eviction is not a separate, third CAS loop: it is folded into `Put`'s own CAS attempt (`evictToFit`) whenever an insert would push the cache over `maxSize`/`maxBytes`, so a size-limit trim is atomic with the insert that triggered it. A standalone eviction pass tried this after Put previously succeeded, but could then lose its own CAS race indefinitely to concurrent access-count updates from `Get` — since only `Put` ever grows the cache, a dropped eviction had no later Put to retry it, leaving the cache permanently over its configured limit. The running byte total is likewise stored inside the same CAS-protected snapshot (`hotCacheData.totalBytes`) rather than in a separately-updated atomic: a byte counter updated only *after* the entries CAS succeeds can be read by a concurrent `Put` after the entries change has landed but before the counter catches up, silently undercounting and skipping byte-limit eviction it should have performed. Contention is observable via `HotCache.CASStats()` and, when a `Config.PromRegistry` is set, the `dingo_hot_cache_cas_attempts_total`, `dingo_hot_cache_writers_aborted_after_budget_total`, `dingo_hot_cache_successful_commits_after_backoff_total`, and `dingo_hot_cache_successful_commit_backoff_seconds_total` metrics (labeled `cache="utxo"|"tx"`); a configured logger also gets a rate-limited warning (at most one per second) when writes are dropped, with the underlying counters remaining authoritative regardless.
+Tier 1 (`HotCache`, `database/hot_cache.go`) uses 64 mutable shards. `Get`
+locks only the shard selected by the key, copies the cached value for caller
+isolation, and records access counts on one in four hits. A sampled count update
+uses a bounded non-blocking shard-lock loop, so LFU accuracy remains
+best-effort under contention without turning reads into cardinality-sized map
+copies.
+
+`Put` uses a bounded non-blocking update-lock loop. Routine insertion or
+replacement changes only the selected shard; the update lock serializes every
+membership change and the exact entry/byte counters. If an insert would cross
+either configured limit, `Put`
+examines at most 64 candidates from insertion/replacement order and evicts the
+least frequently used entries in that fixed window. The insert is admitted
+only when those bounded candidates restore both limits; otherwise the existing
+cache is left intact and the best-effort insert is dropped. A failed window is
+rotated behind the remaining entries so a later bounded attempt can inspect
+different candidates instead of freezing admission behind one undersized
+sample. Admission therefore never copies or sorts the full cache, and both its
+synchronous work and its temporary allocation remain independent of configured
+cardinality. Exhausting the update-lock retry budget also drops the cache
+update; either outcome only causes a later miss to be recomputed from Tier 2/3.
+
+Contention remains observable through the compatibility API
+`HotCache.CASStats()` and the existing
+`dingo_hot_cache_cas_attempts_total`,
+`dingo_hot_cache_writers_aborted_after_budget_total`,
+`dingo_hot_cache_successful_commits_after_backoff_total`, and
+`dingo_hot_cache_successful_commit_backoff_seconds_total` metrics, labeled
+`cache="utxo"|"tx"`. Their historical CAS names are retained for dashboard
+compatibility; they now count non-blocking update-lock attempts. A configured
+logger also receives rate-limited warnings when an update is dropped.
 
 ### CborOffset Structure
 
