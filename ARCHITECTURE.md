@@ -1904,6 +1904,14 @@ networks that declare Shelley at genesis, such as preview, run both. Later
 updates use the normal delayed E-3 snapshot, E-2 performance, and E-1 pots
 mapping.
 
+Both bootstrap rounds resolve against mark snapshot epoch 0, so that row must
+exist even when it is empty. `snapshot.Manager.CaptureGenesisSnapshot` persists
+it on a fresh sync whose genesis registers no pools — preview, whose pools
+register on chain during epoch 0 — rather than treating an empty distribution
+as nothing to record. An empty slot-0 distribution behind a later current epoch
+still skips the capture: there it means the pool data predates a Mithril
+import, not that the network had no stake.
+
 CIP-0163 full-pot reward distribution is an operator-set, consensus-affecting
 feature gate (`FullPotRewardsEnabled`, default off; see `WithFullPotRewards` and
 `LedgerStateConfig`). When off, `rewards.Calculate` is byte-for-byte identical to

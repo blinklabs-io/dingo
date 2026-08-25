@@ -882,7 +882,22 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		}
 	}
 
-	if distribution.TotalPools == 0 {
+	// An empty distribution means two different things depending on where the
+	// chain actually is.
+	//
+	// Behind a later current epoch it means the pool data predates a Mithril
+	// import and is simply not visible at slot 0. There is no trustworthy
+	// epoch-0 basis to persist, so the capture is skipped as before.
+	//
+	// On a true fresh sync (currentEpochId == 0) it means the network's
+	// Shelley genesis registers no pools and the first ones register on chain
+	// during epoch 0 -- preview is such a network. cardano-ledger's Go stake
+	// distribution is empty at genesis there, so the epoch-0 mark snapshot is
+	// empty rather than absent, and it is still persisted below: the reward
+	// rounds at the boundaries into epochs 1, 2 and 3 all resolve against
+	// snapshot epoch 0, and without the row every one of them skips for a
+	// missing reward snapshot and the ADA pots never move (dingo #3381).
+	if distribution.TotalPools == 0 && currentEpochId > 0 {
 		if m.metrics != nil {
 			m.metrics.captureDurationSeconds.Observe(
 				time.Since(start).Seconds(),
@@ -894,6 +909,13 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			"component", "snapshot",
 		)
 		return nil
+	}
+	if distribution.TotalPools == 0 {
+		m.logger.Info(
+			"no genesis pools; seeding an empty epoch 0 mark snapshot."+
+				" leader election is disabled until pool stake is registered",
+			"component", "snapshot",
+		)
 	}
 
 	m.logger.Info(
