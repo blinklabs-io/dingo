@@ -264,9 +264,8 @@ func TestServerStopIsIdempotent(t *testing.T) {
 	require.NoError(t, srv.Stop(t.Context()))
 }
 
-// TestServerGracefulShutdown asserts Stop closes the listener so the
-// port stops accepting connections, and that it has done so by the time
-// Stop returns rather than some time afterwards.
+// TestServerGracefulShutdown asserts Stop releases the listener before it
+// returns by immediately starting a replacement on the same address.
 func TestServerGracefulShutdown(t *testing.T) {
 	srv, addr := startOnFreePort(
 		t, t.Context(), newTestDeps(),
@@ -278,10 +277,13 @@ func TestServerGracefulShutdown(t *testing.T) {
 	defer cancel()
 	require.NoError(t, srv.Stop(stopCtx))
 
-	require.False(
-		t, portAccepts(addr),
-		"listener still accepting after Stop",
+	restarted := newTestServer(
+		t,
+		newTestDeps(),
+		func(c *ServerConfig) { c.ListenAddress = addr },
 	)
+	require.NoError(t, restarted.Start(t.Context()))
+	require.NoError(t, restarted.Stop(t.Context()))
 }
 
 // TestConcurrentStartStopNeverLeavesThePortBound hammers the interleavings the
