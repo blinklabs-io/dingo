@@ -455,6 +455,25 @@ func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(t *testing.T)
 	assert.True(t, got)
 }
 
+// TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet pins a
+// reviewer-caught overclaim in the original fix: the override must be
+// restricted to a network gouroboros itself registers as sharing mainnet's
+// magic (currently only prime-mainnet), not any registered name that simply
+// isn't "mainnet". A node started with Network="preview" against a genesis
+// that (incorrectly, e.g. from a misconfiguration) declares Mainnet must
+// still enforce mainnet's BBODY strictness rather than have it silently
+// relaxed just because "preview" isn't literally "mainnet" — preview's own
+// magic doesn't match real mainnet's, so this is a configuration mismatch,
+// not the known prime-mainnet identity-reuse case.
+func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(t *testing.T) {
+	ls := newLedgerStateForNetworkNamed(
+		t, "Mainnet", byron.MainnetProtocolMagic, "preview",
+	)
+	got, err := ls.isMainnet()
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
 // TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig
 // confirms the fail-closed contract reaches the wiring layer:
 // validateBlockHeaderProtocolVersion must return an error rather than

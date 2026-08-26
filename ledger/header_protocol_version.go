@@ -153,13 +153,20 @@ func ValidateHeaderProtocolVersion(
 // cardano-ledger's mainnet-only BBODY strictness there rejects headers a
 // chain's own nodes have already built on top of.
 //
-// When ls.config.Network names a network gouroboros recognizes, that
-// resolved identity decides mainnet-ness instead of the raw networkId
-// value, so prime-mainnet correctly gets the same relaxed treatment as
-// any other testnet despite its Mainnet-shaped genesis. An unset or
-// unrecognized Network name (a config built from a raw NetworkMagic, or
-// an embedder that never set it) falls back to the networkId-only check,
-// preserving prior behavior for every caller that predates this field.
+// A Mainnet-tagged genesis is only overridden to non-mainnet when
+// ls.config.Network names a network gouroboros itself registers as
+// sharing mainnet's network magic (currently just prime-mainnet) — the
+// narrow, known identity-reuse case this function exists to handle. Any
+// other named network paired with a Mainnet-tagged genesis is a
+// configuration mismatch, not a recognized alias, and falls through to
+// the genesis-only answer (true) rather than silently relaxing the BBODY
+// check for a misconfigured node: a node started with, say, Network=
+// "preview" against a genesis that (incorrectly) declares Mainnet must
+// not have mainnet's strictness relaxed just because the name isn't
+// literally "mainnet". An unset or unrecognized Network name (a config
+// built from a raw NetworkMagic, or an embedder that never set it) falls
+// back to the networkId-only check, preserving prior behavior for every
+// caller that predates this field.
 //
 // Fails closed: when CardanoNodeConfig or Shelley genesis is missing,
 // or the networkId field carries an unrecognized value, returns
@@ -178,8 +185,18 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 	switch sg.NetworkId {
 	case shelleyGenesisMainnetNetworkId:
 		if ls.config.Network != "" {
-			if known, ok := ouroboros.NetworkByName(ls.config.Network); ok {
-				return known.Name == ouroboros.NetworkCardanoMainnet.Name, nil
+			if known, ok := ouroboros.NetworkByName(ls.config.Network); ok &&
+				known.Name != ouroboros.NetworkCardanoMainnet.Name &&
+				known.NetworkMagic == ouroboros.NetworkCardanoMainnet.NetworkMagic {
+				// Only a network gouroboros itself registers as sharing
+				// mainnet's magic (currently just prime-mainnet) may
+				// override a Mainnet-tagged genesis to non-mainnet. Any
+				// other named network paired with a Mainnet-tagged genesis
+				// is a configuration mismatch, not a known identity-reuse
+				// case, so it falls through to the genesis-only answer
+				// (true) rather than silently relaxing the BBODY check for
+				// a misconfigured node.
+				return false, nil
 			}
 		}
 		return true, nil
