@@ -100,6 +100,14 @@ func filesMatching(
 	t.Helper()
 
 	var found []string
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return filesMatchingWalk(t, root, match)
+	}
+	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Output()
+	if err != nil || filepath.Clean(strings.TrimSpace(string(topLevel))) != filepath.Clean(rootAbs) {
+		return filesMatchingWalk(t, root, match)
+	}
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
 	output, err := cmd.Output()
 	if err != nil {
@@ -226,6 +234,15 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("workflowFiles() = %v, want %v", got, want)
+	}
+
+	parent := t.TempDir()
+	runGit(t, parent, "init")
+	nested := filepath.Join(parent, "nested")
+	writeTestFile(t, nested, "docs/archive.md")
+	got, want = markdownFiles(t, nested), []string{"docs/archive.md"}
+	if !slices.Equal(got, want) {
+		t.Errorf("nested markdownFiles() = %v, want %v", got, want)
 	}
 }
 
