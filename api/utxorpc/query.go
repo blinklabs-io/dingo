@@ -717,13 +717,14 @@ func (s *queryServiceServer) ReadData(
 		resp.Values = append(resp.Values, acd)
 	}
 
-	// Get chain point (slot and hash)
-	point := s.utxorpc.config.LedgerState.Tip().Point
+	// Get chain point (slot, hash, and height)
+	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
 
 	// Set up response utxos
 	resp.LedgerTip = &query.ChainPoint{
-		Slot: point.Slot,
-		Hash: point.Hash,
+		Slot:   br.Slot,
+		Hash:   br.Hash,
+		Height: br.Height,
 	}
 
 	return connect.NewResponse(resp), nil
