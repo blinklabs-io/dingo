@@ -4564,7 +4564,13 @@ func (ls *LedgerState) calculateEpochNonce(
 	currentEra eras.EraDesc,
 	currentEpoch models.Epoch,
 ) ([]byte, []byte, []byte, []byte, error) {
-	// No epoch nonce in Byron
+	// No epoch nonce in Byron. NOTE: currentEra is the SOURCE era being
+	// rolled over, not necessarily the era the new epoch will run at — a
+	// rollover whose source era is Byron but whose destination era (per
+	// the caller's later era-transition decision) is Shelley or beyond
+	// still returns nil here. applyBoundaryEraTransitions seeds a real
+	// nonce for that case once the destination era is known; see the
+	// comment there.
 	if currentEra.Id == 0 {
 		return nil, nil, nil, nil, nil
 	}

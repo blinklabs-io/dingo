@@ -3475,6 +3475,34 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	newEpoch.EraId = workingEraId
 	newEpoch.SlotLength = slotLength
 	newEpoch.LengthInSlots = epochLength
+	// calculateEpochNonce short-circuits to an all-nil nonce whenever the
+	// ROLLOVER'S SOURCE era is Byron (no Praos nonce there), regardless of
+	// what era this boundary actually transitions into. That is correct
+	// when the new epoch stays in Byron, but here workingEraId has just
+	// been advanced past Byron (that is the only way this function runs),
+	// so the epoch needs a real nonce for header verification in its new
+	// era. Seed it the same way every other from-genesis nonce path does
+	// (computeEpochNonceForSlot, calculateEpochNonce's own no-prior-nonce
+	// branch): the Shelley genesis hash for nonce/evolving/candidate, with
+	// LastEpochBlockNonce left at NeutralNonce (nil) — see #2734. Without
+	// this, header verification permanently rejects every block in the
+	// new era with "epoch has no nonce for slot" for any Byron-prefixed
+	// network that syncs from genesis instead of a Mithril snapshot.
+	if workingEraId != 0 && len(newEpoch.Nonce) == 0 {
+		genesisHashBytes, err := hex.DecodeString(
+			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode Shelley genesis hash for post-Byron epoch nonce: %w",
+				err,
+			)
+		}
+		newEpoch.Nonce = genesisHashBytes
+		newEpoch.EvolvingNonce = genesisHashBytes
+		newEpoch.CandidateNonce = genesisHashBytes
+		newEpoch.LastEpochBlockNonce = nil
+	}
 	if err := ls.db.SetEpoch(
 		newEpoch.StartSlot,
 		newEpoch.EpochId,
@@ -3515,6 +3543,10 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 			rolloverResult.NewEpochCache[i].EraId = workingEraId
 			rolloverResult.NewEpochCache[i].SlotLength = slotLength
 			rolloverResult.NewEpochCache[i].LengthInSlots = epochLength
+			rolloverResult.NewEpochCache[i].Nonce = newEpoch.Nonce
+			rolloverResult.NewEpochCache[i].EvolvingNonce = newEpoch.EvolvingNonce
+			rolloverResult.NewEpochCache[i].CandidateNonce = newEpoch.CandidateNonce
+			rolloverResult.NewEpochCache[i].LastEpochBlockNonce = newEpoch.LastEpochBlockNonce
 		}
 	}
 
