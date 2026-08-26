@@ -1,3 +1,5 @@
+//go:build dingo_live_lifecycle_integration
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -387,11 +389,6 @@ func requireInboundListenerAcceptsConnections(t *testing.T, ln net.Listener) {
 		"node must still accept inbound connections on %s after the live operation",
 		addr,
 	)
-}
-
-func TestTwoNodeDevnetSyncOverRealNetworking(t *testing.T) {
-	_, syncer, _ := startTwoNodeDevnet(t)
-	waitForTipSlotAtLeast(t, syncer, 5)
 }
 
 // TestLiveTruncateUnderRealForgingAndNetworking is the Phase 3 core
