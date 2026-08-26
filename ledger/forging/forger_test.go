@@ -200,6 +200,38 @@ func TestCheckAndForgeProductionRemovesConfirmedTransactions(t *testing.T) {
 	require.Equal(t, []string{tx.Hash().String()}, remover.hashes)
 }
 
+func TestCheckAndForgeProductionUsesRetainedReconnectFrontier(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(114220801, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       114220801,
+			chainTipSlot:      114220600,
+			upstreamTipSlot:   114220800,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+	)
+}
+
 func (c *forgerTestLeiosChecker) MayProduceEndorserBlock(
 	uint64,
 ) (bool, string, error) {

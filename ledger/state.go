@@ -1050,6 +1050,7 @@ type LedgerState struct {
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
 	syncUpstreamTipSlot  atomic.Uint64 // latest admitted peer header slot
+	syncUpstreamActive   atomic.Bool   // whether consumers may use the retained frontier
 	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
 
 	// Rate-limiting for non-active rollback drop messages
@@ -2582,7 +2583,7 @@ func (ls *LedgerState) isNearTip(slot uint64) bool {
 func (ls *LedgerState) isNearTipWithStabilityWindow(
 	slot, stabilityWindow uint64,
 ) bool {
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip := ls.UpstreamTipSlot()
 	if upstreamTip == 0 {
 		return false
 	}
@@ -2591,9 +2592,9 @@ func (ls *LedgerState) isNearTipWithStabilityWindow(
 
 // nearUpstreamTip reports whether slot is within stabilityWindow of a KNOWN
 // upstreamTip. Callers that must tell "upstream tip unknown" apart from
-// "known, and we are far behind it" read syncUpstreamTipSlot themselves and
-// call this directly; isNearTipWithStabilityWindow folds unknown into
-// not-near, which is the safe answer for its callers but not for all of them.
+// "known, and we are far behind it" read UpstreamTipSlot themselves and call
+// this directly; isNearTipWithStabilityWindow folds unknown into not-near,
+// which is the safe answer for its callers but not for all of them.
 func nearUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 	if slot >= upstreamTip {
 		return true
@@ -2652,13 +2653,13 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	ls.RUnlock()
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
 	// Read once and gate on a KNOWN upstream tip only. An unknown one is not
-	// evidence of catching up: no peer has ever connected, or the last active
-	// connection dropped and zeroed it (see handleEventChainsyncBlockfetch's
-	// active-connection handling in chainsync.go). Deferring on that would
+	// evidence of catching up: no peer has ever connected, or no active
+	// connection currently exposes the retained admitted-header frontier.
+	// Deferring on that would
 	// retain consumed rows forever on a node without peers, where cleanup
 	// previously ran off the local tip alone -- an unbounded utxo table in
 	// exactly the mode documented as minimal storage.
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip := ls.UpstreamTipSlot()
 	if upstreamTip != 0 &&
 		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow) {
 		ls.config.Logger.Debug(
@@ -8257,10 +8258,27 @@ func (ls *LedgerState) PrimaryChainTipSlot() uint64 {
 }
 
 // UpstreamTipSlot returns the latest admitted header slot delivered by an
-// upstream peer. It does not return the peer's untrusted advertised tip.
-// Returns 0 if no upstream header has been admitted yet.
+// upstream peer while an upstream connection is active. It does not return the
+// peer's untrusted advertised tip. The admitted frontier remains monotonic
+// across reconnects, but this method returns 0 while no upstream connection is
+// active so peerless consumers retain their prior behavior.
 func (ls *LedgerState) UpstreamTipSlot() uint64 {
+	if ls.config.GetActiveConnectionFunc != nil &&
+		!ls.syncUpstreamActive.Load() {
+		return 0
+	}
 	return ls.syncUpstreamTipSlot.Load()
+}
+
+func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
+	ls.syncUpstreamActive.Store(true)
+	current := ls.syncUpstreamTipSlot.Load()
+	for slot > current {
+		if ls.syncUpstreamTipSlot.CompareAndSwap(current, slot) {
+			return
+		}
+		current = ls.syncUpstreamTipSlot.Load()
+	}
 }
 
 // GetCurrentPParams returns the currentPParams value

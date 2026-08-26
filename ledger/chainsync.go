@@ -627,6 +627,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	if err != nil {
 		return
 	}
+	ls.syncUpstreamActive.Store(true)
 	if requestFreshCursor {
 		ls.config.Logger.Info(
 			"chain switch selected peer is ahead without queued headers, requesting fresh chainsync cursor",
@@ -691,9 +692,13 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 		activeConnId := ls.config.GetActiveConnectionFunc()
 		if activeConnId == nil ||
 			sameConnectionId(*activeConnId, e.ConnectionId) {
-			ls.syncUpstreamTipSlot.Store(0)
+			ls.syncUpstreamActive.Store(false)
 		}
 	}
+	// Keep the admitted-header frontier as a monotonic high-water mark across
+	// disconnects. Consumers hide it while no active connection exists, but a
+	// reconnect must not replace it with an older peer's first admitted header
+	// and weaken the forging sync gate.
 }
 
 func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
@@ -782,6 +787,7 @@ func (ls *LedgerState) detectConnectionSwitch(
 		return nil, false
 	}
 	activeConnId = ls.config.GetActiveConnectionFunc()
+	ls.syncUpstreamActive.Store(activeConnId != nil)
 	if activeConnId != nil &&
 		(ls.lastActiveConnId == nil ||
 			!sameConnectionId(*ls.lastActiveConnId, *activeConnId)) {
@@ -2878,11 +2884,10 @@ func (ls *LedgerState) recordAdmittedHeaderFrontier(
 		return
 	}
 	admittedPoint := ls.chain.HeaderTip().Point
-	if !pointMatches(admittedPoint, e.Point) ||
-		admittedPoint.Slot <= ls.syncUpstreamTipSlot.Load() {
+	if !pointMatches(admittedPoint, e.Point) {
 		return
 	}
-	ls.syncUpstreamTipSlot.Store(admittedPoint.Slot)
+	ls.advanceUpstreamTipSlot(admittedPoint.Slot)
 }
 
 // shouldEnforceBlockPipelineCrypto mirrors the serial header path's
@@ -6011,7 +6016,7 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 	if now.Sub(ls.syncProgressLastLog) < syncProgressLogInterval {
 		return
 	}
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip := ls.UpstreamTipSlot()
 	if upstreamTip == 0 {
 		// No upstream tip known yet, skip
 		return
@@ -6054,7 +6059,7 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 // 0.0 (unknown/just started) and 1.0 (fully synced), allowing the peer
 // governor to exit bootstrap mode once sync reaches its threshold.
 func (ls *LedgerState) SyncProgress() float64 {
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip := ls.UpstreamTipSlot()
 	if upstreamTip == 0 {
 		return 0
 	}

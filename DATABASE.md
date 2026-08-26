@@ -372,12 +372,12 @@ In core mode, consumed UTxO rows are hard-deleted only by the background
 ledger cleanup after they are outside the current era's stability window.
 That cleanup is deferred while the local tip is materially behind a known
 admitted upstream-header frontier and is single-flight across its timer and
-epoch-boundary triggers. The deferral needs a delivered frontier: a node with
-no admitted peer header has no catch-up distance to measure, so cleanup falls
-back to running off the local tip alone rather than deferring for as long as
-the node stays peerless. Each eligible run deletes at most one bounded batch,
-so the potentially large `utxo`/stake-reference scan cannot hold SQLite's single
-write connection indefinitely; later timer or epoch-boundary runs reclaim the
+epoch-boundary triggers. That admitted frontier is retained monotonically across
+reconnects, but consumers treat it as unknown while no chainsync client is
+active. Cleanup therefore falls back to the local tip while the node is
+peerless. Each eligible run deletes at most one bounded batch, so the
+potentially large `utxo`/stake-reference scan cannot hold SQLite's single write
+connection indefinitely; later timer or epoch-boundary runs reclaim the
 remaining rows once the node is near the upstream tip.
 API mode retains spent UTxO metadata for historical transaction queries.
 

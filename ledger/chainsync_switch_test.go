@@ -150,7 +150,7 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	ls.blockfetchRequestRangeCleanup()
 }
 
-func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
+func TestHandleConnectionClosedEventRetainsAdmittedUpstreamFrontier(
 	t *testing.T,
 ) {
 	closedConnId := testChainsyncConnId(6000, 3001)
@@ -158,24 +158,24 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 	otherConnId := testChainsyncConnId(6000, 3002)
 
 	tests := []struct {
-		name       string
-		activeConn *ouroboros.ConnectionId
-		wantTip    uint64
+		name        string
+		activeConn  *ouroboros.ConnectionId
+		wantVisible uint64
 	}{
 		{
-			name:       "active connection closed",
-			activeConn: &equivalentClosedConnId,
-			wantTip:    0,
+			name:        "active connection closed",
+			activeConn:  &equivalentClosedConnId,
+			wantVisible: 0,
 		},
 		{
-			name:       "no active connection",
-			activeConn: nil,
-			wantTip:    0,
+			name:        "no active connection",
+			activeConn:  nil,
+			wantVisible: 0,
 		},
 		{
-			name:       "different active connection remains",
-			activeConn: &otherConnId,
-			wantTip:    114220800,
+			name:        "different active connection remains",
+			activeConn:  &otherConnId,
+			wantVisible: 114220800,
 		},
 	}
 	for _, tc := range tests {
@@ -188,6 +188,8 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 				},
 			}
 			ls.syncUpstreamTipSlot.Store(114220800)
+			var pending pendingPublishes
+			ls.detectConnectionSwitch(&pending)
 
 			ls.handleConnectionClosedEvent(event.NewEvent(
 				ConnectionClosedEventType,
@@ -196,9 +198,44 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 				},
 			))
 
-			assert.Equal(t, tc.wantTip, ls.syncUpstreamTipSlot.Load())
+			assert.Equal(t, uint64(114220800), ls.syncUpstreamTipSlot.Load())
+			assert.Equal(t, tc.wantVisible, ls.UpstreamTipSlot())
 		})
 	}
+}
+
+func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
+	t *testing.T,
+) {
+	closedConnId := testChainsyncConnId(6000, 3001)
+	reconnectedConnId := testChainsyncConnId(6000, 3002)
+	activeConnId := &closedConnId
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return activeConnId
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+	var pending pendingPublishes
+	ls.detectConnectionSwitch(&pending)
+
+	ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: closedConnId},
+	))
+	activeConnId = nil
+	require.Equal(t, uint64(0), ls.UpstreamTipSlot())
+
+	activeConnId = &reconnectedConnId
+	ls.lastActiveConnId = nil
+	ls.detectConnectionSwitch(&pending)
+	const stalePeerSlot uint64 = 114220700
+	if stalePeerSlot > ls.syncUpstreamTipSlot.Load() {
+		ls.syncUpstreamTipSlot.Store(stalePeerSlot)
+	}
+	assert.Equal(t, uint64(114220800), ls.UpstreamTipSlot())
 }
 
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
