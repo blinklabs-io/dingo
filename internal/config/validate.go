@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -308,6 +309,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	apiListeners := serving &&
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
+	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
@@ -352,8 +354,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"midnight.port",
 			c.Midnight.Host,
 			c.Midnight.Port,
-			apiListeners,
-			false,
+			midnightServer,
+			midnightServer,
 		},
 	}
 	// Two active listeners contending for a port only fails at bind
@@ -714,6 +716,33 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			storageModeAPI, c.StorageMode, storageModeAPI,
 		))
 	}
+	if c.Midnight.ServerEnabled && c.StorageMode != storageModeAPI &&
+		effectiveMode != RunModeDev && !c.RunMode.IsDevMode() {
+		errs = append(errs, fmt.Errorf(
+			"midnight.serverEnabled requires storageMode %q, got %q: "+
+				"set storageMode to %q or disable midnight.serverEnabled",
+			storageModeAPI, c.StorageMode, storageModeAPI,
+		))
+	}
+	if c.Midnight.ReflectionEnabled && !c.Midnight.ServerEnabled {
+		errs = append(errs, errors.New(
+			"midnight.reflectionEnabled requires midnight.serverEnabled",
+		))
+	}
+	// Plaintext is safe by default only on loopback. Wildcard, unspecified,
+	// hostname, and concrete remote addresses require either the configured
+	// TLS keypair or an explicit escape hatch acknowledging that transport
+	// security is supplied outside Dingo.
+	useMidnightTLS := c.TlsCertFilePath != "" && c.TlsKeyFilePath != ""
+	if midnightServer && !useMidnightTLS &&
+		!c.Midnight.AllowInsecureRemote &&
+		!isLoopbackAddr(c.Midnight.Host) {
+		errs = append(errs, fmt.Errorf(
+			"midnight.host %q is not loopback: configure TLS or set "+
+				"midnight.allowInsecureRemote to acknowledge plaintext exposure",
+			c.Midnight.Host,
+		))
+	}
 
 	if c.DatabaseLifecycle.SnapshotEnabled &&
 		c.DatabaseLifecycle.SnapshotDir == "" {
@@ -884,6 +913,18 @@ func isWildcardAddr(addr string) bool {
 	default:
 		return false
 	}
+}
+
+// isLoopbackAddr recognizes only explicit loopback literals and localhost.
+// It deliberately performs no DNS lookup: accepting an arbitrary hostname
+// based on a mutable resolution would turn startup validation into a TOCTOU
+// exposure check. Empty and wildcard addresses are therefore remote.
+func isLoopbackAddr(addr string) bool {
+	if strings.EqualFold(addr, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(addr, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // checkDirWritable ensures dir exists (creating it if needed) and that this

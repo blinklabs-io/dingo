@@ -132,9 +132,26 @@ The following environment variables modify Dingo's behavior:
   - Log output format: `text` (default, human-readable) or `json` (machine-parseable, for ELK/Loki ingestion)
 - `DINGO_LOGGING_LEVEL`
   - Minimum log level: `debug`, `info` (default), `warn`, or `error` (the `--debug` flag overrides this to `debug`)
-- `TLS_CERT_FILE_PATH` - TLS certificate used by the built-in UTxO RPC
-  listener, requires `TLS_KEY_FILE_PATH` (default: empty)
-- `TLS_KEY_FILE_PATH` - TLS private key used by the built-in UTxO RPC listener
+- `DINGO_MIDNIGHT_ENABLED`
+  - Enable Midnight indexing in API storage mode (default: `false`)
+- `DINGO_MIDNIGHT_SERVER_ENABLED`
+  - Independently enable the Midnight gRPC server in API storage mode
+    (default: `false`)
+- `DINGO_MIDNIGHT_REFLECTION_ENABLED`
+  - Enable gRPC reflection on the Midnight server; requires the server
+    (default: `false`)
+- `DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE`
+  - Permit a plaintext Midnight listener on a wildcard, hostname, or concrete
+    non-loopback address (default: `false`)
+- `DINGO_MIDNIGHT_HOST`
+  - Midnight gRPC listen address (default: `127.0.0.1`)
+- `DINGO_MIDNIGHT_PORT`
+  - Midnight gRPC listen port; must be non-zero when the server is enabled
+    (default: `50051`)
+- `TLS_CERT_FILE_PATH` - TLS certificate used directly by an enabled Midnight
+  gRPC listener and as the built-in UTxO RPC compatibility default; requires
+  `TLS_KEY_FILE_PATH` (default: empty)
+- `TLS_KEY_FILE_PATH` - matching TLS private key for those listeners
   (default: empty)
 
 ### Block Production (SPO Mode)
@@ -191,6 +208,7 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 | 3000 | Blockfrost REST API | Disabled |
 | 8080 | Mesh (Rosetta) REST API | Disabled |
 | 9090 | UTxO RPC (gRPC) | Disabled |
+| 50051 | Midnight state (gRPC) | Disabled |
 | — | Bark archive (gRPC) | Disabled (example when enabled: 9091) |
 | — | pprof debug endpoints | Disabled (`DINGO_DEBUG_PORT=0`; loopback when enabled) |
 
@@ -224,12 +242,23 @@ storageMode: "api"
 
 ## API Servers and Bark
 
-Dingo includes three general-purpose external APIs plus Bark. UTxO RPC,
-Blockfrost, and Mesh are client-facing APIs and require `storageMode: "api"`.
+Dingo includes three general-purpose external APIs, an Acropolis-compatible
+Midnight state service, and Bark. UTxO RPC, Blockfrost, and Mesh are
+client-facing APIs and require `storageMode: "api"`.
 Their built-in providers are registered with the instance-owned plugin host,
 start on their provider defaults in API mode, and can be configured
 independently under `plugins.api`. Set an individual port to 0 to disable that
 interface.
+
+Midnight indexing and serving are separate opt-ins. `midnight.enabled` starts
+the indexer, while `midnight.serverEnabled` starts the gRPC listener for rows
+already present in the Midnight tables; either may be enabled independently in
+API storage mode. The listener defaults to `127.0.0.1:50051`. Reflection is
+available only with `midnight.reflectionEnabled`. Plaintext wildcard, hostname,
+and concrete non-loopback binds are rejected unless
+`midnight.allowInsecureRemote` is set; configuring both
+`tlsCertFilePath` and `tlsKeyFilePath` permits a remote TLS listener. Dingo does
+not add authentication to this Acropolis-compatible service.
 
 Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
@@ -249,6 +278,7 @@ takes precedence.
 | UTxO RPC | `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT` | 9090 | gRPC | General-purpose client API (v1alpha and v1beta) |
 | Blockfrost | `DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT` | 3000 | REST | General-purpose client API |
 | Mesh (Rosetta) | `DINGO_PLUGINS_API_MESH_CONFIG_PORT` | 8080 | REST | General-purpose client API |
+| Midnight | `DINGO_MIDNIGHT_PORT` | 50051 (server off) | gRPC | Acropolis-compatible Midnight state API |
 | Bark | `DINGO_BARK_PORT` | disabled | Connect/gRPC | Dingo-to-Dingo C2/archive protocol |
 
 ```bash
@@ -354,17 +384,18 @@ Credential locations:
   names are.
 
 The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a
-supported, **UTxO RPC-only** compatibility default. They merge in as the
-lowest-priority input, field by field, alongside the shared `api.tls`
-default and UTxO RPC's own `tls` config — not as an all-or-nothing fallback
-that only applies when both of those are completely unset. For example, if
-the shared `api.tls` sets only `mode: server` with no `certFilePath`/
-`keyFilePath` of its own, UTxO RPC still inherits those two fields from the
-legacy root settings. They are not promoted onto Blockfrost or Mesh, since
-doing so would silently switch a previously plaintext listener to TLS on
-upgrade. `bindAddr` and `corsAllowedOrigins` are unrelated to this policy
-and remain root-level settings shared by all listeners (`bindAddr` is also
-used by the relay/NtN listener, not just the APIs).
+supported compatibility input with two consumers. The Midnight gRPC server
+uses the pair directly when explicitly enabled. UTxO RPC merges it as the
+lowest-priority policy, field by field, alongside the shared `api.tls` default
+and its own `tls` config — not as an all-or-nothing fallback that applies only
+when both newer scopes are completely unset. For example, if shared `api.tls`
+sets only `mode: server` with no `certFilePath`/`keyFilePath`, UTxO RPC still
+inherits the two paths from the legacy root settings. The root pair is not
+promoted onto Blockfrost or Mesh, since doing so would silently switch a
+previously plaintext listener to TLS on upgrade. `bindAddr` and
+`corsAllowedOrigins` are unrelated to this policy and remain root-level
+settings shared by all listeners (`bindAddr` is also used by the relay/NtN
+listener, not just the APIs).
 
 ### Archive And History Expiry Nodes
 
@@ -492,6 +523,11 @@ Or use the subcommand form for more control:
 # Download and import
 ./dingo -n preview mithril sync
 ```
+
+The Docker entrypoint manages both a first-run or resumed Mithril sync and the
+subsequent `serve` process as direct children. It forwards SIGINT and SIGTERM
+to whichever child is active, waits for that child to finish, and returns the
+child's exit status instead of masking an interrupted bootstrap as success.
 
 The default `v2` backend restores incremental per-immutable-file archives only
 after checking the genesis-rooted certificate chain, certified Merkle root, and

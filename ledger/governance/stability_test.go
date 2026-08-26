@@ -37,9 +37,9 @@ const (
 
 // stabilityConwayPParams returns Conway pparams configured for the
 // requested protocol major version. Threshold values are realistic so
-// post-bootstrap tests exercise the same code path as production. The
-// bootstrap branch in ShouldRatify (major <= 9) ignores thresholds
-// entirely; only one yes vote of any kind is required.
+// post-bootstrap tests exercise the same code path as production. During
+// bootstrap, DRep thresholds are zero but the action-specific SPO and CC
+// requirements still apply.
 func stabilityConwayPParams(major uint) *conway.ConwayProtocolParameters {
 	p := mockledger.NewMockConwayProtocolParams()
 	p.ProtocolVersion.Major = major
@@ -143,6 +143,47 @@ func seedDRepYesVote(
 	}, nil))
 }
 
+func seedHardForkCommitteeAndSPOVotes(
+	t *testing.T,
+	db *database.Database,
+	store *tallyTestStore,
+	proposals ...*models.GovernanceProposal,
+) {
+	t.Helper()
+	coldCred := testBytes(28, 0xD1)
+	hotCred := testBytes(28, 0xD2)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: coldCred, ExpiresEpoch: stabilityTestEpoch + 10},
+	}, nil))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldCred,
+		HotCredential:  hotCred,
+		CertificateID:  1,
+		AddedSlot:      1,
+	})
+	poolCred := testBytes(28, 0xD3)
+	seedPoolWithStake(
+		t, store, poolCred, testBytes(29, 0xD4), 100,
+		stakeEpochFor(stabilityTestEpoch),
+	)
+	for _, proposal := range proposals {
+		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeCC,
+			VoterCredential: hotCred,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		}, nil))
+		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeSPO,
+			VoterCredential: poolCred,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		}, nil))
+	}
+}
+
 func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
 	t *testing.T,
 ) {
@@ -205,30 +246,27 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 	assert.Nil(t, got, "non-HardForkInitiation actions must be ignored")
 }
 
-// TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote pins
-// the bootstrap ratification semantic: in pparams with major <= 9 a
-// single yes vote of any non-zero magnitude suffices to make a proposal
-// ratifiable, regardless of thresholds. The mid-epoch helper must
-// surface this as an upcoming transition with the correct target major
-// version (extracted from the proposal's encoded action).
-func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(
+// TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO
+// pins the bootstrap hard-fork requirement in the mid-epoch helper: a DRep
+// vote alone is not sufficient, while the required CC and SPO votes surface
+// the transition with the target major version from the encoded action.
+func TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO(
 	t *testing.T,
 ) {
-	db, _ := newTallyTestDB(t)
+	db, store := newTallyTestDB(t)
 
 	const targetMajor uint = 11
 	proposal := seedHardForkInitiationProposal(
 		t, db, stabilityTestEpoch, targetMajor, 1, stabilityProposalTx,
 	)
-	drepCred := seedDRepWithStake(t, db, 1_000)
-	seedDRepYesVote(t, db, proposal.ID, drepCred)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
 
 	in := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
-	require.NotNil(t, got, "bootstrap + yes vote must be ratifiable")
+	require.NotNil(t, got, "bootstrap CC + SPO votes must be ratifiable")
 	assert.Equal(t, targetMajor, got.NewMajor,
 		"target major must come from the proposal's encoded action")
 	assert.Equal(t, proposal.ID, got.Proposal.ID,
@@ -238,13 +276,14 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(
 func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	t *testing.T,
 ) {
-	db, _ := newTallyTestDB(t)
+	db, store := newTallyTestDB(t)
 
 	proposal := seedHardForkInitiationProposal(
 		t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx,
 	)
 	drepCred := seedDRepWithStake(t, db, 1_000)
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
 	rewardCred := models.NewStakeCredentialRef(
 		0,
 		testBytes(28, stabilityStakeCred),
@@ -256,14 +295,14 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	))
 
 	gateOff := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(gateOff)
 	require.NoError(t, err)
 	require.NotNil(t, got, "gate off must preserve the expired account's vote")
 
 	gateOn := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, true, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, true, stabilityConwayPParams(10), nil, nil,
 	)
 	got, err = EvaluateRatifiableHardForkInitiation(gateOn)
 	require.NoError(t, err)
@@ -274,15 +313,14 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	)
 }
 
-// TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable
-// pins the negative side of bootstrap: even though thresholds are zero,
-// at least ONE yes vote (DRep, SPO, or CC) is required. With zero votes
-// of any kind, the proposal does not ratify.
-func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(
+// TestEvaluateRatifiableHardForkInitiation_BootstrapDRepOnly_NotRatifiable
+// pins the negative side of bootstrap: a DRep yes vote does not substitute
+// for the required CC and SPO votes on a hard-fork proposal.
+func TestEvaluateRatifiableHardForkInitiation_BootstrapDRepOnly_NotRatifiable(
 	t *testing.T,
 ) {
 	db, _ := newTallyTestDB(t)
-	seedHardForkInitiationProposal(
+	proposal := seedHardForkInitiationProposal(
 		t,
 		db,
 		stabilityTestEpoch,
@@ -290,13 +328,15 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(
 		1,
 		stabilityProposalTx,
 	)
+	drepCred := seedDRepWithStake(t, db, 1_000)
+	seedDRepYesVote(t, db, proposal.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
-	assert.Nil(t, got, "no votes means no ratification, even in bootstrap")
+	assert.Nil(t, got, "DRep-only vote must not ratify a bootstrap hard fork")
 }
 
 // When two HardForkInitiation proposals are simultaneously ratifiable,
@@ -307,7 +347,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(
 func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAddedSlot(
 	t *testing.T,
 ) {
-	db, _ := newTallyTestDB(t)
+	db, store := newTallyTestDB(t)
 
 	const (
 		earlyMajor    uint   = 11
@@ -328,9 +368,10 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 	drepCred := seedDRepWithStake(t, db, 1_000)
 	seedDRepYesVote(t, db, early.ID, drepCred)
 	seedDRepYesVote(t, db, late.ID, drepCred)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, early, late)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)

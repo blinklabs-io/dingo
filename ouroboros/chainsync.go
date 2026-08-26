@@ -1708,7 +1708,11 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	// Record arrival at the raw network callback boundary. Header decoding can
 	// block behind another peer's in-flight decode of the same bytes, so a
 	// timestamp taken by the decoded handler would already include local work.
-	arrivalTime := time.Now()
+	arrivalNow := o.chainsyncArrivalNow
+	if arrivalNow == nil {
+		arrivalNow = time.Now
+	}
+	arrivalTime := arrivalNow()
 	key := hashDecodeInput(blockType, blockData)
 	header, err := decodeWithPanicSafeMetrics(
 		o.headerDecodeCache,

@@ -261,11 +261,11 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 		)
 	}
 
-	// Evolve KES key to the target period. kes.Update returns a new SecretKey
-	// with a deep copy of the data, so pc.kesSKey is only replaced on success.
-	evolvedKey := pc.kesSKey
-	for evolvedKey.Period < targetPeriod {
-		newKey, err := kes.Update(evolvedKey)
+	// kes.Update consumes its input key on success. Install each successor
+	// before the next update so a later failure cannot leave pc.kesSKey
+	// pointing at an erased predecessor.
+	for pc.kesSKey.Period < targetPeriod {
+		newKey, err := kes.Update(pc.kesSKey)
 		if err != nil {
 			return fmt.Errorf(
 				"failed to update KES key to period %d (absolute %d): %w",
@@ -274,9 +274,8 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 				err,
 			)
 		}
-		evolvedKey = newKey
+		pc.kesSKey = newKey
 	}
-	pc.kesSKey = evolvedKey
 
 	return nil
 }

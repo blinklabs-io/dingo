@@ -41,9 +41,10 @@ import (
 // leiosForgedEBEntry holds one locally-forged endorser block ready to
 // be announced to peers via LeiosNotify.
 type leiosForgedEBEntry struct {
-	point *ocommon.Point
-	size  uint64
-	vote  *lcommon.LeiosPrototypeVote
+	point          *ocommon.Point
+	size           uint64
+	vote           *lcommon.LeiosPrototypeVote
+	excludeConnKey string
 	// announcement is the raw Dijkstra ranking-block header sent in the
 	// w31 BlockAnnouncement message.
 	announcement []byte
@@ -125,6 +126,13 @@ func newLeiosForgedEBLog() *leiosForgedEBLog {
 func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	l.mu.Lock()
 	l.items = append(l.items, entry)
+	// A caught-up origin already has the entry, so do not retain it waiting
+	// for that connection to issue another RequestNext. Origins that are
+	// behind advance across the exclusion when their preceding delivery is
+	// completed.
+	if entry.excludeConnKey != "" {
+		l.skipExcludedLocked(entry.excludeConnKey)
+	}
 	l.pruneLocked()
 	wake := l.wakeCh
 	l.wakeCh = make(chan struct{})
@@ -150,12 +158,14 @@ func (l *leiosForgedEBLog) next(
 		}
 		delete(l.reservations, connKey)
 	}
-	cursor, exists := l.cursors[connKey]
-	if !exists {
+	if _, exists := l.cursors[connKey]; !exists {
 		// New connection: start at the current tail.
-		cursor = l.base + len(l.items)
-		l.cursors[connKey] = cursor
+		l.cursors[connKey] = l.base + len(l.items)
 	}
+	if l.skipExcludedLocked(connKey) {
+		l.pruneLocked()
+	}
+	cursor := l.cursors[connKey]
 	idx := cursor - l.base
 	if idx < len(l.items) {
 		entry := l.items[idx]
@@ -195,6 +205,7 @@ func (l *leiosForgedEBLog) complete(connKey string, delivered bool) {
 				l.cursors[connKey],
 			)
 		}
+		l.skipExcludedLocked(connKey)
 	} else {
 		if !reserved.retry {
 			l.retries[reserved.index]++
@@ -202,6 +213,38 @@ func (l *leiosForgedEBLog) complete(connKey string, delivered bool) {
 		l.retryCursors[connKey] = reserved.index
 	}
 	l.pruneLocked()
+}
+
+// skipExcludedLocked advances connKey across consecutive entries that it
+// originated. It never creates a delivery reservation or retry claim: these
+// entries have already crossed this connection in the opposite direction.
+// Callers must hold l.mu. When a reservation exists, its entry precedes the
+// excluded cursor position and remains untouched.
+func (l *leiosForgedEBLog) skipExcludedLocked(connKey string) bool {
+	cursor, exists := l.cursors[connKey]
+	if !exists {
+		return false
+	}
+	advanced := false
+	for {
+		idx := cursor - l.base
+		if idx < 0 || idx >= len(l.items) ||
+			l.items[idx].excludeConnKey != connKey {
+			break
+		}
+		cursor++
+		advanced = true
+	}
+	if advanced {
+		l.cursors[connKey] = cursor
+		if retry, ok := l.retryCursors[connKey]; ok && retry < cursor {
+			// The skipped retry is still owed globally, but this connection
+			// cannot satisfy it because it originated the entry. Move only
+			// this connection's claim to its next eligible retry.
+			l.advanceRetryCursorLocked(connKey, cursor)
+		}
+	}
+	return advanced
 }
 
 // advanceRetryCursorLocked moves connKey's retry claim to the oldest pending
@@ -214,17 +257,31 @@ func (l *leiosForgedEBLog) advanceRetryCursorLocked(
 	cursor int,
 ) {
 	delete(l.retryCursors, connKey)
+	if nextRetry, found := l.nextRetryLocked(connKey, cursor); found {
+		l.retryCursors[connKey] = nextRetry
+	}
+}
+
+// nextRetryLocked returns the oldest failed delivery at or after cursor that
+// connKey is eligible to receive. A connection cannot discharge a retry for
+// an entry it originally supplied.
+// Callers must hold l.mu.
+func (l *leiosForgedEBLog) nextRetryLocked(
+	connKey string,
+	cursor int,
+) (int, bool) {
 	nextRetry := l.base + len(l.items)
 	found := false
 	for retry := range l.retries {
-		if retry >= cursor && retry < nextRetry {
+		idx := retry - l.base
+		if retry >= cursor && retry < nextRetry && idx >= 0 &&
+			idx < len(l.items) &&
+			l.items[idx].excludeConnKey != connKey {
 			nextRetry = retry
 			found = true
 		}
 	}
-	if found {
-		l.retryCursors[connKey] = nextRetry
-	}
+	return nextRetry, found
 }
 
 // removeConn unregisters a connection cursor and prunes newly freed entries.
@@ -250,10 +307,8 @@ func (l *leiosForgedEBLog) registerConn(connKey string) {
 	l.mu.Lock()
 	if _, exists := l.cursors[connKey]; !exists {
 		cursor := l.base + len(l.items)
-		for retry := range l.retries {
-			if retry < cursor {
-				cursor = retry
-			}
+		if retry, found := l.nextRetryLocked(connKey, l.base); found {
+			cursor = retry
 		}
 		l.cursors[connKey] = cursor
 		if l.retries[cursor] > 0 {
@@ -660,7 +715,12 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			if data.txCount == 0 || data.completeTxCache() {
 				return
 			}
-			txs, err := o.fetchLeiosEbTxsBatched(client, point, data.txCount)
+			txs, err := o.fetchLeiosEbTxsBatched(
+				client,
+				point,
+				data.txCount,
+				data.blockRaw,
+			)
 			if err != nil {
 				// The transactions gathered by this attempt are retained
 				// against the cached endorser block, so a later offer of the
@@ -679,6 +739,15 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 					"fetched", len(txs),
 					"retained", retained,
 					"tx_count", data.txCount,
+				)
+				return
+			}
+			if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
+				o.config.Logger.Debug(
+					"leios EB transaction references mismatch",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
 				)
 				return
 			}
@@ -941,8 +1010,23 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
+	manifestRaw []byte,
 ) ([]cbor.RawMessage, error) {
-	return o.fetchLeiosEbTxsBatchedUntil(client, point, txCount, time.Time{})
+	var validate func(int, cbor.RawMessage) error
+	if len(manifestRaw) > 0 {
+		var err error
+		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		client,
+		point,
+		txCount,
+		time.Time{},
+		validate,
+	)
 }
 
 // fetchLeiosEbTxsBatchedUntil is fetchLeiosEbTxsBatched with an optional
@@ -960,7 +1044,32 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
+	manifestRaw []byte,
 	deadline time.Time,
+) ([]cbor.RawMessage, error) {
+	var validate func(int, cbor.RawMessage) error
+	if len(manifestRaw) > 0 {
+		var err error
+		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		client,
+		point,
+		txCount,
+		deadline,
+		validate,
+	)
+}
+
+func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	deadline time.Time,
+	validate func(int, cbor.RawMessage) error,
 ) ([]cbor.RawMessage, error) {
 	if client == nil {
 		return nil, errors.New("leios-fetch client unavailable")
@@ -1051,6 +1160,14 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 			}
 			idx := served[k]
 			if idx >= 0 && idx < txCount && result[idx] == nil {
+				if validate != nil {
+					if err := validate(idx, raw); err != nil {
+						return leiosCollectTxs(result), fmt.Errorf(
+							"validate fetched transaction: %w",
+							err,
+						)
+					}
+				}
 				result[idx] = slices.Clone(raw)
 				progress++
 			}
@@ -1470,19 +1587,40 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	}
 }
 
-// EnqueueLeiosPrototypeVote queues a vote -- locally emitted, or newly
-// accepted from a peer and re-diffused -- for diffusion over the same
-// LeiosNotify stream used by the reference implementation.
+// EnqueueLeiosPrototypeVote queues a locally emitted vote for diffusion to
+// every registered peer over the LeiosNotify stream used by the reference
+// implementation.
 func (o *Ouroboros) EnqueueLeiosPrototypeVote(vote lcommon.LeiosPrototypeVote) {
+	o.enqueueLeiosPrototypeVote(vote, "")
+}
+
+// EnqueueLeiosPrototypeVoteFromPeer queues a newly accepted peer vote for
+// diffusion to every registered LeiosNotify peer except the connection that
+// supplied it.
+func (o *Ouroboros) EnqueueLeiosPrototypeVoteFromPeer(
+	vote lcommon.LeiosPrototypeVote,
+	originConnKey string,
+) {
+	o.enqueueLeiosPrototypeVote(vote, originConnKey)
+}
+
+func (o *Ouroboros) enqueueLeiosPrototypeVote(
+	vote lcommon.LeiosPrototypeVote,
+	excludeConnKey string,
+) {
 	o.leiosVoteEnqueueCount.Add(1)
 	copyVote := vote
 	copyVote.VoteSignature = slices.Clone(vote.VoteSignature)
-	o.leiosEBLog.append(leiosForgedEBEntry{vote: &copyVote})
+	o.leiosEBLog.append(leiosForgedEBEntry{
+		vote:           &copyVote,
+		excludeConnKey: excludeConnKey,
+	})
 }
 
-// LeiosVoteEnqueueCount reports how many times EnqueueLeiosPrototypeVote has
-// been called. A queue-depth check on the underlying log doesn't work for
-// this: with no peer connections registered (leiosForgedEBLog.pruneLocked
+// LeiosVoteEnqueueCount reports how many local or peer-originated votes have
+// been enqueued for diffusion. A queue-depth check on the underlying log
+// doesn't work for this: with no peer connections registered
+// (leiosForgedEBLog.pruneLocked
 // treats every entry as immediately prunable when no cursor holds it), an
 // entry is pruned again within the same append call that added it. This
 // counter is unaffected by that pruning, so it can actually distinguish

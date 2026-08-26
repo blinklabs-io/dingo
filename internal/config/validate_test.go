@@ -211,6 +211,7 @@ func TestValidate(t *testing.T) {
 			name: "distinct bind addresses may share a port",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
 				c.DebugBindAddr = "127.0.0.1"
 				c.PrivateBindAddr = "127.0.0.1"
 				c.DebugPort = 13000
@@ -231,6 +232,7 @@ func TestValidate(t *testing.T) {
 			name: "wildcard bind address collides with specific",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
 				c.DebugBindAddr = "0.0.0.0"
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
@@ -646,6 +648,160 @@ func TestValidateMidnightEnabledAllowedInDevMode(t *testing.T) {
 	cfg.Midnight.Enabled = true
 	assert.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
 	assert.NoError(t, cfg.validate(RunModeDev, minUnprivilegedPort))
+}
+
+func TestValidateMidnightServerPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Config)
+		wantErr   string
+	}{
+		{
+			name: "disabled server ignores configured port",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.Port = maxPort + 1
+			},
+		},
+		{
+			name: "disabled server ignores listener collision",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.Host = c.BindAddr
+				c.Midnight.Port = c.RelayPort
+			},
+		},
+		{
+			name: "disabled server ignores remote plaintext host",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.Host = "0.0.0.0"
+			},
+		},
+		{
+			name: "enabled server requires api storage",
+			configure: func(c *Config) {
+				c.Midnight.ServerEnabled = true
+			},
+			wantErr: `midnight.serverEnabled requires storageMode "api"`,
+		},
+		{
+			name: "enabled server requires a port",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Port = 0
+			},
+			wantErr: "midnight.port must be set",
+		},
+		{
+			name: "enabled server allowed in dev mode",
+			configure: func(c *Config) {
+				c.RunMode = RunModeDev
+				c.Midnight.ServerEnabled = true
+			},
+		},
+		{
+			name: "reflection requires server",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ReflectionEnabled = true
+			},
+			wantErr: "midnight.reflectionEnabled requires midnight.serverEnabled",
+		},
+		{
+			name: "loopback ipv4 plaintext",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "127.0.0.1"
+			},
+		},
+		{
+			name: "loopback ipv6 plaintext",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "::1"
+			},
+		},
+		{
+			name: "localhost plaintext",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "localhost"
+			},
+		},
+		{
+			name: "remote plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "192.0.2.1"
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "wildcard ipv4 plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "0.0.0.0"
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "wildcard ipv6 plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "::"
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "unspecified plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = ""
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "remote plaintext explicit override",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "192.0.2.1"
+				c.Midnight.AllowInsecureRemote = true
+			},
+		},
+		{
+			name: "remote tls",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "192.0.2.1"
+				c.TlsCertFilePath = "/tls/server.crt"
+				c.TlsKeyFilePath = "/tls/server.key"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.configure(cfg)
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 // TestValidateDelegatorInactivity pins the CIP-0163 range check: the

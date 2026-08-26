@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"slices"
 	"strings"
@@ -1054,23 +1053,6 @@ func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
 	return c.txInfoV3, nil
 }
 
-// restrictiveEnormousBudget is used when evaluating Plutus scripts in
-// restrictive (phase-2 ledger validation) mode. Instead of limiting the CEK
-// machine to the declared redeemer budget during execution — which causes
-// intermediate slippage-batch flush failures — we run with a virtually
-// unlimited budget and compare the full consumed amount against the declared
-// budget after execution. This mirrors cardano-node's restrictingEnormous
-// semantics: the machine runs unconstrained, flushes its accumulated step
-// budget when evaluation succeeds, and then the complete usedBudget must fit
-// within the declared redeemer budget.
-//
-// math.MaxInt64/2 avoids overflow in ExBudget arithmetic (consumed = enormous - remaining).
-//
-// The Alonzo and Babbage phase-2 script validation helpers in this package use
-// the same value, so changing it changes script validation in every era from
-// Alonzo onward.
-const restrictiveEnormousBudget = int64(math.MaxInt64 / 2)
-
 func evaluateConwayPlutusScript(
 	plutusScript lcommon.Script,
 	purpose script.ScriptPurpose,
@@ -1081,12 +1063,11 @@ func evaluateConwayPlutusScript(
 	txInfos *conwayTxInfoCache,
 	restrictive bool,
 ) (lcommon.ExUnits, error, error) {
-	// In restrictive mode, ignore the budget argument as a machine limit and
-	// pass an enormous budget to gouroboros/plutigo so intermediate
-	// slippage-batch flushes never exhaust the budget mid-execution. After
+	// In restrictive mode, use the protocol transaction budget as the machine
+	// limit so intermediate slippage-batch flushes do not reject a script just
+	// because they temporarily exceed its declared redeemer budget. After
 	// execution we compare the complete consumed amount, including the final
-	// accumulated step batch, against the budget argument. Callers set that
-	// argument to the declared redeemer budget.
+	// accumulated step batch, against the declared redeemer budget.
 	//
 	// In exact mode the caller-supplied budget argument is itself the machine
 	// limit, and no post-execution comparison is done. EvaluateTxConway uses
@@ -1095,10 +1076,7 @@ func evaluateConwayPlutusScript(
 	// budget.
 	evalBudget := budget
 	if restrictive {
-		evalBudget = lcommon.ExUnits{
-			Steps:  restrictiveEnormousBudget,
-			Memory: restrictiveEnormousBudget,
-		}
+		evalBudget = pp.MaxTxExUnits
 	}
 	switch s := plutusScript.(type) {
 	case lcommon.PlutusV3Script:

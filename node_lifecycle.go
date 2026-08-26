@@ -453,6 +453,10 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 		if stopErr := n.pluginHost.StopCapability(
 			ctx, plugin.CapabilityStorageMetadata,
 		); stopErr != nil {
+			if errors.Is(stopErr, context.Canceled) ||
+				errors.Is(stopErr, context.DeadlineExceeded) {
+				stopErr = errors.Join(errStorageDrainUnconfirmed, stopErr)
+			}
 			err = errors.Join(
 				err,
 				fmt.Errorf("metadata storage shutdown: %w", stopErr),
@@ -461,6 +465,10 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 		if stopErr := n.pluginHost.StopCapability(
 			ctx, plugin.CapabilityStorageBlob,
 		); stopErr != nil {
+			if errors.Is(stopErr, context.Canceled) ||
+				errors.Is(stopErr, context.DeadlineExceeded) {
+				stopErr = errors.Join(errStorageDrainUnconfirmed, stopErr)
+			}
 			err = errors.Join(
 				err,
 				fmt.Errorf("blob storage shutdown: %w", stopErr),
@@ -962,7 +970,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	return nil
 }
 
-// reinitializeAPIServers rebuilds the optional, storage-mode/port-gated API
+// reinitializeAPIServers rebuilds the optional, storage-mode/config-gated API
 // servers (utxorpc, midnightServer, blockfrostAPI, meshAPI,
 // offchainMetadataFetcher), matching Run()'s gating exactly. The Bark blob-
 // store client (n.config.barkBaseUrl) is handled in reinitializeCoreStorage
@@ -1006,7 +1014,7 @@ func (n *Node) reinitializeAPIServers() error {
 		n.bark.ResumeDB(n.db)
 	}
 
-	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
+	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
@@ -1022,14 +1030,16 @@ func (n *Node) reinitializeAPIServers() error {
 					}
 					return block.Number, true, nil
 				},
-				Host:            n.config.midnight.Host,
-				Port:            n.config.midnight.Port,
-				TLSCertFilePath: n.config.tlsCertFilePath,
-				TLSKeyFilePath:  n.config.tlsKeyFilePath,
-				ShutdownTimeout: n.config.shutdownTimeout,
-				Database:        midnightserver.NewDatabase(n.db),
-				SlotTimer:       n.ledgerState,
-				PromRegistry:    n.config.promRegistry,
+				Host:                n.config.midnight.Host,
+				Port:                n.config.midnight.Port,
+				TLSCertFilePath:     n.config.tlsCertFilePath,
+				TLSKeyFilePath:      n.config.tlsKeyFilePath,
+				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
+				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:     n.config.shutdownTimeout,
+				Database:            midnightserver.NewDatabase(n.db),
+				SlotTimer:           n.ledgerState,
+				PromRegistry:        n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1605,9 +1615,10 @@ var errRestoreSwapUnrecoverable = errors.New(
 // errStorageDrainUnconfirmed marks a quiesceForLiveLifecycleOp or
 // closeStorageForLiveLifecycleOp failure where a background goroutine could
 // not be confirmed to have exited before its bounded wait timed out —
-// currently either n.ledgerState.Close()'s rollback-event/dbWorkerPool
-// waits, or the leios persist writer's drain
-// (PauseLeiosPersistWriterForLiveLifecycleOp). Unlike every other error
+// currently n.ledgerState.Close()'s rollback-event/dbWorkerPool waits, the
+// leios persist writer's drain (PauseLeiosPersistWriterForLiveLifecycleOp),
+// or a storage provider whose context-bounded Stop returned before its cleanup
+// completed. Unlike every other error
 // these functions can return, this one means a goroutine may still be
 // reading/writing n.db, not merely that some cleanup step reported failure
 // after the resource was already unused. Restore/Truncate must not treat

@@ -47,6 +47,15 @@ type queryServiceServer struct {
 	utxorpc *Utxorpc
 }
 
+// ErrByronProtocolParams reports that the ledger holds no current protocol
+// parameters because the chain is still in its Byron prefix. Byron carries no
+// protocol-parameter CBOR, so this is an expected state during a from-genesis
+// synchronization rather than a node fault, and no Shelley-shaped parameters
+// may be substituted for it.
+var ErrByronProtocolParams = errors.New(
+	"protocol parameters unavailable in the Byron era",
+)
+
 func extractSearchPredicatePatterns(
 	predicate *query.UtxoPredicate,
 ) (*utxorpcCardano.AddressPattern, *utxorpcCardano.AssetPattern) {
@@ -249,7 +258,16 @@ func (s *queryServiceServer) ReadParams(
 
 	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParams()
 	if protoParams == nil {
-		return nil, errors.New("current protocol parameters empty")
+		// Byron carries no protocol-parameter CBOR, so a genuine Byron
+		// prefix reaches this during a from-genesis sync. FailedPrecondition
+		// tells the caller the chain is not yet in a state that can answer,
+		// which is the truth; Unavailable would invite a retry loop across
+		// what can be days of synchronization. Return before the tip lookup:
+		// there is no useful tip to pair with an absent parameter set.
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			ErrByronProtocolParams,
+		)
 	}
 
 	// Get chain point (slot, hash, and height)
