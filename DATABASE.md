@@ -1257,6 +1257,32 @@ recovered input. This check is not applied below the boundary or on the Mithril
 gap-closure recovery path, where imported history need not carry a block-index
 entry for the producer.
 
+### Unreachable Blob Objects
+
+UTxO and transaction deletion removes the blob object first and the metadata
+row that names it second (`deleteUtxoBlobs`, `deleteTxBlobs`, called from
+`UtxosDeleteRolledback`, the consumed-UTxO cleanup, and
+`TransactionsDeleteRolledback`). Metadata is the source of truth, so the order
+cannot be reversed and a blob failure cannot abort the metadata delete: a
+rolled-back UTxO must not stay in the live set because its blob is stuck.
+
+The consequence is that a failed blob delete strands an object permanently. It
+is not the same orphan the durability contract above describes: those sit
+*beyond* the metadata tip and startup reconciliation trims them
+(`cleanupOrphanedBlobs`). These sit *beneath* the tip with no row pointing at
+them, so nothing can name them again and no sweep reclaims them. They are
+unreachable, not merely unreferenced, and they consume disk until the store is
+rebuilt from scratch.
+
+Both deleters therefore report `ErrBlobDeleteIncomplete` with the failed and
+total counts instead of reporting a clean deletion, their callers log the
+condition at error level, and every stranded object increments
+`dingo_database_blob_orphans_total` (registered by `RegisterBlobOrphanMetrics`,
+readable in-process via `BlobOrphanCount`). That counter is the only signal
+that a blob store is accumulating dead data, so a non-zero and growing value is
+worth alerting on: it means blob deletes are failing, and the objects already
+lost are not recoverable by any automatic path.
+
 ### Archive And History Expiry Contract
 
 Archive nodes and history-expiry nodes use the same logical blob keys. The

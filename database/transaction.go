@@ -1194,7 +1194,8 @@ func (d *Database) GetTransactionMetadataByHash(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.transactionStore().GetTransactionMetadataByHash(hash, txn.Metadata())
+	return d.transactionStore().
+		GetTransactionMetadataByHash(hash, txn.Metadata())
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -1717,11 +1718,15 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	return nil
 }
 
-// deleteTxBlobs attempts to delete blob data for the given transaction hashes.
-// This is a best-effort operation; metadata remains the source of truth. When
-// the caller provides a blob transaction, deletions stay coupled to that outer
-// commit. A temporary blob-only transaction is used only as a fallback when no
-// blob handle is available.
+// deleteTxBlobs deletes blob data for the given transaction hashes. Metadata
+// remains the source of truth. When the caller provides a blob transaction,
+// deletions stay coupled to that outer commit. A temporary blob-only
+// transaction is used only as a fallback when no blob handle is available.
+//
+// Failures do not stop the remaining deletes, but they are counted and
+// reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
+// metadata that names these objects, after which nothing can reach them
+// again.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	const batchSize = 500
 	blob := d.Blob()
@@ -1772,11 +1777,18 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		}
 	}
 	if deleteErrors > 0 {
+		recordBlobOrphans(deleteErrors)
 		d.logger.Warn(
 			"TX blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
+			len(txHashes),
+		)
+		return fmt.Errorf(
+			"%w: %d of %d transaction blobs",
+			ErrBlobDeleteIncomplete,
+			deleteErrors,
 			len(txHashes),
 		)
 	}
@@ -1816,7 +1828,17 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Delete blob data first (best effort)
-	_ = deleteTxBlobs(d, txHashes, txn)
+	// A blob delete failure must not stop the metadata cleanup below: a
+	// rolled-back transaction cannot stay addressable. The objects it strands
+	// are counted and logged rather than dropped.
+	if blobErr := deleteTxBlobs(d, txHashes, txn); blobErr != nil {
+		d.logger.Error(
+			"rolled-back transaction blob delete left unreachable objects",
+			"error", blobErr,
+			"slot", slot,
+			"transactions", len(txHashes),
+		)
+	}
 
 	// Then delete metadata (source of truth)
 	if err := d.transactionStore().DeleteAddressTransactionsAfterSlot(
