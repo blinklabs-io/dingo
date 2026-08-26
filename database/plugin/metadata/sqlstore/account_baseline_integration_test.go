@@ -110,7 +110,7 @@ func testAccountBaselineBackfill(
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	require.Len(t, registry, 4)
+	require.GreaterOrEqual(t, len(registry), 4)
 	// The schema that predates the baseline table, so the rows below are the
 	// legacy state the backfill reads.
 	runTo(registry[:3])
@@ -147,7 +147,9 @@ func testAccountBaselineBackfill(
 ) VALUES (NULL, 0, 400, 0, TRUE)`)
 	require.NoError(t, err)
 
-	runTo(registry)
+	// Keep this regression scoped to the v4 baseline migration as later
+	// migrations are appended to the registry.
+	runTo(registry[:4])
 
 	baselineKeys := func() [][]byte {
 		rows, err := db.QueryContext(ctx, `
