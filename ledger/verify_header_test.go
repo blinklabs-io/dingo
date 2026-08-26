@@ -2590,3 +2590,98 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake(
 	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
 }
+
+// newImportedActiveLedger builds a ledger positioned inside a Mithril-imported
+// epoch, so leaderEligibilityStake takes the imported active-distribution
+// branch rather than the rotated mark snapshot.
+func newImportedActiveLedger(
+	t *testing.T,
+	tb *testBlockResult,
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	if tb.block.slot <= 1 {
+		// Slot 0 disables the Mithril boundary sentinel; move the mock
+		// block past it. This test exercises stake-source selection, not
+		// VRF proof input.
+		tb.block.slot = 2
+	}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		LengthInSlots: 1_000_000,
+		Nonce:         tb.epochNonce,
+	}
+	ls.mithrilLedgerSlot = tb.block.slot - 1
+	ls.publishSnapshotsLocked()
+	return ls, db
+}
+
+// TestVerifyBlockLeaderEligibility_ImportedActiveZeroDenominatorIsUnavailable
+// verifies that a pool row carrying stake with a zero stake denominator is
+// classified as an unavailable snapshot. The denominator is the threshold's
+// divisor, so its absence means eligibility cannot be evaluated — a storage
+// gap in the import, not a statement that the pool is ineligible.
+func TestVerifyBlockLeaderEligibility_ImportedActiveZeroDenominatorIsUnavailable(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{39}, 0, tamperNone)
+	ls, db := newImportedActiveLedger(t, tb)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfType(
+		t,
+		db,
+		5,
+		models.PoolStakeSnapshotTypeActive,
+		poolKeyHash[:],
+		1_000_000_000,
+		0,
+	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}
+
+// TestVerifyBlockLeaderEligibility_ImportedActiveEmptyDistributionIsUnavailable
+// covers an imported epoch with no active rows at all. cardano-ledger's
+// nesPd is always populated, so an empty one is dingo-side incompleteness.
+func TestVerifyBlockLeaderEligibility_ImportedActiveEmptyDistributionIsUnavailable(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
+	ls, _ := newImportedActiveLedger(t, tb)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing from active pool distribution")
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}
+
+// TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection
+// is the negative case that keeps the classification honest: when the imported
+// distribution is populated and this pool is simply not in it, the answer is
+// authoritative. That is cardano-ledger's VRFKeyUnknown and must stay a
+// rejection, not become a deferrable "snapshot unavailable".
+func TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
+	ls, db := newImportedActiveLedger(t, tb)
+	otherPool := make([]byte, 28)
+	otherPool[0] = 0xAB
+	seedPoolStakeSnapshotOfType(
+		t,
+		db,
+		5,
+		models.PoolStakeSnapshotTypeActive,
+		otherPool,
+		1_000_000_000,
+		1_000_000_000,
+	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing from active pool distribution")
+	assert.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}

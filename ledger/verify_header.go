@@ -1166,6 +1166,39 @@ func (ls *LedgerState) leaderEligibilityStake(
 		if snapshot == nil ||
 			snapshot.TotalStake == 0 ||
 			snapshot.StakeDenominator == 0 {
+			// Mirror the mark path below and separate a storage gap from
+			// genuine ineligibility. A zero denominator leaves the
+			// threshold with no divisor, and an imported distribution
+			// holding no pools at all cannot be the certified nesPd
+			// (which is always populated); both mean dingo cannot yet
+			// answer, so they are classified as unavailable and header
+			// verification ahead of the apply cursor defers. A pool
+			// simply absent from a populated distribution is an
+			// authoritative answer -- cardano-ledger's VRFKeyUnknown --
+			// and stays a rejection.
+			unavailable := snapshot != nil && snapshot.StakeDenominator == 0
+			if !unavailable {
+				if total, terr := ls.db.Metadata().GetTotalActiveStake(
+					epochId,
+					models.PoolStakeSnapshotTypeActive,
+					nil,
+				); terr == nil && total == 0 {
+					unavailable = true
+				}
+			}
+			if unavailable {
+				return 0, 0, epochId,
+					models.PoolStakeSnapshotTypeActive, false,
+					fmt.Errorf(
+						"%w: block header verification rejected at slot %d: "+
+							"producer pool %x missing from active pool distribution "+
+							"for epoch %d (imported distribution is incomplete)",
+						errLeaderStakeSnapshotUnavailable,
+						block.SlotNumber(),
+						poolKeyHash[:],
+						epochId,
+					)
+			}
 			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false,
 				fmt.Errorf(
 					"block header verification rejected at slot %d: "+
