@@ -179,7 +179,7 @@ func (o *Ouroboros) leiosfetchServerVotesRequest(
 		// Unknown vote IDs are already omitted from this response. Treat an
 		// unavailable vote manager as an empty result instead of failing the
 		// shared bearer.
-		return oleiosfetch.NewMsgVotes(nil), nil
+		return oleiosfetch.NewMsgVotes(make([]cbor.RawMessage, 0)), nil
 	}
 	// MsgVotesRequestVoteId aliases lcommon.LeiosVoteId; unknown ids
 	// are omitted from the response.
