@@ -413,8 +413,8 @@ func (n *Node) apiPluginSelection(
 // bark's own existing default behavior (all interfaces) is preserved for
 // deployments only using it for the read-only Archive service. Bind address
 // is a network control, independent of the mTLS client-certificate
-// authentication check Bark.Start enforces whenever lifecycleEnabled (see
-// BarkConfig.TlsClientCAFilePath) -- this default narrows exposure as
+// authentication and operator-fingerprint authorization checks Bark.Start
+// enforces whenever lifecycleEnabled -- this default narrows exposure as
 // defense in depth, it is not what makes those RPCs safe to reach.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
@@ -1372,21 +1372,22 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
-				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; its destructive RPCs also require a verified mTLS client certificate (--bark-client-ca-file-path) independent of bind address, but widen this bind only behind your own trusted network controls",
+				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; every DatabaseService RPC requires a verified mTLS client certificate (--bark-client-ca-file-path), and destructive RPCs require an allowlisted certificate fingerprint (--bark-operator-certificate-fingerprints), independent of bind address; widen this bind only behind your own trusted network controls",
 				"component",
 				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{
-			Logger:              n.config.logger,
-			DB:                  db,
-			TlsCertFilePath:     n.config.tlsCertFilePath,
-			TlsKeyFilePath:      n.config.tlsKeyFilePath,
-			TlsClientCAFilePath: n.config.barkClientCAFilePath,
-			Host:                barkHost,
-			Port:                n.config.barkPort,
-			CORSAllowedOrigins:  n.config.corsAllowedOrigins,
-			DestinationRegistry: n.destinationRegistry,
+			Logger:                          n.config.logger,
+			DB:                              db,
+			TlsCertFilePath:                 n.config.tlsCertFilePath,
+			TlsKeyFilePath:                  n.config.tlsKeyFilePath,
+			TlsClientCAFilePath:             n.config.barkClientCAFilePath,
+			OperatorCertificateFingerprints: n.config.barkOperatorCertificateFingerprints,
+			Host:                            barkHost,
+			Port:                            n.config.barkPort,
+			CORSAllowedOrigins:              n.config.corsAllowedOrigins,
+			DestinationRegistry:             n.destinationRegistry,
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and

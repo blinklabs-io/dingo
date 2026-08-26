@@ -114,6 +114,7 @@ var logPlainConfigFields = []string{
 	"BackfillBatchSize",
 	"BarkClientCAFilePath",
 	"BarkHost",
+	"BarkOperatorCertificateFingerprints",
 	"BarkPort",
 	"BindAddr",
 	"BlockPipelineEnabled",

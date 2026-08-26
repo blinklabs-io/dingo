@@ -244,17 +244,24 @@ barkHost: ""
 
 # PEM CA bundle Bark verifies client certificates (mTLS) against. Required
 # whenever the database lifecycle service is enabled (barkPort set alongside
-# databaseLifecycle.snapshotDir below): its destructive DatabaseService RPCs
-# (CreateSnapshot, DeleteSnapshot, VerifySnapshot, Restore, Truncate,
-# CancelOperation) refuse any caller whose connection didn't present a
-# certificate verified against this CA -- Dingo refuses to start rather than
-# mount them unauthenticated. Also requires tlsCertFilePath/tlsKeyFilePath
-# above to be set. Read-only RPCs (status/catalog/Archive) never require a
-# client certificate. dingoctl's --client-cert/--client-key/--ca-cert flags
-# are the client side of this.
+# databaseLifecycle.snapshotDir below): every DatabaseService RPC requires a
+# certificate verified against this CA. ArchiveService remains public.
+# Also requires tlsCertFilePath/tlsKeyFilePath above to be set. dingoctl's
+# --client-cert/--client-key/--ca-cert flags are the client side of this.
 # Can be overridden with DINGO_BARK_CLIENT_CA_FILE_PATH
 # CLI: --bark-client-ca-file-path
 barkClientCaFilePath: ""
+
+# SHA-256 fingerprints of client certificate DER bytes authorized to invoke
+# destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
+# VerifySnapshot, Restore, Truncate, CancelOperation). Hex is matched
+# case-insensitively and may contain colons. At least one is required whenever
+# the database lifecycle service is enabled; a CA-valid certificate not in this
+# list may use read-only DatabaseService RPCs but receives PERMISSION_DENIED for
+# destructive ones.
+# Can be overridden with DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS
+# CLI: --bark-operator-certificate-fingerprints
+barkOperatorCertificateFingerprints: []
 
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
@@ -831,10 +838,10 @@ databaseLifecycle:
   # mounted at all (it's silently skipped, leaving only bark's Archive
   # service, if this is empty). Every snapshot is always written here,
   # regardless of whether snapshotCloudDestination is also set. Setting
-  # this alongside barkPort also requires barkClientCaFilePath (and
-  # tlsCertFilePath/tlsKeyFilePath) above -- Dingo refuses to start
-  # otherwise, since the DatabaseService's destructive RPCs must not be
-  # mounted without a way to authenticate callers.
+  # this alongside barkPort also requires barkClientCaFilePath,
+  # barkOperatorCertificateFingerprints, and tlsCertFilePath/tlsKeyFilePath
+  # above -- Dingo refuses to start otherwise, since DatabaseService must not
+  # be mounted without both authentication and operator authorization.
   #
   # Docker image note: the container always runs as a non-root user with a
   # pinned UID:GID of 1000:1000 (see Dockerfile) and never chowns anything
