@@ -1820,6 +1820,12 @@ func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
 }
 
+// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
+// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
+func (c *Config) BarkOperatorCertificateFingerprints() []string {
+	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
+}
+
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
 func (c *Config) TlsCertFilePath() string {
 	return c.cfg.TlsCertFilePath

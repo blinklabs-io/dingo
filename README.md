@@ -620,9 +620,13 @@ a target beyond the security parameter, because it exists for disaster-recovery
 scenarios (see CIP-0135) where the chain must be rewound further than Ouroboros
 Praos allows. The resulting database is resync-ready from the target point.
 
-The same operations are also exposed remotely through the Bark
-`DatabaseService`. Bark has no built-in authentication, so do not expose its
-port outside a trusted network.
+The same operations are also exposed remotely through Bark's
+`DatabaseService`. Every `DatabaseService` RPC requires a client certificate
+verified against `barkClientCaFilePath`; destructive RPCs also require the
+certificate's SHA-256 fingerprint in
+`barkOperatorCertificateFingerprints`. Bark's read-only `ArchiveService`
+remains public on the same listener, so expose the Bark port only to the
+intended network.
 
 ## Database Plugins
 
