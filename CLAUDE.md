@@ -27,7 +27,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 ## Pre-commit
 
 ```shell
-golangci-lint run ./...
+make lint         # golangci-lint: every module, plus GOOS=windows
 nilaway ./...
 modernize ./...   # --fix to auto-apply
 make import-boundaries

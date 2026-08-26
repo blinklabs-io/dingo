@@ -124,7 +124,7 @@ func utxosFromShelleyInitialFunds(
 		addrBytes, err := hex.DecodeString(address)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"Shelley initialFunds address %q: %w",
+				"shelley initialFunds address %q: %w",
 				address, err,
 			)
 		}
