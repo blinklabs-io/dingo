@@ -1489,10 +1489,12 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		defer ls.chainsyncMutex.Unlock()
 		return sameConnectionId(ls.headerPipelineConnId, connId2) &&
 			len(ls.bufferedHeaderEvents[connIdKey(connId2)]) == 0 &&
-			ls.chain.HeaderCount() == 1
+			ls.chain.HeaderCount() == 1 &&
+			ls.syncUpstreamTipSlot.Load() == 1
 	}, 2*time.Second, 10*time.Millisecond)
 	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId2))
 	assert.Equal(t, 1, ls.chain.HeaderCount())
+	assert.Equal(t, uint64(1), ls.syncUpstreamTipSlot.Load())
 }
 
 func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {

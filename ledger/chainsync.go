@@ -2442,7 +2442,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
 	headerCryptoVerified := false
-	headerValidationRequired := ls.shouldVerifyChainsyncHeaderCrypto(
+	headerValidationRequired, headerTrusted := ls.chainsyncHeaderCryptoPolicy(
 		e.Point.Slot,
 	)
 	if headerValidationRequired {
@@ -2487,6 +2487,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			}
 		} else {
 			headerCryptoVerified = true
+			headerTrusted = true
 		}
 	}
 
@@ -2615,6 +2616,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 			if resolved {
+				ls.recordAdmittedHeaderFrontier(
+					e,
+					headerTrusted,
+				)
 				return nil
 			}
 			// Fallback: after several consecutive mismatches where
@@ -2645,15 +2650,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	// Reset mismatch counter on successful header addition
 	ls.headerMismatchCount = 0
-	// Track only the delivered header frontier after the header has passed the
-	// applicable admission path and entered the local header queue. The peer's
-	// advertised e.Tip is a separate, untrusted field in the ChainSync message;
-	// validating this header does not authenticate that claim.
-	admittedHeaderSlot := ls.chain.HeaderTip().Point.Slot
-	if (!headerValidationRequired || headerCryptoVerified) &&
-		admittedHeaderSlot > ls.syncUpstreamTipSlot.Load() {
-		ls.syncUpstreamTipSlot.Store(admittedHeaderSlot)
-	}
+	ls.recordAdmittedHeaderFrontier(
+		e,
+		headerTrusted,
+	)
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
@@ -2846,8 +2846,43 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	return true, nil
 }
 
-func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
-	return ls.shouldEnforceBlockPipelineCrypto(slot)
+// chainsyncHeaderCryptoPolicy distinguishes headers trusted by an explicitly
+// disabled validation path (historical sync or Mithril coverage) from headers
+// whose crypto check must wait for an epoch nonce. Both skip verification at
+// chainsync time, but only the former may advance shared sync state.
+func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
+	slot uint64,
+) (verifyNow bool, trustedWithoutVerification bool) {
+	validationEnabled, mithrilLedgerSlot := ls.validationStateSnapshot()
+	if !validationEnabled {
+		return false, true
+	}
+	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
+		return false, true
+	}
+	if !ls.hasCachedEpochNonceForSlot(slot) {
+		return false, false
+	}
+	return true, false
+}
+
+// recordAdmittedHeaderFrontier advances shared sync state only when the
+// delivered header is now the locally admitted queue frontier. The peer's
+// advertised tip is a separate, untrusted field in the ChainSync message;
+// validating this header does not authenticate that claim.
+func (ls *LedgerState) recordAdmittedHeaderFrontier(
+	e ChainsyncEvent,
+	headerTrusted bool,
+) {
+	if ls.chain == nil || !headerTrusted {
+		return
+	}
+	admittedPoint := ls.chain.HeaderTip().Point
+	if !pointMatches(admittedPoint, e.Point) ||
+		admittedPoint.Slot <= ls.syncUpstreamTipSlot.Load() {
+		return
+	}
+	ls.syncUpstreamTipSlot.Store(admittedPoint.Slot)
 }
 
 // shouldEnforceBlockPipelineCrypto mirrors the serial header path's

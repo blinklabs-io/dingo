@@ -242,8 +242,8 @@ type SlotClockProvider interface {
 	ChainTipSlot() uint64
 	// NextSlotTime returns the wall-clock time when the next slot begins.
 	NextSlotTime() (time.Time, error)
-	// UpstreamTipSlot returns the latest known tip slot from upstream peers.
-	// Returns 0 if no upstream tip is known.
+	// UpstreamTipSlot returns the latest admitted header slot from upstream
+	// peers. Returns 0 if no upstream header has been admitted.
 	UpstreamTipSlot() uint64
 }
 
