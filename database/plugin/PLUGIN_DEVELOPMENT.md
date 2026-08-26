@@ -93,11 +93,14 @@ Factories should construct resources without starting background work.
 the host stops that provider before returning the error. Composition code owns
 unwinding previously started providers around their non-plugin dependents.
 
-The built-in storage stores expose `Start`/`Stop` with no context parameter, so
-the lifecycle adapter honors cancellation only at the boundary: `StartFunc`
-returns early on `ctx.Err()` before beginning work, but it cannot interrupt a
-`Start` already in progress. `StopFunc` runs cleanup regardless of `ctx` state.
-If your store's own start/stop accept a context, thread it through instead.
+Most built-in storage stores expose `Start`/`Stop` with no context parameter,
+so their lifecycle adapters honor cancellation only at the boundary:
+`StartFunc` returns early on `ctx.Err()` before beginning work, but it cannot
+interrupt a `Start` already in progress. The Badger provider is the exception:
+it threads the stop context into `CloseContext`, stops periodic value-log GC,
+and returns at the deadline while a non-cancelable in-flight rewrite drains
+through the same one-time close. If a store's own start/stop accepts a context,
+thread it through instead.
 
 Test strict configuration decoding, construction/start failures, normal stop,
 and the subsystem contract. Storage providers must preserve transaction,

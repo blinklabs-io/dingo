@@ -11,6 +11,13 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 `Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
 local `badger` blob and `sqlite` metadata providers.
 
+The Badger provider threads the host's stop context through its close path.
+Stopping periodic value-log GC prevents a successful rewrite from starting a
+second pass. Badger does not expose cancellation for a rewrite already in
+flight, so that rewrite drains through a one-time background close while the
+provider returns the stop context error at its deadline. A later direct
+`Close` waits for that same cleanup instead of starting a competing close.
+
 Standalone command/bootstrap composition owns these stores through
 `internal/plugins.DatabaseRuntime`. `OpenDatabase` returns either a live
 runtime with a nil error or a nil runtime with an error, so conventional error
