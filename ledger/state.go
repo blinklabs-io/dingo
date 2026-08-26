@@ -3489,6 +3489,16 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	// new era with "epoch has no nonce for slot" for any Byron-prefixed
 	// network that syncs from genesis instead of a Mithril snapshot.
 	if workingEraId != 0 && len(newEpoch.Nonce) == 0 {
+		if ls.config.CardanoNodeConfig == nil {
+			return nil, errors.New(
+				"seed post-Byron epoch nonce: CardanoNodeConfig is nil",
+			)
+		}
+		if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
+			return nil, errors.New(
+				"seed post-Byron epoch nonce: could not get Shelley genesis hash",
+			)
+		}
 		genesisHashBytes, err := hex.DecodeString(
 			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 		)
@@ -3496,6 +3506,12 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 			return nil, fmt.Errorf(
 				"decode Shelley genesis hash for post-Byron epoch nonce: %w",
 				err,
+			)
+		}
+		if len(genesisHashBytes) != lcommon.Blake2b256Size {
+			return nil, fmt.Errorf(
+				"seed post-Byron epoch nonce: Shelley genesis hash is %d bytes, expected %d",
+				len(genesisHashBytes), lcommon.Blake2b256Size,
 			)
 		}
 		newEpoch.Nonce = genesisHashBytes
