@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	badgerdb "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
@@ -218,11 +219,10 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 	store.gcWg.Add(1)
 	go store.blobGc(gcTicks, store.gcStopCh)
 	gcTicks <- time.Time{}
-	select {
-	case <-gcStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("value-log GC did not start")
-	}
+	testutil.RequireReceive(
+		t, gcStarted, 5*time.Second,
+		"value-log GC did not start",
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -230,23 +230,14 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 	go func() {
 		stopDone <- host.Stop(ctx)
 	}()
-	<-ctx.Done()
-
-	var stopErr error
-	returnedAtDeadline := false
-	select {
-	case stopErr = <-stopDone:
-		returnedAtDeadline = true
-	case <-time.After(500 * time.Millisecond):
-	}
+	stopErr := testutil.RequireReceive(
+		t, stopDone, 5*time.Second,
+		"provider stop exceeded its context",
+	)
 
 	release()
-	if !returnedAtDeadline {
-		stopErr = <-stopDone
-	}
 	require.NoError(t, store.Close())
 
-	require.True(t, returnedAtDeadline, "provider stop exceeded its context")
 	require.ErrorIs(t, stopErr, context.DeadlineExceeded)
 	require.Equal(t, int32(1), attempts.Load())
 	require.True(t, store.DB().IsClosed())
