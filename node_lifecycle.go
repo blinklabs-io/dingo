@@ -106,37 +106,100 @@ import (
 // n.ouroboros exactly once, to pause its Leios persistence writer — see
 // this file's top doc comment for why that one piece of n.ouroboros can't
 // simply be left running like everything else on it.
+// stopWithDeadline runs a component's Stop and waits at most d for it to
+// return.
+//
+// The component Stop calls in quiesceForLiveLifecycleOp cancel their own
+// context and then wait on a WaitGroup with no bound of their own, so a
+// goroutine that does not observe the cancellation wedges the entire live
+// restore or truncate — well past the configured shutdown timeout, with no
+// error for the caller to act on. Bounding the wait turns that hang into a
+// decision.
+//
+// An unfinished wait escalates to errStorageDrainUnconfirmed rather than being
+// reported as an ordinary failure, matching connManager.Stop, the leios
+// persist writer's drain, and the storage providers below. The distinction is
+// what the caller does next: a component that reports a failure has stopped,
+// while one that never returned may still be reading or writing n.db, so
+// Restore/Truncate must abandon the operation and force a supervised restart
+// instead of reopening storage underneath it.
+//
+// The abandoned goroutine is deliberately left running. It cannot be
+// interrupted from here, and the escalation brings the process down anyway, so
+// leaking it for that window is strictly safer than proceeding to close the
+// database it may still be using.
+//
+// The caller's context deliberately does not shorten this wait. Cancelling a
+// restore should not escalate a component that would have stopped cleanly into
+// a supervised restart, and a cancelled context is no reason to abandon a stop
+// mid-flight: the deadline alone decides, so the wait is bounded either way.
+func stopWithDeadline(
+	d time.Duration,
+	name string,
+	stop func() error,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- stop() }()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case stopErr := <-done:
+		if stopErr != nil {
+			return fmt.Errorf("%s shutdown: %w", name, stopErr)
+		}
+		return nil
+	case <-timer.C:
+		return errors.Join(
+			errStorageDrainUnconfirmed,
+			fmt.Errorf("%s did not stop within %s", name, d),
+		)
+	}
+}
+
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
 
+	// Each of these Stop calls cancels its own context and then waits on a
+	// WaitGroup that has no deadline of its own, so every one is bounded here
+	// instead -- see stopWithDeadline for why an unfinished wait escalates to
+	// errStorageDrainUnconfirmed rather than being reported as an ordinary
+	// stop failure. The budget is the configured shutdown timeout, the same
+	// one the koios parity observer below already uses.
+	stopTimeout := n.configuredShutdownTimeout()
 	if n.blockForger != nil {
-		n.blockForger.Stop()
+		if stopErr := stopWithDeadline(
+			stopTimeout, "block forger",
+			func() error { n.blockForger.Stop(); return nil },
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
+		}
 	}
 	if n.leaderElection != nil {
-		if stopErr := n.leaderElection.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leader election shutdown: %w", stopErr),
-			)
+		if stopErr := stopWithDeadline(
+			stopTimeout, "leader election", n.leaderElection.Stop,
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 	// Pipeline manager stopped before vote manager: it consumes the vote
 	// manager's EbQuorumEvent, matching the dependency order Run()'s
 	// startup-failure cleanup stack already uses (see node.go).
 	if n.leiosPipelineManager != nil {
-		if stopErr := n.leiosPipelineManager.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leios pipeline manager shutdown: %w", stopErr),
-			)
+		if stopErr := stopWithDeadline(
+			stopTimeout, "leios pipeline manager",
+			n.leiosPipelineManager.Stop,
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 	if n.leiosVoteManager != nil {
-		if stopErr := n.leiosVoteManager.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leios vote manager shutdown: %w", stopErr),
-			)
+		if stopErr := stopWithDeadline(
+			stopTimeout, "leios vote manager",
+			n.leiosVoteManager.Stop,
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 	if n.peerGov != nil {
@@ -158,11 +221,10 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		n.poolRelayProvider = nil
 	}
 	if n.snapshotMgr != nil {
-		if stopErr := n.snapshotMgr.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("snapshot manager shutdown: %w", stopErr),
-			)
+		if stopErr := stopWithDeadline(
+			stopTimeout, "snapshot manager", n.snapshotMgr.Stop,
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 	// The Koios parity observer (dingo #3098) reads Dingo's committed reward
