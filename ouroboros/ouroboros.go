@@ -92,9 +92,13 @@ type Ouroboros struct {
 	eventBus       *event.EventBus
 	mempool        mempool.Service
 	ledgerState    *ledger.LedgerState
-	leiosVotes     LeiosVoteHandler
-	leiosPipeline  LeiosPipelineHandler
-	config         OuroborosConfig
+	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
+	// LeiosNotify. It returns validation facts only; this package owns peer,
+	// publication, and relay semantics.
+	leiosAnnouncementLedger LeiosAnnouncementLedger
+	leiosVotes              LeiosVoteHandler
+	leiosPipeline           LeiosPipelineHandler
+	config                  OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
 	registerer *trackingRegisterer
@@ -323,10 +327,14 @@ type OuroborosConfig struct {
 	// Ouroboros, connmanager takes ConfigureListeners and OutboundConnOpts,
 	// and peergov takes RequestPeersFromPeer. Ouroboros must therefore be
 	// built before any of them exists.
-	LedgerState    *ledger.LedgerState
-	Mempool        mempool.Service
-	ChainsyncState *chainsync.State
-	PeerGov        *peergov.PeerGovernor
+	LedgerState *ledger.LedgerState
+	// LeiosAnnouncementLedger is the narrow ledger read/validation boundary
+	// required when EnableLeios is true. Node composition supplies the same
+	// LedgerState instance through this restricted surface.
+	LeiosAnnouncementLedger LeiosAnnouncementLedger
+	Mempool                 mempool.Service
+	ChainsyncState          *chainsync.State
+	PeerGov                 *peergov.PeerGovernor
 }
 
 type blockfetchMetrics struct {
@@ -379,15 +387,16 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
-		config:           cfg,
-		registerer:       newTrackingRegisterer(cfg.PromRegistry),
-		eventBus:         cfg.EventBus,
-		connManager:      cfg.ConnManager,
-		ledgerState:      cfg.LedgerState,
-		mempool:          cfg.Mempool,
-		chainsyncState:   cfg.ChainsyncState,
-		peerGov:          cfg.PeerGov,
-		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
+		config:                  cfg,
+		registerer:              newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                cfg.EventBus,
+		connManager:             cfg.ConnManager,
+		ledgerState:             cfg.LedgerState,
+		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
 		),

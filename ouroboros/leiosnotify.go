@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -37,6 +38,18 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 )
+
+// LeiosAnnouncementLedger is the synchronous, read-only ledger boundary used
+// when a LeiosNotify peer sends a dangling ranking-block announcement.
+// Implementations validate all header crypto before returning only the OCIN
+// freshness fact; Ouroboros retains ownership of record and relay policy.
+type LeiosAnnouncementLedger interface {
+	CurrentSlot() (uint64, error)
+	SlotToTime(uint64) (time.Time, error)
+	ValidateLeiosAnnouncementHeader(
+		gledger.BlockHeader,
+	) (ledger.LeiosAnnouncementOCINStaleness, error)
+}
 
 // leiosForgedEBEntry holds one locally-forged endorser block ready to
 // be announced to peers via LeiosNotify.
@@ -1312,9 +1325,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	source string,
 	deferVerification bool,
 ) error {
-	if o.ledgerState == nil {
+	if isNilInterface(o.leiosAnnouncementLedger) {
 		return errors.New(
-			"cannot accept leios announcement without ledger state",
+			"cannot accept leios announcement without announcement ledger",
 		)
 	}
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
@@ -1327,7 +1340,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"ranking-block header has no valid endorser-block announcement",
 		)
 	}
-	currentSlot, slotErr := o.ledgerState.CurrentSlot()
+	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
 	if slotErr != nil {
 		return fmt.Errorf(
 			"read current slot for announcement validation: %w",
@@ -1341,7 +1354,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			currentSlot,
 		)
 	}
-	announcementStart, timeErr := o.ledgerState.SlotToTime(header.SlotNumber())
+	announcementStart, timeErr := o.leiosAnnouncementLedger.SlotToTime(
+		header.SlotNumber(),
+	)
 	if timeErr != nil {
 		return fmt.Errorf("read announcement slot time: %w", timeErr)
 	}
@@ -1355,11 +1370,24 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if age > leiosNotifyMaxAnnouncementAge {
 		return fmt.Errorf("announcement is stale by %s", age)
 	}
-	if err := o.ledgerState.ValidateBlockHeaderCrypto(header); err != nil {
+	staleness, err := o.leiosAnnouncementLedger.ValidateLeiosAnnouncementHeader(
+		header,
+	)
+	if err != nil {
 		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
 			o.deferLeiosAnnouncement(header, raw, source)
 		}
 		return fmt.Errorf("validate ranking-block header: %w", err)
+	}
+	if staleness == ledger.LeiosAnnouncementStaleOCIN {
+		o.config.Logger.Debug(
+			"ignoring leios announcement with stale opcert counter",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", source,
+			"slot", header.SlotNumber(),
+		)
+		return nil
 	}
 	// Drop announcements that can no longer affect the acceptance window
 	// before adding this one. This is deliberately done for local and peer
@@ -1446,14 +1474,14 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 // rebuilt from the retained announcements so an old EB cannot keep its size
 // invariant alive after its announcements expire.
 func (o *Ouroboros) pruneLeiosAnnouncements() {
-	if o.ledgerState == nil {
+	if isNilInterface(o.leiosAnnouncementLedger) {
 		return
 	}
 	now := time.Now()
 	o.leiosAnnouncementsMu.Lock()
 	defer o.leiosAnnouncementsMu.Unlock()
 	for key, announcement := range o.leiosAnnouncements {
-		start, err := o.ledgerState.SlotToTime(announcement.slot)
+		start, err := o.leiosAnnouncementLedger.SlotToTime(announcement.slot)
 		if err != nil || now.Sub(start) > leiosNotifyMaxAnnouncementAge {
 			delete(o.leiosAnnouncements, key)
 		}

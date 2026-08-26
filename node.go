@@ -1180,20 +1180,21 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// wired. This is deliberately the last construction before the peer
 	// governor and connection manager start below.
 	n.ouroborosConfig = ouroborosPkg.OuroborosConfig{
-		Logger:                n.config.logger,
-		EventBus:              n.eventBus,
-		ConnManager:           n.connManager,
-		LedgerState:           n.ledgerState,
-		Mempool:               n.mempool,
-		ChainsyncState:        n.chainsyncState,
-		PeerGov:               n.peerGov,
-		NetworkMagic:          n.config.networkMagic,
-		PeerSharing:           n.config.peerSharing,
-		IntersectTip:          n.config.intersectTip,
-		IntersectPoints:       n.config.intersectPoints,
-		PromRegistry:          n.retainedComponentPromRegistry(),
-		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
-		EnableLeios:           enableLeiosNetworking,
+		Logger:                  n.config.logger,
+		EventBus:                n.eventBus,
+		ConnManager:             n.connManager,
+		LedgerState:             n.ledgerState,
+		LeiosAnnouncementLedger: n.ledgerState,
+		Mempool:                 n.mempool,
+		ChainsyncState:          n.chainsyncState,
+		PeerGov:                 n.peerGov,
+		NetworkMagic:            n.config.networkMagic,
+		PeerSharing:             n.config.peerSharing,
+		IntersectTip:            n.config.intersectTip,
+		IntersectPoints:         n.config.intersectPoints,
+		PromRegistry:            n.retainedComponentPromRegistry(),
+		ChainsyncBlockTimeout:   n.config.chainsyncStallTimeout,
+		EnableLeios:             enableLeiosNetworking,
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
 		// extension ahead of the IOG Leios prototype. The prototype relays do
 		// not run a protocol-20 responder and reset the connection if we

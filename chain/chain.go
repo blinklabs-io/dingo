@@ -1120,6 +1120,36 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 	return points
 }
 
+// PointAtDepth returns the point depth blocks behind the current tip. A depth
+// of zero returns the tip. When depth reaches beyond the retained chain, the
+// immutable point is origin and found is false.
+//
+// Unlike RecentPoints, this performs one indexed lookup regardless of depth,
+// which is important for consensus reads at the security-parameter boundary.
+func (c *Chain) PointAtDepth(depth uint64) (point ocommon.Point, found bool, err error) {
+	if c == nil {
+		return ocommon.Point{}, false, errors.New("chain is nil")
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if c.tipBlockIndex < initialBlockIndex || depth >= c.tipBlockIndex {
+		return ocommon.Point{}, false, nil
+	}
+	if depth == 0 {
+		return ocommon.NewPoint(
+			c.currentTip.Point.Slot,
+			c.currentTip.Point.Hash,
+		), true, nil
+	}
+	unlocks := c.lockBlockIndexReadLocks()
+	defer unlocks()
+	block, err := c.blockByIndexLocked(c.tipBlockIndex - depth)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	return ocommon.NewPoint(block.Slot, block.Hash), true, nil
+}
+
 // IntersectPoints returns up to count points in descending order for
 // chainsync FindIntersect. It keeps a dense window near the tip and
 // then samples exponentially older blocks so lagging peers can still

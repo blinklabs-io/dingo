@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -45,6 +46,29 @@ import (
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeLeiosAnnouncementLedger struct {
+	currentSlot uint64
+	slotTime    time.Time
+	staleness   ledger.LeiosAnnouncementOCINStaleness
+	err         error
+	validated   int
+}
+
+func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
+	return f.currentSlot, nil
+}
+
+func (f *fakeLeiosAnnouncementLedger) SlotToTime(uint64) (time.Time, error) {
+	return f.slotTime, nil
+}
+
+func (f *fakeLeiosAnnouncementLedger) ValidateLeiosAnnouncementHeader(
+	gledger.BlockHeader,
+) (ledger.LeiosAnnouncementOCINStaleness, error) {
+	f.validated++
+	return f.staleness, f.err
+}
 
 func mustCbor(t *testing.T, value any) cbor.RawMessage {
 	t.Helper()
@@ -80,7 +104,10 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 	})
 	require.NoError(t, err)
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ls,
+	})
 	o.ledgerState = ls
 	return o
 }
@@ -128,6 +155,35 @@ func testDijkstraBlockRaw(
 	require.NoError(t, err)
 	hash := decoded.Hash()
 	return ocommon.NewPoint(uint64(idx), hash.Bytes()), cbor.RawMessage(raw)
+}
+
+func testDijkstraAnnouncementHeaderRaw(t *testing.T) []byte {
+	t.Helper()
+	_, blockRaw := testDijkstraBlockRaw(t, 1)
+	var components []cbor.RawMessage
+	_, err := cbor.Decode(blockRaw, &components)
+	require.NoError(t, err)
+	require.Len(t, components, 2)
+
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xaa
+	var headerTop []cbor.RawMessage
+	_, err = cbor.Decode(components[0], &headerTop)
+	require.NoError(t, err)
+	require.Len(t, headerTop, 2)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	headerBody = append(
+		headerBody,
+		mustCbor(t, false),
+		mustCbor(t, []any{ebHash.Bytes(), uint64(1234)}),
+	)
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err := cbor.Encode(headerTop)
+	require.NoError(t, err)
+	return headerRaw
 }
 
 func testLeiosEndorserBlockRaw(
@@ -363,6 +419,76 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	require.ErrorContains(t, record(headerRaw), "third distinct")
 }
 
+func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
+	tests := []struct {
+		name        string
+		staleness   ledger.LeiosAnnouncementOCINStaleness
+		validateErr error
+		wantRecord  bool
+		wantRelay   bool
+	}{
+		{
+			name:       "fresh announcement is processed and relayed",
+			staleness:  ledger.LeiosAnnouncementFreshOCIN,
+			wantRecord: true,
+			wantRelay:  true,
+		},
+		{
+			name:      "stale announcement is accepted and ignored",
+			staleness: ledger.LeiosAnnouncementStaleOCIN,
+		},
+		{
+			name:        "non OCIN validation failure keeps suppression behavior",
+			validateErr: errors.New("invalid KES signature"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := connmanager.NewConnectionManager(
+				connmanager.ConnectionManagerConfig{},
+			)
+			conn, err := gouroboros.New()
+			require.NoError(t, err)
+			require.True(t, cm.AddConnection(
+				conn,
+				false,
+				"127.0.0.1:1234",
+			))
+			defer func() {
+				conn.ErrorChan() <- errors.New("test connection closed")
+			}()
+
+			announcementLedger := &fakeLeiosAnnouncementLedger{
+				currentSlot: 10,
+				slotTime:    time.Now().Add(-time.Minute),
+				staleness:   tt.staleness,
+				err:         tt.validateErr,
+			}
+			o := newOuroboros(OuroborosConfig{
+				ConnManager:             cm,
+				EnableLeios:             true,
+				LeiosAnnouncementLedger: announcementLedger,
+			})
+			o.leiosEBLog.registerConn("relay")
+
+			err = o.leiosnotifyClientNotification(
+				oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+				oleiosnotify.NewMsgBlockAnnouncement(
+					testDijkstraAnnouncementHeaderRaw(t),
+				),
+			)
+			require.NoError(t, err,
+				"accepted-ignore and existing suppression must keep the bearer usable")
+			require.Equal(t, 1, announcementLedger.validated)
+			require.Same(t, conn, cm.GetConnectionById(conn.Id()),
+				"the announcement callback must not disconnect the peer")
+			require.Equal(t, tt.wantRecord, len(o.leiosAnnouncements) == 1)
+			entry, _ := o.leiosEBLog.next("relay")
+			require.Equal(t, tt.wantRelay, entry != nil)
+		})
+	}
+}
+
 func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.leiosDeferredAnnouncements["pending"] = leiosDeferredAnnouncement{
@@ -371,7 +497,7 @@ func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
 	require.ErrorContains(
 		t,
 		o.acceptLeiosAnnouncement([]byte("not cbor"), "test"),
-		"without ledger state",
+		"without announcement ledger",
 	)
 	require.Empty(t, o.leiosAnnouncements)
 	require.Empty(t, o.leiosEBLog.items)
