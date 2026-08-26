@@ -728,7 +728,8 @@ mithril:
   # Remove temporary files after loading completes
   # Default: true
   cleanupAfterLoad: true
-  # Verify the Mithril certificate chain from snapshot back to genesis
+  # Verify STM certificates back to the pinned Mithril genesis key from the
+  # selected Cardano network config. Set false only for an unverified bootstrap.
   # Default: true
   verifyCertificates: true
 
