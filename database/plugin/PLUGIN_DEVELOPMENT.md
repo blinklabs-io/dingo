@@ -102,6 +102,11 @@ and returns at the deadline while a non-cancelable in-flight rewrite drains
 through the same one-time close. If a store's own start/stop accepts a context,
 thread it through instead.
 
+Composition code must not treat a context-bounded storage `Stop` as proof that
+the resource has drained. A live replacement must either observe completed
+cleanup or fail closed; it must never resolve a new provider against the same
+path while the old provider may still be closing in the background.
+
 Test strict configuration decoding, construction/start failures, normal stop,
 and the subsystem contract. Storage providers must preserve transaction,
 iterator-lifetime, commit-timestamp, optimization, and persisted-format

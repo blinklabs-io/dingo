@@ -17,6 +17,9 @@ second pass. Badger does not expose cancellation for a rewrite already in
 flight, so that rewrite drains through a one-time background close while the
 provider returns the stop context error at its deadline. A later direct
 `Close` waits for that same cleanup instead of starting a competing close.
+Live restore and truncate treat this deadline as an unconfirmed drain and
+request a supervised restart instead of reopening the same data directory
+while the background close may still own it.
 
 Standalone command/bootstrap composition owns these stores through
 `internal/plugins.DatabaseRuntime`. `OpenDatabase` returns either a live

@@ -236,7 +236,13 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 	)
 
 	release()
-	require.NoError(t, store.Close())
+	require.Eventually(
+		t,
+		store.DB().IsClosed,
+		5*time.Second,
+		10*time.Millisecond,
+		"provider-owned close did not finish after value-log GC drained",
+	)
 
 	require.ErrorIs(t, stopErr, context.DeadlineExceeded)
 	require.Equal(t, int32(1), attempts.Load())
