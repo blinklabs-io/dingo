@@ -4906,6 +4906,18 @@ func (ls *LedgerState) processEpochRollover(
 	currentPParams lcommon.ProtocolParameters,
 	deferBoundarySnapshot bool,
 ) (*EpochRolloverResult, error) {
+	// Fail closed at the top of the production rollover path rather than
+	// letting a nil config reach one of the several unchecked
+	// ls.config.CardanoNodeConfig dereferences below (e.g. the
+	// ShelleyGenesis() read further down, or applyBoundaryEraTransitions's
+	// post-Byron nonce seeding) -- any of which would panic instead of
+	// returning an error. NewLedgerState does not itself require a non-nil
+	// CardanoNodeConfig, so this is the boundary that must catch it.
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, errors.New(
+			"process epoch rollover: CardanoNodeConfig is nil",
+		)
+	}
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
 	)
