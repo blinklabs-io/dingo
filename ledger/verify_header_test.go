@@ -1371,17 +1371,26 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 		nil,
 	))
 
-	// The preceding epoch remains genesis-overlay active, while canonical
-	// epoch-2 slots use decentralisationParam=0 and must fall through to the
-	// normal pool path. A current-epoch-only lookup regresses here by reading
-	// epoch-1's d=1 and returning genesisOverlayNonActive.
-	require.True(t, ls.genesisDelegationActiveForSlot(172_780))
-	require.False(t, ls.genesisDelegationActiveForSlot(172_836))
+	// The preceding epoch has an active overlay slot, while canonical epoch-2
+	// slots use decentralisationParam=0 and must fall through to the normal
+	// pool path. A current-epoch-only lookup regresses here by reading epoch-1's
+	// d=1 and returning genesisOverlayNonActive for the epoch-2 block.
+	precedingBlock := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 172_780},
+		slot:  172_780,
+	}
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		precedingBlock,
+		genesisCfg.ShelleyGenesis(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, genesisOverlayActive, status)
+
 	block := &mockBoundaryAlonzoBlock{
 		Block: &mockBabbageBlock{slot: 172_836},
 		slot:  172_836,
 	}
-	_, status, err := ls.genesisOverlayDelegationForBlock(
+	_, status, err = ls.genesisOverlayDelegationForBlock(
 		block,
 		genesisCfg.ShelleyGenesis(),
 	)
@@ -1552,11 +1561,11 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
-func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
+func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotUsesPoolThreshold(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{54}, 0, tamperNone)
-	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
 	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
 	require.NoError(t, err)
@@ -1571,10 +1580,26 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1000)},
 	}
 	ls.publishSnapshotsLocked()
+	seedBlockPoolRegistration(t, db, tb.block)
+	seedPoolStakeSnapshot(t, db, 4, delegateHash.Bytes(), 1)
+	dummyPool := make([]byte, lcommon.Blake2b224Size)
+	dummyPool[0] = 0xFF
+	seedPoolStakeSnapshot(t, db, 4, dummyPool, 1_000_000_000_000_000_000)
+
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		tb.block,
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, genesisOverlayNone, status)
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+	require.Error(
+		t,
+		err,
+		"a non-overlay slot must apply the Praos leader threshold",
+	)
+	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
 
 	// A stale decentralized parameter set can classify this future slot as
 	// genesisOverlayNone. Header verification must defer before that
@@ -2148,26 +2173,6 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 		err.Error(),
 		"VRF leader value exceeds stake-derived threshold",
 	)
-}
-
-func TestVerifyBlockLeaderEligibility_DecentralizationActiveSkipsThreshold(
-	t *testing.T,
-) {
-	tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
-	ls.currentPParams = &shelley.ShelleyProtocolParameters{
-		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
-	}
-	ls.publishSnapshotsLocked()
-
-	poolKeyHash := tb.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1)
-	dummyHash := make([]byte, 28)
-	dummyHash[0] = 0xFF
-	seedPoolStakeSnapshot(t, db, 4, dummyHash, 1_000_000_000_000_000_000)
-
-	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	require.NoError(t, err)
 }
 
 func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(

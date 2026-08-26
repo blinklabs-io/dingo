@@ -769,53 +769,6 @@ func activeSlotCoeffInverse(activeSlotsCoeff *big.Rat) uint64 {
 	return inv.Uint64()
 }
 
-func (ls *LedgerState) genesisDelegationActiveForSlot(slot uint64) bool {
-	if pparams := ls.genesisOverlayProtocolParamsForSlot(slot); pparams != nil {
-		return decentralizedParamActive(pparams)
-	}
-	if ls.config.CardanoNodeConfig == nil {
-		return false
-	}
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil ||
-		shelleyGenesis.ProtocolParameters.Decentralization == nil {
-		return false
-	}
-	return shelleyGenesis.ProtocolParameters.Decentralization.Sign() > 0
-}
-
-// genesisOverlayProtocolParamsForSlot resolves the protocol parameters that
-// govern the slot's epoch. ProtocolParamsForSlot intentionally forecasts from
-// the current state for forging, but that is not a historical lookup: at an
-// epoch boundary it can return the previous epoch's decentralization value.
-// Prefer the epoch-specific metadata row, falling back to the current/forecast
-// value only when the target epoch is not persisted yet. Header callers defer
-// that not-yet-authoritative case before making an overlay decision.
-func (ls *LedgerState) genesisOverlayProtocolParamsForSlot(
-	slot uint64,
-) lcommon.ProtocolParameters {
-	if epoch, err := ls.epochForSlot(slot); err == nil {
-		snapshot := ls.loadConsensusSnapshot()
-		if epoch.EpochId == snapshot.currentEpoch.EpochId {
-			return snapshot.currentPParams
-		}
-		if ls.db != nil {
-			era, ok := ls.eraById(epoch.EraId)
-			if ok && era != nil && era.DecodePParamsFunc != nil {
-				if pparams, pparamsErr := ls.db.GetPParams(
-					epoch.EpochId,
-					era.Id,
-					era.DecodePParamsFunc,
-					nil,
-				); pparamsErr == nil && pparams != nil {
-					return pparams
-				}
-			}
-		}
-	}
-	return ls.ProtocolParamsForSlot(slot)
-}
-
 // genesisOverlayProtocolParamsForBlock resolves protocol parameters for the
 // block body era rather than only the epoch's current era. A hard-fork
 // boundary block may be encoded in the predecessor era while its header
@@ -857,13 +810,6 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
 		}
 	}
 	return ls.ProtocolParamsForSlot(slot)
-}
-
-func decentralizedParamActive(
-	pparams lcommon.ProtocolParameters,
-) bool {
-	rat := decentralizationParamRat(pparams)
-	return rat != nil && rat.Sign() > 0
 }
 
 func decentralizationParamRat(
@@ -915,6 +861,12 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // how the VRF leader value is derived from the output bytes; ConsensusModeForEpoch
 // selects the correct path for the block's era.
 //
+// The production caller first runs verifyGenesisDelegateHeader, which handles
+// or rejects exact genesis-overlay slots. Reaching this function from that path
+// means the block is in a Praos slot and must receive the pool threshold check,
+// even when the decentralization parameter enables overlay slots elsewhere in
+// the same epoch.
+//
 // Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
 // slot coefficient is logged and skipped rather than rejecting, to tolerate
 // early-chain bootstrap states where the genesis snapshot is not yet written.
@@ -923,18 +875,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	epochId uint64,
 ) error {
 	if block.Era().Id == byron.EraIdByron {
-		return nil
-	}
-	if ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
-		ls.config.Logger.Warn(
-			"skipping leader eligibility check: decentralization parameter active",
-			"slot",
-			block.SlotNumber(),
-			"epoch",
-			epochId,
-			"component",
-			"ledger",
-		)
 		return nil
 	}
 
