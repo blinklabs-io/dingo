@@ -127,6 +127,10 @@ jobs:
           ./database/plugin/metadata/postgres
           ./database/plugin/metadata/mysql
           -timeout 10m
+      - name: go-test-live-lifecycle
+        # These two-node tests exercise live Truncate/Restore while a real
+        # producer is forging and the syncer is connected over loopback.
+        run: make test-live-lifecycle
       - name: go-test
         # Keep PR feedback fast by omitting race instrumentation. Release
         # validation runs in the publish workflow before draft creation.
