@@ -207,12 +207,13 @@ type peerHeaderChain struct {
 // one recovery pass, so decoded headers are released with the pass and cannot
 // outlive the peer history budget.
 type peerHeaderHistoryPathCacheEntry struct {
-	ancestor  ocommon.Point
-	distance  int
-	hasRecord bool
-	ok        bool
-	event     ChainsyncEvent
-	nextHash  string
+	ancestor       ocommon.Point
+	distance       int
+	hasRecord      bool
+	ok             bool
+	depthExhausted bool
+	event          ChainsyncEvent
+	nextHash       string
 }
 
 type peerHeaderHistoryPathStep struct {
@@ -2354,6 +2355,25 @@ func cachePeerHeaderHistoryPath(
 	}
 }
 
+// cachePeerHeaderHistoryDepthExhausted retains links from a walk that reached
+// the depth bound without treating them as unavailable. A later, shorter
+// suffix can reuse the links while the loop still charges each one against its
+// own depth bound.
+func cachePeerHeaderHistoryDepthExhausted(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+) {
+	for _, step := range steps {
+		cache[step.key] = peerHeaderHistoryPathCacheEntry{
+			hasRecord:      true,
+			ok:             true,
+			depthExhausted: true,
+			event:          step.event,
+			nextHash:       step.nextHash,
+		}
+	}
+}
+
 func markPeerHeaderHistoryPathUnavailable(
 	steps []peerHeaderHistoryPathStep,
 	cache map[string]peerHeaderHistoryPathCacheEntry,
@@ -2392,6 +2412,28 @@ func (ls *LedgerState) findPeerForkPathCached(
 		}
 		visited[key] = struct{}{}
 		if entry, ok := cache[key]; ok {
+			if entry.depthExhausted {
+				if !entry.ok || !entry.hasRecord {
+					markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+					return nil, nil, nil
+				}
+				nextHash, err := hex.DecodeString(entry.nextHash)
+				if err != nil {
+					markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+					return nil, nil, fmt.Errorf(
+						"decode cached peer header hash %q: %w",
+						entry.nextHash,
+						err,
+					)
+				}
+				steps = append(steps, peerHeaderHistoryPathStep{
+					event:    entry.event,
+					key:      key,
+					nextHash: entry.nextHash,
+				})
+				prevHash = nextHash
+				continue
+			}
 			if !entry.ok || !entry.hasRecord || entry.distance <= 0 {
 				markPeerHeaderHistoryPathUnavailable(steps, cache, key)
 				return nil, nil, nil
@@ -2480,6 +2522,7 @@ func (ls *LedgerState) findPeerForkPathCached(
 		})
 		prevHash = recordPrev
 	}
+	cachePeerHeaderHistoryDepthExhausted(steps, cache)
 	return nil, nil, nil
 }
 

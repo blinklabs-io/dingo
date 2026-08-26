@@ -212,6 +212,8 @@ func TestFindPeerForkPathCachedPreservesShorterSuffixAfterDepthLimit(
 	require.NotNil(t, ancestor)
 	assert.True(t, pointMatches(*ancestor, fixture.ancestorTip.Point))
 	assert.Len(t, path, limit-1)
+	assert.Equal(t, limit+1, lookupCalls)
+	assert.Equal(t, limit, peerLookupCalls)
 }
 
 func TestFindPeerForkPathCachedChargesAndPropagatesCachedSuffix(
