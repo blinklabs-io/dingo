@@ -3556,8 +3556,9 @@ dropping one already advertised would silently omit a transaction the peer
 legitimately requested. A non-blocking `NextTx` returns nil once the cache is
 full; a blocking one parks until a slot frees rather than answering empty, since
 the peer's pull loop has no backoff for an empty reply and would spin
-request/reply without pacing. Shutdown releases a parked waiter. Serving a
-body or the peer acknowledging its ids frees slots and reopens the window. The
+request/reply without pacing. Shutdown or connection cleanup releases a parked
+waiter. Serving a body or the peer acknowledging its ids frees slots and
+reopens the window. The
 protocol request window is far below the default limit, so this bounds an
 aggressive peer rather than affecting normal relay. Explicit cache removal and
 clearing preserve the same per-consumer semantics while preventing an idle
