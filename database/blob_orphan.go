@@ -53,6 +53,24 @@ func recordBlobOrphans(n int) {
 	blobOrphans.Add(uint64(n)) //nolint:gosec // n is guarded positive above
 }
 
+// recordBlobOrphansOnCommit adds n to the unreachable-object counter once the
+// transaction that removes the naming metadata has committed durably.
+//
+// The blob delete happens before that metadata removal, so counting at delete
+// time would count objects a rollback leaves perfectly reachable, and count
+// them again on the retry. A nil txn has no commit to wait for -- there is no
+// pending metadata removal to gate on -- so it counts immediately.
+func recordBlobOrphansOnCommit(txn *Txn, n int) {
+	if n <= 0 {
+		return
+	}
+	if txn == nil {
+		recordBlobOrphans(n)
+		return
+	}
+	txn.AfterCommit(func() { recordBlobOrphans(n) })
+}
+
 // RegisterBlobOrphanMetrics exposes the unreachable-object counter on the
 // given Prometheus registry.
 //

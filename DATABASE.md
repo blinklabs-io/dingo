@@ -1277,7 +1277,12 @@ rebuilt from scratch.
 Both deleters therefore report `ErrBlobDeleteIncomplete` with the failed and
 total counts instead of reporting a clean deletion, their callers log the
 condition at error level, and every stranded object increments
-`dingo_database_blob_orphans_total` (registered by `RegisterBlobOrphanMetrics`,
+`dingo_database_blob_orphans_total`. That increment is registered as an
+after-commit callback on the enclosing transaction rather than applied at
+delete time: the blob delete runs before the metadata removal, so an object is
+not stranded until that removal is durable. A transaction that rolls back
+leaves the row naming the blob, which stays reachable and uncounted, and the
+retry does not double-count it (registered by `RegisterBlobOrphanMetrics`,
 readable in-process via `BlobOrphanCount`). That counter is the only signal
 that a blob store is accumulating dead data, so a non-zero and growing value is
 worth alerting on: it means blob deletes are failing, and the objects already

@@ -121,3 +121,55 @@ func TestDeleteUtxoBlobsWithoutBlobStoreIsReported(t *testing.T) {
 	}, nil)
 	require.Error(t, err)
 }
+
+// TestBlobOrphansAreNotCountedUntilMetadataCommits covers the ordering between
+// the blob delete and the metadata removal that makes the object unreachable.
+//
+// The blob delete runs first, so counting there would count an object that is
+// still perfectly reachable if the enclosing transaction never commits — and
+// count it again when the caller retries. Only a durable metadata removal
+// strands anything.
+func TestBlobOrphansAreNotCountedUntilMetadataCommits(t *testing.T) {
+	db := openTestDB(t)
+	db.blob = &mockBlobStore{
+		deleteUtxoErrs: map[string]error{
+			"05:0": errors.New("blob store unavailable"),
+		},
+	}
+	txn := db.Transaction(true)
+	before := BlobOrphanCount()
+
+	err := deleteUtxoBlobs(db, []models.Utxo{
+		{TxId: []byte{0x05}, OutputIdx: 0},
+	}, txn)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrBlobDeleteIncomplete)
+	assert.Zero(t, BlobOrphanCount()-before,
+		"nothing is stranded until the metadata naming it is gone")
+
+	require.NoError(t, txn.Commit())
+	assert.Equal(t, uint64(1), BlobOrphanCount()-before,
+		"the commit is what strands the object")
+}
+
+// TestBlobOrphansAreNotCountedOnRollback is the negative case: a rolled-back
+// transaction leaves the metadata row in place, so the blob is still named and
+// reachable and must not be counted.
+func TestBlobOrphansAreNotCountedOnRollback(t *testing.T) {
+	db := openTestDB(t)
+	db.blob = &mockBlobStore{
+		deleteTxErrs: map[string]error{
+			string([]byte{0xDD}): errors.New("blob store unavailable"),
+		},
+	}
+	txn := db.Transaction(true)
+	before := BlobOrphanCount()
+
+	err := deleteTxBlobs(db, [][]byte{{0xDD}}, txn)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrBlobDeleteIncomplete)
+
+	require.NoError(t, txn.Rollback())
+	assert.Zero(t, BlobOrphanCount()-before,
+		"a rollback leaves the row, so nothing was orphaned")
+}

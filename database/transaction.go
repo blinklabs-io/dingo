@@ -1726,7 +1726,8 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 // Failures do not stop the remaining deletes, but they are counted and
 // reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
 // metadata that names these objects, after which nothing can reach them
-// again.
+// again. The count is deferred to the enclosing transaction's commit for the
+// reason given on deleteUtxoBlobs.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	const batchSize = 500
 	blob := d.Blob()
@@ -1777,7 +1778,7 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		}
 	}
 	if deleteErrors > 0 {
-		recordBlobOrphans(deleteErrors)
+		recordBlobOrphansOnCommit(txn, deleteErrors)
 		d.logger.Warn(
 			"TX blob deletion completed with errors",
 			"failed",

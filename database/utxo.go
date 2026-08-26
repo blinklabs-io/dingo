@@ -58,7 +58,13 @@ var errExactAddressCandidateScanLimit = errors.New(
 // reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
 // metadata that names these objects, after which nothing can reach them
 // again.
-func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
+//
+// txn is used only to time that count. An object is not stranded until the
+// metadata naming it is durably gone, so the counter is incremented from an
+// after-commit callback; if the enclosing transaction rolls back, the row
+// still names the blob and nothing was orphaned. A nil txn has no commit to
+// wait for and counts immediately.
+func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 	const batchSize = 500
 	blob := d.Blob()
 	if blob == nil {
@@ -97,7 +103,7 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
 		}
 	}
 	if deleteErrors > 0 {
-		recordBlobOrphans(deleteErrors)
+		recordBlobOrphansOnCommit(txn, deleteErrors)
 		d.logger.Warn(
 			"UTxO blob deletion completed with errors",
 			"failed",
