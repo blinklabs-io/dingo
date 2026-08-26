@@ -3137,12 +3137,14 @@ first place. While the node has fewer chain-selection-eligible upstreams than
 its hot-peer target (`MinHotPeers`), replenishment is treated as urgent: a
 dedicated emergency ticker (default 30s via
 `EmergencyDiscoveryCheckInterval`, far more frequent than the 5-minute
-reconcile) pulls fresh stake-pool relays on a short emergency interval (default
-30s via `EmergencyLedgerPeerRefreshInterval`) instead of the normal hourly
-`LedgerPeerRefreshInterval`, so a run of dead or flaky relays can never wedge
-sync while the ledger still lists plenty of registered relays. Once the node is
-at its hot-peer target the emergency path is a no-op and the normal hourly
-cadence applies.
+reconcile) initially pulls fresh stake-pool relays on a short emergency
+interval (default 30s via `EmergencyLedgerPeerRefreshInterval`) instead of the
+normal hourly `LedgerPeerRefreshInterval`. Persistent completed rounds double
+that interval up to the normal cadence, while recovery resets the next shortage
+to the fast floor. Each provider query and relay-candidate pass is single-flight
+across reconcile and emergency ticks: its generation remains claimed until the
+round completes, errors, is canceled, or panics, so a slow provider cannot
+overlap the next tick or leave an artificial retry delay behind.
 
 Each outbound dial attempt re-resolves a hostname-based peer's address fresh,
 narrows the records to the address families the local host can route to
