@@ -62,17 +62,51 @@ func fetchGapBlocks(
 		)
 	}
 
-	var lastErr error
-	for i, peer := range netInfo.BootstrapPeers {
-		peerAddr := net.JoinHostPort(
+	peerAddrs := make([]string, 0, len(netInfo.BootstrapPeers))
+	for _, peer := range netInfo.BootstrapPeers {
+		peerAddrs = append(peerAddrs, net.JoinHostPort(
 			peer.Address,
 			strconv.FormatUint(uint64(peer.Port), 10),
-		)
+		))
+	}
+	return fetchGapBlocksFromPeers(
+		ctx,
+		logger,
+		netInfo.NetworkMagic,
+		peerAddrs,
+		start,
+		end,
+		fetchGapBlocksFromPeer,
+	)
+}
 
-		blocks, err := fetchGapBlocksFromPeer(
-			ctx, logger, netInfo.NetworkMagic,
+type gapBlockPeerFetcher func(
+	context.Context,
+	*slog.Logger,
+	uint32,
+	string,
+	ocommon.Point,
+	ocommon.Point,
+) ([]models.Block, error)
+
+func fetchGapBlocksFromPeers(
+	ctx context.Context,
+	logger *slog.Logger,
+	networkMagic uint32,
+	peerAddrs []string,
+	start ocommon.Point,
+	end ocommon.Point,
+	fetchFromPeer gapBlockPeerFetcher,
+) ([]models.Block, error) {
+	var lastErr error
+	for i, peerAddr := range peerAddrs {
+		blocks, err := fetchFromPeer(
+			ctx, logger, networkMagic,
 			peerAddr, start, end,
 		)
+		if err == nil {
+			err = validateCompleteGapBlocks(blocks, start, end)
+		}
 		if err == nil {
 			return blocks, nil
 		}
@@ -88,14 +122,14 @@ func fetchGapBlocks(
 			"component", "mithril",
 			"peer", peerAddr,
 			"peer_index", i,
-			"total_peers", len(netInfo.BootstrapPeers),
+			"total_peers", len(peerAddrs),
 			"error", err,
 		)
 	}
 
 	return nil, fmt.Errorf(
 		"all %d bootstrap peers failed: %w",
-		len(netInfo.BootstrapPeers),
+		len(peerAddrs),
 		lastErr,
 	)
 }
@@ -394,6 +428,13 @@ func validateStoredGapContinuity(
 			immutableTip.Slot,
 		)
 	}
+	if blocks[0].Slot <= immutableTip.Slot {
+		return fmt.Errorf(
+			"gap first block slot %d does not follow start slot %d",
+			blocks[0].Slot,
+			immutableTip.Slot,
+		)
+	}
 	if !bytes.Equal(blocks[0].PrevHash, immutableTip.Hash) {
 		return fmt.Errorf(
 			"stored gap first block at slot %d prev hash %x does not match immutable tip slot %d hash %x",
@@ -404,6 +445,13 @@ func validateStoredGapContinuity(
 		)
 	}
 	for i := 1; i < len(blocks); i++ {
+		if blocks[i].Slot <= blocks[i-1].Slot {
+			return fmt.Errorf(
+				"gap block slot %d does not follow previous block slot %d",
+				blocks[i].Slot,
+				blocks[i-1].Slot,
+			)
+		}
 		if bytes.Equal(blocks[i].PrevHash, blocks[i-1].Hash) {
 			continue
 		}
@@ -418,27 +466,35 @@ func validateStoredGapContinuity(
 	return nil
 }
 
-func validateStoredGapBlocks(
+func validateCompleteGapBlocks(
 	blocks []models.Block,
-	immutableTip models.Block,
-	ledgerStateHash []byte,
+	start ocommon.Point,
+	end ocommon.Point,
 ) error {
+	if len(blocks) == 0 {
+		return fmt.Errorf(
+			"gap is empty after start slot %d",
+			start.Slot,
+		)
+	}
+	immutableTip := models.Block{Slot: start.Slot, Hash: start.Hash}
 	if err := validateStoredGapContinuity(blocks, immutableTip); err != nil {
 		return err
 	}
-	if len(blocks) == 0 {
+	last := blocks[len(blocks)-1]
+	if last.Slot != end.Slot {
 		return fmt.Errorf(
-			"stored volatile gap is empty after immutable tip slot %d",
-			immutableTip.Slot,
+			"gap terminal block slot %d does not match requested end slot %d",
+			last.Slot,
+			end.Slot,
 		)
 	}
-	last := blocks[len(blocks)-1]
-	if !bytes.Equal(last.Hash, ledgerStateHash) {
+	if !bytes.Equal(last.Hash, end.Hash) {
 		return fmt.Errorf(
-			"stored gap terminal block at slot %d hash %x does not match ledger state hash %x",
+			"gap terminal block at slot %d hash %x does not match requested end hash %x",
 			last.Slot,
 			last.Hash,
-			ledgerStateHash,
+			end.Hash,
 		)
 	}
 	return nil

@@ -19,7 +19,6 @@ package mithril
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
@@ -27,41 +26,40 @@ import (
 // removeExtractedFile removes fullPath only if it is not a directory, and
 // reports an error for anything else.
 //
-// DeleteFile is the file-only removal here: it fails on a directory, so no
-// separate type check is needed and none is done — establishing the type and
-// then removing would let a writer swap a file in between and have it
-// unlinked, which is the whole reason this is not os.Root.Remove.
+// Refusing a directory is the deletion itself here, not a check in front of
+// it: establishing the type and then removing would let a writer swap a file
+// in between and have it unlinked, which is the whole reason this is not
+// os.Root.Remove.
 //
-// Unlike the Unix path the deletion itself is addressed by name, because
-// Windows has no handle-relative removal — the same limit removeEmptyExtractDir
-// carries, for the same reason.
-//
-// What is narrowed is everything above it. Every directory component is walked
-// through its parent's handle and confirmed to be the entry the name denotes
-// (openVerifiedParent), and those handles are held across the deletion, so a
-// reparse point substituted mid-extraction is refused during the walk rather
-// than followed by DeleteFile. Only the immediate parent's own name is
-// resolved a second time. Holding the parent handles does not prevent that
-// substitution: os.Root opens them with FILE_SHARE_DELETE (see
-// internal/syscall/windows/at_windows.go), so another process can still rename
-// or delete a verified directory. The walk rejects a component already
-// substituted when it runs; closing the remaining race needs a
-// handle-relative removal. See issue #3228.
+// Every directory component down to the parent is walked through its own
+// parent's handle and confirmed to be the entry the name denotes
+// (openVerifiedParent), and those handles are held across the deletion. The
+// final component is then opened relative to that verified parent's handle —
+// not resolved from a path — and the deletion is applied to that open handle
+// (openRelativeForDeletion, setDeleteDisposition; see
+// extract_handlerelative_windows.go), which is what closes the residual
+// window issue #3228 tracked: nothing here resolves any component's name a
+// second time, so a reparse point substituted at the leaf after the walk
+// finishes is refused at the open rather than followed.
 func removeExtractedFile(root *os.Root, name, fullPath string) error {
 	parent, base, release, err := openVerifiedParent(root, name)
 	if err != nil {
 		return err
 	}
 	defer release()
-	// Built from the verified walk rather than taken from the caller, so the
-	// name deleted is the one the handles above were checked for. fullPath is
-	// kept for the error, which is what an operator sees.
-	target := filepath.Join(parent.Name(), base)
-	path, err := windows.UTF16PtrFromString(target)
+	dirFile, dir, err := rootDirHandle(parent)
 	if err != nil {
-		return fmt.Errorf("resolving extraction destination: %w", err)
+		return fmt.Errorf("opening extraction directory: %w", err)
 	}
-	if err := windows.DeleteFile(path); err != nil {
+	defer dirFile.Close()
+
+	handle, err := openRelativeForDeletion(dir, base, windows.FILE_NON_DIRECTORY_FILE)
+	if err != nil {
+		return &os.PathError{Op: "unlink", Path: fullPath, Err: err}
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+
+	if err := setDeleteDisposition(handle); err != nil {
 		return &os.PathError{Op: "unlink", Path: fullPath, Err: err}
 	}
 	return nil

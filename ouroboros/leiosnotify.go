@@ -715,7 +715,12 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			if data.txCount == 0 || data.completeTxCache() {
 				return
 			}
-			txs, err := o.fetchLeiosEbTxsBatched(client, point, data.txCount)
+			txs, err := o.fetchLeiosEbTxsBatched(
+				client,
+				point,
+				data.txCount,
+				data.blockRaw,
+			)
 			if err != nil {
 				// The transactions gathered by this attempt are retained
 				// against the cached endorser block, so a later offer of the
@@ -734,6 +739,15 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 					"fetched", len(txs),
 					"retained", retained,
 					"tx_count", data.txCount,
+				)
+				return
+			}
+			if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
+				o.config.Logger.Debug(
+					"leios EB transaction references mismatch",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
 				)
 				return
 			}
@@ -996,8 +1010,23 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
+	manifestRaw []byte,
 ) ([]cbor.RawMessage, error) {
-	return o.fetchLeiosEbTxsBatchedUntil(client, point, txCount, time.Time{})
+	var validate func(int, cbor.RawMessage) error
+	if len(manifestRaw) > 0 {
+		var err error
+		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		client,
+		point,
+		txCount,
+		time.Time{},
+		validate,
+	)
 }
 
 // fetchLeiosEbTxsBatchedUntil is fetchLeiosEbTxsBatched with an optional
@@ -1015,7 +1044,32 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
+	manifestRaw []byte,
 	deadline time.Time,
+) ([]cbor.RawMessage, error) {
+	var validate func(int, cbor.RawMessage) error
+	if len(manifestRaw) > 0 {
+		var err error
+		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		client,
+		point,
+		txCount,
+		deadline,
+		validate,
+	)
+}
+
+func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	deadline time.Time,
+	validate func(int, cbor.RawMessage) error,
 ) ([]cbor.RawMessage, error) {
 	if client == nil {
 		return nil, errors.New("leios-fetch client unavailable")
@@ -1106,6 +1160,14 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 			}
 			idx := served[k]
 			if idx >= 0 && idx < txCount && result[idx] == nil {
+				if validate != nil {
+					if err := validate(idx, raw); err != nil {
+						return leiosCollectTxs(result), fmt.Errorf(
+							"validate fetched transaction: %w",
+							err,
+						)
+					}
+				}
 				result[idx] = slices.Clone(raw)
 				progress++
 			}

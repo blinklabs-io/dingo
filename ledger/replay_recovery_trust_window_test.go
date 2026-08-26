@@ -44,7 +44,7 @@ type trustWindowLedger struct {
 	ls        *LedgerState
 	ledgerTip ochainsync.Tip
 	failing   *txValidationError
-	resyncs   chan event.ChainsyncResyncEvent
+	resyncs   <-chan event.Event
 }
 
 // newTrustWindowLedger builds the shape of issue #3261: the applied ledger tip
@@ -85,20 +85,15 @@ func newTrustWindowLedger(
 
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
-	resyncs := make(chan event.ChainsyncResyncEvent, 64)
-	subId := bus.SubscribeFunc(
+	// Observe the bus-owned subscriber channel directly. Publish hands an
+	// event to this channel before it returns, so draining after a recovery
+	// attempt cannot race a SubscribeFunc dispatch goroutine that has not yet
+	// copied an already-published resync into a second test-only channel.
+	subId, resyncs := bus.SubscribeWithBuffer(
 		event.ChainsyncResyncEventType,
-		func(evt event.Event) {
-			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
-			if !ok {
-				return
-			}
-			select {
-			case resyncs <- resync:
-			default:
-			}
-		},
+		64,
 	)
+	require.NotZero(t, subId)
 	t.Cleanup(func() {
 		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
 	})
@@ -298,11 +293,11 @@ func TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering(t *testing.T) {
 }
 
 // TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState covers the
-// post-bootstrap replay path from issue #3301. The producer is canonical but
-// below the imported anchor, so its parent can never be a legal local rewind
-// target. Changing failing block/transaction identities must not rearm the
-// budget while the applied tip remains fixed; replay failures can creep
-// forward in exactly that shape.
+// post-bootstrap replay path from issues #3301 and #3318. The producer is
+// canonical but below the imported anchor, so its parent can never be a legal
+// local rewind target. Changing failing block/transaction identities must not
+// rearm the budget while the applied tip remains fixed; replay failures can
+// creep forward in exactly that shape.
 func TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState(
 	t *testing.T,
 ) {

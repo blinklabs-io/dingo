@@ -99,10 +99,31 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	if time.Duration(now-lastRefresh) < refreshInterval {
 		return
 	}
-	if !p.lastLedgerPeerRefresh.CompareAndSwap(lastRefresh, now) {
-		// Another goroutine claimed the refresh
+
+	// The timestamp gates when discovery may begin, but a slow provider can
+	// outlive that interval. Hold a separate generation-owned claim across the
+	// provider query and candidate pass so a later tick cannot overlap it.
+	generation := p.ledgerDiscoveryGeneration.Add(1)
+	if !p.ledgerDiscoveryInFlight.CompareAndSwap(0, generation) {
 		return
 	}
+	claimedTimestamp := false
+	completed := false
+	defer func() {
+		if claimedTimestamp && !completed {
+			p.lastLedgerPeerRefresh.CompareAndSwap(now, lastRefresh)
+		}
+		p.ledgerDiscoveryInFlight.CompareAndSwap(generation, 0)
+	}()
+
+	// A prior owner may have completed between the first interval check and
+	// this generation obtaining the claim. Recheck while ownership is held.
+	lastRefresh = p.lastLedgerPeerRefresh.Load()
+	if time.Duration(now-lastRefresh) < refreshInterval ||
+		!p.lastLedgerPeerRefresh.CompareAndSwap(lastRefresh, now) {
+		return
+	}
+	claimedTimestamp = true
 
 	// Get pool relays from ledger
 	if err := ctx.Err(); err != nil {
@@ -115,17 +136,10 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 			"error", err,
 			"emergency", urgent,
 		)
-		// Reset timestamp to allow retry on next reconciliation cycle
-		// rather than waiting for the full refresh interval
-		p.lastLedgerPeerRefresh.Store(lastRefresh)
 		return
 	}
-
-	if urgent {
-		// Counted only once the round is actually going ahead, so a round
-		// suppressed by the interval gate or a failed provider fetch does
-		// not escalate the backoff.
-		p.emergencyRefreshRounds.Add(1)
+	if err := ctx.Err(); err != nil {
+		return
 	}
 
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
@@ -151,6 +165,15 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 			"emergency", urgent,
 		)
 	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	if urgent {
+		// Count only a complete urgent round. Interval-gated, failed, canceled,
+		// or panicking rounds retain the existing backoff and retry immediately.
+		p.emergencyRefreshRounds.Add(1)
+	}
+	completed = true
 }
 
 // ledgerPeersUrgent reports whether the node is critically short of connected

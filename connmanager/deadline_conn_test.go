@@ -18,6 +18,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
@@ -77,6 +79,36 @@ func TestDeadlineConnLeavesReadDeadlineToTheMuxer(t *testing.T) {
 		t.Fatalf(
 			"expected only the muxer's SetReadDeadline call, got %d",
 			base.readDeadlineCalls,
+		)
+	}
+}
+
+func TestHandshakeDeadlineConnCapsMuxerReadDeadline(t *testing.T) {
+	base := &recordingConn{}
+	wrapped := withHandshakeDeadline(base)
+	handshakeDeadline := time.Now().Add(time.Second)
+	muxerDeadline := handshakeDeadline.Add(time.Minute)
+
+	require.NoError(t, wrapped.SetDeadline(handshakeDeadline))
+	require.NoError(t, wrapped.SetReadDeadline(muxerDeadline))
+	if !base.readDeadline.Equal(handshakeDeadline) {
+		t.Fatalf(
+			"muxer read deadline should not extend handshake deadline: want %v, got %v",
+			handshakeDeadline,
+			base.readDeadline,
+		)
+	}
+
+	// Once negotiation is complete, normal protocol-managed deadlines are
+	// restored and the wrapper no longer caps the muxer's read deadline.
+	require.NoError(t, wrapped.SetDeadline(time.Time{}))
+	postHandshakeDeadline := time.Now().Add(time.Minute)
+	require.NoError(t, wrapped.SetReadDeadline(postHandshakeDeadline))
+	if !base.readDeadline.Equal(postHandshakeDeadline) {
+		t.Fatalf(
+			"read deadline should be restored after handshake: want %v, got %v",
+			postHandshakeDeadline,
+			base.readDeadline,
 		)
 	}
 }

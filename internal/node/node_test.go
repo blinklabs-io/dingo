@@ -248,6 +248,44 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigWiresMidnightServerPolicy pins the composition boundary
+// between YAML/env/CLI configuration and the root node configuration used by
+// both initial startup and live API reinitialization.
+func TestBuildDingoConfigWiresMidnightServerPolicy(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Midnight: config.MidnightConfig{
+			Enabled:                     true,
+			ServerEnabled:               true,
+			ReflectionEnabled:           true,
+			AllowInsecureRemote:         true,
+			Port:                        50052,
+			Host:                        "127.0.0.2",
+			CNightPolicyID:              "policy",
+			PermissionedCandidatePolicy: "permissioned",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeAPI,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	got := built.Midnight()
+	if got != cfg.Midnight {
+		t.Fatalf("expected Midnight config to flow through, got %+v", got)
+	}
+}
+
 // TestRootPeerTargetComposition verifies Cardano fallback values and Dingo's
 // higher-precedence root-peer setting reach the top-level Dingo configuration.
 func TestRootPeerTargetComposition(t *testing.T) {

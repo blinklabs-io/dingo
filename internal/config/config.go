@@ -473,14 +473,25 @@ func DefaultLoggingConfig() LoggingConfig {
 // optional gRPC API surface. Indexing is only active when Enabled is true
 // AND Dingo is running in API storage mode -- both are required, since the
 // indexer depends on the API-mode indexes to function; Validate rejects
-// Enabled without API storage mode. Port 0 disables only the gRPC server.
+// Enabled without API storage mode. ServerEnabled independently opts into
+// serving the stored Midnight state; when enabled, Port must be non-zero.
 type MidnightConfig struct {
 	// Enabled opts into running the Midnight indexer. Default false: an
 	// api-mode deployment that wants Midnight indexing must set this
 	// explicitly.
-	Enabled bool   `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
-	Port    uint   `yaml:"port"    envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host    string `yaml:"host"    envconfig:"DINGO_MIDNIGHT_HOST"`
+	Enabled bool `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	// ServerEnabled independently opts into the Midnight gRPC listener.
+	// Indexing and serving persisted Midnight rows are separate operations.
+	ServerEnabled bool `yaml:"serverEnabled" envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
+	// ReflectionEnabled exposes gRPC service discovery when the server is
+	// enabled. It defaults off because reflection broadens the public surface.
+	ReflectionEnabled bool `yaml:"reflectionEnabled" envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	// AllowInsecureRemote permits a plaintext listener on a non-loopback
+	// address. It is an explicit escape hatch for deployments that provide
+	// transport security outside Dingo.
+	AllowInsecureRemote bool   `yaml:"allowInsecureRemote" envconfig:"DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE"`
+	Port                uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host                string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -499,7 +510,7 @@ type MidnightConfig struct {
 func DefaultMidnightConfig() MidnightConfig {
 	return MidnightConfig{
 		Port: 50051,
-		Host: "0.0.0.0",
+		Host: "127.0.0.1",
 	}
 }
 
@@ -970,10 +981,10 @@ type MithrilConfig struct {
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"       envconfig:"DINGO_MITHRIL_CLEANUP"`
-	// VerifyCertificates enables certificate chain verification
-	// during bootstrap. When true, the bootstrap process walks
-	// the Mithril certificate chain from the snapshot back to the
-	// genesis certificate to verify the chain is unbroken.
+	// VerifyCertificates enables STM certificate-chain verification during
+	// bootstrap. When true, bootstrap requires the Cardano network config's
+	// pinned Mithril genesis verification key and verifies the chain back to it.
+	// False explicitly selects the unverified bootstrap flow.
 	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
@@ -1431,6 +1442,12 @@ func (c *Config) ApplyDefaults() {
 	// This also keeps manually constructed Config values fail-safe.
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
+	}
+	// Match the Midnight server's safe default before validation so an
+	// explicitly empty YAML or environment value does not look like a remote
+	// plaintext listener and require the insecure-remote escape hatch.
+	if c.Midnight.Host == "" {
+		c.Midnight.Host = DefaultMidnightConfig().Host
 	}
 	if c.Plugins.Mempool.Config == nil {
 		c.Plugins.Mempool.Config = make(map[string]any)
