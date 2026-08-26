@@ -632,7 +632,7 @@ func parseCurrentEra(
 	// GovState (index 3 in UTxOState)
 	if len(utxoState) > 3 {
 		result.GovStateData = utxoState[3]
-		pparamsData, pparamsErr := extractPParamsData(
+		pparamsData, prevPParamsData, pparamsErr := extractPParamsData(
 			eraIndex,
 			utxoState[3],
 		)
@@ -643,6 +643,7 @@ func parseCurrentEra(
 			)
 		}
 		result.PParamsData = pparamsData
+		result.PrevPParamsData = prevPParamsData
 	}
 
 	return result, nil

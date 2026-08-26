@@ -588,6 +588,88 @@ func TestInboundConnectionLimit_OutboundNotCounted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAcceptLoopDoesNotBlockOnSilentHandshake(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	mockLn := newToggleMockListener()
+	cfg := ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: 2,
+		Listeners: []ListenerConfig{{
+			Listener: mockLn,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+			},
+		}},
+	}
+
+	cm := NewConnectionManager(cfg)
+	ctx := t.Context()
+	require.NoError(t, cm.Start(ctx))
+	// Consume the signal for the initial Accept call. The next signal must
+	// come after the silent peer has been accepted and setup was dispatched.
+	require.True(t, mockLn.WaitForAcceptEntered(2*time.Second))
+
+	silent, peer := net.Pipe()
+	defer peer.Close()
+	mockLn.ProvideConnection(silent)
+	require.True(
+		t,
+		mockLn.WaitForAcceptEntered(2*time.Second),
+		"silent handshake must not serialize the listener accept loop",
+	)
+
+	// Stop must close pending handshakes instead of waiting for the production
+	// timeout. The accept worker is tracked and must exit cleanly.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	require.NoError(t, cm.Stop(stopCtx))
+}
+
+func TestInboundLimitRejectionUntracksPendingConnection(t *testing.T) {
+	mockLn := newToggleMockListener()
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: 1,
+		Listeners: []ListenerConfig{{
+			Listener: mockLn,
+		}},
+	})
+	t.Cleanup(func() { goleak.VerifyNone(t) })
+
+	// Occupy the only inbound slot so the accept loop rejects the next bearer
+	// before dispatching its handshake goroutine.
+	require.True(t, cm.tryReserveInboundSlot())
+	t.Cleanup(cm.releaseInboundSlot)
+	require.NoError(t, cm.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	require.True(t, mockLn.WaitForAcceptEntered(2*time.Second))
+
+	rejected, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	mockLn.ProvideConnection(rejected)
+	require.True(
+		t,
+		mockLn.WaitForAcceptEntered(2*time.Second),
+		"accept loop must continue after the inbound limit rejection",
+	)
+
+	cm.listenersMutex.Lock()
+	pending := len(cm.pendingConns)
+	cm.listenersMutex.Unlock()
+	require.Zero(
+		t,
+		pending,
+		"a connection closed during admission must not remain pending",
+	)
+}
+
 func TestAcceptLoopBackoffOnError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

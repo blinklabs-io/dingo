@@ -58,6 +58,13 @@ type mockHeader struct {
 	slot        uint64
 }
 
+type sizedMockHeader struct {
+	mockHeader
+	cbor []byte
+}
+
+func (m sizedMockHeader) Cbor() []byte { return m.cbor }
+
 func (m mockHeader) Hash() lcommon.Blake2b256     { return m.hash }
 func (m mockHeader) PrevHash() lcommon.Blake2b256 { return m.prevHash }
 func (m mockHeader) BlockNumber() uint64          { return m.blockNumber }

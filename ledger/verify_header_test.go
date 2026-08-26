@@ -1371,17 +1371,26 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 		nil,
 	))
 
-	// The preceding epoch remains genesis-overlay active, while canonical
-	// epoch-2 slots use decentralisationParam=0 and must fall through to the
-	// normal pool path. A current-epoch-only lookup regresses here by reading
-	// epoch-1's d=1 and returning genesisOverlayNonActive.
-	require.True(t, ls.genesisDelegationActiveForSlot(172_780))
-	require.False(t, ls.genesisDelegationActiveForSlot(172_836))
+	// The preceding epoch has an active overlay slot, while canonical epoch-2
+	// slots use decentralisationParam=0 and must fall through to the normal
+	// pool path. A current-epoch-only lookup regresses here by reading epoch-1's
+	// d=1 and returning genesisOverlayNonActive for the epoch-2 block.
+	precedingBlock := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 172_780},
+		slot:  172_780,
+	}
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		precedingBlock,
+		genesisCfg.ShelleyGenesis(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, genesisOverlayActive, status)
+
 	block := &mockBoundaryAlonzoBlock{
 		Block: &mockBabbageBlock{slot: 172_836},
 		slot:  172_836,
 	}
-	_, status, err := ls.genesisOverlayDelegationForBlock(
+	_, status, err = ls.genesisOverlayDelegationForBlock(
 		block,
 		genesisCfg.ShelleyGenesis(),
 	)
@@ -1552,11 +1561,11 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
-func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
+func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotUsesPoolThreshold(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{54}, 0, tamperNone)
-	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
 	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
 	require.NoError(t, err)
@@ -1571,10 +1580,26 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1000)},
 	}
 	ls.publishSnapshotsLocked()
+	seedBlockPoolRegistration(t, db, tb.block)
+	seedPoolStakeSnapshot(t, db, 4, delegateHash.Bytes(), 1)
+	dummyPool := make([]byte, lcommon.Blake2b224Size)
+	dummyPool[0] = 0xFF
+	seedPoolStakeSnapshot(t, db, 4, dummyPool, 1_000_000_000_000_000_000)
+
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		tb.block,
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, genesisOverlayNone, status)
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+	require.Error(
+		t,
+		err,
+		"a non-overlay slot must apply the Praos leader threshold",
+	)
+	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
 
 	// A stale decentralized parameter set can classify this future slot as
 	// genesisOverlayNone. Header verification must defer before that
@@ -2150,26 +2175,6 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 	)
 }
 
-func TestVerifyBlockLeaderEligibility_DecentralizationActiveSkipsThreshold(
-	t *testing.T,
-) {
-	tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
-	ls.currentPParams = &shelley.ShelleyProtocolParameters{
-		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
-	}
-	ls.publishSnapshotsLocked()
-
-	poolKeyHash := tb.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1)
-	dummyHash := make([]byte, 28)
-	dummyHash[0] = 0xFF
-	seedPoolStakeSnapshot(t, db, 4, dummyHash, 1_000_000_000_000_000_000)
-
-	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	require.NoError(t, err)
-}
-
 func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 	t *testing.T,
 ) {
@@ -2390,19 +2395,23 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	)
 }
 
-// TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips verifies that
-// when the active slot coefficient is unavailable (Shelley genesis not loaded),
-// the eligibility check is skipped rather than rejecting the block.
-func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
-	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
-
+// newCoeffGuardLedger builds a ledger whose pool stake is already seeded, so
+// verifyBlockLeaderEligibility reaches the active-slot-coefficient guard. cfg
+// is the Shelley genesis under test (nil for "genesis never loaded"), and
+// prototypeProfile selects the Musashi prototype bypass.
+func newCoeffGuardLedger(
+	t *testing.T,
+	tb *testBlockResult,
+	cfg *cardano.CardanoNodeConfig,
+	prototypeProfile bool,
+) *LedgerState {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
-	// Seed a pool stake snapshot so the check reaches the coeff lookup.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
@@ -2417,67 +2426,267 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 			},
 		},
 		config: LedgerStateConfig{
-			// No CardanoNodeConfig → ActiveSlotCoeff() returns 0 → skip.
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			CardanoNodeConfig:             cfg,
+			SkipLeaderStakeThresholdCheck: prototypeProfile,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 		},
 	}
 	ls.publishSnapshotsLocked()
-
-	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "missing active slot coeff should skip, not reject")
+	return ls
 }
 
-// TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips_ExplicitZero
-// verifies that a genesis with activeSlotsCoeff=0 also triggers the skip path.
-// A zero coefficient produces a zero threshold and would otherwise reject every
-// non-Byron block.
-func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
-	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
-
-	poolKeyHash := tb.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
-
-	// Build a genesis config with activeSlotsCoeff explicitly set to 0.
-	// big.Rat.SetString("0") gives Sign()==0, which the guard must catch.
+// newZeroCoeffGenesisCfg returns a Shelley genesis with activeSlotsCoeff
+// explicitly 0. big.Rat.SetString("0") gives Sign()==0, which the guard must
+// catch: a zero coefficient produces a zero threshold, under which no VRF
+// output is ever below the threshold.
+func newZeroCoeffGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
+	t.Helper()
 	zeroCoeffJSON := `{
 		"activeSlotsCoeff": 0,
 		"securityParam": 432,
 		"slotsPerKESPeriod": 129600,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
-	zeroCfg := &cardano.CardanoNodeConfig{}
+	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		zeroCfg.LoadShelleyGenesisFromReader(strings.NewReader(zeroCoeffJSON)),
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(zeroCoeffJSON)),
 	)
+	return cfg
+}
 
-	ls := &LedgerState{
-		db: db,
-		epochCache: []models.Epoch{
-			{
-				EpochId:       5,
-				StartSlot:     0,
-				LengthInSlots: 1_000_000,
-				Nonce:         tb.epochNonce,
-			},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: zeroCfg,
-			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
+// TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffRejects verifies that
+// an unavailable active slot coefficient (Shelley genesis not loaded) rejects
+// the block on a standard profile. The coefficient is an input to the
+// leadership threshold, so without it eligibility cannot be evaluated at all;
+// accepting the block anyway admits an unverified producer.
+func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffRejects(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
+	ls := newCoeffGuardLedger(t, tb, nil, false)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err, "unevaluable eligibility must not be accepted")
+	assert.Contains(t, err.Error(), "active slot coefficient")
+}
+
+// TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects covers the same
+// guard for a genesis that loads but carries activeSlotsCoeff=0.
+func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
+	ls := newCoeffGuardLedger(t, tb, newZeroCoeffGenesisCfg(t), false)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err, "a zero coefficient must not be accepted")
+	assert.Contains(t, err.Error(), "active slot coefficient")
+}
+
+// TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts
+// pins the one profile that may still bypass the check. The Musashi prototype
+// already trusts stake-derived threshold failures
+// (SkipLeaderStakeThresholdCheck); an unevaluable threshold is bypassed under
+// the same explicitly selected profile and nowhere else.
+func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
+	ls := newCoeffGuardLedger(t, tb, nil, true)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+}
+
+// TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts is the
+// zero-coefficient half of the prototype bypass.
+func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
+	ls := newCoeffGuardLedger(t, tb, newZeroCoeffGenesisCfg(t), true)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+}
+
+// seedZeroTotalActiveStakeSummary marks the epoch's mark aggregate ready at
+// zero. GetTotalActiveStake prefers a ready epoch_summary over summing the
+// pool rows, so this reproduces the inconsistency the guard is about: the
+// producing pool holds stake, yet the network-wide denominator reads zero.
+func seedZeroTotalActiveStakeSummary(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+) {
+	t.Helper()
+	require.NoError(
+		t,
+		db.Metadata().SaveEpochSummary(epochSummary(epoch, 0), nil),
+	)
+}
+
+// TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakeRejects verifies that a
+// zero total active stake rejects rather than accepting the block. The pool
+// row carries stake, so this is a storage or computation gap in dingo's own
+// aggregate, not a genuinely empty network — and the threshold's denominator
+// is unusable either way.
+func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakeRejects(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{37}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+	seedZeroTotalActiveStakeSummary(t, db, 4)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err, "a zero stake denominator must not be accepted")
+	assert.Contains(t, err.Error(), "total active stake")
+	// Classified as an unavailable snapshot so header verification running
+	// ahead of the ledger apply cursor can defer instead of rejecting.
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}
+
+// TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts pins
+// the prototype bypass for the stake half of the guard.
+func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{37}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.config.SkipLeaderStakeThresholdCheck = true
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+	seedZeroTotalActiveStakeSummary(t, db, 4)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+}
+
+// TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake verifies
+// that the new rejection does not break blockfetch header verification during
+// catch-up: while the ledger apply cursor is behind the block, a missing
+// aggregate defers, and it only becomes a rejection once the cursor has
+// caught up.
+func TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{38}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	seedBlockPoolRegistration(t, db, tb.block)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+	seedZeroTotalActiveStakeSummary(t, db, 4)
+
+	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
 	ls.publishSnapshotsLocked()
 
-	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(
+	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.Contains(t, err.Error(), "leader stake snapshot state")
+
+	err = ls.verifyBlockHeaderCrypto(tb.block)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}
+
+// newImportedActiveLedger builds a ledger positioned inside a Mithril-imported
+// epoch, so leaderEligibilityStake takes the imported active-distribution
+// branch rather than the rotated mark snapshot.
+func newImportedActiveLedger(
+	t *testing.T,
+	tb *testBlockResult,
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	if tb.block.slot <= 1 {
+		// Slot 0 disables the Mithril boundary sentinel; move the mock
+		// block past it. This test exercises stake-source selection, not
+		// VRF proof input.
+		tb.block.slot = 2
+	}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		LengthInSlots: 1_000_000,
+		Nonce:         tb.epochNonce,
+	}
+	ls.mithrilLedgerSlot = tb.block.slot - 1
+	ls.publishSnapshotsLocked()
+	return ls, db
+}
+
+// TestVerifyBlockLeaderEligibility_ImportedActiveZeroDenominatorIsUnavailable
+// verifies that a pool row carrying stake with a zero stake denominator is
+// classified as an unavailable snapshot. The denominator is the threshold's
+// divisor, so its absence means eligibility cannot be evaluated — a storage
+// gap in the import, not a statement that the pool is ineligible.
+func TestVerifyBlockLeaderEligibility_ImportedActiveZeroDenominatorIsUnavailable(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{39}, 0, tamperNone)
+	ls, db := newImportedActiveLedger(t, tb)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfType(
 		t,
-		err,
-		"zero active slot coeff should skip, not reject all blocks",
+		db,
+		5,
+		models.PoolStakeSnapshotTypeActive,
+		poolKeyHash[:],
+		1_000_000_000,
+		0,
 	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}
+
+// TestVerifyBlockLeaderEligibility_ImportedActiveEmptyDistributionIsUnavailable
+// covers an imported epoch with no active rows at all. cardano-ledger's
+// nesPd is always populated, so an empty one is dingo-side incompleteness.
+func TestVerifyBlockLeaderEligibility_ImportedActiveEmptyDistributionIsUnavailable(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
+	ls, _ := newImportedActiveLedger(t, tb)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing from active pool distribution")
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}
+
+// TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection
+// is the negative case that keeps the classification honest: when the imported
+// distribution is populated and this pool is simply not in it, the answer is
+// authoritative. That is cardano-ledger's VRFKeyUnknown and must stay a
+// rejection, not become a deferrable "snapshot unavailable".
+func TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
+	ls, db := newImportedActiveLedger(t, tb)
+	otherPool := make([]byte, 28)
+	otherPool[0] = 0xAB
+	seedPoolStakeSnapshotOfType(
+		t,
+		db,
+		5,
+		models.PoolStakeSnapshotTypeActive,
+		otherPool,
+		1_000_000_000,
+		1_000_000_000,
+	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing from active pool distribution")
+	assert.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
 }

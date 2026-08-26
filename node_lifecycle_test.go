@@ -902,34 +902,21 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 	}
 }
 
-// TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode
-// guards against a real half-torn-down state this package used to leave
-// the node in: quiesceForLiveLifecycleOp attempts every one of its stop
-// calls regardless of an earlier one failing, so by the time either it or
-// closeStorageForLiveLifecycleOp returns a non-nil error (e.g. because
-// ctx's deadline passed), the node is already substantially quiesced —
-// forger/mempool/connections/APIs stopped. Truncate/Restore used to just
-// return that error without attempting to resume, leaving the process
-// running but silently unresponsive with no forging, mempool, or
-// networking and no indication a restart was needed. They must instead
-// attempt reinitializeAndResume and bring the node back up on its
-// untouched original data directory.
-//
-// closeStorageForLiveLifecycleOp's deferredIndexMaintenanceDone select is
-// used here as a deterministic failure trigger: setting that channel
-// without ever closing it, combined with a ctx that expires before the
-// select is reached, forces exactly one clean, reproducible error out of
-// closeStorageForLiveLifecycleOp without needing to fake any component's
-// Stop method.
-func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
+// TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed guards the
+// boundary between context-bounded provider shutdown and live storage reopen.
+// A provider may honor the deadline by returning while its one-time cleanup
+// continues in the background. StopCapability has already relinquished that
+// instance, so reopening the same data directory would race the old cleanup.
+// The node must request a supervised restart instead.
+func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	t *testing.T,
 ) {
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	oldCtx := n.ctx
-	oldDB := n.db
-
+	// Expire the operation context before provider shutdown. The real Badger
+	// provider then returns from CloseContext at the deadline while its owned
+	// close continues asynchronously.
 	n.deferredIndexMaintenanceDone = make(chan struct{})
 
 	shortCtx, cancel := context.WithTimeout(
@@ -945,10 +932,72 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "close storage")
+	require.ErrorContains(t, err, "could not confirm")
+	require.Error(t, n.ctx.Err())
+	require.Nil(t, n.db, "storage must not be reopened before provider drain")
 
-	// n.ctx (the node's own long-lived context, distinct from shortCtx
-	// above) must survive untouched, and every subsystem quiesced during
-	// the failed attempt must have been rebuilt rather than left down.
+	// Wait for the provider-owned background close before TempDir cleanup. A
+	// scratch runtime can acquire the same path only after the old Badger lock
+	// is released; the cancelled Node itself remains stopped and never reopens.
+	require.Eventually(t, func() bool {
+		deps := n.storageDependencies(n.config.dataDir)
+		deps.PromRegistry = n.config.promRegistry
+		runtime, openErr := internalplugins.OpenDatabase(
+			context.Background(),
+			n.databaseConfig(),
+			n.storageSelections(),
+			deps,
+		)
+		if openErr != nil {
+			return false
+		}
+		return runtime.Close(context.Background()) == nil
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestLiveTruncateResumesAfterCompletedStorageStopFailure proves that an
+// ordinary provider Stop error still resumes the quiesced node when every
+// provider has completed cleanup. The synthetic provider returns its error
+// synchronously; the real Badger provider behind it also closes before
+// StopCapability returns.
+func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
+	const numBlocks = 10
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	stopFailure := errors.New("completed storage stop failure")
+	require.NoError(t, plugin.Register[string, struct{}, struct{}](
+		n.pluginHost,
+		plugin.Descriptor{
+			Capability: plugin.CapabilityStorageBlob,
+			Name:       "test-stop-error",
+		},
+		func() struct{} { return struct{}{} },
+		func(context.Context, struct{}, struct{}) (string, plugin.Instance, error) {
+			return "test", plugin.Lifecycle{
+				StopFunc: func(context.Context) error { return stopFailure },
+			}, nil
+		},
+	))
+	_, err := plugin.Resolve[string](
+		context.Background(),
+		n.pluginHost,
+		plugin.CapabilityStorageBlob,
+		"test-stop-error",
+		nil,
+		struct{}{},
+	)
+	require.NoError(t, err)
+
+	oldCtx := n.ctx
+	oldDB := n.db
+	targetSlot := points[len(points)/2].Slot
+	_, err = n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.ErrorIs(t, err, stopFailure)
+	require.ErrorContains(t, err, "close storage")
+
 	require.Same(t, oldCtx, n.ctx)
 	require.NoError(t, n.ctx.Err())
 	require.NotSame(t, oldDB, n.db, "storage must be reopened fresh on resume")
@@ -958,9 +1007,6 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
 	require.NotNil(t, n.connManager)
 	require.NotNil(t, n.peerGov)
 
-	// Nothing was actually truncated — the failure happened before the
-	// data directory was ever touched — so every original block must
-	// still be present.
 	tip, tipErr := n.db.GetTip(nil)
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
@@ -968,18 +1014,14 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
 		_, blockErr := database.BlockByHash(n.db, p.Hash)
 		require.NoErrorf(
 			t, blockErr,
-			"block at slot %d missing after a resumed truncate failure", p.Slot,
+			"block at slot %d missing after a resumed stop failure", p.Slot,
 		)
 	}
 }
 
 // TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed guards
 // against the actual use-after-close race errStorageDrainUnconfirmed exists
-// to prevent — the opposite of
-// TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode
-// above. That test's failure trigger (deferredIndexMaintenanceDone) is a
-// clean failure with no goroutine left running, so resuming on it is
-// safe. Here the trigger is a real dbWorkerPool worker still executing an
+// to prevent. Here the trigger is a real dbWorkerPool worker still executing an
 // operation against the *old* database when Close's bounded wait gives up
 // on it, which is exactly the case reinitializeAndResume must not paper
 // over: reopening storage while that worker might still be using it would

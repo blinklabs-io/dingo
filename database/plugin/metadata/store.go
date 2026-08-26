@@ -2147,6 +2147,10 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardSnapshot, error)
 
+	// DeleteProvisionalRewardSnapshot deletes a non-authoritative reward
+	// snapshot for an epoch and type. Authoritative boundary state is retained.
+	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
+
 	// SaveRewardPoolInputs saves per-pool reward inputs for an epoch.
 	SaveRewardPoolInputs(
 		[]*models.RewardPoolInput,

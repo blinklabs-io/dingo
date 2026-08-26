@@ -16,15 +16,67 @@ package peergov
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type countingLedgerPeerProvider struct {
+	calls atomic.Int32
+}
+
+func (p *countingLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+	p.calls.Add(1)
+	return nil, nil
+}
+
+func (*countingLedgerPeerProvider) CurrentSlot() uint64 {
+	return 1
+}
+
+type slowLedgerPeerProvider struct {
+	started chan struct{}
+	release <-chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *slowLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+	p.calls.Add(1)
+	p.started <- struct{}{}
+	<-p.release
+	return nil, nil
+}
+
+func (*slowLedgerPeerProvider) CurrentSlot() uint64 {
+	return 1
+}
+
+type panicLedgerPeerProvider struct {
+	panicOnCall atomic.Bool
+	calls       atomic.Int32
+}
+
+func (p *panicLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+	p.calls.Add(1)
+	if p.panicOnCall.Load() {
+		panic("ledger provider panic")
+	}
+	return nil, nil
+}
+
+func (*panicLedgerPeerProvider) CurrentSlot() uint64 {
+	return 1
+}
 
 // addEligibleUpstreamPeers appends n connected, chain-selection-eligible
 // upstream peers (client connections from a topology source).
@@ -218,4 +270,148 @@ func TestDiscoverLedgerPeers_NoBypassWhenNotUrgent(t *testing.T) {
 		countPeersBySource(pg, PeerSourceP2PLedger),
 		"non-urgent node must respect the refresh interval and add no ledger peers",
 	)
+}
+
+func TestDiscoverLedgerPeers_SlowProviderRemainsSingleFlight(t *testing.T) {
+	release := make(chan struct{})
+	provider := &slowLedgerPeerProvider{
+		started: make(chan struct{}, 2),
+		release: release,
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		UseLedgerAfterSlot:                 0,
+		MinHotPeers:                        2,
+		LedgerPeerTarget:                   1,
+		LedgerPeerProvider:                 provider,
+		EmergencyLedgerPeerRefreshInterval: time.Nanosecond,
+		LedgerPeerRefreshInterval:          4 * time.Minute,
+	})
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		pg.discoverLedgerPeers()
+	}()
+	defer func() {
+		testutil.RequireReceive(t, firstDone, time.Second,
+			"first discovery must finish after its provider is released")
+	}()
+	defer close(release)
+
+	testutil.RequireReceive(t, provider.started, time.Second,
+		"first discovery must enter the provider")
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		pg.discoverLedgerPeers()
+	}()
+	testutil.RequireReceive(t, secondDone, time.Second,
+		"a later emergency tick must return while discovery is in flight")
+	require.Equal(t, int32(1), provider.calls.Load(),
+		"a slow provider must not be entered by overlapping discoveries")
+}
+
+func TestDiscoverLedgerPeers_CanceledRefreshReleasesClaimAndDelay(
+	t *testing.T,
+) {
+	provider := &countingLedgerPeerProvider{}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		UseLedgerAfterSlot:                 0,
+		MinHotPeers:                        2,
+		LedgerPeerTarget:                   1,
+		LedgerPeerProvider:                 provider,
+		EmergencyLedgerPeerRefreshInterval: time.Nanosecond,
+		LedgerPeerRefreshInterval:          4 * time.Minute,
+	})
+	lastRefresh := time.Now().Add(-time.Minute).UnixNano()
+	pg.lastLedgerPeerRefresh.Store(lastRefresh)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pg.discoverLedgerPeersContext(ctx)
+	require.Equal(t, int32(0), provider.calls.Load())
+	require.Zero(t, pg.ledgerDiscoveryInFlight.Load())
+	require.Equal(t, lastRefresh, pg.lastLedgerPeerRefresh.Load())
+
+	pg.discoverLedgerPeers()
+	require.Equal(t, int32(1), provider.calls.Load(),
+		"the next discovery must retry immediately after cancellation")
+}
+
+func TestDiscoverLedgerPeers_CanceledSlowProviderReleasesClaimAndDelay(
+	t *testing.T,
+) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProvider := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	defer releaseProvider()
+	provider := &slowLedgerPeerProvider{
+		started: make(chan struct{}, 2),
+		release: release,
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		UseLedgerAfterSlot:                 0,
+		MinHotPeers:                        2,
+		LedgerPeerTarget:                   1,
+		LedgerPeerProvider:                 provider,
+		EmergencyLedgerPeerRefreshInterval: time.Nanosecond,
+		LedgerPeerRefreshInterval:          4 * time.Minute,
+	})
+	lastRefresh := time.Now().Add(-time.Minute).UnixNano()
+	pg.lastLedgerPeerRefresh.Store(lastRefresh)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pg.discoverLedgerPeersContext(ctx)
+	}()
+	testutil.RequireReceive(t, provider.started, time.Second,
+		"discovery must enter the slow provider")
+	cancel()
+	releaseProvider()
+	testutil.RequireReceive(t, done, time.Second,
+		"canceled discovery must finish after its provider returns")
+	require.Equal(t, int32(1), provider.calls.Load())
+	require.Zero(t, pg.ledgerDiscoveryInFlight.Load())
+	require.Equal(t, lastRefresh, pg.lastLedgerPeerRefresh.Load())
+
+	pg.discoverLedgerPeers()
+	require.Equal(t, int32(2), provider.calls.Load(),
+		"the next discovery must retry immediately after cancellation")
+}
+
+func TestDiscoverLedgerPeers_PanickingProviderReleasesClaimAndDelay(
+	t *testing.T,
+) {
+	provider := &panicLedgerPeerProvider{}
+	provider.panicOnCall.Store(true)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		UseLedgerAfterSlot:                 0,
+		MinHotPeers:                        2,
+		LedgerPeerTarget:                   1,
+		LedgerPeerProvider:                 provider,
+		EmergencyLedgerPeerRefreshInterval: time.Nanosecond,
+		LedgerPeerRefreshInterval:          4 * time.Minute,
+	})
+	lastRefresh := time.Now().Add(-time.Minute).UnixNano()
+	pg.lastLedgerPeerRefresh.Store(lastRefresh)
+
+	func() {
+		defer func() {
+			require.Equal(t, "ledger provider panic", recover())
+		}()
+		pg.discoverLedgerPeers()
+	}()
+	require.Zero(t, pg.ledgerDiscoveryInFlight.Load())
+	require.Equal(t, lastRefresh, pg.lastLedgerPeerRefresh.Load())
+
+	provider.panicOnCall.Store(false)
+	pg.discoverLedgerPeers()
+	require.Equal(t, int32(2), provider.calls.Load(),
+		"the next discovery must retry immediately after a provider panic")
 }

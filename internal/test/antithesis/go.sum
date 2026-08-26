@@ -4,8 +4,8 @@ github.com/antithesishq/antithesis-sdk-go v0.7.0 h1:uWDG8BqLD1lI2ps38WDz2vXflrTX
 github.com/antithesishq/antithesis-sdk-go v0.7.0/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=
 github.com/bits-and-blooms/bitset v1.24.4/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
-github.com/blinklabs-io/gouroboros v0.199.0 h1:hK/BCHKQlRdB55Hvrb2NrfznLu1/ClgM+rxVAJuL+7E=
-github.com/blinklabs-io/gouroboros v0.199.0/go.mod h1:V06nVPcN4gjGdX4tKbbH2oDDg74DdNAOuCjryEkLa+E=
+github.com/blinklabs-io/gouroboros v0.201.1 h1:LQQGCOJQ08pVr4dRlVDelgQCTQOGmDRIBIc0TkqIWGE=
+github.com/blinklabs-io/gouroboros v0.201.1/go.mod h1:V06nVPcN4gjGdX4tKbbH2oDDg74DdNAOuCjryEkLa+E=
 github.com/blinklabs-io/ouroboros-mock v0.16.1 h1:WOhbzxN2PdkM6fCDcN/weLYaHyr4E1aiNpFGTDG5IIE=
 github.com/blinklabs-io/ouroboros-mock v0.16.1/go.mod h1:b62AMGYgh3oFZAi2v9gCEbqy0h+pz8SnY8KyL6tADoM=
 github.com/blinklabs-io/plutigo v0.3.0 h1:lUl7q96a+XSxpd7iEh0AxvnyMNp9s1wZITv/3RuCfkA=

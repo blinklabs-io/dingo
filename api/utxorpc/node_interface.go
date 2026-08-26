@@ -85,4 +85,5 @@ type UtxorpcEventBus interface {
 		handlerFunc event.EventHandlerFunc,
 	) event.EventSubscriberId
 	Unsubscribe(eventType event.EventType, subId event.EventSubscriberId)
+	UnsubscribeAndWait(eventType event.EventType, subId event.EventSubscriberId)
 }

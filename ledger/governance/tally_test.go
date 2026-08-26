@@ -175,7 +175,7 @@ func TestTallyDRepVotesSeparatesSameHashByCredentialTag(t *testing.T) {
 	assert.Equal(t, uint64(0), tally.DRepAbstainStake)
 }
 
-func TestTallyCCVotesRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
+func TestTallyProposalRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 	db, store := newTallyTestDB(t)
 	coldA := testBytes(28, 10)
 	hotA := testBytes(28, 11)
@@ -199,32 +199,42 @@ func TestTallyCCVotesRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 		CertificateID:  2,
 		AddedSlot:      1,
 	})
+	proposal := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 15),
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 9,
+		ExpiresEpoch:  20,
+		AnchorHash:    testBytes(32, 16),
+		ReturnAddress: testBytes(29, 17),
+		AddedSlot:     1,
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      proposal.ID,
+		VoterType:       models.VoterTypeCC,
+		VoterCredential: hotA,
+		Vote:            models.VoteYes,
+		AddedSlot:       2,
+	}, nil))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      proposal.ID,
+		VoterType:       models.VoterTypeCC,
+		VoterCredential: unseatedHot,
+		Vote:            models.VoteYes,
+		AddedSlot:       2,
+	}, nil))
 
-	tally := &ProposalTally{}
-	err := tallyCCVotes(
-		&TallyContext{DB: db, CurrentEpoch: 10},
-		[]*models.GovernanceVote{
-			{
-				VoterType:       models.VoterTypeCC,
-				VoterCredential: hotA,
-				Vote:            models.VoteYes,
-			},
-			{
-				VoterType:       models.VoterTypeCC,
-				VoterCredential: unseatedHot,
-				Vote:            models.VoteYes,
-			},
-		},
-		tally,
+	tally, err := TallyProposal(
+		&TallyContext{DB: db, CurrentEpoch: 10}, proposal,
 	)
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, tally.CCTotalCount)
+	assert.Equal(t, 1, tally.CCTotalCount)
 	assert.Equal(t, 1, tally.CCYesCount)
-	assert.Equal(t, big.NewRat(1, 2), tally.CCYesRatio())
+	assert.Equal(t, big.NewRat(1, 1), tally.CCYesRatio())
 }
 
-func TestLoadCommitteeVotingStateCountsSeatedMembersWithoutHotAuth(
+func TestLoadCommitteeVotingStateExcludesSeatedMembersWithoutHotAuth(
 	t *testing.T,
 ) {
 	db, store := newTallyTestDB(t)
@@ -254,7 +264,7 @@ func TestLoadCommitteeVotingStateCountsSeatedMembersWithoutHotAuth(
 	state, err := LoadCommitteeVotingState(db, nil, 10)
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, state.ActiveMemberCount)
+	assert.Equal(t, 1, state.ActiveMemberCount)
 	assert.Equal(t, []string{string(hotA)}, state.MemberHotCredentials)
 	assert.Contains(t, state.HotCredentialPresence, string(hotA))
 	assert.NotContains(t, state.HotCredentialPresence, string(unseatedHot))
@@ -380,6 +390,76 @@ func TestTallyCCVotesExcludesExpiredCommitteeMembers(t *testing.T) {
 
 	assert.Zero(t, tally.CCTotalCount)
 	assert.Zero(t, tally.CCYesCount)
+}
+
+func TestTallyProposalCommitteeTermEpochIsInclusive(t *testing.T) {
+	testCases := []struct {
+		name         string
+		currentEpoch uint64
+		wantActive   bool
+	}{
+		{name: "before term epoch", currentEpoch: 9, wantActive: true},
+		{name: "at term epoch", currentEpoch: 10, wantActive: true},
+		{name: "after term epoch", currentEpoch: 11, wantActive: false},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			db, store := newTallyTestDB(t)
+			cold := testBytes(28, 70)
+			hot := testBytes(28, 71)
+
+			require.NoError(t, store.SetCommitteeMembers(
+				[]*models.CommitteeMember{{
+					ColdCredHash: cold,
+					ExpiresEpoch: 10,
+					AddedSlot:    1,
+				}},
+				nil,
+			))
+			seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+				ColdCredential: cold,
+				HotCredential:  hot,
+				CertificateID:  1,
+				AddedSlot:      1,
+			})
+			proposal := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 72),
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 1,
+				ExpiresEpoch:  20,
+				AnchorHash:    testBytes(32, 73),
+				ReturnAddress: testBytes(29, 74),
+				AddedSlot:     1,
+			}
+			require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+			require.NoError(t, db.SetGovernanceVote(
+				&models.GovernanceVote{
+					ProposalID:      proposal.ID,
+					VoterType:       models.VoterTypeCC,
+					VoterCredential: hot,
+					Vote:            models.VoteYes,
+					AddedSlot:       2,
+				},
+				nil,
+			))
+
+			tally, err := TallyProposal(&TallyContext{
+				DB:           db,
+				CurrentEpoch: testCase.currentEpoch,
+			}, proposal)
+			require.NoError(t, err)
+			if testCase.wantActive {
+				assert.Equal(t, 1, tally.CCTotalCount)
+				assert.Equal(t, 1, tally.CCYesCount)
+				assert.Equal(t, big.NewRat(1, 1), tally.CCYesRatio())
+			} else {
+				assert.Zero(t, tally.CCTotalCount)
+				assert.Zero(t, tally.CCYesCount)
+				assert.Zero(t, tally.CCYesRatio().Sign())
+			}
+		})
+	}
 }
 
 // TestTallyCCVotesNonVotingMembersAreNotCountedAsNo guards against the

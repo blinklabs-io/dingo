@@ -108,7 +108,7 @@ type utxoValidationRuleSkip struct {
 const (
 	noUtxoValidationRuleIndex = -1
 
-	// Positions in gouroboros v0.193.4-0.20260821025747-7f9fce84e569
+	// Positions in gouroboros v0.201.1
 	// UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// their runtime function names before filtering by index.
@@ -122,7 +122,7 @@ const (
 	conwayUtxoValidateFeeTooSmallRuleIndex     = 24
 	conwayUtxoValidateExUnitsTooBigRuleIndex   = 39
 	conwayUtxoValidatePlutusScriptsRuleIndex   = 43
-	dijkstraUtxoValidatePlutusScriptsRuleIndex = 38
+	dijkstraUtxoValidatePlutusScriptsRuleIndex = 43
 
 	conwayRefScriptCostStride = 25_600
 )

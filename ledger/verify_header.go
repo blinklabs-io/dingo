@@ -769,53 +769,6 @@ func activeSlotCoeffInverse(activeSlotsCoeff *big.Rat) uint64 {
 	return inv.Uint64()
 }
 
-func (ls *LedgerState) genesisDelegationActiveForSlot(slot uint64) bool {
-	if pparams := ls.genesisOverlayProtocolParamsForSlot(slot); pparams != nil {
-		return decentralizedParamActive(pparams)
-	}
-	if ls.config.CardanoNodeConfig == nil {
-		return false
-	}
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil ||
-		shelleyGenesis.ProtocolParameters.Decentralization == nil {
-		return false
-	}
-	return shelleyGenesis.ProtocolParameters.Decentralization.Sign() > 0
-}
-
-// genesisOverlayProtocolParamsForSlot resolves the protocol parameters that
-// govern the slot's epoch. ProtocolParamsForSlot intentionally forecasts from
-// the current state for forging, but that is not a historical lookup: at an
-// epoch boundary it can return the previous epoch's decentralization value.
-// Prefer the epoch-specific metadata row, falling back to the current/forecast
-// value only when the target epoch is not persisted yet. Header callers defer
-// that not-yet-authoritative case before making an overlay decision.
-func (ls *LedgerState) genesisOverlayProtocolParamsForSlot(
-	slot uint64,
-) lcommon.ProtocolParameters {
-	if epoch, err := ls.epochForSlot(slot); err == nil {
-		snapshot := ls.loadConsensusSnapshot()
-		if epoch.EpochId == snapshot.currentEpoch.EpochId {
-			return snapshot.currentPParams
-		}
-		if ls.db != nil {
-			era, ok := ls.eraById(epoch.EraId)
-			if ok && era != nil && era.DecodePParamsFunc != nil {
-				if pparams, pparamsErr := ls.db.GetPParams(
-					epoch.EpochId,
-					era.Id,
-					era.DecodePParamsFunc,
-					nil,
-				); pparamsErr == nil && pparams != nil {
-					return pparams
-				}
-			}
-		}
-	}
-	return ls.ProtocolParamsForSlot(slot)
-}
-
 // genesisOverlayProtocolParamsForBlock resolves protocol parameters for the
 // block body era rather than only the epoch's current era. A hard-fork
 // boundary block may be encoded in the predecessor era while its header
@@ -857,13 +810,6 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
 		}
 	}
 	return ls.ProtocolParamsForSlot(slot)
-}
-
-func decentralizedParamActive(
-	pparams lcommon.ProtocolParameters,
-) bool {
-	rat := decentralizationParamRat(pparams)
-	return rat != nil && rat.Sign() > 0
 }
 
 func decentralizationParamRat(
@@ -915,6 +861,12 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // how the VRF leader value is derived from the output bytes; ConsensusModeForEpoch
 // selects the correct path for the block's era.
 //
+// The production caller first runs verifyGenesisDelegateHeader, which handles
+// or rejects exact genesis-overlay slots. Reaching this function from that path
+// means the block is in a Praos slot and must receive the pool threshold check,
+// even when the decentralization parameter enables overlay slots elsewhere in
+// the same epoch.
+//
 // Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
 // slot coefficient is logged and skipped rather than rejecting, to tolerate
 // early-chain bootstrap states where the genesis snapshot is not yet written.
@@ -923,18 +875,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	epochId uint64,
 ) error {
 	if block.Era().Id == byron.EraIdByron {
-		return nil
-	}
-	if ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
-		ls.config.Logger.Warn(
-			"skipping leader eligibility check: decentralization parameter active",
-			"slot",
-			block.SlotNumber(),
-			"epoch",
-			epochId,
-			"component",
-			"ledger",
-		)
 		return nil
 	}
 
@@ -954,32 +894,70 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		return nil
 	}
 	if totalStake == 0 {
-		// Genesis snapshot not yet written (very early bootstrap).
-		// Skip rather than reject.
-		ls.config.Logger.Warn(
-			"skipping leader eligibility check: total active stake is zero",
-			"slot", block.SlotNumber(),
-			"epoch", epochId,
-			"snapshot_epoch", snapshotEpoch,
-			"snapshot_type", snapshotType,
-			"component", "ledger",
+		// leaderEligibilityStake already rejected an absent or zero pool
+		// row, so reaching here means the producer holds stake while the
+		// network-wide denominator reads zero: a dingo-side storage or
+		// computation gap rather than an empty network, and a threshold
+		// with no denominator to divide by. Accepting the block would
+		// admit a producer nothing verified, so only the explicitly
+		// selected prototype profile may bypass it.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility unevaluable: total active stake is zero; trusting block (prototype profile)",
+				"slot",
+				block.SlotNumber(),
+				"epoch",
+				epochId,
+				"snapshot_epoch",
+				snapshotEpoch,
+				"snapshot_type",
+				snapshotType,
+				"component",
+				"ledger",
+			)
+			return nil
+		}
+		// Classified as an unavailable snapshot so header verification
+		// running ahead of the ledger apply cursor defers instead of
+		// rejecting (verifyBlockHeaderState); once the cursor has caught
+		// up the same state is a hard rejection.
+		return fmt.Errorf(
+			"%w: block header verification rejected at slot %d: "+
+				"total active stake for epoch %d snapshot %s is zero "+
+				"while producer pool %x holds stake",
+			errLeaderStakeSnapshotUnavailable,
+			block.SlotNumber(),
+			snapshotEpoch,
+			snapshotType,
+			poolKeyHash[:],
 		)
-		return nil
 	}
 
 	// Use the genesis Rat directly to avoid a float64 precision roundtrip.
-	// A zero or negative coefficient would compute a zero threshold and
-	// reject every non-Byron block; treat it as unavailable.
+	// A zero or negative coefficient computes a zero threshold, under which
+	// no VRF output is ever eligible.
 	activeSlotCoeffRat := ls.activeSlotCoeffRat()
 	if activeSlotCoeffRat == nil || activeSlotCoeffRat.Sign() <= 0 {
-		ls.config.Logger.Warn(
-			"skipping leader eligibility check: active slot coefficient unavailable or non-positive",
-			"slot",
+		// The coefficient is a threshold input, so without it eligibility
+		// cannot be evaluated at all. Unlike a missing snapshot this is a
+		// genesis/configuration fault that the apply cursor never
+		// resolves, so it is rejected outright rather than deferred.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility unevaluable: active slot coefficient unavailable or non-positive; trusting block (prototype profile)",
+				"slot",
+				block.SlotNumber(),
+				"component",
+				"ledger",
+			)
+			return nil
+		}
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"active slot coefficient unavailable or non-positive; "+
+				"leader eligibility cannot be evaluated",
 			block.SlotNumber(),
-			"component",
-			"ledger",
 		)
-		return nil
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
@@ -1128,6 +1106,39 @@ func (ls *LedgerState) leaderEligibilityStake(
 		if snapshot == nil ||
 			snapshot.TotalStake == 0 ||
 			snapshot.StakeDenominator == 0 {
+			// Mirror the mark path below and separate a storage gap from
+			// genuine ineligibility. A zero denominator leaves the
+			// threshold with no divisor, and an imported distribution
+			// holding no pools at all cannot be the certified nesPd
+			// (which is always populated); both mean dingo cannot yet
+			// answer, so they are classified as unavailable and header
+			// verification ahead of the apply cursor defers. A pool
+			// simply absent from a populated distribution is an
+			// authoritative answer -- cardano-ledger's VRFKeyUnknown --
+			// and stays a rejection.
+			unavailable := snapshot != nil && snapshot.StakeDenominator == 0
+			if !unavailable {
+				if total, terr := ls.db.Metadata().GetTotalActiveStake(
+					epochId,
+					models.PoolStakeSnapshotTypeActive,
+					nil,
+				); terr == nil && total == 0 {
+					unavailable = true
+				}
+			}
+			if unavailable {
+				return 0, 0, epochId,
+					models.PoolStakeSnapshotTypeActive, false,
+					fmt.Errorf(
+						"%w: block header verification rejected at slot %d: "+
+							"producer pool %x missing from active pool distribution "+
+							"for epoch %d (imported distribution is incomplete)",
+						errLeaderStakeSnapshotUnavailable,
+						block.SlotNumber(),
+						poolKeyHash[:],
+						epochId,
+					)
+			}
 			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false,
 				fmt.Errorf(
 					"block header verification rejected at slot %d: "+

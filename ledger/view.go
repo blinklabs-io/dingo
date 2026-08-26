@@ -79,6 +79,19 @@ var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 // back to weaker existence-only proposal ancestry checks.
 var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 
+// The Conway reward-withdrawal rule discovers this capability with a runtime
+// type assertion on the *LedgerView passed to ValidateTx*. On protocol versions
+// 10 and 11 a failed assertion rejects every affected withdrawal
+// (DRepDelegationStateUnavailableError), so signature drift here is a
+// consensus-level break. Make it a compile error instead.
+var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
+
+// Byron redeem and bootstrap witness verification asserts this capability at
+// runtime and fails the transaction when it is absent, so drift in
+// ByronProtocolMagic would reject every Byron transaction carrying those
+// witnesses rather than fail to build.
+var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
+
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if genesis == nil {
