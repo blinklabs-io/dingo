@@ -954,32 +954,70 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		return nil
 	}
 	if totalStake == 0 {
-		// Genesis snapshot not yet written (very early bootstrap).
-		// Skip rather than reject.
-		ls.config.Logger.Warn(
-			"skipping leader eligibility check: total active stake is zero",
-			"slot", block.SlotNumber(),
-			"epoch", epochId,
-			"snapshot_epoch", snapshotEpoch,
-			"snapshot_type", snapshotType,
-			"component", "ledger",
+		// leaderEligibilityStake already rejected an absent or zero pool
+		// row, so reaching here means the producer holds stake while the
+		// network-wide denominator reads zero: a dingo-side storage or
+		// computation gap rather than an empty network, and a threshold
+		// with no denominator to divide by. Accepting the block would
+		// admit a producer nothing verified, so only the explicitly
+		// selected prototype profile may bypass it.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility unevaluable: total active stake is zero; trusting block (prototype profile)",
+				"slot",
+				block.SlotNumber(),
+				"epoch",
+				epochId,
+				"snapshot_epoch",
+				snapshotEpoch,
+				"snapshot_type",
+				snapshotType,
+				"component",
+				"ledger",
+			)
+			return nil
+		}
+		// Classified as an unavailable snapshot so header verification
+		// running ahead of the ledger apply cursor defers instead of
+		// rejecting (verifyBlockHeaderState); once the cursor has caught
+		// up the same state is a hard rejection.
+		return fmt.Errorf(
+			"%w: block header verification rejected at slot %d: "+
+				"total active stake for epoch %d snapshot %s is zero "+
+				"while producer pool %x holds stake",
+			errLeaderStakeSnapshotUnavailable,
+			block.SlotNumber(),
+			snapshotEpoch,
+			snapshotType,
+			poolKeyHash[:],
 		)
-		return nil
 	}
 
 	// Use the genesis Rat directly to avoid a float64 precision roundtrip.
-	// A zero or negative coefficient would compute a zero threshold and
-	// reject every non-Byron block; treat it as unavailable.
+	// A zero or negative coefficient computes a zero threshold, under which
+	// no VRF output is ever eligible.
 	activeSlotCoeffRat := ls.activeSlotCoeffRat()
 	if activeSlotCoeffRat == nil || activeSlotCoeffRat.Sign() <= 0 {
-		ls.config.Logger.Warn(
-			"skipping leader eligibility check: active slot coefficient unavailable or non-positive",
-			"slot",
+		// The coefficient is a threshold input, so without it eligibility
+		// cannot be evaluated at all. Unlike a missing snapshot this is a
+		// genesis/configuration fault that the apply cursor never
+		// resolves, so it is rejected outright rather than deferred.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility unevaluable: active slot coefficient unavailable or non-positive; trusting block (prototype profile)",
+				"slot",
+				block.SlotNumber(),
+				"component",
+				"ledger",
+			)
+			return nil
+		}
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"active slot coefficient unavailable or non-positive; "+
+				"leader eligibility cannot be evaluated",
 			block.SlotNumber(),
-			"component",
-			"ledger",
 		)
-		return nil
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.

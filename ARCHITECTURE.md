@@ -6662,7 +6662,14 @@ on by the network profile itself rather than by operator configuration:
   because dingo's leadership stake is delegated UTxO only — staking rewards are
   not yet computed — which spuriously rejects the dominant pool's eligible
   blocks on Musashi's concentrated topology. Every cryptographic header check
-  (KES, VRF proof, registered-VRF-key binding, opcert) still applies.
+  (KES, VRF proof, registered-VRF-key binding, opcert) still applies. The same
+  flag is also the only bypass for the two states in which the threshold cannot
+  be computed at all — a zero total active stake while the producing pool holds
+  stake, and an unavailable or non-positive active slot coefficient. Standard
+  profiles reject a block they cannot evaluate rather than accepting it: the
+  stake case is classified as an unavailable snapshot so header verification
+  running ahead of the ledger apply cursor still defers, while the coefficient
+  case is a genesis fault the cursor never resolves and is rejected outright.
 - `SkipDijkstraTxValidation` skips *running* the per-transaction rule set for
   **Dijkstra-era transactions only** (`LedgerState.skipDijkstraTxValidation`);
   Conway and earlier are still validated on a Musashi node. The prototype
