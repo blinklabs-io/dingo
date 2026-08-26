@@ -548,12 +548,16 @@ The connection manager wraps TCP bearers with an idle-aware write deadline at
 both accept and dial boundaries, for NtC and N2N alike. Each write refreshes the
 two-minute deadline just before the syscall, so a peer that stops reading cannot
 hold a protocol goroutine in `Write` forever while healthy long-lived Ouroboros
-sessions are unaffected. Read deadlines stay with the muxer, which sets its own
-per-segment deadline as slowloris protection; refreshing a read deadline per
-`Read` would override that protocol-managed bound and let a peer dribbling bytes
-keep a segment read open indefinitely. Helpers needing the concrete socket type
-(SO_LINGER, Unix peer credentials) unwrap through the wrapper, so wrapping an
-accepted connection never silently disables them.
+sessions are unaffected. Accepted connections perform their potentially blocking
+handshake in a tracked per-connection goroutine, so a silent peer cannot serialize
+the listener's accept loop. During that unauthenticated window, a generic
+connection wrapper caps the muxer's per-segment read deadline at the listener's
+10-second handshake deadline. The wrapper clears the absolute deadline after
+negotiation, returning read-deadline ownership to the muxer for the normal
+long-lived session. Helpers needing the concrete socket type (SO_LINGER, Unix
+peer credentials) unwrap through the wrapper, so wrapping an accepted connection
+never silently disables them. Cancellation closes an in-flight bearer, and failed
+setup releases its reserved inbound and per-IP slots.
 
 ```mermaid
 graph TB
