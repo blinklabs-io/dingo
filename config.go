@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"math"
 	"net/http"
 	"runtime"
@@ -258,7 +257,6 @@ type Config struct {
 	delegatorInactivityEnabled                                                          bool
 	delegatorInactivity                                                                 uint64
 	leiosVoteSigningKeyFile                                                             string
-	leiosVoterPublicKeys                                                                map[string]string
 	midnight                                                                            MidnightConfig
 	chainsyncMaxClients                                                                 int
 	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
@@ -813,7 +811,7 @@ func (c *Config) syncCompatFields() {
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
-	c.leiosVoteSigningKeyFile, c.leiosVoterPublicKeys = c.cfg.LeiosVoteSigningKeyFile, c.cfg.LeiosVoterPublicKeys
+	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
@@ -1410,18 +1408,6 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosVoteSigningKeyFile = path
-	}
-}
-
-// WithLeiosVoterPublicKeys specifies the static Leios voter public key
-// registry (DINGO_LEIOS_VOTER_PUBLIC_KEYS): hex pool key hash to
-// hex-encoded BLS12-381 public key. Stands in for CIP-0164 key
-// registration, which is not yet specified. Experimental, leios runMode
-// only.
-func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
-	return func(c *Config) {
-		// Copy so later caller mutations cannot change live config
-		c.cfg.LeiosVoterPublicKeys = maps.Clone(keys)
 	}
 }
 
@@ -2179,11 +2165,6 @@ func (c *Config) ValidateForgedBlock() bool {
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
-}
-
-// LeiosVoterPublicKeys returns the Leios voter public key registry.
-func (c *Config) LeiosVoterPublicKeys() map[string]string {
-	return c.cfg.LeiosVoterPublicKeys
 }
 
 // PeerSharing returns the peer sharing configuration.

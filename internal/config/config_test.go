@@ -1776,8 +1776,6 @@ func TestLoad_WithLeiosVotingConfig(t *testing.T) {
 runMode: "leios"
 network: "preview"
 leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
-leiosVoterPublicKeys:
-  "aabbcc": "ddeeff"
 `
 
 	tmpDir := t.TempDir()
@@ -1799,19 +1797,12 @@ leiosVoterPublicKeys:
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
-	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
-		t.Errorf(
-			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
-			cfg.LeiosVoterPublicKeys,
-		)
-	}
 }
 
 func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 	resetGlobalConfig()
 
 	t.Setenv("DINGO_LEIOS_VOTE_SIGNING_KEY_FILE", "/env/leios-vote.skey")
-	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
 
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -1824,12 +1815,30 @@ func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
-	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
-		t.Errorf(
-			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
-			cfg.LeiosVoterPublicKeys,
-		)
-	}
+}
+
+func TestLoad_RejectsRetiredLeiosVoterPublicKeysYAML(t *testing.T) {
+	resetGlobalConfig()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "retired-leios-voter-keys.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(`
+runMode: "leios"
+leiosVoterPublicKeys:
+  "aabbcc": "ddeeff"
+`), 0o600))
+
+	_, err := LoadConfig(tmpFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "field leiosVoterPublicKeys not found")
+}
+
+func TestLoad_RejectsRetiredLeiosVoterPublicKeysEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
+
+	_, err := LoadConfig("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported")
 }
 
 // GetConfig hands out snapshots, so nested plugin config values must be

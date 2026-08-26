@@ -1282,6 +1282,140 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	assert.True(t, stored.verified)
 }
 
+// TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat proves a
+// production-shaped manager (non-nil ledger key provider) never promotes a
+// keyless seat through the private-harness static registry. The vote remains
+// observable for membership/stake diagnostics, but it is not verified and
+// cannot contribute to a certificate.
+func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
+	t *testing.T,
+) {
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			// Keep the fixture's populated Registry while wiring the same
+			// non-nil key-provider shape production composition uses. The
+			// provider deliberately has no registration for member.
+			cfg.KeyProvider = &fakeLeiosKeyProvider{}
+		},
+	)
+	rbHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer",
+		fixture.makePrototypeVote(t, member.VoterId, rbHash),
+	))
+	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
+	fixture.mgr.mu.Lock()
+	stored := fixture.mgr.votesById[voteID]
+	tally := fixture.mgr.tallies[tallyKey{
+		slotNo:           577,
+		ebHash:           ebHash,
+		announcingRbHash: rbHash,
+	}]
+	fixture.mgr.mu.Unlock()
+
+	require.NotNil(t, stored)
+	assert.False(
+		t,
+		stored.verified,
+		"static registry must not verify a keyless on-chain seat in reference mode",
+	)
+	require.NotNil(t, tally)
+	assert.Zero(
+		t,
+		tally.verifiedStake,
+		"a static fallback vote must not contribute certificate stake",
+	)
+}
+
+// TestVoteManagerReferenceModeRejectsLocalStaticFallback proves production
+// composition cannot auto-register the local signing key when the pool has no
+// usable on-chain registration. Registry-based local voting remains available
+// only to managers constructed without a KeyProvider (the private test seam).
+func TestVoteManagerReferenceModeRejectsLocalStaticFallback(t *testing.T) {
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	key := fixture.keys[member.VoterId]
+
+	err := fixture.mgr.ValidateVotingKey(poolKeyHash, key)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain")
+	err = fixture.mgr.EnableVoting(poolKeyHash, key)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain")
+
+	fixture.mgr.mu.Lock()
+	votingKey := fixture.mgr.votingKey
+	fixture.mgr.mu.Unlock()
+	assert.Nil(t, votingKey, "a keyless pool must remain non-voting")
+}
+
+// TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch exercises both
+// sides of the production trust boundary: a configured static key cannot
+// verify a vote when it differs from the PoP-verified on-chain registration,
+// while the registered key is accepted for the same committee seat.
+func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(t *testing.T) {
+	onChainKey := testSigningKey(t, 203)
+	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	require.NoError(t, err)
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       onChainKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	rbHash := lcommon.NewBlake2b256([]byte("on-chain-authority-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("on-chain-authority-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	// The fixture's default key is still present in Registry, but conflicts
+	// with the on-chain registration and therefore must be rejected.
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer-static",
+		fixture.makePrototypeVote(t, member.VoterId, rbHash),
+	))
+	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteID}))
+
+	sig, err := SignVote(onChainKey, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer-on-chain",
+		lcommon.LeiosPrototypeVote{
+			AnnouncingRbHash: rbHash,
+			VoterId:          member.VoterId,
+			VoteSignature:    sig,
+		},
+	))
+	fixture.mgr.mu.Lock()
+	stored := fixture.mgr.votesById[voteID]
+	fixture.mgr.mu.Unlock()
+	require.NotNil(t, stored)
+	assert.True(t, stored.verified)
+}
+
 // TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent proves an on-chain
 // key whose proof of possession does not verify is excluded entirely,
 // matching upstream's "invalid proofs are treated as absent" rule: the
@@ -1397,13 +1531,10 @@ func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
 	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
 }
 
-// TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches
-// proves a real on-chain key rotation is not blocked by a peer's or this
-// operator's own leios-voter-public-keys entry still holding the
-// pre-rotation key: EnableVoting must not fail just because
-// RegisterPublicKey's conflict check would, since the on-chain key is
-// already the stronger, PoP-verified trust source ValidateVotingKey
-// resolved against.
+// TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches proves
+// a real on-chain key rotation is not blocked by a private-harness Registry
+// entry still holding the pre-rotation key: a non-nil KeyProvider is the
+// authoritative, PoP-verified trust source.
 func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 	t *testing.T,
 ) {

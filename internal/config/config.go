@@ -711,11 +711,6 @@ type Config struct {
 	// a block producer whose pool is a committee member, the node emits
 	// Leios votes for endorser blocks.
 	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
-	// LeiosVoterPublicKeys maps hex pool key hashes to hex-encoded
-	// BLS12-381 voter public keys for vote signature verification.
-	// CIP-0164 key registration is not yet specified, so this static
-	// registry stands in for it (devnet-style).
-	LeiosVoterPublicKeys map[string]string `yaml:"leiosVoterPublicKeys"    envconfig:"DINGO_LEIOS_VOTER_PUBLIC_KEYS"`
 
 	// PeerSharing enables the peer sharing protocol, allowing this node
 	// to advertise known peers to other nodes on request. Pointer
@@ -1212,13 +1207,6 @@ func cloneConfig(cfg *Config) *Config {
 	}
 	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
 	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
-	if cfg.LeiosVoterPublicKeys != nil {
-		clone.LeiosVoterPublicKeys = make(
-			map[string]string,
-			len(cfg.LeiosVoterPublicKeys),
-		)
-		maps.Copy(clone.LeiosVoterPublicKeys, cfg.LeiosVoterPublicKeys)
-	}
 	clone.Plugins.Storage.Blob = clonePluginSelection(
 		cfg.Plugins.Storage.Blob,
 	)
@@ -1267,6 +1255,11 @@ func LoadConfig(configFile string) (*Config, error) {
 	cfg := cloneConfig(globalConfig)
 	midnightYAMLFields = nil
 	configFile = resolveConfigFile(configFile)
+	if value := os.Getenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS"); value != "" {
+		return nil, errors.New(
+			"DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported; reference-compatible Leios voting requires a proof-verified on-chain key registration",
+		)
+	}
 
 	if configFile != "" {
 		buf, err := os.ReadFile(configFile)
