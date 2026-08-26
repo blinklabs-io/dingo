@@ -1947,12 +1947,25 @@ Key models in `database/models/`:
 
 The `LedgerState` (`ledger/state.go`) manages UTXO tracking and validation:
 
-The first reward update is applied at the boundary into epoch 2 using epoch
-0's block performance with the epoch-1 ADA pots. Cardano-ledger's Go stake
-distribution is still empty at that point, so monetary expansion and treasury
+The boundaries into epochs 1 and 2 are bootstrap rounds. Cardano-ledger's Go
+stake distribution is still empty at both, so monetary expansion and treasury
 tax are applied but no pool or account rewards are distributed; the post-tax
-amount returns to reserves. Later updates use the normal delayed E-3 snapshot,
-E-2 performance, and E-1 pots mapping.
+amount returns to reserves. The epoch-1 round reads the slot-0 genesis ADA pots
+(the epoch-0 row, whose fee pot is empty because no epoch precedes epoch 0);
+the epoch-2 round uses epoch 0's block performance with the epoch-1 ADA pots.
+Networks with a Byron prefix have no Shelley reward round at either boundary,
+and `applyStakeRewards`' Byron performance-epoch guard suppresses both there;
+networks that declare Shelley at genesis, such as preview, run both. Later
+updates use the normal delayed E-3 snapshot, E-2 performance, and E-1 pots
+mapping.
+
+Both bootstrap rounds resolve against mark snapshot epoch 0, so that row must
+exist even when it is empty. `snapshot.Manager.CaptureGenesisSnapshot` persists
+it on a fresh sync whose genesis registers no pools — preview, whose pools
+register on chain during epoch 0 — rather than treating an empty distribution
+as nothing to record. An empty slot-0 distribution behind a later current epoch
+still skips the capture: there it means the pool data predates a Mithril
+import, not that the network had no stake.
 
 CIP-0163 full-pot reward distribution is an operator-set, consensus-affecting
 feature gate (`FullPotRewardsEnabled`, default off; see `WithFullPotRewards` and
@@ -7721,10 +7734,10 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    reserves, and route unspendable rewards to the treasury before governance
    reads it. It is a no-op until the required reward inputs exist (the mark
    snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
-   Precomputation". Epoch 2 is the bootstrap exception: it applies expansion
-   and treasury tax synchronously with an empty Go distribution and returns the
-   post-tax amount to reserves. It is not precomputed because zero output rows
-   cannot provide rollback-safe precompute provenance.
+   Precomputation". Epochs 1 and 2 are the bootstrap exceptions: each applies
+   expansion and treasury tax synchronously with an empty Go distribution and
+   returns the post-tax amount to reserves. Neither is precomputed because zero
+   output rows cannot provide rollback-safe precompute provenance.
 2. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
    move-instantaneous-rewards certificates accumulated during the ended epoch —
    credit their rewards to registered reward accounts and apply the pot-to-pot
@@ -7790,7 +7803,10 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    reserves, treasury, and fees after every boundary treasury/reserves mutation
    above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal
    reserves top-up). This `reward_ada_pots` row seeds the delayed reward
-   calculation for a later epoch.
+   calculation for a later epoch. Epoch 0 has no rollover, so its row is
+   written from the same slot-0 baseline as the genesis network state
+   (`saveGenesisRewardAdaPots`), which is what the epoch-1 bootstrap round
+   reads.
 10. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
 11. Authoritative Mark snapshot write (`captureEpochBoundarySnapshot` →
     `snapshot.Manager.CaptureEpochBoundarySnapshot`, when a hook is installed),
