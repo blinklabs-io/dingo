@@ -56,6 +56,20 @@ func newLedgerStateForNetwork(
 	magic uint32,
 ) *LedgerState {
 	t.Helper()
+	return newLedgerStateForNetworkNamed(t, networkId, magic, "")
+}
+
+// newLedgerStateForNetworkNamed is newLedgerStateForNetwork with control
+// over the network selector dingo was started with (LedgerStateConfig.
+// Network), for cases where genesis identity alone is ambiguous — see
+// TestLedgerStateIsMainnet_PrimeMainnetNotRealMainnet.
+func newLedgerStateForNetworkNamed(
+	t *testing.T,
+	networkId string,
+	magic uint32,
+	network string,
+) *LedgerState {
+	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON(networkId, magic)),
@@ -63,6 +77,7 @@ func newLedgerStateForNetwork(
 	return &LedgerState{
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
+			Network:           network,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
@@ -393,6 +408,51 @@ func TestLedgerStateIsMainnet_NetworkIdNotMagic(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, got)
 	})
+}
+
+// TestLedgerStateIsMainnet_PrimeMainnetNotRealMainnet pins the fix for a
+// deterministic sync wedge on prime-mainnet: Apex Fusion's prime-mainnet
+// genesis declares networkId=Mainnet and network magic 764824073 —
+// byte-identical to real Cardano mainnet's genesis identity — but runs its
+// own independent hard-fork schedule. Enforcing cardano-ledger's
+// mainnet-only BBODY header-protocol-version strictness there rejected
+// headers prime-mainnet's own nodes had already built on top of. The
+// network dingo was started with is the one signal that still
+// disambiguates the two chains.
+func TestLedgerStateIsMainnet_PrimeMainnetNotRealMainnet(t *testing.T) {
+	ls := newLedgerStateForNetworkNamed(
+		t, "Mainnet", byron.MainnetProtocolMagic, "prime-mainnet",
+	)
+	got, err := ls.isMainnet()
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+// TestLedgerStateIsMainnet_NamedMainnetStillTrue confirms the Network
+// selector doesn't just default to relaxing the check: an explicit
+// Network="mainnet" alongside a Mainnet-identity genesis must still
+// resolve to real mainnet.
+func TestLedgerStateIsMainnet_NamedMainnetStillTrue(t *testing.T) {
+	ls := newLedgerStateForNetworkNamed(
+		t, "Mainnet", byron.MainnetProtocolMagic, "mainnet",
+	)
+	got, err := ls.isMainnet()
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
+// TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis confirms
+// that a Network value gouroboros doesn't recognize (e.g. a config built
+// without the CLI network selector reaching LedgerStateConfig) falls back
+// to the pre-existing genesis-only check rather than failing or silently
+// relaxing the rule.
+func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(t *testing.T) {
+	ls := newLedgerStateForNetworkNamed(
+		t, "Mainnet", byron.MainnetProtocolMagic, "some-custom-devnet",
+	)
+	got, err := ls.isMainnet()
+	require.NoError(t, err)
+	assert.True(t, got)
 }
 
 // TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig

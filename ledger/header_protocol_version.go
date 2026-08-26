@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -140,11 +141,25 @@ func ValidateHeaderProtocolVersion(
 }
 
 // isMainnet reports whether this LedgerState is configured for Cardano
-// mainnet, derived from the Shelley genesis networkId field. This is
-// the literal port of cardano-ledger's `netId == Mainnet` predicate
-// used by the BBODY rule. Network magic alone is not a reliable
-// discriminator (devnet shares mainnet's RequiresNoMagic wire setting);
-// only the genesis-declared identity has the right semantics.
+// mainnet, derived from the Shelley genesis networkId field and, where
+// available, the network dingo was started with. The networkId check is
+// the literal port of cardano-ledger's `netId == Mainnet` predicate used
+// by the BBODY rule, but it is not sufficient on its own: a foreign chain
+// that reuses Cardano mainnet's identity for wire compatibility declares
+// the same networkId (and often the same network magic) while running its
+// own, independent hard-fork schedule. gouroboros's own network registry
+// contains exactly this case — prime-mainnet declares networkId=Mainnet
+// and magic 764824073, byte-identical to real Cardano mainnet. Enforcing
+// cardano-ledger's mainnet-only BBODY strictness there rejects headers a
+// chain's own nodes have already built on top of.
+//
+// When ls.config.Network names a network gouroboros recognizes, that
+// resolved identity decides mainnet-ness instead of the raw networkId
+// value, so prime-mainnet correctly gets the same relaxed treatment as
+// any other testnet despite its Mainnet-shaped genesis. An unset or
+// unrecognized Network name (a config built from a raw NetworkMagic, or
+// an embedder that never set it) falls back to the networkId-only check,
+// preserving prior behavior for every caller that predates this field.
 //
 // Fails closed: when CardanoNodeConfig or Shelley genesis is missing,
 // or the networkId field carries an unrecognized value, returns
@@ -162,6 +177,11 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 	}
 	switch sg.NetworkId {
 	case shelleyGenesisMainnetNetworkId:
+		if ls.config.Network != "" {
+			if known, ok := ouroboros.NetworkByName(ls.config.Network); ok {
+				return known.Name == ouroboros.NetworkCardanoMainnet.Name, nil
+			}
+		}
 		return true, nil
 	case shelleyGenesisTestnetNetworkId:
 		return false, nil
