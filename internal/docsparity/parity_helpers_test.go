@@ -90,7 +90,8 @@ func readRepoFile(t *testing.T, root, rel string) string {
 
 // filesMatching returns tracked repository-relative paths for which match
 // reports true. Using Git's index keeps local worktrees and other untracked
-// files out of documentation parity checks.
+// files out of documentation parity checks. Source archives without Git
+// metadata fall back to walking the extracted tree.
 func filesMatching(
 	t *testing.T,
 	root string,
@@ -102,7 +103,7 @@ func filesMatching(
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
 	output, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("list tracked files in %s: %v", root, err)
+		return filesMatchingWalk(t, root, match)
 	}
 	for rel := range strings.SplitSeq(string(output), "\x00") {
 		if rel == "" {
@@ -112,6 +113,45 @@ func filesMatching(
 		if match(rel) {
 			found = append(found, rel)
 		}
+	}
+	return found
+}
+
+func filesMatchingWalk(
+	t *testing.T,
+	root string,
+	match func(rel string) bool,
+) []string {
+	t.Helper()
+
+	skippedDirs := map[string]bool{
+		".git":         true,
+		".worktrees":   true,
+		".tools":       true,
+		"node_modules": true,
+	}
+	var found []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if skippedDirs[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if match(rel) {
+			found = append(found, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
 	}
 	return found
 }
