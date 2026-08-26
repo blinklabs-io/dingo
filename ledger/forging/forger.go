@@ -610,8 +610,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	// Skip if the chain is still syncing from a peer.
-	// Compare against the upstream peer tip rather than the wall
-	// clock. Forging while syncing creates blocks that conflict
+	// Compare against the admitted upstream header frontier rather than the
+	// wall clock. Forging while syncing creates blocks that conflict
 	// with the peer's chain, causing persistent header mismatches
 	// and resync loops.
 	// See forgeSyncToleranceSlots for the tolerance rationale.

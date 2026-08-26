@@ -2993,11 +2993,12 @@ A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`
 
 Under every strategy, all eligible peers still update tip tracking, observed-header history (for blockfetch peer discovery), and fork detection, so divergent peer headers produce fork/candidate-chain handling rather than silent suppression. The strategy is set via `chainsync.strategy` (YAML), `DINGO_CHAINSYNC_STRATEGY` (env), or `--chainsync-strategy` (CLI).
 
-`LedgerState` promotes a peer-advertised tip into its shared sync-progress and
-cleanup state only after the accompanying header passes the applicable crypto
-checks and is admitted to the local header queue. Rejected, buffered,
-queue-full, and crypto-deferred headers leave that shared tip unchanged; a
-later successful replay or header advances it normally.
+`LedgerState` advances its shared sync-progress and cleanup frontier to an
+admitted header's own slot only after that header passes the applicable crypto
+checks and enters the local header queue. The peer-advertised tip carried beside
+the header is a separate untrusted claim and is not promoted into that state.
+Rejected, buffered, queue-full, and crypto-deferred headers leave the frontier
+unchanged; a later successful replay or header advances it normally.
 
 #### Header Verification Handoff
 

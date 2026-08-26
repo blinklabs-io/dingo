@@ -2645,14 +2645,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	// Reset mismatch counter on successful header addition
 	ls.headerMismatchCount = 0
-	// Track the peer tip only after the accompanying header has passed the
-	// applicable admission path and entered the local header queue. Recording
-	// e.Tip before validation, or after a deferred validation decision, lets a
-	// rejected header advance the shared catch-up/cleanup state with
-	// unauthenticated peer data.
+	// Track only the delivered header frontier after the header has passed the
+	// applicable admission path and entered the local header queue. The peer's
+	// advertised e.Tip is a separate, untrusted field in the ChainSync message;
+	// validating this header does not authenticate that claim.
+	admittedHeaderSlot := ls.chain.HeaderTip().Point.Slot
 	if (!headerValidationRequired || headerCryptoVerified) &&
-		e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
-		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
+		admittedHeaderSlot > ls.syncUpstreamTipSlot.Load() {
+		ls.syncUpstreamTipSlot.Store(admittedHeaderSlot)
 	}
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
@@ -5968,8 +5968,8 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 }
 
 // logSyncProgress logs periodic sync progress at INFO level.
-// It reports the current slot, upstream tip slot, percentage complete,
-// and sync rate in slots per second. syncUpstreamTipSlot is read
+// It reports the current slot, admitted upstream header frontier, percentage
+// complete, and sync rate in slots per second. syncUpstreamTipSlot is read
 // atomically since it is written by the chainsync handler goroutine.
 func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 	now := time.Now()

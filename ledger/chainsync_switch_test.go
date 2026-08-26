@@ -1103,7 +1103,7 @@ func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 	require.Empty(t, ls.bufferedHeaderEvents[connIdKey(connId2)])
 }
 
-func TestHandleEventChainsyncDoesNotRecordRejectedPeerTip(t *testing.T) {
+func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	// Keep the test at header admission; no blockfetch worker is needed.
@@ -1117,16 +1117,20 @@ func TestHandleEventChainsyncDoesNotRecordRejectedPeerTip(t *testing.T) {
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
+	advertisedSlot := ^uint64(0)
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  accepted,
 		Point:        ocommon.NewPoint(accepted.slot, accepted.hash.Bytes()),
 		Tip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(100, []byte("accepted-tip")),
-			BlockNumber: 100,
+			Point: ocommon.NewPoint(
+				advertisedSlot,
+				[]byte("unbound-advertised-tip"),
+			),
+			BlockNumber: advertisedSlot,
 		},
 	}))
-	require.Equal(t, uint64(100), ls.syncUpstreamTipSlot.Load())
+	require.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 
 	// The next header does not extend the queued chain. Its advertised tip
 	// must not advance shared progress state before fork handling rejects it.
@@ -1141,11 +1145,11 @@ func TestHandleEventChainsyncDoesNotRecordRejectedPeerTip(t *testing.T) {
 		BlockHeader:  rejected,
 		Point:        ocommon.NewPoint(rejected.slot, rejected.hash.Bytes()),
 		Tip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(999, []byte("untrusted-tip")),
-			BlockNumber: 999,
+			Point:       ocommon.NewPoint(advertisedSlot-1, []byte("rejected-tip")),
+			BlockNumber: advertisedSlot - 1,
 		},
 	}))
-	assert.Equal(t, uint64(100), ls.syncUpstreamTipSlot.Load())
+	assert.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 }
 
 func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
@@ -1190,19 +1194,21 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 		},
 	})
 	require.NoError(t, err)
+	require.Equal(t, header1.slot, ls.syncUpstreamTipSlot.Load())
 
 	err = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connId2,
 		BlockHeader:  header2,
 		Point:        ocommon.NewPoint(header2.slot, header2.hash.Bytes()),
 		Tip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(60002, []byte("tip-2")),
-			BlockNumber: 60002,
+			Point:       ocommon.NewPoint(^uint64(0), []byte("unbound-tip-2")),
+			BlockNumber: ^uint64(0),
 		},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, connId1, ls.headerPipelineConnId)
 	assert.Equal(t, 1, ls.chain.HeaderCount())
+	assert.Equal(t, header1.slot, ls.syncUpstreamTipSlot.Load())
 	events := ls.bufferedHeaderEvents[connIdKey(connId2)]
 	require.Len(t, events, 1)
 	assert.Equal(

@@ -1049,7 +1049,7 @@ type LedgerState struct {
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
-	syncUpstreamTipSlot  atomic.Uint64 // upstream peer's tip slot
+	syncUpstreamTipSlot  atomic.Uint64 // latest admitted peer header slot
 	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
 
 	// Rate-limiting for non-active rollback drop messages
@@ -8254,8 +8254,9 @@ func (ls *LedgerState) PrimaryChainTipSlot() uint64 {
 	return ls.PrimaryChainTip().Point.Slot
 }
 
-// UpstreamTipSlot returns the latest known tip slot from upstream peers.
-// Returns 0 if no upstream tip is known yet.
+// UpstreamTipSlot returns the latest admitted header slot delivered by an
+// upstream peer. It does not return the peer's untrusted advertised tip.
+// Returns 0 if no upstream header has been admitted yet.
 func (ls *LedgerState) UpstreamTipSlot() uint64 {
 	return ls.syncUpstreamTipSlot.Load()
 }
