@@ -22,22 +22,26 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
-func TestLedgerProcessBlockRejectsExpiredPhase2InvalidTransaction(
+func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 	t *testing.T,
 ) {
 	const (
-		invalidHereafter = uint64(9)
-		blockSlot        = uint64(10)
+		blockSlot     = uint64(10)
+		invalidBefore = uint64(11)
 	)
 	db := newTestDB(t)
+	// Key 8 is the upstream invalid-before/lower-bound field. Deliberately omit
+	// key 3 (invalid-hereafter) so this regression is independent of the
+	// separately owned upstream upper-bound implementation.
 	txCbor, err := cbor.Encode([]any{
-		map[uint]any{2: uint64(0), 3: invalidHereafter},
+		map[uint]any{2: uint64(0), 8: invalidBefore},
 		map[uint]any{},
 		nil,
 	})
@@ -96,7 +100,7 @@ func TestLedgerProcessBlockRejectsExpiredPhase2InvalidTransaction(
 	err = db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
 			txn,
-			ocommon.Point{Slot: blockSlot, Hash: []byte("expired-invalid-tx")},
+			ocommon.Point{Slot: blockSlot, Hash: []byte("phase-1-invalid-tx")},
 			block,
 			true,
 			false,
@@ -110,6 +114,17 @@ func TestLedgerProcessBlockRejectsExpiredPhase2InvalidTransaction(
 		)
 		return err
 	})
-	var invalidHereafterErr eras.InvalidHereafterError
-	require.ErrorAs(t, err, &invalidHereafterErr)
+	var outsideValidityIntervalErr allegra.OutsideValidityIntervalUtxoError
+	require.ErrorAs(
+		t,
+		err,
+		&outsideValidityIntervalErr,
+		"phase-2-invalid transactions must still run phase-1 rules",
+	)
+	require.Equal(
+		t,
+		invalidBefore,
+		outsideValidityIntervalErr.ValidityIntervalStart,
+	)
+	require.Equal(t, blockSlot, outsideValidityIntervalErr.Slot)
 }

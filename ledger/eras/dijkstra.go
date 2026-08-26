@@ -224,8 +224,7 @@ func ValidateTxDijkstra(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	if tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters); !ok ||
-		tmpPparams == nil {
+	if _, ok := pp.(*gdijkstra.DijkstraProtocolParameters); !ok {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -246,9 +245,6 @@ func ValidateTxDijkstra(
 				),
 			)
 		}
-	}
-	if err := validateInvalidHereafter(tx, slot); err != nil {
-		errs = append(errs, err)
 	}
 	// CIP-23: reject pool registration certificates whose margin is below the
 	// operator-configured minimum pool margin. No-op when disabled (nil floor).

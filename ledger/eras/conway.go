@@ -206,9 +206,6 @@ func ValidateTxConway(
 			)
 		}
 	}
-	if err := validateInvalidHereafter(tx, slot); err != nil {
-		errs = append(errs, err)
-	}
 	if err := ValidateTxFeeConway(tx, ls, tmpPparams); err != nil &&
 		(!isInputResolutionError(err) || len(errs) == 0) {
 		errs = append(

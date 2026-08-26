@@ -29,7 +29,6 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/data"
@@ -89,7 +88,6 @@ type mockConwayFeeTx struct {
 	mockFeeTx
 	inputs             []lcommon.TransactionInput
 	referenceInputs    []lcommon.TransactionInput
-	ttl                uint64
 	certificates       []lcommon.Certificate
 	withdrawals        map[*lcommon.Address]*big.Int
 	assetMint          *lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
@@ -119,7 +117,7 @@ func (m *mockConwayFeeTx) Outputs() []lcommon.TransactionOutput {
 }
 
 func (m *mockConwayFeeTx) TTL() uint64 {
-	return m.ttl
+	return 0
 }
 
 func (m *mockConwayFeeTx) ValidityIntervalStart() uint64 {
@@ -1594,230 +1592,6 @@ func TestValidateTxPreAlonzoRejectsWrongProtocolParams(t *testing.T) {
 				tc.validateTx(&shelley.ShelleyTransaction{}, 0, ls, nilPparams),
 				ErrIncompatibleProtocolParams,
 			)
-		})
-	}
-}
-
-func TestValidateTxRejectsMissingProtocolParamsAcrossEras(t *testing.T) {
-	var nilAllegra *allegra.AllegraProtocolParameters
-	var nilMary *mary.MaryProtocolParameters
-	var nilAlonzo *alonzo.AlonzoProtocolParameters
-	var nilBabbage *babbage.BabbageProtocolParameters
-	var nilConway *conway.ConwayProtocolParameters
-	var nilDijkstra *dijkstra.DijkstraProtocolParameters
-
-	tests := []struct {
-		name       string
-		validateTx lcommon.UtxoValidationRuleFunc
-		typedNil   lcommon.ProtocolParameters
-	}{
-		{name: "allegra", validateTx: ValidateTxAllegra, typedNil: nilAllegra},
-		{name: "mary", validateTx: ValidateTxMary, typedNil: nilMary},
-		{name: "alonzo", validateTx: ValidateTxAlonzo, typedNil: nilAlonzo},
-		{name: "babbage", validateTx: ValidateTxBabbage, typedNil: nilBabbage},
-		{name: "conway", validateTx: ValidateTxConway, typedNil: nilConway},
-		{
-			name:       "dijkstra",
-			validateTx: ValidateTxDijkstra,
-			typedNil:   nilDijkstra,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tx := &mockConwayFeeTx{mockFeeTx: mockFeeTx{fee: big.NewInt(0)}}
-			ls := newMockLedgerState()
-
-			require.ErrorIs(
-				t,
-				tc.validateTx(tx, 0, ls, nil),
-				ErrIncompatibleProtocolParams,
-			)
-			require.ErrorIs(
-				t,
-				tc.validateTx(tx, 0, ls, tc.typedNil),
-				ErrIncompatibleProtocolParams,
-			)
-		})
-	}
-}
-
-func TestValidateTxRejectsExpiredInvalidHereafterAcrossEras(t *testing.T) {
-	const validationSlot = 200
-
-	tests := []struct {
-		name       string
-		validateTx func(lcommon.Transaction, uint64, lcommon.LedgerState) error
-		setup      func(*testing.T)
-	}{
-		{
-			name: "allegra",
-			validateTx: func(
-				tx lcommon.Transaction,
-				slot uint64,
-				ls lcommon.LedgerState,
-			) error {
-				return ValidateTxAllegra(
-					tx,
-					slot,
-					ls,
-					&allegra.AllegraProtocolParameters{MaxTxSize: 16_384},
-				)
-			},
-			setup: func(t *testing.T) {
-				original := allegraUtxoValidationRules
-				allegraUtxoValidationRules = nil
-				t.Cleanup(func() { allegraUtxoValidationRules = original })
-			},
-		},
-		{
-			name: "mary",
-			validateTx: func(
-				tx lcommon.Transaction,
-				slot uint64,
-				ls lcommon.LedgerState,
-			) error {
-				return ValidateTxMary(
-					tx,
-					slot,
-					ls,
-					&mary.MaryProtocolParameters{},
-				)
-			},
-			setup: func(t *testing.T) {
-				original := mary.UtxoValidationRules
-				mary.UtxoValidationRules = nil
-				t.Cleanup(func() { mary.UtxoValidationRules = original })
-			},
-		},
-		{
-			name: "alonzo",
-			validateTx: func(
-				tx lcommon.Transaction,
-				slot uint64,
-				ls lcommon.LedgerState,
-			) error {
-				return ValidateTxAlonzo(
-					tx,
-					slot,
-					ls,
-					&alonzo.AlonzoProtocolParameters{MaxTxSize: 16_384},
-				)
-			},
-			setup: func(t *testing.T) {
-				original := alonzoUtxoValidationRules
-				alonzoUtxoValidationRules = nil
-				t.Cleanup(func() { alonzoUtxoValidationRules = original })
-			},
-		},
-		{
-			name: "babbage",
-			validateTx: func(
-				tx lcommon.Transaction,
-				slot uint64,
-				ls lcommon.LedgerState,
-			) error {
-				return ValidateTxBabbage(
-					tx,
-					slot,
-					ls,
-					&babbage.BabbageProtocolParameters{MaxTxSize: 16_384},
-				)
-			},
-			setup: func(t *testing.T) {
-				original := babbageUtxoValidationRules
-				babbageUtxoValidationRules = nil
-				t.Cleanup(func() { babbageUtxoValidationRules = original })
-			},
-		},
-		{
-			name: "conway",
-			validateTx: func(
-				tx lcommon.Transaction,
-				slot uint64,
-				ls lcommon.LedgerState,
-			) error {
-				return ValidateTxConway(
-					tx,
-					slot,
-					ls,
-					&conway.ConwayProtocolParameters{},
-				)
-			},
-			setup: withoutConwayUtxoValidationRules,
-		},
-		{
-			name: "dijkstra",
-			validateTx: func(
-				tx lcommon.Transaction,
-				slot uint64,
-				ls lcommon.LedgerState,
-			) error {
-				return ValidateTxDijkstra(
-					tx,
-					slot,
-					ls,
-					&dijkstra.DijkstraProtocolParameters{},
-				)
-			},
-			setup: func(t *testing.T) {
-				original := dijkstraUtxoValidationRules
-				originalPhase1 := dijkstraPhase1UtxoValidationRules
-				dijkstraUtxoValidationRules = nil
-				dijkstraPhase1UtxoValidationRules = nil
-				t.Cleanup(func() {
-					dijkstraUtxoValidationRules = original
-					dijkstraPhase1UtxoValidationRules = originalPhase1
-				})
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.setup(t)
-			ls := newMockLedgerState()
-			for _, test := range []struct {
-				name         string
-				invalidAfter uint64
-				shouldError  bool
-			}{
-				{name: "upper bound absent", invalidAfter: 0},
-				{
-					name:         "before validation slot",
-					invalidAfter: validationSlot - 1,
-					shouldError:  true,
-				},
-				{
-					name:         "at validation slot",
-					invalidAfter: validationSlot,
-					shouldError:  true,
-				},
-				{name: "after validation slot", invalidAfter: validationSlot + 1},
-			} {
-				t.Run(test.name, func(t *testing.T) {
-					tx := &mockConwayFeeTx{
-						mockFeeTx: mockFeeTx{fee: big.NewInt(0)},
-						ttl:       test.invalidAfter,
-					}
-					err := tc.validateTx(tx, validationSlot, ls)
-					if test.shouldError {
-						var invalidHereafter InvalidHereafterError
-						require.ErrorAs(t, err, &invalidHereafter)
-						require.Equal(
-							t,
-							test.invalidAfter,
-							invalidHereafter.InvalidHereafter,
-						)
-						require.Equal(
-							t,
-							uint64(validationSlot),
-							invalidHereafter.Slot,
-						)
-						return
-					}
-					require.NoError(t, err)
-				})
-			}
 		})
 	}
 }

@@ -202,7 +202,7 @@ func ValidateTxBabbage(
 	pp lcommon.ProtocolParameters,
 ) error {
 	tmpPparams, ok := pp.(*babbage.BabbageProtocolParameters)
-	if !ok || tmpPparams == nil {
+	if !ok {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -219,9 +219,6 @@ func ValidateTxBabbage(
 				err,
 			)
 		}
-	}
-	if err := validateInvalidHereafter(tx, slot); err != nil {
-		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)

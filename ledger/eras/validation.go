@@ -40,34 +40,6 @@ type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
 }
 
-// InvalidHereafterError reports a transaction whose upper validity bound has
-// already passed. The upstream Allegra-through-Dijkstra rule checks only the
-// lower bound (invalid_before), so Dingo enforces invalid_hereafter in each
-// active era validation entry point.
-type InvalidHereafterError struct {
-	InvalidHereafter uint64
-	Slot             uint64
-}
-
-func (e InvalidHereafterError) Error() string {
-	return fmt.Sprintf(
-		"transaction outside validity interval: invalid_hereafter %d, slot %d",
-		e.InvalidHereafter,
-		e.Slot,
-	)
-}
-
-func validateInvalidHereafter(tx lcommon.Transaction, slot uint64) error {
-	invalidHereafter := tx.TTL()
-	if invalidHereafter == 0 || slot < invalidHereafter {
-		return nil
-	}
-	return InvalidHereafterError{
-		InvalidHereafter: invalidHereafter,
-		Slot:             slot,
-	}
-}
-
 // MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
 // CIP-23 minimum pool margin to era validation, mirroring phase2ValidationSkipper.
 // Exported so implementers (e.g. *ledger.LedgerView) can assert conformance at

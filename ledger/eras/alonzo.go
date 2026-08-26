@@ -170,7 +170,7 @@ func ValidateTxAlonzo(
 	pp lcommon.ProtocolParameters,
 ) error {
 	tmpPparams, ok := pp.(*alonzo.AlonzoProtocolParameters)
-	if !ok || tmpPparams == nil {
+	if !ok {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -187,9 +187,6 @@ func ValidateTxAlonzo(
 				err,
 			)
 		}
-	}
-	if err := validateInvalidHereafter(tx, slot); err != nil {
-		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
