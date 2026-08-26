@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-08-03
+Last reviewed: 2026-08-26
 
 ## In-process plugin host
 
@@ -16,6 +16,14 @@ configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
+Storage lifecycle contexts cross the provider boundary. In particular, Badger
+stops scheduling value-log GC before close and prevents a successful rewrite
+from chaining another pass. Because Badger cannot cancel a rewrite already in
+flight, an expired stop context bounds the host's wait while the one-time close
+continues after that rewrite drains; direct close calls join the same cleanup.
+Live restore and truncate classify that deadline as an unconfirmed storage
+drain and request a supervised restart; they never resolve a replacement store
+against the same data directory while the prior close may still own it.
 API providers are resolved for lifecycle only because node composition has no
 in-process consumer of their concrete server values. Each API provider's
 TLS/authentication policy goes through a merged-config handoff, not a
