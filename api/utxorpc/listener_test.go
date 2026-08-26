@@ -20,45 +20,26 @@ import (
 	"net"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/stretchr/testify/require"
 )
 
-// The shutdown protocol these two tests exercise is covered in depth, with the
+// The shutdown protocol this test exercises is covered in depth, with the
 // windows constructed rather than raced, in internal/apilistener. What is
 // checked here is that this package is wired to it -- that a utxorpc server
 // keeps the promise its Stop makes, including on the force-close escalation
 // paths that are this listener's own.
 
-// TestServerStopReleasesPortBeforeServeRegisters covers the window between
-// net.Listen and Serve registering that listener with the http.Server.
-// http.Server.Shutdown closes only registered listeners, so a Stop landing
-// inside the window used to return with the port still bound.
-func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
-	for i := range 100 {
-		u, addr := startOnFreePort(
-			t, t.Context(),
-			apiconfig.EffectiveTLS{}, apiconfig.EffectiveAuth{},
-		)
-
-		stopUtxorpc(t, u)
-
-		require.False(
-			t, portAccepts(addr),
-			"listener still accepting when Stop returned "+
-				"(iteration %d)", i,
-		)
-	}
-}
-
 // TestServerRebindsAfterStop is the production path this fix exists for: a
 // live database restore or truncate quiesces the API capabilities and
 // reinitializeAPIServers brings them back up on the same configured port (see
 // node_lifecycle.go). A Stop that returned while the socket was still bound
-// left that restart failing with EADDRINUSE.
+// left that restart failing with EADDRINUSE. The constructed tests in
+// internal/apilistener assert closure on the original listener object; dialing
+// a released ephemeral address here could instead reach another package's
+// listener when the suite runs concurrently.
 func TestServerRebindsAfterStop(t *testing.T) {
 	u, addr := startOnFreePort(
 		t, t.Context(),
@@ -81,14 +62,4 @@ func TestServerRebindsAfterStop(t *testing.T) {
 		"a capability restart must rebind the port Stop released",
 	)
 	stopUtxorpc(t, restarted)
-}
-
-// portAccepts reports whether a TCP connection to addr succeeds.
-func portAccepts(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
