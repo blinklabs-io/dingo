@@ -284,29 +284,6 @@ func TestServerGracefulShutdown(t *testing.T) {
 	)
 }
 
-// TestServerStopReleasesPortBeforeServeRegisters covers the window
-// between startServer binding the socket and the goroutine it launches
-// reaching http.Server.Serve: Shutdown closes only the listeners Serve
-// registered, so in that window Stop used to return with the port still
-// bound -- which the capability restart in node_lifecycle.go then fails
-// to rebind. Stopping straight after Start lands in the window often
-// but not every time, so the assertion is repeated.
-func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
-	for i := range 100 {
-		srv, addr := startOnFreePort(
-			t, t.Context(), newTestDeps(),
-		)
-
-		require.NoError(t, srv.Stop(t.Context()))
-
-		require.False(
-			t, portAccepts(addr),
-			"listener still accepting when Stop returned "+
-				"(iteration %d)", i,
-		)
-	}
-}
-
 // TestConcurrentStartStopNeverLeavesThePortBound hammers the interleavings the
 // individual lifecycle tests each pin one of: Start racing Stop, Stop racing the
 // context monitor, and a restart on the same address immediately after.
@@ -365,13 +342,10 @@ func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
 			t, srv.Stop(t.Context()),
 			"a second Stop must stay clean (iteration %d)", i,
 		)
-		require.False(
-			t, portAccepts(addr),
-			"Stop returned nil but the port is still accepting "+
-				"(iteration %d)", i,
-		)
-
 		// The contract Stop's nil return promises: the address is rebindable.
+		// Rebinding is the package-level assertion: dialing a released
+		// ephemeral address could instead reach another package's listener
+		// when the suite runs concurrently.
 		next := newTestServer(
 			t, newTestDeps(),
 			func(c *ServerConfig) { c.ListenAddress = addr },
