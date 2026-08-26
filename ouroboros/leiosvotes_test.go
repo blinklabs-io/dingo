@@ -258,8 +258,10 @@ func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
 		oleiosfetch.CallbackContext{},
 		[]oleiosfetch.MsgVotesRequestVoteId{{SlotNo: 1, VoterId: 2}},
 	)
-	require.ErrorIs(t, err, errLeiosVotesUnavailable)
-	assert.Nil(t, msg)
+	require.NoError(t, err)
+	votesMsg, ok := msg.(*oleiosfetch.MsgVotes)
+	require.True(t, ok)
+	assert.Empty(t, votesMsg.VotesRaw)
 }
 
 func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {

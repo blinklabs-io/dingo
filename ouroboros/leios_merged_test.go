@@ -186,6 +186,28 @@ func TestLeiosTxsFromBitmapPreservesRequestedOrder(t *testing.T) {
 	require.Equal(t, []cbor.RawMessage{txs[1], txs[3]}, got)
 }
 
+func TestLeiosFetchServerMissingDataUsesUnavailableErrors(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	point := ocommon.NewPoint(10, make([]byte, 32))
+
+	msg, err := o.leiosfetchServerBlockRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+	)
+	require.Nil(t, msg)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockNotFound)
+
+	msg, err = o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: 1},
+	)
+	require.Nil(t, msg)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
+}
+
 func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
@@ -206,6 +228,7 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Nil(t, msg)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 	require.Contains(t, err.Error(), "txs not available")
 }
 
@@ -229,6 +252,8 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Nil(t, msg)
+	require.NotErrorIs(t, err, oleiosfetch.ErrBlockNotFound)
+	require.NotErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 	require.Contains(t, err.Error(), "beyond")
 }
 
