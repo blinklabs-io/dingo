@@ -106,6 +106,70 @@ import (
 // n.ouroboros exactly once, to pause its Leios persistence writer — see
 // this file's top doc comment for why that one piece of n.ouroboros can't
 // simply be left running like everything else on it.
+// namedStop pairs a component's Stop with the name quiesce reports it under.
+type namedStop struct {
+	name string
+	stop func() error
+}
+
+// quiesceComponentStops is every component quiesceForLiveLifecycleOp stops
+// whose own Stop cancels a context and then waits on a sync.WaitGroup with no
+// deadline of its own. Each is therefore bounded by stopWithDeadline rather
+// than called directly.
+//
+// Ordering is preserved from the inline calls it replaced: the Leios pipeline
+// manager stops before the vote manager because it consumes that manager's
+// EbQuorumEvent, matching the dependency order Run()'s startup-failure cleanup
+// stack already uses (see node.go). The database lifecycle manager stops last,
+// as it did inline, after the koios parity observer.
+func (n *Node) quiesceComponentStops() []namedStop {
+	var stops []namedStop
+	if n.blockForger != nil {
+		stops = append(stops, namedStop{
+			name: "block forger",
+			stop: func() error { n.blockForger.Stop(); return nil },
+		})
+	}
+	if n.leaderElection != nil {
+		stops = append(stops, namedStop{
+			name: "leader election",
+			stop: n.leaderElection.Stop,
+		})
+	}
+	if n.leiosPipelineManager != nil {
+		stops = append(stops, namedStop{
+			name: "leios pipeline manager",
+			stop: n.leiosPipelineManager.Stop,
+		})
+	}
+	if n.leiosVoteManager != nil {
+		stops = append(stops, namedStop{
+			name: "leios vote manager",
+			stop: n.leiosVoteManager.Stop,
+		})
+	}
+	if n.snapshotMgr != nil {
+		stops = append(stops, namedStop{
+			name: "snapshot manager",
+			stop: n.snapshotMgr.Stop,
+		})
+	}
+	if n.dbLifecycleMgr != nil {
+		stops = append(stops, namedStop{
+			name: "database lifecycle manager",
+			stop: n.dbLifecycleMgr.Stop,
+		})
+	}
+	return stops
+}
+
+// componentStopsForQuiesce is (*Node).quiesceComponentStops, indirected
+// through a variable so a quiesce-level test can inject a stop that blocks
+// until released -- the same indirection syncDataDirParent uses for fsync
+// failures. None of these components can be made to block from outside, so
+// without it the escalation path could only be exercised below quiesce.
+var componentStopsForQuiesce = (*Node).quiesceComponentStops
+
 // stopWithDeadline runs a component's Stop and waits at most d for it to
 // return.
 //
@@ -161,43 +225,21 @@ func stopWithDeadline(
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
 
-	// Each of these Stop calls cancels its own context and then waits on a
-	// WaitGroup that has no deadline of its own, so every one is bounded here
-	// instead -- see stopWithDeadline for why an unfinished wait escalates to
+	// Every component whose Stop cancels its own context and then waits on a
+	// WaitGroup with no deadline of its own is bounded here -- see
+	// stopWithDeadline for why an unfinished wait escalates to
 	// errStorageDrainUnconfirmed rather than being reported as an ordinary
 	// stop failure. The budget is the configured shutdown timeout, the same
-	// one the koios parity observer below already uses.
+	// one the koios parity observer below uses.
+	//
+	// They are stopped as one ordered list rather than inline so the set is
+	// visible in one place and testable as a set: quiesceComponentStops is
+	// what a quiesce-level test asserts against, and a call site that went
+	// back to a direct Stop would drop out of it.
 	stopTimeout := n.configuredShutdownTimeout()
-	if n.blockForger != nil {
+	for _, cs := range componentStopsForQuiesce(n) {
 		if stopErr := stopWithDeadline(
-			stopTimeout, "block forger",
-			func() error { n.blockForger.Stop(); return nil },
-		); stopErr != nil {
-			err = errors.Join(err, stopErr)
-		}
-	}
-	if n.leaderElection != nil {
-		if stopErr := stopWithDeadline(
-			stopTimeout, "leader election", n.leaderElection.Stop,
-		); stopErr != nil {
-			err = errors.Join(err, stopErr)
-		}
-	}
-	// Pipeline manager stopped before vote manager: it consumes the vote
-	// manager's EbQuorumEvent, matching the dependency order Run()'s
-	// startup-failure cleanup stack already uses (see node.go).
-	if n.leiosPipelineManager != nil {
-		if stopErr := stopWithDeadline(
-			stopTimeout, "leios pipeline manager",
-			n.leiosPipelineManager.Stop,
-		); stopErr != nil {
-			err = errors.Join(err, stopErr)
-		}
-	}
-	if n.leiosVoteManager != nil {
-		if stopErr := stopWithDeadline(
-			stopTimeout, "leios vote manager",
-			n.leiosVoteManager.Stop,
+			stopTimeout, cs.name, cs.stop,
 		); stopErr != nil {
 			err = errors.Join(err, stopErr)
 		}
@@ -219,13 +261,6 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	if n.poolRelayProvider != nil {
 		n.poolRelayProvider.Close()
 		n.poolRelayProvider = nil
-	}
-	if n.snapshotMgr != nil {
-		if stopErr := stopWithDeadline(
-			stopTimeout, "snapshot manager", n.snapshotMgr.Stop,
-		); stopErr != nil {
-			err = errors.Join(err, stopErr)
-		}
 	}
 	// The Koios parity observer (dingo #3098) reads Dingo's committed reward
 	// state through a RewardParitySource backed directly by n.db, the same
@@ -259,14 +294,6 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			n.koiosParitySubId,
 		)
 		n.koiosParitySubId = 0
-	}
-	if n.dbLifecycleMgr != nil {
-		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
-			)
-		}
 	}
 	// utxorpc/blockfrost/mesh are API-capability plugin providers with no
 	// service kept on Node (see node.go's Run()) -- StopCapability is a
