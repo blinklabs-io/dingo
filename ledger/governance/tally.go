@@ -322,6 +322,14 @@ func addUint64(a, b uint64) (uint64, error) {
 // DReps are not counted toward any bucket. The proposal-independent
 // voting power is taken from ctx.DRepState when present (precomputed
 // once per epoch by ProcessEpoch); otherwise it is loaded lazily.
+//
+// Every DRepTotalStake addition below runs before the corresponding
+// DRepYes/No/AbstainStake addition for the same power value, so
+// DRepTotalStake stays >= every bucket at all times: its addUint64 check
+// always fires first (or ties) whenever a bucket-specific addition would
+// have overflowed. The per-bucket checks are kept anyway as defense in
+// depth against a future reordering of this function, not because they are
+// independently reachable today.
 func tallyDRepVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,

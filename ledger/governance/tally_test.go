@@ -290,6 +290,162 @@ func TestTallySPOVotesYesStakeOverflow(t *testing.T) {
 	})
 }
 
+// TestTallySPOVotesExplicitNoAndAbstainStakeOverflow drives the explicit-vote
+// SPONoStake and SPOAbstainStake accumulations in tallySPOVotes to the exact
+// uint64 max boundary via two synthetic pool snapshot rows.
+func TestTallySPOVotesExplicitNoAndAbstainStakeOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+	poolA := testBytes(28, 1)
+	poolB := testBytes(28, 2)
+
+	newState := func(stakeB uint64) *SPOVotingState {
+		return &SPOVotingState{
+			Dist: []*models.PoolStakeSnapshot{
+				{PoolKeyHash: poolA, TotalStake: types.Uint64(maxUint64 - 1)},
+				{PoolKeyHash: poolB, TotalStake: types.Uint64(stakeB)},
+			},
+		}
+	}
+
+	t.Run("no stake", func(t *testing.T) {
+		votes := []*models.GovernanceVote{
+			{VoterCredential: poolA, Vote: models.VoteNo},
+			{VoterCredential: poolB, Vote: models.VoteNo},
+		}
+		t.Run("just below overflow succeeds", func(t *testing.T) {
+			tally := &ProposalTally{}
+			err := tallySPOVotes(&TallyContext{SPOState: newState(1)}, votes, tally)
+			require.NoError(t, err)
+			assert.Equal(t, maxUint64, tally.SPONoStake)
+		})
+		t.Run("just above overflow fails", func(t *testing.T) {
+			tally := &ProposalTally{}
+			err := tallySPOVotes(&TallyContext{SPOState: newState(2)}, votes, tally)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "overflows uint64")
+		})
+	})
+
+	t.Run("abstain stake", func(t *testing.T) {
+		votes := []*models.GovernanceVote{
+			{VoterCredential: poolA, Vote: models.VoteAbstain},
+			{VoterCredential: poolB, Vote: models.VoteAbstain},
+		}
+		t.Run("just below overflow succeeds", func(t *testing.T) {
+			tally := &ProposalTally{}
+			err := tallySPOVotes(&TallyContext{SPOState: newState(1)}, votes, tally)
+			require.NoError(t, err)
+			assert.Equal(t, maxUint64, tally.SPOAbstainStake)
+		})
+		t.Run("just above overflow fails", func(t *testing.T) {
+			tally := &ProposalTally{}
+			err := tallySPOVotes(&TallyContext{SPOState: newState(2)}, votes, tally)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "overflows uint64")
+		})
+	})
+}
+
+// TestTallySPOVotesAutoVoteOverflow drives the reward-account auto-vote
+// SPOAbstainStake and SPONoStake accumulations in tallySPOVotes to the exact
+// uint64 max boundary, via resolved snapshot rows carrying no explicit vote.
+func TestTallySPOVotesAutoVoteOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+	poolA := testBytes(28, 1)
+	poolB := testBytes(28, 2)
+
+	newState := func(autoVote uint8, stakeB uint64) *SPOVotingState {
+		return &SPOVotingState{
+			Dist: []*models.PoolStakeSnapshot{
+				{
+					PoolKeyHash:                   poolA,
+					TotalStake:                    types.Uint64(maxUint64 - 1),
+					RewardAccountAutoVote:         autoVote,
+					RewardAccountAutoVoteResolved: true,
+				},
+				{
+					PoolKeyHash:                   poolB,
+					TotalStake:                    types.Uint64(stakeB),
+					RewardAccountAutoVote:         autoVote,
+					RewardAccountAutoVoteResolved: true,
+				},
+			},
+		}
+	}
+
+	t.Run("abstain auto-vote", func(t *testing.T) {
+		t.Run("just below overflow succeeds", func(t *testing.T) {
+			tally := &ProposalTally{}
+			state := newState(models.PoolRewardAccountAutoVoteAbstain, 1)
+			err := tallySPOVotes(&TallyContext{SPOState: state}, nil, tally)
+			require.NoError(t, err)
+			assert.Equal(t, maxUint64, tally.SPOAbstainStake)
+		})
+		t.Run("just above overflow fails", func(t *testing.T) {
+			tally := &ProposalTally{}
+			state := newState(models.PoolRewardAccountAutoVoteAbstain, 2)
+			err := tallySPOVotes(&TallyContext{SPOState: state}, nil, tally)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "overflows uint64")
+		})
+	})
+
+	// A non-NoConfidence action routes the NoConfidence auto-vote to
+	// SPONoStake (see tallySPOVotes' RewardAccountAutoVote switch).
+	t.Run("no-confidence auto-vote routed to no stake", func(t *testing.T) {
+		newTally := func() *ProposalTally {
+			return &ProposalTally{
+				ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+			}
+		}
+
+		t.Run("just below overflow succeeds", func(t *testing.T) {
+			state := newState(models.PoolRewardAccountAutoVoteNoConfidence, 1)
+			tally := newTally()
+			err := tallySPOVotes(&TallyContext{SPOState: state}, nil, tally)
+			require.NoError(t, err)
+			assert.Equal(t, maxUint64, tally.SPONoStake)
+		})
+		t.Run("just above overflow fails", func(t *testing.T) {
+			state := newState(models.PoolRewardAccountAutoVoteNoConfidence, 2)
+			tally := newTally()
+			err := tallySPOVotes(&TallyContext{SPOState: state}, nil, tally)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "overflows uint64")
+		})
+	})
+}
+
+// TestLoadSPOVotingStateTotalStakeOverflow drives LoadSPOVotingState's
+// total-stake accumulation to the exact uint64 max boundary via two real
+// "mark" snapshot rows persisted through the database.
+func TestLoadSPOVotingStateTotalStakeOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+
+	newDB := func(stakeB uint64) *database.Database {
+		db, store := newTallyTestDB(t)
+		seedPoolWithStake(
+			t, store, testBytes(28, 1), testBytes(28, 2), maxUint64-1, 9,
+		)
+		seedPoolWithStake(
+			t, store, testBytes(28, 3), testBytes(28, 4), stakeB, 9,
+		)
+		return db
+	}
+
+	t.Run("just below overflow succeeds", func(t *testing.T) {
+		state, err := LoadSPOVotingState(newDB(1), nil, 9)
+		require.NoError(t, err)
+		assert.Equal(t, maxUint64, state.TotalStake)
+	})
+
+	t.Run("just above overflow fails", func(t *testing.T) {
+		_, err := LoadSPOVotingState(newDB(2), nil, 9)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overflows uint64")
+	})
+}
+
 func TestTallyCCVotesRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 	db, store := newTallyTestDB(t)
 	coldA := testBytes(28, 10)
