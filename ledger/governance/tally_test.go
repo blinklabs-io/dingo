@@ -175,6 +175,121 @@ func TestTallyDRepVotesSeparatesSameHashByCredentialTag(t *testing.T) {
 	assert.Equal(t, uint64(0), tally.DRepAbstainStake)
 }
 
+// TestAddUint64Overflow exercises addUint64 at the exact uint64 max
+// boundary: maxUint64-1 plus 1 is the largest sum that fits, plus 2
+// overflows.
+func TestAddUint64Overflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+
+	sum, err := addUint64(maxUint64-1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, maxUint64, sum)
+
+	_, err = addUint64(maxUint64-1, 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflows uint64")
+}
+
+// TestTallyDRepVotesTotalStakeOverflow drives the per-DRep DRepTotalStake
+// accumulation in tallyDRepVotes to the exact uint64 max boundary via two
+// synthetic DReps, bypassing the database entirely.
+func TestTallyDRepVotesTotalStakeOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+	credA := models.StakeCredentialRef{Key: testBytes(28, 1)}
+	credB := models.StakeCredentialRef{Key: testBytes(28, 2)}
+
+	newState := func(powerB uint64) *DRepVotingState {
+		return &DRepVotingState{
+			Dreps: []*models.Drep{
+				{CredentialTag: credA.Tag, Credential: credA.Key, Active: true},
+				{CredentialTag: credB.Tag, Credential: credB.Key, Active: true},
+			},
+			Powers: map[string]uint64{
+				credA.MapKey(): maxUint64 - 1,
+				credB.MapKey(): powerB,
+			},
+		}
+	}
+
+	t.Run("just below overflow succeeds", func(t *testing.T) {
+		tally := &ProposalTally{}
+		err := tallyDRepVotes(&TallyContext{DRepState: newState(1)}, nil, tally)
+		require.NoError(t, err)
+		assert.Equal(t, maxUint64, tally.DRepTotalStake)
+	})
+
+	t.Run("just above overflow fails", func(t *testing.T) {
+		tally := &ProposalTally{}
+		err := tallyDRepVotes(&TallyContext{DRepState: newState(2)}, nil, tally)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overflows uint64")
+	})
+}
+
+// TestTallyDRepVotesVirtualPowerOverflow drives the AlwaysAbstain +
+// AlwaysNoConfidence combination in tallyDRepVotes to the exact uint64 max
+// boundary.
+func TestTallyDRepVotesVirtualPowerOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+
+	newState := func(noConfidence uint64) *DRepVotingState {
+		return &DRepVotingState{
+			AbstainPower:      maxUint64 - 1,
+			NoConfidencePower: noConfidence,
+		}
+	}
+
+	t.Run("just below overflow succeeds", func(t *testing.T) {
+		tally := &ProposalTally{}
+		err := tallyDRepVotes(&TallyContext{DRepState: newState(1)}, nil, tally)
+		require.NoError(t, err)
+		assert.Equal(t, maxUint64, tally.DRepTotalStake)
+	})
+
+	t.Run("just above overflow fails", func(t *testing.T) {
+		tally := &ProposalTally{}
+		err := tallyDRepVotes(&TallyContext{DRepState: newState(2)}, nil, tally)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overflows uint64")
+	})
+}
+
+// TestTallySPOVotesYesStakeOverflow drives the explicit-vote SPOYesStake
+// accumulation in tallySPOVotes to the exact uint64 max boundary via two
+// synthetic pool snapshot rows, bypassing the database entirely.
+func TestTallySPOVotesYesStakeOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+	poolA := testBytes(28, 1)
+	poolB := testBytes(28, 2)
+
+	newState := func(stakeB uint64) *SPOVotingState {
+		return &SPOVotingState{
+			Dist: []*models.PoolStakeSnapshot{
+				{PoolKeyHash: poolA, TotalStake: types.Uint64(maxUint64 - 1)},
+				{PoolKeyHash: poolB, TotalStake: types.Uint64(stakeB)},
+			},
+		}
+	}
+	votes := []*models.GovernanceVote{
+		{VoterCredential: poolA, Vote: models.VoteYes},
+		{VoterCredential: poolB, Vote: models.VoteYes},
+	}
+
+	t.Run("just below overflow succeeds", func(t *testing.T) {
+		tally := &ProposalTally{}
+		err := tallySPOVotes(&TallyContext{SPOState: newState(1)}, votes, tally)
+		require.NoError(t, err)
+		assert.Equal(t, maxUint64, tally.SPOYesStake)
+	})
+
+	t.Run("just above overflow fails", func(t *testing.T) {
+		tally := &ProposalTally{}
+		err := tallySPOVotes(&TallyContext{SPOState: newState(2)}, votes, tally)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overflows uint64")
+	})
+}
+
 func TestTallyCCVotesRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 	db, store := newTallyTestDB(t)
 	coldA := testBytes(28, 10)

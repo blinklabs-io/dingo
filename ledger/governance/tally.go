@@ -305,6 +305,18 @@ func LoadDRepVotingState(
 	}, nil
 }
 
+// addUint64 returns a+b, or an error instead of wrapping when the sum
+// would overflow uint64. Stake values are lovelace amounts; ADA's fixed
+// ~45B supply keeps real sums far below the limit, but ratification
+// arithmetic must fail closed on corrupt or adversarial snapshot data
+// rather than silently wrap into an incorrect tally.
+func addUint64(a, b uint64) (uint64, error) {
+	if b > ^uint64(0)-a {
+		return 0, fmt.Errorf("stake sum overflows uint64: %d + %d", a, b)
+	}
+	return a + b, nil
+}
+
 // tallyDRepVotes sums voting power for regular DReps and the predefined
 // AlwaysAbstain / AlwaysNoConfidence DRep options. Non-voting regular
 // DReps are not counted toward any bucket. The proposal-independent
@@ -343,7 +355,11 @@ func tallyDRepVotes(
 				Key: drep.Credential,
 			}
 			power := state.Powers[ref.MapKey()]
-			tally.DRepTotalStake += power
+			var err error
+			tally.DRepTotalStake, err = addUint64(tally.DRepTotalStake, power)
+			if err != nil {
+				return fmt.Errorf("drep total stake: %w", err)
+			}
 
 			vote, voted := voteByCred[ref.MapKey()]
 			if !voted {
@@ -351,25 +367,56 @@ func tallyDRepVotes(
 			}
 			switch vote {
 			case models.VoteYes:
-				tally.DRepYesStake += power
+				tally.DRepYesStake, err = addUint64(tally.DRepYesStake, power)
+				if err != nil {
+					return fmt.Errorf("drep yes stake: %w", err)
+				}
 			case models.VoteNo:
-				tally.DRepNoStake += power
+				tally.DRepNoStake, err = addUint64(tally.DRepNoStake, power)
+				if err != nil {
+					return fmt.Errorf("drep no stake: %w", err)
+				}
 			case models.VoteAbstain:
-				tally.DRepAbstainStake += power
+				tally.DRepAbstainStake, err = addUint64(
+					tally.DRepAbstainStake, power,
+				)
+				if err != nil {
+					return fmt.Errorf("drep abstain stake: %w", err)
+				}
 			}
 		}
 	}
 
 	abstainPower := state.AbstainPower
 	noConfidencePower := state.NoConfidencePower
-	tally.DRepTotalStake += abstainPower + noConfidencePower
-	tally.DRepAbstainStake += abstainPower
+	virtualPower, err := addUint64(abstainPower, noConfidencePower)
+	if err != nil {
+		return fmt.Errorf("drep virtual power: %w", err)
+	}
+	tally.DRepTotalStake, err = addUint64(tally.DRepTotalStake, virtualPower)
+	if err != nil {
+		return fmt.Errorf("drep total stake: %w", err)
+	}
+	tally.DRepAbstainStake, err = addUint64(tally.DRepAbstainStake, abstainPower)
+	if err != nil {
+		return fmt.Errorf("drep abstain stake: %w", err)
+	}
 	if noConfidencePower > 0 {
 		if lcommon.GovActionType(tally.ActionType) ==
 			lcommon.GovActionTypeNoConfidence {
-			tally.DRepYesStake += noConfidencePower
+			tally.DRepYesStake, err = addUint64(
+				tally.DRepYesStake, noConfidencePower,
+			)
+			if err != nil {
+				return fmt.Errorf("drep yes stake: %w", err)
+			}
 		} else {
-			tally.DRepNoStake += noConfidencePower
+			tally.DRepNoStake, err = addUint64(
+				tally.DRepNoStake, noConfidencePower,
+			)
+			if err != nil {
+				return fmt.Errorf("drep no stake: %w", err)
+			}
 		}
 	}
 	return nil
@@ -434,7 +481,10 @@ func LoadSPOVotingState(
 	}
 	var total uint64
 	for _, s := range dist {
-		total += uint64(s.TotalStake)
+		total, err = addUint64(total, uint64(s.TotalStake))
+		if err != nil {
+			return nil, fmt.Errorf("spo total stake: %w", err)
+		}
 	}
 	return &SPOVotingState{Dist: dist, TotalStake: total}, nil
 }
@@ -471,15 +521,27 @@ func tallySPOVotes(
 
 	for _, s := range dist {
 		stake := uint64(s.TotalStake)
+		var err error
 
 		if v, voted := voteByPool[string(s.PoolKeyHash)]; voted {
 			switch v {
 			case models.VoteYes:
-				tally.SPOYesStake += stake
+				tally.SPOYesStake, err = addUint64(tally.SPOYesStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo yes stake: %w", err)
+				}
 			case models.VoteNo:
-				tally.SPONoStake += stake
+				tally.SPONoStake, err = addUint64(tally.SPONoStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo no stake: %w", err)
+				}
 			case models.VoteAbstain:
-				tally.SPOAbstainStake += stake
+				tally.SPOAbstainStake, err = addUint64(
+					tally.SPOAbstainStake, stake,
+				)
+				if err != nil {
+					return fmt.Errorf("spo abstain stake: %w", err)
+				}
 			}
 			continue
 		}
@@ -495,12 +557,21 @@ func tallySPOVotes(
 		}
 		switch s.RewardAccountAutoVote {
 		case models.PoolRewardAccountAutoVoteAbstain:
-			tally.SPOAbstainStake += stake
+			tally.SPOAbstainStake, err = addUint64(tally.SPOAbstainStake, stake)
+			if err != nil {
+				return fmt.Errorf("spo abstain stake: %w", err)
+			}
 		case models.PoolRewardAccountAutoVoteNoConfidence:
 			if isNoConfidenceAction {
-				tally.SPOYesStake += stake
+				tally.SPOYesStake, err = addUint64(tally.SPOYesStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo yes stake: %w", err)
+				}
 			} else {
-				tally.SPONoStake += stake
+				tally.SPONoStake, err = addUint64(tally.SPONoStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo no stake: %w", err)
+				}
 			}
 		case models.PoolRewardAccountAutoVoteNone:
 			// No auto-vote: pool contributes only to SPOTotalStake
