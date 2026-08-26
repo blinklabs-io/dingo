@@ -142,9 +142,12 @@ func TestReadState_ReportsStakePoolDistribution(t *testing.T) {
 
 	stub := &readStateLedgerStub{
 		block: models.Block{Slot: 1234, Hash: []byte{0xDE, 0xAD}, Number: 77},
+		// The height rides on the tip that was read with the rows, not on a
+		// later block lookup.
 		dist: &ledger.PoolStakeDistribution{
 			Tip: ochainsync.Tip{
-				Point: ocommon.NewPoint(1234, []byte{0xDE, 0xAD}),
+				Point:       ocommon.NewPoint(1234, []byte{0xDE, 0xAD}),
+				BlockNumber: 77,
 			},
 			SnapshotEpoch:    9,
 			TotalActiveStake: 4_000_000,
@@ -353,13 +356,18 @@ func TestReadState_NilStakePoolDistributionMessageMeansEveryPool(t *testing.T) {
 // so the two cannot be confused.
 func TestReadState_LedgerTipComesFromTheDistributionRead(t *testing.T) {
 	readTip := ochainsync.Tip{
-		Point: ocommon.NewPoint(1000, []byte{0x0A}),
+		Point:       ocommon.NewPoint(1000, []byte{0x0A}),
+		BlockNumber: 42,
 	}
 	stub := &readStateLedgerStub{
 		tip: ochainsync.Tip{
-			Point: ocommon.NewPoint(9999, []byte{0xFF}),
+			Point:       ocommon.NewPoint(9999, []byte{0xFF}),
+			BlockNumber: 999,
 		},
-		block: models.Block{Slot: 1000, Hash: []byte{0x0A}, Number: 42},
+		// Deliberately disagrees with readTip.BlockNumber: the height must
+		// come from the tip the rows were read at, not from a later block
+		// lookup that can name a different one.
+		block: models.Block{Slot: 1000, Hash: []byte{0x0A}, Number: 7},
 		dist: &ledger.PoolStakeDistribution{
 			Tip: readTip,
 		},
@@ -377,7 +385,12 @@ func TestReadState_LedgerTipComesFromTheDistributionRead(t *testing.T) {
 	assert.Equal(t, uint64(1000), tip.GetSlot(),
 		"the reported point must be the one the distribution was read at")
 	assert.Equal(t, []byte{0x0A}, tip.GetHash())
-	assert.Equal(t, uint64(42), tip.GetHeight())
+	assert.Equal(
+		t,
+		uint64(42),
+		tip.GetHeight(),
+		"the height must come from the same read as the point, not the live tip",
+	)
 	assert.Zero(t, stub.tipCalls,
 		"the live tip must not be sampled while building the reply")
 }
@@ -454,15 +467,17 @@ func TestReadState_LedgerErrorIsInternal(t *testing.T) {
 	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
 }
 
-// TestReadState_TipHeightFallsBackWhenBlockMissing covers the tip block being
-// unreadable. The distribution is still the answer to the question asked, so
-// the reply is served with an unknown height rather than failed.
-func TestReadState_TipHeightFallsBackWhenBlockMissing(t *testing.T) {
+// TestReadState_TipHeightSurvivesAnUnreadableBlock covers the tip's block row
+// being unreadable. The reply still carries the real height, because the tip
+// read alongside the stake rows already holds it; nothing has to go back to
+// storage to recover it.
+func TestReadState_TipHeightSurvivesAnUnreadableBlock(t *testing.T) {
 	stub := &readStateLedgerStub{
 		blockErr: errors.New("no such block"),
 		dist: &ledger.PoolStakeDistribution{
 			Tip: ochainsync.Tip{
-				Point: ocommon.NewPoint(4321, []byte{0xBE, 0xEF}),
+				Point:       ocommon.NewPoint(4321, []byte{0xBE, 0xEF}),
+				BlockNumber: 88,
 			},
 		},
 	}
@@ -477,7 +492,9 @@ func TestReadState_TipHeightFallsBackWhenBlockMissing(t *testing.T) {
 	require.NotNil(t, tip)
 	assert.Equal(t, uint64(4321), tip.GetSlot())
 	assert.Equal(t, []byte{0xBE, 0xEF}, tip.GetHash())
-	assert.Equal(t, uint64(0), tip.GetHeight())
+	assert.Equal(t, uint64(88), tip.GetHeight(),
+		"an unreadable block must not turn into a height of 0, which on the "+
+			"wire is indistinguishable from the origin block")
 }
 
 // TestStakeFractionToBetaRational covers the encoding of a stake fraction into

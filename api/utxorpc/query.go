@@ -271,21 +271,7 @@ func (s *queryServiceServer) ReadParams(
 	}
 
 	// Get chain point (slot, hash, and height)
-	point := s.utxorpc.config.LedgerState.Tip().Point
-	var br blockRef
-	if model, err := s.utxorpc.config.LedgerState.GetBlock(point); err != nil {
-		s.utxorpc.config.Logger.Warn(
-			"failed to look up tip block for height; using height=0",
-			"error", err,
-		)
-		br = blockRef{
-			Slot:   point.Slot,
-			Hash:   point.Hash,
-			Height: 0,
-		}
-	} else {
-		br = blockRefFromModel(model)
-	}
+	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
 
 	// Set up response parameters
 	tmpPparams, err := protoParams.Utxorpc()
@@ -516,21 +502,7 @@ func (s *queryServiceServer) ReadUtxos(
 	}
 
 	// Get chain point (slot, hash, and height)
-	point := s.utxorpc.config.LedgerState.Tip().Point
-	var br blockRef
-	if model, err := s.utxorpc.config.LedgerState.BlockByHash(point.Hash); err != nil {
-		s.utxorpc.config.Logger.Warn(
-			"failed to look up tip block for height; using height=0",
-			"error", err,
-		)
-		br = blockRef{
-			Slot:   point.Slot,
-			Hash:   point.Hash,
-			Height: 0,
-		}
-	} else {
-		br = blockRefFromModel(model)
-	}
+	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
 
 	// Set up response utxos
 	resp.LedgerTip = &query.ChainPoint{
@@ -544,21 +516,7 @@ func (s *queryServiceServer) ReadUtxos(
 
 // searchUtxosLedgerTip returns the current tip as a ChainPoint for SearchUtxos responses.
 func (s *queryServiceServer) searchUtxosLedgerTip() *query.ChainPoint {
-	point := s.utxorpc.config.LedgerState.Tip().Point
-	var br blockRef
-	if model, err := s.utxorpc.config.LedgerState.BlockByHash(point.Hash); err != nil {
-		s.utxorpc.config.Logger.Warn(
-			"failed to look up tip block for height; using height=0",
-			"error", err,
-		)
-		br = blockRef{
-			Slot:   point.Slot,
-			Hash:   point.Hash,
-			Height: 0,
-		}
-	} else {
-		br = blockRefFromModel(model)
-	}
+	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
 	return &query.ChainPoint{
 		Slot:   br.Slot,
 		Hash:   br.Hash,
@@ -867,21 +825,7 @@ func (s *queryServiceServer) ReadTx(
 	}
 
 	// Get chain point (slot, hash, and height)
-	point := s.utxorpc.config.LedgerState.Tip().Point
-	var br blockRef
-	if model, err := s.utxorpc.config.LedgerState.GetBlock(point); err != nil {
-		s.utxorpc.config.Logger.Warn(
-			"failed to look up tip block for height; using height=0",
-			"error", err,
-		)
-		br = blockRef{
-			Slot:   point.Slot,
-			Hash:   point.Hash,
-			Height: 0,
-		}
-	} else {
-		br = blockRefFromModel(model)
-	}
+	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
 
 	// Set up response utxos
 	resp := &query.ReadTxResponse{
