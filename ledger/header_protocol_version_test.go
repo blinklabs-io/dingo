@@ -474,6 +474,25 @@ func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(t *testing.T
 	assert.True(t, got)
 }
 
+// TestLedgerStateIsMainnet_PrimeMainnetNameWithMismatchedGenesisMagicStaysMainnet
+// pins a second reviewer-caught gap: the override checked only the
+// registry's canonical magic for the configured name, never the magic
+// actually present in the loaded genesis. Network="prime-mainnet" paired
+// with a genesis whose own magic matches neither real mainnet's nor
+// prime-mainnet's (a corrupted or misconfigured genesis file) must not
+// disable the BBODY check — that combination isn't the known
+// identity-reuse case, just a broken config, and must stay mainnet-strict.
+func TestLedgerStateIsMainnet_PrimeMainnetNameWithMismatchedGenesisMagicStaysMainnet(
+	t *testing.T,
+) {
+	ls := newLedgerStateForNetworkNamed(
+		t, "Mainnet", 999, "prime-mainnet",
+	)
+	got, err := ls.isMainnet()
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
 // TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig
 // confirms the fail-closed contract reaches the wiring layer:
 // validateBlockHeaderProtocolVersion must return an error rather than

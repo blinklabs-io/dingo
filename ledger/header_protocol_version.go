@@ -153,10 +153,16 @@ func ValidateHeaderProtocolVersion(
 // cardano-ledger's mainnet-only BBODY strictness there rejects headers a
 // chain's own nodes have already built on top of.
 //
-// A Mainnet-tagged genesis is only overridden to non-mainnet when
+// A Mainnet-tagged genesis is only overridden to non-mainnet when both the
+// genesis actually loaded carries mainnet's network magic AND
 // ls.config.Network names a network gouroboros itself registers as
-// sharing mainnet's network magic (currently just prime-mainnet) — the
-// narrow, known identity-reuse case this function exists to handle. Any
+// sharing that magic (currently just prime-mainnet) — the narrow, known
+// identity-reuse case this function exists to handle. Checking only the
+// registry's canonical magic for the configured name, without also
+// checking sg.NetworkMagic, would let Network="prime-mainnet" disable the
+// BBODY check for a genesis whose own magic doesn't actually match either
+// network — a misconfigured or corrupted genesis file, not the identity-
+// reuse case being handled. Any
 // other named network paired with a Mainnet-tagged genesis is a
 // configuration mismatch, not a recognized alias, and falls through to
 // the genesis-only answer (true) rather than silently relaxing the BBODY
@@ -184,18 +190,28 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 	}
 	switch sg.NetworkId {
 	case shelleyGenesisMainnetNetworkId:
-		if ls.config.Network != "" {
+		if ls.config.Network != "" &&
+			sg.NetworkMagic == ouroboros.NetworkCardanoMainnet.NetworkMagic {
 			if known, ok := ouroboros.NetworkByName(ls.config.Network); ok &&
 				known.Name != ouroboros.NetworkCardanoMainnet.Name &&
 				known.NetworkMagic == ouroboros.NetworkCardanoMainnet.NetworkMagic {
 				// Only a network gouroboros itself registers as sharing
 				// mainnet's magic (currently just prime-mainnet) may
-				// override a Mainnet-tagged genesis to non-mainnet. Any
-				// other named network paired with a Mainnet-tagged genesis
-				// is a configuration mismatch, not a known identity-reuse
-				// case, so it falls through to the genesis-only answer
-				// (true) rather than silently relaxing the BBODY check for
-				// a misconfigured node.
+				// override a Mainnet-tagged genesis to non-mainnet, and
+				// only when the genesis actually loaded also carries
+				// mainnet's magic — not merely the registry's canonical
+				// value for the configured name. Without the sg.NetworkMagic
+				// check, Network="prime-mainnet" paired with a loaded
+				// genesis whose own magic is neither real mainnet's nor
+				// prime-mainnet's (e.g. a misconfigured or corrupted
+				// genesis file) would still disable the BBODY check, since
+				// the registry lookup only reflects prime-mainnet's known
+				// magic, not what was actually loaded. Any other named
+				// network paired with a Mainnet-tagged genesis is a
+				// configuration mismatch, not a known identity-reuse case,
+				// and falls through to the genesis-only answer (true)
+				// rather than silently relaxing the BBODY check for a
+				// misconfigured node.
 				return false, nil
 			}
 		}
