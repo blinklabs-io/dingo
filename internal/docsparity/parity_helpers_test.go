@@ -23,8 +23,10 @@ package docsparity_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -49,14 +51,6 @@ var historicalDocs = map[string]bool{
 	"benchmark_results_api_backfill.md": true,
 	"benchmark_results_bp_pi.md":        true,
 	"benchmark_results_targeted.md":     true,
-}
-
-// skippedDirs never contain documentation this package owns.
-var skippedDirs = map[string]bool{
-	".git":         true,
-	".worktrees":   true,
-	".tools":       true,
-	"node_modules": true,
 }
 
 // repoRoot walks up from the working directory until it finds the module
@@ -94,41 +88,30 @@ func readRepoFile(t *testing.T, root, rel string) string {
 	return strings.ReplaceAll(string(data), "\r\n", "\n")
 }
 
-// filesMatching returns repository-relative paths of every file under root
-// for which match reports true.
+// filesMatching returns tracked repository-relative paths for which match
+// reports true. Using Git's index keeps local worktrees and other untracked
+// files out of documentation parity checks.
 func filesMatching(
 	t *testing.T,
 	root string,
-	match func(name string) bool,
+	match func(rel string) bool,
 ) []string {
 	t.Helper()
 
 	var found []string
-	err := filepath.WalkDir(
-		root,
-		func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				if skippedDirs[entry.Name()] {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !match(entry.Name()) {
-				return nil
-			}
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			found = append(found, rel)
-			return nil
-		},
-	)
+	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
+	output, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("walk %s: %v", root, err)
+		t.Fatalf("list tracked files in %s: %v", root, err)
+	}
+	for rel := range strings.SplitSeq(string(output), "\x00") {
+		if rel == "" {
+			continue
+		}
+		rel = filepath.FromSlash(rel)
+		if match(rel) {
+			found = append(found, rel)
+		}
 	}
 	return found
 }
@@ -137,8 +120,8 @@ func filesMatching(
 func markdownFiles(t *testing.T, root string) []string {
 	t.Helper()
 
-	all := filesMatching(t, root, func(name string) bool {
-		return strings.HasSuffix(name, ".md")
+	all := filesMatching(t, root, func(rel string) bool {
+		return strings.HasSuffix(rel, ".md")
 	})
 	kept := make([]string, 0, len(all))
 	for _, rel := range all {
@@ -154,7 +137,8 @@ func markdownFiles(t *testing.T, root string) []string {
 func dockerfiles(t *testing.T, root string) []string {
 	t.Helper()
 
-	return filesMatching(t, root, func(name string) bool {
+	return filesMatching(t, root, func(rel string) bool {
+		name := filepath.Base(rel)
 		return name == "Dockerfile" || strings.HasPrefix(name, "Dockerfile.")
 	})
 }
@@ -163,24 +147,67 @@ func dockerfiles(t *testing.T, root string) []string {
 func workflowFiles(t *testing.T, root string) []string {
 	t.Helper()
 
-	dir := filepath.Join(root, ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
+	return filesMatching(t, root, func(rel string) bool {
+		return (strings.HasSuffix(rel, ".yml") ||
+			strings.HasSuffix(rel, ".yaml")) &&
+			filepath.Dir(rel) == filepath.Join(".github", "workflows")
+	})
+}
+
+func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+
+	writeTestFile(t, root, "docs/tracked.md")
+	writeTestFile(t, root, "Dockerfile")
+	writeTestFile(t, root, ".github/workflows/tracked.yml")
+	writeTestFile(t, root, ".claude/worktrees/scratch/ignored.md")
+	writeTestFile(t, root, ".claude/worktrees/scratch/Dockerfile")
+	writeTestFile(t, root, ".github/workflows/ignored.yaml")
+	runGit(
+		t,
+		root,
+		"add",
+		"docs/tracked.md",
+		"Dockerfile",
+		".github/workflows/tracked.yml",
+	)
+
+	got, want := markdownFiles(t, root), []string{"docs/tracked.md"}
+	if !slices.Equal(got, want) {
+		t.Errorf("markdownFiles() = %v, want %v", got, want)
 	}
-	var found []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() {
-			continue
-		}
-		if !strings.HasSuffix(name, ".yml") &&
-			!strings.HasSuffix(name, ".yaml") {
-			continue
-		}
-		found = append(found, filepath.Join(".github", "workflows", name))
+	got, want = dockerfiles(t, root), []string{"Dockerfile"}
+	if !slices.Equal(got, want) {
+		t.Errorf("dockerfiles() = %v, want %v", got, want)
 	}
-	return found
+	got, want = workflowFiles(t, root), []string{
+		filepath.Join(".github", "workflows", "tracked.yml"),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("workflowFiles() = %v, want %v", got, want)
+	}
+}
+
+func writeTestFile(t *testing.T, root, rel string) {
+	t.Helper()
+
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create directory for %s: %v", rel, err)
+	}
+	if err := os.WriteFile(path, []byte("test\n"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", rel, err)
+	}
+}
+
+func runGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
 }
 
 // markdownBlock is one logical chunk of a markdown document: a paragraph, a
