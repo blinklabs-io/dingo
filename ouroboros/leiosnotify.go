@@ -1099,7 +1099,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 	// connection free while its progress survives for the next offer. A
 	// completing attempt's caller stores the whole set, which clears this.
 	defer func() {
-		o.retainLeiosPartialTxs(point.Hash, result)
+		o.retainLeiosPartialTxs(point.Hash, result, validate)
 	}()
 	// The no-progress guard below guarantees termination (each non-final round
 	// places at least one new transaction, and there are txCount of them); this

@@ -194,12 +194,12 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 			tail[i] = cbor.RawMessage(enc)
 		}
 	}
-	o.retainLeiosPartialTxs(point.Hash, head)
+	o.retainLeiosPartialTxs(point.Hash, head, nil)
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 60, data.partialTxCount())
 
-	o.retainLeiosPartialTxs(point.Hash, tail)
+	o.retainLeiosPartialTxs(point.Hash, tail, nil)
 	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, txCount, data.partialTxCount())
@@ -219,7 +219,7 @@ func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.retainLeiosPartialTxs([]byte{0xde, 0xad}, []cbor.RawMessage{
 		mustCbor(t, "tx0"),
-	})
+	}, nil)
 	_, ok := o.lookupLeiosEndorserBlock([]byte{0xde, 0xad})
 	require.False(t, ok)
 }

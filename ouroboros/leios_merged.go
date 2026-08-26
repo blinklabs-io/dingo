@@ -452,6 +452,7 @@ func (o *Ouroboros) seedLeiosPartialTxs(
 func (o *Ouroboros) retainLeiosPartialTxs(
 	hash []byte,
 	partial []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	if len(partial) == 0 {
 		return
@@ -464,9 +465,29 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 		existing.txCount <= 0 {
 		return
 	}
+	held := existing.partialTxs
+	add := partial
+	if validate != nil {
+		held = cloneRawMessages(held)
+		for idx, raw := range held {
+			if raw != nil {
+				if err := validate(idx, raw); err != nil {
+					held[idx] = nil
+				}
+			}
+		}
+		add = cloneRawMessages(add)
+		for idx, raw := range add {
+			if raw != nil {
+				if err := validate(idx, raw); err != nil {
+					add[idx] = nil
+				}
+			}
+		}
+	}
 	merged, added := mergeLeiosPartialTxs(
-		existing.partialTxs,
-		partial,
+		held,
+		add,
 		existing.txCount,
 	)
 	if added == 0 {

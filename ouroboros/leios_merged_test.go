@@ -811,6 +811,58 @@ func (r manifestTxRequester) BlockTxsRequest(
 	return oleiosfetch.NewMsgBlockTxsFull(point, bitmaps, txs), nil
 }
 
+type recordingManifestTxRequester struct {
+	txs       []cbor.RawMessage
+	requested []int
+}
+
+func (r *recordingManifestTxRequester) BlockTxsRequest(
+	_ context.Context,
+	point ocommon.Point,
+	bitmaps map[uint16]uint64,
+) (protocol.Message, error) {
+	indices := leiosBitmapTxIndices(bitmaps)
+	r.requested = append(r.requested, indices...)
+	txs := make([]cbor.RawMessage, 0, len(indices))
+	for _, index := range indices {
+		if index >= 0 && index < len(r.txs) {
+			txs = append(txs, r.txs[index])
+		}
+	}
+	return oleiosfetch.NewMsgBlockTxsFull(point, bitmaps, txs), nil
+}
+
+func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(t *testing.T) {
+	tx1, ref1 := testLeiosManifestTx(t, 1)
+	tx2, ref2 := testLeiosManifestTx(t, 2)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref1, ref2},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(123, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+
+	// Seed index 0 with the body for index 1. A resumed fetch must discard it
+	// before computing its request bitmap, then replace it in the retained set.
+	o.retainLeiosPartialTxs(point.Hash, []cbor.RawMessage{tx2, nil}, nil)
+	requester := &recordingManifestTxRequester{
+		txs: []cbor.RawMessage{tx1, tx2},
+	}
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 2, manifestRaw)
+	require.NoError(t, err)
+	require.Contains(t, requester.requested, 0)
+	require.NoError(t, validateLeiosEndorserBlockTxs(manifestRaw, txs))
+
+	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, 2, cached.partialTxCount())
+	require.NoError(t, validateLeiosEndorserBlockTxs(
+		manifestRaw,
+		leiosCollectTxs(cached.partialTxs),
+	))
+}
+
 func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(t *testing.T) {
 	tx1, ref1 := testLeiosManifestTx(t, 1)
 	tx2, ref2 := testLeiosManifestTx(t, 2)
