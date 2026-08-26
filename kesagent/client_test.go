@@ -488,7 +488,7 @@ func TestSignModeReconnectsAfterDrop(t *testing.T) {
 		Mode:         ModeSign,
 		OpCert:       opcert,
 		MinReconnect: 10 * time.Millisecond,
-		SignTimeout:  time.Second,
+		SignTimeout:  900 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)

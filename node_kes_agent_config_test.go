@@ -90,3 +90,45 @@ func TestKESAgentSignTimeoutOption(t *testing.T) {
 	require.Equal(t, want, cfg.shelleyKESAgentSignTimeout)
 	require.Equal(t, want, cfg.cfg.ShelleyKESAgentSignTimeout)
 }
+
+func TestProgrammaticConfigValidatesKESAgentSignTimeout(t *testing.T) {
+	newProducer := func(timeout time.Duration) (*Node, error) {
+		return New(NewConfig(
+			WithNetworkMagic(1),
+			WithPrometheusRegistry(prometheus.NewRegistry()),
+			WithListeners(ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: "127.0.0.1:0",
+			}),
+			WithBlockProducer(true),
+			WithShelleyVRFKey("/keys/vrf.skey"),
+			WithShelleyOperationalCertificate("/keys/opcert.cert"),
+			WithShelleyKESAgentSocket("/run/kes-agent.sock"),
+			WithShelleyKESAgentMode("sign"),
+			WithShelleyKESAgentSignTimeout(timeout),
+		))
+	}
+
+	for _, timeout := range []time.Duration{
+		-time.Nanosecond,
+		time.Second,
+		time.Second + time.Nanosecond,
+	} {
+		t.Run("invalid_"+timeout.String(), func(t *testing.T) {
+			_, err := newProducer(timeout)
+			require.ErrorContains(t, err, "shelleyKesAgentSignTimeout")
+		})
+	}
+
+	for _, timeout := range []time.Duration{
+		0,
+		time.Nanosecond,
+		time.Second - time.Nanosecond,
+	} {
+		t.Run("valid_"+timeout.String(), func(t *testing.T) {
+			n, err := newProducer(timeout)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = n.Stop() })
+		})
+	}
+}

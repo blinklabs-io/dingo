@@ -34,6 +34,9 @@ import (
 const (
 	minUnprivilegedPort = 1024
 	maxPort             = 65535
+	// maxKESAgentSignTimeout is exclusive. A sign-mode request blocks the
+	// slot-aligned forging loop, so it must finish before the next mainnet slot.
+	maxKESAgentSignTimeout = time.Second
 )
 
 // ValidateKESKeySources rejects a block producer that names both a local KES
@@ -48,6 +51,19 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	if kesKeyPath != "" && kesAgentSocket != "" {
 		return errors.New(
 			"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		)
+	}
+	return nil
+}
+
+// ValidateKESAgentSignTimeout accepts zero as the documented default selector,
+// or an explicit positive timeout shorter than one mainnet slot.
+func ValidateKESAgentSignTimeout(timeout time.Duration) error {
+	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
+		return fmt.Errorf(
+			"shelleyKesAgentSignTimeout (%s) must be zero (use default) or positive and less than %s",
+			timeout,
+			maxKESAgentSignTimeout,
 		)
 	}
 	return nil
@@ -528,11 +544,10 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.ShelleyKESAgentMode,
 		))
 	}
-	if c.ShelleyKESAgentSignTimeout < 0 {
-		errs = append(errs, fmt.Errorf(
-			"shelleyKesAgentSignTimeout (%s) must not be negative",
-			c.ShelleyKESAgentSignTimeout,
-		))
+	if err := ValidateKESAgentSignTimeout(
+		c.ShelleyKESAgentSignTimeout,
+	); err != nil {
+		errs = append(errs, err)
 	}
 
 	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].

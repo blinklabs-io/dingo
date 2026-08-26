@@ -18,8 +18,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // frameBytes builds a length-prefixed frame around an arbitrary payload,
@@ -90,6 +93,40 @@ func TestReadFrameTruncatedPayloadDoesNotDecode(t *testing.T) {
 	}
 	if kp.Period != 0 {
 		t.Fatalf("a truncated frame populated the value: period %d", kp.Period)
+	}
+}
+
+type deadlineRecordingReader struct {
+	*bytes.Reader
+	deadlines []time.Time
+}
+
+func (r *deadlineRecordingReader) SetReadDeadline(deadline time.Time) error {
+	r.deadlines = append(r.deadlines, deadline)
+	return nil
+}
+
+func TestReadFrameLeavesCallerDeadlineUntouched(t *testing.T) {
+	// Handshake and sign-mode callers install tighter round-trip deadlines
+	// around readFrame. The generic reader must neither replace nor clear them;
+	// only the serve-key loop opts into a body-only timeout.
+	r := &deadlineRecordingReader{
+		Reader: bytes.NewReader(
+			frameBytes(
+				[]byte(`{"protocol":"bursa-kes-agent/1","mode":"sign"}`),
+			),
+		),
+	}
+	var hello Hello
+	if err := readFrame(r, &hello); err != nil {
+		t.Fatalf("readFrame: %v", err)
+	}
+	if len(r.deadlines) != 0 {
+		t.Fatalf(
+			"readFrame changed a caller-managed deadline %d times: %v",
+			len(r.deadlines),
+			r.deadlines,
+		)
 	}
 }
 
@@ -188,5 +225,48 @@ func TestWriteFrameRoundTrips(t *testing.T) {
 	if got.Type != want.Type || got.Period != want.Period ||
 		!bytes.Equal(got.Signature, want.Signature) {
 		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
+	}
+}
+
+type shortNilWriter struct {
+	shortCall int
+	calls     int
+}
+
+func (w *shortNilWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls == w.shortCall {
+		return len(p) - 1, nil
+	}
+	return len(p), nil
+}
+
+func TestWriteFrameRejectsShortNilWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		shortCall int
+		wantPart  string
+	}{
+		{name: "header", shortCall: 1, wantPart: "frame header"},
+		{name: "payload", shortCall: 2, wantPart: "frame payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &shortNilWriter{shortCall: tc.shortCall}
+			err := writeFrame(w, Hello{Protocol: ProtocolID, Mode: ModeSign})
+			if !errors.Is(err, io.ErrShortWrite) {
+				t.Fatalf(
+					"short %s write returned %v, want io.ErrShortWrite",
+					tc.wantPart,
+					err,
+				)
+			}
+			if !strings.Contains(err.Error(), tc.wantPart) {
+				t.Fatalf(
+					"short-write error %q does not name %s",
+					err,
+					tc.wantPart,
+				)
+			}
+		})
 	}
 }

@@ -375,6 +375,26 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "KES agent sign timeout defaults at zero",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 0
+			},
+		},
+		{
+			name: "KES agent sign timeout at slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "KES agent sign timeout above slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second + time.Nanosecond
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
 			name: "no network and no magic",
 			modify: func(c *Config) {
 				c.Network = ""

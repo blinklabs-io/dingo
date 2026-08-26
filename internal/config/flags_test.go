@@ -778,6 +778,33 @@ func loadConfigThroughPipeline(
 	return cfg, nil
 }
 
+func TestPipeline_KESAgentSignTimeoutBounds(t *testing.T) {
+	_, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=1s"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "shelleyKesAgentSignTimeout") {
+		t.Fatalf("CLI accepted a one-slot KES agent sign timeout: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=999ms"},
+	)
+	if err != nil {
+		t.Fatalf("CLI rejected a sub-slot KES agent sign timeout: %v", err)
+	}
+	if cfg.ShelleyKESAgentSignTimeout != 999*time.Millisecond {
+		t.Fatalf(
+			"CLI sign timeout = %s, want 999ms",
+			cfg.ShelleyKESAgentSignTimeout,
+		)
+	}
+}
+
 // TestPipeline_FlagOverridesInvalidYAMLRunMode is a precedence
 // regression test: a higher-precedence CLI flag must be able to replace
 // an invalid YAML runMode, so LoadConfig cannot reject the value before

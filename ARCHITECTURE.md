@@ -673,6 +673,10 @@ header signing requests so the secret key remains with the agent. The node
 owns the client lifecycle: failed forging initialization closes a temporary
 client, successful startup retains it, and live lifecycle operations and node
 shutdown stop the client before wiping any locally held key material.
+Serve-key connections may wait indefinitely between pushes, but once a frame
+length header arrives its body must arrive within ten seconds or the client
+closes the connection and reconnects. Handshake and sign-mode exchanges retain
+their tighter caller-managed deadlines.
 
 ## Directory Structure
 
@@ -3624,6 +3628,9 @@ answered otherwise looks healthy in the forging metrics until a slot is lost.
 Block-producer startup waits a bounded interval for the agent to deliver a key
 (serve-key) or accept a session (sign) and logs an error rather than failing,
 since the agent may legitimately start after the node.
+The sign-mode round-trip timeout is 500 milliseconds by default; an explicit
+value must be positive and strictly below the one-second mainnet slot so a
+stalled agent cannot park the synchronous forging loop across later slots.
 
 One agent can serve the same KES key to more than one producer, and nothing in
 the protocol or in this client detects that. Two producers holding the same key

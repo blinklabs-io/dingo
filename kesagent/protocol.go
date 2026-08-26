@@ -49,6 +49,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 const (
@@ -58,6 +59,11 @@ const (
 
 	// maxFrameLen caps a single frame payload (matches the agent).
 	maxFrameLen = 1 << 20 // 1 MiB
+
+	// frameBodyReadTimeout bounds how long a serve-key frame body may take to
+	// arrive after its length header. The header remains unbounded because an
+	// idle serve-key connection legitimately waits between pushes.
+	frameBodyReadTimeout = 10 * time.Second
 )
 
 // Socket modes for the service socket.
@@ -125,11 +131,19 @@ func writeFrame(w io.Writer, v any) error {
 		hdr[:],
 		uint32(len(payload)),
 	) // #nosec G115 -- bounded by maxFrameLen
-	if _, err := w.Write(hdr[:]); err != nil {
+	n, err := w.Write(hdr[:])
+	if err != nil {
 		return fmt.Errorf("kesagent: write frame header: %w", err)
 	}
-	if _, err := w.Write(payload); err != nil {
+	if n != len(hdr) {
+		return fmt.Errorf("kesagent: write frame header: %w", io.ErrShortWrite)
+	}
+	n, err = w.Write(payload)
+	if err != nil {
 		return fmt.Errorf("kesagent: write frame payload: %w", err)
+	}
+	if n != len(payload) {
+		return fmt.Errorf("kesagent: write frame payload: %w", io.ErrShortWrite)
 	}
 	return nil
 }
@@ -149,6 +163,17 @@ var framePayloadBuffer = func(n uint32) []byte { return make([]byte, n) }
 // reconnect. json.Unmarshal base64-decodes into freshly allocated fields, so
 // nothing in v aliases this buffer.
 func readFrame(r io.Reader, v any) error {
+	return readFrameWithBodyTimeout(r, v, 0)
+}
+
+// readFrameWithBodyTimeout reads one frame and bounds only its body read. It is
+// used by the long-lived serve-key loop; handshake and sign callers keep their
+// tighter round-trip deadlines around readFrame instead.
+func readFrameWithBodyTimeout(
+	r io.Reader,
+	v any,
+	bodyTimeout time.Duration,
+) error {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return err // may be io.EOF; callers distinguish
@@ -159,6 +184,19 @@ func readFrame(r io.Reader, v any) error {
 	}
 	if n > maxFrameLen {
 		return fmt.Errorf("kesagent: frame too large (%d bytes)", n)
+	}
+	if bodyTimeout > 0 {
+		if d, ok := r.(interface {
+			SetReadDeadline(time.Time) error
+		}); ok {
+			if err := d.SetReadDeadline(time.Now().Add(bodyTimeout)); err != nil {
+				return fmt.Errorf(
+					"kesagent: set frame body read deadline: %w",
+					err,
+				)
+			}
+			defer func() { _ = d.SetReadDeadline(time.Time{}) }()
+		}
 	}
 	payload := framePayloadBuffer(n)
 	defer wipe(payload)

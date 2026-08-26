@@ -530,6 +530,11 @@ func (n *Node) configValidate() error {
 			return err
 		}
 	}
+	if err := internalconfig.ValidateKESAgentSignTimeout(
+		n.config.cfg.ShelleyKESAgentSignTimeout,
+	); err != nil {
+		return err
+	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",

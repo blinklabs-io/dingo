@@ -16,6 +16,7 @@ package kesagent
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"net"
@@ -30,6 +31,43 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	prometheustest "github.com/prometheus/client_golang/prometheus/testutil"
 )
+
+// clampedReadDeadlineConn shortens long read deadlines so the serve-key body
+// timeout can be exercised without making the test wait for the production
+// ten-second bound. A caller deadline already tighter than max is preserved.
+type clampedReadDeadlineConn struct {
+	net.Conn
+	max       time.Duration
+	readBytes atomic.Int64
+	events    chan<- readDeadlineEvent
+}
+
+type readDeadlineEvent struct {
+	deadline  time.Time
+	readBytes int64
+}
+
+func (c *clampedReadDeadlineConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.readBytes.Add(int64(n))
+	return n, err
+}
+
+func (c *clampedReadDeadlineConn) SetReadDeadline(deadline time.Time) error {
+	if c.events != nil {
+		c.events <- readDeadlineEvent{
+			deadline:  deadline,
+			readBytes: c.readBytes.Load(),
+		}
+	}
+	if !deadline.IsZero() {
+		maxDeadline := time.Now().Add(c.max)
+		if deadline.After(maxDeadline) {
+			deadline = maxDeadline
+		}
+	}
+	return c.Conn.SetReadDeadline(deadline)
+}
 
 // --- helpers ------------------------------------------------------------
 
@@ -182,6 +220,121 @@ func TestConnectFailureLoggingIsThrottled(t *testing.T) {
 	}
 	if warns == 0 {
 		t.Fatal("no connect failure was reported at Warn")
+	}
+}
+
+func TestServeKeyReconnectsWhenFrameBodyStalls(t *testing.T) {
+	_, _, opcert := newTestKES(t, 0)
+	var (
+		attempts   atomic.Int32
+		servers    sync.WaitGroup
+		secondOnce sync.Once
+	)
+	partialSent := make(chan struct{})
+	secondDial := make(chan struct{})
+	release := make(chan struct{})
+	deadlineEvents := make(chan readDeadlineEvent, 4)
+
+	dial := func(context.Context) (net.Conn, error) {
+		clientConn, serverConn := net.Pipe()
+		attempt := attempts.Add(1)
+		servers.Go(func() {
+			defer func() { _ = serverConn.Close() }()
+			if err := writeFrame(serverConn, Hello{
+				Protocol: ProtocolID,
+				Mode:     ModeServeKey,
+			}); err != nil {
+				return
+			}
+			if attempt == 1 {
+				// Declare a two-byte body but send only its first byte. The peer
+				// remains connected, so only the body deadline can release the
+				// client's registered read and allow another dial.
+				partial := frameBytes([]byte("{}"))[:5]
+				if _, err := serverConn.Write(partial); err != nil {
+					return
+				}
+				close(partialSent)
+			} else {
+				secondOnce.Do(func() { close(secondDial) })
+			}
+			<-release
+		})
+		wrapped := &clampedReadDeadlineConn{
+			Conn: clientConn,
+			max:  25 * time.Millisecond,
+		}
+		if attempt == 1 {
+			wrapped.events = deadlineEvents
+		}
+		return wrapped, nil
+	}
+
+	client, err := New(Config{
+		Mode:         ModeServeKey,
+		OpCert:       opcert,
+		Dial:         dial,
+		MinReconnect: time.Millisecond,
+		MaxReconnect: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	t.Cleanup(func() {
+		client.Close()
+		close(release)
+		servers.Wait()
+	})
+	client.Start(t.Context())
+
+	select {
+	case <-partialSent:
+	case <-time.After(time.Second):
+		t.Fatal("fake agent did not send the partial serve-key frame")
+	}
+	select {
+	case <-secondDial:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal(
+			"serve-key client did not reconnect after a declared frame body stalled",
+		)
+	}
+
+	events := make([]readDeadlineEvent, 0, cap(deadlineEvents))
+	for range cap(deadlineEvents) {
+		select {
+		case event := <-deadlineEvents:
+			events = append(events, event)
+		case <-time.After(time.Second):
+			t.Fatalf(
+				"first connection recorded %d read-deadline changes, want 4: %+v",
+				len(events),
+				events,
+			)
+		}
+	}
+	if events[0].deadline.IsZero() || events[0].readBytes != 0 {
+		t.Fatalf(
+			"handshake deadline was not installed before reading: %+v",
+			events,
+		)
+	}
+	if !events[1].deadline.IsZero() || events[1].readBytes <= 4 {
+		t.Fatalf("handshake deadline was not cleared after Hello: %+v", events)
+	}
+	if events[2].deadline.IsZero() ||
+		events[2].readBytes != events[1].readBytes+4 {
+		t.Fatalf(
+			"serve-key body deadline did not start after its four-byte header: %+v",
+			events,
+		)
+	}
+	if !events[3].deadline.IsZero() ||
+		events[3].readBytes != events[2].readBytes+1 {
+		t.Fatalf(
+			"serve-key body deadline was not cleared after the partial-body timeout: %+v",
+			events,
+		)
 	}
 }
 
@@ -356,7 +509,7 @@ func TestSignModeSignsAfterAgentClosesBetweenRequests(t *testing.T) {
 		Mode:         ModeSign,
 		OpCert:       opcert,
 		MinReconnect: 10 * time.Millisecond,
-		SignTimeout:  time.Second,
+		SignTimeout:  900 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -403,7 +556,7 @@ func TestSignModeDoesNotRetryAgentError(t *testing.T) {
 		SocketPath:  agent.socket(),
 		Mode:        ModeSign,
 		OpCert:      opcert,
-		SignTimeout: time.Second,
+		SignTimeout: 900 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -434,6 +587,60 @@ func TestDefaultSignTimeoutIsBelowASlot(t *testing.T) {
 			"default sign timeout %v is not below a mainnet slot (%v)",
 			defaultSignTimeout, mainnetSlot,
 		)
+	}
+}
+
+func TestNewValidatesSignTimeoutBounds(t *testing.T) {
+	_, _, opcert := newTestKES(t, 0)
+	const mainnetSlot = time.Second
+	for _, timeout := range []time.Duration{
+		-time.Nanosecond,
+		mainnetSlot,
+		mainnetSlot + time.Nanosecond,
+	} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			_, err := New(Config{
+				SocketPath:  "/run/kes-agent.sock",
+				Mode:        ModeSign,
+				OpCert:      opcert,
+				SignTimeout: timeout,
+			})
+			if err == nil {
+				t.Fatalf("New accepted out-of-range sign timeout %s", timeout)
+			}
+			if !strings.Contains(err.Error(), "sign timeout") {
+				t.Fatalf(
+					"unexpected error for sign timeout %s: %v",
+					timeout,
+					err,
+				)
+			}
+		})
+	}
+
+	for _, timeout := range []time.Duration{
+		0,
+		time.Nanosecond,
+		mainnetSlot - time.Nanosecond,
+	} {
+		t.Run("valid_"+timeout.String(), func(t *testing.T) {
+			client, err := New(Config{
+				SocketPath:  "/run/kes-agent.sock",
+				Mode:        ModeSign,
+				OpCert:      opcert,
+				SignTimeout: timeout,
+			})
+			if err != nil {
+				t.Fatalf("New rejected valid sign timeout %s: %v", timeout, err)
+			}
+			if timeout == 0 && client.cfg.SignTimeout != defaultSignTimeout {
+				t.Fatalf(
+					"zero sign timeout resolved to %s, want default %s",
+					client.cfg.SignTimeout,
+					defaultSignTimeout,
+				)
+			}
+		})
 	}
 }
 
@@ -916,7 +1123,7 @@ func TestSignRejectsMalformedResponses(t *testing.T) {
 				SocketPath:   agent.socket(),
 				Mode:         ModeSign,
 				OpCert:       opcert,
-				SignTimeout:  time.Second,
+				SignTimeout:  900 * time.Millisecond,
 				MinReconnect: 10 * time.Millisecond,
 			})
 			if err != nil {

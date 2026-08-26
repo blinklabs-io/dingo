@@ -73,6 +73,9 @@ const (
 	// answering. A unix-socket round trip to a healthy agent is sub-
 	// millisecond, so this is generous; SignTimeout overrides it.
 	defaultSignTimeout = 500 * time.Millisecond
+	// maxSignTimeout is exclusive: a configured sign round trip must finish
+	// before the next one-second mainnet slot begins.
+	maxSignTimeout = time.Second
 	// defaultHandshakeTimeout bounds the Hello exchange so an agent that
 	// accepts the socket without speaking cannot wedge the client.
 	defaultHandshakeTimeout = 5 * time.Second
@@ -209,7 +212,14 @@ func New(cfg Config) (*Client, error) {
 	if cfg.MaxReconnect <= 0 {
 		cfg.MaxReconnect = defaultMaxReconnect
 	}
-	if cfg.SignTimeout <= 0 {
+	if cfg.SignTimeout < 0 || cfg.SignTimeout >= maxSignTimeout {
+		return nil, fmt.Errorf(
+			"kesagent: sign timeout %s must be zero (use default) or positive and less than %s",
+			cfg.SignTimeout,
+			maxSignTimeout,
+		)
+	}
+	if cfg.SignTimeout == 0 {
 		cfg.SignTimeout = defaultSignTimeout
 	}
 	if cfg.HandshakeTimeout <= 0 {
@@ -384,7 +394,11 @@ func (c *Client) runServeKey(ctx context.Context) {
 		installedKey := false
 		for {
 			var kp KeyPush
-			if err := readFrame(conn, &kp); err != nil {
+			if err := readFrameWithBodyTimeout(
+				conn,
+				&kp,
+				frameBodyReadTimeout,
+			); err != nil {
 				_ = conn.Close()
 				c.setConn(nil)
 				c.setConnectedMetric(false)
