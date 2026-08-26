@@ -124,6 +124,9 @@ func validateLeiosEndorserBlockTxs(
 	if err != nil {
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
+	if err := block.Validate(); err != nil {
+		return fmt.Errorf("validate leios endorser block references: %w", err)
+	}
 	if len(txsRaw) != len(block.TransactionReferences) {
 		return fmt.Errorf(
 			"leios endorser block transaction count mismatch: got %d, want %d",
@@ -192,6 +195,9 @@ func leiosEndorserBlockTxValidator(
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
 	if err != nil {
 		return nil, fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if err := block.Validate(); err != nil {
+		return nil, fmt.Errorf("validate leios endorser block references: %w", err)
 	}
 	if len(block.TransactionReferences) != txCount {
 		return nil, fmt.Errorf(
@@ -390,16 +396,27 @@ func mergeLeiosPartialTxs(
 // by an earlier caller); partialTxs is sparse.
 func (data *leiosEndorserBlockData) seedLeiosPartialTxsLocked(
 	result []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	for idx, raw := range data.txsRaw {
 		if idx >= len(result) || raw == nil {
 			break
+		}
+		if validate != nil {
+			if err := validate(idx, raw); err != nil {
+				continue
+			}
 		}
 		result[idx] = raw
 	}
 	for idx, raw := range data.partialTxs {
 		if idx >= len(result) || raw == nil || result[idx] != nil {
 			continue
+		}
+		if validate != nil {
+			if err := validate(idx, raw); err != nil {
+				continue
+			}
 		}
 		result[idx] = raw
 	}
@@ -413,6 +430,7 @@ func (data *leiosEndorserBlockData) seedLeiosPartialTxsLocked(
 func (o *Ouroboros) seedLeiosPartialTxs(
 	hash []byte,
 	result []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	if len(result) == 0 {
 		return
@@ -423,7 +441,7 @@ func (o *Ouroboros) seedLeiosPartialTxs(
 	if !ok || data == nil || data.expired(time.Now()) {
 		return
 	}
-	data.seedLeiosPartialTxsLocked(result)
+	data.seedLeiosPartialTxsLocked(result, validate)
 }
 
 // retainLeiosPartialTxs merges an incomplete fetch result into the cached
