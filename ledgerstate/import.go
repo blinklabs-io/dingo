@@ -293,10 +293,12 @@ type ParsedSnapShot struct {
 // StakeNumerator/StakeDenominator are the exact sigma fraction used by
 // Praos leader eligibility.
 type ParsedActivePoolStake struct {
-	PoolKeyHash      []byte
-	StakeNumerator   uint64
-	StakeDenominator uint64
-	VrfKeyHash       []byte
+	PoolKeyHash             []byte
+	StakeNumerator          uint64
+	StakeDenominator        uint64
+	VrfKeyHash              []byte
+	LeiosKeyPublic          []byte
+	LeiosKeyPossessionProof []byte
 }
 
 // ImportProgress reports progress during ledger state import.
@@ -2048,12 +2050,18 @@ func ActivePoolDistributionSnapshots(
 			continue
 		}
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:              epoch,
-			SnapshotType:       models.PoolStakeSnapshotTypeActive,
-			PoolKeyHash:        slices.Clone(pool.PoolKeyHash),
-			TotalStake:         types.Uint64(pool.StakeNumerator),
-			StakeDenominator:   types.Uint64(pool.StakeDenominator),
-			CapturedSlot:       capturedSlot,
+			Epoch:            epoch,
+			SnapshotType:     models.PoolStakeSnapshotTypeActive,
+			PoolKeyHash:      slices.Clone(pool.PoolKeyHash),
+			TotalStake:       types.Uint64(pool.StakeNumerator),
+			StakeDenominator: types.Uint64(pool.StakeDenominator),
+			CapturedSlot:     capturedSlot,
+			LeiosKeyPublic: append(
+				[]byte(nil), pool.LeiosKeyPublic...,
+			),
+			LeiosKeyPossessionProof: append(
+				[]byte(nil), pool.LeiosKeyPossessionProof...,
+			),
 			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
