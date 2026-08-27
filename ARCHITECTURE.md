@@ -1128,6 +1128,13 @@ Phase 4: Cleanup resources
   Registered shutdown functions
 ```
 
+`Node.Run` holds a startup lifecycle gate from entry until startup either
+completes or has unwound its LIFO rollback stack. Normal shutdown takes the
+same gate before its phase-ordered teardown begins. A SIGINT/SIGTERM received
+while components are still starting can therefore cancel startup without
+letting `Node.Stop` concurrently close a partially initialized component; the
+normal shutdown waits until rollback has finished.
+
 The node creates one shutdown context from the configured `shutdownTimeout`
 and passes it through every phase. PeerGovernor shutdown cancels its internal
 run context, which interrupts ledger-peer DNS discovery and outbound work,
