@@ -565,24 +565,39 @@ func applyGuardExpiredLeaderScenario(
 // reproduced by the reviewer against real database rows and has no unit-level
 // fixture here.
 func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
-	_, ok := stakeRewardEpochsForNewEpoch(2)
-	require.False(
-		t,
-		ok,
-		"stakeRewardEpochsForNewEpoch must still report no round at the "+
-			"bootstrap epoch; the guard compensates by using the "+
-			"application helper instead",
-	)
+	for _, newEpoch := range []uint64{1, 2} {
+		_, ok := stakeRewardEpochsForNewEpoch(newEpoch)
+		require.False(
+			t,
+			ok,
+			"stakeRewardEpochsForNewEpoch must still report no round at "+
+				"bootstrap epoch %d; the guard compensates by using the "+
+				"application helper instead",
+			newEpoch,
+		)
 
-	app, ok := stakeRewardEpochsForApplication(2)
-	require.True(t, ok, "the application path acts on the bootstrap round")
-	require.Equal(
-		t,
-		uint64(0),
-		app.performance,
-		"the bootstrap round's performance epoch is the one with no pparams",
-	)
-	require.True(t, app.bootstrap, "newEpoch 2 is the bootstrap round")
+		app, ok := stakeRewardEpochsForApplication(newEpoch)
+		require.True(
+			t,
+			ok,
+			"the application path acts on bootstrap round %d",
+			newEpoch,
+		)
+		require.Equal(
+			t,
+			uint64(0),
+			app.performance,
+			"bootstrap round %d resolves against the performance epoch "+
+				"with no pparams",
+			newEpoch,
+		)
+		require.True(
+			t,
+			app.bootstrap,
+			"newEpoch %d is a bootstrap round",
+			newEpoch,
+		)
+	}
 
 	// From epoch 3 up the two helpers agree, which is what made guarding on
 	// either of them look equivalent.
@@ -645,6 +660,54 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, 2, 43_200)
 	}))
+}
+
+// TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch is the
+// negative case for the 0->1 bootstrap round added for dingo #3381. A network
+// with a Byron prefix has no Shelley reward round at that boundary, so the
+// Byron performance-epoch guard must suppress it and leave the slot-0 pots
+// untouched -- even though the epoch 0 ADA pots row now exists.
+func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
+	t *testing.T,
+) {
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetEpoch(
+		0,
+		0,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ByronEraDesc.Id,
+		1,
+		21_600,
+		nil,
+	))
+	require.NoError(t, meta.SetNetworkState(0, 100_000_000, 0, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Reserves:     100_000_000,
+		CapturedSlot: 0,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		CapturedSlot: 0,
+		BoundarySlot: 0,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 1, 21_600)
+	}))
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, uint64(0), uint64(state.Treasury))
+	require.Equal(t, uint64(100_000_000), uint64(state.Reserves))
 }
 
 // TestApplyStakeRewardsGuardsExpiredRewardAccount is the Task 10 reward-crediting
@@ -4652,7 +4715,20 @@ func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
 	}, epochs)
 }
 
-func TestRewardParametersUseRUPDCalculationEpochLength(t *testing.T) {
+// TestRewardParametersSplitCalculationAndPerformanceEpochInputs pins where
+// each reward parameter is read from when the two epochs disagree.
+//
+// The epoch length is the calculation epoch's: it stands in for the
+// slotsPerEpoch the RUPD rule passes for the epoch it runs in. Every
+// protocol-parameter value is the performance epoch's, because
+// cardano-ledger's startStep binds `pr = es ^. prevPParamsEpochStateL` and
+// derives d, rho, tau and the pool-level parameters it passes to
+// mkPoolRewardInfo from that. Reading tau or d from the calculation epoch
+// instead silently changes reward amounts on any network where the parameters
+// move across the boundary (dingo #3481).
+func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
+	t *testing.T,
+) {
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -4731,10 +4807,31 @@ func TestRewardParametersUseRUPDCalculationEpochLength(t *testing.T) {
 		&models.RewardAdaPots{Reserves: 100_000_000},
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1_000), params.EpochLength)
-	require.Equal(t, big.NewRat(1, 5), params.TreasuryExpansion)
-	require.Equal(t, big.NewRat(0, 1), params.Decentralization)
-	require.Equal(t, big.NewRat(1, 2), performanceDecentralization)
+	require.Equal(
+		t,
+		uint64(1_000),
+		params.EpochLength,
+		"epoch length comes from the calculation epoch",
+	)
+	require.Equal(
+		t,
+		big.NewRat(0, 1),
+		params.TreasuryExpansion,
+		"tau comes from the performance epoch",
+	)
+	require.Equal(
+		t,
+		big.NewRat(1, 2),
+		params.Decentralization,
+		"d comes from the performance epoch",
+	)
+	require.Equal(
+		t,
+		params.Decentralization,
+		performanceDecentralization,
+		"the block-count decentralization is the same value the "+
+			"calculation uses",
+	)
 }
 
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(

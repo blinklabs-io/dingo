@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -140,11 +141,38 @@ func ValidateHeaderProtocolVersion(
 }
 
 // isMainnet reports whether this LedgerState is configured for Cardano
-// mainnet, derived from the Shelley genesis networkId field. This is
-// the literal port of cardano-ledger's `netId == Mainnet` predicate
-// used by the BBODY rule. Network magic alone is not a reliable
-// discriminator (devnet shares mainnet's RequiresNoMagic wire setting);
-// only the genesis-declared identity has the right semantics.
+// mainnet, derived from the Shelley genesis networkId field and, where
+// available, the network dingo was started with. The networkId check is
+// the literal port of cardano-ledger's `netId == Mainnet` predicate used
+// by the BBODY rule, but it is not sufficient on its own: a foreign chain
+// that reuses Cardano mainnet's identity for wire compatibility declares
+// the same networkId (and often the same network magic) while running its
+// own, independent hard-fork schedule. gouroboros's own network registry
+// contains exactly this case — prime-mainnet declares networkId=Mainnet
+// and magic 764824073, byte-identical to real Cardano mainnet. Enforcing
+// cardano-ledger's mainnet-only BBODY strictness there rejects headers a
+// chain's own nodes have already built on top of.
+//
+// A Mainnet-tagged genesis is only overridden to non-mainnet when both the
+// genesis actually loaded carries mainnet's network magic AND
+// ls.config.Network names a network gouroboros itself registers as
+// sharing that magic (currently just prime-mainnet) — the narrow, known
+// identity-reuse case this function exists to handle. Checking only the
+// registry's canonical magic for the configured name, without also
+// checking sg.NetworkMagic, would let Network="prime-mainnet" disable the
+// BBODY check for a genesis whose own magic doesn't actually match either
+// network — a misconfigured or corrupted genesis file, not the identity-
+// reuse case being handled. Any
+// other named network paired with a Mainnet-tagged genesis is a
+// configuration mismatch, not a recognized alias, and falls through to
+// the genesis-only answer (true) rather than silently relaxing the BBODY
+// check for a misconfigured node: a node started with, say, Network=
+// "preview" against a genesis that (incorrectly) declares Mainnet must
+// not have mainnet's strictness relaxed just because the name isn't
+// literally "mainnet". An unset or unrecognized Network name (a config
+// built from a raw NetworkMagic, or an embedder that never set it) falls
+// back to the networkId-only check, preserving prior behavior for every
+// caller that predates this field.
 //
 // Fails closed: when CardanoNodeConfig or Shelley genesis is missing,
 // or the networkId field carries an unrecognized value, returns
@@ -162,6 +190,31 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 	}
 	switch sg.NetworkId {
 	case shelleyGenesisMainnetNetworkId:
+		if ls.config.Network != "" &&
+			sg.NetworkMagic == ouroboros.NetworkCardanoMainnet.NetworkMagic {
+			if known, ok := ouroboros.NetworkByName(ls.config.Network); ok &&
+				known.Name != ouroboros.NetworkCardanoMainnet.Name &&
+				known.NetworkMagic == ouroboros.NetworkCardanoMainnet.NetworkMagic {
+				// Only a network gouroboros itself registers as sharing
+				// mainnet's magic (currently just prime-mainnet) may
+				// override a Mainnet-tagged genesis to non-mainnet, and
+				// only when the genesis actually loaded also carries
+				// mainnet's magic — not merely the registry's canonical
+				// value for the configured name. Without the sg.NetworkMagic
+				// check, Network="prime-mainnet" paired with a loaded
+				// genesis whose own magic is neither real mainnet's nor
+				// prime-mainnet's (e.g. a misconfigured or corrupted
+				// genesis file) would still disable the BBODY check, since
+				// the registry lookup only reflects prime-mainnet's known
+				// magic, not what was actually loaded. Any other named
+				// network paired with a Mainnet-tagged genesis is a
+				// configuration mismatch, not a known identity-reuse case,
+				// and falls through to the genesis-only answer (true)
+				// rather than silently relaxing the BBODY check for a
+				// misconfigured node.
+				return false, nil
+			}
+		}
 		return true, nil
 	case shelleyGenesisTestnetNetworkId:
 		return false, nil

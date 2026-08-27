@@ -62,7 +62,7 @@ func TestConnectionManagerConnError(t *testing.T) {
 	var doneOnce sync.Once
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
-			ConnClosedFunc: func(connId ouroboros.ConnectionId, err error) {
+			ConnClosedFunc: func(connId ouroboros.ConnectionId, isNtC bool, err error) {
 				if err != nil && connId == expectedConnId {
 					doneOnce.Do(func() { close(doneChan) })
 				}
@@ -148,7 +148,7 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 	doneChan := make(chan any)
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
-			ConnClosedFunc: func(connId ouroboros.ConnectionId, err error) {
+			ConnClosedFunc: func(connId ouroboros.ConnectionId, isNtC bool, err error) {
 				if connId != expectedConnId {
 					t.Fatalf(
 						"did not receive closed signal from expected connection: got %d, wanted %d",

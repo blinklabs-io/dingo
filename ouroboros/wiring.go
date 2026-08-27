@@ -64,6 +64,9 @@ func isNilInterface(v any) bool {
 // partially-wired instance unrepresentable in production: the constructor is
 // the only way to obtain one, and it refuses to build without the full set.
 func (cfg OuroborosConfig) validateDependencies() error {
+	if cfg.EnableLeios && isNilInterface(cfg.LeiosAnnouncementLedger) {
+		return fmt.Errorf("%w: LeiosAnnouncementLedger", ErrMissingDependency)
+	}
 	for _, dep := range []struct {
 		name  string
 		isNil bool
@@ -90,6 +93,8 @@ func (cfg OuroborosConfig) validateDependencies() error {
 func (o *Ouroboros) hasDependencies() bool {
 	return o.eventBus != nil &&
 		o.ledgerState != nil &&
+		(!o.config.EnableLeios ||
+			!isNilInterface(o.leiosAnnouncementLedger)) &&
 		o.mempool != nil &&
 		o.chainsyncState != nil &&
 		o.connManager != nil &&

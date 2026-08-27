@@ -67,6 +67,13 @@ func (p *Pump) Run(ctx context.Context) error {
 		startup = startupTimer.C
 	}
 	ready := false
+	// A healthy node can accept an N2C connection before the network's
+	// configured system start. Keep the first submission behind the genesis
+	// boundary so an accepted pre-genesis transaction is not later discarded
+	// when forging and ledger revalidation begin.
+	if err := p.waitForGenesis(ctx, startup); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -131,6 +138,33 @@ func (p *Pump) Run(ctx context.Context) error {
 		if !p.cooldown(ctx) {
 			return ctx.Err()
 		}
+	}
+}
+
+// waitForGenesis blocks transaction generation until the configured network
+// start. The startup deadline remains active while waiting, so a bad runtime
+// genesis timestamp fails readiness instead of leaving txpump hung forever.
+func (p *Pump) waitForGenesis(
+	ctx context.Context,
+	startup <-chan time.Time,
+) error {
+	delay := time.Until(p.genesisTime)
+	if delay <= 0 {
+		return nil
+	}
+	p.logger.Info("waiting for genesis start", "delay", delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-startup:
+		return fmt.Errorf(
+			"txpump readiness timeout after %s: genesis has not started",
+			p.cfg.StartupTimeout,
+		)
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -202,12 +236,16 @@ func enabledTypes(
 	return enabled
 }
 
-// currentSlot returns the number of 1-second slots elapsed since the Pump was
-// created.  Using elapsed time (rather than Unix epoch seconds) ensures that
-// the slot counter starts near 0 and epoch gating works correctly for devnet
-// testing, where epochs are only 500 slots long.
+// currentSlot returns the number of 1-second slots elapsed since genesis.
+// Using elapsed time (rather than Unix epoch seconds) ensures that the slot
+// counter starts near 0 and epoch gating works correctly for devnet testing,
+// where epochs are only 500 slots long. Before genesis, report slot 0 rather
+// than converting a negative duration to a near-MaxUint64 slot.
 func (p *Pump) currentSlot() uint64 {
 	elapsed := time.Since(p.genesisTime)
+	if elapsed <= 0 {
+		return 0
+	}
 	return uint64(elapsed.Seconds())
 }
 
@@ -357,17 +395,18 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 			"tx_id", txID,
 			"send_lovelace", sendAmount,
 		)
-		// Return both outputs to the wallet immediately so chained
-		// transactions can spend them within the same batch.
+		// Quarantine submitted outputs for the configured confirmation window
+		// so an early fork cannot invalidate an immediate dependency chain.
+		confirmationDelay := p.cfg.confirmationDelay()
 		if signingKey != nil {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: sendAmount, SigningKey: signingKey})
+			p.wallet.AddAfter(confirmationDelay, UTxO{TxHash: txID, Index: 0, Amount: sendAmount, SigningKey: signingKey})
 		}
 		if change > 0 {
 			changeUTxO := UTxO{TxHash: txID, Index: 1, Amount: change}
 			if signingKey != nil {
 				changeUTxO.SigningKey = signingKey
 			}
-			p.wallet.Add(changeUTxO)
+			p.wallet.AddAfter(confirmationDelay, changeUTxO)
 		}
 	}
 
@@ -449,7 +488,7 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 		// Return the change output to the wallet so future transactions can
 		// spend it.
 		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: change})
+			p.wallet.AddAfter(p.cfg.confirmationDelay(), UTxO{TxHash: txID, Index: 0, Amount: change})
 		}
 	}
 	if p.txlog != nil {
@@ -547,7 +586,7 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 		// Return the change output to the wallet so future transactions can
 		// spend it.
 		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: change})
+			p.wallet.AddAfter(p.cfg.confirmationDelay(), UTxO{TxHash: txID, Index: 0, Amount: change})
 		}
 	}
 	if p.txlog != nil {
@@ -666,7 +705,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 		entry.Status = "submitted"
 		p.logger.Info("plutus tx submitted", "kind", txKind, "tx_id", txID)
 		if txKind == "plutus_lock" {
-			p.addLockedPlutusUTxO(UTxO{
+			p.addLockedPlutusUTxOAfter(p.cfg.confirmationDelay(), UTxO{
 				TxHash: txID,
 				Index:  0,
 				Amount: minSendAmount,
@@ -680,7 +719,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 			if txKind == "plutus_lock" {
 				changeIdx = 1
 			}
-			p.wallet.Add(UTxO{TxHash: txID, Index: changeIdx, Amount: change})
+			p.wallet.AddAfter(p.cfg.confirmationDelay(), UTxO{TxHash: txID, Index: changeIdx, Amount: change})
 		}
 	}
 	if p.txlog != nil {
@@ -695,14 +734,27 @@ func (p *Pump) addLockedPlutusUTxO(utxo UTxO) {
 	p.plutusLocked = append(p.plutusLocked, utxo)
 }
 
-func (p *Pump) takeLockedPlutusUTxO() (UTxO, bool) {
-	if len(p.plutusLocked) == 0 {
-		return UTxO{}, false
+func (p *Pump) addLockedPlutusUTxOAfter(delay time.Duration, utxo UTxO) {
+	if delay > 0 {
+		utxo.availableAt = time.Now().Add(delay)
 	}
-	last := len(p.plutusLocked) - 1
-	utxo := p.plutusLocked[last]
-	p.plutusLocked = p.plutusLocked[:last]
-	return utxo, true
+	p.addLockedPlutusUTxO(utxo)
+}
+
+func (p *Pump) takeLockedPlutusUTxO() (UTxO, bool) {
+	now := time.Now()
+	for i := len(p.plutusLocked) - 1; i >= 0; i-- {
+		utxo := p.plutusLocked[i]
+		if !utxo.availableAt.IsZero() && utxo.availableAt.After(now) {
+			continue
+		}
+		p.plutusLocked = append(
+			p.plutusLocked[:i],
+			p.plutusLocked[i+1:]...,
+		)
+		return utxo, true
+	}
+	return UTxO{}, false
 }
 
 // cooldown waits for a random duration in [CooldownMin, CooldownMax]ms.

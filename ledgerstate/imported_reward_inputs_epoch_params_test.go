@@ -93,6 +93,7 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 		txn.Metadata(),
 		snapshots,
 		resolve,
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		logger,
@@ -142,6 +143,7 @@ func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
 		txn.Metadata(),
 		snapshots,
 		func(uint64) (map[string]*ParsedPool, error) { return nil, wantErr },
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -319,6 +321,7 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 				"%w: epoch %d", errRewardParamsWindowUnknown, epoch,
 			)
 		},
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -376,6 +379,7 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 			}
 			return params, nil
 		},
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),

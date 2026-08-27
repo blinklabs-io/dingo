@@ -16,7 +16,6 @@ package blockfrost
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
@@ -35,36 +34,19 @@ func stopNow(t *testing.T, srv *Blockfrost) error {
 	return srv.Stop(ctx)
 }
 
-// The shutdown protocol these two tests exercise is covered in depth, with the
+// The shutdown protocol this test exercises is covered in depth, with the
 // windows constructed rather than raced, in internal/apilistener. What is
 // checked here is that this package is wired to it -- that a Blockfrost server
 // keeps the promise its Stop makes.
-
-// TestServerStopReleasesPortBeforeServeRegisters covers the window between
-// net.Listen and Serve registering that listener with the http.Server.
-// http.Server.Shutdown closes only registered listeners, so a Stop landing
-// inside the window used to return with the port still bound.
-func TestServerStopReleasesPortBeforeServeRegisters(t *testing.T) {
-	for i := range 100 {
-		srv, addr := startOnFreePort(
-			t, t.Context(), BlockfrostConfig{},
-		)
-
-		require.NoError(t, stopNow(t, srv))
-
-		require.False(
-			t, portAccepts(addr),
-			"listener still accepting when Stop returned "+
-				"(iteration %d)", i,
-		)
-	}
-}
 
 // TestServerRebindsAfterStop is the production path this fix exists for: a
 // live database restore or truncate quiesces the API capabilities and
 // reinitializeAPIServers brings them back up on the same configured port (see
 // node_lifecycle.go). A Stop that returned while the socket was still bound
-// left that restart failing with EADDRINUSE.
+// left that restart failing with EADDRINUSE. The constructed tests in
+// internal/apilistener assert closure on the original listener object; dialing
+// a released ephemeral address here could instead reach another package's
+// listener when the suite runs concurrently.
 func TestServerRebindsAfterStop(t *testing.T) {
 	srv, addr := startOnFreePort(t, t.Context(), BlockfrostConfig{})
 	require.NoError(t, stopNow(t, srv))
@@ -77,14 +59,4 @@ func TestServerRebindsAfterStop(t *testing.T) {
 		"a capability restart must rebind the port Stop released",
 	)
 	require.NoError(t, stopNow(t, restarted))
-}
-
-// portAccepts reports whether a TCP connection to addr succeeds.
-func portAccepts(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -204,4 +205,36 @@ func TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress(
 		exhausted,
 		"the tally must be exhausted once every legal rewind depth has been refused",
 	)
+}
+
+func TestResetAtTipRecoveryDescentClearsSameFailureOnProgress(
+	t *testing.T,
+) {
+	failure := &txValidationError{
+		BlockPoint: ocommon.NewPoint(510, []byte("failure-block")),
+		TxHash:     []byte("failure-tx"),
+	}
+	ls := &LedgerState{
+		lastAtTipRecovery:         newAtTipRecoveryAttempt(failure),
+		atTipRecoveryLastFailSlot: failure.BlockPoint.Slot,
+		atTipRecoveryDescentCount: 1,
+		atTipRecoveryHolding:      true,
+	}
+	ls.lastAtTipRecovery.Attempts = 2
+	require.Nil(t, ls.mithrilBoundaryRecovery)
+
+	// Replaying to the same applied tip is not progress. Preserve both the
+	// same-failure depth and distinct-failure convergence state.
+	ls.resetAtTipRecoveryDescent(failure.BlockPoint.Slot)
+	require.Equal(t, 2, ls.lastAtTipRecovery.Attempts)
+	require.Equal(t, 1, ls.atTipRecoveryDescentCount)
+	require.True(t, ls.atTipRecoveryHolding)
+
+	// A committed block past the failing region proves recovery converged.
+	// A later at-tip failure must start at the shallow first attempt.
+	ls.resetAtTipRecoveryDescent(failure.BlockPoint.Slot + 1)
+	require.Nil(t, ls.lastAtTipRecovery)
+	require.Zero(t, ls.atTipRecoveryLastFailSlot)
+	require.Zero(t, ls.atTipRecoveryDescentCount)
+	require.False(t, ls.atTipRecoveryHolding)
 }

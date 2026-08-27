@@ -52,6 +52,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		EventBus:           n.eventBus,
 		Logger:             n.config.logger,
 		CardanoNodeConfig:  n.config.cardanoNodeConfig,
+		Network:            n.config.network,
 		PromRegistry:       n.config.promRegistry,
 		ForgeBlocks:        n.config.isDevMode(),
 		ValidateHistorical: n.config.validateHistorical,

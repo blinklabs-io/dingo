@@ -403,13 +403,17 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 
 	poolKeyHash := make([]byte, 28)
 	poolKeyHash[0] = 0x4a
+	publicKey := bytes.Repeat([]byte{0x7b}, 96)
+	possessionProof := bytes.Repeat([]byte{0x8c}, 48)
 	rows := ActivePoolDistributionSnapshots(
 		[]ParsedActivePoolStake{
 			{
-				PoolKeyHash:      poolKeyHash,
-				StakeNumerator:   3,
-				StakeDenominator: 10,
-				VrfKeyHash:       bytes.Repeat([]byte{0x9b}, 32),
+				PoolKeyHash:             poolKeyHash,
+				StakeNumerator:          3,
+				StakeDenominator:        10,
+				VrfKeyHash:              bytes.Repeat([]byte{0x9b}, 32),
+				LeiosKeyPublic:          publicKey,
+				LeiosKeyPossessionProof: possessionProof,
 			},
 		},
 		298,
@@ -435,6 +439,66 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 	require.Equal(t, uint64(3), uint64(stored.TotalStake))
 	require.Equal(t, uint64(10), uint64(stored.StakeDenominator))
 	require.Equal(t, uint64(127178646), stored.CapturedSlot)
+	require.Equal(t, publicKey, stored.LeiosKeyPublic)
+	require.Equal(t, possessionProof, stored.LeiosKeyPossessionProof)
+}
+
+func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	poolKeyHash := bytes.Repeat([]byte{0x4d}, 28)
+	publicKey := bytes.Repeat([]byte{0x5e}, 96)
+	possessionProof := bytes.Repeat([]byte{0x6f}, 48)
+	rows := []*models.PoolStakeSnapshot{{
+		Epoch:                   101,
+		SnapshotType:            models.PoolStakeSnapshotTypeMark,
+		PoolKeyHash:             poolKeyHash,
+		TotalStake:              123,
+		DelegatorCount:          1,
+		CapturedSlot:            456,
+		LeiosKeyPublic:          publicKey,
+		LeiosKeyPossessionProof: possessionProof,
+	}}
+	require.NoError(t, persistImportedSnapshot(
+		ImportConfig{
+			Database: db,
+			State:    &RawLedgerState{Epoch: 102},
+		},
+		999,
+		snapshotImportTarget{name: "set", targetEpoch: 101},
+		rows,
+	))
+
+	stored, err := db.Metadata().GetPoolStakeSnapshot(
+		101,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, publicKey, stored.LeiosKeyPublic)
+	require.Equal(t, possessionProof, stored.LeiosKeyPossessionProof)
+
+	// SQL conversion and the model returned by the store must not alias caller
+	// buffers used to construct the imported snapshot.
+	wantPublicKey := append([]byte(nil), publicKey...)
+	wantPossessionProof := append([]byte(nil), possessionProof...)
+	rows[0].LeiosKeyPublic[0] ^= 0xff
+	rows[0].LeiosKeyPossessionProof[0] ^= 0xff
+	again, err := db.Metadata().GetPoolStakeSnapshot(
+		101,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, wantPublicKey, again.LeiosKeyPublic)
+	require.Equal(t, wantPossessionProof, again.LeiosKeyPossessionProof)
 }
 
 // TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark verifies the

@@ -3717,6 +3717,53 @@ func (a *NodeAdapter) TransactionSubmit(
 	return tx.Hash().String(), nil
 }
 
+// TransactionEvaluate evaluates script execution units for raw transaction
+// CBOR without submitting the transaction.
+func (a *NodeAdapter) TransactionEvaluate(
+	txCbor []byte,
+) (TransactionEvaluationResponse, error) {
+	txType, err := gledger.DetermineTransactionType(txCbor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: determine transaction type: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: decode transaction: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	_, _, redeemerExUnits, err := a.ledgerState.EvaluateTx(tx)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: evaluate transaction: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	result := make(TransactionEvaluationResponse, len(redeemerExUnits))
+	for key, exUnits := range redeemerExUnits {
+		purpose := redeemerPurpose(key.Tag)
+		if purpose == "" {
+			return nil, fmt.Errorf(
+				"%w: unsupported redeemer tag %d",
+				ErrInvalidTransaction,
+				key.Tag,
+			)
+		}
+		result[fmt.Sprintf("%s:%d", purpose, key.Index)] = ExecutionUnitsResponse{
+			Memory: uint64(exUnits.Memory), // nolint:gosec
+			Steps:  uint64(exUnits.Steps),  // nolint:gosec
+		}
+	}
+	return result, nil
+}
+
 // TransactionCBOR returns raw signed transaction CBOR bytes for the requested
 // transaction hash.
 func (a *NodeAdapter) TransactionCBOR(

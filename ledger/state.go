@@ -487,12 +487,19 @@ type PeerHeaderLookupFunc func(
 type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
-	PromRegistry                prometheus.Registerer
-	Logger                      *slog.Logger
-	Database                    *database.Database
-	ChainManager                *chain.ChainManager
-	EventBus                    *event.EventBus
-	CardanoNodeConfig           *cardano.CardanoNodeConfig
+	PromRegistry      prometheus.Registerer
+	Logger            *slog.Logger
+	Database          *database.Database
+	ChainManager      *chain.ChainManager
+	EventBus          *event.EventBus
+	CardanoNodeConfig *cardano.CardanoNodeConfig
+	// Network is the CLI/YAML/env network selector dingo was started with
+	// (e.g. "mainnet", "preprod", "prime-mainnet"). Shelley genesis alone
+	// cannot distinguish real Cardano mainnet from a foreign chain that
+	// reuses its identity for wire compatibility -- see isMainnet in
+	// header_protocol_version.go. Empty when dingo was configured with a
+	// raw NetworkMagic instead of a named network.
+	Network                     string
 	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
 	PeersWithBlockFunc          PeersWithBlockFunc
 	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
@@ -1484,23 +1491,21 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// to one commit batch and let EventBus backpressure bound decoded CBOR while
 	// the chain store catches up. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 			ChainsyncEventType,
 			event.EventQueueSize,
+			event.SubscriberBackpressureBlock,
 			ls.handleEventChainsync,
 		)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
 		)
-		ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
-			BlockfetchEventType,
-			blockfetchCommitBatchSize,
-			ls.handleEventBlockfetch,
-		)
-		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
+		ls.subscribeBlockfetchEvents(ls.handleEventBlockfetch)
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 			chain.ChainUpdateEventType,
 			event.EventQueueSize,
+			event.SubscriberBackpressureBlock,
 			ls.handleEventChainUpdate,
 		)
 		ls.chainSwitchSubID = ls.config.EventBus.SubscribeFunc(
@@ -1587,6 +1592,19 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+// subscribeBlockfetchEvents preserves lossless blockfetch delivery. A dropped
+// blockfetch event cannot be replayed from the EventBus, so this subscriber
+// remains attached until it drains or normal node lifecycle cancellation closes
+// it rather than taking the ordinary stalled-subscriber detachment path.
+func (ls *LedgerState) subscribeBlockfetchEvents(handler event.EventHandlerFunc) {
+	ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
+		BlockfetchEventType,
+		blockfetchCommitBatchSize,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
 }
 
 func (ls *LedgerState) loadMithrilTrustBoundary() {
@@ -3475,6 +3493,50 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	newEpoch.EraId = workingEraId
 	newEpoch.SlotLength = slotLength
 	newEpoch.LengthInSlots = epochLength
+	// calculateEpochNonce short-circuits to an all-nil nonce whenever the
+	// ROLLOVER'S SOURCE era is Byron (no Praos nonce there), regardless of
+	// what era this boundary actually transitions into. That is correct
+	// when the new epoch stays in Byron, but here workingEraId has just
+	// been advanced past Byron (that is the only way this function runs),
+	// so the epoch needs a real nonce for header verification in its new
+	// era. Seed it the same way every other from-genesis nonce path does
+	// (computeEpochNonceForSlot, calculateEpochNonce's own no-prior-nonce
+	// branch): the Shelley genesis hash for nonce/evolving/candidate, with
+	// LastEpochBlockNonce left at NeutralNonce (nil) — see #2734. Without
+	// this, header verification permanently rejects every block in the
+	// new era with "epoch has no nonce for slot" for any Byron-prefixed
+	// network that syncs from genesis instead of a Mithril snapshot.
+	if workingEraId != 0 && len(newEpoch.Nonce) == 0 {
+		if ls.config.CardanoNodeConfig == nil {
+			return nil, errors.New(
+				"seed post-Byron epoch nonce: CardanoNodeConfig is nil",
+			)
+		}
+		if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
+			return nil, errors.New(
+				"seed post-Byron epoch nonce: could not get Shelley genesis hash",
+			)
+		}
+		genesisHashBytes, err := hex.DecodeString(
+			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode Shelley genesis hash for post-Byron epoch nonce: %w",
+				err,
+			)
+		}
+		if len(genesisHashBytes) != lcommon.Blake2b256Size {
+			return nil, fmt.Errorf(
+				"seed post-Byron epoch nonce: Shelley genesis hash is %d bytes, expected %d",
+				len(genesisHashBytes), lcommon.Blake2b256Size,
+			)
+		}
+		newEpoch.Nonce = genesisHashBytes
+		newEpoch.EvolvingNonce = genesisHashBytes
+		newEpoch.CandidateNonce = genesisHashBytes
+		newEpoch.LastEpochBlockNonce = nil
+	}
 	if err := ls.db.SetEpoch(
 		newEpoch.StartSlot,
 		newEpoch.EpochId,
@@ -3515,6 +3577,10 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 			rolloverResult.NewEpochCache[i].EraId = workingEraId
 			rolloverResult.NewEpochCache[i].SlotLength = slotLength
 			rolloverResult.NewEpochCache[i].LengthInSlots = epochLength
+			rolloverResult.NewEpochCache[i].Nonce = newEpoch.Nonce
+			rolloverResult.NewEpochCache[i].EvolvingNonce = newEpoch.EvolvingNonce
+			rolloverResult.NewEpochCache[i].CandidateNonce = newEpoch.CandidateNonce
+			rolloverResult.NewEpochCache[i].LastEpochBlockNonce = newEpoch.LastEpochBlockNonce
 		}
 	}
 
@@ -6051,7 +6117,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 							ebTxs,
 							applied,
 						)
-						blockDonation += donation
+						blockDonation, err = addUint64(blockDonation, donation)
+						if err != nil {
+							return nil, fmt.Errorf(
+								"accumulate leios endorser block donation: %w",
+								err,
+							)
+						}
 					}
 				} else {
 					if !ls.config.LeiosApplyEndorserBlockTxs {
@@ -6106,7 +6178,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 			delta.Offsets = offsets
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
-				delta.donate(blockDonation)
+				if err := delta.donate(blockDonation); err != nil {
+					delta.Release()
+					return nil, fmt.Errorf(
+						"seed block donation: %w", err,
+					)
+				}
 				blockDonation = 0
 			}
 		}
@@ -6246,7 +6323,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 				delta.Release()
 				return nil, err
 			}
-			blockDonation += delta.donation
+			var err error
+			blockDonation, err = addUint64(blockDonation, delta.donation)
+			if err != nil {
+				delta.Release()
+				return nil, fmt.Errorf(
+					"accumulate block donation: %w", err,
+				)
+			}
 			delta.Release()
 			delta = nil // reset
 
@@ -6273,7 +6357,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			)
 			delta.Offsets = offsets
 		}
-		delta.donate(blockDonation)
+		if err := delta.donate(blockDonation); err != nil {
+			delta.Release()
+			return nil, fmt.Errorf("finalize block donation: %w", err)
+		}
 	}
 	// Record the opcert counter now that the block's transactions are
 	// processed. The monotonicity check ran before transaction validation
@@ -9104,6 +9191,14 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 		),
 	}
 }
+
+// Both the block builder and the mempool discover the validation-session
+// capability with a runtime type assertion on the TxValidator they were handed
+// and silently fall back to unpinned per-transaction validation when it fails,
+// so drift in WithTxValidationSession would quietly drop the snapshot pinning
+// rather than break the build. The mempool's identical interface is guarded in
+// the root package, which is where *LedgerState is wired in as its validator.
+var _ forging.TxValidationSessionProvider = (*LedgerState)(nil)
 
 // WithTxValidationSession pins a mempool revalidation batch to one immutable
 // ledger publication, one validation slot/era/parameter set, and one

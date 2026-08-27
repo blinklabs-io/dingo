@@ -101,6 +101,7 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 		func(uint64) (map[string]*ParsedPool, error) {
 			return registered, nil
 		},
+		nil,
 		100,
 		9_999,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),

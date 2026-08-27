@@ -30,8 +30,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// ConnectionManagerConnClosedFunc is a function that takes a connection ID and an optional error
-type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
+// ConnectionManagerConnClosedFunc is a function that takes a connection ID,
+// whether the closed connection was node-to-client (local), and an optional
+// error. Unlike ConnectionClosedEventType, it fires for every closed
+// connection regardless of isNtC — see the call site below for why the
+// broad EventBus event stays NtN-only.
+type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, bool, error)
 
 const (
 	// metricNamePrefix is the common prefix for all connection manager metrics
@@ -60,6 +64,7 @@ type ConnectionManager struct {
 	peerConnectivity map[string]peerConnectionSummary
 	metrics          *connectionManagerMetrics
 	listeners        []net.Listener
+	pendingConns     map[net.Conn]struct{}
 	config           ConnectionManagerConfig
 	// resolveDeferredOnce guards the one-time evaluation of
 	// ListenersProvider/OutboundConnOptsProvider. Using sync.Once also
@@ -176,6 +181,7 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		),
 		inboundPeerAddrs: make(map[string]int),
 		peerConnectivity: make(map[string]peerConnectionSummary),
+		pendingConns:     make(map[net.Conn]struct{}),
 		ipConns:          make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
@@ -557,6 +563,11 @@ func (c *ConnectionManager) stopListeners() {
 		}
 	}
 	c.listeners = nil
+	pendingConns := make([]net.Conn, 0, len(c.pendingConns))
+	for conn := range c.pendingConns {
+		pendingConns = append(pendingConns, conn)
+	}
+	clear(c.pendingConns)
 	c.listenersMutex.Unlock()
 
 	for _, listener := range listeners {
@@ -566,6 +577,13 @@ func (c *ConnectionManager) stopListeners() {
 				"error", err,
 			)
 		}
+	}
+	for _, conn := range pendingConns {
+		closeConnAndLog(
+			c.config.Logger,
+			conn,
+			"error closing pending inbound connection",
+		)
 	}
 }
 
@@ -742,6 +760,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			existingConn := existing.conn
 			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
+			existingIsNtC := existing.isNtC
 			// Remove the old entry so the evicted connection's
 			// error-watcher goroutine cannot double-decrement
 			// metrics via RemoveConnection.
@@ -756,6 +775,13 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			// The evicted connection's own error-watcher goroutine cannot
+			// deliver this: by the time its ErrorChan fires, RemoveConnection
+			// finds either no entry or the replacement's entry for connId
+			// and returns false without calling ConnClosedFunc. Without this
+			// call, an evicted NtC connection's chainsync server-side client
+			// state (and its live chain iterator) would never be released.
+			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
 			c.connectionsMutex.Lock()
 
 		default:
@@ -781,6 +807,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			existingConn := existing.conn
 			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
+			existingIsNtC := existing.isNtC
 			delete(c.connections, connId)
 			c.connectionsMutex.Unlock()
 			closeConnAndLog(
@@ -792,6 +819,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
 			c.connectionsMutex.Lock()
 		}
 	}
@@ -843,12 +871,43 @@ func (c *ConnectionManager) addConnectionImpl(
 				),
 			)
 		}
-		// Call configured connection closed callback func
+		// Call configured connection closed callback func. Fires for both
+		// NtN and NtC closes -- unlike the EventBus event above, this is a
+		// direct per-connection call rather than a fan-out to multiple
+		// subscribers, so it carries no reconnect-storm risk. It is the
+		// only close notification an NtC connection gets.
 		if c.config.ConnClosedFunc != nil {
-			c.config.ConnClosedFunc(connId, err)
+			c.config.ConnClosedFunc(connId, isNtC, err)
 		}
 	}()
 	return true
+}
+
+// errConnectionReplaced is the error reported to ConnClosedFunc for a
+// connection evicted by a ConnectionId collision, rather than a closed
+// transport.
+var errConnectionReplaced = errors.New(
+	"connection replaced by a new connection with the same identity",
+)
+
+// notifyEvictedConnectionClosed calls ConnClosedFunc for a connection just
+// evicted by a ConnectionId collision (addConnectionImpl's replacement
+// branches). The evicted connection's own error-watcher goroutine cannot
+// deliver this itself: by the time its ErrorChan fires, RemoveConnection
+// finds either no entry or the replacement's entry for connId and returns
+// false without calling ConnClosedFunc, so without this call an evicted NtC
+// connection's chainsync server-side client state (and its live chain
+// iterator) would never be released. Called synchronously, before the
+// replacement connection is registered in c.connections, so it cannot race
+// the replacement's own state registration.
+func (c *ConnectionManager) notifyEvictedConnectionClosed(
+	connId ouroboros.ConnectionId,
+	isNtC bool,
+) {
+	if c.config.ConnClosedFunc == nil {
+		return
+	}
+	c.config.ConnClosedFunc(connId, isNtC, errConnectionReplaced)
 }
 
 func (c *ConnectionManager) RemoveConnection(
