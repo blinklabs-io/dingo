@@ -369,12 +369,28 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	writeTestFile(t, archive, "docs/tracked.md")
 	writeTestFile(t, archive, ".claude/worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".codex/worktrees/scratch/ignored.md")
+	writeTestFile(t, archive, ".codex/worktrees/scratch/Dockerfile")
+	writeTestFile(t, archive, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
 	writeTestFile(t, archive, ".agents/worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".tools/scratch/ignored.md")
 	got, want = markdownFiles(t, archive), []string{"docs/tracked.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("archive markdownFiles() = %v, want %v", got, want)
+	}
+	got, want = dockerfiles(t, archive), []string{}
+	if !slices.Equal(got, want) {
+		t.Errorf("archive dockerfiles() = %v, want %v", got, want)
+	}
+
+	// Use a matcher broader than workflowFiles so the fallback walk reaches a
+	// workflow nested inside a generated worktree. The parent implementation
+	// walked this path and returned it because it did not exclude .codex.
+	got, want = filesMatching(t, archive, func(rel string) bool {
+		return strings.HasSuffix(rel, "/.github/workflows/ignored.yml")
+	}), []string{}
+	if !slices.Equal(got, want) {
+		t.Errorf("archive nested workflow files = %v, want %v", got, want)
 	}
 }
 
