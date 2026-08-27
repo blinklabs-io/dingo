@@ -104,19 +104,24 @@ type Node struct {
 	// ouroborosConfig retains the settings half of the config Run built, so a
 	// live restore can reconstruct ouroboros against rebuilt dependencies
 	// without recomputing them and drifting from Run.
-	ouroborosConfig                  ouroborosPkg.OuroborosConfig
-	blockForger                      *forging.BlockForger
-	leaderElection                   *leader.Election
-	rtsMetrics                       *rtsMetrics
-	shutdownFuncs                    []func(context.Context) error
-	deferredIndexMaintenanceDone     chan struct{}
-	config                           Config
-	ctx                              context.Context
-	cancel                           context.CancelFunc
-	fatalErrMu                       sync.Mutex
-	fatalErr                         error
-	shutdownOnce                     sync.Once
-	shutdownErr                      error
+	ouroborosConfig              ouroborosPkg.OuroborosConfig
+	blockForger                  *forging.BlockForger
+	leaderElection               *leader.Election
+	rtsMetrics                   *rtsMetrics
+	shutdownFuncs                []func(context.Context) error
+	deferredIndexMaintenanceDone chan struct{}
+	config                       Config
+	ctx                          context.Context
+	cancel                       context.CancelFunc
+	fatalErrMu                   sync.Mutex
+	fatalErr                     error
+	shutdownOnce                 sync.Once
+	shutdownErr                  error
+	// startupLifecycleMu keeps the startup rollback and normal shutdown from
+	// operating on the same partially initialized component concurrently. Run
+	// holds it until startup has either completed or unwound its LIFO cleanup;
+	// shutdown takes it before it begins its phase-ordered teardown.
+	startupLifecycleMu               sync.Mutex
 	chainsyncStallRecycler           *chainsyncrecycler.Recycler
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
@@ -443,6 +448,24 @@ var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
+	// A signal can cancel ctx while this function is still constructing
+	// components. Hold the lifecycle gate until either the startup cleanup has
+	// finished or every component has started, so the command layer's Stop
+	// cannot tear down a component while the rollback is doing the same.
+	n.startupLifecycleMu.Lock()
+	startupGateHeld := true
+	var started []func()
+	defer func() {
+		if !startupGateHeld {
+			return
+		}
+		r := recover()
+		n.cleanupFailedStartup(started)
+		if r != nil {
+			panic(r)
+		}
+	}()
+
 	// Configure tracing
 	n.warnIfTracingMisconfigured()
 	if n.config.tracing {
@@ -462,7 +485,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	go n.runRTSMetricsUpdater(n.ctx, rtsMetricsUpdateInterval)
 
 	// Track started components for cleanup on failure
-	var started []func()
 	stopPluginCapability := func(capability plugin.Capability) func() {
 		return func() {
 			if err := n.pluginHost.StopCapability(
@@ -479,29 +501,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			}
 		}
 	}
-	success := false
-	defer func() {
-		r := recover()
-		if r != nil {
-			if n.cancel != nil {
-				n.cancel()
-			}
-			// Cleanup on panic, then re-panic
-			for _, s := range slices.Backward(started) {
-				s()
-			}
-			panic(r)
-		} else if !success {
-			if n.cancel != nil {
-				n.cancel()
-			}
-			// Cleanup on failure (non-panic)
-			for _, s := range slices.Backward(started) {
-				s()
-			}
-		}
-	}()
-
 	// Register eventBus cleanup (created in New(), has background goroutines).
 	// Close (not Stop): startup-failure cleanup is terminal, and Stop restarts
 	// the async-worker pool, leaking those goroutines.
@@ -1668,7 +1667,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 
 	// All components started successfully
-	success = true
+	n.startupLifecycleMu.Unlock()
+	startupGateHeld = false
 
 	// Only now -- every component above has actually started against
 	// n.config.dataDir -- is a pre-restore backup left over from an
@@ -1678,6 +1678,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.removeConfirmedRestoreBackup()
 
 	return n.waitForShutdown()
+}
+
+// cleanupFailedStartup completes a failed startup while Run owns the startup
+// lifecycle gate. The gate is released only after every started component has
+// stopped, so shutdown cannot overlap the LIFO rollback on a startup signal.
+func (n *Node) cleanupFailedStartup(started []func()) {
+	defer n.startupLifecycleMu.Unlock()
+	if n.cancel != nil {
+		n.cancel()
+	}
+	for _, stop := range slices.Backward(started) {
+		stop()
+	}
 }
 
 // cancelForFatal records the first component failure before cancelling the
