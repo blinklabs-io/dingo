@@ -1983,23 +1983,37 @@ ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 	if err != nil {
 		return fmt.Errorf("load pool registrations query: %w", err)
 	}
+	// Collect every registration row and fully close this cursor before
+	// issuing any nested owner/relay query on the same queryer. On SQLite,
+	// concurrently open cursors on one connection are fine, but MySQL and
+	// PostgreSQL connections are strictly request/response: issuing a new
+	// query while this outer result set is still open corrupts the
+	// connection (observed as go-sql-driver/mysql's "busy buffer" /
+	// "unexpected sequence nr", and equivalent protocol-desync failures on
+	// PostgreSQL) once that connection is returned to the pool and reused
+	// -- see the conformance suite's real-backend investigation. Load
+	// children only after this cursor is closed, matching the safe
+	// collect-then-batch-load pattern loadPoolsAssociations already uses.
+	registrations := make([]*models.PoolRegistration, 0)
 	for rows.Next() {
 		registration, err := scanPoolRegistration(rows)
 		if err != nil {
 			rows.Close()
 			return err
 		}
-		if err := loadPoolRegistrationChildren(ctx, db, registration); err != nil {
-			rows.Close()
-			return err
-		}
-		pool.Registration = append(pool.Registration, *registration)
+		registrations = append(registrations, registration)
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	for _, registration := range registrations {
+		if err := loadPoolRegistrationChildren(ctx, db, registration); err != nil {
+			return err
+		}
+		pool.Registration = append(pool.Registration, *registration)
 	}
 	rows, err = db.QueryContext(ctx, `
 SELECT r.pool_key_hash, r.certificate_id, r.id, r.pool_id, r.epoch, r.added_slot
