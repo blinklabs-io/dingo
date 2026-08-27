@@ -224,7 +224,8 @@ func ValidateTxDijkstra(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	if _, ok := pp.(*gdijkstra.DijkstraProtocolParameters); !ok {
+	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
+	if !ok || tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -233,7 +234,10 @@ func ValidateTxDijkstra(
 	}
 	tx = normalizedTx
 	errs := []error{}
-	for _, validationRule := range dijkstraValidationRules(ls) {
+	// Phase-1 rules apply to every transaction regardless of its declared
+	// phase-2 result. A declared-invalid transaction still has to prove its
+	// collateral, redeemers, and other UTXO invariants.
+	for _, validationRule := range dijkstraPhase1ValidationRules() {
 		err = validationRule.validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
@@ -258,40 +262,52 @@ func ValidateTxDijkstra(
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	return nil
+	if shouldSkipPhase2Validation(ls) {
+		return nil
+	}
+
+	// gdijkstra.UtxoValidatePlutusScripts deliberately skips transactions whose
+	// IsValid flag is false. Re-evaluate with a copied concrete transaction set
+	// valid so phase-2 is independent of the block producer's declaration. The
+	// concrete *DijkstraTransaction is essential: the upstream evaluator uses it
+	// for Dijkstra guarding redeemers and sub-transaction witness scripts.
+	phase2Tx, err := dijkstraTransactionForPhase2(tx)
+	if err != nil {
+		return err
+	}
+	phase2Err := gdijkstra.UtxoValidatePlutusScripts(
+		phase2Tx,
+		slot,
+		ls,
+		tmpPparams,
+	)
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
-var (
-	dijkstraUtxoValidationRules       = buildDijkstraValidationRules(false)
-	dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules(true)
+var dijkstraPhase1UtxoValidationRules = buildIndexedUtxoValidationRules(
+	gdijkstra.UtxoValidationRules,
+	dijkstraUtxoValidatePlutusScriptsRuleIndex,
+	gdijkstra.UtxoValidatePlutusScripts,
+	"dijkstra.UtxoValidatePlutusScripts",
 )
 
-func dijkstraValidationRules(
-	ls lcommon.LedgerState,
-) []indexedUtxoValidationRule {
-	if shouldSkipPhase2Validation(ls) {
-		return dijkstraPhase1UtxoValidationRules
-	}
-	return dijkstraUtxoValidationRules
+func dijkstraPhase1ValidationRules() []indexedUtxoValidationRule {
+	return dijkstraPhase1UtxoValidationRules
 }
 
-func buildDijkstraValidationRules(
-	skipPhase2 bool,
-) []indexedUtxoValidationRule {
-	if skipPhase2 {
-		return buildIndexedUtxoValidationRules(
-			gdijkstra.UtxoValidationRules,
-			dijkstraUtxoValidatePlutusScriptsRuleIndex,
-			gdijkstra.UtxoValidatePlutusScripts,
-			"dijkstra.UtxoValidatePlutusScripts",
+func dijkstraTransactionForPhase2(
+	tx lcommon.Transaction,
+) (*gdijkstra.DijkstraTransaction, error) {
+	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
+	if !ok || dijkstraTx == nil {
+		return nil, fmt.Errorf(
+			"Dijkstra phase-2 validation requires *dijkstra.DijkstraTransaction, got %T",
+			tx,
 		)
 	}
-	return buildIndexedUtxoValidationRules(
-		gdijkstra.UtxoValidationRules,
-		noUtxoValidationRuleIndex,
-		nil,
-		"",
-	)
+	phase2Tx := *dijkstraTx
+	phase2Tx.TxIsValid = true
+	return &phase2Tx, nil
 }
 
 func EvaluateTxDijkstra(

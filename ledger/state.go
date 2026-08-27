@@ -6110,13 +6110,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 				blockDonation = 0
 			}
 		}
-		// Validate transaction
-		// Skip validation for phase-2 failed TXs (isValid=false).
-		// These are consensus-valid: the block producer already
-		// determined the script failure, collateral is consumed
-		// instead of regular inputs, and tx.Consumed()/Produced()
-		// return the correct collateral-based UTxO sets.
-		if shouldValidate && tx.IsValid() {
+		// Validate phase-1 and require the locally evaluated phase-2 result to
+		// match the declared validity flag before applying any transaction state.
+		if shouldValidate {
 			validationEra, err := resolveValidationEra(
 				tx,
 				currentEra,
@@ -6156,35 +6152,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 					lv,
 					pp,
 				)
-				// When a TX has isValid=true, the block producer's
-				// Plutus evaluator verified the script passed. For
-				// pre-Dijkstra eras, log a local evaluator disagreement
-				// and trust the block producer. Standard Dijkstra keeps
-				// the validation error so invalid Leios blocks are rejected;
-				// the Musashi prototype retains its explicit trust bypass.
-				var plutusErr conway.PlutusScriptFailedError
-				if err != nil && errors.As(err, &plutusErr) &&
-					(validationEra.Id != dijkstra.EraIdDijkstra ||
-						ls.trustDijkstraTxValidationError(validationEra.Id)) {
-					ls.config.Logger.Warn(
-						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
-						"component",
-						"ledger",
-						"tx_hash",
-						tx.Hash().String(),
-						"block_slot",
-						point.Slot,
-						"script_hash",
-						hex.EncodeToString(plutusErr.ScriptHash[:]),
-						"redeemer_tag",
-						plutusErr.Tag,
-						"redeemer_index",
-						plutusErr.Index,
-						"eval_error",
-						plutusErr.Err.Error(),
-					)
-					err = nil
-				}
 				// The Musashi prototype trusts remaining Dijkstra validation
 				// disagreements because its certificate-driven closure is still
 				// evolving. Standard profiles leave the error intact and reject

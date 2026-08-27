@@ -1953,6 +1953,15 @@ because prior pot transitions cannot be repaired safely without replay.
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
+Validated Alonzo, Babbage, and Conway block application runs phase 1 for every
+transaction and re-evaluates phase 2 for both declared validity outcomes before
+applying the transaction delta. A transaction marked valid must execute every
+Plutus script successfully; a transaction marked invalid must produce a local
+script-execution failure. Either mismatch rejects the block transaction before
+its regular-input or collateral effects can commit. Historical blocks already
+at least `k` deep retain the explicit replay-only phase-2 skip; their declared
+outcomes are trusted only inside that immutable replay window.
+
 Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The boundary block body's era is authoritative for ordinary advancement: a source-era block can advertise the next protocol major in its header without activating that successor. Header elevation is used only after the body itself advances, where it can validate the exceptional two-consecutive-era boundary path. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
 An empty from-genesis database therefore does not infer a hard-fork epoch from

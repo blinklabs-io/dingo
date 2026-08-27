@@ -134,6 +134,26 @@ func shouldSkipPhase2Validation(
 	return ok && skipper.SkipPhase2Validation()
 }
 
+// validatePlutusOutcome requires the locally evaluated phase-2 result to
+// match the transaction's declared validity flag. A failed script is the
+// expected outcome for an invalid transaction; every other validation error
+// remains a hard failure because it does not establish that script execution
+// itself failed.
+func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
+	if tx.IsValid() {
+		return phase2Err
+	}
+	if phase2Err == nil {
+		return errors.New(
+			"transaction declared invalid but Plutus scripts succeeded",
+		)
+	}
+	if _, ok := errors.AsType[conway.PlutusScriptFailedError](phase2Err); ok {
+		return nil
+	}
+	return phase2Err
+}
+
 // txHasRedeemers reports whether the transaction carries at least one redeemer.
 //
 // Redeemers are what drive Plutus phase-2 evaluation: every Plutus script a

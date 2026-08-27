@@ -231,25 +231,20 @@ func ValidateTxConway(
 	); err != nil {
 		return fmt.Errorf("conway plutus redeemer validation: %w", err)
 	}
-	// Skip script evaluation (Phase-2) if TX is marked as not valid.
-	// These transactions failed script validation on-chain; collateral
-	// is consumed instead of regular inputs.
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
-	if err := validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		tmpPparams,
 		plutusCtx,
 		false,
-	); err != nil {
-		return fmt.Errorf("conway plutus validation: %w", err)
+	)
+	if phase2Err != nil {
+		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
-	return nil
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 var (
@@ -455,20 +450,18 @@ func validateTxPlutusConway(
 	pp *conway.ConwayProtocolParameters,
 	validateRequiredRedeemers bool,
 ) error {
-	if !tx.IsValid() {
-		return nil
-	}
 	plutusCtx, err := newConwayPlutusValidationContext(tx, ls)
 	if err != nil {
 		return err
 	}
-	return validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		pp,
 		plutusCtx,
 		validateRequiredRedeemers,
 	)
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 func validateTxPlutusConwayWithContext(
