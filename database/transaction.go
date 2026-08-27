@@ -986,13 +986,16 @@ func (d *Database) recoverConsumedUtxo(
 	if err != nil {
 		return nil, fmt.Errorf("decode transaction output: %w", err)
 	}
-	ret := models.UtxoLedgerToModel(
+	ret, err := models.UtxoLedgerToModel(
 		lcommon.Utxo{
 			Id:     input,
 			Output: output,
 		},
 		addedSlot,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("convert recovered utxo: %w", err)
+	}
 	// Populate the producer transaction FK so that joins on
 	// utxo.transaction_id and Preload("Outputs") from the producer
 	// Transaction see this row after a rollback reanimates it. The
@@ -1079,7 +1082,16 @@ func (d *Database) SetGenesisTransaction(
 		}
 
 		// Build model for metadata store
-		utxoModels[i] = models.UtxoLedgerToModel(utxo, 0)
+		model, err := models.UtxoLedgerToModel(utxo, 0)
+		if err != nil {
+			return fmt.Errorf(
+				"convert genesis utxo %x:%d: %w",
+				bytePrefix(txId),
+				outputIdx,
+				err,
+			)
+		}
+		utxoModels[i] = model
 	}
 
 	// Store transaction in metadata

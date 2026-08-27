@@ -45,6 +45,22 @@ func blockIndexID(key []byte) (id uint64, ok bool) {
 	), true
 }
 
+// batchEnd returns the inclusive upper bound of the batch starting at start,
+// clamped to tipID. It avoids start+uint64(batchSize)-1 overflowing past
+// math.MaxUint64: that wraparound would silently produce an end below
+// start, corrupting the batch's iteration range instead of failing loudly.
+//
+// batchSize must be positive; DeleteBlocksAfter guarantees this by
+// substituting DefaultBlockDeleteBatchSize for any batchSize <= 0 before
+// calling in.
+func batchEnd(start, tipID uint64, batchSize int) uint64 {
+	size := uint64(batchSize) // #nosec G115 -- batchSize > 0, see doc comment
+	if tipID-start >= size-1 {
+		return start + size - 1
+	}
+	return tipID
+}
+
 // DeleteBlocksAfter removes every block whose internal, sequentially
 // assigned block ID (models.Block.ID — the basis of the blob store's "bi"
 // index, distinct from the chain's Number/height field) falls in
@@ -104,7 +120,7 @@ func DeleteBlocksAfter(
 		if err := ctx.Err(); err != nil {
 			return blocksDeleted, err
 		}
-		end := min(start+uint64(batchSize)-1, tipID)
+		end := batchEnd(start, tipID, batchSize)
 		var batchDeleted uint64
 		var batchIsIrreversible bool
 		txn := db.BlobTxn(true)
