@@ -73,8 +73,11 @@ const defaultLintGOOS = "linux"
 func goModuleDirs(t *testing.T, root string) []string {
 	t.Helper()
 
-	mods := filesMatching(t, root, func(name string) bool {
-		return name == "go.mod"
+	// filesMatching passes a repository-relative path, so match on the base
+	// name: comparing the whole path would find only the root module and
+	// leave this check passing vacuously.
+	mods := filesMatching(t, root, func(rel string) bool {
+		return filepath.Base(rel) == "go.mod"
 	})
 	dirs := make([]string, 0, len(mods))
 	for _, rel := range mods {

@@ -38,9 +38,10 @@ jobs:
       # These are steps of a single `lint` job rather than a matrix on
       # purpose. Branch protection matches a required context by name, and a
       # matrix would render `lint (root)`, `lint (examples/dingo-gov-lens)`
-      # and so on -- retiring the `lint` context that is currently required
-      # and leaving the check silently unenforced until branch protection is
-      # updated to match. Keeping one job keeps that contract intact.
+      # and so on. `lint` is not a required context today -- only
+      # `go-test (Linux) (1.26.x)` is -- so one job is what keeps the name
+      # stable for the point at which it is made required, rather than
+      # leaving a renamed context to be noticed later.
       #
       # internal/docsparity's TestLintCoversEveryGoModule derives the module
       # list from the tree and fails until every go.mod has a step here, so a
