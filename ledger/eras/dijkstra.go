@@ -233,7 +233,7 @@ func ValidateTxDijkstra(
 	}
 	tx = normalizedTx
 	errs := []error{}
-	for _, validationRule := range dijkstraValidationRules(tx, ls) {
+	for _, validationRule := range dijkstraValidationRules(ls) {
 		err = validationRule.validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
@@ -267,10 +267,9 @@ var (
 )
 
 func dijkstraValidationRules(
-	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
 ) []indexedUtxoValidationRule {
-	if !tx.IsValid() || shouldSkipPhase2Validation(ls) {
+	if shouldSkipPhase2Validation(ls) {
 		return dijkstraPhase1UtxoValidationRules
 	}
 	return dijkstraUtxoValidationRules

@@ -6582,14 +6582,22 @@ on by the network profile itself rather than by operator configuration:
   spending endorser-resident outputs are unresolvable and would disagree on
   essentially every transaction — and be trusted anyway.
 
+On standard profiles, Dingo still calls the public Dijkstra validator for a
+phase-two-invalid transaction so phase-one rules run. The validator itself
+owns the protocol-defined `isValid=false` boundary and skips Plutus phase-two
+script evaluation; Dingo does not replace its production rule set or emulate
+that decision. The block-application regression in
+`ledger/phase2_invalid_phase1_test.go` therefore checks the public path's
+phase-one result, not script non-evaluation.
+
 The flag also scopes acceptance through
 `LedgerState.trustDijkstraTxValidationError`. Only the Musashi prototype logs
 and trusts a Dijkstra validation disagreement. Standard Leios profiles run the
 Dijkstra rules and reject invalid transactions.
 
 Because these two settings make a node accept blocks and transactions a
-validating ledger would reject, the profile boundary is enforced rather than
-documented.
+validating ledger would reject, the profile boundary is enforced and
+documented here.
 Musashi is matched on *either* half of its identity — the network name
 `musashi` or network magic 164 — so a configuration supplying one half
 alongside a different predefined network is rejected at startup

@@ -37,6 +37,9 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 		invalidBefore = uint64(11)
 	)
 	db := newTestDB(t)
+	// This uses the public block-application path. The Dijkstra validator owns
+	// the protocol-defined phase-two skip; this regression checks that Dingo
+	// still invokes it for phase-one validation.
 	// Key 8 is the upstream invalid-before/lower-bound field. Deliberately omit
 	// key 3 (invalid-hereafter) so this regression is independent of the
 	// separately owned upstream upper-bound implementation.
