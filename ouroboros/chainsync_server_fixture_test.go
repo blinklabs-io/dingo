@@ -497,14 +497,18 @@ func TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget(
 // per-connection work budget bounds cumulative work across many in-bounds
 // requests, not just the size of a single request: a second full-size
 // request immediately following the first must be rejected even though
-// each is within the point-count limit on its own. The gap between the two
-// requests is a single wire round trip — far too short for
-// chainsyncFindIntersectBudgetRate to refill another full burst — so this
-// is deterministic rather than timing-sensitive.
+// each is within the point-count limit on its own. The limiter's clock is
+// pinned so the assertion holds regardless of how long the wire round trips
+// actually take, rather than relying on them staying under the 5s a full
+// burst would need to refill at chainsyncFindIntersectBudgetRate.
 func TestChainsyncServerFindIntersectRateLimitsRepeatedRequests(
 	t *testing.T,
 ) {
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.o.chainsyncFindIntersectLimiter.nowFunc = func() time.Time {
+		return now
+	}
 
 	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
 	require.NoError(t, f.h.FindIntersect(points))
