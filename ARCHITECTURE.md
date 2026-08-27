@@ -2440,6 +2440,19 @@ dependency across two points in the pipeline:
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
   is later rolled back.
+- **Leios announcement classification** (`ValidateLeiosAnnouncementHeader`):
+  a dangling ranking-block announcement first passes the same VRF, KES, opcert
+  signature, and KES-expiry checks as other header-only input. Ledger then
+  reads the selected primary chain exactly `k` blocks behind its tip and
+  compares the announcement OCIN with the issuer's highest counter at or before
+  that immutable point. Equality and any greater counter are fresh because the
+  lagging immutable view cannot impose an upper bound. A lower counter, an
+  issuer with no counter at that point, or a chain shorter than `k` (origin)
+  is stale. This is a verdict, not a validation error: node composition injects
+  LedgerState through the narrow `LeiosAnnouncementLedger` interface, and the
+  Ouroboros LeiosNotify handler accepts a stale peer message without recording,
+  publishing, or relaying it and without disconnecting the shared bearer.
+  Non-OCIN crypto failures retain the existing invalid-announcement handling.
 
 ### Epoch Nonce Computation
 

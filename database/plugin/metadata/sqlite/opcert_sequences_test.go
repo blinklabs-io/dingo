@@ -75,3 +75,42 @@ func TestLatestPoolOpCertSequencesEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, sequences)
 }
+
+func TestLatestPoolOpCertSequenceAtOrBefore(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	pool := bytes.Repeat([]byte{0xC3}, 28)
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pool))
+	require.NoError(t, store.UpdatePoolOpCertSequence(pkh, 2, 10, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(pkh, 9, 20, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(pkh, 4, 30, nil))
+
+	sequence, found, err := store.LatestPoolOpCertSequenceAtOrBefore(
+		pkh,
+		9,
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Zero(t, sequence)
+
+	sequence, found, err = store.LatestPoolOpCertSequenceAtOrBefore(
+		pkh,
+		20,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(9), sequence)
+
+	sequence, found, err = store.LatestPoolOpCertSequenceAtOrBefore(
+		pkh,
+		30,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(9), sequence,
+		"the highest accepted counter, not the newest row, is authoritative")
+}
