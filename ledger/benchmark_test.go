@@ -2365,7 +2365,7 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 				CardanoNodeConfig: newTestShelleyGenesisCfg(b),
 				Logger:            benchmarkDiscardLogger,
 			},
-			epochNonceHexCache: make(map[uint64]string),
+			epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		}
 
 		b.ReportAllocs()

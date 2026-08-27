@@ -809,7 +809,7 @@ type LedgerState struct {
 	chainsyncState                     ChainsyncState
 	currentTipBlockNonce               []byte
 	epochCache                         []models.Epoch
-	epochNonceHexCache                 map[uint64]string
+	epochNonceHexCache                 map[uint64]epochNonceHexCacheEntry
 	checkpoints                        map[uint64]string // configured chain checkpoints keyed by block number (height)
 	slotsPerKESPeriod                  atomic.Uint64
 	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
@@ -1161,7 +1161,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		chainsyncState:     InitChainsyncState,
 		db:                 cfg.Database,
 		chain:              cfg.ChainManager.PrimaryChain(),
-		epochNonceHexCache: make(map[uint64]string),
+		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		validationEnabled:  cfg.ValidateHistorical,
 		byronPBFT:          byronPBFT,
 	}

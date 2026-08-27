@@ -485,6 +485,7 @@ func TestSlotClockContextCancellation(t *testing.T) {
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
+	existing := clock.Subscribe()
 	clock.Start(ctx)
 
 	// Cancel context
@@ -502,6 +503,36 @@ func TestSlotClockContextCancellation(t *testing.T) {
 		// Good, clock stopped
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("clock did not stop after context cancellation")
+	}
+
+	// A cancelled clock has stopped just as surely as one stopped explicitly:
+	// its existing subscriber and any later subscription must be closed.
+	_, ok := <-existing
+	assert.False(t, ok, "cancellation must close existing subscriptions")
+	_, ok = <-clock.Subscribe()
+	assert.False(t, ok, "cancellation must close later subscriptions")
+}
+
+func TestSlotClockSubscriptionAfterStopIsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start bool
+	}{
+		{name: "before_start"},
+		{name: "after_start", start: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			systemStart := time.Now()
+			provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
+			clock := NewSlotClock(provider, DefaultSlotClockConfig())
+			if tc.start {
+				clock.Start(t.Context())
+			}
+			clock.Stop()
+
+			_, ok := <-clock.Subscribe()
+			assert.False(t, ok, "subscriptions registered after Stop must be closed")
+		})
 	}
 }
 
