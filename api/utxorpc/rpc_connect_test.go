@@ -97,6 +97,7 @@ type utxorpcConnectHarness struct {
 
 type utxorpcHarnessOptions struct {
 	numBlocks       int
+	blocks          []models.Block
 	maxHistoryItems int
 	serverTimeout   time.Duration
 	skipIndexTxHash []byte
@@ -173,7 +174,10 @@ func newUtxorpcConnectHarness(
 	})
 	require.NoError(t, err)
 
-	blocks := loadTestChainBlocks(t, opts.numBlocks)
+	blocks := opts.blocks
+	if len(blocks) == 0 {
+		blocks = loadTestChainBlocks(t, opts.numBlocks)
+	}
 	require.NotEmpty(t, blocks)
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
@@ -1164,7 +1168,7 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	// Load a long prefix to locate an empty block, then trim the harness chain
 	// so that empty block is the tip. Otherwise WatchTx keeps iterating forward
 	// and may hit transactions that panic in gouroboros Utxorpc().
-	scan := loadTestChainBlocks(t, 80)
+	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	var cut int
 	found := false
 	for j := 6; j < len(scan); j++ {
@@ -1181,11 +1185,8 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	if cut < 2 {
 		t.Fatalf("empty block cut must include a parent, got %d", cut)
 	}
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: cut})
-	blocks := loadTestChainBlocks(t, cut)
-	if len(blocks) < cut {
-		t.Fatalf("expected at least %d blocks, got %d", cut, len(blocks))
-	}
+	blocks := scan[:cut]
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{blocks: blocks})
 	parent := blocks[cut-2]
 	emptyChild := blocks[cut-1]
 	require.Equal(t, emptyChild.Slot, h.LS.Tip().Point.Slot)

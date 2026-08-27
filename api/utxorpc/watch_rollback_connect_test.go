@@ -110,11 +110,11 @@ func requireWatchTxIdle(
 }
 
 func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
-	scan := loadTestChainBlocks(t, 80)
+	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	start := findEmptyFixtureRun(t, scan, 2)
 	blocks := scan[:start+2]
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
-		numBlocks: len(blocks),
+		blocks: blocks,
 	})
 
 	var blockReads atomic.Int32
@@ -183,14 +183,14 @@ func requireWatchTxUndos(
 }
 
 func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
-	scan := loadTestChainBlocks(t, 80)
+	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	start := findEmptyFixtureRun(t, scan, 4)
 	require.GreaterOrEqual(t, start, 3)
 	blocks := scan[:start+1]
-	txPayload := scan[3]
+	txPayload := scan[start-1]
 	undoCount := requireFixtureWatchTxAppliedCount(t, txPayload)
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
-		numBlocks: len(blocks),
+		blocks: blocks,
 	})
 
 	// Reuse one known-convertible transaction payload for two persisted block
@@ -259,11 +259,11 @@ func TestConnect_WatchTx_RollbackPanicBecomesStreamError(t *testing.T) {
 }
 
 func runWatchTxRollbackPanicChild(t *testing.T) {
-	scan := loadTestChainBlocks(t, 80)
+	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	childIdx := findEmptyFixtureRun(t, scan, 1)
 	blocks := scan[:childIdx+1]
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
-		numBlocks: len(blocks),
+		blocks: blocks,
 	})
 	h.U.config.LedgerState = &watchTxLedgerStateProbe{
 		UtxorpcLedgerState: h.LS,

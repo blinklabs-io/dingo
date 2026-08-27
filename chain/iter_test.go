@@ -24,8 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -456,15 +456,10 @@ func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
 		return true
 	}, 2*time.Second, "iterator should hold chain lock at tip")
 
-	blockFixture, err := mockfixtures.NewHarness(
-		mockfixtures.HarnessConfig{},
-	).Fixture(
-		"ouroboros-consensus/ouroboros-consensus-cardano/" +
-			"golden/cardano/CardanoNodeToNodeVersion2/Block_Conway",
-	)
+	blocks, err := testfixtures.GenerateConwayChain(1)
 	require.NoError(t, err)
-	block, err := blockFixture.DecodeLedgerBlock()
-	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
 	blockHash := block.Hash().Bytes()
 
 	go func() {
