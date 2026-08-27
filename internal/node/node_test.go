@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,43 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 		t.Fatalf(
 			"expected api.auth.token to flow through, got %+v",
 			got.Auth,
+		)
+	}
+}
+
+// TestBuildDingoConfigWiresBarkOperatorFingerprints pins the production
+// composition boundary between loaded YAML/env/CLI configuration and the root
+// configuration that Run passes to dingo.New and, in turn, Bark.
+func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		strings.Repeat("ab", 32),
+		strings.Repeat("cd", 32),
+	}
+	cfg := &config.Config{
+		BarkOperatorCertificateFingerprints: want,
+	}
+
+	built := buildDingoConfig(
+		cfg,
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.BarkOperatorCertificateFingerprints(); !slices.Equal(
+		got,
+		want,
+	) {
+		t.Fatalf(
+			"expected Bark operator fingerprints to flow through, got %v",
+			got,
 		)
 	}
 }

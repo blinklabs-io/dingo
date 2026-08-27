@@ -103,6 +103,11 @@ The following environment variables modify Dingo's behavior:
   - Comma-separated HTTPS hostnames additionally allowed for Bark-supplied
     block download URLs. The allowlist always includes the
     `DINGO_BARK_BASE_URL` hostname.
+- `DINGO_BARK_CLIENT_CA_FILE_PATH`
+  - PEM CA bundle used to authenticate every Bark DatabaseService caller.
+- `DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS`
+  - Comma-separated SHA-256 client certificate fingerprints authorized for
+    destructive Bark DatabaseService RPCs.
 - `DINGO_DEBUG_BIND_ADDR`
   - IP address to bind for unauthenticated pprof endpoints (default:
     `127.0.0.1`)
@@ -616,9 +621,13 @@ a target beyond the security parameter, because it exists for disaster-recovery
 scenarios (see CIP-0135) where the chain must be rewound further than Ouroboros
 Praos allows. The resulting database is resync-ready from the target point.
 
-The same operations are also exposed remotely through the Bark
-`DatabaseService`. Bark has no built-in authentication, so do not expose its
-port outside a trusted network.
+The same operations are also exposed remotely through Bark's
+`DatabaseService`. Every `DatabaseService` RPC requires a client certificate
+verified against `barkClientCaFilePath`; destructive RPCs also require the
+certificate's SHA-256 fingerprint in
+`barkOperatorCertificateFingerprints`. Bark's read-only `ArchiveService`
+remains public on the same listener, so expose the Bark port only to the
+intended network.
 
 ## Database Plugins
 

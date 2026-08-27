@@ -15,6 +15,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -424,22 +426,39 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, err)
 	}
 
-	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
-	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
-	// whenever bark is enabled with a snapshot directory configured —
-	// exactly node.go's Run() gating for lifecycleEnabled. Those RPCs must
-	// never be reachable without a way to authenticate callers, regardless
-	// of bind address (BarkHost/effectiveBarkHost is a network control, not
-	// an identity one), so a client CA is required upfront here rather than
-	// left to fail deep inside bark.Bark.Start at startup.
+	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
+	// directory configured. Every method must authenticate its caller, and its
+	// destructive methods additionally require explicit operator authorization.
+	// Validate both policies here rather than failing deep in Bark.Start.
 	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
 		c.BarkClientCAFilePath == "" {
 		errs = append(errs, errors.New(
 			"barkClientCaFilePath is required when bark is enabled "+
 				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
-				"destructive DatabaseService RPCs must not be mounted "+
-				"without a way to authenticate callers",
+				"DatabaseService RPCs must not be mounted without a way to "+
+				"authenticate callers",
 		))
+	}
+	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
+		len(c.BarkOperatorCertificateFingerprints) == 0 {
+		errs = append(errs, errors.New(
+			"barkOperatorCertificateFingerprints requires at least one SHA-256 "+
+				"client certificate fingerprint when bark is enabled (barkPort) "+
+				"alongside databaseLifecycle.snapshotDir: verified identity alone "+
+				"does not authorize destructive DatabaseService RPCs",
+		))
+	}
+	for idx, fingerprint := range c.BarkOperatorCertificateFingerprints {
+		normalized := strings.ReplaceAll(strings.TrimSpace(fingerprint), ":", "")
+		decoded, err := hex.DecodeString(normalized)
+		if err != nil || len(decoded) != sha256.Size {
+			errs = append(errs, fmt.Errorf(
+				"barkOperatorCertificateFingerprints[%d] must be a %d-byte "+
+					"SHA-256 certificate fingerprint encoded as hexadecimal",
+				idx,
+				sha256.Size,
+			))
+		}
 	}
 	// mTLS client verification also needs the server's own TLS pair --
 	// without it, bark.Bark.Start's own equivalent check (independent of

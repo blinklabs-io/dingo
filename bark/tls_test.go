@@ -193,6 +193,17 @@ func writeTestClientCert(
 	return certPath, keyPath
 }
 
+func testCertificateFingerprint(t *testing.T, certPath string) string {
+	t.Helper()
+	pemBytes, err := os.ReadFile(certPath)
+	require.NoError(t, err)
+	block, _ := pem.Decode(pemBytes)
+	require.NotNil(t, block)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+	return certFingerprint(cert)
+}
+
 // TestTLSServerReusesPreloadedCertAfterFilesChange guards against a real
 // bug: startServer's TLS path used to hand server.ServeTLS the same
 // on-disk cert/key paths it had just preflight-loaded, causing ServeTLS to

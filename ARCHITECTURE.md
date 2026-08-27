@@ -6156,20 +6156,26 @@ documented "one operation at a time" invariant (a second call while one is
 running gets `FAILED_PRECONDITION`) and is the backing store for
 `GetOperationHistory` (in-memory only — does not survive a bark restart).
 
-**Authentication** (`bark/auth.go`, dingo#2988). Bind address alone doesn't
-authenticate a caller, so the DatabaseService's destructive RPCs
-(`CreateSnapshot`, `DeleteSnapshot`, `VerifySnapshot`, `Restore`, `Truncate`,
-`CancelOperation` — everything except the read-only status/catalog RPCs and
-the entirely-read-only `ArchiveService`) additionally require mTLS client
-certificate authentication, independent of bind address. `BarkConfig.
-TlsClientCAFilePath` supplies a PEM CA bundle; `startServer` loads it into an
+**Request bounds.** Every Bark Connect handler, including ArchiveService,
+DatabaseService, health, and reflection, uses per-message 1 MiB read and send
+limits. Connect applies the read limit independently to compressed wire bytes
+and the decompressed message before unary decoding reaches an interceptor; the
+send limit is also per message, so `StreamOperationProgress` can remain open
+across arbitrarily many bounded updates. Archive `FetchBlock` additionally
+requires 1–100 block references before it acquires the database, bounding URL
+signing/storage work and response growth. The HTTP server applies a 60-second
+request read timeout but no write timeout, so slow request bodies are bounded
+without imposing an overall deadline on long-lived server streams.
+
+**Authentication and authorization** (`bark/auth.go`, dingo#2988 and #3499).
+Bind address alone doesn't authenticate a caller. Every DatabaseService RPC
+requires mTLS client-certificate authentication, independent of bind address;
+the entirely-read-only ArchiveService remains public. `BarkConfig.
+TlsClientCAFilePath` supplies a PEM CA bundle. `startServer` loads it into an
 `x509.CertPool` and sets the listener's `ClientAuth` to
-`tls.VerifyClientCertIfGiven` — "if given," not "required," because
-read-only RPCs on the same listener must keep working for a caller with no
-client cert at all. Go's TLS stack still fully chain-verifies any certificate
-that *is* presented against `ClientCAs` during the handshake itself, before
-any HTTP request is processed, so a certificate signed by an untrusted CA
-never reaches the request layer regardless of which RPC it's calling.
+`tls.VerifyClientCertIfGiven` — "if given," not "required," because Archive is
+served on the same listener. Go's TLS stack still chain-verifies any presented
+certificate against `ClientCAs` during the handshake before request handling.
 
 Because Connect's `AnyRequest`/`StreamingHandlerConn` don't expose the
 underlying `tls.ConnectionState`, `peerCertContextMiddleware` wraps the mux
@@ -6178,18 +6184,16 @@ connection presented a verified client certificate — plus, for audit
 logging, its Subject Common Name and a SHA-256 fingerprint — into the
 request context. `newOperatorAuthInterceptor`, wired via
 `connect.WithInterceptors` when `databaseconnect.NewDatabaseServiceHandler`
-is constructed, is deny-by-default: it exempts a procedure from requiring a
-verified certificate only if it's named in an explicit `readOnlyDatabaseProcedures`
-allowlist, not merely because it's absent from `destructiveDatabaseProcedures`
-— so a DatabaseService RPC added later without updating either map still
-requires authentication like a known destructive one, rather than silently
-passing through unauthenticated. It rejects with `connect.CodeUnauthenticated`
-if the context shows no verified certificate; every non-read-only call,
-accepted or rejected, is logged with the caller's certificate identity (or
-its absence), since `GetOperationHistory` has no notion of caller identity of
-its own — an unclassified procedure is additionally logged as such, so an
-operator notices and fixes the classification even though it's already
-being safely rejected. Because this all sits beneath `*http.Server`, one check covers
+is constructed, is deny-by-default and enforces two stages. It first rejects
+every DatabaseService request without a verified certificate with
+`connect.CodeUnauthenticated`. It then permits methods explicitly classified
+read-only, while destructive or unclassified methods additionally require the
+certificate's SHA-256 fingerprint in `BarkConfig.
+OperatorCertificateFingerprints`; a verified non-operator receives
+`connect.CodePermissionDenied`. Every non-read-only call, accepted or rejected,
+is logged with the caller's certificate identity. An unclassified procedure is
+also logged and treated as destructive. Because this all sits beneath
+`*http.Server`, one check covers
 Connect, gRPC, and gRPC-Web alike — they're just HTTP requests distinguished
 by content type once they reach the generated handler, not separate code
 paths needing separate wiring. The interceptor implements the full
@@ -6200,17 +6204,18 @@ proposed `LifecycleService`, which calls for the identical "no anonymous
 calls" requirement.
 
 `Start` (not `NewBark`) fails closed: mounting `Lifecycle` without
-`TlsClientCAFilePath` (or without `TlsCertFilePath`/`TlsKeyFilePath` — mTLS
-has no meaning without the server's own TLS listener underneath it) is
-refused rather than silently serving those RPCs unauthenticated. The check
+`TlsClientCAFilePath`, at least one `OperatorCertificateFingerprint`, or
+`TlsCertFilePath`/`TlsKeyFilePath` is refused rather than silently serving
+DatabaseService with a missing authentication or authorization stage. The check
 lives at `Start`, not construction, because a `databaseServiceHandler` built
 via `newDatabaseServiceHandler` and exercised through direct in-process Go
 calls — as most of this package's own handler-level tests do — never goes
 through `Start`'s mux/interceptor wiring and so is never actually
 network-reachable in the first place; `internal/config/validate.go` also
 checks the same invariant upfront (`barkPort` + `databaseLifecycle.
-snapshotDir` set without `barkClientCaFilePath`), so a misconfigured `dingo`
-invocation fails fast at the CLI rather than deep inside `Node.Run()`.
+snapshotDir` set without `barkClientCaFilePath` or
+`barkOperatorCertificateFingerprints`), so a misconfigured `dingo` invocation
+fails fast at the CLI rather than deep inside `Node.Run()`.
 `dingoctl`'s existing `--client-cert`/`--client-key`/`--ca-cert` flags
 (`dingoctl/internal/client/tls.go`) are the client side of this — no new
 dingoctl plumbing was needed.
