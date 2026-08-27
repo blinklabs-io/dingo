@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
+	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 )
 
 // postgresConformanceSchema is the dedicated schema this suite migrates
@@ -90,8 +91,9 @@ func NewDingoPostgresStateManager(dsn string) (*DingoStateManager, error) {
 // plugin itself has no schema-provisioning step the way the mysql plugin
 // does for CREATE DATABASE), then resolves the metadata store against dsn
 // with its connection search_path pinned to that schema (see
-// PostgresDSNWithSearchPath), so every table the store's migrations create
-// lands there instead of colliding with the plugin's own tests.
+// storagetest.PostgresDSNWithSearchPath), so every table the store's
+// migrations create lands there instead of colliding with the plugin's
+// own tests.
 func newDingoPostgresStateManagerAt(
 	dsn, blobDataDir string,
 ) (*DingoStateManager, error) {
@@ -120,7 +122,7 @@ func newDingoPostgresStateManagerAtSchema(
 		)
 	}
 
-	scopedDSN := PostgresDSNWithSearchPath(dsn, schema)
+	scopedDSN := storagetest.PostgresDSNWithSearchPath(dsn, schema)
 	m, err := newDingoStateManager(realBackendOptions{
 		dataDir:      blobDataDir,
 		metadataName: "postgres",

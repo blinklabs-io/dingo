@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -350,9 +351,9 @@ func TestNewDingoPostgresStateManagerBadCredentialsFails(t *testing.T) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=postgres password=storagetest-wrong-password "+
 			"dbname=%s sslmode=disable",
-		EscapeLibpqValue(host),
-		EscapeLibpqValue(port),
-		EscapeLibpqValue(database),
+		storagetest.EscapeLibpqValue(host),
+		storagetest.EscapeLibpqValue(port),
+		storagetest.EscapeLibpqValue(database),
 	)
 
 	m, err := NewDingoPostgresStateManager(dsn)
