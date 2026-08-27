@@ -261,6 +261,15 @@ func DeleteBlocksAfter(
 			return blocksDeleted, err
 		}
 		blocksDeleted += batchDeleted
+		// end == tipID marks the final batch. Testing that directly,
+		// rather than relying on the loop's start <= tipID condition to
+		// stop things, matters because tipID can itself be MaxUint64: in
+		// that case start = end + 1 would wrap to 0, which is <= tipID,
+		// and the loop would incorrectly run additional batches below
+		// afterID.
+		if end == tipID {
+			break
+		}
 		start = end + 1
 	}
 	return blocksDeleted, nil

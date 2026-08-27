@@ -795,12 +795,16 @@ func (s *Store) GetScript(
 	if err != nil {
 		return nil, fmt.Errorf("get script: %w", err)
 	}
+	scriptType, err := checkedUint8(row.Type.Int64)
+	if err != nil {
+		return nil, fmt.Errorf("get script: %w", err)
+	}
 	return &models.Script{
 		Hash:        row.Hash,
 		Content:     row.Content,
 		ID:          uint(row.ID),
 		CreatedSlot: createdSlot,
-		Type:        uint8(row.Type.Int64),
+		Type:        scriptType,
 	}, nil
 }
 
@@ -1197,4 +1201,15 @@ func checkedUint64(value int64) (uint64, error) {
 		return 0, fmt.Errorf("signed SQL value %d is negative", value)
 	}
 	return uint64(value), nil
+}
+
+// checkedUint8 narrows a signed SQL column to uint8. script.type is an
+// unconstrained SQLite INTEGER, so a row corrupted or tampered with
+// outside normal writes can hold a value outside [0, 255]; converting
+// that directly would silently wrap instead of failing.
+func checkedUint8(value int64) (uint8, error) {
+	if value < 0 || value > math.MaxUint8 {
+		return 0, fmt.Errorf("signed SQL value %d does not fit in uint8", value)
+	}
+	return uint8(value), nil
 }
