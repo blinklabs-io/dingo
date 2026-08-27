@@ -25,6 +25,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
@@ -848,38 +849,32 @@ func testOuroborosForDecodeCache(tb testing.TB) *Ouroboros {
 	}
 }
 
-func conwayBlockFixtureBytes(t *testing.T) (blockType uint, raw []byte) {
-	t.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
-	require.NoError(t, err)
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Block_Conway",
+func conwayBlockFixtureBytes(tb testing.TB) (blockType uint, raw []byte) {
+	tb.Helper()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		common.Blake2b256{},
+		2,
+		20,
+		1,
 	)
-	require.NoError(t, err)
-	blockType, err = fixture.LedgerBlockType()
-	require.NoError(t, err)
-	raw, err = fixture.LedgerBlockBytes()
-	require.NoError(t, err)
-	return blockType, raw
+	require.NoError(tb, err)
+	require.Len(tb, blocks, 1)
+	return uint(blocks[0].Type()), blocks[0].Cbor()
 }
 
-func conwayHeaderFixtureBytes(t *testing.T) (headerType uint, raw []byte) {
-	t.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
-	require.NoError(t, err)
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Header_Conway",
+func conwayHeaderFixtureBytes(tb testing.TB) (headerType uint, raw []byte) {
+	tb.Helper()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		common.Blake2b256{},
+		2,
+		20,
+		1,
 	)
-	require.NoError(t, err)
-	headerType, err = fixture.LedgerHeaderType()
-	require.NoError(t, err)
-	raw, err = fixture.LedgerHeaderBytes()
-	require.NoError(t, err)
-	return headerType, raw
+	require.NoError(tb, err)
+	require.Len(tb, blocks, 1)
+	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
 }
 
 func TestBlockDecodeCacheIntegrationRealConwayBlock(t *testing.T) {

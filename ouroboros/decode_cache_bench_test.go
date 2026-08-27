@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 )
 
 // benchConwayBlockFixture and benchConwayHeaderFixture mirror
@@ -27,53 +26,11 @@ import (
 // the same real fixture loading works from both Test and Benchmark
 // functions.
 func benchConwayBlockFixture(b *testing.B) (blockType uint, raw []byte) {
-	b.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(b.TempDir())
-	if err != nil {
-		b.Fatalf("extract fixtures: %v", err)
-	}
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Block_Conway",
-	)
-	if err != nil {
-		b.Fatalf("load fixture: %v", err)
-	}
-	blockType, err = fixture.LedgerBlockType()
-	if err != nil {
-		b.Fatalf("block type: %v", err)
-	}
-	raw, err = fixture.LedgerBlockBytes()
-	if err != nil {
-		b.Fatalf("block bytes: %v", err)
-	}
-	return blockType, raw
+	return conwayBlockFixtureBytes(b)
 }
 
 func benchConwayHeaderFixture(b *testing.B) (headerType uint, raw []byte) {
-	b.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(b.TempDir())
-	if err != nil {
-		b.Fatalf("extract fixtures: %v", err)
-	}
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Header_Conway",
-	)
-	if err != nil {
-		b.Fatalf("load fixture: %v", err)
-	}
-	headerType, err = fixture.LedgerHeaderType()
-	if err != nil {
-		b.Fatalf("header type: %v", err)
-	}
-	raw, err = fixture.LedgerHeaderBytes()
-	if err != nil {
-		b.Fatalf("header bytes: %v", err)
-	}
-	return headerType, raw
+	return conwayHeaderFixtureBytes(b)
 }
 
 // --- Blocks -----------------------------------------------------------
