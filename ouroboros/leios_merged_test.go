@@ -243,7 +243,11 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 		conn.ErrorChan() <- errors.New("test connection closed")
 	}()
 
-	o := newOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager:        cm,
+		EnableLeios:        true,
+		EnableLeiosTxFetch: true,
+	})
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockTxsOffer(
@@ -732,6 +736,62 @@ func TestValidateLeiosEndorserBlockTxsBindsManifestOrder(t *testing.T) {
 	}
 }
 
+func TestValidateLeiosEndorserBlockTxsRejectsMalformedManifest(t *testing.T) {
+	tx, ref := testLeiosManifestTx(t, 1)
+	hashRaw, err := cbor.Encode(ref.TransactionHash)
+	require.NoError(t, err)
+	sizeRaw, err := cbor.Encode(uint16(ref.TransactionSize))
+	require.NoError(t, err)
+
+	duplicateManifest := append([]byte{0x81, 0xa2}, hashRaw...)
+	duplicateManifest = append(duplicateManifest, sizeRaw...)
+	duplicateManifest = append(duplicateManifest, hashRaw...)
+	duplicateManifest = append(duplicateManifest, sizeRaw...)
+	zeroSizeManifest := append([]byte{0x81, 0xa1}, hashRaw...)
+	zeroSizeManifest = append(zeroSizeManifest, 0x00)
+
+	for name, manifest := range map[string][]byte{
+		"missing references":   {0x81, 0xa0},
+		"duplicate references": duplicateManifest,
+		"zero reference size":  zeroSizeManifest,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := validateLeiosEndorserBlockTxs(manifest, []cbor.RawMessage{tx})
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestValidateLeiosEndorserBlockTxsRejectsWrongSizeAndMalformedBody(
+	t *testing.T,
+) {
+	tx, ref := testLeiosManifestTx(t, 1)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+
+	tests := map[string]cbor.RawMessage{
+		"wrong size":     append(cbor.RawMessage(nil), tx...),
+		"malformed body": {0xff},
+		"trailing bytes": append(append(cbor.RawMessage(nil), tx...), 0x00),
+	}
+	for name, candidate := range tests {
+		t.Run(name, func(t *testing.T) {
+			manifest := manifestRaw
+			candidateRef := ref
+			if name == "wrong size" {
+				candidateRef.TransactionSize++
+				manifest, err = lcommon.LeiosEndorserBlock{
+					TransactionReferences: []lcommon.LeiosTransactionReference{candidateRef},
+				}.MarshalCBOR()
+				require.NoError(t, err)
+			}
+			require.Error(t, validateLeiosEndorserBlockTxs(manifest, []cbor.RawMessage{candidate}))
+		})
+	}
+}
+
 type manifestTxRequester struct {
 	txs []cbor.RawMessage
 }
@@ -749,6 +809,58 @@ func (r manifestTxRequester) BlockTxsRequest(
 		}
 	}
 	return oleiosfetch.NewMsgBlockTxsFull(point, bitmaps, txs), nil
+}
+
+type recordingManifestTxRequester struct {
+	txs       []cbor.RawMessage
+	requested []int
+}
+
+func (r *recordingManifestTxRequester) BlockTxsRequest(
+	_ context.Context,
+	point ocommon.Point,
+	bitmaps map[uint16]uint64,
+) (protocol.Message, error) {
+	indices := leiosBitmapTxIndices(bitmaps)
+	r.requested = append(r.requested, indices...)
+	txs := make([]cbor.RawMessage, 0, len(indices))
+	for _, index := range indices {
+		if index >= 0 && index < len(r.txs) {
+			txs = append(txs, r.txs[index])
+		}
+	}
+	return oleiosfetch.NewMsgBlockTxsFull(point, bitmaps, txs), nil
+}
+
+func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(t *testing.T) {
+	tx1, ref1 := testLeiosManifestTx(t, 1)
+	tx2, ref2 := testLeiosManifestTx(t, 2)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref1, ref2},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(123, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+
+	// Seed index 0 with the body for index 1. A resumed fetch must discard it
+	// before computing its request bitmap, then replace it in the retained set.
+	o.retainLeiosPartialTxs(point.Hash, []cbor.RawMessage{tx2, nil}, nil)
+	requester := &recordingManifestTxRequester{
+		txs: []cbor.RawMessage{tx1, tx2},
+	}
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 2, manifestRaw)
+	require.NoError(t, err)
+	require.Contains(t, requester.requested, 0)
+	require.NoError(t, validateLeiosEndorserBlockTxs(manifestRaw, txs))
+
+	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, 2, cached.partialTxCount())
+	require.NoError(t, validateLeiosEndorserBlockTxs(
+		manifestRaw,
+		leiosCollectTxs(cached.partialTxs),
+	))
 }
 
 func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(t *testing.T) {
