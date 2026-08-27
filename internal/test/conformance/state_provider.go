@@ -15,11 +15,14 @@
 package conformance
 
 import (
-	"encoding/hex"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -28,8 +31,41 @@ import (
 // ErrNotFound is returned when a requested item is not found
 var ErrNotFound = errors.New("conformance: not found")
 
+// withBadConnRetry retries fn once when it fails with a transient "bad
+// connection" driver error -- observed specifically on the first read
+// against a Postgres backend immediately after a fresh migration run (a
+// newly pooled connection's first statement can race the just-committed
+// DDL and get invalidated by the driver), which exceeds database/sql's
+// own built-in bad-connection retry budget under this harness's
+// connection-pool sizing and usage pattern (many short-lived, nil-txn
+// reads). A single manual retry against a fresh connection resolves it;
+// if the second attempt also fails, the error is real and is returned
+// as-is, not swallowed.
+func withBadConnRetry[T any](fn func() (T, error)) (T, error) {
+	v, err := fn()
+	if err != nil && isBadConnErr(err) {
+		v, err = fn()
+	}
+	return v, err
+}
+
+// isBadConnErr reports whether err is (or wraps, including as a message
+// substring surfaced through a non-wrapping fmt.Errorf in an
+// intermediate layer) database/sql/driver's transient bad-connection
+// signal.
+func isBadConnErr(err error) bool {
+	return errors.Is(err, driver.ErrBadConn) ||
+		strings.Contains(err.Error(), "bad connection")
+}
+
 // DingoStateProvider implements conformance.StateProvider by wrapping
-// DingoStateManager to satisfy all gouroboros state interfaces.
+// DingoStateManager to satisfy all gouroboros state interfaces. Every read
+// method below queries manager.db -- the real, configured backend -- live;
+// none of them read from any in-memory mirror of UTxO/certificate/pool/
+// DRep/committee state (see state_manager.go's type doc comment for the
+// one narrow, documented exception: reward-account balances, which are
+// harness-injected synthetic validation input, not application state
+// Dingo itself commits).
 type DingoStateProvider struct {
 	manager *DingoStateManager
 }
@@ -58,7 +94,9 @@ func (p *DingoStateProvider) CostModels() map[common.PlutusLanguage]common.CostM
 
 // ========== common.UtxoState ==========
 
-// UtxoById looks up a UTxO by transaction input
+// UtxoById looks up a UTxO by transaction input, reading through the real
+// backend (metadata row plus blob-stored output CBOR -- see
+// DingoStateManager.createUtxo).
 func (p *DingoStateProvider) UtxoById(
 	id common.TransactionInput,
 ) (common.Utxo, error) {
@@ -68,12 +106,29 @@ func (p *DingoStateProvider) UtxoById(
 
 	inputId := id.Id()
 	inputIdx := id.Index()
-	utxoId := fmt.Sprintf("%x#%d", inputId.Bytes(), inputIdx)
 
-	if utxo, ok := p.manager.utxos[utxoId]; ok {
-		return utxo, nil
+	utxo, err := withBadConnRetry(func() (*models.Utxo, error) {
+		return p.manager.db.UtxoByRef(inputId.Bytes(), inputIdx, nil)
+	})
+	if err != nil {
+		if errors.Is(err, database.ErrUtxoNotFound) {
+			return common.Utxo{}, ErrNotFound
+		}
+		return common.Utxo{}, fmt.Errorf("lookup utxo: %w", err)
 	}
-	return common.Utxo{}, ErrNotFound
+	output, err := utxo.Decode()
+	if err != nil {
+		return common.Utxo{}, fmt.Errorf("decode utxo output: %w", err)
+	}
+
+	txHash := inputId
+	return common.Utxo{
+		Id: &dingoTransactionInput{
+			txId:  txHash,
+			index: inputIdx,
+		},
+		Output: output,
+	}, nil
 }
 
 // ========== common.CertState ==========
@@ -82,17 +137,44 @@ func (p *DingoStateProvider) UtxoById(
 func (p *DingoStateProvider) StakeRegistration(
 	stakingKey []byte,
 ) ([]common.StakeRegistrationCertificate, error) {
-	// For conformance testing, we track registrations by credential hash
-	// Return empty slice if not found
-	return []common.StakeRegistrationCertificate{}, nil
+	regs, err := withBadConnRetry(
+		func() ([]common.StakeRegistrationCertificate, error) {
+			return p.manager.db.Metadata().
+				GetStakeRegistrationsByCredential(0, stakingKey, nil)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup stake registrations: %w", err)
+	}
+	if len(regs) == 0 {
+		scriptRegs, err := withBadConnRetry(
+			func() ([]common.StakeRegistrationCertificate, error) {
+				return p.manager.db.Metadata().
+					GetStakeRegistrationsByCredential(1, stakingKey, nil)
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("lookup stake registrations: %w", err)
+		}
+		return scriptRegs, nil
+	}
+	return regs, nil
 }
 
 // IsStakeCredentialRegistered checks if a stake credential is currently registered
 func (p *DingoStateProvider) IsStakeCredentialRegistered(
 	cred common.Credential,
 ) bool {
-	_, exists := p.manager.stakeRegistrations[mockledger.NewRewardAccountKey(cred)]
-	return exists
+	credentialTag := conformanceCredentialTag(cred)
+	account, err := withBadConnRetry(func() (*models.Account, error) {
+		return p.manager.db.GetAccountByCredential(
+			credentialTag, cred.Credential[:], false, nil,
+		)
+	})
+	if err != nil || account == nil {
+		return false
+	}
+	return account.Active
 }
 
 // ========== common.SlotState ==========
@@ -113,40 +195,125 @@ func (p *DingoStateProvider) TimeToSlot(t time.Time) (uint64, error) {
 
 // ========== common.PoolState ==========
 
-// PoolCurrentState returns the current state of a pool
+// PoolCurrentState returns the current state of a pool. A pool's
+// PoolRetirementCertificate is already persisted (pool + pool_retirement
+// rows) at certificate-application time via SetTransactionMetadataOnly in
+// ApplyTransaction, so there is nothing further to read at epoch-boundary
+// time -- see ProcessEpochBoundary's doc comment. The pending retirement
+// epoch, when any, is reported unconditionally (matching
+// ledger.LedgerView.PoolCurrentState); whether the pool is still
+// considered actively registered is decided by poolIsActive -- see its
+// doc comment.
 func (p *DingoStateProvider) PoolCurrentState(
 	poolKeyHash common.PoolKeyHash,
 ) (*common.PoolRegistrationCertificate, *uint64, error) {
-	if p.manager.poolRegistrations[poolKeyHash] {
-		// Check if pool has pending retirement
-		if retireEpoch, retiring := p.manager.govState.PoolRetirements[poolKeyHash]; retiring {
-			return &common.PoolRegistrationCertificate{
-				Operator: poolKeyHash,
-			}, &retireEpoch, nil
-		}
-		return &common.PoolRegistrationCertificate{
-			Operator: poolKeyHash,
-		}, nil, nil
+	pool, err := withBadConnRetry(func() (*models.Pool, error) {
+		return p.manager.db.GetPool(poolKeyHash, true, nil)
+	})
+	if errors.Is(err, models.ErrPoolNotFound) {
+		return nil, nil, nil
 	}
-	// Also check if pool is pending retirement
-	if retireEpoch, retiring := p.manager.govState.PoolRetirements[poolKeyHash]; retiring {
-		return &common.PoolRegistrationCertificate{
-			Operator: poolKeyHash,
-		}, &retireEpoch, nil
+	if err != nil {
+		return nil, nil, fmt.Errorf("lookup pool: %w", err)
 	}
-	return nil, nil, nil
+	pendingEpoch := latestPoolRetirementEpoch(pool)
+	if !poolIsActive(pool, p.manager.currentEpoch) {
+		return nil, pendingEpoch, nil
+	}
+	return &common.PoolRegistrationCertificate{
+		Operator: poolKeyHash,
+	}, pendingEpoch, nil
 }
 
-// IsPoolRegistered checks if a pool is currently registered
+// IsPoolRegistered checks if a pool is currently active -- see poolIsActive.
 func (p *DingoStateProvider) IsPoolRegistered(
 	poolKeyHash common.PoolKeyHash,
 ) bool {
-	if p.manager.poolRegistrations[poolKeyHash] {
+	pool, err := withBadConnRetry(func() (*models.Pool, error) {
+		return p.manager.db.GetPool(poolKeyHash, true, nil)
+	})
+	if err != nil {
+		return false
+	}
+	return poolIsActive(pool, p.manager.currentEpoch)
+}
+
+// poolIsActive mirrors the ordering rule the real node's
+// GetActivePoolKeyHashesAtSlot uses
+// (database/plugin/metadata/sqlstore/pool.go): a pool is active if it has
+// a registration and either (a) that registration was submitted at or
+// after its latest retirement certificate -- a later re-registration
+// cancels a pending retirement, which the metadata store's certificate
+// application never separately deletes -- or (b) the retirement's target
+// epoch has not yet arrived. The real node derives this comparison from
+// live chain tip/added_slot/cert-index ordering; this conformance harness
+// has no real block stream to derive tip/cert-index from, so it compares
+// each row's AddedSlot (falling back to CertificateID as an
+// insertion-order tiebreak for same-slot certificates) against the
+// manager's own authoritative currentEpoch instead.
+func poolIsActive(pool *models.Pool, currentEpoch uint64) bool {
+	reg := latestPoolRegistrationRow(pool)
+	if reg == nil {
+		return false
+	}
+	ret := latestPoolRetirementRow(pool)
+	if ret == nil {
 		return true
 	}
-	// Also check pending retirements (pool is still registered until retirement)
-	_, retiring := p.manager.govState.PoolRetirements[poolKeyHash]
-	return retiring
+	registrationSupersedesRetirement := reg.AddedSlot > ret.AddedSlot ||
+		(reg.AddedSlot == ret.AddedSlot && reg.CertificateID > ret.CertificateID)
+	return registrationSupersedesRetirement || currentEpoch < ret.Epoch
+}
+
+// latestPoolRegistrationRow returns the most recently added registration
+// row for pool (by AddedSlot, then CertificateID), or nil if it has none.
+func latestPoolRegistrationRow(pool *models.Pool) *models.PoolRegistration {
+	if len(pool.Registration) == 0 {
+		return nil
+	}
+	latest := &pool.Registration[0]
+	for i := 1; i < len(pool.Registration); i++ {
+		reg := &pool.Registration[i]
+		if reg.AddedSlot > latest.AddedSlot ||
+			(reg.AddedSlot == latest.AddedSlot &&
+				reg.CertificateID > latest.CertificateID) {
+			latest = reg
+		}
+	}
+	return latest
+}
+
+// latestPoolRetirementRow returns the most recently added retirement row
+// for pool (by AddedSlot, then CertificateID), or nil if it has none.
+func latestPoolRetirementRow(pool *models.Pool) *models.PoolRetirement {
+	if len(pool.Retirement) == 0 {
+		return nil
+	}
+	latest := &pool.Retirement[0]
+	for i := 1; i < len(pool.Retirement); i++ {
+		ret := &pool.Retirement[i]
+		if ret.AddedSlot > latest.AddedSlot ||
+			(ret.AddedSlot == latest.AddedSlot &&
+				ret.CertificateID > latest.CertificateID) {
+			latest = ret
+		}
+	}
+	return latest
+}
+
+// latestPoolRetirementEpoch returns the most recently recorded retirement
+// epoch for pool, or nil if it has none.
+func latestPoolRetirementEpoch(pool *models.Pool) *uint64 {
+	if len(pool.Retirement) == 0 {
+		return nil
+	}
+	epoch := pool.Retirement[0].Epoch
+	for _, retirement := range pool.Retirement[1:] {
+		if retirement.Epoch > epoch {
+			epoch = retirement.Epoch
+		}
+	}
+	return &epoch
 }
 
 // IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
@@ -192,11 +359,14 @@ func (p *DingoStateProvider) IsRewardAccountRegistered(
 	return p.IsStakeCredentialRegistered(cred)
 }
 
-// RewardAccountBalance returns the current reward balance for a stake credential
+// RewardAccountBalance returns the current reward balance for a stake
+// credential. Reward balances are harness-injected synthetic validation
+// input (see DingoStateManager.SetRewardBalances's doc comment), so this
+// reads the govState mirror rather than the real backend.
 func (p *DingoStateProvider) RewardAccountBalance(
 	cred common.Credential,
 ) (*uint64, error) {
-	balance, exists := p.manager.stakeRegistrations[mockledger.NewRewardAccountKey(cred)]
+	balance, exists := p.manager.govState.RewardAccountBalances[mockledger.NewRewardAccountKey(cred)]
 	if !exists {
 		return nil, nil
 	}
@@ -205,39 +375,38 @@ func (p *DingoStateProvider) RewardAccountBalance(
 
 // ========== common.GovState ==========
 
-// CommitteeMember looks up a constitutional committee member by credential hash
+// CommitteeMember looks up a constitutional committee member by credential
+// hash. Enacted (real, committed) members are read from the backend
+// directly; a member proposed by a pending (not yet enacted) UpdateCommittee
+// action falls back to the govState pre-validation mirror, matching the
+// upstream harness's own distinction between committed and merely-proposed
+// committee membership.
 func (p *DingoStateProvider) CommitteeMember(
 	coldKey common.Blake2b224,
 ) (*common.CommitteeMember, error) {
-	// Check current members first
-	if expiry, ok := p.manager.committeeMembers[coldKey]; ok {
-		member := &common.CommitteeMember{
-			ColdKey:     coldKey,
-			ExpiryEpoch: expiry,
-		}
-		// Add hot key if authorized
-		if hotKey, hasHot := p.manager.hotKeyAuthorizations[coldKey]; hasHot {
-			member.HotKey = &hotKey
-		}
+	member, err := p.realCommitteeMember(coldKey)
+	if err != nil {
+		return nil, err
+	}
+	if member != nil {
 		return member, nil
 	}
 
 	// Check proposed members from governance state
 	if memberInfo := p.manager.govState.GetCommitteeMember(coldKey); memberInfo != nil {
-		member := &common.CommitteeMember{
+		result := &common.CommitteeMember{
 			ColdKey:     coldKey,
 			ExpiryEpoch: memberInfo.ExpiryEpoch,
 			Resigned:    memberInfo.Resigned,
 		}
 		if memberInfo.HotKey != nil {
-			member.HotKey = memberInfo.HotKey
+			result.HotKey = memberInfo.HotKey
 		}
-		return member, nil
+		return result, nil
 	}
 
 	// Check if member is proposed in a pending UpdateCommittee action
 	if p.manager.govState.IsProposedCommitteeMember(coldKey) {
-		// Get the expiry from the proposal
 		for _, proposal := range p.manager.govState.Proposals {
 			if proposal.ActionType == common.GovActionTypeUpdateCommittee {
 				if expiry, ok := proposal.ProposedMembers[coldKey]; ok {
@@ -253,25 +422,100 @@ func (p *DingoStateProvider) CommitteeMember(
 	return nil, nil
 }
 
+// realCommitteeMember reads an enacted committee member's full state
+// (expiry epoch, hot-key authorization, resignation) by joining the real
+// committee_member and auth_committee_hot rows.
+func (p *DingoStateProvider) realCommitteeMember(
+	coldKey common.Blake2b224,
+) (*common.CommitteeMember, error) {
+	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
+		return p.manager.db.GetCommitteeMembers(nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee members: %w", err)
+	}
+	var expiryEpoch uint64
+	found := false
+	for _, member := range members {
+		if common.NewBlake2b224(member.ColdCredHash) == coldKey {
+			expiryEpoch = member.ExpiresEpoch
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+
+	result := &common.CommitteeMember{
+		ColdKey:     coldKey,
+		ExpiryEpoch: expiryEpoch,
+	}
+
+	auth, err := withBadConnRetry(func() (*models.AuthCommitteeHot, error) {
+		return p.manager.db.GetCommitteeMember(coldKey[:], nil)
+	})
+	if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
+		return nil, fmt.Errorf("lookup committee hot key: %w", err)
+	}
+	if auth != nil {
+		hotKey := common.NewBlake2b224(auth.HotCredential)
+		result.HotKey = &hotKey
+	}
+
+	resigned, err := withBadConnRetry(func() (bool, error) {
+		return p.manager.db.IsCommitteeMemberResigned(coldKey[:], nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee resignation: %w", err)
+	}
+	result.Resigned = resigned
+
+	return result, nil
+}
+
 // CommitteeMembers returns all committee members
 func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error) {
 	var members []common.CommitteeMember
 
-	// Add current members
-	for coldKey, expiry := range p.manager.committeeMembers {
+	realMembers, err := withBadConnRetry(
+		func() ([]*models.CommitteeMember, error) {
+			return p.manager.db.GetCommitteeMembers(nil)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee members: %w", err)
+	}
+	for _, dbMember := range realMembers {
+		coldKey := common.NewBlake2b224(dbMember.ColdCredHash)
 		member := common.CommitteeMember{
 			ColdKey:     coldKey,
-			ExpiryEpoch: expiry,
+			ExpiryEpoch: dbMember.ExpiresEpoch,
 		}
-		if hotKey, hasHot := p.manager.hotKeyAuthorizations[coldKey]; hasHot {
+		auth, err := withBadConnRetry(func() (*models.AuthCommitteeHot, error) {
+			return p.manager.db.GetCommitteeMember(dbMember.ColdCredHash, nil)
+		})
+		if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
+			return nil, fmt.Errorf("lookup committee hot key: %w", err)
+		}
+		if auth != nil {
+			hotKey := common.NewBlake2b224(auth.HotCredential)
 			member.HotKey = &hotKey
 		}
+		resigned, err := withBadConnRetry(func() (bool, error) {
+			return p.manager.db.IsCommitteeMemberResigned(
+				dbMember.ColdCredHash, nil,
+			)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("lookup committee resignation: %w", err)
+		}
+		member.Resigned = resigned
 		members = append(members, member)
 	}
 
-	// Add members from governance state
+	// Add members from governance state (proposed, not yet enacted)
 	for coldKey, memberInfo := range p.manager.govState.CommitteeMembers {
-		// Skip if already added
 		found := false
 		for _, m := range members {
 			if m.ColdKey == coldKey {
@@ -296,14 +540,25 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 	return members, nil
 }
 
-// DRepRegistration looks up a DRep registration by credential hash
+// DRepRegistration looks up a DRep registration by credential hash. The
+// real store keys DRep rows by (credentialTag, credential); the upstream
+// conformance interface only carries the hash, so both credential tags are
+// checked, matching the tag-agnostic semantics the harness has always used.
 func (p *DingoStateProvider) DRepRegistration(
 	credential common.Blake2b224,
 ) (*common.DRepRegistration, error) {
-	if p.manager.drepRegistrations[credential] {
-		return &common.DRepRegistration{
-			Credential: credential,
-		}, nil
+	for _, tag := range [...]uint8{0, 1} {
+		drep, err := withBadConnRetry(func() (*models.Drep, error) {
+			return p.manager.db.GetDrepByCredential(
+				tag, credential[:], false, nil,
+			)
+		})
+		if err != nil {
+			continue
+		}
+		if drep != nil && drep.Active {
+			return &common.DRepRegistration{Credential: credential}, nil
+		}
 	}
 	return nil, nil
 }
@@ -327,17 +582,19 @@ func (p *DingoStateProvider) DRepDelegation(
 
 // DRepRegistrations returns all DRep registrations
 func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, error) {
-	dreps := make(
-		[]common.DRepRegistration,
-		0,
-		len(p.manager.drepRegistrations),
-	)
-	for cred := range p.manager.drepRegistrations {
-		dreps = append(dreps, common.DRepRegistration{
-			Credential: cred,
+	dreps, err := withBadConnRetry(func() ([]*models.Drep, error) {
+		return p.manager.db.GetActiveDreps(nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup active dreps: %w", err)
+	}
+	result := make([]common.DRepRegistration, 0, len(dreps))
+	for _, drep := range dreps {
+		result = append(result, common.DRepRegistration{
+			Credential: common.NewBlake2b224(drep.Credential),
 		})
 	}
-	return dreps, nil
+	return result, nil
 }
 
 // Constitution returns the current constitution
@@ -350,23 +607,28 @@ func (p *DingoStateProvider) TreasuryValue() (uint64, error) {
 	return 0, nil
 }
 
-// GovActionById looks up a governance action by its ID
+// GovActionById looks up a governance action by its ID against the real
+// backend.
 func (p *DingoStateProvider) GovActionById(
 	id common.GovActionId,
 ) (*common.GovActionState, error) {
-	key := fmt.Sprintf(
-		"%s#%d",
-		hex.EncodeToString(id.TransactionId[:]),
-		id.GovActionIdx,
+	proposal, err := withBadConnRetry(
+		func() (*models.GovernanceProposal, error) {
+			return p.manager.db.GetGovernanceProposal(
+				id.TransactionId[:], id.GovActionIdx, nil,
+			)
+		},
 	)
-	proposal := p.manager.govState.GetProposal(key)
-	if proposal == nil {
+	if errors.Is(err, models.ErrGovernanceProposalNotFound) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup governance action: %w", err)
 	}
 	return &common.GovActionState{
 		ActionId:   id,
-		ActionType: proposal.ActionType,
-		ExpirySlot: proposal.ExpiresAfter * 432000, // Approximate: epoch * slots per epoch
+		ActionType: common.GovActionType(proposal.ActionType),
+		ExpirySlot: proposal.ExpiresEpoch * conformanceSlotsPerEpoch,
 	}, nil
 }
 

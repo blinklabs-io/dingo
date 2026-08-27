@@ -17,10 +17,15 @@
 package conformance
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
 )
@@ -194,4 +199,187 @@ func TestRulesConformanceVectorsWithResultsPostgres(t *testing.T) {
 			"sqlite; vector discovery/extraction should be backend-invariant",
 	)
 	require.Zero(t, pgFailed, "postgres backend failed vectors sqlite passed")
+}
+
+// TestNewDingoPostgresStateManagerRestartSurvivesReopen proves state
+// committed through a real Postgres-backed DingoStateManager survives
+// closing that manager and opening a new one against the same DSN/schema
+// -- the Postgres analog of
+// TestDingoStateManagerRestartSurvivesReopen (state_manager_backend_test.go).
+// Unlike the sqlite case there is no local file to reopen: the state lives
+// on the Postgres server itself, so "restart" here means a fresh manager
+// instance pointed at the same database/schema.
+func TestNewDingoPostgresStateManagerRestartSurvivesReopen(t *testing.T) {
+	skipIfPostgresConformanceNotConfigured(t)
+
+	// Both manager instances share one local blob directory: the local
+	// Badger blob store and the remote Postgres metadata store are paired
+	// at construction (see newDingoPostgresStateManagerAt's doc comment),
+	// so m2 must reuse m1's blob directory to reopen against the same
+	// already-populated metadata store without tripping that pairing
+	// check.
+	blobDataDir := t.TempDir()
+	dsn := postgresConformanceDSN()
+
+	// blobDataDir is always a fresh, empty t.TempDir(), so this test needs
+	// an equally fresh, empty metadata side to pair with it -- reusing
+	// postgresConformanceSchema (the schema every other test in this suite
+	// shares) would trip database.New's commit-timestamp consistency check
+	// against whatever those other tests have already committed there, and
+	// truncating that shared schema here would just move the same mismatch
+	// onto the *other* tests instead (they pair the stable, suite-shared
+	// postgresConformanceBlobDir with that schema, and this test's own
+	// commits -- made through blobDataDir, not that stable directory --
+	// would advance the shared schema's commit timestamp out from under
+	// them). A schema unique to this test run sidesteps the problem
+	// entirely: nothing else ever touches it.
+	schema := fmt.Sprintf("conformance_restart_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_ = dropPostgresSchema(dsn, schema)
+	})
+
+	m1, err := newDingoPostgresStateManagerAtSchema(dsn, blobDataDir, schema)
+	require.NoError(t, err)
+
+	pp := &conway.ConwayProtocolParameters{}
+	require.NoError(t, m1.LoadInitialState(
+		&conformance.ParsedInitialState{CurrentEpoch: 0},
+		pp,
+	))
+
+	cred := common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xa1),
+	}
+	tx, err := syntheticTransaction(
+		"pg-restart-stake-registration",
+		[]common.Certificate{
+			&common.StakeRegistrationCertificate{
+				CertType:        uint(common.CertificateTypeStakeRegistration),
+				StakeCredential: cred,
+			},
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, m1.ApplyTransaction(tx, 100))
+	require.NoError(t, m1.Close())
+
+	m2, err := newDingoPostgresStateManagerAtSchema(dsn, blobDataDir, schema)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m2.Close()) }()
+
+	provider := m2.GetStateProvider()
+	require.True(
+		t,
+		provider.IsStakeCredentialRegistered(cred),
+		"stake registration committed by m1 must be visible from a fresh manager pointed at the same schema",
+	)
+}
+
+// TestNewDingoPostgresStateManagerRollbackDiscardsWrites is the Postgres
+// analog of TestDingoStateManagerRollbackDiscardsWrites: a write inside a
+// real, rolled-back Postgres transaction is not visible via a fresh read.
+func TestNewDingoPostgresStateManagerRollbackDiscardsWrites(t *testing.T) {
+	skipIfPostgresConformanceNotConfigured(t)
+
+	m := newTestPostgresConformanceManager(t)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	cred := testHash28(0xa2)
+
+	txn := m.db.Transaction(true)
+	account := &models.Account{
+		StakingKey:    cred[:],
+		CredentialTag: 0,
+		Active:        true,
+	}
+	require.NoError(t, m.db.CreateAccount(txn, account))
+	require.NoError(t, txn.Rollback())
+
+	got, err := m.db.GetAccountByCredential(0, cred[:], false, nil)
+	require.ErrorIs(t, err, models.ErrAccountNotFound)
+	require.Nil(t, got)
+}
+
+// TestNewDingoPostgresStateManagerUnreachableHostFails proves an
+// unreachable Postgres host fails DingoStateManager construction with a
+// real, bounded-time error -- not a hang and not a silently-successful
+// no-op backend -- mirroring
+// database/plugin/metadata/postgres's own
+// TestMetadataStoreUnreachableHostFailsWithoutHanging. No live Postgres
+// server is required for this test: it points at a closed local port with
+// a short connect_timeout.
+func TestNewDingoPostgresStateManagerUnreachableHostFails(t *testing.T) {
+	dsn := "host=127.0.0.1 port=1 user=postgres password=x " +
+		"dbname=x sslmode=disable connect_timeout=3"
+
+	start := time.Now()
+	m, err := NewDingoPostgresStateManager(dsn)
+	require.Error(t, err)
+	require.Nil(t, m)
+	require.Less(
+		t,
+		time.Since(start),
+		15*time.Second,
+		"an unreachable host should fail within the connect timeout, not hang",
+	)
+}
+
+// TestNewDingoPostgresStateManagerBadCredentialsFails proves a reachable
+// Postgres server that rejects the supplied credentials fails
+// DingoStateManager construction cleanly, mirroring
+// database/plugin/metadata/postgres's own
+// TestMetadataStoreBadCredentialsFailsCleanly. It requires a real,
+// reachable server (unlike the unreachable-host case above) so the
+// failure is specifically credential rejection.
+func TestNewDingoPostgresStateManagerBadCredentialsFails(t *testing.T) {
+	skipIfPostgresConformanceNotConfigured(t)
+
+	host := "localhost"
+	if v := os.Getenv("POSTGRES_HOST"); v != "" {
+		host = v
+	}
+	port := "5432"
+	if v := os.Getenv("POSTGRES_PORT"); v != "" {
+		port = v
+	}
+	database := "dingo_test"
+	if v := os.Getenv("POSTGRES_DATABASE"); v != "" {
+		database = v
+	}
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=postgres password=storagetest-wrong-password "+
+			"dbname=%s sslmode=disable",
+		EscapeLibpqValue(host),
+		EscapeLibpqValue(port),
+		EscapeLibpqValue(database),
+	)
+
+	m, err := NewDingoPostgresStateManager(dsn)
+	require.Error(t, err)
+	require.Nil(t, m)
+}
+
+// dropPostgresSchema drops schema (and everything in it) over an ordinary,
+// unscoped connection to dsn. Used to tear down a test-owned, uniquely
+// named schema created via newDingoPostgresStateManagerAtSchema (see
+// TestNewDingoPostgresStateManagerRestartSurvivesReopen) -- unlike the
+// suite-shared postgresConformanceSchema, a per-test schema has no other
+// caller relying on it surviving, so cleanup is a plain drop rather than
+// truncatePostgresConformanceSchema's in-place empty.
+func dropPostgresSchema(dsn, schema string) error {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("open postgres admin connection: %w", err)
+	}
+	defer db.Close()
+	// schema is always Go-generated (a test-owned unique name), never
+	// operator/DSN input, so string concatenation here carries no
+	// injection risk -- same reasoning as ensurePostgresConformanceSchema.
+	if _, err := db.Exec(
+		"DROP SCHEMA IF EXISTS " + schema + " CASCADE",
+	); err != nil {
+		return fmt.Errorf("drop postgres schema %q: %w", schema, err)
+	}
+	return nil
 }
