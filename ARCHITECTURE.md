@@ -5224,8 +5224,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
   | `/pool_history` | derived-match | `pool_id_bech32` | Request identity is decoded to Dingo's pool key hash for set membership. |
   | `/pool_history` | derived-match | `active_stake`, `delegator_cnt` | Exact values against `reward_pool_input` at stake epoch K-1. |
-  | `/pool_history` | derived-match | `block_cnt`, `fixed_cost` | Exact values against `reward_pool_input` at parameter epoch K+1. |
-  | `/pool_history` | derived-match | `margin` | K+1 values compared as equivalent rational numbers. |
+  | `/pool_history` | derived-match | `block_cnt` | Exact value against `reward_pool_input` at parameter epoch K+1. |
+  | `/pool_history` | derived-match | `fixed_cost` | Exact value against `reward_pool_input` at stake epoch K-1: a mark snapshot records the pool parameters in force for the epoch it is the basis for. |
+  | `/pool_history` | derived-match | `margin` | K-1 values compared as equivalent rational numbers. |
   | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with aggregated `reward_pool_output.member_reward_total` at K-1. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
@@ -5240,7 +5241,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koiosStakeEpoch`/`koiosParamEpoch` and reads each field group from the one
   that actually matches:
   - **stake epoch (K-1):** `epoch_summary.TotalActiveStake` and
-    `reward_pool_input`'s `DelegatedStake`/`DelegatorCount` are the mark stake
+    `reward_pool_input`'s `DelegatedStake`/`DelegatorCount`/`Margin`/`Cost`
+    are the mark stake
     distribution Praos actually used as K's active-stake/reward-calculation
     basis — derived from `ledger/reward_calculation.go`'s
     `stakeRewardEpochsForNewEpoch` (`epochs.snapshot = epochs.performance - 1`,
@@ -5257,12 +5259,19 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     `compareEpochAccounts` (`check.go`) reads Dingo's `reward_account_output`
     at `stakeEpoch`, reusing `koiosStakeEpoch` rather than deriving a second,
     possibly-diverging offset.
-  - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced`, `Margin`,
-    and `Cost` (fixed cost) describe the epoch *before* the row's own Epoch —
-    `ledger/snapshot/rotation.go`'s `buildRewardStateInputs` stamps them from
-    `evt.PreviousEpoch` onto the row captured for the new epoch at snapshot
-    time, independent of the stake-epoch offset above (which governs that
-    same row's `DelegatedStake`/`DelegatorCount` instead).
+  - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced` describes
+    the epoch *before* the row's own Epoch — `ledger/snapshot/rotation.go`'s
+    `buildRewardStateInputs` stamps it from `evt.PreviousEpoch` onto the row
+    captured for the new epoch at snapshot time, independent of the
+    stake-epoch offset above (which governs that same row's
+    `DelegatedStake`/`DelegatorCount` instead). `BlocksProduced` is the only
+    field read here. `Margin` and `Cost` were read at this epoch too until
+    dingo #3484: a mark snapshot records the pool parameters as of its own
+    boundary, and those are the ones in force for the epoch that snapshot is
+    the basis for, so they belong with the stake epoch. Both are constant for
+    most pools, which is why the wrong alignment stayed invisible until a
+    preview pool changed its cost and another changed its margin at epoch
+    13.
   - `reward_ada_pots` (treasury/reserves/fees, compared in
     `CompareEpochTotals`) is unaffected by either offset: it is a
     point-in-time ledger pot balance captured at the boundary into K itself,
@@ -5371,18 +5380,19 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   calculation may simply not have finished yet); past that window it is
   `dingo_db_missing` (a genuine gap in Dingo's own computation). Both are
   `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
-  presence/grace split to `reward_pool_input`'s param-epoch fields
-  (`blocks_produced`/`fixed_cost`/`margin`, reported together as
-  `reward_pool_input_params` when absent) via `DingoPoolEpochData.
-  ParamsPresent`, for the same reason: a not-yet-captured param-epoch row must
-  not silently compare as zero blocks/cost/margin against Koios's real values.
-  The same split applies a third time to `reward_pool_input`'s stake-epoch
-  fields (`delegated_stake`/`delegator_count`, reported together as
+  presence/grace split to `reward_pool_input`'s param-epoch field
+  (`blocks_produced` alone, reported as `reward_pool_input_params` when
+  absent) via `DingoPoolEpochData.ParamsPresent`, for the same reason: a
+  not-yet-captured param-epoch row must not silently compare as zero blocks
+  against Koios's real value. The same split applies a third time to
+  `reward_pool_input`'s stake-epoch fields (`delegated_stake`/
+  `delegator_count`/`fixed_cost`/`margin`, reported together as
   `reward_pool_input_stake` when absent) via `DingoPoolEpochData.
   StakePresent` — a pool whose stake-epoch row hasn't landed yet (e.g. a
   freshly registered pool captured first at the param epoch) must not
-  silently compare as zero stake/delegators against Koios's real values
-  either.
+  silently compare as zero stake/delegators/cost/margin against Koios's real
+  values either. `fixed_cost` and `margin` sit on this side of the split, not
+  with `blocks_produced`, because they are read at K-1 (dingo #3484).
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
@@ -7940,8 +7950,10 @@ reward application first, ADA-pot capture last) by
 
 ### Reward Calculation And Precomputation
 
-Reward protocol parameters and epoch length come from the RUPD calculation
-epoch, while block-production counts use the delayed performance epoch. TPraos
+Reward protocol parameters and block-production counts come from the delayed
+performance epoch, while epoch length comes from the RUPD calculation epoch —
+see "Blockchain State Management" above for the derivation from
+cardano-ledger's `startStep`. TPraos
 overlay slots are excluded while decentralization is non-zero. Pre-Babbage
 calculation resolves the reward prefilter from stake-account certificate
 history immediately before the first reward-update slot, using the RUPD

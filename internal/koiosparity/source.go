@@ -227,11 +227,16 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	}
 	m := make(map[string]*DingoPoolEpochData, len(stakeInputs))
 	for _, inp := range stakeInputs {
-		m[hex.EncodeToString(inp.PoolKeyHash)] = &DingoPoolEpochData{
+		data := &DingoPoolEpochData{
 			StakePresent:   true,
 			DelegatedStake: strconv.FormatUint(uint64(inp.DelegatedStake), 10),
 			DelegatorCount: inp.DelegatorCount,
+			FixedCost:      strconv.FormatUint(uint64(inp.Cost), 10),
 		}
+		if inp.Margin != nil && inp.Margin.Rat != nil {
+			data.Margin = inp.Margin.String()
+		}
+		m[hex.EncodeToString(inp.PoolKeyHash)] = data
 	}
 
 	paramInputs, err := meta.GetRewardPoolInputs(paramEpoch, txn.Metadata())
@@ -252,10 +257,6 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		data.ParamsPresent = true
 		if inp.BlocksProduced != nil {
 			data.BlocksProduced = *inp.BlocksProduced
-		}
-		data.FixedCost = strconv.FormatUint(uint64(inp.Cost), 10)
-		if inp.Margin != nil && inp.Margin.Rat != nil {
-			data.Margin = inp.Margin.String()
 		}
 	}
 

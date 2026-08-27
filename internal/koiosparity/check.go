@@ -313,7 +313,8 @@ const preStakingThroughEpoch = 1
 // reward_pool_input's stake fields exactly. See ARCHITECTURE.md's Koios
 // Parity Tracker "Epoch alignment" section for the full derivation and
 // koiosParamEpoch below for the distinct offset reward_pool_input's
-// BlocksProduced/Margin/FixedCost fields need instead.
+// BlocksProduced field needs instead. Margin/FixedCost share this stake-epoch
+// offset rather than that one (dingo #3484).
 //
 // ok is false for koiosEpoch <= preStakingThroughEpoch (0 and 1), neither of
 // which has a valid stake epoch (checkEpoch never reaches this for those
@@ -330,13 +331,15 @@ func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 }
 
 // koiosParamEpoch returns the Dingo reward_pool_input epoch whose
-// BlocksProduced and pool Margin/FixedCost fields describe Koios reporting
-// epoch koiosEpoch ("K+1"). ledger/snapshot/rotation.go's
-// buildRewardStateInputs stamps these fields from evt.PreviousEpoch (the just
-// -ended epoch) onto the row captured for the *new* epoch — one epoch after
-// the epoch they describe — independent of the stake-epoch offset above,
-// which governs the same row's DelegatedStake/DelegatorCount instead. See
-// koiosStakeEpoch's doc comment and ARCHITECTURE.md.
+// BlocksProduced field describes Koios reporting epoch koiosEpoch ("K+1").
+// ledger/snapshot/rotation.go's buildRewardStateInputs stamps it from
+// evt.PreviousEpoch (the just-ended epoch) onto the row captured for the
+// *new* epoch — one epoch after the epoch it describes — independent of the
+// stake-epoch offset above, which governs the same row's DelegatedStake/
+// DelegatorCount/Margin/Cost instead. BlocksProduced is the only field read
+// at this offset: a mark snapshot records the pool parameters as of its own
+// boundary, so Margin/FixedCost belong with the stake epoch (dingo #3484).
+// See koiosStakeEpoch's doc comment and ARCHITECTURE.md.
 func koiosParamEpoch(koiosEpoch uint64) uint64 {
 	return koiosEpoch + 1
 }
@@ -476,8 +479,8 @@ func checkEpoch(
 	)
 
 	// 2. Bulk-load all pool reward data for this epoch from Dingo's DB,
-	// spread across stakeEpoch (active stake/delegator count/member rewards)
-	// and paramEpoch (blocks produced/margin/fixed cost) — see
+	// spread across stakeEpoch (active stake/delegator count/member rewards,
+	// plus margin/fixed cost) and paramEpoch (blocks produced) — see
 	// GetPoolEpochDataMap's doc comment. Two-to-three queries regardless of
 	// how many pools Koios knows about.
 	var dingoPoolMap map[string]*DingoPoolEpochData
@@ -563,7 +566,19 @@ func checkEpoch(
 	// Convert key-hash hex back to bech32 so PoolBech32 is consistently formatted.
 	var onlyDingo []string
 	if dingoPoolErr == nil {
-		for keyHex := range dingoPoolMap {
+		for keyHex, dingoPool := range dingoPoolMap {
+			// GetPoolEpochDataMap returns the union of the stake-epoch
+			// (K-1) and param-epoch (K+1) reads, so a pool that registered
+			// during K appears here through its param-epoch row alone: its
+			// first mark snapshot is captured at the boundary into K+1, and
+			// it is not part of K's active-stake basis at all. Koios has no
+			// pool_history row for it until K+2, so comparing presence at K
+			// would report a divergence where both sides agree the pool did
+			// not yet exist. Only a pool actually in K's stake basis can be
+			// present-only-in-Dingo (dingo #3483).
+			if !dingoPool.StakePresent {
+				continue
+			}
 			if _, inKoios := koiosKeySet[keyHex]; !inKoios {
 				poolBech32, bechErr := PoolKeyHashHexToBech32(keyHex)
 				if bechErr != nil {
