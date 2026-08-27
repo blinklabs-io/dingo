@@ -370,12 +370,12 @@ flowchart LR
 
 In core mode, consumed UTxO rows are hard-deleted only by the background
 ledger cleanup after they are outside the current era's stability window.
-That cleanup is deferred while the local tip is materially behind a known
-admitted upstream-header frontier and is single-flight across its timer and
-epoch-boundary triggers. That admitted frontier is retained monotonically across
-reconnects, but consumers treat it as unknown while no chainsync client is
-active. Cleanup therefore falls back to the local tip while the node is
-peerless. Each eligible run deletes at most one bounded batch, so the
+That cleanup is deferred while the local tip is materially behind the active
+peer's corroborated upstream target and is single-flight across its timer and
+epoch-boundary triggers. Header admission retains a separate monotonic frontier
+for bookkeeping, but cleanup does not use it as a remote target. While a client
+is active but its target is still unknown, cleanup waits; while the node is
+peerless, it falls back to the local tip. Each eligible run deletes at most one bounded batch, so the
 potentially large `utxo`/stake-reference scan cannot hold SQLite's single write
 connection indefinitely; later timer or epoch-boundary runs reclaim the
 remaining rows once the node is near the upstream tip.
