@@ -1612,6 +1612,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// LatestPoolOpCertSequenceAtOrBefore returns the highest op-cert sequence
+	// observed for a pool no later than the supplied canonical-chain slot.
+	// This is the chain-dependent counter view at a historical point; pools
+	// with no issuer row by that point are absent rather than counter zero.
+	LatestPoolOpCertSequenceAtOrBefore(
+		lcommon.PoolKeyHash,
+		uint64, // slot
+		types.Txn,
+	) (uint64, bool, error)
+
 	// LatestPoolOpCertSequences returns the highest observed op-cert sequence
 	// for every pool that has issued a block, keyed by pool key hash. Pools
 	// that have never issued one are absent rather than reported as zero.

@@ -678,6 +678,13 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			err,
 		)
 	}
+	// LookupClient snapshots this same field under clientState's own lock,
+	// scoped to this one connection rather than the whole chainsync State,
+	// so a slow RollBackward send here cannot stall AddClient/LookupClient/
+	// RemoveClient for other connections. Held through the send and state
+	// transition so observers cannot read the pending flag after
+	// RollBackward is visible but before it is cleared.
+	clientState.LockRollbackState()
 	if clientState.NeedsInitialRollback {
 		o.config.Logger.Debug(
 			"chainsync server: initial rollback",
@@ -689,11 +696,14 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			tip,
 		)
 		if err != nil {
+			clientState.UnlockRollbackState()
 			return err
 		}
 		clientState.NeedsInitialRollback = false
+		clientState.UnlockRollbackState()
 		return nil
 	}
+	clientState.UnlockRollbackState()
 	// Check for available block
 	next, err := clientState.ChainIter.Next(false)
 	if err != nil {

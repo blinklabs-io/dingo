@@ -433,6 +433,31 @@ WHERE pool_key_hash = ? AND slot > ?`,
 	return uint64(sequence), count > 0, err
 }
 
+func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
+	poolKeyHash lcommon.PoolKeyHash,
+	slot uint64,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return 0, false, err
+	}
+	var sequence int64
+	var count int64
+	err = db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(sequence), 0), COUNT(*)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot <= ?`,
+		poolKeyHash.Bytes(),
+		slotValue,
+	).Scan(&sequence, &count)
+	return uint64(sequence), count > 0, err
+}
+
 // LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
 // issues.
 //
