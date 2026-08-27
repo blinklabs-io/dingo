@@ -22,13 +22,12 @@ import (
 	"testing"
 	"time"
 
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -849,31 +848,19 @@ func testOuroborosForDecodeCache(tb testing.TB) *Ouroboros {
 	}
 }
 
-func conwayBlockFixtureBytes(tb testing.TB) (blockType uint, raw []byte) {
-	tb.Helper()
-	blocks, err := fixtures.GenerateConwayChain(
-		1,
-		common.Blake2b256{},
-		2,
-		20,
-		1,
-	)
-	require.NoError(tb, err)
-	require.Len(tb, blocks, 1)
+func conwayBlockFixtureBytes(t *testing.T) (blockType uint, raw []byte) {
+	t.Helper()
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
 	return uint(blocks[0].Type()), blocks[0].Cbor()
 }
 
-func conwayHeaderFixtureBytes(tb testing.TB) (headerType uint, raw []byte) {
-	tb.Helper()
-	blocks, err := fixtures.GenerateConwayChain(
-		1,
-		common.Blake2b256{},
-		2,
-		20,
-		1,
-	)
-	require.NoError(tb, err)
-	require.Len(tb, blocks, 1)
+func conwayHeaderFixtureBytes(t *testing.T) (headerType uint, raw []byte) {
+	t.Helper()
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
 	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
 }
 
@@ -1122,10 +1109,8 @@ func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 	t *testing.T,
 ) {
 	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
-	blockType, raw := conwayBlockFixtureBytes(t)
-	badRaw := make([]byte, len(raw))
-	copy(badRaw, raw)
-	badRaw[len(badRaw)/2] ^= 0xFF
+	blockType, _ := conwayBlockFixtureBytes(t)
+	badRaw := []byte{0x00}
 	ctx := blockfetch.CallbackContext{}
 
 	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badRaw))

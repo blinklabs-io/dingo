@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -26,11 +27,27 @@ import (
 // the same real fixture loading works from both Test and Benchmark
 // functions.
 func benchConwayBlockFixture(b *testing.B) (blockType uint, raw []byte) {
-	return conwayBlockFixtureBytes(b)
+	b.Helper()
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	if err != nil {
+		b.Fatalf("generate fixture: %v", err)
+	}
+	if len(blocks) != 1 {
+		b.Fatalf("expected one generated block, got %d", len(blocks))
+	}
+	return uint(blocks[0].Type()), blocks[0].Cbor()
 }
 
 func benchConwayHeaderFixture(b *testing.B) (headerType uint, raw []byte) {
-	return conwayHeaderFixtureBytes(b)
+	b.Helper()
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	if err != nil {
+		b.Fatalf("generate fixture: %v", err)
+	}
+	if len(blocks) != 1 {
+		b.Fatalf("expected one generated block, got %d", len(blocks))
+	}
+	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
 }
 
 // --- Blocks -----------------------------------------------------------

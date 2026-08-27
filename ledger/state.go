@@ -1491,23 +1491,21 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// to one commit batch and let EventBus backpressure bound decoded CBOR while
 	// the chain store catches up. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 			ChainsyncEventType,
 			event.EventQueueSize,
+			event.SubscriberBackpressureBlock,
 			ls.handleEventChainsync,
 		)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
 		)
-		ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
-			BlockfetchEventType,
-			blockfetchCommitBatchSize,
-			ls.handleEventBlockfetch,
-		)
-		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
+		ls.subscribeBlockfetchEvents(ls.handleEventBlockfetch)
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 			chain.ChainUpdateEventType,
 			event.EventQueueSize,
+			event.SubscriberBackpressureBlock,
 			ls.handleEventChainUpdate,
 		)
 		ls.chainSwitchSubID = ls.config.EventBus.SubscribeFunc(
@@ -1594,6 +1592,19 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+// subscribeBlockfetchEvents preserves lossless blockfetch delivery. A dropped
+// blockfetch event cannot be replayed from the EventBus, so this subscriber
+// remains attached until it drains or normal node lifecycle cancellation closes
+// it rather than taking the ordinary stalled-subscriber detachment path.
+func (ls *LedgerState) subscribeBlockfetchEvents(handler event.EventHandlerFunc) {
+	ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
+		BlockfetchEventType,
+		blockfetchCommitBatchSize,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
 }
 
 func (ls *LedgerState) loadMithrilTrustBoundary() {

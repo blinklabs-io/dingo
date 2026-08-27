@@ -8,6 +8,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
   - `WaitForCondition` / `require.Eventually` — 2–5s timeout, 5–10ms interval, lock shared state inside the condition fn
   - `RequireReceive` / `RequireNoReceive` for channel assertions
   - `context.WithTimeout` for graceful shutdown
+- Live two-node lifecycle integration tests use the shared `dingo_db_integration` build tag; run them with `make test-live-lifecycle`.
 - The default `make` target formats and builds; tests are a separate target.
 - `make test` runs with `-race`.
 - Integration tests in `internal/integration/` load real blocks from `database/immutable/testdata/`.

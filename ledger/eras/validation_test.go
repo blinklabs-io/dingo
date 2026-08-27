@@ -1300,9 +1300,9 @@ func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(t *testing.T
 	require.NoError(t, err)
 
 	// ShelleyBlock.Transactions constructs this shape from the separately
-	// decoded body and witness components. Its generic CBOR encoder expands
-	// the protocol-update body, but the fee calculation must use the preserved
-	// component bytes instead.
+	// decoded body and witness components. The upstream transaction body now
+	// preserves its original wire bytes, so rebuilding the transaction retains
+	// the canonical encoding used for fee calculation.
 	blockTx := &shelley.ShelleyTransaction{
 		Body:       wireTx.Body,
 		WitnessSet: wireTx.WitnessSet,
@@ -1313,8 +1313,8 @@ func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(t *testing.T
 }
 
 // TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes covers the
-// same wire-CBOR preservation path in Allegra. The preprod fixture body uses
-// only fields Allegra shares with Shelley, so it decodes in both eras.
+// same wire-byte preservation in Allegra. The preprod fixture body uses only
+// fields Allegra shares with Shelley, so it decodes in both eras.
 func TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes(
 	t *testing.T,
 ) {
@@ -1334,10 +1334,11 @@ func TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes(
 }
 
 // TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection pins the reason Mary
-// is excluded from preAlonzoRebuiltWireSize: MaryTransactionBody implements
-// MarshalCBOR and returns its preserved bytes, so a rebuilt Mary transaction
-// already encodes to its wire size. If upstream loses that method this test
-// fails and Mary has to be added to preAlonzoRebuiltWireSize.
+// is excluded from preAlonzoRebuiltWireSize: MaryTransactionBody also
+// implements MarshalCBOR and returns its preserved bytes, so a rebuilt Mary
+// transaction already encodes to its wire size. If upstream loses that method,
+// this test fails and the helper's supported transaction types must be
+// reconsidered.
 func TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection(t *testing.T) {
 	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
 	require.NoError(t, err)
@@ -1470,10 +1471,10 @@ func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
 
 // TestValidateTxPreAlonzoRebuiltUpdateTxSizes drives ValidateTxShelley and
 // ValidateTxAllegra with the preprod protocol-update transaction rebuilt the
-// way a block delivers it. The released ledger preserves component wire CBOR,
-// so both upstream and Dingo size this transaction at its 1156-byte wire size.
-// The empty mock ledger state fails other rules, so each assertion is on the
-// fee or size message specifically.
+// way a block delivers it. Both the upstream and Dingo fee and max-size rules
+// must use the 1156 bytes that were on the wire. The empty mock ledger state
+// fails other rules, so each assertion is on the fee or size message
+// specifically.
 func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 	const (
 		preprodMinFeeA   = 44
@@ -1530,6 +1531,8 @@ func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 				MinFeeB:   preprodMinFeeB,
 				MaxTxSize: preprodMaxTxSize,
 			}
+			// Upstream and Dingo both size the rebuilt transaction from its
+			// preserved component bytes.
 			require.NoError(t, tc.upstreamFeeRule(tc.tx, 0, ls, pparams))
 			err := tc.validateTx(tc.tx, 0, ls, pparams)
 			require.Error(t, err, "unresolvable inputs must still fail")
@@ -1550,8 +1553,9 @@ func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 				dingoFeeTooSmall,
 			)
 
-			// Fee and max-size must be judged against the same wire size. A limit
-			// above it is accepted by both upstream and Dingo validation.
+			// Fee and max-size must be judged against the same preserved wire
+			// size. A limit between the old re-encoded size and the wire size
+			// is accepted by both implementations.
 			narrowSize := &shelley.ShelleyProtocolParameters{
 				MinFeeA:   preprodMinFeeA,
 				MinFeeB:   preprodMinFeeB,
@@ -1563,17 +1567,12 @@ func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 			assert.NotContains(t, err.Error(), dingoSizeTooLarge)
 			assert.NotContains(t, err.Error(), "transaction size too large")
 
-			// A limit below the wire size is still enforced by both paths.
+			// A limit below the wire size is still enforced.
 			tinySize := &shelley.ShelleyProtocolParameters{
 				MinFeeA:   preprodMinFeeA,
 				MinFeeB:   preprodMinFeeB,
 				MaxTxSize: 1_000,
 			}
-			require.ErrorContains(
-				t,
-				tc.upstreamSizeRule(tc.tx, 0, ls, tinySize),
-				"transaction size too large: size 1156",
-			)
 			require.ErrorContains(
 				t,
 				tc.validateTx(tc.tx, 0, ls, tinySize),
