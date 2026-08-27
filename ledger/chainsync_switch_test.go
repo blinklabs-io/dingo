@@ -245,6 +245,9 @@ func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return activeConnId
 			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return !sameConnectionId(connId, closedConnId)
+			},
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(114220800)
@@ -280,6 +283,9 @@ func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return activeConnId
 			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return !sameConnectionId(connId, closedConnId)
+			},
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(114220800)
@@ -302,6 +308,37 @@ func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
 	// A zero upstream frontier is the production forger's peerless state; a
 	// dead queued switch must not re-enable the retained sync gate.
 	assert.False(t, ls.syncUpstreamActive.Load())
+}
+
+func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(t *testing.T) {
+	targetConnId := testChainsyncConnId(6000, 3031)
+	activeConnId := testChainsyncConnId(6000, 3032)
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConnId
+			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return sameConnectionId(connId, targetConnId) ||
+					sameConnectionId(connId, activeConnId)
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+	ls.syncUpstreamActive.Store(true)
+
+	// A close subscriber can update the active pointer before the queued
+	// chain-switch subscriber runs. The target remains registered and must
+	// retain its frontier despite the pointer mismatch.
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{NewConnectionId: targetConnId},
+	))
+
+	assert.Equal(t, targetConnId, ls.selectedBlockfetchConnId)
+	assert.Equal(t, uint64(114220800), ls.UpstreamTipSlot())
 }
 
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
@@ -838,6 +875,9 @@ func newChainSwitchFallbackFixture(
 			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &currentConn
+			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return sameConnectionId(connId, connId3)
 			},
 			GetPeerObservedTipFunc: func(
 				connId ouroboros.ConnectionId,

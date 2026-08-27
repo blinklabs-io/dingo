@@ -568,26 +568,24 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	if ls.config.GetActiveConnectionFunc != nil {
-		activeConnId := ls.config.GetActiveConnectionFunc()
-		if activeConnId == nil {
-			ls.chainsyncBlockfetchMutex.Unlock()
-			ls.config.Logger.Warn(
-				"ignoring chain switch for closed connection without live fallback",
-				"component", "ledger",
-				"connection_id", e.NewConnectionId.String(),
-			)
-			return
-		}
-		if !sameConnectionId(*activeConnId, effectiveConnId) {
+		if !ls.isConnectionLive(effectiveConnId) {
+			activeConnId := ls.config.GetActiveConnectionFunc()
+			if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+				ls.chainsyncBlockfetchMutex.Unlock()
+				ls.syncUpstreamActive.Store(false)
+				ls.config.Logger.Warn(
+					"ignoring chain switch without a live connection",
+					"component", "ledger",
+					"connection_id", e.NewConnectionId.String(),
+				)
+				return
+			}
 			ls.config.Logger.Info(
-				"chain switch target is not live, using active best peer",
+				"chain switch target is not live, using live active best peer",
 				"component", "ledger",
 				"requested_connection_id", effectiveConnId.String(),
 				"active_connection_id", activeConnId.String(),
 			)
-			// The requested target's queued headers are not usable for the
-			// live fallback. Discard them before handoff so the fallback can
-			// request a fresh cursor or replay its own buffered headers.
 			ls.clearQueuedHeaders()
 			effectiveConnId = *activeConnId
 		}
@@ -652,14 +650,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		return
 	}
 	if ls.config.GetActiveConnectionFunc != nil {
-		activeConnId := ls.config.GetActiveConnectionFunc()
-		if activeConnId == nil {
-			ls.syncUpstreamActive.Store(false)
-			return
-		}
-		if !sameConnectionId(*activeConnId, effectiveConnId) {
-			// The active peer changed while the switch was being handed off;
-			// do not make the retained frontier visible to a dead target.
+		if !ls.isConnectionLive(effectiveConnId) {
 			ls.syncUpstreamActive.Store(false)
 			return
 		}
@@ -878,6 +869,9 @@ func (ls *LedgerState) detectConnectionSwitch(
 	// for the connection that was live only at the start of this function.
 	if ls.config.GetActiveConnectionFunc != nil {
 		activeConnId = ls.config.GetActiveConnectionFunc()
+		if activeConnId != nil && !ls.isConnectionLive(*activeConnId) {
+			activeConnId = nil
+		}
 	}
 	ls.syncUpstreamActive.Store(activeConnId != nil)
 	return activeConnId, true
