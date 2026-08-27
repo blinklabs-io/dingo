@@ -17,11 +17,13 @@ package immutable
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
 const (
 	primaryFileExtension = ".primary"
+	primaryIndexVersion  = 1
 )
 
 type primaryIndex struct {
@@ -53,6 +55,12 @@ func (p *primaryIndex) Open(f entryReader) error {
 	if err := binary.Read(f, binary.BigEndian, &p.version); err != nil {
 		return err
 	}
+	if p.version != primaryIndexVersion {
+		return fmt.Errorf(
+			"unsupported primary index version %d",
+			p.version,
+		)
+	}
 	return nil
 }
 
@@ -68,6 +76,20 @@ func (p *primaryIndex) Next() (*primaryIndexEntry, error) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if tmpOffset%secondaryIndexEntrySize != 0 {
+		return nil, fmt.Errorf(
+			"secondary index offset %d is not aligned to %d-byte records",
+			tmpOffset,
+			secondaryIndexEntrySize,
+		)
+	}
+	if p.seenFirstOffset && tmpOffset < p.lastOffset {
+		return nil, fmt.Errorf(
+			"non-monotonic secondary index offset: %d follows %d",
+			tmpOffset,
+			p.lastOffset,
+		)
 	}
 	empty := true
 	if tmpOffset > p.lastOffset || !p.seenFirstOffset {

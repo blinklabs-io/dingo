@@ -287,3 +287,109 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	assert.Equal(t, withdrawal, uint64(account.Reward),
 		"withdrawal paid to the reward account")
 }
+
+// TestAddUint64Overflow exercises addUint64 at the exact uint64 max
+// boundary: maxUint64-1 plus 1 is the largest sum that fits, plus 2
+// overflows.
+func TestAddUint64Overflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+
+	sum, err := addUint64(maxUint64-1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, maxUint64, sum)
+
+	_, err = addUint64(maxUint64-1, 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflows uint64")
+}
+
+// TestLedgerDeltaDonateOverflow exercises LedgerDelta.donate at the exact
+// uint64 max boundary for d.donation.
+func TestLedgerDeltaDonateOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+
+	d := &LedgerDelta{donation: maxUint64 - 1}
+	require.NoError(t, d.donate(1))
+	assert.Equal(t, maxUint64, d.donation)
+
+	d2 := &LedgerDelta{donation: maxUint64 - 1}
+	err := d2.donate(2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflows uint64")
+	assert.Equal(
+		t, maxUint64-1, d2.donation,
+		"donation left unchanged on overflow",
+	)
+}
+
+// conwayDonationTx builds a valid Conway transaction whose body carries the
+// given treasury donation, for feeding into LedgerDelta donation aggregation.
+func conwayDonationTx(donation uint64) *conway.ConwayTransaction {
+	return &conway.ConwayTransaction{
+		Body:      conway.ConwayTransactionBody{TxDonation: donation},
+		TxIsValid: true,
+	}
+}
+
+// TestLedgerDeltaAccumulateNetworkDonationsOverflow drives the per-tx
+// donation summation in accumulateNetworkDonations to the exact uint64 max
+// boundary using two real Conway transactions.
+func TestLedgerDeltaAccumulateNetworkDonationsOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+
+	newDelta := func(donationB uint64) *LedgerDelta {
+		return &LedgerDelta{
+			Transactions: []TransactionRecord{
+				{Tx: conwayDonationTx(maxUint64 - 1), Index: 0},
+				{Tx: conwayDonationTx(donationB), Index: 1},
+			},
+		}
+	}
+
+	t.Run("just below overflow succeeds", func(t *testing.T) {
+		d := newDelta(1)
+		require.NoError(t, d.accumulateNetworkDonations(nil))
+		assert.Equal(t, maxUint64, d.donation)
+	})
+
+	t.Run("just above overflow fails", func(t *testing.T) {
+		d := newDelta(2)
+		err := d.accumulateNetworkDonations(nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overflows uint64")
+	})
+}
+
+// TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState verifies that
+// a donation-sum overflow aborts before any database write: no
+// network_donation row is recorded and the network state is untouched.
+func TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState(t *testing.T) {
+	db := newDonationTestDB(t)
+	ls := &LedgerState{db: db}
+	maxUint64 := ^uint64(0)
+
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+
+	delta := &LedgerDelta{
+		Transactions: []TransactionRecord{
+			{Tx: conwayDonationTx(maxUint64 - 1), Index: 0},
+			{Tx: conwayDonationTx(2), Index: 1},
+		},
+	}
+
+	txn := db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		return delta.recordNetworkDonations(ls, txn, nil)
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflows uint64")
+
+	total, err := db.Metadata().SumNetworkDonationsForEpoch(0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), total, "no donation row recorded on overflow")
+
+	treasury, reserves, slot := networkState(t, db)
+	assert.Equal(t, uint64(1_000), treasury, "treasury untouched on overflow")
+	assert.Equal(t, uint64(5_000), reserves, "reserves untouched on overflow")
+	assert.Equal(t, uint64(50), slot, "network state slot untouched on overflow")
+}

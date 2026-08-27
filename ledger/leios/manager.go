@@ -1032,7 +1032,7 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	if inserted {
 		m.eventBus.Publish(VoteReceivedEventType, event.NewEvent(
 			VoteReceivedEventType,
-			VoteEmittedEvent{Vote: vote},
+			VoteReceivedEvent{Vote: vote, OriginConnKey: connKey},
 		))
 	}
 	return nil

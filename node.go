@@ -413,8 +413,8 @@ func (n *Node) apiPluginSelection(
 // bark's own existing default behavior (all interfaces) is preserved for
 // deployments only using it for the read-only Archive service. Bind address
 // is a network control, independent of the mTLS client-certificate
-// authentication check Bark.Start enforces whenever lifecycleEnabled (see
-// BarkConfig.TlsClientCAFilePath) -- this default narrows exposure as
+// authentication and operator-fingerprint authorization checks Bark.Start
+// enforces whenever lifecycleEnabled -- this default narrows exposure as
 // defense in depth, it is not what makes those RPCs safe to reach.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
@@ -432,6 +432,14 @@ func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 	return n.ouroborosRef.Load()
 }
+
+// Run wires *ledger.LedgerState in as the mempool's TxValidator, and the
+// mempool discovers the optional validation-session capability on it with a
+// runtime type assertion, silently falling back to unpinned per-transaction
+// validation when that fails. Guard the pairing here, in the package that
+// makes it, so drift cannot quietly unpin mempool revalidation from its
+// ledger snapshot.
+var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
@@ -804,6 +812,20 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					fn,
 				)
 			},
+			// Read the applied ledger tip straight from metadata rather than
+			// from n.ledgerState.Tip(): LedgerState only loads its in-memory
+			// tip inside Start, which runs after this indexer has already
+			// backfilled, so Tip() would still be the zero value here. Blocks
+			// stored above this slot -- the whole post-snapshot suffix on a
+			// Mithril-bootstrapped node -- are replayed by LedgerState.Start
+			// and reach the indexer as live block events instead.
+			LedgerTipSlot: func() (uint64, error) {
+				tip, err := n.db.GetTip(nil)
+				if err != nil {
+					return 0, err
+				}
+				return tip.Point.Slot, nil
+			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
 					"fatal midnight indexer error, initiating shutdown",
@@ -1100,6 +1122,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
+			ConnClosedFunc:      n.handleConnManagerClosed,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -1350,21 +1373,22 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
-				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; its destructive RPCs also require a verified mTLS client certificate (--bark-client-ca-file-path) independent of bind address, but widen this bind only behind your own trusted network controls",
+				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; every DatabaseService RPC requires a verified mTLS client certificate (--bark-client-ca-file-path), and destructive RPCs require an allowlisted certificate fingerprint (--bark-operator-certificate-fingerprints), independent of bind address; widen this bind only behind your own trusted network controls",
 				"component",
 				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{
-			Logger:              n.config.logger,
-			DB:                  db,
-			TlsCertFilePath:     n.config.tlsCertFilePath,
-			TlsKeyFilePath:      n.config.tlsKeyFilePath,
-			TlsClientCAFilePath: n.config.barkClientCAFilePath,
-			Host:                barkHost,
-			Port:                n.config.barkPort,
-			CORSAllowedOrigins:  n.config.corsAllowedOrigins,
-			DestinationRegistry: n.destinationRegistry,
+			Logger:                          n.config.logger,
+			DB:                              db,
+			TlsCertFilePath:                 n.config.tlsCertFilePath,
+			TlsKeyFilePath:                  n.config.tlsKeyFilePath,
+			TlsClientCAFilePath:             n.config.barkClientCAFilePath,
+			OperatorCertificateFingerprints: n.config.barkOperatorCertificateFingerprints,
+			Host:                            barkHost,
+			Port:                            n.config.barkPort,
+			CORSAllowedOrigins:              n.config.corsAllowedOrigins,
+			DestinationRegistry:             n.destinationRegistry,
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and
@@ -1403,10 +1427,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
-	// Configure the Midnight gRPC server (only in API mode with a non-zero
-	// port). Port 0 disables the server while leaving the indexer eligible to
-	// run.
-	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
+	// Configure the Midnight gRPC server only after the operator explicitly
+	// enables it in API mode. The indexer has an independent opt-in.
+	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
@@ -1422,14 +1445,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					}
 					return block.Number, true, nil
 				},
-				Host:            n.config.midnight.Host,
-				Port:            n.config.midnight.Port,
-				TLSCertFilePath: n.config.tlsCertFilePath,
-				TLSKeyFilePath:  n.config.tlsKeyFilePath,
-				ShutdownTimeout: n.config.shutdownTimeout,
-				Database:        midnightserver.NewDatabase(n.db),
-				SlotTimer:       n.ledgerState,
-				PromRegistry:    n.config.promRegistry,
+				Host:                n.config.midnight.Host,
+				Port:                n.config.midnight.Port,
+				TLSCertFilePath:     n.config.tlsCertFilePath,
+				TLSKeyFilePath:      n.config.tlsKeyFilePath,
+				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
+				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:     n.config.shutdownTimeout,
+				Database:            midnightserver.NewDatabase(n.db),
+				SlotTimer:           n.ledgerState,
+				PromRegistry:        n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1698,6 +1723,11 @@ func applyPeerTargets(cfg Config, peerGovConfig *peergov.PeerGovernorConfig) {
 	peerGovConfig.TargetNumberOfRootPeers = cfg.targetNumberOfRootPeers
 }
 
+// midnightServerActive centralizes the startup and live-reinitialization gate.
+func midnightServerActive(storageMode StorageMode, cfg MidnightConfig) bool {
+	return storageMode.IsAPI() && cfg.ServerEnabled && cfg.Port > 0
+}
+
 // logErrIfNotNil logs err at Error level if non-nil, so a cleanup step run
 // from the startup failure/shutdown unwind stack doesn't fail silently.
 func logErrIfNotNil(logger *slog.Logger, msg string, err error) {
@@ -1714,6 +1744,31 @@ func taintValue(relaxed bool) string {
 		return nodesettings.LatchOn
 	}
 	return nodesettings.LatchOff
+}
+
+// handleConnManagerClosed releases the chainsync server-side (N2C) client
+// state -- including its live chain iterator -- for a node-to-client
+// connection that just closed.
+//
+// NtC closes are deliberately excluded from the ConnectionClosedEventType
+// fan-out (see the connection manager's publish site) because every current
+// subscriber does node-to-node work and a local client reconnecting in a
+// tight loop would otherwise wedge the EventBus. This callback is the NtC
+// counterpart to HandleConnClosedEvent, which already performs the
+// equivalent RemoveClient cleanup for NtN closes via that event. Guarding on
+// isNtC here keeps the release exactly-once: an NtN close still cleans up
+// only through HandleConnClosedEvent.
+func (n *Node) handleConnManagerClosed(
+	connId ouroboros.ConnectionId,
+	isNtC bool,
+	_ error,
+) {
+	if !isNtC {
+		return
+	}
+	if n.chainsyncState != nil {
+		n.chainsyncState.RemoveClient(connId)
+	}
 }
 
 // subscribeConnectionEvents wires the connection-manager side of the EventBus:

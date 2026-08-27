@@ -269,7 +269,7 @@ func (f *chainsyncServerFixture) setTip(
 // state being asserted on.
 func (f *chainsyncServerFixture) registeredClient(
 	t *testing.T,
-) (*dchainsync.ChainsyncClientState, bool) {
+) (*dchainsync.ChainsyncClientStateSnapshot, bool) {
 	t.Helper()
 	connId, ok := f.observedConnId()
 	if !ok {
@@ -452,6 +452,78 @@ func TestChainsyncServerFindIntersectAcceptsNormalPointList(t *testing.T) {
 
 	msg := f.observe(t)
 	require.True(t, msg.IsIntersectFound())
+}
+
+// TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget verifies
+// duplicate points within one request are deduplicated before the
+// per-connection work budget is charged. A list of chainsyncMaxFindIntersectPoints
+// copies of the same point is at the point-count limit but collapses to a
+// single point after deduplication, so it must be charged as 1 point of work,
+// not chainsyncMaxFindIntersectPoints.
+func TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+
+	// An empty chain intersects any in-bounds request at origin, so
+	// IntersectFound here only tells us the request wasn't rejected — the
+	// assertion that matters is the second request below.
+	point := makeFindIntersectPoints(1)[0]
+	dup := make([]ocommon.Point, chainsyncMaxFindIntersectPoints)
+	for i := range dup {
+		dup[i] = point
+	}
+	require.NoError(t, f.h.FindIntersect(dup))
+	require.True(t, f.observe(t).IsIntersectFound())
+
+	// Had the duplicate-heavy request above been charged its full
+	// un-deduplicated size, it would have exhausted the entire work budget
+	// on its own, and this distinct-point request — within both the
+	// point-count and work-budget limits by itself — would be rejected too.
+	require.NoError(
+		t,
+		f.h.FindIntersect(
+			makeFindIntersectPoints(chainsyncMaxFindIntersectPoints-1),
+		),
+	)
+	require.True(
+		t,
+		f.observe(t).IsIntersectFound(),
+		"a duplicate-heavy request must not exhaust the work budget meant for distinct points",
+	)
+}
+
+// TestChainsyncServerFindIntersectRateLimitsRepeatedRequests verifies the
+// per-connection work budget bounds cumulative work across many in-bounds
+// requests, not just the size of a single request: a second full-size
+// request immediately following the first must be rejected even though
+// each is within the point-count limit on its own. The limiter's clock is
+// pinned so the assertion holds regardless of how long the wire round trips
+// actually take, rather than relying on them staying under the 5s a full
+// burst would need to refill at chainsyncFindIntersectBudgetRate.
+func TestChainsyncServerFindIntersectRateLimitsRepeatedRequests(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.o.chainsyncFindIntersectLimiter.nowFunc = func() time.Time {
+		return now
+	}
+
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
+	require.NoError(t, f.h.FindIntersect(points))
+	require.True(
+		t,
+		f.observe(t).IsIntersectFound(),
+		"first full-size request should be within the work budget",
+	)
+
+	require.NoError(t, f.h.FindIntersect(points))
+	require.True(
+		t,
+		f.observe(t).IsIntersectNotFound(),
+		"a repeated full-size request over the per-connection work budget must be rejected",
+	)
 }
 
 // =============================================================================

@@ -855,9 +855,8 @@ func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
 // relay stored a peer's vote for its own tally but never queued it back up
 // for its other peers, so a block producer behind that relay never observed
 // quorum. A newly accepted peer vote must publish VoteReceivedEventType
-// (node_leios.go's subscriber feeds this straight into
-// EnqueueLeiosPrototypeVote, mirroring locally emitted votes) with the exact
-// signed fields the peer sent.
+// (node_leios.go's subscriber feeds this into the origin-aware Ouroboros
+// enqueue path) with the exact signed fields and connection key the peer sent.
 func TestVoteManagerPeerPrototypeVoteRequeuedForRelay(t *testing.T) {
 	fixture := newManagerFixture(t)
 	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
@@ -873,9 +872,10 @@ func TestVoteManagerPeerPrototypeVoteRequeuedForRelay(t *testing.T) {
 	requeued := testutil.RequireReceive(
 		t, receivedCh, 2*time.Second, "peer vote requeued for relay",
 	)
-	data, ok := requeued.Data.(VoteEmittedEvent)
+	data, ok := requeued.Data.(VoteReceivedEvent)
 	require.True(t, ok)
 	assert.Equal(t, vote, data.Vote)
+	assert.Equal(t, "conn-a", data.OriginConnKey)
 }
 
 // TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement
@@ -909,9 +909,10 @@ func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
 		2*time.Second,
 		"queued peer vote requeued for relay once its ranking block resolves",
 	)
-	data, ok := requeued.Data.(VoteEmittedEvent)
+	data, ok := requeued.Data.(VoteReceivedEvent)
 	require.True(t, ok)
 	assert.Equal(t, vote, data.Vote)
+	assert.Equal(t, "conn-a", data.OriginConnKey)
 }
 
 // TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay confirms the

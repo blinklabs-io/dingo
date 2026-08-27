@@ -67,7 +67,38 @@ var (
 	ErrMempoolFull         = errors.New("mempool full")
 	ErrTransactionNotFound = errors.New("transaction not found")
 	ErrInvalidStakeAddress = errors.New("invalid stake address")
+	// ErrProtocolParamsUnavailable reports that no protocol parameters exist
+	// for the requested point. Byron carries no protocol-parameter CBOR, so a
+	// genuine Byron prefix reaches this during a from-genesis sync; it is an
+	// expected state rather than a node fault, and callers must not
+	// substitute Shelley-shaped defaults for it.
+	ErrProtocolParamsUnavailable = errors.New(
+		"protocol parameters not available",
+	)
 )
+
+// drepInactivityFromPParams reads the Conway-era drep_activity parameter from
+// pparams. The second return reports whether the era defines the parameter at
+// all, which a bare uint64 cannot express: a chain that genuinely configured
+// drep_activity to 0 and an era with no DRep semantics are different facts.
+func drepInactivityFromPParams(
+	pparams lcommon.ProtocolParameters,
+) (uint64, bool) {
+	// Dijkstra embeds ConwayProtocolParameters, but a type switch matches
+	// concrete types, so *Dijkstra never falls into the *Conway case and each
+	// era needs its own arm.
+	switch pp := pparams.(type) {
+	case *dijkstra.DijkstraProtocolParameters:
+		return pp.DRepInactivityPeriod, true
+	case *conway.ConwayProtocolParameters:
+		return pp.DRepInactivityPeriod, true
+	default:
+		// Byron has no protocol parameters at all, and every era before
+		// Conway has parameters but no DRep semantics. Neither can report a
+		// drep_activity value, and neither may borrow one.
+		return 0, false
+	}
+}
 
 // TransactionSubmitter accepts raw transaction CBOR for mempool admission.
 type TransactionSubmitter interface {
@@ -605,9 +636,10 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 ) {
 	pparams := a.ledgerState.GetCurrentPParams()
 	if pparams == nil {
-		return ProtocolParamsInfo{}, errors.New(
-			"protocol parameters not available",
-		)
+		// A Byron prefix has no protocol-parameter CBOR to report. Surface
+		// the sentinel so the handler can answer "not found" rather than
+		// reporting a node fault for an expected stage of a genesis sync.
+		return ProtocolParamsInfo{}, ErrProtocolParamsUnavailable
 	}
 	info, err := protocolParamsInfoFromNative(
 		pparams,
@@ -674,10 +706,27 @@ func (a *NodeAdapter) EpochProtocolParams(
 		)
 	}
 	if len(pparamRows) == 0 {
+		// The epoch row resolved above, so the epoch itself exists; only
+		// its parameters do not. Byron is the era where that is the norm
+		// rather than a gap, and it stays reachable long after a sync
+		// completes via GET /epochs/0/parameters. Reporting "epoch not
+		// found" would tell the caller something false about what the node
+		// holds.
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"get protocol parameters for epoch %d: %w",
 			epoch,
-			ErrEpochNotFound,
+			ErrProtocolParamsUnavailable,
+		)
+	}
+	if era.DecodePParamsFunc == nil {
+		// ByronEraDesc defines no decoder because the era has no parameter
+		// CBOR to decode. Unreachable while the empty-rows check above
+		// runs first, but the nil call would panic if that ever reordered.
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: era %d: %w",
+			epoch,
+			era.Id,
+			ErrProtocolParamsUnavailable,
 		)
 	}
 	pparamRow := pparamRows[0]
@@ -1209,17 +1258,13 @@ func (a *NodeAdapter) predefinedDRep(
 }
 
 // drepInactivityPeriod returns the Conway-era drep_activity protocol
-// parameter (epochs of inactivity before a DRep expires), or 0 when it
-// is unavailable.
-func (a *NodeAdapter) drepInactivityPeriod() uint64 {
-	switch pp := a.ledgerState.GetCurrentPParams().(type) {
-	case *conway.ConwayProtocolParameters:
-		return pp.DRepInactivityPeriod
-	case *dijkstra.DijkstraProtocolParameters:
-		return pp.DRepInactivityPeriod
-	default:
-		return 0
-	}
+// parameter (epochs of inactivity before a DRep expires) from the current
+// ledger state. The second return reports whether a value was available; see
+// drepInactivityFromPParams.
+func (a *NodeAdapter) drepInactivityPeriod() (uint64, bool) {
+	return drepInactivityFromPParams(
+		a.ledgerState.GetCurrentPParams(),
+	)
 }
 
 // drepStatus derives the Blockfrost retirement/expiry view of a DRep
@@ -1233,17 +1278,31 @@ func drepStatus(
 	registrationEpoch uint64,
 	currentEpoch uint64,
 	inactivityPeriod uint64,
+	inactivityKnown bool,
 ) (retired bool, expired bool, lastActive uint64) {
 	retired = !active
 	lastActive = lastActivityEpoch
 	if lastActive == 0 {
 		lastActive = registrationEpoch
 	}
+	// Track whether an expiry is known separately from its value. A derived
+	// expiry of 0 is legitimate — drep_activity 0 on a DRep that last acted
+	// in epoch 0 — so testing the number for zero would read a real expiry as
+	// "none known" and report that DRep active forever.
+	//
+	// A stored expiry_epoch of 0 still means "not recorded": the column has
+	// no null, and that convention predates this function.
 	expiry := expiryEpoch
-	if expiry == 0 && inactivityPeriod > 0 {
+	expiryKnown := expiry > 0
+	// Derive an expiry only when the era actually reports drep_activity.
+	// Gating on "inactivityPeriod > 0" instead would conflate an era with no
+	// DRep semantics against a chain that set drep_activity to 0, where a
+	// DRep expires the epoch it last acted.
+	if !expiryKnown && inactivityKnown {
 		expiry = lastActive + inactivityPeriod
+		expiryKnown = true
 	}
-	expired = !retired && expiry > 0 && expiry <= currentEpoch
+	expired = !retired && expiryKnown && expiry <= currentEpoch
 	return retired, expired, lastActive
 }
 
@@ -1310,13 +1369,15 @@ func (a *NodeAdapter) drepByCredentialTag(
 		)
 	}
 
+	inactivityPeriod, inactivityKnown := a.drepInactivityPeriod()
 	retired, expired, lastActive := drepStatus(
 		drep.Active,
 		drep.LastActivityEpoch,
 		drep.ExpiryEpoch,
 		registrationEpoch.EpochId,
 		a.ledgerState.CurrentEpoch(),
-		a.drepInactivityPeriod(),
+		inactivityPeriod,
+		inactivityKnown,
 	)
 
 	// Echo the identifier form the caller used: CIP-129 inputs carry
@@ -1404,7 +1465,7 @@ func (a *NodeAdapter) DReps(
 	}
 
 	currentEpoch := a.ledgerState.CurrentEpoch()
-	inactivity := a.drepInactivityPeriod()
+	inactivity, inactivityKnown := a.drepInactivityPeriod()
 
 	type entry struct {
 		predefined *uint64
@@ -1436,6 +1497,7 @@ func (a *NodeAdapter) DReps(
 			epochForSlot(regSlot),
 			currentEpoch,
 			inactivity,
+			inactivityKnown,
 		)
 		entries = append(entries, entry{
 			credential: drep.Credential,
@@ -3655,6 +3717,53 @@ func (a *NodeAdapter) TransactionSubmit(
 	return tx.Hash().String(), nil
 }
 
+// TransactionEvaluate evaluates script execution units for raw transaction
+// CBOR without submitting the transaction.
+func (a *NodeAdapter) TransactionEvaluate(
+	txCbor []byte,
+) (TransactionEvaluationResponse, error) {
+	txType, err := gledger.DetermineTransactionType(txCbor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: determine transaction type: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: decode transaction: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	_, _, redeemerExUnits, err := a.ledgerState.EvaluateTx(tx)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: evaluate transaction: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	result := make(TransactionEvaluationResponse, len(redeemerExUnits))
+	for key, exUnits := range redeemerExUnits {
+		purpose := redeemerPurpose(key.Tag)
+		if purpose == "" {
+			return nil, fmt.Errorf(
+				"%w: unsupported redeemer tag %d",
+				ErrInvalidTransaction,
+				key.Tag,
+			)
+		}
+		result[fmt.Sprintf("%s:%d", purpose, key.Index)] = ExecutionUnitsResponse{
+			Memory: uint64(exUnits.Memory), // nolint:gosec
+			Steps:  uint64(exUnits.Steps),  // nolint:gosec
+		}
+	}
+	return result, nil
+}
+
 // TransactionCBOR returns raw signed transaction CBOR bytes for the requested
 // transaction hash.
 func (a *NodeAdapter) TransactionCBOR(
@@ -4993,7 +5102,7 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	if epoch == nil {
 		pparams := a.ledgerState.GetCurrentPParams()
 		if pparams == nil {
-			return nil, errors.New("protocol parameters not available")
+			return nil, ErrProtocolParamsUnavailable
 		}
 		return pparams, nil
 	}
@@ -5011,7 +5120,17 @@ func (a *NodeAdapter) protocolParamsForSlot(
 		return nil, err
 	}
 	if pparams == nil {
-		return nil, errors.New("decoded protocol parameters are nil")
+		// GetPParams reports (nil, nil) when the era recorded no
+		// protocol-parameter row. Byron is the era that does so by
+		// construction — it has no parameter CBOR and no decoder — so this
+		// carries the same sentinel as the no-epoch-row branch rather than
+		// an untyped error a caller cannot distinguish.
+		return nil, fmt.Errorf(
+			"epoch %d era %d: %w",
+			epoch.EpochId,
+			era.Id,
+			ErrProtocolParamsUnavailable,
+		)
 	}
 	return pparams, nil
 }

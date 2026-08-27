@@ -106,6 +106,12 @@ func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 	header, err := o.decodeChainsyncHeader(headerType, raw)
 	require.NoError(t, err)
 	key := hashDecodeInput(headerType, raw)
+	expectedArrival := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	arrivalCaptured := make(chan struct{}, 1)
+	o.chainsyncArrivalNow = func() time.Time {
+		arrivalCaptured <- struct{}{}
+		return expectedArrival
+	}
 
 	// Claim this decode key so the real raw callback has to wait. The arrival
 	// timestamp must already be captured before it joins that wait.
@@ -134,12 +140,17 @@ func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 			ochainsync.Tip{},
 		)
 	}()
+	testutil.RequireReceive(
+		t,
+		arrivalCaptured,
+		2*time.Second,
+		"raw callback should capture arrival before waiting on decode",
+	)
 	testutil.WaitForCondition(t, func() bool {
 		o.headerDecodeCache.mu.Lock()
 		defer o.headerDecodeCache.mu.Unlock()
 		return len(o.headerDecodeCache.inFlight[key]) == 1
 	}, 2*time.Second, "raw callback should wait on the claimed decode")
-	releasedAt := time.Now()
 	release()
 	require.NoError(t, testutil.RequireReceive(
 		t,
@@ -156,7 +167,7 @@ func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 	)
 	data, ok := evt.Data.(ledger.ChainsyncEvent)
 	require.True(t, ok)
-	require.True(t, data.ArrivalTime.Before(releasedAt))
+	require.Equal(t, expectedArrival, data.ArrivalTime)
 }
 
 func TestChainsyncHeaderAdmissionIsPreObservationAndPeerLocal(t *testing.T) {

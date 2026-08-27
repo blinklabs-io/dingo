@@ -470,7 +470,13 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 		cfg ledger.LedgerStateConfig,
 	) (*ledger.LedgerState, error) {
 		captured = cfg
-		return &ledger.LedgerState{}, nil
+		state, err := ledger.NewLedgerState(cfg)
+		if state != nil {
+			t.Cleanup(func() {
+				require.NoError(t, state.Close())
+			})
+		}
+		return state, err
 	}
 	installEpochBoundarySnapshotHookForLoad = func(
 		_ *ledger.LedgerState,
@@ -497,6 +503,141 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.NotNil(t, capturedHook)
 	require.True(t, captured.TrustedReplay)
 	require.True(t, captured.ManualBlockProcessing)
+}
+
+func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
+	stopAfterRollbackValidation := errors.New(
+		"stop after load rollback validation",
+	)
+
+	for _, test := range []struct {
+		name              string
+		mutate            func(*cardano.CardanoNodeConfig)
+		wantErr           string
+		wantHook          bool
+		wantRollbackOkay  bool
+		wantSecurityParam int
+	}{
+		{
+			name: "Shelley at genesis uses Shelley K",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				enabled := false
+				epoch := uint64(0)
+				nodeCfg.ExperimentalHardForksEnabled = &enabled
+				nodeCfg.TestShelleyHardForkAtEpoch = &epoch
+				nodeCfg.ByronGenesis().ProtocolConsts.K = 2160
+				nodeCfg.ShelleyGenesis().SecurityParam = 432
+			},
+			wantHook:          true,
+			wantRollbackOkay:  true,
+			wantSecurityParam: 432,
+		},
+		{
+			name: "Shelley at genesis ignores unused zero Byron K",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				enabled := false
+				epoch := uint64(0)
+				nodeCfg.ExperimentalHardForksEnabled = &enabled
+				nodeCfg.TestShelleyHardForkAtEpoch = &epoch
+				nodeCfg.ByronGenesis().ProtocolConsts.K = 0
+				nodeCfg.ShelleyGenesis().SecurityParam = 432
+			},
+			wantHook:          true,
+			wantRollbackOkay:  true,
+			wantSecurityParam: 432,
+		},
+		{
+			name: "zero Byron K before Shelley",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				epoch := uint64(1)
+				nodeCfg.TestShelleyHardForkAtEpoch = &epoch
+				nodeCfg.ByronGenesis().ProtocolConsts.K = 0
+			},
+			wantErr: "Byron security parameter K must be positive: got 0",
+		},
+		{
+			name: "negative Shelley K at genesis",
+			mutate: func(nodeCfg *cardano.CardanoNodeConfig) {
+				nodeCfg.ShelleyGenesis().SecurityParam = -1
+			},
+			wantErr: "Shelley security parameter K must be positive: got -1",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := newTestDB(t)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			var loadConfig ledger.LedgerStateConfig
+			var rollbackErr error
+			var selectedSecurityParam int
+			hookCalled := false
+			oldNewLedgerStateForLoad := newLedgerStateForLoad
+			oldInstallHook := installEpochBoundarySnapshotHookForLoad
+			newLedgerStateForLoad = func(
+				cfg ledger.LedgerStateConfig,
+			) (*ledger.LedgerState, error) {
+				loadConfig = cfg
+				state, err := ledger.NewLedgerState(cfg)
+				if state != nil {
+					t.Cleanup(func() {
+						require.NoError(t, state.Close())
+					})
+				}
+				if err == nil && test.mutate != nil {
+					test.mutate(cfg.CardanoNodeConfig)
+				}
+				if err == nil {
+					selectedSecurityParam, _ = loadSecurityParamForConfig(
+						cfg.CardanoNodeConfig,
+					)
+				}
+				return state, err
+			}
+			installEpochBoundarySnapshotHookForLoad = func(
+				_ *ledger.LedgerState,
+				_ func(*database.Txn, event.EpochTransitionEvent) error,
+			) error {
+				hookCalled = true
+				rollbackErr = loadConfig.ChainManager.PrimaryChain().ValidateRollback(
+					ocommon.NewPoint(0, nil),
+				)
+				return stopAfterRollbackValidation
+			}
+			t.Cleanup(func() {
+				newLedgerStateForLoad = oldNewLedgerStateForLoad
+				installEpochBoundarySnapshotHookForLoad = oldInstallHook
+			})
+
+			err := LoadWithDB(
+				context.Background(),
+				&config.Config{Network: "preview"},
+				logger,
+				"unused",
+				db,
+			)
+			if test.wantErr != "" {
+				require.ErrorIs(t, err, chain.ErrInvalidSecurityParam)
+				require.ErrorContains(t, err, test.wantErr)
+				require.False(t, hookCalled, "invalid K reached load hooks")
+				return
+			}
+			require.ErrorIs(t, err, stopAfterRollbackValidation)
+			require.Equal(t, test.wantHook, hookCalled)
+			require.Equal(
+				t,
+				test.wantSecurityParam,
+				selectedSecurityParam,
+			)
+			if test.wantRollbackOkay {
+				require.False(
+					t,
+					errors.Is(rollbackErr, chain.ErrSecurityParamNotConfigured),
+					"load replay reached rollback validation without configuring K: %v",
+					rollbackErr,
+				)
+				require.NoError(t, rollbackErr)
+			}
+		})
+	}
 }
 
 // TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot

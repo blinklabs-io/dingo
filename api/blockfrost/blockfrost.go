@@ -179,6 +179,10 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleTransactionSubmit,
 	)
 	mux.HandleFunc(
+		"POST /api/v0/utils/txs/evaluate",
+		b.handleTransactionEvaluate,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/txs/{hash}/cbor",
 		b.handleTransactionCBOR,
 	)

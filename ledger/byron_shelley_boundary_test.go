@@ -15,13 +15,26 @@
 package ledger
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -237,4 +250,334 @@ func TestByronBlockHeaderProtocolVersionSkippedWithoutPParams(t *testing.T) {
 			)
 		})
 	}
+}
+
+func newByronShelleyBoundaryLedger(
+	t *testing.T,
+) (*LedgerState, gledger.Block, gledger.Block) {
+	t.Helper()
+
+	const byronGenesisJSON = `{
+		"protocolConsts": {"k": 2160, "protocolMagic": 764824073},
+		"blockVersionData": {"slotDuration": "20000"}
+	}`
+	const shelleyGenesisJSON = `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 2160,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"networkId": "Mainnet",
+		"networkMagic": 764824073,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("42", 32),
+	}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(
+		strings.NewReader(byronGenesisJSON),
+	))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(shelleyGenesisJSON),
+	))
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
+		securityParam: 2,
+	}))
+
+	lastByron := loadBoundaryBlock(
+		t,
+		"mainnet-byron-last-4492799.cbor",
+		1,
+	)
+	firstShelley := loadBoundaryBlock(
+		t,
+		"mainnet-shelley-first-4492800.cbor",
+		2,
+	)
+	rawBlocks := []chain.RawBlock{{
+		Slot:        lastByron.SlotNumber(),
+		Hash:        lastByron.Hash().Bytes(),
+		BlockNumber: lastByron.BlockNumber(),
+		Type:        1,
+		Cbor:        lastByron.Cbor(),
+	}}
+	rawBlocks = append(rawBlocks, chain.RawBlock{
+		Slot:        firstShelley.SlotNumber(),
+		Hash:        firstShelley.Hash().Bytes(),
+		BlockNumber: firstShelley.BlockNumber(),
+		Type:        2,
+		PrevHash:    firstShelley.PrevHash().Bytes(),
+		Cbor:        firstShelley.Cbor(),
+	})
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+
+	const (
+		byronEpoch       = uint64(207)
+		byronEpochStart  = uint64(4_471_200)
+		byronEpochLength = uint(21_600)
+	)
+	require.NoError(t, db.SetEpoch(
+		byronEpochStart,
+		byronEpoch,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ByronEraDesc.Id,
+		20_000,
+		byronEpochLength,
+		nil,
+	))
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cfg,
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		ValidateHistorical: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+
+	byronTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			lastByron.SlotNumber(),
+			lastByron.Hash().Bytes(),
+		),
+		BlockNumber: lastByron.BlockNumber(),
+	}
+	require.NoError(t, db.SetTip(byronTip, nil))
+	byronNonce := bytes.Repeat([]byte{0x42}, 32)
+	require.NoError(t, db.SetBlockNonce(
+		byronTip.Point.Hash,
+		byronTip.Point.Slot,
+		byronNonce,
+		true,
+		nil,
+	))
+	ls.currentTip = byronTip
+	ls.currentTipBlockNonce = byronNonce
+	ls.currentEpoch = models.Epoch{
+		EpochId:       byronEpoch,
+		StartSlot:     byronEpochStart,
+		SlotLength:    20_000,
+		LengthInSlots: byronEpochLength,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	ls.currentEra = eras.ByronEraDesc
+	ls.currentPParams = nil
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.publishSnapshotsLocked()
+
+	return ls, lastByron, firstShelley
+}
+
+func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
+	t *testing.T,
+) {
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	require.True(t, ls.validationEnabled)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	close(results)
+
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+	// Historical validation is enabled above, so the normal processing path
+	// calls validateInboundBlockEnvelope before applying this block. That call
+	// rejects a Shelley block with nil pparams; reaching the new tip therefore
+	// proves the boundary rollover installed them before validation.
+	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
+	pparams, ok := ls.currentPParams.(*shelley.ShelleyProtocolParameters)
+	require.True(t, ok, "the first Shelley block must install Shelley pparams")
+	assert.Equal(t, uint(2), pparams.ProtocolMajor)
+	assert.Equal(t, firstShelley.SlotNumber(), ls.currentTip.Point.Slot)
+}
+
+// TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the fix for
+// #3559 through the same production path as
+// TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams: without the
+// post-Byron nonce seeding in applyBoundaryEraTransitions (ledger/state.go),
+// calculateEpochNonce returns a nil nonce for any rollover whose source era is
+// Byron, regardless of the destination era, and the transitioned epoch is
+// persisted with no nonce at all. That existing test only asserts on era,
+// pparams, and tip, so it still passes with the nonce-seeding block deleted;
+// this test asserts on the nonce itself, in all three places a caller can
+// observe it — the in-memory current epoch, the epoch cache, and the
+// persisted database row — and fails without the fix.
+func TestByronShelleyBoundarySeedsEpochNonceOnProductionPath(t *testing.T) {
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	require.True(t, ls.validationEnabled)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	close(results)
+
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
+
+	// The fix seeds the nonce/evolving/candidate nonce from the Shelley
+	// genesis hash, which newByronShelleyBoundaryLedger sets to 32 bytes of
+	// 0x42 (ShelleyGenesisHash: strings.Repeat("42", 32)).
+	expectedNonce := bytes.Repeat([]byte{0x42}, 32)
+	transitionedEpoch := ls.currentEpoch.EpochId
+
+	// In-memory current epoch.
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(ls.currentEpoch.Nonce),
+		"in-memory epoch must carry the seeded nonce",
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(ls.currentEpoch.EvolvingNonce),
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(ls.currentEpoch.CandidateNonce),
+	)
+
+	// Epoch cache.
+	var cached *models.Epoch
+	for i := range ls.epochCache {
+		if ls.epochCache[i].EpochId == transitionedEpoch {
+			cached = &ls.epochCache[i]
+			break
+		}
+	}
+	require.NotNil(
+		t,
+		cached,
+		"epoch cache must contain the transitioned epoch",
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(cached.Nonce),
+		"epoch cache entry must carry the seeded nonce",
+	)
+
+	// Persisted epoch row.
+	epochs, err := ls.db.GetEpochs(nil)
+	require.NoError(t, err)
+	var persisted *models.Epoch
+	for i := range epochs {
+		if epochs[i].EpochId == transitionedEpoch {
+			persisted = &epochs[i]
+			break
+		}
+	}
+	require.NotNil(
+		t,
+		persisted,
+		"the transitioned epoch must be persisted",
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(persisted.Nonce),
+		"persisted epoch row must carry the seeded nonce",
+	)
+}
+
+func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
+	t *testing.T,
+) {
+	ls, lastByron, firstShelley := newByronShelleyBoundaryLedger(t)
+
+	const shelleyEpoch = uint64(208)
+	shelleyPParams := &shelley.ShelleyProtocolParameters{
+		ProtocolMajor:      2,
+		ProtocolMinor:      0,
+		MaxBlockBodySize:   65_536,
+		MaxBlockHeaderSize: 1_100,
+	}
+	pparamsCbor, err := cbor.Encode(shelleyPParams)
+	require.NoError(t, err)
+	require.NoError(t, ls.db.SetEpoch(
+		firstShelley.SlotNumber(),
+		shelleyEpoch,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ShelleyEraDesc.Id,
+		1_000,
+		432_000,
+		nil,
+	))
+	require.NoError(t, ls.db.SetPParams(
+		pparamsCbor,
+		firstShelley.SlotNumber(),
+		shelleyEpoch,
+		eras.ShelleyEraDesc.Id,
+		nil,
+	))
+	shelleyTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			firstShelley.SlotNumber(),
+			firstShelley.Hash().Bytes(),
+		),
+		BlockNumber: firstShelley.BlockNumber(),
+	}
+	require.NoError(t, ls.db.SetTip(shelleyTip, nil))
+	ls.currentTip = shelleyTip
+	ls.currentEpoch = models.Epoch{
+		EpochId:       shelleyEpoch,
+		StartSlot:     firstShelley.SlotNumber(),
+		SlotLength:    1_000,
+		LengthInSlots: 432_000,
+		EraId:         eras.ShelleyEraDesc.Id,
+	}
+	ls.epochCache = append(ls.epochCache, ls.currentEpoch)
+	ls.currentEra = eras.ShelleyEraDesc
+	ls.currentPParams = shelleyPParams
+	ls.transitionInfo = hardfork.NewTransitionKnown(shelleyEpoch)
+	ls.publishSnapshotsLocked()
+
+	byronPoint := ocommon.NewPoint(
+		lastByron.SlotNumber(),
+		lastByron.Hash().Bytes(),
+	)
+	require.NoError(t, ls.rollbackChainAndState(byronPoint))
+
+	assert.Equal(t, byronPoint, ls.currentTip.Point)
+	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)
+	assert.Nil(t, ls.currentPParams)
+	assert.Nil(t, ls.prevEraPParams)
+	assert.Equal(t, hardfork.NewTransitionUnknown(), ls.transitionInfo)
 }

@@ -115,37 +115,6 @@ func TestRequestLimitConstants(t *testing.T) {
 	require.Equal(t, time.Hour, DefaultServerTimeout)
 }
 
-// TestRequestLimitEnforcement_Pattern verifies the limit enforcement
-// pattern used in FetchBlock, ReadUtxos, DumpHistory, SearchUtxos, and ReadData.
-// This tests the comparison logic in isolation, since calling the
-// actual gRPC handlers requires a full LedgerState.
-func TestRequestLimitEnforcement_Pattern(t *testing.T) {
-	tests := []struct {
-		name      string
-		count     int
-		limit     int
-		shouldErr bool
-	}{
-		{"at limit", 100, 100, false},
-		{"below limit", 50, 100, false},
-		{"above limit", 101, 100, true},
-		{"zero items", 0, 100, false},
-		{"single item", 1, 100, false},
-		{"way above limit", 10000, 100, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			exceeds := tc.count > tc.limit
-			require.Equal(
-				t,
-				tc.shouldErr,
-				exceeds,
-				"limit enforcement mismatch",
-			)
-		})
-	}
-}
-
 func TestUtxorpc_StartStop(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),

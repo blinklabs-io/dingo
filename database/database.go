@@ -317,6 +317,12 @@ func New(config *Config, stores Stores) (*Database, error) {
 				"error", err,
 			)
 		}
+		if err := RegisterBlobOrphanMetrics(configCopy.PromRegistry); err != nil {
+			configCopy.Logger.Warn(
+				"failed to register blob orphan metrics",
+				"error", err,
+			)
+		}
 	}
 	// Register database size metrics
 	if configCopy.PromRegistry != nil {

@@ -55,6 +55,7 @@ type Querier interface {
 	DeletePoolStakeSnapshotsAfterEpoch(ctx context.Context, epoch int64) error
 	DeletePoolStakeSnapshotsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeletePoolStakeSnapshotsForEpoch(ctx context.Context, arg DeletePoolStakeSnapshotsForEpochParams) error
+	DeleteProvisionalRewardSnapshot(ctx context.Context, arg DeleteProvisionalRewardSnapshotParams) error
 	DeleteRewardAccountOutputsAfterSlot(ctx context.Context, arg DeleteRewardAccountOutputsAfterSlotParams) error
 	DeleteRewardAccountOutputsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardAccountOutputsForEpoch(ctx context.Context, epoch int64) error

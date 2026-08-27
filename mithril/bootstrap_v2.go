@@ -443,16 +443,12 @@ func verifyArtifactCertificateV2(
 		"artifact", "cardano_database",
 		"certificate_hash", artifact.CertificateHash,
 	)
-	verificationMode := VerificationModeStructural
-	if cfg.GenesisVerificationKey != "" {
-		verificationMode = VerificationModeSTM
-	}
 	verificationResult, err := VerifyCertificateChainWithMode(
 		ctx,
 		client,
 		artifact.CertificateHash,
 		"", // v2 leaf binding uses cardano_database_merkle_root below
-		verificationMode,
+		VerificationModeSTM,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -460,22 +456,20 @@ func verifyArtifactCertificateV2(
 			err,
 		)
 	}
-	if cfg.GenesisVerificationKey != "" {
-		if verificationResult == nil ||
-			verificationResult.GenesisCertificate == nil {
-			return errors.New(
-				"genesis verification key provided but no genesis certificate found in chain",
-			)
-		}
-		if err := VerifyGenesisCertificateSignature(
-			verificationResult.GenesisCertificate,
-			cfg.GenesisVerificationKey,
-		); err != nil {
-			return fmt.Errorf(
-				"genesis certificate verification failed: %w",
-				err,
-			)
-		}
+	if verificationResult == nil ||
+		verificationResult.GenesisCertificate == nil {
+		return errors.New(
+			"verified certificate chain has no genesis certificate",
+		)
+	}
+	if err := VerifyGenesisCertificateSignature(
+		verificationResult.GenesisCertificate,
+		cfg.GenesisVerificationKey,
+	); err != nil {
+		return fmt.Errorf(
+			"genesis certificate verification failed: %w",
+			err,
+		)
 	}
 	verificationMaterial, err := BuildVerificationMaterial(
 		ctx,

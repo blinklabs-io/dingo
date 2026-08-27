@@ -50,6 +50,10 @@ type forgingMetrics struct {
 	forgeValidationDuration prometheus.Histogram
 	forgeValidationFailed   prometheus.Counter
 
+	// Panics recovered from pluggable forging callbacks (leader
+	// selection, validation, publication), by phase.
+	forgePanicRecovered *prometheus.CounterVec
+
 	// Leios EB forging outcomes
 	leiosEbForged  prometheus.Counter
 	leiosEbSkipped *prometheus.CounterVec
@@ -185,6 +189,13 @@ func initForgingMetrics(
 			Name: "dingo_forge_validation_failed_total",
 			Help: "forged blocks dropped because self-validation failed",
 		},
+	)
+	m.forgePanicRecovered = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_panic_recovered_total",
+			Help: "panics recovered from pluggable forging callbacks, by phase",
+		},
+		[]string{"phase"},
 	)
 	m.leiosEbForged = factory.NewCounter(
 		prometheus.CounterOpts{

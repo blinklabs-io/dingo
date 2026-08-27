@@ -1162,11 +1162,23 @@ func (c *Cache) InsertCheckRun(run CheckRun) error {
 	return err
 }
 
-// InsertMismatches bulk-inserts mismatch records.
-func (c *Cache) InsertMismatches(mismatches []CheckMismatch) error {
-	if len(mismatches) == 0 {
-		return nil
-	}
+// CommitEpochMismatches atomically replaces all mismatch rows for an epoch:
+// the prior rows are deleted and the new set inserted in a single
+// transaction, the same "delete then bulk insert, commit together" pattern
+// CommitEpochData uses for pool rows. Committing both together means a
+// failure partway through the insert rolls back the delete too, so a failed
+// write never leaves the cache with less evidence than before the check ran.
+// Callers must call this only once every fallible read for the epoch has
+// already succeeded, so prior evidence is never cleared ahead of a
+// still-incomplete replacement. Each row's Network and Epoch are normalised
+// from the network/epoch parameters before insertion, mirroring
+// CommitEpochData, so a mismatched caller cannot corrupt a different epoch's
+// data.
+func (c *Cache) CommitEpochMismatches(
+	network string,
+	epoch uint64,
+	mismatches []CheckMismatch,
+) error {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
@@ -1176,28 +1188,31 @@ func (c *Cache) InsertMismatches(mismatches []CheckMismatch) error {
 			_ = tx.Rollback()
 		}
 	}()
-	stmt, err := tx.Prepare(
-		`INSERT INTO check_mismatches (network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, m := range mismatches {
-		if _, err = stmt.Exec(m.Network, m.Epoch, m.PoolBech32, m.StakeAddress, m.Field, m.DingoValue, m.KoiosValue, m.Category, m.CheckedAt); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// DeleteEpochMismatches removes all mismatch rows for an epoch (before re-check).
-func (c *Cache) DeleteEpochMismatches(network string, epoch uint64) error {
-	_, err := c.db.Exec(
+	if _, err = tx.Exec(
 		"DELETE FROM check_mismatches WHERE network = ? AND epoch = ?",
 		network,
 		epoch,
-	)
+	); err != nil {
+		return err
+	}
+	if len(mismatches) > 0 {
+		var stmt *sql.Stmt
+		stmt, err = tx.Prepare(
+			`INSERT INTO check_mismatches (network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for i := range mismatches {
+			mismatches[i].Network, mismatches[i].Epoch = network, epoch
+			m := mismatches[i]
+			if _, err = stmt.Exec(m.Network, m.Epoch, m.PoolBech32, m.StakeAddress, m.Field, m.DingoValue, m.KoiosValue, m.Category, m.CheckedAt); err != nil {
+				return err
+			}
+		}
+	}
+	err = tx.Commit()
 	return err
 }
 

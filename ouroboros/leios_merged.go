@@ -111,6 +111,113 @@ func cloneRawMessages(in []cbor.RawMessage) []cbor.RawMessage {
 	return out
 }
 
+// validateLeiosEndorserBlockTxs binds fetched transaction wire values to the
+// manifest before the complete set is cached or applied. Leios transaction
+// references use the Cardano transaction ID (the hash of the transaction body)
+// and the complete transaction's encoded size, while leios-fetch carries each
+// transaction either directly or in a CBOR byte-string wrapper.
+func validateLeiosEndorserBlockTxs(
+	manifestRaw []byte,
+	txsRaw []cbor.RawMessage,
+) error {
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	if err != nil {
+		return fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if err := block.Validate(); err != nil {
+		return fmt.Errorf("validate leios endorser block references: %w", err)
+	}
+	if len(txsRaw) != len(block.TransactionReferences) {
+		return fmt.Errorf(
+			"leios endorser block transaction count mismatch: got %d, want %d",
+			len(txsRaw),
+			len(block.TransactionReferences),
+		)
+	}
+	for i, raw := range txsRaw {
+		if err := validateLeiosEndorserBlockTx(
+			i,
+			block.TransactionReferences[i],
+			raw,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateLeiosEndorserBlockTx(
+	index int,
+	ref lcommon.LeiosTransactionReference,
+	raw cbor.RawMessage,
+) error {
+	txCbor := []byte(raw)
+	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
+		var inner []byte
+		bytesRead, err := cbor.Decode(txCbor, &inner)
+		if err != nil {
+			return fmt.Errorf("unwrap endorser tx %d: %w", index, err)
+		}
+		if bytesRead != len(txCbor) {
+			return fmt.Errorf("endorser tx %d has trailing wrapper bytes", index)
+		}
+		txCbor = inner
+	}
+	var txElems []cbor.RawMessage
+	bytesRead, err := cbor.Decode(txCbor, &txElems)
+	if err != nil {
+		return fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
+	}
+	if bytesRead != len(txCbor) {
+		return fmt.Errorf("endorser tx %d has trailing envelope bytes", index)
+	}
+	if len(txElems) == 0 {
+		return fmt.Errorf("endorser tx %d has no body", index)
+	}
+	if len(txCbor) != int(ref.TransactionSize) {
+		return fmt.Errorf(
+			"endorser tx %d size mismatch: got %d, want %d",
+			index,
+			len(txCbor),
+			ref.TransactionSize,
+		)
+	}
+	if bodyHash := lcommon.Blake2b256Hash(txElems[0]); bodyHash != ref.TransactionHash {
+		return fmt.Errorf("endorser tx %d body hash mismatch", index)
+	}
+	return nil
+}
+
+func leiosEndorserBlockTxValidator(
+	manifestRaw []byte,
+	txCount int,
+) (func(int, cbor.RawMessage) error, error) {
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	if err != nil {
+		return nil, fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if err := block.Validate(); err != nil {
+		return nil, fmt.Errorf("validate leios endorser block references: %w", err)
+	}
+	if len(block.TransactionReferences) != txCount {
+		return nil, fmt.Errorf(
+			"leios endorser block transaction count mismatch: got %d, want %d",
+			txCount,
+			len(block.TransactionReferences),
+		)
+	}
+	return func(index int, raw cbor.RawMessage) error {
+		if index < 0 || index >= len(block.TransactionReferences) {
+			return fmt.Errorf("endorser tx index %d out of range", index)
+		}
+		return validateLeiosEndorserBlockTx(
+			index,
+			block.TransactionReferences[index],
+			raw,
+		)
+	}, nil
+}
+
 func (o *Ouroboros) storeLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
@@ -289,16 +396,27 @@ func mergeLeiosPartialTxs(
 // by an earlier caller); partialTxs is sparse.
 func (data *leiosEndorserBlockData) seedLeiosPartialTxsLocked(
 	result []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	for idx, raw := range data.txsRaw {
 		if idx >= len(result) || raw == nil {
 			break
+		}
+		if validate != nil {
+			if err := validate(idx, raw); err != nil {
+				continue
+			}
 		}
 		result[idx] = raw
 	}
 	for idx, raw := range data.partialTxs {
 		if idx >= len(result) || raw == nil || result[idx] != nil {
 			continue
+		}
+		if validate != nil {
+			if err := validate(idx, raw); err != nil {
+				continue
+			}
 		}
 		result[idx] = raw
 	}
@@ -312,6 +430,7 @@ func (data *leiosEndorserBlockData) seedLeiosPartialTxsLocked(
 func (o *Ouroboros) seedLeiosPartialTxs(
 	hash []byte,
 	result []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	if len(result) == 0 {
 		return
@@ -322,7 +441,7 @@ func (o *Ouroboros) seedLeiosPartialTxs(
 	if !ok || data == nil || data.expired(time.Now()) {
 		return
 	}
-	data.seedLeiosPartialTxsLocked(result)
+	data.seedLeiosPartialTxsLocked(result, validate)
 }
 
 // retainLeiosPartialTxs merges an incomplete fetch result into the cached
@@ -333,6 +452,7 @@ func (o *Ouroboros) seedLeiosPartialTxs(
 func (o *Ouroboros) retainLeiosPartialTxs(
 	hash []byte,
 	partial []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	if len(partial) == 0 {
 		return
@@ -345,12 +465,34 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 		existing.txCount <= 0 {
 		return
 	}
+	held := existing.partialTxs
+	add := partial
+	removedHeld := false
+	if validate != nil {
+		held = cloneRawMessages(held)
+		for idx, raw := range held {
+			if raw != nil {
+				if err := validate(idx, raw); err != nil {
+					held[idx] = nil
+					removedHeld = true
+				}
+			}
+		}
+		add = cloneRawMessages(add)
+		for idx, raw := range add {
+			if raw != nil {
+				if err := validate(idx, raw); err != nil {
+					add[idx] = nil
+				}
+			}
+		}
+	}
 	merged, added := mergeLeiosPartialTxs(
-		existing.partialTxs,
-		partial,
+		held,
+		add,
 		existing.txCount,
 	)
-	if added == 0 {
+	if added == 0 && !removedHeld {
 		return
 	}
 	// Cached entries are replaced, never mutated in place: lookups hand out the
@@ -360,6 +502,9 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 	// indefinitely.
 	updated := *existing
 	updated.partialTxs = merged
+	if updated.partialTxCount() == 0 {
+		updated.partialTxs = nil
+	}
 	for _, cacheKey := range existing.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == existing {
 			o.leiosEndorserBlocks[cacheKey] = &updated
@@ -502,6 +647,21 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 			"error", err,
 		)
 		return nil, false
+	}
+	if len(txsRaw) > 0 {
+		if err := validateLeiosEndorserBlockTxs(manifestRaw, txsRaw); err != nil {
+			// Transaction blobs written before manifest binding was enforced (or
+			// corrupted afterward) are only a historical-serving cache. Keep the
+			// content-addressed manifest, but discard the untrusted bodies so the
+			// normal by-point path fetches and persists a verified replacement.
+			o.config.Logger.Debug(
+				"discarding leios EB txs that mismatch persisted manifest",
+				"component", "network",
+				"hash", hex.EncodeToString(hash),
+				"error", err,
+			)
+			txsRaw = nil
+		}
 	}
 
 	cacheKeys := []string{leiosBlockKey(hash)}

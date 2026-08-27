@@ -382,10 +382,23 @@ func (b *rewardInputBundle) validate() error {
 
 // rewardInputStore is the slice of the metadata store this seeding needs.
 type rewardInputStore interface {
+	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
+	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
 	SaveRewardPoolInputs([]*models.RewardPoolInput, types.Txn) error
 	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
+	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
 }
+
+// rewardPParamsValidator checks that the protocol-parameter history needed to
+// consume one imported reward basis is available. An unavailable history is a
+// per-basis eligibility failure, not a failure of the whole import.
+type rewardPParamsValidator func(epoch uint64) error
+
+var errRewardPParamsUnavailable = errors.New(
+	"protocol parameters required by imported reward basis are unavailable",
+)
 
 // seedImportedRewardInputs writes the reward basis for the epochs an imported
 // snapshot covers.
@@ -407,6 +420,7 @@ func seedImportedRewardInputs(
 	txn types.Txn,
 	snapshots *ParsedSnapShots,
 	resolveParams rewardPoolParamsResolver,
+	validatePParams rewardPParamsValidator,
 	epoch uint64,
 	capturedSlot uint64,
 	logger rewardSeedLogger,
@@ -432,6 +446,52 @@ func seedImportedRewardInputs(
 	}
 
 	for _, c := range candidates {
+		existing, err := store.GetRewardSnapshot(
+			c.epoch, "mark", txn,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"checking existing reward snapshot for epoch %d: %w",
+				c.epoch, err,
+			)
+		}
+		if existing != nil && existing.Authoritative {
+			if logger != nil {
+				logger.Info(
+					"not seeding reward inputs for an imported epoch because an authoritative basis already exists",
+					"component",
+					"ledgerstate",
+					"epoch",
+					c.epoch,
+					"snapshot",
+					c.name,
+				)
+			}
+			continue
+		}
+		if existing != nil {
+			if err := store.DeleteRewardInputsForEpoch(c.epoch, txn); err != nil {
+				return fmt.Errorf(
+					"deleting provisional reward inputs for epoch %d: %w",
+					c.epoch, err,
+				)
+			}
+			if err := store.DeleteRewardOutputsForEpoch(c.epoch, txn); err != nil {
+				return fmt.Errorf(
+					"deleting provisional reward outputs for epoch %d: %w",
+					c.epoch, err,
+				)
+			}
+			if err := store.DeleteProvisionalRewardSnapshot(
+				c.epoch, "mark", txn,
+			); err != nil {
+				return fmt.Errorf(
+					"deleting provisional reward snapshot for epoch %d: %w",
+					c.epoch, err,
+				)
+			}
+		}
+
 		var params map[string]*ParsedPool
 		if resolveParams != nil {
 			resolved, err := resolveParams(c.epoch)
@@ -454,10 +514,14 @@ func seedImportedRewardInputs(
 				if logger != nil {
 					logger.Warn(
 						"no pool parameter window for an imported epoch, so the registration fallback is unavailable; the epoch is still seeded if its snapshot describes every pool it delegates to",
-						"component", "ledgerstate",
-						"epoch", c.epoch,
-						"snapshot", c.name,
-						"error", err.Error(),
+						"component",
+						"ledgerstate",
+						"epoch",
+						c.epoch,
+						"snapshot",
+						c.name,
+						"error",
+						err.Error(),
 					)
 				}
 			default:
@@ -481,13 +545,42 @@ func seedImportedRewardInputs(
 			if logger != nil {
 				logger.Warn(
 					"not seeding reward inputs for an imported epoch: the derived basis does not reconcile, so that epoch's reward round will be skipped and its rewards never credited",
-					"component", "ledgerstate",
-					"epoch", c.epoch,
-					"snapshot", c.name,
-					"error", err.Error(),
+					"component",
+					"ledgerstate",
+					"epoch",
+					c.epoch,
+					"snapshot",
+					c.name,
+					"error",
+					err.Error(),
 				)
 			}
 			continue
+		}
+		if validatePParams != nil {
+			if err := validatePParams(c.epoch); err != nil {
+				if !errors.Is(err, errRewardPParamsUnavailable) {
+					return fmt.Errorf(
+						"checking protocol parameters for imported reward epoch %d: %w",
+						c.epoch,
+						err,
+					)
+				}
+				if logger != nil {
+					logger.Warn(
+						"not seeding reward inputs for an imported epoch: required protocol parameters are unavailable, so that epoch's reward round will be skipped and its rewards never credited",
+						"component",
+						"ledgerstate",
+						"epoch",
+						c.epoch,
+						"snapshot",
+						c.name,
+						"error",
+						err.Error(),
+					)
+				}
+				continue
+			}
 		}
 		if err := store.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
 			return fmt.Errorf(

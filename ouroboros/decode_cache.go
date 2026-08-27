@@ -133,10 +133,16 @@ func newDecodeCache[T any]() *decodeCache[T] {
 // bookkeeping, never the decode itself, so concurrent decodes for different
 // keys never serialize against each other.
 //
-// A decodeFn that panics does not strand this key: the panic is recovered
-// long enough to record it as a normal cached failure and release every
-// waiter, then re-raised so the calling goroutine's own crash-or-recover
-// behavior is unchanged from before this cache existed. See finishDecode.
+// A decodeFn that panics does not strand this key, and does not crash the
+// calling goroutine either: the panic is recovered and recorded as a normal
+// cached failure via finishDecode, exactly like an ordinary decode error, so
+// the leader gets back a plain (zero value, err, true) result instead of a
+// re-raised panic. This makes the leader's own outcome symmetric with every
+// other caller for the same key -- an in-flight waiter, or a later lookup of
+// the now-cached failure -- which were already returned a clean error before
+// this fix. See dingo #3511: a decoder panic used to escape uncontained into
+// the leader's calling protocol worker even though the cache had already
+// recorded it as a normal decode failure. See finishDecode.
 func (c *decodeCache[T]) getOrDecode(
 	key decodeCacheKey,
 	decodeFn func() (T, error),
@@ -174,12 +180,16 @@ func (c *decodeCache[T]) getOrDecode(
 	// principle, panic instead of erroring -- gouroboros' own cbor.Value
 	// decoder recovers only one specific panic class and re-panics for
 	// every other one) must not leave this key's claim held and its
-	// waiters parked forever. Recover, record the panic as a normal
-	// (cacheable) decode failure via finishDecode -- exactly like any
-	// other failure, so every current waiter is woken and any future
-	// submission of the identical bytes fails fast instead of panicking
-	// again -- then re-panic so this goroutine's own crash-or-recover
-	// behavior is unchanged from before this cache existed.
+	// waiters parked forever, and must not crash the caller either: a
+	// decode failure -- panic or ordinary error -- is a contained result
+	// about these bytes, not a fault in the calling protocol worker.
+	// Recover, and record the panic as a normal (cacheable) decode failure
+	// via finishDecode -- exactly like any other failure, so every current
+	// waiter is woken and any future submission of the identical bytes
+	// fails fast instead of panicking again -- then return it as this
+	// call's own (value, err) result instead of re-raising. value is still
+	// its zero value here: the panic happened before decodeFn's return
+	// values were ever assigned to it.
 	//
 	// completed (not recover()'s return value) is what decides whether
 	// decodeFn panicked: recover() returns nil both when there is no panic
@@ -200,7 +210,8 @@ func (c *decodeCache[T]) getOrDecode(
 			panicErr = fmt.Errorf("decode panicked: %v", r)
 		}
 		c.finishDecode(key, value, panicErr)
-		panic(r)
+		err = panicErr
+		decoded = true
 	}()
 
 	value, err = decodeFn()
@@ -210,45 +221,31 @@ func (c *decodeCache[T]) getOrDecode(
 }
 
 // decodeWithPanicSafeMetrics wraps getOrDecode and owns recording its
-// hit/miss outcome entirely, covering three cases in one place so a future
-// change to one can't drift out of sync with the others:
+// hit/miss outcome entirely, covering two cases in one place so a future
+// change to one can't drift out of sync with the other. A decodeFn panic
+// needs no case of its own here: getOrDecode fully contains it and always
+// returns a normal (value, err, decoded) result (see its own doc comment),
+// so a panicked decode reaches this function as an ordinary failed err,
+// indistinguishable from one decodeFn returned directly.
 //
-//   - decodeFn panics: getOrDecode's own panic recovery re-raises after
-//     cleaning up the cache (see its doc comment), so this call never
-//     returns normally -- recordOutcome(true) runs from a recover here,
-//     before the panic is re-raised again.
-//   - decodeFn returns an error, or a waiter/cached-hit shares an
-//     already-failed outcome: recordOutcome(true). A failed delivery never
-//     represents an actual decode being successfully reused, whether this
-//     call ran decodeFn itself or reused another caller's failure, so it
-//     must never be counted as a hit -- getOrDecode's own decoded flag
-//     alone would undercount this, since it is false for every hit
-//     (including a hit on a cached failure) and every waiter (including one
-//     woken by a failing in-flight decode).
+//   - decodeFn returns an error (including one recovered from a decodeFn
+//     panic), or a waiter/cached-hit shares an already-failed outcome:
+//     recordOutcome(true). A failed delivery never represents an actual
+//     decode being successfully reused, whether this call ran decodeFn
+//     itself or reused another caller's failure, so it must never be
+//     counted as a hit -- getOrDecode's own decoded flag alone would
+//     undercount this, since it is false for every hit (including a hit on
+//     a cached failure) and every waiter (including one woken by a failing
+//     in-flight decode).
 //   - a genuine successful decode or hit: recordOutcome(decoded), matching
 //     getOrDecode's own contract exactly.
-//
-// completed, not recover()'s return value, decides whether getOrDecode
-// panicked -- see getOrDecode's own doc comment on why testing "r == nil"
-// alone would mistake a bare panic(nil) for normal completion.
 func decodeWithPanicSafeMetrics[T any](
 	cache *decodeCache[T],
 	key decodeCacheKey,
 	decodeFn func() (T, error),
 	recordOutcome func(isMiss bool),
 ) (value T, err error) {
-	completed := false
-	defer func() {
-		if completed {
-			return
-		}
-		r := recover()
-		recordOutcome(true)
-		panic(r)
-	}()
-	var decoded bool
-	value, err, decoded = cache.getOrDecode(key, decodeFn)
-	completed = true
+	value, err, decoded := cache.getOrDecode(key, decodeFn)
 	recordOutcome(decoded || err != nil)
 	return value, err
 }

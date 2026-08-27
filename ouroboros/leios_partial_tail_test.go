@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -79,7 +80,7 @@ func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 	requireTxsInIndexOrder(t, txs, diffused)
 
@@ -108,12 +109,12 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	first := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(first, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(first, point, txCount, nil)
 	require.Error(t, err)
 
 	// The relay finished diffusing and re-offers the block.
 	second := &diffusingBlockTxsRequester{available: txCount}
-	txs, err := o.fetchLeiosEbTxsBatched(second, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(second, point, txCount, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, txCount)
 
@@ -157,7 +158,7 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 
 	for range 3 {
@@ -194,12 +195,12 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 			tail[i] = cbor.RawMessage(enc)
 		}
 	}
-	o.retainLeiosPartialTxs(point.Hash, head)
+	o.retainLeiosPartialTxs(point.Hash, head, nil)
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 60, data.partialTxCount())
 
-	o.retainLeiosPartialTxs(point.Hash, tail)
+	o.retainLeiosPartialTxs(point.Hash, tail, nil)
 	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, txCount, data.partialTxCount())
@@ -207,10 +208,38 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 	// A fetch seeded from the union needs no further transactions from the
 	// relay at all.
 	requester := &diffusingBlockTxsRequester{available: 0}
-	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, txCount)
 	require.Zero(t, requester.calls)
+}
+
+// Retention validation can invalidate bodies that were already cached. Even
+// when the current fetch contributes no replacement body, the sanitized union
+// must replace the old cache entry so a later fetch cannot reuse the invalid
+// body.
+func TestRetainLeiosPartialTxsPublishesSanitizedHeldEntries(t *testing.T) {
+	_, ref1 := testLeiosManifestTx(t, 1)
+	tx2, ref2 := testLeiosManifestTx(t, 2)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref1, ref2},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(23, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+
+	// Seed index 0 with the body for index 1. The validation callback below
+	// must clear it even though this attempt offers no replacement body.
+	o.retainLeiosPartialTxs(point.Hash, []cbor.RawMessage{tx2, nil}, nil)
+	validate, err := leiosEndorserBlockTxValidator(manifestRaw, 2)
+	require.NoError(t, err)
+	o.retainLeiosPartialTxs(point.Hash, []cbor.RawMessage{tx2, nil}, validate)
+
+	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Empty(t, cached.partialTxs)
+	require.Zero(t, cached.partialTxCount())
 }
 
 // Retention is scoped to endorser blocks dingo is actually tracking: a partial
@@ -219,7 +248,7 @@ func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.retainLeiosPartialTxs([]byte{0xde, 0xad}, []cbor.RawMessage{
 		mustCbor(t, "tx0"),
-	})
+	}, nil)
 	_, ok := o.lookupLeiosEndorserBlock([]byte{0xde, 0xad})
 	require.False(t, ok)
 }
@@ -239,7 +268,7 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 
 	// Age the entry to just short of its TTL, the window in which a re-offer
