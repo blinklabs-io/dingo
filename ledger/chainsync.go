@@ -585,6 +585,10 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 				"requested_connection_id", effectiveConnId.String(),
 				"active_connection_id", activeConnId.String(),
 			)
+			// The requested target's queued headers are not usable for the
+			// live fallback. Discard them before handoff so the fallback can
+			// request a fresh cursor or replay its own buffered headers.
+			ls.clearQueuedHeaders()
 			effectiveConnId = *activeConnId
 		}
 	}
@@ -820,7 +824,6 @@ func (ls *LedgerState) detectConnectionSwitch(
 		return nil, false
 	}
 	activeConnId = ls.config.GetActiveConnectionFunc()
-	ls.syncUpstreamActive.Store(activeConnId != nil)
 	if activeConnId != nil &&
 		(ls.lastActiveConnId == nil ||
 			!sameConnectionId(*ls.lastActiveConnId, *activeConnId)) {
@@ -870,6 +873,13 @@ func (ls *LedgerState) detectConnectionSwitch(
 		// point + connection, so peer switches do not poison healthy
 		// fork convergence.
 	}
+	// Re-read the authoritative selection after handoff. A close or switch can
+	// occur while the handoff is running; never reactivate the retained frontier
+	// for the connection that was live only at the start of this function.
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId = ls.config.GetActiveConnectionFunc()
+	}
+	ls.syncUpstreamActive.Store(activeConnId != nil)
 	return activeConnId, true
 }
 

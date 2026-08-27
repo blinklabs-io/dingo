@@ -150,6 +150,36 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	ls.blockfetchRequestRangeCleanup()
 }
 
+func TestDetectConnectionSwitchRechecksLivenessBeforeReactivatingFrontier(
+	t *testing.T,
+) {
+	previousConnId := testChainsyncConnId(6000, 3021)
+	activeConnId := testChainsyncConnId(6000, 3022)
+	callbackCalls := 0
+	ls := &LedgerState{
+		lastActiveConnId: &previousConnId,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				callbackCalls++
+				if callbackCalls == 1 {
+					return &activeConnId
+				}
+				return nil
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+
+	var pending pendingPublishes
+	got, configured := ls.detectConnectionSwitch(&pending)
+
+	assert.True(t, configured)
+	assert.Nil(t, got)
+	assert.Zero(t, ls.UpstreamTipSlot())
+	assert.False(t, ls.syncUpstreamActive.Load())
+}
+
 func TestHandleConnectionClosedEventRetainsAdmittedUpstreamFrontier(
 	t *testing.T,
 ) {
