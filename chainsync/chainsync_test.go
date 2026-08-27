@@ -1508,6 +1508,44 @@ func TestLookupClientReturnsSnapshot(t *testing.T) {
 	require.Equal(t, []byte{0x01}, snapshot.Cursor.Hash)
 }
 
+// TestLookupClientPerClientLockDoesNotBlockOtherClients guards against a
+// second issue found in review of the 3267 fix: an earlier version of the
+// rollback-state lock reused chainsync.State's map-wide mutex, so a slow
+// RollBackward send on one connection (chainsyncServerRequestNext holds the
+// lock across that send) would stall LookupClient and RemoveClient for every
+// other connection too.
+//
+// It locks one client's rollback state to simulate a send in flight, then
+// proves LookupClient and RemoveClient on a different client complete almost
+// immediately rather than waiting on that lock.
+func TestLookupClientPerClientLockDoesNotBlockOtherClients(t *testing.T) {
+	provider := &mockChainProvider{}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	slowConn := newTestConnId(1)
+	otherConn := newTestConnId(2)
+	slowClient, err := s.AddClient(slowConn, ocommon.NewPoint(1, []byte{0x01}))
+	require.NoError(t, err)
+	_, err = s.AddClient(otherConn, ocommon.NewPoint(2, []byte{0x02}))
+	require.NoError(t, err)
+
+	slowClient.LockRollbackState()
+	defer slowClient.UnlockRollbackState()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, ok := s.LookupClient(otherConn)
+		require.True(t, ok)
+		s.RemoveClient(otherConn)
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		200*time.Millisecond,
+		"LookupClient/RemoveClient for another connection must not wait on a different client's rollback lock",
+	)
+}
+
 // TestAddClient_NilChainProvider_ReturnsError verifies that AddClient returns
 // an error rather than panicking when no ChainProvider has been wired.
 func TestAddClient_NilChainProvider_ReturnsError(t *testing.T) {

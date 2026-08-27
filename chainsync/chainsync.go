@@ -98,6 +98,34 @@ type ChainsyncClientState struct {
 	ChainIter            *chain.ChainIterator
 	Cursor               ocommon.Point
 	NeedsInitialRollback bool
+	// mu guards NeedsInitialRollback so chainsyncServerRequestNext's
+	// read-send-clear sequence and LookupClient's snapshot read never
+	// observe a torn value. It is scoped to this one client rather than
+	// State's map-wide lock so a slow send to one peer cannot stall
+	// AddClient/LookupClient/RemoveClient for every other connection.
+	mu sync.Mutex
+}
+
+// LockRollbackState and UnlockRollbackState serialize access to
+// NeedsInitialRollback for this client. Callers outside this package (the
+// chainsync server's request-next handler) use these instead of reaching
+// into an unexported field.
+func (cs *ChainsyncClientState) LockRollbackState() {
+	cs.mu.Lock()
+}
+
+func (cs *ChainsyncClientState) UnlockRollbackState() {
+	cs.mu.Unlock()
+}
+
+// ChainsyncClientStateSnapshot is an immutable, point-in-time copy of a
+// registered server-side chainsync client's mutable state. It intentionally
+// omits ChainIter: callers only need Cursor and NeedsInitialRollback, and
+// exposing the shared iterator would let a caller cancel or advance the
+// live client's iterator through what looks like a read-only value.
+type ChainsyncClientStateSnapshot struct {
+	Cursor               ocommon.Point
+	NeedsInitialRollback bool
 }
 
 // TrackedClient holds per-connection state for a tracked
@@ -335,8 +363,8 @@ func (s *State) AddClient(
 }
 
 // LookupClient returns a snapshot of the registered server-side (N2C)
-// chainsync client state for a connection, or false if no client is registered
-// for it.
+// chainsync client state for a connection, or false if no client is
+// registered for it.
 //
 // Unlike AddClient, this is a pure read: it never registers a client as a
 // side effect of being asked about one. Callers that need to assert whether
@@ -344,16 +372,25 @@ func (s *State) AddClient(
 // the question cannot create its own answer.
 func (s *State) LookupClient(
 	connId connection.ConnectionId,
-) (*ChainsyncClientState, bool) {
+) (*ChainsyncClientStateSnapshot, bool) {
 	s.Lock()
-	defer s.Unlock()
 	clientState, ok := s.clients[connId]
+	s.Unlock()
 	if !ok || clientState == nil {
 		return nil, false
 	}
-	clientStateSnapshot := *clientState
-	clientStateSnapshot.Cursor.Hash = cloneBytes(clientState.Cursor.Hash)
-	return &clientStateSnapshot, true
+	// clientState's mutable fields are guarded by its own lock, not
+	// State's, so this only serializes against chainsyncServerRequestNext
+	// for this one connection instead of blocking every other connection's
+	// AddClient/LookupClient/RemoveClient.
+	clientState.LockRollbackState()
+	defer clientState.UnlockRollbackState()
+	cursor := clientState.Cursor
+	cursor.Hash = cloneBytes(clientState.Cursor.Hash)
+	return &ChainsyncClientStateSnapshot{
+		Cursor:               cursor,
+		NeedsInitialRollback: clientState.NeedsInitialRollback,
+	}, true
 }
 
 // RemoveClient unregisters a server-side (N2C) chainsync

@@ -269,7 +269,7 @@ func (f *chainsyncServerFixture) setTip(
 // state being asserted on.
 func (f *chainsyncServerFixture) registeredClient(
 	t *testing.T,
-) (*dchainsync.ChainsyncClientState, bool) {
+) (*dchainsync.ChainsyncClientStateSnapshot, bool) {
 	t.Helper()
 	connId, ok := f.observedConnId()
 	if !ok {
