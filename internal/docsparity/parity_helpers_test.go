@@ -104,8 +104,16 @@ func filesMatching(
 	if err != nil {
 		return filesMatchingWalk(t, root, match)
 	}
+	rootResolved, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return filesMatchingWalk(t, root, match)
+	}
 	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Output()
-	if err != nil || filepath.Clean(strings.TrimSpace(string(topLevel))) != filepath.Clean(rootAbs) {
+	if err != nil {
+		return filesMatchingWalk(t, root, match)
+	}
+	topLevelResolved, err := filepath.EvalSymlinks(strings.TrimSpace(string(topLevel)))
+	if err != nil || filepath.Clean(topLevelResolved) != filepath.Clean(rootResolved) {
 		return filesMatchingWalk(t, root, match)
 	}
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
@@ -237,6 +245,16 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("workflowFiles() = %v, want %v", got, want)
 	}
+	t.Run("through symlink", func(t *testing.T) {
+		linkedRoot := filepath.Join(t.TempDir(), "repo")
+		if err := os.Symlink(root, linkedRoot); err != nil {
+			t.Skipf("create repository symlink: %v", err)
+		}
+		got := workflowFiles(t, linkedRoot)
+		if !slices.Equal(got, want) {
+			t.Errorf("workflowFiles() through symlink = %v, want %v", got, want)
+		}
+	})
 
 	parent := t.TempDir()
 	runGit(t, parent, "init")
