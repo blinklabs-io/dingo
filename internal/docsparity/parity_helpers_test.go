@@ -351,7 +351,7 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	writeTestFile(t, nested, ".github/workflows/archive.yml")
 	writeTestFile(t, nested, ".claude/worktrees/scratch/ignored.md")
 	writeTestFile(t, nested, ".claude/worktrees/scratch/Dockerfile")
-	writeTestFile(t, nested, ".claude/worktrees/scratch/ignored.yml")
+	writeTestFile(t, nested, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
 	got, want = markdownFiles(t, nested), []string{"docs/archive.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("nested markdownFiles() = %v, want %v", got, want)
@@ -385,6 +385,9 @@ func TestDocumentationDiscoveryRecognizesAliasedRepositoryRoot(t *testing.T) {
 	writeTestFile(t, root, ".github/workflows/tracked.yml")
 	writeTestFile(t, root, "Dockerfile")
 	writeTestFile(t, root, ".codex/worktrees/ignored.md")
+	writeTestFile(t, root, "untracked.md")
+	writeTestFile(t, root, ".github/workflows/untracked.yaml")
+	writeTestFile(t, root, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
 	runGit(t, root, "add", "docs/tracked.md", ".github/workflows/tracked.yml", "Dockerfile")
 
 	alias := filepath.Join(t.TempDir(), "repo-alias")
