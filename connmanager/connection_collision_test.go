@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
 )
@@ -104,5 +105,62 @@ func TestReplacedConnectionCloseDoesNotPublishStaleEvent(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
+	waitForConnectionManagerWatchers(t, cm)
+}
+
+// TestSameDirectionCollisionNotifiesEvictedConnection reproduces a gap a
+// CodeRabbit review of issue #3508's fix identified: a connection evicted by
+// a same-direction ConnectionId collision is closed directly by
+// addConnectionImpl, so its own error-watcher goroutine never observes a
+// live ErrorChan send -- and even if it did, RemoveConnection would already
+// find the replacement's entry under connId and reject it. Without an
+// explicit notification at the eviction site, ConnClosedFunc never fires for
+// the evicted connection, so an evicted NtC connection's chainsync
+// server-side client state (and its live chain iterator) would never be
+// released.
+func TestSameDirectionCollisionNotifiesEvictedConnection(t *testing.T) {
+	type call struct {
+		isNtC bool
+		err   error
+	}
+	calls := make(chan call, 2)
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		ConnClosedFunc: func(_ ouroboros.ConnectionId, isNtC bool, err error) {
+			calls <- call{isNtC: isNtC, err: err}
+		},
+	})
+	first := newUnstartedConnection(t)
+	second := newUnstartedConnection(t)
+
+	require.True(
+		t,
+		cm.addNtCConnectionWithIPKey(first, true, "127.0.0.1:3002", ""),
+	)
+	require.True(
+		t,
+		cm.addNtCConnectionWithIPKey(second, true, "127.0.0.1:3002", ""),
+	)
+	require.Same(t, second, cm.GetConnectionById(second.Id()))
+
+	c := testutil.RequireReceive(
+		t,
+		calls,
+		time.Second,
+		"expected a ConnClosedFunc call for the evicted connection",
+	)
+	require.True(t, c.isNtC, "evicted NtC connection must report isNtC=true")
+	require.ErrorIs(t, c.err, errConnectionReplaced)
+
+	// The evicted connection's own ErrorChan send must not produce a second,
+	// stale call once it is actually closed.
+	first.ErrorChan() <- errors.New("evicted connection closed")
+	testutil.RequireNoReceive(
+		t,
+		calls,
+		200*time.Millisecond,
+		"evicted connection's own close must not re-trigger ConnClosedFunc",
+	)
+
+	second.ErrorChan() <- nil
 	waitForConnectionManagerWatchers(t, cm)
 }

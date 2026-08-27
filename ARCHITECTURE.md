@@ -1298,6 +1298,18 @@ All event types follow the `subsystem.snake_case_name` convention.
   than they drain and wedge the subscriber permanently — via exactly the
   two-topic coupling above — which silently stops the node from following the
   chain while it continues to forge
+- An NtC close still needs to release the chainsync server-side (N2C) client
+  state `chainsyncServerFindIntersect`/`chainsyncServerRequestNext` register
+  in `chainsync.State` via `AddClient` — most importantly, its live
+  `chain.ChainIterator`. Since that release can't ride the suppressed
+  `connmanager.conn_closed` event, `ConnectionManager` calls a separate,
+  unconditional `ConnClosedFunc(connId, isNtC, err)` for every connection
+  close (NtC and NtN alike) as a direct per-connection call rather than an
+  EventBus fan-out, so a reconnect storm costs no subscriber buffer capacity.
+  `Node.handleConnManagerClosed`, wired as `ConnClosedFunc`, calls
+  `chainsyncState.RemoveClient` only when `isNtC` is true — the NtN half of
+  cleanup still runs exactly once, through `Ouroboros.HandleConnClosedEvent`
+  on the `connmanager.conn_closed` subscription above
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure

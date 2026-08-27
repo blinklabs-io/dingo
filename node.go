@@ -1122,6 +1122,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
+			ConnClosedFunc:      n.handleConnManagerClosed,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -1742,6 +1743,31 @@ func taintValue(relaxed bool) string {
 		return nodesettings.LatchOn
 	}
 	return nodesettings.LatchOff
+}
+
+// handleConnManagerClosed releases the chainsync server-side (N2C) client
+// state -- including its live chain iterator -- for a node-to-client
+// connection that just closed.
+//
+// NtC closes are deliberately excluded from the ConnectionClosedEventType
+// fan-out (see the connection manager's publish site) because every current
+// subscriber does node-to-node work and a local client reconnecting in a
+// tight loop would otherwise wedge the EventBus. This callback is the NtC
+// counterpart to HandleConnClosedEvent, which already performs the
+// equivalent RemoveClient cleanup for NtN closes via that event. Guarding on
+// isNtC here keeps the release exactly-once: an NtN close still cleans up
+// only through HandleConnClosedEvent.
+func (n *Node) handleConnManagerClosed(
+	connId ouroboros.ConnectionId,
+	isNtC bool,
+	_ error,
+) {
+	if !isNtC {
+		return
+	}
+	if n.chainsyncState != nil {
+		n.chainsyncState.RemoveClient(connId)
+	}
 }
 
 // subscribeConnectionEvents wires the connection-manager side of the EventBus:
