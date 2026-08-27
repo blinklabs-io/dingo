@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -117,7 +118,7 @@ func filesMatching(
 		if rel == "" {
 			continue
 		}
-		rel = filepath.ToSlash(filepath.FromSlash(rel))
+		rel = normalizeDiscoveryPath(rel)
 		if match(rel) {
 			found = append(found, rel)
 		}
@@ -132,29 +133,25 @@ func filesMatchingWalk(
 ) []string {
 	t.Helper()
 
-	skippedDirs := map[string]bool{
-		".git":         true,
-		".claude":      true,
-		".worktrees":   true,
-		".tools":       true,
-		"node_modules": true,
-	}
 	var found []string
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			if skippedDirs[entry.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		rel = filepath.ToSlash(rel)
+		rel = normalizeDiscoveryPath(rel)
+		if entry.IsDir() {
+			if isExcludedDiscoveryPath(rel) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if isExcludedDiscoveryPath(rel) {
+			return nil
+		}
 		if match(rel) {
 			found = append(found, rel)
 		}
@@ -166,6 +163,43 @@ func filesMatchingWalk(
 	return found
 }
 
+// excludedDiscoveryRoots are generated or dependency trees that are not part
+// of a source checkout's documentation/configuration surface. They are
+// expressed with slash separators because repository-relative paths use Git's
+// format regardless of the host platform.
+var excludedDiscoveryRoots = []string{
+	".agents/worktrees",
+	".claude/worktrees",
+	".codex/worktrees",
+	".git",
+	".tools",
+	".worktrees",
+	"node_modules",
+}
+
+// normalizeDiscoveryPath converts a repository-relative path to the stable
+// slash-separated form used by every discovery predicate. Replacing both
+// separators before path.Clean keeps synthetic Windows paths testable on Unix
+// and avoids filepath semantics changing the parity contract by host OS.
+func normalizeDiscoveryPath(rel string) string {
+	rel = strings.ReplaceAll(rel, `\`, "/")
+	rel = path.Clean(rel)
+	if rel == "." {
+		return ""
+	}
+	return strings.TrimPrefix(rel, "./")
+}
+
+func isExcludedDiscoveryPath(rel string) bool {
+	rel = normalizeDiscoveryPath(rel)
+	for _, root := range excludedDiscoveryRoots {
+		if rel == root || strings.HasPrefix(rel, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // markdownFiles returns every non-historical markdown document in the tree.
 func markdownFiles(t *testing.T, root string) []string {
 	t.Helper()
@@ -175,7 +209,7 @@ func markdownFiles(t *testing.T, root string) []string {
 	})
 	kept := make([]string, 0, len(all))
 	for _, rel := range all {
-		if historicalDocs[filepath.Base(rel)] {
+		if historicalDocs[path.Base(rel)] {
 			continue
 		}
 		kept = append(kept, rel)
@@ -188,7 +222,7 @@ func dockerfiles(t *testing.T, root string) []string {
 	t.Helper()
 
 	return filesMatching(t, root, func(rel string) bool {
-		name := filepath.Base(rel)
+		name := path.Base(rel)
 		return name == "Dockerfile" || strings.HasPrefix(name, "Dockerfile.")
 	})
 }
@@ -200,8 +234,39 @@ func workflowFiles(t *testing.T, root string) []string {
 	return filesMatching(t, root, func(rel string) bool {
 		return (strings.HasSuffix(rel, ".yml") ||
 			strings.HasSuffix(rel, ".yaml")) &&
-			filepath.ToSlash(filepath.Dir(rel)) == ".github/workflows"
+			path.Dir(rel) == ".github/workflows"
 	})
+}
+
+func TestNormalizeDiscoveryPathIsPlatformIndependent(t *testing.T) {
+	tests := map[string]struct {
+		input    string
+		excluded bool
+	}{
+		"windows agent worktree": {
+			input:    `.codex\\worktrees\\scratch\\notes.md`,
+			excluded: true,
+		},
+		"unix agent worktree": {
+			input:    `.claude/worktrees/scratch/notes.md`,
+			excluded: true,
+		},
+		"similar name remains": {
+			input:    `.codex/worktree-notes/notes.md`,
+			excluded: false,
+		},
+		"tracked repository file": {
+			input:    `docs\\guide.md`,
+			excluded: false,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := isExcludedDiscoveryPath(tt.input); got != tt.excluded {
+				t.Fatalf("isExcludedDiscoveryPath(%q) = %v, want %v", tt.input, got, tt.excluded)
+			}
+		})
+	}
 }
 
 func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
@@ -213,17 +278,22 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	writeTestFile(t, root, ".github/workflows/tracked.yml")
 	writeTestFile(t, root, ".claude/worktrees/scratch/ignored.md")
 	writeTestFile(t, root, ".claude/worktrees/scratch/Dockerfile")
+	writeTestFile(t, root, ".codex/worktrees/tracked.md")
 	writeTestFile(t, root, ".github/workflows/ignored.yaml")
 	runGit(
 		t,
 		root,
 		"add",
+		".codex/worktrees/tracked.md",
 		"docs/tracked.md",
 		"Dockerfile",
 		".github/workflows/tracked.yml",
 	)
 
-	got, want := markdownFiles(t, root), []string{"docs/tracked.md"}
+	got, want := markdownFiles(t, root), []string{
+		".codex/worktrees/tracked.md",
+		"docs/tracked.md",
+	}
 	if !slices.Equal(got, want) {
 		t.Errorf("markdownFiles() = %v, want %v", got, want)
 	}
@@ -245,6 +315,18 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	got, want = markdownFiles(t, nested), []string{"docs/archive.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("nested markdownFiles() = %v, want %v", got, want)
+	}
+
+	archive := t.TempDir()
+	writeTestFile(t, archive, "docs/tracked.md")
+	writeTestFile(t, archive, ".claude/worktrees/scratch/ignored.md")
+	writeTestFile(t, archive, ".codex/worktrees/scratch/ignored.md")
+	writeTestFile(t, archive, ".agents/worktrees/scratch/ignored.md")
+	writeTestFile(t, archive, ".worktrees/scratch/ignored.md")
+	writeTestFile(t, archive, ".tools/scratch/ignored.md")
+	got, want = markdownFiles(t, archive), []string{"docs/tracked.md"}
+	if !slices.Equal(got, want) {
+		t.Errorf("archive markdownFiles() = %v, want %v", got, want)
 	}
 }
 
