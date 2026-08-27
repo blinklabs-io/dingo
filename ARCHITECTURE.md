@@ -4899,8 +4899,12 @@ TLS and token authentication (including the `project_id` header alias) are
 configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
 "API security" above.
 
-A Blockfrost-compatible REST API that provides read access to chain data and
-transaction submission. The current router includes health/root, blocks,
+A Blockfrost-compatible REST API that provides read access to chain data,
+transaction evaluation, and transaction submission. `POST
+/api/v0/utils/txs/evaluate` accepts a serialized CBOR transaction and returns
+the ledger-calculated execution-unit map keyed by redeemer pointer; it does
+not submit or require a fully valid, balanced transaction. The current router
+includes health/root, blocks,
 epochs/parameters, network/eras, genesis, assets, pools list, pools/extended,
 retiring pools, pool detail, pool metadata, governance DRep list and lookup, address
 summary, address UTxOs and transactions, metadata label JSON/CBOR,
