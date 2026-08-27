@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -43,9 +44,23 @@ func (f *fakeDumpHistoryIter) Next(
 
 func loadTestChainBlocks(t *testing.T, n int) []models.Block {
 	t.Helper()
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(n)
+	require.NoError(t, err)
+	return modelBlocksFromLedgerBlocks(blocks)
+}
+
+func loadTestChainBlocksWithPeriodicTransactions(
+	t *testing.T,
+	n int,
+) []models.Block {
+	t.Helper()
 	blocks, err := testfixtures.GenerateConwayChainWithPeriodicTransactions(n, 4)
 	require.NoError(t, err)
-	out := make([]models.Block, 0, n)
+	return modelBlocksFromLedgerBlocks(blocks)
+}
+
+func modelBlocksFromLedgerBlocks(blocks []gledger.Block) []models.Block {
+	out := make([]models.Block, 0, len(blocks))
 	for _, block := range blocks {
 		out = append(out, models.Block{
 			Hash:     block.Hash().Bytes(),

@@ -1141,10 +1141,8 @@ func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 	t *testing.T,
 ) {
 	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
-	blockType, raw := conwayBlockFixtureBytes(t)
-	badRaw := make([]byte, len(raw))
-	copy(badRaw, raw)
-	badRaw[len(badRaw)/2] ^= 0xFF
+	blockType, _ := conwayBlockFixtureBytes(t)
+	badRaw := []byte{0x00}
 	ctx := blockfetch.CallbackContext{}
 
 	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badRaw))
