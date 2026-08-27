@@ -238,6 +238,42 @@ func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 	assert.Equal(t, uint64(114220800), ls.UpstreamTipSlot())
 }
 
+func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
+	t *testing.T,
+) {
+	closedConnId := testChainsyncConnId(6000, 3011)
+	activeConnId := &closedConnId
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return activeConnId
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+	var pending pendingPublishes
+	ls.detectConnectionSwitch(&pending)
+
+	// Model the EventBus ordering: the close is applied before its already
+	// queued chain-switch event, and the connection manager has no live peer.
+	ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: closedConnId},
+	))
+	activeConnId = nil
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{NewConnectionId: closedConnId},
+	))
+
+	assert.Zero(t, ls.UpstreamTipSlot())
+	// A zero upstream frontier is the production forger's peerless state; a
+	// dead queued switch must not re-enable the retained sync gate.
+	assert.False(t, ls.syncUpstreamActive.Load())
+}
+
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
 	t *testing.T,
 ) {

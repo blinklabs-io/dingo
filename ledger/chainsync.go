@@ -567,8 +567,29 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId := ls.config.GetActiveConnectionFunc()
+		if activeConnId == nil {
+			ls.chainsyncBlockfetchMutex.Unlock()
+			ls.config.Logger.Warn(
+				"ignoring chain switch for closed connection without live fallback",
+				"component", "ledger",
+				"connection_id", e.NewConnectionId.String(),
+			)
+			return
+		}
+		if !sameConnectionId(*activeConnId, effectiveConnId) {
+			ls.config.Logger.Info(
+				"chain switch target is not live, using active best peer",
+				"component", "ledger",
+				"requested_connection_id", effectiveConnId.String(),
+				"active_connection_id", activeConnId.String(),
+			)
+			effectiveConnId = *activeConnId
+		}
+	}
 	replayConnId, err := ls.handoffPipelineOnSwitchLocked(
-		e.NewConnectionId,
+		effectiveConnId,
 		&pending,
 	)
 	if err != nil {
@@ -577,13 +598,12 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		// before giving up.
 		if ls.config.GetActiveConnectionFunc != nil {
 			if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
-				!sameConnectionId(*activeConnId, e.NewConnectionId) {
+				!sameConnectionId(*activeConnId, effectiveConnId) {
 				ls.config.Logger.Info(
 					"chain switch target unavailable, retrying with active best peer",
 					"component",
 					"ledger",
-					"failed_connection_id",
-					e.NewConnectionId.String(),
+					"failed_connection_id", effectiveConnId.String(),
 					"active_connection_id",
 					activeConnId.String(),
 					"error",
@@ -626,6 +646,19 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	ls.chainsyncBlockfetchMutex.Unlock()
 	if err != nil {
 		return
+	}
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId := ls.config.GetActiveConnectionFunc()
+		if activeConnId == nil {
+			ls.syncUpstreamActive.Store(false)
+			return
+		}
+		if !sameConnectionId(*activeConnId, effectiveConnId) {
+			// The active peer changed while the switch was being handed off;
+			// do not make the retained frontier visible to a dead target.
+			ls.syncUpstreamActive.Store(false)
+			return
+		}
 	}
 	ls.syncUpstreamActive.Store(true)
 	if requestFreshCursor {

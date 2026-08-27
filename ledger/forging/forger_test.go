@@ -232,6 +232,34 @@ func TestCheckAndForgeProductionUsesRetainedReconnectFrontier(t *testing.T) {
 	)
 }
 
+func TestCheckAndForgeProductionProceedsWithoutUpstreamFrontier(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			// This is the value exposed after a close-before-switch event.
+			upstreamTipSlot: 0,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
+}
+
 func (c *forgerTestLeiosChecker) MayProduceEndorserBlock(
 	uint64,
 ) (bool, string, error) {
