@@ -128,25 +128,33 @@ func lintRuns(t *testing.T, root string) []lintRun {
 }
 
 // TestLintCoversEveryGoModule checks that the lint job runs golangci-lint
-// against every Go module in the tree. A nested module has its own go.mod, so
-// the root module's `./...` never reaches it: without a run of its own, a
-// green `lint` check says nothing about that module's code.
+// against every Go module in the tree on the default platform. A nested
+// module has its own go.mod, so the root module's `./...` never reaches it:
+// without a run of its own, a green `lint` check says nothing about that
+// module's code.
+//
+// Only default-GOOS runs count. A GOOS=windows run builds a different set of
+// files, so letting it satisfy a module would allow the linux run for that
+// module to be dropped while this check stayed green.
 func TestLintCoversEveryGoModule(t *testing.T) {
 	root := repoRoot(t)
 
 	covered := make(map[string]bool)
 	for _, run := range lintRuns(t, root) {
-		covered[run.dir] = true
+		if run.goos == defaultLintGOOS {
+			covered[run.dir] = true
+		}
 	}
 
 	for _, dir := range goModuleDirs(t, root) {
 		if !covered[dir] {
 			t.Errorf(
-				"module %s has a go.mod but %s never lints it; "+
-					"add a golangci-lint step with "+
+				"module %s has a go.mod but %s never lints it on "+
+					"%s; add a golangci-lint step with "+
 					"working-directory: %s",
 				dir,
 				lintWorkflow,
+				defaultLintGOOS,
 				dir,
 			)
 		}
