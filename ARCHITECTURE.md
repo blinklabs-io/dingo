@@ -498,11 +498,13 @@ only enqueues onto the ordered lane, so subscribers cannot observe an Apply
 before storage is durable and their work never runs inline in `Commit`.
 `ledger.block` remains `PublishBlocking` on the handler's own goroutine.
 
-Because a publisher parked on a full lane is released only by the EventBus
-stopping, and a live restore/truncate closes the `LedgerState` while keeping
-the bus running, ledger publishes go through `PublishOrderedContext` with a
-context `LedgerState.Close` cancels first thing. Without it `Close` waits
-unbounded on a `ledger.tx` subscriber that stopped draining.
+An ordinary stalled subscriber detaches after its delivery timeout; a lossless
+subscriber deliberately remains attached until it drains or is stopped, closed,
+or unsubscribed. A live restore/truncate closes the `LedgerState` while keeping
+the bus running, so ledger publishes go through `PublishOrderedContext` with a
+context `LedgerState.Close` cancels first thing. That cancellation releases a
+full ordered lane regardless of whether a subscriber later drains or its
+lifecycle removes it.
 
 This is also the one deliberate exception to the publish-under-lock rule
 above. `rollbackChainAndState` runs under `chainsyncMutex` — it is reached
@@ -1239,26 +1241,32 @@ All event types follow the `subsystem.snake_case_name` convention.
   buffers for high-volume ledger chainsync and chain-update paths. The
   payload-heavy ledger blockfetch path uses an eight-entry buffer and relies
   on lossless backpressure once one chain-store commit batch is queued
-- Lossless delivery with producer backpressure: when a subscriber buffer or the
-  async queue is full, `Publish`, `PublishBlocking`, and `PublishAsync` all wait
-  for capacity instead of dropping the event. Waits end on `Stop`, `Close`, or
-  `Unsubscribe`. `PublishBlocking` differs only in returning
-  `ErrEventBusStopped` when the bus shuts down mid-delivery
-- A subscriber that stops draining stalls its publishers, and the shared async
-  worker pool means it also delays unrelated async event types. Consumers of
-  `Subscribe` channels must drain for the life of the subscription and
-  `Unsubscribe` when they stop. The stalled-subscriber warning is rate-limited
-  per subscriber, not per delivery, and reports how many publishers are parked
-  on it — every parked publisher observes the same stall, so a per-delivery
-  limit made the log volume scale with publisher count rather than with time
+- Lossless delivery with bounded producer backpressure: when a subscriber buffer
+  or the async queue is full, `Publish`, `PublishBlocking`, and `PublishAsync`
+  wait for capacity instead of dropping an event for a live subscriber. An
+  ordinary in-memory subscriber that cannot free capacity by the delivery
+  timeout is detached; events already accepted into that subscriber retain
+  their order, while the unaccepted event and later events continue to healthy
+  subscribers. A lossless subscriber explicitly uses the blocking policy when
+  detachment would make its component unable to recover safely. Waits also end
+  on `Stop`, `Close`, or `Unsubscribe`. `PublishBlocking` reports the
+  detachment error (or `ErrEventBusStopped` when shutdown wins).
+- A slow subscriber can temporarily backpressure its publishers, but a stalled
+  one cannot hold the topic indefinitely. Consumers of `Subscribe` channels
+  must drain for the life of the subscription and `Unsubscribe` when they stop.
+  The stalled-subscriber warning is rate-limited per subscriber, not per
+  delivery, and reports how many publishers are parked on it — every parked
+  publisher observes the same stall, so a per-delivery limit made the log
+  volume scale with publisher count rather than with time
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
-  while holding a lock that a subscriber of that event acquires.** Because all four wait for
-  capacity rather than dropping, this is a deadlock, not merely a slow path:
-  once the subscriber's buffer fills, the subscriber waits for the lock the
-  publisher holds while the publisher waits for the capacity the subscriber
-  would free. `PublishAsync` is no exception — it waits for room in the shared
-  async queue, which is drained by a worker pool running subscriber handlers,
-  so a handler blocked on the publisher's lock closes the same cycle. Both
+  while holding a lock that a subscriber of that event acquires.** All four can
+  wait for capacity, and a subscriber that is merely slow is still allowed the
+  whole delivery bound before detachment. Once its buffer fills, the subscriber
+  waits for the lock the publisher holds while the publisher waits for the
+  capacity the subscriber would free. `PublishAsync` is no exception — it waits
+  for room in the shared async queue, which is drained by a worker pool running
+  subscriber handlers, so a handler blocked on the publisher's lock closes the
+  same cycle. Both
   `LedgerState.chainsyncMutex` and `chainsyncBlockfetchMutex` count:
   `RecoverAfterLocalRollback` takes the first and nests the second inside it,
   so holding either while publishing is enough to deadlock.
