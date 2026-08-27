@@ -6404,24 +6404,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 	return delta, nil
 }
 
-// latestOpCertCounterForValidation returns the counter history that can
-// establish a no-gap baseline for the next replayed block. A Mithril snapshot
-// authenticates its boundary but does not replay the preceding certificate
-// sequence, so rows at or below that boundary cannot prove that a later
-// counter increment was contiguous. The first validated block after the
-// boundary establishes the local baseline; every subsequent replayed block is
-// checked against it normally.
+// latestOpCertCounterForValidation returns the highest certified or observed
+// opcert counter for a pool. Mithril imports the certified HeaderState counter
+// map at its trust boundary, so normal history lookup remains authoritative
+// for the first replayed block as well as later ones.
 func (ls *LedgerState) latestOpCertCounterForValidation(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *database.Txn,
 ) (uint64, bool, error) {
-	if ls.mithrilLedgerSlot > 0 {
-		return ls.db.LatestPoolOpCertSequenceAfter(
-			poolKeyHash,
-			ls.mithrilLedgerSlot,
-			txn,
-		)
-	}
 	return ls.db.LatestPoolOpCertSequence(poolKeyHash, txn)
 }
 

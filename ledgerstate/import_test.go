@@ -59,6 +59,27 @@ func testPoolKeyHash(value []byte) lcommon.PoolKeyHash {
 	return ret
 }
 
+func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x77}, 28)
+	txn := db.MetadataTxn(true)
+	require.NoError(t, importOpCertCounters(
+		db.Metadata(), map[string]uint64{string(poolKeyHash): 490}, 100, txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		testPoolKeyHash(poolKeyHash), nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(490), sequence)
+}
+
 func TestSnapshotImportTargetsAlignWithRotation(t *testing.T) {
 	snapshots := &ParsedSnapShots{}
 

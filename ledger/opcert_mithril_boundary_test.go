@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMithrilBoundaryOpCertGapEstablishesReplayBaseline(t *testing.T) {
+func TestMithrilBoundaryOpCertCertifiedBaselineRejectsGap(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -37,6 +37,34 @@ func TestMithrilBoundaryOpCertGapEstablishesReplayBaseline(t *testing.T) {
 		nil,
 	))
 	ledgerState := &LedgerState{db: db, mithrilLedgerSlot: boundarySlot}
+
+	stored, found, err := ledgerState.latestOpCertCounterForValidation(
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(1), stored)
+	require.ErrorContains(
+		t,
+		validateOpCertCounter(stored, found, 490, true),
+		"gapped rotation",
+	)
+	require.NoError(t, validateOpCertCounter(stored, found, 2, true))
+	require.ErrorContains(
+		t,
+		validateOpCertCounter(stored, found, 0, true),
+		"stale",
+	)
+}
+
+func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(make([]byte, 28)))
+	ledgerState := &LedgerState{db: db, mithrilLedgerSlot: 100}
 
 	stored, found, err := ledgerState.latestOpCertCounterForValidation(
 		poolKeyHash,

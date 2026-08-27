@@ -108,6 +108,10 @@ type RawLedgerState struct {
 	// LastEpochBlockNonce is the Praos last applied block hash from
 	// consensus state (used in epoch nonce calculation).
 	LastEpochBlockNonce []byte
+	// OpCertCounters is the certified per-pool operational-certificate
+	// counter state from the Praos HeaderState. Keys are 28-byte pool cold-key
+	// hashes encoded as strings so they remain comparable.
+	OpCertCounters map[string]uint64
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to
 	// the single-epoch path.
@@ -2160,6 +2164,16 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		return fmt.Errorf("setting tip: %w", err)
 	}
 
+	// The HeaderState counters are certified at the snapshot tip. Persist them
+	// in the same transaction as the tip so post-snapshot block validation has
+	// the authoritative baseline and never treats an arbitrary first replayed
+	// certificate as one.
+	if err := importOpCertCounters(
+		store, cfg.State.OpCertCounters, tip.Slot, txn.Metadata(),
+	); err != nil {
+		return err
+	}
+
 	// Store evolving nonce as the tip block nonce so that
 	// subsequent block processing starts from the correct rolling
 	// nonce. Without this, the node falls back to the Shelley
@@ -2220,6 +2234,30 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 			"commit transaction in importTip: %w",
 			err,
 		)
+	}
+	return nil
+}
+
+func importOpCertCounters(
+	store metadata.MetadataStore,
+	counters map[string]uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	for poolKey, sequence := range counters {
+		if len(poolKey) != len(lcommon.PoolKeyHash{}) {
+			return fmt.Errorf(
+				"certified opcert pool key has length %d, expected 28",
+				len(poolKey),
+			)
+		}
+		var poolKeyHash lcommon.PoolKeyHash
+		copy(poolKeyHash[:], poolKey)
+		if err := store.UpdatePoolOpCertSequence(
+			poolKeyHash, sequence, slot, txn,
+		); err != nil {
+			return fmt.Errorf("storing certified opcert counter: %w", err)
+		}
 	}
 	return nil
 }
