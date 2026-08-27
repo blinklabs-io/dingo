@@ -85,7 +85,7 @@ func TestPlutusDataToCardano_Map(t *testing.T) {
 }
 
 func TestPlutusDataToCardano_ConstrLargeTagUsesAnyConstructor(t *testing.T) {
-	pd := pdata.NewConstr(200, pdata.NewInteger(big.NewInt(0)))
+	pd := pdata.NewConstrFromBigInt(big.NewInt(200), pdata.NewInteger(big.NewInt(0)))
 	proto := plutusDataToCardano(pd)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
 	require.True(t, ok)

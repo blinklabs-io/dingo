@@ -19,9 +19,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -44,25 +43,17 @@ func (f *fakeDumpHistoryIter) Next(
 
 func loadTestChainBlocks(t *testing.T, n int) []models.Block {
 	t.Helper()
-	imm, err := immutable.New("../../database/immutable/testdata")
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(n)
 	require.NoError(t, err)
-	it, err := imm.BlocksFromPoint(ocommon.Point{})
-	require.NoError(t, err)
-	defer it.Close()
 	out := make([]models.Block, 0, n)
-	for range n {
-		b, err := it.Next()
-		require.NoError(t, err)
-		require.NotNil(t, b)
-		lb, err := ledger.NewBlockFromCbor(b.Type, b.Cbor)
-		require.NoError(t, err)
+	for _, block := range blocks {
 		out = append(out, models.Block{
-			Hash:     lb.Hash().Bytes(),
-			PrevHash: lb.PrevHash().Bytes(),
-			Cbor:     b.Cbor,
-			Slot:     lb.SlotNumber(),
-			Number:   lb.BlockNumber(),
-			Type:     uint(lb.Type()),
+			Hash:     block.Hash().Bytes(),
+			PrevHash: block.PrevHash().Bytes(),
+			Cbor:     block.Cbor(),
+			Slot:     block.SlotNumber(),
+			Number:   block.BlockNumber(),
+			Type:     uint(block.Type()),
 		})
 	}
 	return out
