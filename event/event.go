@@ -55,6 +55,17 @@ var ErrEventBusStopped = errors.New("event bus stopped")
 
 var errChannelSubscriberClosed = errors.New("channel subscriber closed")
 
+// ErrEventSubscriberStalled is returned by PublishBlocking when an in-memory
+// subscriber stays full past the delivery bound and is detached.
+var ErrEventSubscriberStalled = errors.New("event subscriber stalled")
+
+// channelDeliveryTimeout bounds how long an in-memory subscriber may keep a
+// publisher parked after its buffer fills. A subscriber that cannot drain in
+// this interval is detached, so it cannot indefinitely stall the remaining
+// subscribers of that event type. Tests shorten it through this package-local
+// variable; production uses the same bound as remote delivery.
+var channelDeliveryTimeout = RemoteDeliverTimeout
+
 // deliveryStallWarnInterval is how long a single delivery may wait for
 // subscriber capacity before the subscriber is reported as stalled, and how
 // often that report repeats while the wait continues. Backpressure is normal
@@ -378,6 +389,15 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 	if c.closed {
 		return errChannelSubscriberClosed
 	}
+	// A stalled delivery requests closure before EventBus.unsubscribe can take
+	// the subscriber out of its snapshot. Do not let a concurrent publisher
+	// refill a channel in that small interval: the subscriber has already been
+	// detached from the delivery contract.
+	select {
+	case <-c.closeReq:
+		return errChannelSubscriberClosed
+	default:
+	}
 
 	select {
 	case c.ch <- evt:
@@ -393,6 +413,8 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 	defer c.stallWaiters.Add(-1)
 	stall := time.NewTimer(deliveryStallWarnInterval)
 	defer stall.Stop()
+	deliveryTimeout := time.NewTimer(channelDeliveryTimeout)
+	defer deliveryTimeout.Stop()
 	for {
 		select {
 		case c.ch <- evt:
@@ -401,6 +423,13 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 			return errChannelSubscriberClosed
 		case <-c.busStop:
 			return errChannelSubscriberClosed
+		case <-deliveryTimeout.C:
+			// Close the request channel before returning. Publish removes the
+			// subscriber immediately after this error, but every concurrent
+			// publisher must already see the detachment while that removal is
+			// in flight.
+			c.requestClose()
+			return ErrEventSubscriberStalled
 		case <-stall.C:
 			c.warnStalled(evt.Type)
 			stall.Reset(deliveryStallWarnInterval)
@@ -429,13 +458,17 @@ func (c *channelSubscriber) Close() {
 	c.close(false)
 }
 
+func (c *channelSubscriber) requestClose() {
+	c.closeOnce.Do(func() {
+		close(c.closeReq)
+	})
+}
+
 func (c *channelSubscriber) close(discardQueued bool) {
 	// Release waiting sends before asking for the write lock; they hold the
 	// read lock, so the write lock would otherwise wait on a wait that only
 	// Close can end.
-	c.closeOnce.Do(func() {
-		close(c.closeReq)
-	})
+	c.requestClose()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -769,11 +802,10 @@ func (e *EventBus) unsubscribe(
 }
 
 // deliverWithTimeout calls sub.Deliver with a timeout for non-channel
-// subscribers. channelSubscriber.Deliver is called directly: it waits for
-// buffer capacity by design, and bounding that wait would put the drop this
-// package no longer performs back into the delivery path. For other (e.g.
-// network-backed) implementations, the call is bounded by
-// RemoteDeliverTimeout to prevent worker stalls.
+// subscribers. channel subscribers enforce their own timeout in deliverWait,
+// so their stalled send can synchronously request detachment without leaving a
+// delivery goroutine behind. For other (e.g. network-backed) implementations,
+// the call is bounded by RemoteDeliverTimeout to prevent worker stalls.
 //
 // Bounded goroutine leak on timeout: when the timeout fires, the
 // goroutine running sub.Deliver remains alive until Deliver returns.

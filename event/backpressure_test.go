@@ -238,6 +238,79 @@ func TestDeliverAfterCloseReturnsClosed(t *testing.T) {
 	require.NoError(t, sub.Deliver(NewEvent("test", "x")))
 }
 
+// TestPublishDetachesStalledSubscriberWithoutReorderingHealthyDelivery proves
+// the EventBus boundary rather than channelSubscriber in isolation. A dead
+// subscriber cannot hold a topic forever; healthy subscribers still receive
+// every event accepted for them in the publisher's order.
+func TestPublishDetachesStalledSubscriberWithoutReorderingHealthyDelivery(
+	t *testing.T,
+) {
+	originalTimeout := channelDeliveryTimeout
+	channelDeliveryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+
+	const eventType EventType = "test.stalled.detach"
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+
+	_, stalled := eb.SubscribeWithBuffer(eventType, 1)
+	_, healthy := eb.SubscribeWithBuffer(eventType, 2)
+
+	eb.Publish(eventType, NewEvent(eventType, 0))
+	require.Equal(t, 0, (<-healthy).Data)
+
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		eb.Publish(eventType, NewEvent(eventType, 1))
+	}()
+
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("stalled subscriber was not detached within the delivery bound")
+	}
+	require.Equal(t, 1, (<-healthy).Data)
+
+	// The stalled channel keeps only work accepted before detachment, then
+	// closes. The second event was never accepted by that subscriber.
+	require.Equal(t, 0, (<-stalled).Data)
+	_, open := <-stalled
+	require.False(t, open, "stalled subscriber should be detached and closed")
+}
+
+// TestPublishBlockingReportsStalledSubscriber verifies the synchronous API
+// exposes the lifecycle boundary instead of silently treating a detached
+// subscriber as a successful delivery.
+func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
+	originalTimeout := channelDeliveryTimeout
+	channelDeliveryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+
+	const eventType EventType = "test.stalled.blocking"
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+
+	_, stalled := eb.SubscribeWithBuffer(eventType, 1)
+	eb.Publish(eventType, NewEvent(eventType, "first"))
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eb.PublishBlocking(eventType, NewEvent(eventType, "second"))
+	}()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, ErrEventSubscriberStalled)
+	case <-time.After(time.Second):
+		t.Fatal("PublishBlocking did not return after stalled-subscriber timeout")
+	}
+
+	require.Equal(t, "first", (<-stalled).Data)
+	_, open := <-stalled
+	require.False(t, open, "stalled subscriber should be closed")
+}
+
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
