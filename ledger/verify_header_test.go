@@ -41,10 +41,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -82,6 +84,20 @@ const (
 // to verify it.
 type testBlockResult struct {
 	block             *realBabbageBlock
+	epochNonce        []byte
+	slotsPerKesPeriod uint64
+}
+
+type tpraosNonceTamper int
+
+const (
+	tpraosNonceValid tpraosNonceTamper = iota
+	tpraosNonceMismatchedKey
+	tpraosNonceAlteredProof
+)
+
+type tpraosTestBlockResult struct {
+	block             *realTPraosBlock
 	epochNonce        []byte
 	slotsPerKesPeriod uint64
 }
@@ -247,6 +263,143 @@ func createTestBlock(
 	}
 }
 
+// createTestTPraosBlock constructs a Shelley-through-Alonzo header with
+// independently valid leader and nonce VRF certificates. The nonce
+// certificate can be signed by another key or altered before the header body
+// receives its valid KES signature, isolating nonce-VRF verification from the
+// existing leader-VRF and KES checks.
+func createTestTPraosBlock(
+	t testing.TB,
+	era lcommon.Era,
+	blockType int,
+	seed [32]byte,
+	nonceSeed byte,
+	tamper tpraosNonceTamper,
+) *tpraosTestBlockResult {
+	t.Helper()
+
+	vrfPk, vrfSk, err := vrf.KeyGen(seed[:])
+	require.NoError(t, err)
+
+	nonceVrfSk := vrfSk
+	if tamper == tpraosNonceMismatchedKey {
+		otherSeed := seed
+		otherSeed[0] ^= 0xCC
+		_, nonceVrfSk, err = vrf.KeyGen(otherSeed[:])
+		require.NoError(t, err)
+	}
+
+	kesSeed := seed
+	kesSeed[0] ^= 0xAA
+	kesSk, kesPk, err := kes.KeyGen(kes.CardanoKesDepth, kesSeed[:])
+	require.NoError(t, err)
+
+	coldSeed := seed
+	coldSeed[0] ^= 0xBB
+	coldPrivKey := ed25519.NewKeyFromSeed(coldSeed[:])
+	coldPubKey := coldPrivKey.Public().(ed25519.PublicKey)
+
+	const slotsPerKesPeriod = uint64(129600)
+	const slot = uint64(1)
+	epochNonce := make([]byte, 32)
+	for i := range epochNonce {
+		epochNonce[i] = nonceSeed + byte(i) //nolint:gosec
+	}
+
+	nonceInput, err := vrf.MkSeedTPraos(
+		int64(slot),
+		epochNonce,
+		vrf.SeedEta(),
+	)
+	require.NoError(t, err)
+	nonceProof, nonceOutput, err := vrf.Prove(nonceVrfSk, nonceInput)
+	require.NoError(t, err)
+	if tamper == tpraosNonceAlteredProof {
+		nonceProof[0] ^= 0xFF
+	}
+
+	leaderInput, err := vrf.MkSeedTPraos(
+		int64(slot),
+		epochNonce,
+		vrf.SeedL(),
+	)
+	require.NoError(t, err)
+	leaderProof, leaderOutput, err := vrf.Prove(vrfSk, leaderInput)
+	require.NoError(t, err)
+
+	const opCertSeqNum = uint32(0)
+	const opCertKesPeriod = uint32(0)
+	var opCertBody [48]byte
+	copy(opCertBody[:32], kesPk)
+	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
+	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
+	opCertSig := ed25519.Sign(coldPrivKey, opCertBody[:])
+
+	headerBody := shelley.ShelleyBlockHeaderBody{
+		BlockNumber: 1,
+		Slot:        slot,
+		IssuerVkey: func() lcommon.IssuerVkey {
+			var key lcommon.IssuerVkey
+			copy(key[:], coldPubKey)
+			return key
+		}(),
+		VrfKey: vrfPk,
+		NonceVrf: lcommon.VrfResult{
+			Output: nonceOutput,
+			Proof:  nonceProof,
+		},
+		LeaderVrf: lcommon.VrfResult{
+			Output: leaderOutput,
+			Proof:  leaderProof,
+		},
+		BlockBodySize:        1024,
+		OpCertHotVkey:        kesPk,
+		OpCertSequenceNumber: opCertSeqNum,
+		OpCertKesPeriod:      opCertKesPeriod,
+		OpCertSignature:      opCertSig,
+		ProtoMajorVersion:    uint64(era.Id + 1), //nolint:gosec
+	}
+	headerBodyCbor, err := cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerBody.SetCbor(headerBodyCbor)
+	kesSig, err := kes.Sign(kesSk, 0, headerBodyCbor)
+	require.NoError(t, err)
+
+	shelleyHeader := shelley.ShelleyBlockHeader{
+		Body:      headerBody,
+		Signature: kesSig,
+	}
+	var header gledger.BlockHeader
+	switch era.Id {
+	case shelley.EraIdShelley:
+		header = &shelleyHeader
+	case allegra.EraIdAllegra:
+		header = &allegra.AllegraBlockHeader{
+			ShelleyBlockHeader: shelleyHeader,
+		}
+	case mary.EraIdMary:
+		header = &mary.MaryBlockHeader{
+			ShelleyBlockHeader: shelleyHeader,
+		}
+	case alonzo.EraIdAlonzo:
+		header = &alonzo.AlonzoBlockHeader{
+			ShelleyBlockHeader: shelleyHeader,
+		}
+	default:
+		t.Fatalf("unsupported TPraos test era %d", era.Id)
+	}
+
+	return &tpraosTestBlockResult{
+		block: &realTPraosBlock{
+			header:    header,
+			era:       era,
+			blockType: blockType,
+		},
+		epochNonce:        epochNonce,
+		slotsPerKesPeriod: slotsPerKesPeriod,
+	}
+}
+
 // mockByronBlock implements ledger.Block for Byron-era testing.
 // Byron blocks use PBFT consensus and should be skipped by header
 // verification.
@@ -295,6 +448,62 @@ func TestVerifyBlockHeader_ValidBlock(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{1}, 0, tamperNone)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
 	assert.NoError(t, err, "valid block should pass verification")
+}
+
+func TestVerifyBlockHeaderTPraosNonceVRF(t *testing.T) {
+	eras := []struct {
+		name      string
+		era       lcommon.Era
+		blockType int
+	}{
+		{name: "Shelley", era: shelley.EraShelley, blockType: shelley.BlockTypeShelley},
+		{name: "Allegra", era: allegra.EraAllegra, blockType: allegra.BlockTypeAllegra},
+		{name: "Mary", era: mary.EraMary, blockType: mary.BlockTypeMary},
+		{name: "Alonzo", era: alonzo.EraAlonzo, blockType: alonzo.BlockTypeAlonzo},
+	}
+	tests := []struct {
+		name    string
+		tamper  tpraosNonceTamper
+		wantErr bool
+	}{
+		{name: "valid", tamper: tpraosNonceValid},
+		{
+			name:    "mismatched_key",
+			tamper:  tpraosNonceMismatchedKey,
+			wantErr: true,
+		},
+		{
+			name:    "altered_proof",
+			tamper:  tpraosNonceAlteredProof,
+			wantErr: true,
+		},
+	}
+	for eraIdx, era := range eras {
+		for testIdx, test := range tests {
+			t.Run(era.name+"/"+test.name, func(t *testing.T) {
+				var seed [32]byte
+				seed[0] = byte(20 + eraIdx*len(tests) + testIdx)
+				tb := createTestTPraosBlock(
+					t,
+					era.era,
+					era.blockType,
+					seed,
+					byte(40+eraIdx),
+					test.tamper,
+				)
+				err := verifyBlockHeader(
+					tb.block,
+					tb.epochNonce,
+					tb.slotsPerKesPeriod,
+				)
+				if test.wantErr {
+					require.ErrorContains(t, err, "nonce VRF")
+					return
+				}
+				require.NoError(t, err)
+			})
+		}
+	}
 }
 
 // TestVerifyBlockHeader_UsesBodyCBORVRFFields verifies that header crypto
@@ -457,6 +666,50 @@ type realBabbageBlock struct {
 	header *babbage.BabbageBlockHeader
 	era    lcommon.Era
 	slot   uint64
+}
+
+type realTPraosBlock struct {
+	header    gledger.BlockHeader
+	era       lcommon.Era
+	blockType int
+}
+
+func (b *realTPraosBlock) Era() lcommon.Era { return b.era }
+
+func (b *realTPraosBlock) SlotNumber() uint64 { return b.header.SlotNumber() }
+
+func (b *realTPraosBlock) Hash() lcommon.Blake2b256 { return b.header.Hash() }
+
+func (b *realTPraosBlock) PrevHash() lcommon.Blake2b256 {
+	return b.header.PrevHash()
+}
+
+func (b *realTPraosBlock) BlockNumber() uint64 {
+	return b.header.BlockNumber()
+}
+
+func (b *realTPraosBlock) IssuerVkey() lcommon.IssuerVkey {
+	return b.header.IssuerVkey()
+}
+
+func (b *realTPraosBlock) BlockBodySize() uint64 {
+	return b.header.BlockBodySize()
+}
+
+func (b *realTPraosBlock) Cbor() []byte { return nil }
+
+func (b *realTPraosBlock) BlockBodyHash() lcommon.Blake2b256 {
+	return b.header.BlockBodyHash()
+}
+
+func (b *realTPraosBlock) Header() lcommon.BlockHeader { return b.header }
+
+func (b *realTPraosBlock) Type() int { return b.blockType }
+
+func (b *realTPraosBlock) Transactions() []lcommon.Transaction { return nil }
+
+func (b *realTPraosBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
+	return nil, nil
 }
 
 func (b *realBabbageBlock) Era() lcommon.Era {
