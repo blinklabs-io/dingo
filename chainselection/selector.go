@@ -904,6 +904,28 @@ func (cs *ChainSelector) GetPeerTip(
 	return &tipCopy
 }
 
+// GetPeerSyncTarget returns a peer's advertised head only after its delivered
+// frontier is close enough to corroborate that advertisement.
+func (cs *ChainSelector) GetPeerSyncTarget(
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	peerTip := cs.peerTips[connId]
+	if !cs.isPeerSelectableLocked(connId, peerTip, false) {
+		return ochainsync.Tip{}, false
+	}
+	observed := peerTip.SelectionTip()
+	advertised := peerTip.Tip
+	if safeAddUint64(observed.Point.Slot, cs.genesisWindowSlotsLocked()) < advertised.Point.Slot {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	if advertised.Point.Slot == 0 && advertised.BlockNumber == 0 {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	return advertised, true
+}
+
 // GetAllPeerTips returns a deep copy of all tracked peer tips.
 func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainTip {
 	cs.mutex.RLock()

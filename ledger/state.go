@@ -442,6 +442,11 @@ type GetPeerObservedTipFunc func(
 	ouroboros.ConnectionId,
 ) (ochainsync.Tip, bool)
 
+// GetPeerSyncTargetFunc returns a corroborated remote sync target.
+type GetPeerSyncTargetFunc func(
+	ouroboros.ConnectionId,
+) (ochainsync.Tip, bool)
+
 // ConnectionLiveFunc reports whether a connection is still registered with the
 // connection manager. This allows the ledger to drop late chainsync events that
 // arrive after teardown.
@@ -500,6 +505,7 @@ type LedgerStateConfig struct {
 	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
 	GetActiveConnectionFunc     GetActiveConnectionFunc
 	GetPeerObservedTipFunc      GetPeerObservedTipFunc
+	GetPeerSyncTargetFunc       GetPeerSyncTargetFunc
 	ConnectionLiveFunc          ConnectionLiveFunc
 	ConnectionSwitchFunc        ConnectionSwitchFunc
 	ClearSeenHeadersFromFunc    ClearSeenHeadersFromFunc
@@ -1047,11 +1053,13 @@ type LedgerState struct {
 	rewardPrecomputeRetry   *stakeRewardPrecomputeRetry
 	validationEnabled       bool
 	// Sync progress reporting (Fix 4)
-	syncProgressLastLog  time.Time     // last time we logged sync progress
-	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
-	syncUpstreamTipSlot  atomic.Uint64 // latest admitted peer header slot
-	syncUpstreamActive   atomic.Bool   // whether consumers may use the retained frontier
-	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
+	syncProgressLastLog         time.Time     // last time we logged sync progress
+	syncProgressLastSlot        uint64        // slot at last progress log (for rate calc)
+	syncUpstreamTipSlot         atomic.Uint64 // latest admitted peer header slot
+	syncUpstreamTargetSlot      atomic.Uint64 // corroborated remote sync target
+	syncUpstreamActive          atomic.Bool   // whether consumers may use the retained frontier
+	beforeUpstreamActivePublish func()        // test-only ordering hook
+	nextNonceReadyEpoch         atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
 
 	// Rate-limiting for non-active rollback drop messages
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
@@ -2659,7 +2667,14 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	// retain consumed rows forever on a node without peers, where cleanup
 	// previously ran off the local tip alone -- an unbounded utxo table in
 	// exactly the mode documented as minimal storage.
-	upstreamTip := ls.UpstreamTipSlot()
+	upstreamTip, upstreamActive := ls.UpstreamSyncStatus()
+	if upstreamActive && upstreamTip == 0 {
+		ls.config.Logger.Debug(
+			"deferring consumed UTxO cleanup until upstream target is known",
+			"component", "ledger",
+		)
+		return
+	}
 	if upstreamTip != 0 &&
 		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow) {
 		ls.config.Logger.Debug(
@@ -8257,17 +8272,31 @@ func (ls *LedgerState) PrimaryChainTipSlot() uint64 {
 	return ls.PrimaryChainTip().Point.Slot
 }
 
-// UpstreamTipSlot returns the latest admitted header slot delivered by an
-// upstream peer while an upstream connection is active. It does not return the
-// peer's untrusted advertised tip. The admitted frontier remains monotonic
-// across reconnects, but this method returns 0 while no upstream connection is
-// active so peerless consumers retain their prior behavior.
+// UpstreamTipSlot returns the corroborated remote sync target while an upstream
+// connection is active. The admitted frontier is retained separately for
+// admission bookkeeping.
 func (ls *LedgerState) UpstreamTipSlot() uint64 {
 	if ls.config.GetActiveConnectionFunc != nil &&
 		!ls.syncUpstreamActive.Load() {
 		return 0
 	}
-	return ls.syncUpstreamTipSlot.Load()
+	if ls.config.GetPeerSyncTargetFunc == nil {
+		return ls.syncUpstreamTipSlot.Load()
+	}
+	return ls.syncUpstreamTargetSlot.Load()
+}
+
+// UpstreamSyncStatus reports whether a live upstream is selected and its
+// corroborated target. An active upstream with target 0 is still syncing.
+func (ls *LedgerState) UpstreamSyncStatus() (uint64, bool) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		target := ls.UpstreamTipSlot()
+		return target, target != 0
+	}
+	if !ls.syncUpstreamActive.Load() {
+		return 0, false
+	}
+	return ls.UpstreamTipSlot(), true
 }
 
 func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
@@ -8278,10 +8307,25 @@ func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
 		}
 		current = ls.syncUpstreamTipSlot.Load()
 	}
+	if ls.beforeUpstreamActivePublish != nil {
+		ls.beforeUpstreamActivePublish()
+	}
 	// Publish the admitted frontier before allowing consumers to use it. The
 	// forger may observe the active flag immediately, so reversing these stores
 	// exposes a zero or stale slot during the handoff.
 	ls.syncUpstreamActive.Store(true)
+}
+
+func (ls *LedgerState) refreshUpstreamSyncTarget(connId ouroboros.ConnectionId) {
+	if ls.config.GetPeerSyncTargetFunc == nil {
+		return
+	}
+	target, ok := ls.config.GetPeerSyncTargetFunc(connId)
+	if !ok {
+		ls.syncUpstreamTargetSlot.Store(0)
+		return
+	}
+	ls.syncUpstreamTargetSlot.Store(target.Point.Slot)
 }
 
 // GetCurrentPParams returns the currentPParams value

@@ -193,6 +193,14 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return peerTip.SelectionTip(), true
 		},
+		GetPeerSyncTargetFunc: func(
+			connId ouroboros.ConnectionId,
+		) (ochainsync.Tip, bool) {
+			if n.chainSelector == nil {
+				return ochainsync.Tip{}, false
+			}
+			return n.chainSelector.GetPeerSyncTarget(connId)
+		},
 		ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil

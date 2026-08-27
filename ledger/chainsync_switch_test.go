@@ -281,6 +281,10 @@ func TestAdvanceUpstreamTipSlotPublishesFrontierBeforeActivating(t *testing.T) {
 		},
 	}
 	const admittedSlot uint64 = 114220801
+	ls.beforeUpstreamActivePublish = func() {
+		assert.Equal(t, admittedSlot, ls.syncUpstreamTipSlot.Load())
+		assert.False(t, ls.syncUpstreamActive.Load())
+	}
 
 	ls.advanceUpstreamTipSlot(admittedSlot)
 

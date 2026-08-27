@@ -874,6 +874,11 @@ func (ls *LedgerState) detectConnectionSwitch(
 		}
 	}
 	ls.syncUpstreamActive.Store(activeConnId != nil)
+	if activeConnId != nil {
+		ls.refreshUpstreamSyncTarget(*activeConnId)
+	} else {
+		ls.syncUpstreamTargetSlot.Store(0)
+	}
 	return activeConnId, true
 }
 
@@ -2925,6 +2930,13 @@ func (ls *LedgerState) recordAdmittedHeaderFrontier(
 		return
 	}
 	ls.advanceUpstreamTipSlot(admittedPoint.Slot)
+	if ls.config.GetPeerSyncTargetFunc != nil &&
+		ls.config.GetActiveConnectionFunc != nil {
+		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
+			sameConnectionId(*activeConnId, e.ConnectionId) {
+			ls.refreshUpstreamSyncTarget(e.ConnectionId)
+		}
+	}
 }
 
 // shouldEnforceBlockPipelineCrypto mirrors the serial header path's

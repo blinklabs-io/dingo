@@ -49,6 +49,7 @@ type forgerTestSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
 	upstreamTipSlot   uint64
+	upstreamActive    bool
 	slotsPerKESPeriod uint64
 }
 
@@ -70,6 +71,37 @@ func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
 
 func (c forgerTestSlotClock) UpstreamTipSlot() uint64 {
 	return c.upstreamTipSlot
+}
+
+func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
+	return c.upstreamTipSlot, c.upstreamActive || c.upstreamTipSlot > 0
+}
+
+func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			upstreamActive:    true,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
 }
 
 type forgerTestBuilder struct {

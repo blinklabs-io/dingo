@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1100,6 +1101,38 @@ func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
 		ls.isNearTipWithStabilityWindow(990, 10),
 		"explicit window must accept an equal upstream gap",
 	)
+}
+
+func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing.T) {
+	activeConnID := testChainsyncConnId(6000, 3091)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConnID
+			},
+			GetPeerSyncTargetFunc: func(
+				ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return ochainsync.Tip{
+					Point:       ocommon.NewPoint(1000, []byte("network-head")),
+					BlockNumber: 1000,
+				}, true
+			},
+			CardanoNodeConfig: newNonceReadyTestConfig(t),
+		},
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(5, nil)},
+	}
+	ls.syncUpstreamActive.Store(true)
+	ls.syncUpstreamTipSlot.Store(5)
+	ls.refreshUpstreamSyncTarget(activeConnID)
+
+	assert.Equal(t, uint64(5), ls.syncUpstreamTipSlot.Load(),
+		"the admitted frontier remains available for bookkeeping")
+	assert.Equal(t, uint64(1000), ls.UpstreamTipSlot(),
+		"sync consumers must use the corroborated remote target")
+	assert.InDelta(t, 0.005, ls.SyncProgress(), 0.000001)
+	assert.False(t, ls.isNearTip(5),
+		"a restarted node with only a few admitted headers remains in catch-up")
 }
 
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
