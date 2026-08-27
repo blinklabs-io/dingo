@@ -187,7 +187,7 @@ func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
 	start := findEmptyFixtureRun(t, scan, 4)
 	require.GreaterOrEqual(t, start, 3)
 	blocks := scan[:start+1]
-	txPayload := scan[3]
+	txPayload := scan[start-1]
 	undoCount := requireFixtureWatchTxAppliedCount(t, txPayload)
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: len(blocks),

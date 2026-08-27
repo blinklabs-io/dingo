@@ -45,6 +45,49 @@ func GenerateConwayChainWithTransactions(count int) ([]ledger.Block, error) {
 	)
 }
 
+// GenerateConwayChainWithPeriodicTransactions returns a connected Conway
+// chain with one transaction block after every emptyRun empty blocks.
+func GenerateConwayChainWithPeriodicTransactions(
+	count, emptyRun int,
+) ([]ledger.Block, error) {
+	if count <= 0 {
+		return []ledger.Block{}, nil
+	}
+	if emptyRun < 0 {
+		emptyRun = 0
+	}
+	blocks := make([]ledger.Block, 0, count)
+	var previous common.Blake2b256
+	for i := range count {
+		withTransactions := i%(emptyRun+1) == emptyRun
+		var block ledger.Block
+		var err error
+		if withTransactions {
+			generated, generateErr := mockfixtures.GenerateConwayChainWithTransactions(
+				uint64(i+1), previous, uint64(2+i*20), 20, 1,
+			)
+			err = generateErr
+			if len(generated) > 0 {
+				block = generated[0]
+			}
+		} else {
+			generated, generateErr := mockfixtures.GenerateConwayChain(
+				uint64(i+1), previous, uint64(2+i*20), 20, 1,
+			)
+			err = generateErr
+			if len(generated) > 0 {
+				block = generated[0]
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, block)
+		previous = block.Hash()
+	}
+	return blocks, nil
+}
+
 // GenerateBabbageChain returns valid generated Babbage blocks for tests whose
 // ledger configuration intentionally stops at the Babbage era.
 func GenerateBabbageChain(count int) ([]ledger.Block, error) {

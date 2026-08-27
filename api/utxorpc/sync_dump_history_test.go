@@ -43,7 +43,7 @@ func (f *fakeDumpHistoryIter) Next(
 
 func loadTestChainBlocks(t *testing.T, n int) []models.Block {
 	t.Helper()
-	blocks, err := testfixtures.GenerateConwayChainWithTransactions(n)
+	blocks, err := testfixtures.GenerateConwayChainWithPeriodicTransactions(n, 4)
 	require.NoError(t, err)
 	out := make([]models.Block, 0, n)
 	for _, block := range blocks {

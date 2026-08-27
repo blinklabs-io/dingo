@@ -48,6 +48,22 @@ func TestGenerateConwayChainWithTransactions(t *testing.T) {
 	}
 }
 
+func TestGenerateConwayChainWithPeriodicTransactions(t *testing.T) {
+	blocks, err := GenerateConwayChainWithPeriodicTransactions(6, 2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 6)
+	for i, block := range blocks {
+		if i > 0 {
+			require.Equal(t, blocks[i-1].Hash(), block.PrevHash())
+		}
+		if i%3 == 2 {
+			require.NotEmpty(t, block.Transactions())
+		} else {
+			require.Empty(t, block.Transactions())
+		}
+	}
+}
+
 func TestGenerateBabbageChainContract(t *testing.T) {
 	blocks, err := GenerateBabbageChain(3)
 	require.NoError(t, err)
