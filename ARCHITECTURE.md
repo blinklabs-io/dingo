@@ -1991,6 +1991,19 @@ networks that declare Shelley at genesis, such as preview, run both. Later
 updates use the normal delayed E-3 snapshot, E-2 performance, and E-1 pots
 mapping.
 
+Within that mapping, every protocol-parameter input to the calculation — d,
+rho, tau, and the pool-level parameters — is read from the **performance**
+epoch, not the pots epoch. cardano-ledger's `startStep` binds
+`pr = es ^. prevPParamsEpochStateL` and derives all of them from it, including
+the parameter set it hands to `mkPoolRewardInfo`; `updateRewards` reads the
+protocol version from the same place. `prevPParams` during the epoch that
+computes the update is the set in force over the epoch whose blocks are
+counted, which is the performance epoch. Only the epoch length comes from the
+pots epoch, standing in for the `slotsPerEpoch` the RUPD rule passes for the
+epoch it runs in. The two sources agree whenever the parameters did not change
+across the boundary, so a network that never moves them cannot tell the
+difference.
+
 Both bootstrap rounds resolve against mark snapshot epoch 0, so that row must
 exist even when it is empty. `snapshot.Manager.CaptureGenesisSnapshot` persists
 it on a fresh sync whose genesis registers no pools — preview, whose pools
