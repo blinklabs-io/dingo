@@ -95,9 +95,10 @@ type SlotClock struct {
 	subscribers []chan SlotTick
 	mu          sync.RWMutex
 	cancel      context.CancelFunc
+	done        chan struct{}
+	generation  uint64
 	running     bool
 	stopped     bool
-	wg          sync.WaitGroup
 
 	// Track last emitted epoch to avoid duplicates and detect discrepancies
 	lastEmittedEpoch uint64
@@ -112,6 +113,9 @@ type SlotClock struct {
 	// For testing: allow injection of custom time source
 	nowFunc  func() time.Time
 	waitFunc func(context.Context, time.Duration) error
+	// beforeRunDone is a test hook that runs after a worker releases its
+	// lifecycle state but before it reports completion. It is nil in production.
+	beforeRunDone func()
 }
 
 // NewSlotClock creates a new SlotClock with the given provider and configuration
@@ -162,10 +166,13 @@ func (sc *SlotClock) Start(ctx context.Context) {
 	sc.running = true
 	sc.stopped = false
 	sc.cancel = cancel
-	sc.wg.Add(1)
+	sc.generation++
+	generation := sc.generation
+	done := make(chan struct{})
+	sc.done = done
 	sc.mu.Unlock()
 
-	go sc.run(clockCtx)
+	go sc.run(clockCtx, generation, done)
 }
 
 // Stop halts the slot clock and waits for the tick loop to exit.
@@ -173,21 +180,17 @@ func (sc *SlotClock) Start(ctx context.Context) {
 // on receiving from them to exit cleanly.
 func (sc *SlotClock) Stop() {
 	sc.mu.Lock()
-	if !sc.running {
-		sc.stopped = true
-		sc.closeSubscribersLocked()
-		sc.mu.Unlock()
-		sc.wg.Wait()
-		return
-	}
 	sc.stopped = true
-	if sc.cancel != nil {
+	if sc.running && sc.cancel != nil {
 		sc.cancel()
 	}
 	sc.closeSubscribersLocked()
+	done := sc.done
 	sc.mu.Unlock()
 
-	sc.wg.Wait()
+	if done != nil {
+		<-done
+	}
 }
 
 // Subscribe returns a channel that will receive SlotTick notifications.
@@ -355,14 +358,25 @@ func (sc *SlotClock) SetLastEmittedEpoch(epoch uint64) {
 // =============================================================================
 
 // run is the main tick loop
-func (sc *SlotClock) run(ctx context.Context) {
+func (sc *SlotClock) run(
+	ctx context.Context,
+	generation uint64,
+	done chan struct{},
+) {
 	defer func() {
 		sc.mu.Lock()
-		sc.running = false
-		sc.stopped = true
-		sc.closeSubscribersLocked()
+		if sc.generation == generation {
+			sc.running = false
+			sc.stopped = true
+			sc.cancel = nil
+			sc.closeSubscribersLocked()
+		}
+		beforeRunDone := sc.beforeRunDone
 		sc.mu.Unlock()
-		sc.wg.Done()
+		if beforeRunDone != nil {
+			beforeRunDone()
+		}
+		close(done)
 	}()
 
 	logger := sc.config.Logger.With("component", "slot_clock")
