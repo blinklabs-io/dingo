@@ -487,12 +487,19 @@ type PeerHeaderLookupFunc func(
 type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
-	PromRegistry                prometheus.Registerer
-	Logger                      *slog.Logger
-	Database                    *database.Database
-	ChainManager                *chain.ChainManager
-	EventBus                    *event.EventBus
-	CardanoNodeConfig           *cardano.CardanoNodeConfig
+	PromRegistry      prometheus.Registerer
+	Logger            *slog.Logger
+	Database          *database.Database
+	ChainManager      *chain.ChainManager
+	EventBus          *event.EventBus
+	CardanoNodeConfig *cardano.CardanoNodeConfig
+	// Network is the CLI/YAML/env network selector dingo was started with
+	// (e.g. "mainnet", "preprod", "prime-mainnet"). Shelley genesis alone
+	// cannot distinguish real Cardano mainnet from a foreign chain that
+	// reuses its identity for wire compatibility -- see isMainnet in
+	// header_protocol_version.go. Empty when dingo was configured with a
+	// raw NetworkMagic instead of a named network.
+	Network                     string
 	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
 	PeersWithBlockFunc          PeersWithBlockFunc
 	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
