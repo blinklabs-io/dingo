@@ -1491,9 +1491,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// to one commit batch and let EventBus backpressure bound decoded CBOR while
 	// the chain store catches up. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 			ChainsyncEventType,
 			event.EventQueueSize,
+			event.SubscriberBackpressureBlock,
 			ls.handleEventChainsync,
 		)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
@@ -1501,9 +1502,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ls.handleEventChainsyncAwaitReply,
 		)
 		ls.subscribeBlockfetchEvents(ls.handleEventBlockfetch)
-		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 			chain.ChainUpdateEventType,
 			event.EventQueueSize,
+			event.SubscriberBackpressureBlock,
 			ls.handleEventChainUpdate,
 		)
 		ls.chainSwitchSubID = ls.config.EventBus.SubscribeFunc(

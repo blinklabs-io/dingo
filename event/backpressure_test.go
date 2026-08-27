@@ -313,6 +313,61 @@ func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
 	require.False(t, open, "stalled subscriber should be closed")
 }
 
+// TestLosslessSubscribeFuncDoesNotDetach verifies the policy used by
+// ordering-critical ledger streams. A full callback queue must apply
+// backpressure until the handler drains it, rather than silently removing the
+// subscriber after the ordinary delivery timeout.
+func TestLosslessSubscribeFuncDoesNotDetach(t *testing.T) {
+	originalTimeout := channelDeliveryTimeout
+	channelDeliveryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+
+	const eventType EventType = "test.lossless.callback"
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	eb.SubscribeFuncWithBufferPolicy(
+		eventType,
+		1,
+		SubscriberBackpressureBlock,
+		func(evt Event) {
+			if evt.Data == "first" {
+				once.Do(func() { close(started) })
+				<-release
+			}
+		},
+	)
+
+	eb.Publish(eventType, NewEvent(eventType, "first"))
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("lossless callback did not begin")
+	}
+	eb.Publish(eventType, NewEvent(eventType, "second"))
+
+	published := make(chan error, 1)
+	go func() {
+		published <- eb.PublishBlocking(eventType, NewEvent(eventType, "third"))
+	}()
+	select {
+	case err := <-published:
+		t.Fatalf("lossless callback detached while full: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-published:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("lossless callback did not resume after draining")
+	}
+}
+
 // TestStalledSubscriberDetachmentReportsWarningAndMetric makes the bounded
 // path observable with the production defaults: detachment emits a warning and
 // increments the delivery-timeout metric even though the periodic stall warning
