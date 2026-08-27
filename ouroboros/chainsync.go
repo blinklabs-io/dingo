@@ -48,6 +48,21 @@ const (
 	// headroom so legitimate sync is never rejected.
 	chainsyncMaxFindIntersectPoints = 1000
 
+	// chainsyncFindIntersectBudgetRate bounds the sustained rate (points per
+	// second) of database lookup work a single ChainSync peer connection may
+	// trigger via repeated FindIntersect requests. Cost is charged per point
+	// actually looked up, after deduplication, so this bounds cumulative
+	// work across many requests, not just the size of one request. Honest
+	// clients issue FindIntersect rarely — on connect, and on resync after a
+	// rollback we cannot follow — so this is far above legitimate use.
+	chainsyncFindIntersectBudgetRate = 200
+
+	// chainsyncFindIntersectBudgetBurst allows a peer to spend its entire
+	// FindIntersect work budget on one immediate request up to
+	// chainsyncMaxFindIntersectPoints, matching the point-count cap above so
+	// a single in-bounds request is never rejected by the budget alone.
+	chainsyncFindIntersectBudgetBurst = float64(chainsyncMaxFindIntersectPoints)
+
 	// chainsyncRestartTimeout bounds how long the restart of a
 	// chainsync client can take before we give up and close the
 	// connection. Increase this for slow or congested networks.
@@ -575,6 +590,27 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 			"connection_id", ctx.ConnectionId.String(),
 			"num_points", len(points),
 			"max_points", chainsyncMaxFindIntersectPoints,
+		)
+		return retPoint, tip, ochainsync.ErrIntersectNotFound
+	}
+	// Deduplicate before charging the work budget or performing any lookup.
+	// GetIntersectPoint's running-best-match scan only skips a point once a
+	// higher-or-equal-slot match has already been found, so a peer resending
+	// the same point many times (or an equal-slot point with a different
+	// hash) would otherwise force one redundant database lookup per repeat.
+	// The intersection result is independent of point order (the highest
+	// matching slot always wins), so deduplicating here changes no outcome.
+	points = normalizeIntersectPoints(points)
+	if o.chainsyncFindIntersectLimiter != nil &&
+		!o.chainsyncFindIntersectLimiter.Allow(ctx.ConnectionId, len(points)) {
+		o.config.Logger.Warn(
+			"chainsync server: rejecting FindIntersect over per-connection work budget",
+			"component",
+			"ouroboros",
+			"connection_id",
+			ctx.ConnectionId.String(),
+			"num_points",
+			len(points),
 		)
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
