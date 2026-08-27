@@ -414,6 +414,32 @@ func TestTallySPOVotesAutoVoteOverflow(t *testing.T) {
 			assert.Contains(t, err.Error(), "overflows uint64")
 		})
 	})
+
+	// A NoConfidence action routes the NoConfidence auto-vote to
+	// SPOYesStake instead — a separate checked addition from the branch
+	// above.
+	t.Run("no-confidence auto-vote routed to yes stake", func(t *testing.T) {
+		newTally := func() *ProposalTally {
+			return &ProposalTally{
+				ActionType: uint8(lcommon.GovActionTypeNoConfidence),
+			}
+		}
+
+		t.Run("just below overflow succeeds", func(t *testing.T) {
+			state := newState(models.PoolRewardAccountAutoVoteNoConfidence, 1)
+			tally := newTally()
+			err := tallySPOVotes(&TallyContext{SPOState: state}, nil, tally)
+			require.NoError(t, err)
+			assert.Equal(t, maxUint64, tally.SPOYesStake)
+		})
+		t.Run("just above overflow fails", func(t *testing.T) {
+			state := newState(models.PoolRewardAccountAutoVoteNoConfidence, 2)
+			tally := newTally()
+			err := tallySPOVotes(&TallyContext{SPOState: state}, nil, tally)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "overflows uint64")
+		})
+	})
 }
 
 // TestLoadSPOVotingStateTotalStakeOverflow drives LoadSPOVotingState's
