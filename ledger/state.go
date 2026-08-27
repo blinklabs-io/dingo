@@ -1053,13 +1053,11 @@ type LedgerState struct {
 	rewardPrecomputeRetry   *stakeRewardPrecomputeRetry
 	validationEnabled       bool
 	// Sync progress reporting (Fix 4)
-	syncProgressLastLog         time.Time     // last time we logged sync progress
-	syncProgressLastSlot        uint64        // slot at last progress log (for rate calc)
-	syncUpstreamTipSlot         atomic.Uint64 // latest admitted peer header slot
-	syncUpstreamTargetSlot      atomic.Uint64 // corroborated remote sync target
-	syncUpstreamActive          atomic.Bool   // whether consumers may use the retained frontier
-	beforeUpstreamActivePublish func()        // test-only ordering hook
-	nextNonceReadyEpoch         atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
+	syncProgressLastLog  time.Time     // last time we logged sync progress
+	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
+	syncUpstreamTipSlot  atomic.Uint64 // latest admitted peer header slot
+	syncUpstreamState    atomic.Pointer[upstreamSyncState]
+	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
 
 	// Rate-limiting for non-active rollback drop messages
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
@@ -1092,6 +1090,13 @@ type LedgerState struct {
 	// Test hook called after Close releases the blockfetch continuation mutex
 	// and before it waits for continuation workers.
 	blockfetchContinuationSchedulingHook func()
+}
+
+// upstreamSyncState is one connection-generation snapshot. Consumers must not
+// combine an active flag from one peer with a target from another peer.
+type upstreamSyncState struct {
+	connectionKey string
+	targetSlot    uint64
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -8276,14 +8281,21 @@ func (ls *LedgerState) PrimaryChainTipSlot() uint64 {
 // connection is active. The admitted frontier is retained separately for
 // admission bookkeeping.
 func (ls *LedgerState) UpstreamTipSlot() uint64 {
-	if ls.config.GetActiveConnectionFunc != nil &&
-		!ls.syncUpstreamActive.Load() {
+	if ls.config.GetActiveConnectionFunc == nil {
+		return ls.syncUpstreamTipSlot.Load()
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+		return 0
+	}
+	state := ls.syncUpstreamState.Load()
+	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
 		return 0
 	}
 	if ls.config.GetPeerSyncTargetFunc == nil {
 		return ls.syncUpstreamTipSlot.Load()
 	}
-	return ls.syncUpstreamTargetSlot.Load()
+	return state.targetSlot
 }
 
 // UpstreamSyncStatus reports whether a live upstream is selected and its
@@ -8293,10 +8305,15 @@ func (ls *LedgerState) UpstreamSyncStatus() (uint64, bool) {
 		target := ls.UpstreamTipSlot()
 		return target, target != 0
 	}
-	if !ls.syncUpstreamActive.Load() {
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
 		return 0, false
 	}
-	return ls.UpstreamTipSlot(), true
+	state := ls.syncUpstreamState.Load()
+	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
+		return 0, true
+	}
+	return state.targetSlot, true
 }
 
 func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
@@ -8307,25 +8324,60 @@ func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
 		}
 		current = ls.syncUpstreamTipSlot.Load()
 	}
-	if ls.beforeUpstreamActivePublish != nil {
-		ls.beforeUpstreamActivePublish()
-	}
-	// Publish the admitted frontier before allowing consumers to use it. The
-	// forger may observe the active flag immediately, so reversing these stores
-	// exposes a zero or stale slot during the handoff.
-	ls.syncUpstreamActive.Store(true)
 }
 
-func (ls *LedgerState) refreshUpstreamSyncTarget(connId ouroboros.ConnectionId) {
+func (ls *LedgerState) publishActiveUpstream(connId ouroboros.ConnectionId) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		return
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !sameConnectionId(*activeConnId, connId) ||
+		!ls.isConnectionLive(connId) {
+		return
+	}
+	current := ls.syncUpstreamState.Load()
+	if current != nil && current.connectionKey == connIdKey(connId) {
+		return
+	}
+	ls.syncUpstreamState.Store(&upstreamSyncState{connectionKey: connIdKey(connId)})
+}
+
+func (ls *LedgerState) clearActiveUpstream() {
+	ls.syncUpstreamState.Store(nil)
+}
+
+// publishAdmittedUpstreamTarget is called only after a header has been
+// authenticated and admitted. Revalidation binds the target to the still-live
+// active connection rather than a prior switch generation.
+func (ls *LedgerState) publishAdmittedUpstreamTarget(connId ouroboros.ConnectionId) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		return
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !sameConnectionId(*activeConnId, connId) ||
+		!ls.isConnectionLive(connId) {
+		return
+	}
 	if ls.config.GetPeerSyncTargetFunc == nil {
+		ls.publishActiveUpstream(connId)
 		return
 	}
 	target, ok := ls.config.GetPeerSyncTargetFunc(connId)
 	if !ok {
-		ls.syncUpstreamTargetSlot.Store(0)
+		ls.publishActiveUpstream(connId)
 		return
 	}
-	ls.syncUpstreamTargetSlot.Store(target.Point.Slot)
+	// Recheck after consulting chain selection: a handoff may have happened
+	// while obtaining the target.
+	activeConnId = ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !sameConnectionId(*activeConnId, connId) ||
+		!ls.isConnectionLive(connId) {
+		return
+	}
+	ls.syncUpstreamState.Store(&upstreamSyncState{
+		connectionKey: connIdKey(connId),
+		targetSlot:    target.Point.Slot,
+	})
 }
 
 // GetCurrentPParams returns the currentPParams value

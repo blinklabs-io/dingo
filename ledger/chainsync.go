@@ -572,7 +572,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			activeConnId := ls.config.GetActiveConnectionFunc()
 			if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
 				ls.chainsyncBlockfetchMutex.Unlock()
-				ls.syncUpstreamActive.Store(false)
+				ls.clearActiveUpstream()
 				ls.config.Logger.Warn(
 					"ignoring chain switch without a live connection",
 					"component", "ledger",
@@ -651,11 +651,11 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	}
 	if ls.config.GetActiveConnectionFunc != nil {
 		if !ls.isConnectionLive(effectiveConnId) {
-			ls.syncUpstreamActive.Store(false)
+			ls.clearActiveUpstream()
 			return
 		}
 	}
-	ls.syncUpstreamActive.Store(true)
+	ls.publishActiveUpstream(effectiveConnId)
 	if requestFreshCursor {
 		ls.config.Logger.Info(
 			"chain switch selected peer is ahead without queued headers, requesting fresh chainsync cursor",
@@ -720,7 +720,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 		activeConnId := ls.config.GetActiveConnectionFunc()
 		if activeConnId == nil ||
 			sameConnectionId(*activeConnId, e.ConnectionId) {
-			ls.syncUpstreamActive.Store(false)
+			ls.clearActiveUpstream()
 		}
 	}
 	// Keep the admitted-header frontier as a monotonic high-water mark across
@@ -873,11 +873,12 @@ func (ls *LedgerState) detectConnectionSwitch(
 			activeConnId = nil
 		}
 	}
-	ls.syncUpstreamActive.Store(activeConnId != nil)
 	if activeConnId != nil {
-		ls.refreshUpstreamSyncTarget(*activeConnId)
+		// A new selection starts with an unknown target. Only admitted header
+		// work may publish a peer-advertised target.
+		ls.publishActiveUpstream(*activeConnId)
 	} else {
-		ls.syncUpstreamTargetSlot.Store(0)
+		ls.clearActiveUpstream()
 	}
 	return activeConnId, true
 }
@@ -2930,13 +2931,7 @@ func (ls *LedgerState) recordAdmittedHeaderFrontier(
 		return
 	}
 	ls.advanceUpstreamTipSlot(admittedPoint.Slot)
-	if ls.config.GetPeerSyncTargetFunc != nil &&
-		ls.config.GetActiveConnectionFunc != nil {
-		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
-			sameConnectionId(*activeConnId, e.ConnectionId) {
-			ls.refreshUpstreamSyncTarget(e.ConnectionId)
-		}
-	}
+	ls.publishAdmittedUpstreamTarget(e.ConnectionId)
 }
 
 // shouldEnforceBlockPipelineCrypto mirrors the serial header path's

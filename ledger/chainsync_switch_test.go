@@ -177,7 +177,8 @@ func TestDetectConnectionSwitchRechecksLivenessBeforeReactivatingFrontier(
 	assert.True(t, configured)
 	assert.Nil(t, got)
 	assert.Zero(t, ls.UpstreamTipSlot())
-	assert.False(t, ls.syncUpstreamActive.Load())
+	_, active := ls.UpstreamSyncStatus()
+	assert.False(t, active)
 }
 
 func TestHandleConnectionClosedEventRetainsAdmittedUpstreamFrontier(
@@ -271,7 +272,7 @@ func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 	assert.Equal(t, uint64(114220800), ls.UpstreamTipSlot())
 }
 
-func TestAdvanceUpstreamTipSlotPublishesFrontierBeforeActivating(t *testing.T) {
+func TestAdvanceUpstreamTipSlotDoesNotPublishWithoutAdmittedTarget(t *testing.T) {
 	activeConnID := testChainsyncConnId(6000, 3041)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -281,16 +282,12 @@ func TestAdvanceUpstreamTipSlotPublishesFrontierBeforeActivating(t *testing.T) {
 		},
 	}
 	const admittedSlot uint64 = 114220801
-	ls.beforeUpstreamActivePublish = func() {
-		assert.Equal(t, admittedSlot, ls.syncUpstreamTipSlot.Load())
-		assert.False(t, ls.syncUpstreamActive.Load())
-	}
-
 	ls.advanceUpstreamTipSlot(admittedSlot)
 
 	assert.Equal(t, admittedSlot, ls.syncUpstreamTipSlot.Load())
-	assert.True(t, ls.syncUpstreamActive.Load())
-	assert.Equal(t, admittedSlot, ls.UpstreamTipSlot())
+	assert.Zero(t, ls.UpstreamTipSlot())
+	_, active := ls.UpstreamSyncStatus()
+	assert.True(t, active)
 }
 
 func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
@@ -329,7 +326,8 @@ func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
 	assert.Zero(t, ls.UpstreamTipSlot())
 	// A zero upstream frontier is the production forger's peerless state; a
 	// dead queued switch must not re-enable the retained sync gate.
-	assert.False(t, ls.syncUpstreamActive.Load())
+	_, active := ls.UpstreamSyncStatus()
+	assert.False(t, active)
 }
 
 func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(t *testing.T) {
@@ -349,7 +347,7 @@ func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(t *testing.T
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(114220800)
-	ls.syncUpstreamActive.Store(true)
+	ls.publishActiveUpstream(activeConnId)
 
 	// A close subscriber can update the active pointer before the queued
 	// chain-switch subscriber runs. The target remains registered and must
@@ -1274,6 +1272,15 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 	// Keep the test at header admission; no blockfetch worker is needed.
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	connID := fixture.connId
+	targetSlot := uint64(0)
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &connID
+	}
+	ls.config.GetPeerSyncTargetFunc = func(ouroboros.ConnectionId) (ochainsync.Tip, bool) {
+		return ochainsync.Tip{Point: ocommon.NewPoint(targetSlot, []byte("target"))}, targetSlot != 0
+	}
+	ls.publishActiveUpstream(connID)
+	assert.Zero(t, ls.UpstreamTipSlot(), "selection alone must not publish a target")
 
 	// This header is accepted and establishes the initial upstream tip.
 	accepted := mockHeader{
@@ -1283,6 +1290,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
 	advertisedSlot := ^uint64(0)
+	targetSlot = accepted.slot
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  accepted,
@@ -1296,6 +1304,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		},
 	}))
 	require.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
+	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot())
 
 	// The next header does not extend the queued chain. Its advertised tip
 	// must not advance shared progress state before fork handling rejects it.
@@ -1305,6 +1314,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		blockNumber: 3,
 		slot:        3,
 	}
+	targetSlot = advertisedSlot - 1
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  rejected,
@@ -1315,6 +1325,8 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		},
 	}))
 	assert.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
+	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot(),
+		"a rejected header must not publish its advertised target")
 }
 
 func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(

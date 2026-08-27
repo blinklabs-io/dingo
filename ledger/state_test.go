@@ -1122,9 +1122,9 @@ func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing
 		},
 		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(5, nil)},
 	}
-	ls.syncUpstreamActive.Store(true)
 	ls.syncUpstreamTipSlot.Store(5)
-	ls.refreshUpstreamSyncTarget(activeConnID)
+	ls.publishActiveUpstream(activeConnID)
+	ls.publishAdmittedUpstreamTarget(activeConnID)
 
 	assert.Equal(t, uint64(5), ls.syncUpstreamTipSlot.Load(),
 		"the admitted frontier remains available for bookkeeping")
@@ -1133,6 +1133,44 @@ func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing
 	assert.InDelta(t, 0.005, ls.SyncProgress(), 0.000001)
 	assert.False(t, ls.isNearTip(5),
 		"a restarted node with only a few admitted headers remains in catch-up")
+}
+
+func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(t *testing.T) {
+	connA := testChainsyncConnId(6000, 3092)
+	connB := testChainsyncConnId(6000, 3093)
+	activeConn := connA
+	targets := map[string]uint64{
+		connIdKey(connA): 100,
+		connIdKey(connB): 200,
+	}
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId { return &activeConn },
+			GetPeerSyncTargetFunc: func(connId ouroboros.ConnectionId) (ochainsync.Tip, bool) {
+				return ochainsync.Tip{Point: ocommon.NewPoint(targets[connIdKey(connId)], nil)}, true
+			},
+		},
+	}
+
+	ls.publishActiveUpstream(connA)
+	assert.Zero(t, ls.UpstreamTipSlot(), "active selection alone must not trust a target")
+	ls.publishAdmittedUpstreamTarget(connA)
+	assert.Equal(t, uint64(100), ls.UpstreamTipSlot())
+
+	// A→B changes the authoritative active connection before the ledger has
+	// processed the switch. The A snapshot must not be visible as B's target.
+	activeConn = connB
+	target, active := ls.UpstreamSyncStatus()
+	assert.True(t, active)
+	assert.Zero(t, target)
+	ls.publishActiveUpstream(connB)
+	assert.Zero(t, ls.UpstreamTipSlot())
+	ls.publishAdmittedUpstreamTarget(connB)
+	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
+
+	// A deferred or rejected header never reaches the trusted publication path.
+	ls.recordAdmittedHeaderFrontier(ChainsyncEvent{ConnectionId: connB}, false)
+	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
 }
 
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
