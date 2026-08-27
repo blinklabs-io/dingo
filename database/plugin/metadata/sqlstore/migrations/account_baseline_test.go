@@ -60,7 +60,7 @@ INSERT INTO account (
 	)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:4])
 
 	var (
 		pool, drep []byte
@@ -99,7 +99,7 @@ func baselineBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 4)
+	require.GreaterOrEqual(t, len(registry), 4)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -154,7 +154,7 @@ INSERT INTO account (
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:4])
 
 	require.Equal(t, 0, baselineRowCount(t, db))
 	replayBaselineExpand(t, db)
@@ -199,7 +199,7 @@ INSERT INTO stake_delegation (
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:4])
 
 	require.Equal(t, 1, baselineRowCount(t, db))
 	var key []byte
@@ -250,7 +250,7 @@ VALUES (?, 0, 400)`,
 
 			registry, err := migrations.SQLiteRegistry()
 			require.NoError(t, err)
-			runTo(registry)
+			runTo(registry[:4])
 
 			require.Equal(t, 0, baselineRowCount(t, db))
 		})

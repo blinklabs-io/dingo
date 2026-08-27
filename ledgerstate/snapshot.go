@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ErrLedgerDirNotFound is returned when the ledger directory cannot
@@ -1191,7 +1192,8 @@ func parseSnapShot(
 }
 
 // ParseActivePoolDistribution decodes NewEpochState.pool-distr:
-// map[PoolKeyHash][UnitInterval, VrfKeyHash]. The UnitInterval is the exact
+// map[PoolKeyHash][UnitInterval, active stake, VrfKeyHash, LeiosKey]. Older
+// states omit active stake and/or LeiosKey. The UnitInterval is the exact
 // active stake fraction (sigma) used by Praos leader eligibility.
 func ParseActivePoolDistribution(
 	data cbor.RawMessage,
@@ -1237,9 +1239,9 @@ func ParseActivePoolDistribution(
 				err,
 			)
 		}
-		if len(fields) != 2 && len(fields) != 3 {
+		if len(fields) < 2 || len(fields) > 4 {
 			return nil, fmt.Errorf(
-				"active pool distribution entry %d: value has %d fields, expected 2 or 3",
+				"active pool distribution entry %d: value has %d fields, expected 2, 3, or 4",
 				idx,
 				len(fields),
 			)
@@ -1254,7 +1256,7 @@ func ParseActivePoolDistribution(
 		}
 
 		vrfFieldIdx := 1
-		if len(fields) == 3 {
+		if len(fields) >= 3 {
 			vrfFieldIdx = 2
 			var activeStake uint64
 			if _, err := cbor.Decode(fields[1], &activeStake); err != nil {
@@ -1300,11 +1302,32 @@ func ParseActivePoolDistribution(
 			)
 		}
 
+		var leiosKey *lcommon.LeiosKey
+		if len(fields) == 4 {
+			leiosKey, err = decodeOptionalLeiosKey(fields[3])
+			if err != nil {
+				return nil, fmt.Errorf(
+					"active pool distribution entry %d: %w",
+					idx,
+					err,
+				)
+			}
+		}
+		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		if leiosKey != nil {
+			leiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
+			leiosKeyPossessionProof = append(
+				[]byte(nil), leiosKey.PossessionProof...,
+			)
+		}
+
 		result = append(result, ParsedActivePoolStake{
-			PoolKeyHash:      slices.Clone(poolKeyHash),
-			StakeNumerator:   stakeNumerator,
-			StakeDenominator: stakeDenominator,
-			VrfKeyHash:       slices.Clone(vrfKeyHash),
+			PoolKeyHash:             slices.Clone(poolKeyHash),
+			StakeNumerator:          stakeNumerator,
+			StakeDenominator:        stakeDenominator,
+			VrfKeyHash:              slices.Clone(vrfKeyHash),
+			LeiosKeyPublic:          leiosKeyPublic,
+			LeiosKeyPossessionProof: leiosKeyPossessionProof,
 		})
 	}
 	return result, nil
@@ -1632,14 +1655,25 @@ func AggregatePoolStake(
 			continue
 		}
 
+		pool := snap.PoolParams[poolHex]
+		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		if pool != nil {
+			leiosKeyPublic = append([]byte(nil), pool.LeiosKeyPublic...)
+			leiosKeyPossessionProof = append(
+				[]byte(nil), pool.LeiosKeyPossessionProof...,
+			)
+		}
+
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:              epoch,
-			SnapshotType:       snapshotType,
-			PoolKeyHash:        poolKeyHash,
-			TotalStake:         types.Uint64(agg.totalStake),
-			DelegatorCount:     agg.delegatorCount,
-			CapturedSlot:       capturedSlot,
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			Epoch:                   epoch,
+			SnapshotType:            snapshotType,
+			PoolKeyHash:             poolKeyHash,
+			TotalStake:              types.Uint64(agg.totalStake),
+			DelegatorCount:          agg.delegatorCount,
+			CapturedSlot:            capturedSlot,
+			LeiosKeyPublic:          leiosKeyPublic,
+			LeiosKeyPossessionProof: leiosKeyPossessionProof,
+			CalculationVersion:      models.RewardStakeCalculationVersion,
 		})
 	}
 
