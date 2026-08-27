@@ -3055,12 +3055,15 @@ waiter-channel design (see Leios CertRB Serving below), applied to ordinary
 block/header decoding rather than Leios EB closures.
 
 A decode function that panics (adversarial/malformed peer bytes could in
-principle trigger this) does not strand the key: `getOrDecode` recovers the
-panic just long enough to record it as an ordinary cached failure and wake
-every waiter, then re-raises it, so the decoding goroutine's own
-crash-or-recover behavior is unchanged but no other connection is left
-permanently blocked on that key, and a later identical delivery fails fast
-from cache instead of panicking again.
+principle trigger this) does not strand the key and does not crash the
+decoding goroutine either: `getOrDecode` recovers the panic, records it as an
+ordinary cached failure, wakes every waiter, and returns it as its own
+`(value, err)` result instead of re-raising, so a decoder panic never escapes
+into `blockfetchClientBlockRaw`/`chainsyncClientRollForwardRaw` or the
+protocol worker that called them — it is handled exactly like any other
+decode error, on the leader's own path as well as every waiter's. A later
+identical delivery still fails fast from the cached failure instead of
+decoding (and therefore panicking) again. See dingo #3511.
 
 A waiting caller's decode outcome is delivered directly through its wait
 channel rather than by re-reading the shared entry map after waking: the
