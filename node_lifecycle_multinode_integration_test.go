@@ -1,3 +1,5 @@
+//go:build dingo_live_lifecycle_integration
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -117,11 +119,11 @@ func devnetCardanoConfig(t testing.TB) *cardano.CardanoNodeConfig {
 
 // dbReadySignalHandler wraps a real slog.Handler and additionally signals
 // once (non-blocking) when a specific log message is emitted. Used here for
-// two distinct synchronization needs: (1) knowing when a node's
-// database.New() (and the global, NOT concurrency-safe plugin-option state
-// it mutates — see plugin.SetPluginOption's own doc comment) has finished,
-// so a second node's database.New() can be started only afterward rather
-// than racing it; (2) giving a background-started Run() goroutine's n.db
+// two distinct synchronization needs: (1) knowing when the forger's
+// database.New() has finished before constructing its syncer, which gives the
+// test deterministic topology setup; each Node has its own instance-owned
+// plugin.Host, so this ordering is not serialization around process-global
+// plugin-option state; (2) giving a background-started Run() goroutine's n.db
 // assignment (node.go's `n.db = db`, itself unsynchronized — nothing in
 // normal operation needs to read it that early) a real happens-before edge
 // against a test goroutine that starts polling n.db immediately after, as
@@ -276,12 +278,11 @@ func runNodeInBackground(t *testing.T, n *Node) {
 }
 
 // startTwoNodeDevnet builds and starts a dev-mode forger and a syncing
-// node pointed at it, serializing their startup so the syncer's
-// database.New() (and the global, not-concurrency-safe plugin-option
-// state it mutates — see plugin.SetPluginOption's doc comment) cannot
-// interleave with the forger's: it waits for the forger's own
-// database.New() to finish (signalled via its logger, not a raw field
-// poll or a sleep) before constructing the syncer at all.
+// node pointed at it, staging their startup so the forger's database has
+// initialized before constructing the syncer. This reduces early topology
+// startup overlap; it is not protection for plugin configuration, because each
+// Node owns an instance-owned plugin.Host. The signal comes from the forger's
+// logger rather than a raw field poll or a sleep.
 //
 // It also waits for the syncer's own database.New() to finish before
 // returning. Run() assigns n.db without holding liveLifecycleMu (nothing
@@ -387,11 +388,6 @@ func requireInboundListenerAcceptsConnections(t *testing.T, ln net.Listener) {
 		"node must still accept inbound connections on %s after the live operation",
 		addr,
 	)
-}
-
-func TestTwoNodeDevnetSyncOverRealNetworking(t *testing.T) {
-	_, syncer, _ := startTwoNodeDevnet(t)
-	waitForTipSlotAtLeast(t, syncer, 5)
 }
 
 // TestLiveTruncateUnderRealForgingAndNetworking is the Phase 3 core

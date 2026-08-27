@@ -6051,7 +6051,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 							ebTxs,
 							applied,
 						)
-						blockDonation += donation
+						blockDonation, err = addUint64(blockDonation, donation)
+						if err != nil {
+							return nil, fmt.Errorf(
+								"accumulate leios endorser block donation: %w",
+								err,
+							)
+						}
 					}
 				} else {
 					if !ls.config.LeiosApplyEndorserBlockTxs {
@@ -6106,7 +6112,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 			delta.Offsets = offsets
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
-				delta.donate(blockDonation)
+				if err := delta.donate(blockDonation); err != nil {
+					delta.Release()
+					return nil, fmt.Errorf(
+						"seed block donation: %w", err,
+					)
+				}
 				blockDonation = 0
 			}
 		}
@@ -6279,7 +6290,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 				delta.Release()
 				return nil, err
 			}
-			blockDonation += delta.donation
+			var err error
+			blockDonation, err = addUint64(blockDonation, delta.donation)
+			if err != nil {
+				delta.Release()
+				return nil, fmt.Errorf(
+					"accumulate block donation: %w", err,
+				)
+			}
 			delta.Release()
 			delta = nil // reset
 
@@ -6306,7 +6324,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			)
 			delta.Offsets = offsets
 		}
-		delta.donate(blockDonation)
+		if err := delta.donate(blockDonation); err != nil {
+			delta.Release()
+			return nil, fmt.Errorf("finalize block donation: %w", err)
+		}
 	}
 	// Record the opcert counter now that the block's transactions are
 	// processed. The monotonicity check ran before transaction validation
