@@ -665,6 +665,10 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 	return a.ledgerState.UpstreamTipSlot()
 }
 
+func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {
+	return a.ledgerState.UpstreamSyncStatus()
+}
+
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
 // the narrow Leios interfaces the forge loop expects.
 type leiosPipelineAdapter struct {
