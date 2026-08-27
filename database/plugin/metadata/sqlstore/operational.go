@@ -846,12 +846,16 @@ func (s *Store) GetPParams(
 		if err != nil {
 			return nil, fmt.Errorf("get pparams: %w", err)
 		}
+		eraId, err := checkedUint(row.EraID.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("get pparams: %w", err)
+		}
 		ret = append(ret, models.PParams{
 			Cbor:      row.Cbor,
 			ID:        uint(row.ID),
 			AddedSlot: addedSlot,
 			Epoch:     epoch,
-			EraId:     uint(row.EraID.Int64),
+			EraId:     eraId,
 		})
 	}
 	return ret, nil
@@ -1171,6 +1175,18 @@ func epochFromValues(
 	if err != nil {
 		return nil, fmt.Errorf("epoch start slot: %w", err)
 	}
+	eraIdVal, err := checkedUint(eraID.Int64)
+	if err != nil {
+		return nil, fmt.Errorf("epoch era id: %w", err)
+	}
+	slotLengthVal, err := checkedUint(slotLength.Int64)
+	if err != nil {
+		return nil, fmt.Errorf("epoch slot length: %w", err)
+	}
+	lengthInSlotsVal, err := checkedUint(lengthInSlots.Int64)
+	if err != nil {
+		return nil, fmt.Errorf("epoch length in slots: %w", err)
+	}
 	return &models.Epoch{
 		Nonce:               nonce,
 		EvolvingNonce:       evolvingNonce,
@@ -1179,9 +1195,9 @@ func epochFromValues(
 		ID:                  uint(id),
 		EpochId:             epochId,
 		StartSlot:           startSlotVal,
-		EraId:               uint(eraID.Int64),
-		SlotLength:          uint(slotLength.Int64),
-		LengthInSlots:       uint(lengthInSlots.Int64),
+		EraId:               eraIdVal,
+		SlotLength:          slotLengthVal,
+		LengthInSlots:       lengthInSlotsVal,
 	}, nil
 }
 
@@ -1212,4 +1228,21 @@ func checkedUint8(value int64) (uint8, error) {
 		return 0, fmt.Errorf("signed SQL value %d does not fit in uint8", value)
 	}
 	return uint8(value), nil
+}
+
+// checkedUint narrows a signed SQL column to uint. Several columns (era
+// id, slot length, length in slots) are unconstrained SQLite INTEGERs
+// read into a plain uint: a negative stored value would otherwise
+// reinterpret its bit pattern as unsigned (e.g. -1 silently becoming
+// MaxUint) instead of failing, and on a 32-bit build uint is only 32 bits
+// wide, so the upper bound is checked against this platform's actual
+// uint width (via ^uint(0), not a hardcoded 64-bit assumption).
+func checkedUint(value int64) (uint, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("signed SQL value %d is negative", value)
+	}
+	if uint64(value) > uint64(^uint(0)) {
+		return 0, fmt.Errorf("signed SQL value %d exceeds uint width", value)
+	}
+	return uint(value), nil
 }

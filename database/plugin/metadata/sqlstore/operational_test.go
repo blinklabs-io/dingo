@@ -103,6 +103,80 @@ func TestCheckedUint64(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestCheckedUint unit-tests the helper directly: zero, a typical
+// positive value, and both out-of-range directions. The upper bound is
+// this platform's own uint width (via ^uint(0)), not a hardcoded 64-bit
+// assumption, so on a 32-bit build the same math.MaxInt64 input this test
+// accepts on 64-bit would correctly be rejected there instead.
+func TestCheckedUint(t *testing.T) {
+	t.Parallel()
+	v, err := checkedUint(42)
+	require.NoError(t, err)
+	assert.Equal(t, uint(42), v)
+
+	v, err = checkedUint(0)
+	require.NoError(t, err)
+	assert.Equal(t, uint(0), v)
+
+	v, err = checkedUint(int64(^uint(0) >> 1))
+	require.NoError(t, err)
+	assert.Equal(t, uint(^uint(0)>>1), v)
+
+	_, err = checkedUint(-1)
+	require.Error(t, err)
+}
+
+// TestGetEpochRejectsNegativeStoredEraID reproduces the review finding on
+// this PR: GetEpoch filters only by epoch_id, so era_id, slot_length, and
+// length_in_slots are returned regardless of their stored value. A
+// negative era_id previously reinterpreted its bit pattern as unsigned in
+// epochFromValues (uint(int64(-1)) silently becomes MaxUint) instead of
+// failing.
+func TestGetEpochRejectsNegativeStoredEraID(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	_, err := store.writeDB.Exec(
+		"INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (?, ?, ?, ?, ?)",
+		1, 0, -1, 1, 432000,
+	)
+	require.NoError(t, err)
+
+	_, err = store.GetEpoch(1, nil)
+	require.Error(t, err)
+}
+
+// TestGetEpochRejectsNegativeStoredSlotLength covers the same regression
+// as TestGetEpochRejectsNegativeStoredEraID for the epoch's slot_length
+// column instead of its era_id column.
+func TestGetEpochRejectsNegativeStoredSlotLength(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	_, err := store.writeDB.Exec(
+		"INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (?, ?, ?, ?, ?)",
+		2, 0, 1, -1, 432000,
+	)
+	require.NoError(t, err)
+
+	_, err = store.GetEpoch(2, nil)
+	require.Error(t, err)
+}
+
+// TestGetEpochRejectsNegativeStoredLengthInSlots covers the same
+// regression as TestGetEpochRejectsNegativeStoredEraID for the epoch's
+// length_in_slots column instead of its era_id column.
+func TestGetEpochRejectsNegativeStoredLengthInSlots(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	_, err := store.writeDB.Exec(
+		"INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (?, ?, ?, ?, ?)",
+		3, 0, 1, 1, -1,
+	)
+	require.NoError(t, err)
+
+	_, err = store.GetEpoch(3, nil)
+	require.Error(t, err)
+}
+
 // TestGetScriptRejectsOutOfRangeStoredType covers script.type: an
 // unconstrained SQLite INTEGER, so a row corrupted outside normal writes
 // can hold a value outside uint8's [0, 255] range. Converting that
