@@ -134,6 +134,7 @@ func filesMatchingWalk(
 
 	skippedDirs := map[string]bool{
 		".git":         true,
+		".claude":      true,
 		".worktrees":   true,
 		".tools":       true,
 		"node_modules": true,
