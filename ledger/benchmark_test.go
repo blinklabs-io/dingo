@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 
@@ -2632,6 +2634,19 @@ func loadBatchProcessingFixture(
 	return seedModels, batchBlocks, rawBlocks, batchSize
 }
 
+// blockNumberFollowsParent mirrors chain.blockNumberContiguous, which is
+// unexported: a block number must be exactly parent+1, except a Byron-era
+// epoch boundary block which legitimately repeats its parent's number.
+func blockNumberFollowsParent(
+	eraId uint8,
+	blockNumber, parentNumber uint64,
+) bool {
+	if blockNumber == parentNumber+1 {
+		return true
+	}
+	return eraId == byron.EraIdByron && blockNumber == parentNumber
+}
+
 func loadBlockProcessingFixture(
 	b *testing.B,
 ) ([]models.Block, []*immutable.Block) {
@@ -2646,6 +2661,10 @@ func loadBlockProcessingFixture(
 
 	const seedCount = 5
 	const blockCount = blockProcessingBenchmarkFixtureBlockCount
+
+	var prevHash []byte
+	var prevNumber uint64
+	var havePrev bool
 
 	seedModels := make([]models.Block, 0, seedCount)
 	for len(seedModels) < seedCount {
@@ -2662,15 +2681,42 @@ func loadBlockProcessingFixture(
 		if err != nil {
 			continue
 		}
+		blockNumber := ledgerBlock.BlockNumber()
+		prevHashBytes := ledgerBlock.PrevHash().Bytes()
+		if havePrev {
+			if !bytes.Equal(prevHashBytes, prevHash) {
+				b.Fatalf(
+					"seed block %x has prev hash %x that does not match parent hash %x",
+					block.Hash,
+					prevHashBytes,
+					prevHash,
+				)
+			}
+			if !blockNumberFollowsParent(
+				ledgerBlock.Era().Id,
+				blockNumber,
+				prevNumber,
+			) {
+				b.Fatalf(
+					"seed block %x claims block number %d that is not contiguous with parent %d",
+					block.Hash,
+					blockNumber,
+					prevNumber,
+				)
+			}
+		}
 		seedModels = append(seedModels, models.Block{
 			ID:       uint64(len(seedModels) + 1),
 			Slot:     block.Slot,
 			Hash:     slices.Clone(block.Hash),
-			Number:   0,
+			Number:   blockNumber,
 			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
+			PrevHash: prevHashBytes,
 			Cbor:     slices.Clone(block.Cbor),
 		})
+		prevHash = slices.Clone(block.Hash)
+		prevNumber = blockNumber
+		havePrev = true
 	}
 
 	blocks := make([]*immutable.Block, 0, blockCount)
@@ -2682,6 +2728,32 @@ func loadBlockProcessingFixture(
 		if block == nil {
 			b.Skip("insufficient blocks available for throughput benchmark")
 		}
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			continue
+		}
+		blockNumber := ledgerBlock.BlockNumber()
+		prevHashBytes := ledgerBlock.PrevHash().Bytes()
+		if !bytes.Equal(prevHashBytes, prevHash) {
+			b.Fatalf(
+				"timed block %x has prev hash %x that does not match parent hash %x",
+				block.Hash,
+				prevHashBytes,
+				prevHash,
+			)
+		}
+		if !blockNumberFollowsParent(
+			ledgerBlock.Era().Id,
+			blockNumber,
+			prevNumber,
+		) {
+			b.Fatalf(
+				"timed block %x claims block number %d that is not contiguous with parent %d",
+				block.Hash,
+				blockNumber,
+				prevNumber,
+			)
+		}
 		tmpBlock := &immutable.Block{
 			Slot: block.Slot,
 			Type: block.Type,
@@ -2689,6 +2761,8 @@ func loadBlockProcessingFixture(
 			Hash: slices.Clone(block.Hash),
 		}
 		blocks = append(blocks, tmpBlock)
+		prevHash = slices.Clone(block.Hash)
+		prevNumber = blockNumber
 	}
 
 	return seedModels, blocks
