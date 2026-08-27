@@ -2377,14 +2377,15 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 
 		for i := 0; b.Loop(); i++ {
 			// verifyBlockHeaderStatelessCrypto isolates the cryptographic
-			// path this benchmark measures. verifyBlockHeaderCrypto also
-			// runs verifyBlockHeaderState, which looks up the pool's
-			// registered VRF key and stake snapshot through ls.db — an
-			// unrelated, database-backed concern this literal LedgerState
-			// has no database for.
+			// path this benchmark measures. Keep epoch cache advancement
+			// disabled because it also requires ls.db, which this literal
+			// LedgerState intentionally does not provide. Likewise,
+			// verifyBlockHeaderCrypto runs verifyBlockHeaderState, which
+			// looks up the pool's registered VRF key and stake snapshot
+			// through ls.db.
 			if _, err := ledgerState.verifyBlockHeaderStatelessCrypto(
 				testBlocks[i%len(testBlocks)].block,
-				true,
+				false,
 			); err != nil {
 				b.Fatal(err)
 			}
