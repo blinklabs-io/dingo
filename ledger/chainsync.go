@@ -4867,7 +4867,13 @@ func (ls *LedgerState) calculateEpochNonce(
 	currentEra eras.EraDesc,
 	currentEpoch models.Epoch,
 ) ([]byte, []byte, []byte, []byte, error) {
-	// No epoch nonce in Byron
+	// No epoch nonce in Byron. NOTE: currentEra is the SOURCE era being
+	// rolled over, not necessarily the era the new epoch will run at — a
+	// rollover whose source era is Byron but whose destination era (per
+	// the caller's later era-transition decision) is Shelley or beyond
+	// still returns nil here. applyBoundaryEraTransitions seeds a real
+	// nonce for that case once the destination era is known; see the
+	// comment there.
 	if currentEra.Id == 0 {
 		return nil, nil, nil, nil, nil
 	}
@@ -5203,6 +5209,18 @@ func (ls *LedgerState) processEpochRollover(
 	currentPParams lcommon.ProtocolParameters,
 	deferBoundarySnapshot bool,
 ) (*EpochRolloverResult, error) {
+	// Fail closed at the top of the production rollover path rather than
+	// letting a nil config reach one of the several unchecked
+	// ls.config.CardanoNodeConfig dereferences below (e.g. the
+	// ShelleyGenesis() read further down, or applyBoundaryEraTransitions's
+	// post-Byron nonce seeding) -- any of which would panic instead of
+	// returning an error. NewLedgerState does not itself require a non-nil
+	// CardanoNodeConfig, so this is the boundary that must catch it.
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, errors.New(
+			"process epoch rollover: CardanoNodeConfig is nil",
+		)
+	}
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
 	)
