@@ -19,10 +19,7 @@ The default target formats and builds; tests are a separate target.
 ## Pre-commit
 
 ```
-make lint         # golangci-lint: every module, plus GOOS=windows
-nilaway ./...
-modernize ./...
-make import-boundaries
+make lint         # import-boundaries, all modules, windows, nilaway, modernize
 make docs-parity
 make golines
 make sql-check    # only when database/sql queries or sqlc.yaml changed
