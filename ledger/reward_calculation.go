@@ -283,10 +283,15 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		return nil, false, nil
 	}
 
+	// The reward-pot protocol parameters (tau, rho, ...) must come from the
+	// same epoch as the fees/blocks the pot was built from (performanceEpoch),
+	// matching cardano-ledger's prevPParamsEpochStateL semantics -- not
+	// potsEpoch, which is one epoch later and can carry a different value if a
+	// param changed between the two. See #3570.
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
 		txn,
 		performanceEpoch,
-		potsEpoch,
+		performanceEpoch,
 		pots,
 	)
 	if err != nil {
@@ -775,10 +780,13 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	) {
 		return nil, false, nil
 	}
+	// See the matching comment in calculateStakeRewardApplication: the
+	// reward-pot protocol parameters must be read as of performanceEpoch, not
+	// potsEpoch.
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
 		txn,
 		epochs.performance,
-		epochs.pots,
+		epochs.performance,
 		pots,
 	)
 	if err != nil {

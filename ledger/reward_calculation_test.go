@@ -306,6 +306,255 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.Equal(t, int64(2), deltas)
 }
 
+// TestApplyStakeRewardsUsesPerformanceEpochPParamsNotPotsEpoch is a regression
+// test for #3570: the reward-pot protocol parameters (tau, rho, ...) must be
+// read as of performanceEpoch, matching the epoch the fees/blocks in the pot
+// came from, not potsEpoch (one epoch later). It reproduces
+// TestApplyStakeRewardsUsesDelayedRewardState's fixture exactly, but also
+// registers a second, drastically different pparams version -- effective at
+// potsEpoch, with a much higher treasury cut (tau) -- simulating a governance
+// update landing between performanceEpoch and potsEpoch, as happened on the
+// real network #3570 was filed against. If the reward calculation incorrectly
+// used potsEpoch's pparams (the pre-fix behavior), the treasury cut and every
+// downstream reward figure would differ from
+// TestApplyStakeRewardsUsesDelayedRewardState's values; this asserts they
+// don't.
+func TestApplyStakeRewardsUsesPerformanceEpochPParamsNotPotsEpoch(t *testing.T) {
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	const (
+		newEpoch            = uint64(4)
+		rewardSnapshotEpoch = uint64(1)
+		performanceEpoch    = uint64(2)
+		potsEpoch           = uint64(3)
+		boundarySlot        = uint64(400)
+	)
+	poolKey := rewardCalcHash(0x11)
+	rewardAccount := rewardCalcHash(0x22)
+	member := rewardCalcHash(0x33)
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], poolKey)
+
+	pparams := &shelley.ShelleyProtocolParameters{
+		NOpt:             10,
+		A0:               rewardCalcRat(1, 2),
+		Rho:              rewardCalcRat(1, 100),
+		Tau:              rewardCalcRat(0, 1),
+		Decentralization: rewardCalcRat(0, 1),
+		ProtocolMajor:    7,
+		ProtocolMinor:    0,
+	}
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+
+	// A drastically different pparams version -- 90% treasury cut instead of
+	// 0% -- takes effect at potsEpoch. If the reward calculation reads this
+	// (the pre-fix bug), every downstream figure below diverges from
+	// TestApplyStakeRewardsUsesDelayedRewardState's values.
+	poisonedPParams := &shelley.ShelleyProtocolParameters{
+		NOpt:             10,
+		A0:               rewardCalcRat(1, 2),
+		Rho:              rewardCalcRat(1, 100),
+		Tau:              rewardCalcRat(9, 10),
+		Decentralization: rewardCalcRat(0, 1),
+		ProtocolMajor:    7,
+		ProtocolMinor:    0,
+	}
+	poisonedPParamsCbor, err := cbor.Encode(poisonedPParams)
+	require.NoError(t, err)
+
+	require.NoError(
+		t,
+		meta.SetEpoch(
+			0,
+			1,
+			nil,
+			nil,
+			nil,
+			nil,
+			eras.ShelleyEraDesc.Id,
+			1,
+			100,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		meta.SetEpoch(
+			100,
+			performanceEpoch,
+			nil,
+			nil,
+			nil,
+			nil,
+			eras.ShelleyEraDesc.Id,
+			1,
+			100,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		meta.SetEpoch(
+			200,
+			potsEpoch,
+			nil,
+			nil,
+			nil,
+			nil,
+			eras.ShelleyEraDesc.Id,
+			1,
+			100,
+			nil,
+		),
+	)
+	for i := range uint64(10) {
+		require.NoError(t, db.UpdatePoolOpCertSequence(
+			poolID,
+			i+1,
+			140+i,
+			nil,
+		))
+	}
+	require.NoError(t, db.SetPParams(
+		pparamsCbor,
+		100,
+		performanceEpoch,
+		eras.ShelleyEraDesc.Id,
+		nil,
+	))
+	require.NoError(t, db.SetPParams(
+		poisonedPParamsCbor,
+		200,
+		potsEpoch,
+		eras.ShelleyEraDesc.Id,
+		nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        potsEpoch,
+		Reserves:     100_000_000,
+		CapturedSlot: 300,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            rewardSnapshotEpoch,
+		SnapshotType:     "mark",
+		TotalActiveStake: 1_000,
+		TotalPoolCount:   1,
+		TotalDelegators:  2,
+		CapturedSlot:     100,
+		BoundarySlot:     100,
+		ProtocolVersion:  7,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+		{
+			Epoch:                      rewardSnapshotEpoch,
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:                     500,
+			Cost:                       1_000,
+			DelegatedStake:             1_000,
+			OwnerStake:                 500,
+			DelegatorCount:             2,
+			CapturedSlot:               100,
+			BoundarySlot:               100,
+		},
+	}, nil))
+	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+		{
+			Epoch:         rewardSnapshotEpoch,
+			PoolKeyHash:   poolKey,
+			CredentialTag: 0,
+			StakingKey:    rewardAccount,
+			Stake:         500,
+			Owner:         true,
+			Registered:    true,
+			CapturedSlot:  100,
+			BoundarySlot:  100,
+		},
+		{
+			Epoch:         rewardSnapshotEpoch,
+			PoolKeyHash:   poolKey,
+			CredentialTag: 0,
+			StakingKey:    member,
+			Stake:         500,
+			Registered:    true,
+			CapturedSlot:  100,
+			BoundarySlot:  100,
+		},
+	}, nil))
+	pool := models.Pool{PoolKeyHash: poolKey}
+	require.NoError(t, db.ImportPool(nil, &pool, &models.PoolRegistration{
+		PoolID:      pool.ID,
+		PoolKeyHash: poolKey,
+		AddedSlot:   0,
+	}))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: rewardAccount,
+		Pool:       poolKey,
+		Active:     true,
+	}))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: member,
+		Pool:       poolKey,
+		Active:     true,
+	}))
+	rewardCalcSeedStakeCert(
+		t,
+		db,
+		1,
+		rewardAccount,
+		0,
+		250,
+		uint(lcommon.CertificateTypeStakeRegistration),
+	)
+	rewardCalcSeedStakeCert(
+		t,
+		db,
+		2,
+		member,
+		0,
+		250,
+		uint(lcommon.CertificateTypeStakeRegistration),
+	)
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+	}))
+
+	// Every figure below matches TestApplyStakeRewardsUsesDelayedRewardState
+	// exactly, despite potsEpoch's pparams calling for a 90% treasury cut:
+	// proof the calculation used performanceEpoch's tau=0, not potsEpoch's.
+	rewardOwner, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardOwner)
+	require.Equal(t, uint64(46_283), uint64(rewardOwner.Reward))
+
+	rewardMember, err := db.GetAccountByCredential(0, member, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardMember)
+	require.Equal(t, uint64(37_049), uint64(rewardMember.Reward))
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, uint64(99_916_668), uint64(state.Reserves))
+	require.Equal(t, uint64(0), uint64(state.Treasury))
+
+	pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pots)
+	require.Equal(t, uint64(1_000_000), uint64(pots.Rewards))
+
+	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	require.NoError(t, err)
+	require.Len(t, poolOutputs, 1)
+	require.Equal(t, uint64(83_333), uint64(poolOutputs[0].TotalReward))
+}
+
 // guardExpiredLeaderResult captures the post-application state a Task 10
 // scenario run produces, so gate-on and gate-off runs can be compared.
 type guardExpiredLeaderResult struct {
@@ -1934,13 +2183,14 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	}))
 	rewardCalcSetAccountActiveByCredential(t, db, 1, sharedStakeHash, false)
 	// Replace the seed's multi-delegator pool with a coherent single-member pool
-	// whose only non-owner delegator is the shared script credential (tag 1). The
-	// reserves (100_000_000) yield an incentives-derived reward pot of 1_000_000,
-	// from which this pool's reward re-derives to 6666; the reuse pool-reward and
-	// amount checks both require that value. With cost 0, margin 0, and the member
-	// holding the entire 1000 delegated stake, MemberReward = TotalReward = 6666.
-	// The account is inactive, so that reward is unspendable and flows to the
-	// treasury without merging into the shared credential's active tag-0 account.
+	// whose only non-owner delegator is the shared script credential (tag 1).
+	// This pool's reward re-derives to 66666 (see #3570: the reward-pot
+	// calculation reads protocol parameters as of performanceEpoch); the reuse
+	// pool-reward and amount checks both require that value. With cost 0,
+	// margin 0, and the member holding the entire 1000 delegated stake,
+	// MemberReward = TotalReward = 66666. The account is inactive, so that
+	// reward is unspendable and flows to the treasury without merging into the
+	// shared credential's active tag-0 account.
 	rewardCalcExecRows(
 		t,
 		db,
@@ -1992,9 +2242,9 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 		{
 			Epoch:             rewardSnapshotEpoch,
 			PoolKeyHash:       poolKey,
-			TotalReward:       6666,
+			TotalReward:       66666,
 			LeaderReward:      0,
-			MemberRewardTotal: 6666,
+			MemberRewardTotal: 66666,
 			OwnerStake:        0,
 			CapturedSlot:      300,
 			BoundarySlot:      boundarySlot,
@@ -2009,7 +2259,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 				StakingKey:    sharedStakeHash,
 				PoolKeyHash:   poolKey,
 				RewardType:    string(rewards.RewardTypeMember),
-				Amount:        6666,
+				Amount:        66666,
 				Spendable:     true,
 				CapturedSlot:  300,
 				BoundarySlot:  boundarySlot,
@@ -2051,12 +2301,12 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
-	require.Equal(t, uint64(6666), uint64(poolOutputs[0].Unspendable))
+	require.Equal(t, uint64(66666), uint64(poolOutputs[0].Unspendable))
 
 	state, err := meta.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	require.Equal(t, uint64(6666), uint64(state.Treasury))
+	require.Equal(t, uint64(66666), uint64(state.Treasury))
 }
 
 func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
@@ -3891,7 +4141,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 			pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
 			require.NoError(t, err)
 			require.NotNil(t, pots)
-			require.Equal(t, uint64(100_000), uint64(pots.Rewards))
+			require.Equal(t, uint64(1_000_000), uint64(pots.Rewards))
 		},
 	)
 
@@ -3927,7 +4177,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 		pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
 		require.NoError(t, err)
 		require.NotNil(t, pots)
-		require.Equal(t, uint64(100_000), uint64(pots.Rewards))
+		require.Equal(t, uint64(1_000_000), uint64(pots.Rewards))
 	})
 }
 
@@ -3979,7 +4229,7 @@ func TestRewardPrecomputeEpochTransitionStoresNextBoundaryOutputs(
 	pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
-	require.Equal(t, uint64(100_000), uint64(pots.Rewards))
+	require.Equal(t, uint64(1_000_000), uint64(pots.Rewards))
 }
 
 func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
@@ -5565,6 +5815,12 @@ func seedRewardPrecomputeTimingState(
 		nil,
 		eras.ShelleyEraDesc.Id,
 		1,
+		// Deliberately different from performanceEpoch's length above:
+		// rewardPrefilterSlot's stability-window cutoff depends on potsEpoch's
+		// own length and is unrelated to the reward-pot parameter epoch (see
+		// #3570, which changed EpochLength for the reward-pot math to come
+		// from performanceEpoch, not potsEpoch -- but left this potsEpoch-only
+		// slot arithmetic untouched).
 		1_000,
 		nil,
 	))

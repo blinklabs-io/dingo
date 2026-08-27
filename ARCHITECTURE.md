@@ -7890,8 +7890,11 @@ reward application first, ADA-pot capture last) by
 
 ### Reward Calculation And Precomputation
 
-Reward protocol parameters and epoch length come from the RUPD calculation
-epoch, while block-production counts use the delayed performance epoch. TPraos
+Reward protocol parameters and epoch length come from the performance epoch —
+the same epoch the pot's fees and block-production counts are drawn from —
+not the later pots epoch (whose ADA-pots row seeds the delayed calculation but
+whose own protocol-parameter snapshot may already reflect a governance update
+that had not yet taken effect for this reward round; see #3570). TPraos
 overlay slots are excluded while decentralization is non-zero. Pre-Babbage
 calculation resolves the reward prefilter from stake-account certificate
 history immediately before the first reward-update slot, using the RUPD
