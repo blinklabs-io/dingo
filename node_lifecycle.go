@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package dingo
+
 // This file implements live database restore/truncate against an
 // already-running Node, in-process, without a full process restart.
 //
@@ -55,7 +57,6 @@
 // replacement from the retained n.ouroborosConfig. Callbacks the node handed
 // to other components resolve n.ouroboros when they fire rather than binding
 // an instance, so they follow the replacement automatically.
-package dingo
 
 import (
 	"context"

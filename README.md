@@ -22,6 +22,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
 - Fast bootstrapping via built-in Mithril client
+- Optional Midnight event indexing and MidnightState gRPC service
 - Multiple external interfaces: general-purpose APIs (UTxO RPC, Blockfrost-compatible REST, Mesh/Rosetta) plus Bark for Dingo-to-Dingo C2 and archive services
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
@@ -870,6 +871,7 @@ validation record.
   - [ ] WIP Blockfrost-compatible REST API (required endpoint families are
         implemented; compatibility hardening and reward parity are ongoing)
   - [x] Mesh (Coinbase Rosetta) API
+  - [x] Optional Midnight event indexer and MidnightState gRPC service
 - [x] Mithril Bootstrap
   - [x] Built-in Mithril client
   - [x] Ledger state import (UTxOs, accounts, pools, DReps, epochs)

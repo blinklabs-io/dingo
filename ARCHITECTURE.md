@@ -1,7 +1,5 @@
 # Architecture
 
-Last reviewed: 2026-08-26
-
 ## In-process plugin host
 
 Dingo composition owns one `plugin.Host`. Providers are registered explicitly;
@@ -102,8 +100,11 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The database schema is currently `v1alpha1` (integer
-migration version 1). It then checks the read pool. File-backed SQLite uses a
+advertising readiness. The current registry has migrations 1 through 4:
+`v1alpha1`, `leios-key-registration`, `token-registry-metadata`, and
+`account-import-baseline`. `DATABASE.md` is the source of truth for their
+schema changes and upgrade behavior. It then checks the read pool. File-backed
+SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
 failed or interrupted phase leaves readiness false and carries the migration
 version and phase in the returned error. Backfill data and its opaque cursor
@@ -241,6 +242,7 @@ graph TB
         DB["Database<br/><i>database/</i>"]
         Blob["BlobStore<br/>badger / s3 / gcs"]
         Meta["MetadataStore<br/>sqlite / postgres / mysql"]
+        DLC["Database lifecycle<br/><i>database/lifecycle/</i>"]
         DBLC["DBLifecycleManager<br/><i>internal/dblifecycle/</i>"]
     end
 
@@ -249,6 +251,8 @@ graph TB
         BFA["Blockfrost API<br/><i>api/blockfrost/</i>"]
         Mesh["Mesh API<br/><i>api/mesh/</i>"]
         Bark["Bark<br/><i>bark/</i>"]
+        MidnightIndex["Midnight indexer<br/><i>midnight/indexer/</i>"]
+        Midnight["MidnightState gRPC<br/><i>midnight/server/</i>"]
     end
 
     subgraph "History Expiry"
@@ -258,7 +262,7 @@ graph TB
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
-    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & HExpiry & DBLC
+    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & MidnightIndex & Midnight & HExpiry & DBLC
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -268,6 +272,7 @@ graph TB
     LS -->|"validate txs"| MP
     ChM --> DB
     DB --> Blob & Meta
+    DLC --> DB
     HExpiry --> LS & DB
     BF --> LE & MP & ChM
     SM -->|"stake snapshots"| DB
@@ -275,16 +280,18 @@ graph TB
     CSel -->|"switch active peer"| CS
     CS -->|"stall detection"| CM
 
-    EB -.->|"events"| LS & ChM & CS & CSel & PG & SM & DBLC & OB & MP
+    EB -.->|"events"| LS & ChM & CS & CSel & PG & SM & DBLC & OB & MP & MidnightIndex
     URPC & BFA & Mesh -.-> LS & DB
     Bark -.-> DB
+    MidnightIndex -.-> DB
+    Midnight -.-> DB
 ```
 
 ### Package Dependency Tree
 
-Internal import relationships between production dingo packages. External
-dependencies and tests are omitted. This graph was refreshed from `go list` on
-2026-06-23.
+Selected internal import relationships between production Dingo packages.
+External dependencies and tests are omitted; the source tree remains the
+authoritative import graph.
 
 ```mermaid
 graph LR
@@ -293,6 +300,7 @@ graph LR
     chain["chain"]
     chainsync["chainsync"]
     chainsel["chainselection"]
+    praos["consensus/praos"]
     connmgr["connmanager"]
     db["database"]
     db_models["database/models"]
@@ -304,6 +312,7 @@ graph LR
     db_meta_impl["database/plugin/metadata/{sqlite,sqlstore}"]
     db_meta_util["database/plugin/metadata/{deferred,labelcodec}"]
     db_immutable["database/immutable"]
+    db_lifecycle["database/lifecycle"]
     cardano_cfg["config/cardano"]
     ev["event"]
     ledger["ledger"]
@@ -322,19 +331,21 @@ graph LR
     intcfg["internal/config"]
     intplugins["internal/plugins"]
     intnode["internal/node"]
+    intdblifecycle["internal/dblifecycle"]
     intnode_ledgerpeers["internal/node/ledgerpeers"]
     intrecycler["internal/chainsyncrecycler"]
     utxorpc["api/utxorpc"]
     blockfrost["api/blockfrost"]
     mesh["api/mesh"]
     bark["bark"]
+    midnight["midnight/{indexer,server}"]
     mithril["mithril<br/>(no internal dingo imports)"]
     keystore["keystore"]
 
     root --> chain & chainsync & chainsel & connmgr & db & ev
     root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology & plugin & intplugins
-    root --> intnode_ledgerpeers & intrecycler
+    root --> intnode_ledgerpeers & intrecycler & intdblifecycle & midnight
     root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
 
     cmd --> root & cardano_cfg & db & db_models & plugin & intplugins
@@ -343,7 +354,7 @@ graph LR
 
     chain --> db & db_models & ev
     chainsync --> chain & ev
-    chainsel --> ev
+    chainsel --> ev & praos
     connmgr --> ev
     peergov --> connmgr & ev & topology
     intnode_ledgerpeers --> ledger & peergov
@@ -352,7 +363,7 @@ graph LR
     ouroboros --> chain & chainsel & chainsync & connmgr
     ouroboros --> ev & ledger & mempool & peergov
 
-    ledger --> chain & chainsel & cardano_cfg
+    ledger --> chain & chainsel & cardano_cfg & praos
     ledger --> db & db_models & db_meta & db_types & ev
     ledger --> ledger_eras & ledger_forging & ledger_governance & ledger_hardfork
     ledger_eras --> cardano_cfg & ledger_hardfork
@@ -378,6 +389,7 @@ graph LR
     intnode --> root & chain & chainsync & cardano_cfg
     intnode --> db & db_immutable & db_models & db_meta
     intnode --> ledger & ledger_eras & ledger_governance & intcfg
+    intdblifecycle --> db_lifecycle
 
     ledgerstate --> db & db_models & db_meta & db_types & ledger_eras
 
@@ -385,7 +397,8 @@ graph LR
     utxorpc --> ledger & ledger_eras & mempool & plugin
     mesh --> chain & db & db_models & ev & ledger & mempool & plugin
     blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool & plugin
-    bark --> db & db_blob & db_types
+    bark --> db & db_blob & db_types & db_lifecycle
+    midnight --> db & ev
 ```
 
 ### Data Flow
@@ -696,6 +709,7 @@ dingo/
 │   ├── event.go         # Selection events
 │   ├── peer_tip.go      # Peer tip tracking
 │   └── vrf.go           # VRF verification
+├── consensus/praos/     # Praos comparison, snapshots, and ledger views
 ├── chainsync/           # Block synchronization protocol state
 │   ├── chainsync.go     # Multi-client sync state, stall detection
 │   └── strategy.go      # Configurable multi-active header-sync strategy
@@ -709,6 +723,7 @@ dingo/
 │   ├── hot_cache.go     # Hot cache for frequently accessed data
 │   ├── block_lru_cache.go # Block-level LRU cache
 │   ├── immutable/       # ImmutableDB chunk reader
+│   ├── lifecycle/       # Snapshot, restore, and truncation library
 │   ├── models/          # Database models
 │   ├── types/           # Database types
 │   ├── sops/            # Storage operations
@@ -852,6 +867,7 @@ dingo/
 │   ├── chainsyncrecycler/ # Chainsync stall/plateau recycler component
 │   │   └── recycler.go  # Start/Stop loop, tick decision logic
 │   ├── config/          # Configuration parsing
+│   ├── dblifecycle/     # CLI and automatic snapshot orchestration
 │   ├── integration/     # Integration tests
 │   ├── node/            # Node orchestration (CLI wiring)
 │   │   ├── node.go      # Run(), signal handling, metrics server
