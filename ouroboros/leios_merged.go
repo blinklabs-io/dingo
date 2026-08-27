@@ -467,12 +467,14 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 	}
 	held := existing.partialTxs
 	add := partial
+	removedHeld := false
 	if validate != nil {
 		held = cloneRawMessages(held)
 		for idx, raw := range held {
 			if raw != nil {
 				if err := validate(idx, raw); err != nil {
 					held[idx] = nil
+					removedHeld = true
 				}
 			}
 		}
@@ -490,7 +492,7 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 		add,
 		existing.txCount,
 	)
-	if added == 0 {
+	if added == 0 && !removedHeld {
 		return
 	}
 	// Cached entries are replaced, never mutated in place: lookups hand out the
@@ -500,6 +502,9 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 	// indefinitely.
 	updated := *existing
 	updated.partialTxs = merged
+	if updated.partialTxCount() == 0 {
+		updated.partialTxs = nil
+	}
 	for _, cacheKey := range existing.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == existing {
 			o.leiosEndorserBlocks[cacheKey] = &updated
