@@ -409,6 +409,30 @@ WHERE pool_key_hash = ?`,
 	return uint64(sequence), count > 0, err
 }
 
+// LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
+// pool after afterSlot. A Mithril-restored ledger uses this to distinguish
+// replayed counter history from rows imported at its trust boundary.
+func (s *Store) LatestPoolOpCertSequenceAfter(
+	poolKeyHash lcommon.PoolKeyHash,
+	afterSlot uint64,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var sequence int64
+	var count int64
+	err = db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(sequence), 0), COUNT(*)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot > ?`,
+		poolKeyHash.Bytes(),
+		afterSlot,
+	).Scan(&sequence, &count)
+	return uint64(sequence), count > 0, err
+}
+
 // LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
 // issues.
 //

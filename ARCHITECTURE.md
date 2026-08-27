@@ -2436,7 +2436,11 @@ dependency across two points in the pipeline:
   era rather than by validation mode (`shouldValidate` can be true for
   historical or near-tip TPraos blocks). A pool with no recorded counter has no
   baseline (genuine first sighting, or a Mithril-restored start) and is accepted
-  as the baseline. Rollback safety is inherited from the per-`(pool, slot)`
+  as the baseline. At a Mithril trust boundary, imported rows at or below the
+  boundary are state snapshots rather than replayed certificate history, so
+  they cannot establish the no-gap baseline: the first replayed block strictly
+  after the boundary establishes it, and later replayed blocks enforce the
+  ordinary rules. Rollback safety is inherited from the per-`(pool, slot)`
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
   is later rolled back.

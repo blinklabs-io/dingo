@@ -5997,7 +5997,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// the per-(pool,slot) PoolOpCertSequence store, which drops rows past
 		// the rollback slot and recomputes the latest counter.
 		if shouldValidate {
-			stored, found, err := ls.db.LatestPoolOpCertSequence(
+			stored, found, err := ls.latestOpCertCounterForValidation(
 				opCertPoolKeyHash,
 				txn,
 			)
@@ -6402,6 +6402,27 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	return delta, nil
+}
+
+// latestOpCertCounterForValidation returns the counter history that can
+// establish a no-gap baseline for the next replayed block. A Mithril snapshot
+// authenticates its boundary but does not replay the preceding certificate
+// sequence, so rows at or below that boundary cannot prove that a later
+// counter increment was contiguous. The first validated block after the
+// boundary establishes the local baseline; every subsequent replayed block is
+// checked against it normally.
+func (ls *LedgerState) latestOpCertCounterForValidation(
+	poolKeyHash lcommon.PoolKeyHash,
+	txn *database.Txn,
+) (uint64, bool, error) {
+	if ls.mithrilLedgerSlot > 0 {
+		return ls.db.LatestPoolOpCertSequenceAfter(
+			poolKeyHash,
+			ls.mithrilLedgerSlot,
+			txn,
+		)
+	}
+	return ls.db.LatestPoolOpCertSequence(poolKeyHash, txn)
 }
 
 func (ls *LedgerState) logLeiosEndorserBlockApplyResult(
