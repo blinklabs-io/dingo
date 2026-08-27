@@ -107,6 +107,7 @@ export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"
 # script created is cleaned up on success, so a passing run cannot destroy
 # a shared or pre-existing path.
 ARTIFACT_DIR_IS_OURS=false
+STAKE_KEYS_HOST_DIR_IS_OURS=false
 if [[ -z "${DEVNET_ARTIFACT_DIR:-}" ]]; then
   DEVNET_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-artifacts.XXXXXX")"
   ARTIFACT_DIR_IS_OURS=true
@@ -173,7 +174,8 @@ cleanup() {
   fi
   log "Tearing down DevNet..."
   docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
-  if [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
+  if [[ "${STAKE_KEYS_HOST_DIR_IS_OURS}" == "true" ]] &&
+    [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
     rm -rf "${STAKE_KEYS_HOST_DIR}"
   fi
   exit "${exit_code}"
@@ -268,6 +270,7 @@ if [[ "${MODE}" == "dingo" ]]; then
     UTXO_KEYS_VOLUME=$(docker volume ls --filter label=com.docker.compose.volume=utxo-keys --format '{{.Name}}' | head -n1)
   fi
   STAKE_KEYS_HOST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-stake-keys.XXXXXX")"
+  STAKE_KEYS_HOST_DIR_IS_OURS=true
   if [[ -z "${UTXO_KEYS_VOLUME}" ]]; then
     warn "Unable to locate the utxo-keys Docker volume; skipping stake-keys copy"
   else
