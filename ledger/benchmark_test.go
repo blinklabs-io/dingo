@@ -2367,13 +2367,25 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 			},
 			epochNonceHexCache: make(map[uint64]string),
 		}
+		// The epoch cache is read through the published consensus snapshot,
+		// not the raw field, so it must be published before use even for
+		// this single-threaded literal construction.
+		ledgerState.publishSnapshotsLocked()
 
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; b.Loop(); i++ {
-			if err := ledgerState.verifyBlockHeaderCrypto(
+			// verifyBlockHeaderStatelessCrypto isolates the cryptographic
+			// path this benchmark measures. Keep epoch cache advancement
+			// disabled because it also requires ls.db, which this literal
+			// LedgerState intentionally does not provide. Likewise,
+			// verifyBlockHeaderCrypto runs verifyBlockHeaderState, which
+			// looks up the pool's registered VRF key and stake snapshot
+			// through ls.db.
+			if _, err := ledgerState.verifyBlockHeaderStatelessCrypto(
 				testBlocks[i%len(testBlocks)].block,
+				false,
 			); err != nil {
 				b.Fatal(err)
 			}
