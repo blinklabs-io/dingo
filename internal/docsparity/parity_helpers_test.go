@@ -117,7 +117,7 @@ func filesMatching(
 		if rel == "" {
 			continue
 		}
-		rel = filepath.FromSlash(rel)
+		rel = filepath.ToSlash(filepath.FromSlash(rel))
 		if match(rel) {
 			found = append(found, rel)
 		}
@@ -134,6 +134,7 @@ func filesMatchingWalk(
 
 	skippedDirs := map[string]bool{
 		".git":         true,
+		".claude":      true,
 		".worktrees":   true,
 		".tools":       true,
 		"node_modules": true,
@@ -153,6 +154,7 @@ func filesMatchingWalk(
 		if err != nil {
 			return err
 		}
+		rel = filepath.ToSlash(rel)
 		if match(rel) {
 			found = append(found, rel)
 		}
@@ -198,7 +200,7 @@ func workflowFiles(t *testing.T, root string) []string {
 	return filesMatching(t, root, func(rel string) bool {
 		return (strings.HasSuffix(rel, ".yml") ||
 			strings.HasSuffix(rel, ".yaml")) &&
-			filepath.Dir(rel) == filepath.Join(".github", "workflows")
+			filepath.ToSlash(filepath.Dir(rel)) == ".github/workflows"
 	})
 }
 
