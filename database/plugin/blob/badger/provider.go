@@ -118,7 +118,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 			}
 			lifecycle := hostplugin.Lifecycle{
 				StartFunc: func(context.Context) error { return store.Start() },
-				StopFunc:  func(context.Context) error { return store.Stop() },
+				StopFunc:  store.CloseContext,
 			}
 			return store, lifecycle, nil
 		},

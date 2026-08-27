@@ -19,8 +19,10 @@ import (
 )
 
 type MempoolConsumer struct {
-	mempool *Mempool
-	cache   map[string]*MempoolTransaction
+	mempool  *Mempool
+	cache    map[string]*MempoolTransaction
+	done     chan struct{}
+	doneOnce sync.Once
 	// cacheSlot signals that a cache slot was freed, waking a blocking NextTx
 	// that parked on a full cache. Buffered by one and signaled without
 	// blocking: a pending wake-up is all a waiter needs, since it re-checks the
@@ -31,6 +33,9 @@ type MempoolConsumer struct {
 	nextTxIdx   int
 	cacheMutex  sync.Mutex
 	nextTxIdxMu sync.Mutex
+	// onWaitForTx is a test-only hook invoked after a blocking NextTx has
+	// subscribed for additions and is ready to be cancelled.
+	onWaitForTx func()
 }
 
 func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
@@ -40,8 +45,18 @@ func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
 	return &MempoolConsumer{
 		mempool:    mempool,
 		cache:      make(map[string]*MempoolTransaction),
+		done:       make(chan struct{}),
 		cacheSlot:  make(chan struct{}, 1),
 		cacheLimit: cacheLimit,
+	}
+}
+
+// cancel releases a blocking NextTx when its connection no longer owns the
+// consumer. It is safe to call more than once because connection cleanup can
+// race with other lifecycle paths.
+func (m *MempoolConsumer) cancel() {
+	if m != nil {
+		m.doneOnce.Do(func() { close(m.done) })
 	}
 }
 
@@ -51,6 +66,12 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 	}
 
 	for {
+		select {
+		case <-m.done:
+			return nil
+		default:
+		}
+
 		// Stop handing out transactions once the body cache is full. NextTx is
 		// what puts a tx id on the wire, and the body is served to the peer
 		// later from this cache only. Dropping a cached body to make room would
@@ -75,6 +96,8 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 			select {
 			case <-m.cacheSlot:
 				continue
+			case <-m.done:
+				return nil
 			case <-m.mempool.done:
 				return nil
 			}
@@ -127,6 +150,9 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 		addTxSubId, addTxChan := m.mempool.eventBus.Subscribe(
 			AddTransactionEventType,
 		)
+		if m.onWaitForTx != nil {
+			m.onWaitForTx()
+		}
 		m.nextTxIdxMu.Unlock()
 		m.mempool.RUnlock()
 
@@ -136,6 +162,9 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
 			// Loop back to check if transaction is available
 			// This naturally handles the case of multiple rapid additions
+		case <-m.done:
+			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
+			return nil
 		case <-m.mempool.done:
 			// Mempool is shutting down, unsubscribe and exit
 			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)

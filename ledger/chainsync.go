@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -154,6 +155,16 @@ const (
 	headerMismatchResyncThreshold = 20
 
 	maxPeerHeaderHistoryPerConn = 256
+	// Genesis fork resolution can need more than the normal K-sized history to
+	// compare a candidate's density, but retaining decoded headers for an
+	// entire slot window makes memory proportional to an attacker-controlled
+	// number of blocks. Store wire header bytes lazily and cap each peer's
+	// retained history independently of the configured slot window. The default
+	// Genesis quorum is one fast source plus two corroborators, so this leaves a
+	// bounded 24 MiB wire-history allowance across the three required peers.
+	// A path that does not fit this budget falls back to a fresh intersection.
+	maxPeerHeaderHistoryBytesPerConn = 8 << 20
+	peerHeaderHistoryRecordOverhead  = 512
 
 	// Match ouroboros-consensus' default maximum permissible clock skew. A
 	// header within this window is held until its slot begins; an earlier
@@ -175,13 +186,41 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 )
 
 type peerHeaderRecord struct {
-	event    ChainsyncEvent
-	prevHash []byte
+	// event carries only the metadata needed to reconstruct a ChainsyncEvent.
+	// Production records leave BlockHeader nil and decode headerCbor only when
+	// recovery actually needs it. In-package synthetic headers may provide an
+	// event with a header and use that fallback when no CBOR is available.
+	event      ChainsyncEvent
+	headerCbor []byte
+	prevHash   []byte
+	decodeType uint
+	bytes      int
 }
 
 type peerHeaderChain struct {
-	order  []string
-	byHash map[string]peerHeaderRecord
+	order         []string
+	byHash        map[string]peerHeaderRecord
+	retainedBytes int
+}
+
+// peerHeaderHistoryPathCacheEntry memoizes one retained header's walk toward
+// a locally known ancestor while replaying a rollback. The cache is scoped to
+// one recovery pass, so decoded headers are released with the pass and cannot
+// outlive the peer history budget.
+type peerHeaderHistoryPathCacheEntry struct {
+	ancestor       ocommon.Point
+	distance       int
+	hasRecord      bool
+	ok             bool
+	depthExhausted bool
+	event          ChainsyncEvent
+	nextHash       string
+}
+
+type peerHeaderHistoryPathStep struct {
+	event    ChainsyncEvent
+	key      string
+	nextHash string
 }
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -1044,17 +1083,71 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	if _, ok := history.byHash[hashKey]; ok {
 		return
 	}
-	history.order = append(history.order, hashKey)
-	history.byHash[hashKey] = peerHeaderRecord{
-		event:    e,
-		prevHash: append([]byte(nil), e.BlockHeader.PrevHash().Bytes()...),
+	headerCbor := append([]byte(nil), e.BlockHeader.Cbor()...)
+	prevHash := append([]byte(nil), e.BlockHeader.PrevHash().Bytes()...)
+	decodeType := e.Type
+	// Musashi carries the Dijkstra header extension under the Conway wire
+	// block type. Preserve the decoder selected by the protocol callback when
+	// the compact record is rehydrated after a fork.
+	if e.BlockHeader.Era().Id == gledger.EraIdDijkstra {
+		decodeType = gledger.BlockTypeDijkstra
 	}
-	limit := ls.peerHeaderHistoryLimit()
-	for len(history.order) > limit {
+	recordBytes := peerHeaderHistoryRecordOverhead +
+		len(headerCbor) + len(prevHash) + len(e.Point.Hash)
+	if recordBytes > maxPeerHeaderHistoryBytesPerConn {
+		return
+	}
+	for len(history.order) > 0 &&
+		(history.retainedBytes+recordBytes > maxPeerHeaderHistoryBytesPerConn ||
+			len(history.order) >= ls.peerHeaderHistoryLimit()) {
 		evictKey := history.order[0]
 		history.order = history.order[1:]
-		delete(history.byHash, evictKey)
+		if evicted, ok := history.byHash[evictKey]; ok {
+			history.retainedBytes -= evicted.bytes
+			delete(history.byHash, evictKey)
+		}
 	}
+	metadata := ChainsyncEvent{
+		ConnectionId: e.ConnectionId,
+		Point: ocommon.Point{
+			Slot: e.Point.Slot,
+			Hash: append([]byte(nil), e.Point.Hash...),
+		},
+		BlockNumber: e.BlockNumber,
+		Type:        e.Type,
+	}
+	if len(headerCbor) == 0 {
+		// Synthetic headers used by some in-package callers do not expose CBOR.
+		// Keep their decoded value, but charge the same conservative record
+		// overhead so this compatibility path cannot bypass the bound.
+		metadata.BlockHeader = e.BlockHeader
+	}
+	record := peerHeaderRecord{
+		event:      metadata,
+		headerCbor: headerCbor,
+		prevHash:   prevHash,
+		decodeType: decodeType,
+		bytes:      recordBytes,
+	}
+	history.order = append(history.order, hashKey)
+	history.byHash[hashKey] = record
+	history.retainedBytes += recordBytes
+}
+
+func (r peerHeaderRecord) chainsyncEvent() (ChainsyncEvent, bool) {
+	if r.event.BlockHeader != nil {
+		return r.event, true
+	}
+	decodeType := r.decodeType
+	if decodeType == 0 {
+		decodeType = r.event.Type
+	}
+	header, err := gledger.NewBlockHeaderFromCbor(decodeType, r.headerCbor)
+	if err != nil {
+		return ChainsyncEvent{}, false
+	}
+	r.event.BlockHeader = header
+	return r.event, true
 }
 
 func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
@@ -1251,11 +1344,18 @@ func (ls *LedgerState) findPeerForkPath(
 		if !ok {
 			return nil, nil, nil
 		}
+		recordEvent, ok := record.chainsyncEvent()
+		if !ok {
+			// A retained header that cannot be reconstructed is treated like a
+			// missing history entry. Re-intersection is safer than comparing or
+			// replaying an incomplete candidate path.
+			return nil, nil, nil
+		}
 		if _, seen := visited[hashKey]; seen {
 			return nil, nil, nil
 		}
 		visited[hashKey] = struct{}{}
-		pathReversed = append(pathReversed, record.event)
+		pathReversed = append(pathReversed, recordEvent)
 		prevHash = append(prevHash[:0], record.prevHash...)
 	}
 	return nil, nil, nil
@@ -2210,6 +2310,223 @@ type LocalRollbackRecoveryResult struct {
 	PrimaryChainTipSlot uint64
 }
 
+func peerHeaderHistoryPathFromCache(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+	cachedKey string,
+	cachedDistance int,
+) ([]ChainsyncEvent, bool) {
+	pathReversed := make(
+		[]ChainsyncEvent,
+		0,
+		len(steps)+cachedDistance,
+	)
+	for _, step := range steps {
+		pathReversed = append(pathReversed, step.event)
+	}
+	key := cachedKey
+	for remaining := cachedDistance; remaining > 0; remaining-- {
+		entry, ok := cache[key]
+		if !ok || !entry.ok || !entry.hasRecord ||
+			entry.distance != remaining {
+			return nil, false
+		}
+		pathReversed = append(pathReversed, entry.event)
+		key = entry.nextHash
+	}
+	slices.Reverse(pathReversed)
+	return pathReversed, true
+}
+
+func cachePeerHeaderHistoryPath(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+	ancestor ocommon.Point,
+	suffixDistance int,
+) {
+	for i, step := range steps {
+		cache[step.key] = peerHeaderHistoryPathCacheEntry{
+			ancestor:  ancestor,
+			distance:  len(steps) - i + suffixDistance,
+			hasRecord: true,
+			ok:        true,
+			event:     step.event,
+			nextHash:  step.nextHash,
+		}
+	}
+}
+
+// cachePeerHeaderHistoryDepthExhausted retains links from a walk that reached
+// the depth bound without treating them as unavailable. A later, shorter
+// suffix can reuse the links while the loop still charges each one against its
+// own depth bound.
+func cachePeerHeaderHistoryDepthExhausted(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+) {
+	for _, step := range steps {
+		cache[step.key] = peerHeaderHistoryPathCacheEntry{
+			hasRecord:      true,
+			ok:             true,
+			depthExhausted: true,
+			event:          step.event,
+			nextHash:       step.nextHash,
+		}
+	}
+}
+
+func markPeerHeaderHistoryPathUnavailable(
+	steps []peerHeaderHistoryPathStep,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+	key string,
+) {
+	cache[key] = peerHeaderHistoryPathCacheEntry{}
+	for _, step := range steps {
+		cache[step.key] = peerHeaderHistoryPathCacheEntry{}
+	}
+}
+
+// findPeerForkPathCached resolves one retained history walk and memoizes each
+// visited link. Rollback recovery may try every retained suffix head when the
+// requested point is absent; sharing these links keeps that fallback linear in
+// the retained history instead of repeatedly walking the same suffix while
+// chainsyncMutex is held.
+func (ls *LedgerState) findPeerForkPathCached(
+	e ChainsyncEvent,
+	initialPrevHash []byte,
+	expectedAncestor ocommon.Point,
+	history *peerHeaderChain,
+	cache map[string]peerHeaderHistoryPathCacheEntry,
+) (*ocommon.Point, []ChainsyncEvent, error) {
+	if len(initialPrevHash) == 0 {
+		return nil, nil, nil
+	}
+	prevHash := append([]byte(nil), initialPrevHash...)
+	steps := make([]peerHeaderHistoryPathStep, 0)
+	visited := make(map[string]struct{})
+	limit := ls.peerHeaderHistoryLimit()
+	for depth := 0; depth < limit && len(prevHash) > 0; depth++ {
+		key := hex.EncodeToString(prevHash)
+		if _, seen := visited[key]; seen {
+			markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+			return nil, nil, nil
+		}
+		visited[key] = struct{}{}
+		if entry, ok := cache[key]; ok {
+			if entry.depthExhausted {
+				if !entry.ok || !entry.hasRecord {
+					markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+					return nil, nil, nil
+				}
+				nextHash, err := hex.DecodeString(entry.nextHash)
+				if err != nil {
+					markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+					return nil, nil, fmt.Errorf(
+						"decode cached peer header hash %q: %w",
+						entry.nextHash,
+						err,
+					)
+				}
+				steps = append(steps, peerHeaderHistoryPathStep{
+					event:    entry.event,
+					key:      key,
+					nextHash: entry.nextHash,
+				})
+				prevHash = nextHash
+				continue
+			}
+			if !entry.ok || !entry.hasRecord || entry.distance <= 0 {
+				markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+				return nil, nil, nil
+			}
+			cachePeerHeaderHistoryPath(
+				steps,
+				cache,
+				entry.ancestor,
+				entry.distance,
+			)
+			if len(steps)+entry.distance >= limit {
+				return nil, nil, nil
+			}
+			if !pointMatches(entry.ancestor, expectedAncestor) {
+				return &entry.ancestor, nil, nil
+			}
+			path, ok := peerHeaderHistoryPathFromCache(
+				steps,
+				cache,
+				key,
+				entry.distance,
+			)
+			if !ok {
+				markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+				return nil, nil, nil
+			}
+			return &entry.ancestor, path, nil
+		}
+
+		ancestorBlock, err := ls.blockByHash(prevHash)
+		if err == nil {
+			ancestor := ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash)
+			cachePeerHeaderHistoryPath(steps, cache, ancestor, 0)
+			if !pointMatches(ancestor, expectedAncestor) {
+				return &ancestor, nil, nil
+			}
+			pathReversed := make([]ChainsyncEvent, 0, len(steps))
+			for _, step := range steps {
+				pathReversed = append(pathReversed, step.event)
+			}
+			slices.Reverse(pathReversed)
+			return &ancestor, pathReversed, nil
+		}
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil, fmt.Errorf(
+				"lookup ancestor hash %x: %w",
+				prevHash,
+				err,
+			)
+		}
+
+		var (
+			record peerHeaderRecord
+			found  bool
+		)
+		if history != nil {
+			record, found = history.byHash[key]
+		}
+		if !found && ls.config.PeerHeaderLookupFunc != nil {
+			lookupEvent, lookupPrevHash, ok := ls.config.PeerHeaderLookupFunc(
+				e.ConnectionId,
+				prevHash,
+			)
+			if ok {
+				record = peerHeaderRecord{
+					event:    lookupEvent,
+					prevHash: lookupPrevHash,
+				}
+				found = true
+			}
+		}
+		if !found {
+			markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+			return nil, nil, nil
+		}
+		recordEvent, ok := record.chainsyncEvent()
+		if !ok {
+			markPeerHeaderHistoryPathUnavailable(steps, cache, key)
+			return nil, nil, nil
+		}
+		recordPrev := append([]byte(nil), record.prevHash...)
+		steps = append(steps, peerHeaderHistoryPathStep{
+			event:    recordEvent,
+			key:      key,
+			nextHash: hex.EncodeToString(recordPrev),
+		})
+		prevHash = recordPrev
+	}
+	cachePeerHeaderHistoryDepthExhausted(steps, cache)
+	return nil, nil, nil
+}
+
 func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
@@ -2218,14 +2535,23 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	if history == nil || len(history.order) == 0 {
 		return 0, nil
 	}
+	pathCache := make(map[string]peerHeaderHistoryPathCacheEntry,
+		len(history.order))
 	for _, v := range slices.Backward(history.order) {
 		record, ok := history.byHash[v]
-		if !ok || record.event.Point.Slot <= point.Slot {
+		if !ok {
 			continue
 		}
-		ancestorPoint, forkPath, err := ls.findPeerForkPath(
-			record.event,
+		recordEvent, ok := record.chainsyncEvent()
+		if !ok || recordEvent.Point.Slot <= point.Slot {
+			continue
+		}
+		ancestorPoint, forkPath, err := ls.findPeerForkPathCached(
+			recordEvent,
 			record.prevHash,
+			point,
+			history,
+			pathCache,
 		)
 		if err != nil {
 			return 0, err
@@ -2233,6 +2559,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if ancestorPoint == nil || !pointMatches(*ancestorPoint, point) {
 			continue
 		}
+		forkPath = append(forkPath, recordEvent)
 		// Anything at or below the chain's current header tip is already
 		// applied. Without this guard, a forkPath entry whose hash equals
 		// the header tip causes AddBlockHeader to fail the prev-hash
@@ -4189,6 +4516,19 @@ func (ls *LedgerState) createGenesisBlock() error {
 			return fmt.Errorf("set genesis network state: %w", err)
 		}
 
+		// The delayed reward calculation reads the ADA pots row for epoch
+		// newEpoch-1, so the boundary into epoch 1 reads epoch 0's. Every
+		// later epoch's row is written by saveRewardAdaPotsForEpoch at its
+		// own rollover; epoch 0 has no rollover, so its row is the same
+		// slot-0 baseline written above. Fees are 0 because no epoch
+		// precedes epoch 0.
+		if err := ls.saveGenesisRewardAdaPots(
+			genesisReserves,
+			txn.Metadata(),
+		); err != nil {
+			return err
+		}
+
 		ls.config.Logger.Info(
 			fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
 				len(txUtxos),
@@ -4266,7 +4606,11 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 	if err != nil {
 		return fmt.Errorf("get existing network state: %w", err)
 	}
-	if state != nil {
+	pots, err := ls.db.Metadata().GetRewardAdaPots(0, nil)
+	if err != nil {
+		return fmt.Errorf("get existing epoch 0 reward ADA pots: %w", err)
+	}
+	if state != nil && pots != nil {
 		return nil
 	}
 
@@ -4286,15 +4630,57 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 	if err != nil {
 		return fmt.Errorf("calculate genesis reserves: %w", err)
 	}
-	if err := ls.db.Metadata().SetNetworkState(0, reserves, 0, nil); err != nil {
-		return fmt.Errorf("set missing genesis network state: %w", err)
+	if state == nil {
+		if err := ls.db.Metadata().SetNetworkState(
+			0, reserves, 0, nil,
+		); err != nil {
+			return fmt.Errorf("set missing genesis network state: %w", err)
+		}
+		ls.config.Logger.Info(
+			"initialized missing genesis network state",
+			"component", "ledger",
+			"treasury", 0,
+			"reserves", reserves,
+		)
 	}
-	ls.config.Logger.Info(
-		"initialized missing genesis network state",
-		"component", "ledger",
-		"treasury", 0,
-		"reserves", reserves,
-	)
+	// Both rows describe the same slot-0 baseline, but they are written by
+	// different code paths and a database created before the epoch 0 ADA pots
+	// row existed can carry one without the other. Seeding it is not a repair
+	// of a mis-synced chain: the row is derived entirely from genesis
+	// configuration, and after the 0->1 boundary has passed nothing reads it.
+	if pots == nil {
+		if err := ls.saveGenesisRewardAdaPots(reserves, nil); err != nil {
+			return err
+		}
+		ls.config.Logger.Info(
+			"initialized missing genesis reward ADA pots",
+			"component", "ledger",
+			"epoch", 0,
+			"treasury", 0,
+			"reserves", reserves,
+		)
+	}
+	return nil
+}
+
+// saveGenesisRewardAdaPots writes the epoch 0 reward ADA pots row: the slot-0
+// treasury/reserves baseline with an empty fee pot. It is the pot input the
+// boundary into epoch 1 reads, so a network whose epoch 0 is already
+// Shelley-era applies that boundary's monetary expansion and treasury tax
+// instead of skipping it (dingo #3381).
+func (ls *LedgerState) saveGenesisRewardAdaPots(
+	reserves uint64,
+	txn types.Txn,
+) error {
+	if err := ls.db.Metadata().SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Treasury:     0,
+		Reserves:     types.Uint64(reserves),
+		Fees:         0,
+		CapturedSlot: 0,
+	}, txn); err != nil {
+		return fmt.Errorf("save genesis reward ADA pots: %w", err)
+	}
 	return nil
 }
 

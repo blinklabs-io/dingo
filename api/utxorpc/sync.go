@@ -359,29 +359,7 @@ func (s *syncServiceServer) ReadTip(
 	s.utxorpc.config.Logger.Info("Got a ReadTip request")
 	resp := &sync.ReadTipResponse{}
 
-	point := s.utxorpc.config.LedgerState.Tip().Point
-
-	// Populate height from the database when available, but fall back to
-	// height = 0 if the lookup fails to preserve compatibility.
-	var (
-		br  blockRef
-		err error
-	)
-	var model models.Block
-	model, err = s.utxorpc.config.LedgerState.GetBlock(point)
-	if err != nil {
-		s.utxorpc.config.Logger.Warn(
-			"failed to look up tip block for height; using height=0",
-			"error", err,
-		)
-		br = blockRef{
-			Slot:   point.Slot,
-			Hash:   point.Hash,
-			Height: 0,
-		}
-	} else {
-		br = blockRefFromModel(model)
-	}
+	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
 
 	resp.Tip = &sync.BlockRef{
 		Slot:   br.Slot,

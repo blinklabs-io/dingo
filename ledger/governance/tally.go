@@ -49,7 +49,7 @@ type ProposalTally struct {
 	CCYesCount     int
 	CCNoCount      int
 	CCAbstainCount int
-	CCTotalCount   int // active, non-resigned members
+	CCTotalCount   int // active, seated, authorized members
 }
 
 // TallyContext carries the inputs needed to tally a proposal.
@@ -78,9 +78,9 @@ type TallyContext struct {
 	DelegatorInactivityOn bool
 }
 
-// CommitteeVotingState is the ratification view of the seated CC:
-// non-expired, non-deleted cold credentials count in the denominator,
-// while only members with a current hot-key authorization may cast votes.
+// CommitteeVotingState is the ratification view of the seated CC. A member
+// counts in the denominator only while its cold credential is seated, its term
+// is current, and it has an active hot-key authorization.
 type CommitteeVotingState struct {
 	ActiveMemberCount     int
 	MemberHotCredentials  []string
@@ -104,14 +104,11 @@ func LoadCommitteeVotingState(
 		return nil, fmt.Errorf("get seated committee members: %w", err)
 	}
 	// Collect non-expired cold credentials so we can batch-check
-	// resignation status. ExpiresEpoch is the first epoch the member
-	// is no longer active; a member with ExpiresEpoch == currentEpoch
-	// has just aged out and must not contribute to the CC denominator
-	// this epoch (matches Cardano-ledger Haskell: active iff
-	// currentEpoch < termEpoch).
+	// resignation status. A member remains active through ExpiresEpoch
+	// (matching Cardano-ledger: currentEpoch <= termEpoch).
 	coldKeys := make([][]byte, 0, len(members))
 	for _, member := range members {
-		if member.ExpiresEpoch <= currentEpoch {
+		if member.ExpiresEpoch < currentEpoch {
 			continue
 		}
 		coldKeys = append(coldKeys, member.ColdCredHash)
@@ -148,7 +145,7 @@ func LoadCommitteeVotingState(
 	}
 
 	return &CommitteeVotingState{
-		ActiveMemberCount:     len(seated),
+		ActiveMemberCount:     len(memberHotCredentials),
 		MemberHotCredentials:  memberHotCredentials,
 		HotCredentialPresence: hotCredentialPresence,
 	}, nil
@@ -589,9 +586,8 @@ func tallySPOVotes(
 	return nil
 }
 
-// tallyCCVotes counts per-member votes restricted to currently active
-// (non-resigned) CC members. CC members vote via their hot credential
-// after key authorization.
+// tallyCCVotes counts per-member votes restricted to currently active,
+// seated, hot-key-authorized CC members.
 func tallyCCVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,
