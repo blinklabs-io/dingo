@@ -271,6 +271,24 @@ func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 	assert.Equal(t, uint64(114220800), ls.UpstreamTipSlot())
 }
 
+func TestAdvanceUpstreamTipSlotPublishesFrontierBeforeActivating(t *testing.T) {
+	activeConnID := testChainsyncConnId(6000, 3041)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConnID
+			},
+		},
+	}
+	const admittedSlot uint64 = 114220801
+
+	ls.advanceUpstreamTipSlot(admittedSlot)
+
+	assert.Equal(t, admittedSlot, ls.syncUpstreamTipSlot.Load())
+	assert.True(t, ls.syncUpstreamActive.Load())
+	assert.Equal(t, admittedSlot, ls.UpstreamTipSlot())
+}
+
 func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
 	t *testing.T,
 ) {

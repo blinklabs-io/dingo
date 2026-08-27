@@ -8271,14 +8271,17 @@ func (ls *LedgerState) UpstreamTipSlot() uint64 {
 }
 
 func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
-	ls.syncUpstreamActive.Store(true)
 	current := ls.syncUpstreamTipSlot.Load()
 	for slot > current {
 		if ls.syncUpstreamTipSlot.CompareAndSwap(current, slot) {
-			return
+			break
 		}
 		current = ls.syncUpstreamTipSlot.Load()
 	}
+	// Publish the admitted frontier before allowing consumers to use it. The
+	// forger may observe the active flag immediately, so reversing these stores
+	// exposes a zero or stale slot during the handoff.
+	ls.syncUpstreamActive.Store(true)
 }
 
 // GetCurrentPParams returns the currentPParams value
