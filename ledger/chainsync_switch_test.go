@@ -204,9 +204,9 @@ func TestHandleConnectionClosedEventRetainsAdmittedUpstreamFrontier(
 			wantVisible: 0,
 		},
 		{
-			name:        "different active connection remains",
+			name:        "different active connection awaits admitted target",
 			activeConn:  &otherConnId,
-			wantVisible: 114220800,
+			wantVisible: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -350,15 +350,15 @@ func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(t *testing.T
 	ls.publishActiveUpstream(activeConnId)
 
 	// A close subscriber can update the active pointer before the queued
-	// chain-switch subscriber runs. The target remains registered and must
-	// retain its frontier despite the pointer mismatch.
+	// chain-switch subscriber runs. The new connection has no admitted event
+	// yet, so it must not inherit the prior connection's frontier.
 	ls.handleChainSwitchEvent(event.NewEvent(
 		chainselection.ChainSwitchEventType,
 		chainselection.ChainSwitchEvent{NewConnectionId: targetConnId},
 	))
 
 	assert.Equal(t, targetConnId, ls.selectedBlockfetchConnId)
-	assert.Equal(t, uint64(114220800), ls.UpstreamTipSlot())
+	assert.Zero(t, ls.UpstreamTipSlot())
 }
 
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
@@ -1272,12 +1272,8 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 	// Keep the test at header admission; no blockfetch worker is needed.
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	connID := fixture.connId
-	targetSlot := uint64(0)
 	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
 		return &connID
-	}
-	ls.config.GetPeerSyncTargetFunc = func(ouroboros.ConnectionId) (ochainsync.Tip, bool) {
-		return ochainsync.Tip{Point: ocommon.NewPoint(targetSlot, []byte("target"))}, targetSlot != 0
 	}
 	ls.publishActiveUpstream(connID)
 	assert.Zero(t, ls.UpstreamTipSlot(), "selection alone must not publish a target")
@@ -1290,7 +1286,6 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
 	advertisedSlot := ^uint64(0)
-	targetSlot = accepted.slot
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  accepted,
@@ -1302,6 +1297,8 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 			),
 			BlockNumber: advertisedSlot,
 		},
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(accepted.slot, []byte("accepted-target"))},
+		SyncTargetTrusted: true,
 	}))
 	require.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot())
@@ -1314,7 +1311,6 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		blockNumber: 3,
 		slot:        3,
 	}
-	targetSlot = advertisedSlot - 1
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  rejected,
@@ -1323,6 +1319,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 			Point:       ocommon.NewPoint(advertisedSlot-1, []byte("rejected-tip")),
 			BlockNumber: advertisedSlot - 1,
 		},
+		SyncTarget: ochainsync.Tip{Point: ocommon.NewPoint(advertisedSlot-1, []byte("rejected-target"))},
 	}))
 	assert.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot(),

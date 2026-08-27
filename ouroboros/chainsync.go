@@ -1003,11 +1003,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
 		// by peergov and skipped here.
+		observedTip := ochainsync.Tip{
+			Point:       point,
+			BlockNumber: v.BlockNumber(),
+		}
 		if ingressEligible {
-			observedTip := ochainsync.Tip{
-				Point:       point,
-				BlockNumber: v.BlockNumber(),
-			}
 			peerTipUpdate := chainselection.PeerTipUpdateEvent{
 				ConnectionId: ctx.ConnectionId,
 				Tip:          tip,
@@ -1127,6 +1127,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
+		// The only target ledger may later publish is paired with this exact
+		// delivered header and its apply-eligibility decision. Do not make
+		// ledger recover it from mutable selector state.
+		chainsyncEvent.SyncTarget = observedTip
+		chainsyncEvent.SyncTargetTrusted = true
 		if err := o.eventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
 			event.NewEvent(

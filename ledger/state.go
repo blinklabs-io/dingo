@@ -8292,9 +8292,6 @@ func (ls *LedgerState) UpstreamTipSlot() uint64 {
 	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
 		return 0
 	}
-	if ls.config.GetPeerSyncTargetFunc == nil {
-		return ls.syncUpstreamTipSlot.Load()
-	}
 	return state.targetSlot
 }
 
@@ -8349,7 +8346,8 @@ func (ls *LedgerState) clearActiveUpstream() {
 // publishAdmittedUpstreamTarget is called only after a header has been
 // authenticated and admitted. Revalidation binds the target to the still-live
 // active connection rather than a prior switch generation.
-func (ls *LedgerState) publishAdmittedUpstreamTarget(connId ouroboros.ConnectionId) {
+func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
+	connId := e.ConnectionId
 	if ls.config.GetActiveConnectionFunc == nil {
 		return
 	}
@@ -8358,12 +8356,7 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(connId ouroboros.Connection
 		!ls.isConnectionLive(connId) {
 		return
 	}
-	if ls.config.GetPeerSyncTargetFunc == nil {
-		ls.publishActiveUpstream(connId)
-		return
-	}
-	target, ok := ls.config.GetPeerSyncTargetFunc(connId)
-	if !ok {
+	if !e.SyncTargetTrusted {
 		ls.publishActiveUpstream(connId)
 		return
 	}
@@ -8376,7 +8369,7 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(connId ouroboros.Connection
 	}
 	ls.syncUpstreamState.Store(&upstreamSyncState{
 		connectionKey: connIdKey(connId),
-		targetSlot:    target.Point.Slot,
+		targetSlot:    e.SyncTarget.Point.Slot,
 	})
 }
 

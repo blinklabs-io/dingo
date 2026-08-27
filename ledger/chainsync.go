@@ -2931,7 +2931,7 @@ func (ls *LedgerState) recordAdmittedHeaderFrontier(
 		return
 	}
 	ls.advanceUpstreamTipSlot(admittedPoint.Slot)
-	ls.publishAdmittedUpstreamTarget(e.ConnectionId)
+	ls.publishAdmittedUpstreamTarget(e)
 }
 
 // shouldEnforceBlockPipelineCrypto mirrors the serial header path's

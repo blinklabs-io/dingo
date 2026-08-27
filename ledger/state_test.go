@@ -1124,7 +1124,11 @@ func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing
 	}
 	ls.syncUpstreamTipSlot.Store(5)
 	ls.publishActiveUpstream(activeConnID)
-	ls.publishAdmittedUpstreamTarget(activeConnID)
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      activeConnID,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(1000, nil)},
+		SyncTargetTrusted: true,
+	})
 
 	assert.Equal(t, uint64(5), ls.syncUpstreamTipSlot.Load(),
 		"the admitted frontier remains available for bookkeeping")
@@ -1154,7 +1158,19 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(t *testin
 
 	ls.publishActiveUpstream(connA)
 	assert.Zero(t, ls.UpstreamTipSlot(), "active selection alone must not trust a target")
-	ls.publishAdmittedUpstreamTarget(connA)
+	// Model the independent queues: a rejected peer-tip observation R is
+	// delivered before ledger later admits header V. R must not be recovered
+	// from mutable selector state when V is published.
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId: connA,
+		SyncTarget:   ochainsync.Tip{Point: ocommon.NewPoint(999, nil)},
+	})
+	assert.Zero(t, ls.UpstreamTipSlot())
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      connA,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(100, nil)},
+		SyncTargetTrusted: true,
+	})
 	assert.Equal(t, uint64(100), ls.UpstreamTipSlot())
 
 	// A→B changes the authoritative active connection before the ledger has
@@ -1165,7 +1181,11 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(t *testin
 	assert.Zero(t, target)
 	ls.publishActiveUpstream(connB)
 	assert.Zero(t, ls.UpstreamTipSlot())
-	ls.publishAdmittedUpstreamTarget(connB)
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      connB,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(200, nil)},
+		SyncTargetTrusted: true,
+	})
 	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
 
 	// A deferred or rejected header never reaches the trusted publication path.
