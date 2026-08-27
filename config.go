@@ -559,6 +559,28 @@ func (n *Node) configValidate() error {
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}
+	// A peer snapshot carries the network magic it was taken on. During
+	// Genesis selection its relays replace the configured bootstrap peers, so
+	// a snapshot from another network aims the node at that network's relays
+	// and discards the addresses that would have worked. Those relays are then
+	// each denied at the handshake for a magic mismatch, leaving the node with
+	// no peers and no route back to the bootstrap list -- an outage-shaped
+	// failure with a configuration cause. Reject it at startup instead.
+	if n.config.topologyConfig != nil &&
+		n.config.topologyConfig.PeerSnapshot != nil &&
+		internalconfig.PeerSnapshotNetworkMismatch(
+			n.config.topologyConfig.PeerSnapshot.NetworkMagic,
+			n.config.cfg.NetworkMagic,
+		) {
+		return fmt.Errorf(
+			"peer snapshot network mismatch: snapshot networkMagic %d does "+
+				"not match the configured networkMagic %d; its relays would "+
+				"replace the configured bootstrap peers and then be refused "+
+				"at the handshake",
+			n.config.topologyConfig.PeerSnapshot.NetworkMagic,
+			n.config.cfg.NetworkMagic,
+		)
+	}
 	// The block-decode pipeline's vendored decode stage
 	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
 	// directly and has no hook for dingo's Leios-extended-header Conway
