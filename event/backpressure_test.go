@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -309,6 +311,78 @@ func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
 	require.Equal(t, "first", (<-stalled).Data)
 	_, open := <-stalled
 	require.False(t, open, "stalled subscriber should be closed")
+}
+
+// TestStalledSubscriberDetachmentReportsWarningAndMetric makes the bounded
+// path observable with the production defaults: detachment emits a warning and
+// increments the delivery-timeout metric even though the periodic stall warning
+// interval is longer than the normal delivery timeout.
+func TestStalledSubscriberDetachmentReportsWarningAndMetric(t *testing.T) {
+	originalTimeout := channelDeliveryTimeout
+	channelDeliveryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+
+	const eventType EventType = "test.stalled.observability"
+	var buf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+	registry := prometheus.NewRegistry()
+	eb := NewEventBus(registry, logger)
+	t.Cleanup(eb.Stop)
+
+	_, _ = eb.SubscribeWithBuffer(eventType, 1)
+	eb.Publish(eventType, NewEvent(eventType, "first"))
+	eb.Publish(eventType, NewEvent(eventType, "second"))
+
+	require.Contains(
+		t,
+		buf.String(),
+		"event subscriber detached after delivery timeout",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			eb.metrics.deliveryTimeouts.WithLabelValues(string(eventType)),
+		),
+	)
+}
+
+// TestConcurrentPublishBlockingReportsStalledSubscriber preserves the cause
+// for every publisher already parked on one subscription when the first timer
+// detaches it. Returning nil to the later publishers would falsely report an
+// accepted delivery that never reached their subscriber.
+func TestConcurrentPublishBlockingReportsStalledSubscriber(t *testing.T) {
+	originalTimeout := channelDeliveryTimeout
+	channelDeliveryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+
+	const eventType EventType = "test.stalled.concurrent"
+	const publishers = 8
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+
+	_, _ = eb.SubscribeWithBuffer(eventType, 1)
+	eb.Publish(eventType, NewEvent(eventType, "first"))
+
+	results := make(chan error, publishers)
+	for range publishers {
+		go func() {
+			results <- eb.PublishBlocking(
+				eventType,
+				NewEvent(eventType, "blocked"),
+			)
+		}()
+	}
+	for range publishers {
+		select {
+		case err := <-results:
+			require.ErrorIs(t, err, ErrEventSubscriberStalled)
+		case <-time.After(time.Second):
+			t.Fatal("blocked publisher did not receive the detachment cause")
+		}
+	}
 }
 
 type lockedBuffer struct {

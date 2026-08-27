@@ -1500,11 +1500,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
 		)
-		ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
-			BlockfetchEventType,
-			blockfetchCommitBatchSize,
-			ls.handleEventBlockfetch,
-		)
+		ls.subscribeBlockfetchEvents(ls.handleEventBlockfetch)
 		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			chain.ChainUpdateEventType,
 			event.EventQueueSize,
@@ -1594,6 +1590,19 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+// subscribeBlockfetchEvents preserves lossless blockfetch delivery. A dropped
+// blockfetch event cannot be replayed from the EventBus, so this subscriber
+// remains attached until it drains or normal node lifecycle cancellation closes
+// it rather than taking the ordinary stalled-subscriber detachment path.
+func (ls *LedgerState) subscribeBlockfetchEvents(handler event.EventHandlerFunc) {
+	ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
+		BlockfetchEventType,
+		blockfetchCommitBatchSize,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
 }
 
 func (ls *LedgerState) loadMithrilTrustBoundary() {

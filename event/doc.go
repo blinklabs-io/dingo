@@ -70,10 +70,11 @@
 // happens-before -- see the ledger.tx section of ARCHITECTURE.md for how
 // the rollback and block-apply paths establish theirs.
 //
-// A healthy subscriber drains a full lane; a stalled one is detached after the
-// delivery timeout. A caller on a goroutine something else waits for before
-// the bus stops must still use PublishOrderedContext and cancel that context
-// when it needs a shorter bound than the subscriber-delivery timeout.
+// A healthy subscriber drains a full lane; the ordinary policy detaches a
+// stalled one after the delivery timeout. A caller on a goroutine something
+// else waits for before the bus stops must still use PublishOrderedContext and
+// cancel that context when it needs a shorter bound than the subscriber-
+// delivery timeout.
 //
 // # Delivery guarantees
 //
@@ -81,11 +82,13 @@
 // channel buffer or the shared async queue is full, the publisher waits for
 // capacity rather than discarding the event, so ingestion slows instead of
 // losing work that subscribers derive state from. A subscriber that remains
-// full for the delivery timeout is detached: events already accepted into its
-// channel retain their order, while the event that cannot be accepted and later
-// events continue only to healthy subscribers. This bounds a dead subscriber's
-// impact without trading unbounded memory for liveness. Stop, Close, and
-// Unsubscribe also release publishers parked on a full buffer.
+// full for the delivery timeout is detached by the ordinary subscription
+// policy: events already accepted into its channel retain their order, while
+// the event that cannot be accepted and later events continue only to healthy
+// subscribers. A lossless owner can explicitly select the blocking policy when
+// detaching its stream would make recovery unsafe. This bounds a dead ordinary
+// subscriber's impact without trading unbounded memory for liveness. Stop,
+// Close, and Unsubscribe also release publishers parked on a full buffer.
 //
 // The practical consequence is that a slow subscriber backpressures its
 // publishers until it drains or is detached. A publisher must not hold a lock

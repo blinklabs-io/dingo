@@ -53,9 +53,10 @@ type orderedLane struct {
 //
 // Like PublishAsync it does not drop for a live subscriber: a full lane makes
 // the publisher wait for capacity rather than discarding the event. A stalled
-// subscriber is detached after the delivery timeout, which lets its lane make
-// progress for healthy subscribers; shutdown also releases the wait. Returns
-// false when the EventBus is stopped or closed.
+// ordinary subscriber is detached after the delivery timeout, which lets its
+// lane make progress for healthy subscribers; a lossless subscription instead
+// remains blocked until lifecycle cancellation. Shutdown also releases the
+// wait. Returns false when the EventBus is stopped or closed.
 //
 // Each event type gets its own lane, so a slow subscriber delays only its own
 // event type instead of holding up every async event as it would on the shared
@@ -65,11 +66,12 @@ func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
 }
 
 // PublishOrderedContext is PublishOrdered that also abandons the publish when
-// ctx is done. A stalled subscriber is detached after the delivery timeout,
-// but a caller on a shutdown-critical goroutine -- one something else waits
-// for before the EventBus itself stops, such as a LedgerState the node closes
-// while keeping the bus running for a live restore -- must pass a context it
-// cancels when it needs a shorter bound.
+// ctx is done. An ordinary stalled subscriber is detached after the delivery
+// timeout, while a lossless subscriber waits for lifecycle cancellation. A
+// caller on a shutdown-critical goroutine -- one something else waits for
+// before the EventBus itself stops, such as a LedgerState the node closes while
+// keeping the bus running for a live restore -- must pass a context it cancels
+// when it needs a shorter bound.
 //
 // Abandoning is not a drop in the delivery-guarantee sense: the event was
 // never accepted, and the false return says so.

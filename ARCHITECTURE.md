@@ -1242,11 +1242,13 @@ All event types follow the `subsystem.snake_case_name` convention.
 - Lossless delivery with bounded producer backpressure: when a subscriber buffer
   or the async queue is full, `Publish`, `PublishBlocking`, and `PublishAsync`
   wait for capacity instead of dropping an event for a live subscriber. An
-  in-memory subscriber that cannot free capacity by the delivery timeout is
-  detached; events already accepted into that subscriber retain their order,
-  while the unaccepted event and later events continue to healthy subscribers.
-  Waits also end on `Stop`, `Close`, or `Unsubscribe`. `PublishBlocking`
-  reports the detachment error (or `ErrEventBusStopped` when shutdown wins).
+  ordinary in-memory subscriber that cannot free capacity by the delivery
+  timeout is detached; events already accepted into that subscriber retain
+  their order, while the unaccepted event and later events continue to healthy
+  subscribers. A lossless subscriber explicitly uses the blocking policy when
+  detachment would make its component unable to recover safely. Waits also end
+  on `Stop`, `Close`, or `Unsubscribe`. `PublishBlocking` reports the
+  detachment error (or `ErrEventBusStopped` when shutdown wins).
 - A slow subscriber can temporarily backpressure its publishers, but a stalled
   one cannot hold the topic indefinitely. Consumers of `Subscribe` channels
   must drain for the life of the subscription and `Unsubscribe` when they stop.
