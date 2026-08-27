@@ -17,12 +17,23 @@ package dingo
 import (
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+func (n *Node) chainsyncSyncTarget(
+	update chainselection.PeerTipUpdateEvent,
+) (ochainsync.Tip, bool) {
+	if n.chainSelector == nil {
+		return update.ObservedTip, update.ObservedTip.Point.Slot != 0 ||
+			update.ObservedTip.BlockNumber != 0
+	}
+	return n.chainSelector.SyncTargetForPeerTipUpdate(update)
+}
 
 // ledgerStateConfig builds the ledger.LedgerStateConfig for this node.
 //

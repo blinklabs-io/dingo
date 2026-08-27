@@ -95,7 +95,8 @@ func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(t *testing.T
 			upstreamActive:    true,
 			slotsPerKESPeriod: 100,
 		},
-		PromRegistry: prometheus.NewRegistry(),
+		ForgeSyncToleranceSlots: 99,
+		PromRegistry:            prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 
@@ -262,6 +263,35 @@ func TestCheckAndForgeProductionUsesRetainedReconnectFrontier(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
+}
+
+func TestCheckAndForgeProductionWaitsForEventPairedCorroboratedTarget(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(101, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       101,
+			chainTipSlot:      100,
+			upstreamTipSlot:   200,
+			upstreamActive:    true,
+			slotsPerKESPeriod: 100,
+		},
+		ForgeSyncToleranceSlots: 99,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
 }
 
 func TestCheckAndForgeProductionProceedsWithoutUpstreamFrontier(t *testing.T) {

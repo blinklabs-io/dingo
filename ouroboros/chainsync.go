@@ -1131,6 +1131,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// delivered header and its apply-eligibility decision. Do not make
 		// ledger recover it from mutable selector state.
 		chainsyncEvent.SyncTarget = observedTip
+		if o.config.ChainsyncSyncTarget != nil {
+			if target, ok := o.config.ChainsyncSyncTarget(
+				chainselection.PeerTipUpdateEvent{
+					ConnectionId: ctx.ConnectionId,
+					Tip:          tip,
+					ObservedTip:  observedTip,
+					VRFOutput:    vrfOutput,
+					PraosView:    praosView,
+				},
+			); ok {
+				chainsyncEvent.SyncTarget = target
+			}
+		}
 		chainsyncEvent.SyncTargetTrusted = true
 		if err := o.eventBus.PublishBlocking(
 			ledger.ChainsyncEventType,

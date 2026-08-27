@@ -926,6 +926,28 @@ func (cs *ChainSelector) GetPeerSyncTarget(
 	return advertised, true
 }
 
+// SyncTargetForPeerTipUpdate applies the bounded-target policy to the exact
+// observed/advertised pair carried by one chainsync event. It intentionally
+// does not read the mutable per-peer tip map.
+func (cs *ChainSelector) SyncTargetForPeerTipUpdate(
+	update PeerTipUpdateEvent,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	window := cs.genesisWindowSlotsLocked()
+	cs.mutex.RUnlock()
+	observed := update.ObservedTip
+	if observed.Point.Slot == 0 && observed.BlockNumber == 0 {
+		return ochainsync.Tip{}, false
+	}
+	if safeAddUint64(observed.Point.Slot, window) < update.Tip.Point.Slot {
+		return observed, true
+	}
+	if update.Tip.Point.Slot == 0 && update.Tip.BlockNumber == 0 {
+		return observed, true
+	}
+	return update.Tip, true
+}
+
 // GetAllPeerTips returns a deep copy of all tracked peer tips.
 func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainTip {
 	cs.mutex.RLock()

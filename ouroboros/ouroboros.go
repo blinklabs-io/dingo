@@ -254,6 +254,10 @@ type OuroborosConfig struct {
 	// revokes corroboration is not yet processed). Returning false (or nil hook)
 	// falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
+	// peer-tip event. Its result is carried with that event into ledger
+	// admission; ledger must not reread mutable selector state.
+	ChainsyncSyncTarget func(chainselection.PeerTipUpdateEvent) (ochainsync.Tip, bool)
 	// ChainsyncObservePeerRollback observes a peer rollback. It returns true if it
 	// handled the observation synchronously, in which case the caller MUST NOT
 	// also publish the async PeerRollbackEvent (avoids a double update). It
