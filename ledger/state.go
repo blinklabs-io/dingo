@@ -6404,14 +6404,28 @@ func (ls *LedgerState) ledgerProcessBlock(
 	return delta, nil
 }
 
-// latestOpCertCounterForValidation returns the highest certified or observed
-// opcert counter for a pool. Mithril imports the certified HeaderState counter
-// map at its trust boundary, so normal history lookup remains authoritative
-// for the first replayed block as well as later ones.
+// latestOpCertCounterForValidation returns the highest observed counter after
+// the Mithril boundary, or the certified counter at the boundary when no later
+// row exists. Rows before the boundary are not part of the certified state.
 func (ls *LedgerState) latestOpCertCounterForValidation(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *database.Txn,
 ) (uint64, bool, error) {
+	if ls.mithrilLedgerSlot > 0 {
+		sequence, found, err := ls.db.LatestPoolOpCertSequenceAfter(
+			poolKeyHash,
+			ls.mithrilLedgerSlot,
+			txn,
+		)
+		if err != nil || found {
+			return sequence, found, err
+		}
+		return ls.db.LatestPoolOpCertSequenceAfter(
+			poolKeyHash,
+			ls.mithrilLedgerSlot-1,
+			txn,
+		)
+	}
 	return ls.db.LatestPoolOpCertSequence(poolKeyHash, txn)
 }
 
