@@ -30,8 +30,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// ConnectionManagerConnClosedFunc is a function that takes a connection ID and an optional error
-type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
+// ConnectionManagerConnClosedFunc is a function that takes a connection ID,
+// whether the closed connection was node-to-client (local), and an optional
+// error. Unlike ConnectionClosedEventType, it fires for every closed
+// connection regardless of isNtC — see the call site below for why the
+// broad EventBus event stays NtN-only.
+type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, bool, error)
 
 const (
 	// metricNamePrefix is the common prefix for all connection manager metrics
@@ -857,9 +861,13 @@ func (c *ConnectionManager) addConnectionImpl(
 				),
 			)
 		}
-		// Call configured connection closed callback func
+		// Call configured connection closed callback func. Fires for both
+		// NtN and NtC closes -- unlike the EventBus event above, this is a
+		// direct per-connection call rather than a fan-out to multiple
+		// subscribers, so it carries no reconnect-storm risk. It is the
+		// only close notification an NtC connection gets.
 		if c.config.ConnClosedFunc != nil {
-			c.config.ConnClosedFunc(connId, err)
+			c.config.ConnClosedFunc(connId, isNtC, err)
 		}
 	}()
 	return true
