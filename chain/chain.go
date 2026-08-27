@@ -772,6 +772,33 @@ func (c *Chain) rollbackForkDepth(
 // underflow that caused the misclassification.
 //
 // Callers must hold c.mutex and c.manager.mutex.
+// checkEphemeralBufferSpan verifies that a fork's in-memory buffer holds an
+// entry for every block it claims above its fork point. rollbackLocked indexes
+// that buffer per rolled-back block, so a short buffer would otherwise surface
+// as an out-of-range offset part-way through the deletion loop, after blocks
+// had already been removed. Checking once up front keeps the rollback
+// all-or-nothing. blockByIndexLocked applies the same bounds per lookup.
+//
+// Reaching the error means this chain's tip index and buffer already disagree,
+// which no public call path produces; it is a corruption report, not a
+// rejection of the caller's rollback point.
+func (c *Chain) checkEphemeralBufferSpan() error {
+	if c.persistent || c.tipBlockIndex <= c.lastCommonBlockIndex {
+		return nil
+	}
+	want := c.tipBlockIndex - c.lastCommonBlockIndex
+	if want <= uint64(len(c.blocks)) { //nolint:gosec
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %d blocks above fork point %d, buffer holds %d",
+		ErrRollbackBeyondEphemeralChain,
+		want,
+		c.lastCommonBlockIndex,
+		len(c.blocks),
+	)
+}
+
 func (c *Chain) rollbackPointBlock(
 	point ocommon.Point,
 ) (models.Block, error) {
@@ -943,6 +970,11 @@ func (c *Chain) rollbackLocked(
 		)
 		return nil, ErrRollbackExceedsSecurityParam
 	}
+	// Validate the in-memory buffer before deleting anything, so a
+	// corrupt span fails the rollback whole rather than part-way through.
+	if err := c.checkEphemeralBufferSpan(); err != nil {
+		return nil, err
+	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
 	// Collect and delete rolled-back blocks in a single pass
@@ -973,9 +1005,13 @@ func (c *Chain) rollbackLocked(
 					rolledBackBlocks = append(rolledBackBlocks, block)
 				}
 			}
-			// Decrement our fork point block index if we rollback beyond it
-			if i < c.lastCommonBlockIndex {
-				c.lastCommonBlockIndex = i
+			// Blocks at or below the fork point belong to the
+			// common prefix held by the primary chain, not to this
+			// fork's in-memory buffer, so there is nothing to delete
+			// here. blockByIndexLocked draws the same boundary with
+			// <=; using < placed the fork point itself on the buffer
+			// side, where its index computes to -1.
+			if i <= c.lastCommonBlockIndex {
 				continue
 			}
 			// Remove from memory buffer
@@ -986,6 +1022,13 @@ func (c *Chain) rollbackLocked(
 				memBlockIndex+1,
 			)
 		}
+	}
+	// A rollback past the fork point shortens the prefix this chain
+	// shares with the primary: every block it still holds is now common.
+	// Re-anchor here, after the loop has finished reading the old value
+	// for buffer offsets, so lastCommonBlockIndex never exceeds the tip.
+	if !c.persistent && rollbackBlockIndex < c.lastCommonBlockIndex {
+		c.lastCommonBlockIndex = rollbackBlockIndex
 	}
 	// Clear out any headers
 	c.headers = slices.Delete(c.headers, 0, len(c.headers))

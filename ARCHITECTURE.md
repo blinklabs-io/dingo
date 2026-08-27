@@ -559,7 +559,11 @@ check and iterator lookup is resolved against the primary chain's active
 in-memory points and cache; the fork's divergent tail is resolved from its own
 in-memory points. If the primary has since rolled the common point back, it is
 not considered held even though the retained cache can still resolve it by
-point.
+point. Rolling an ephemeral fork back draws the same boundary: a block at or
+below the fork point is a common-prefix block with no entry in the fork's own
+buffer, so the rollback deletes nothing there, and once the rollback point
+lands below the fork point the fork re-anchors its common prefix to that point
+rather than leaving it above the new tip.
 
 ### Peer-to-Peer Networking
 
