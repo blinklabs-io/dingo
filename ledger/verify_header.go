@@ -198,6 +198,13 @@ func verifyBlockHeaderHex(
 			err,
 		)
 	}
+	if err := verifyTPraosNonceVrfHex(header, epochNonceHex); err != nil {
+		return fmt.Errorf(
+			"block header verification failed at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
 
 	isValid, _, _, _, err := ledger.VerifyBlock(
 		headerOnlyBlock{header: header},
