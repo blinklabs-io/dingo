@@ -334,8 +334,9 @@ func (s *State) AddClient(
 	return s.clients[connId], nil
 }
 
-// LookupClient returns the registered server-side (N2C) chainsync client
-// state for a connection, or false if no client is registered for it.
+// LookupClient returns a snapshot of the registered server-side (N2C)
+// chainsync client state for a connection, or false if no client is registered
+// for it.
 //
 // Unlike AddClient, this is a pure read: it never registers a client as a
 // side effect of being asked about one. Callers that need to assert whether
@@ -350,7 +351,9 @@ func (s *State) LookupClient(
 	if !ok || clientState == nil {
 		return nil, false
 	}
-	return clientState, true
+	clientStateSnapshot := *clientState
+	clientStateSnapshot.Cursor.Hash = cloneBytes(clientState.Cursor.Hash)
+	return &clientStateSnapshot, true
 }
 
 // RemoveClient unregisters a server-side (N2C) chainsync

@@ -1474,6 +1474,40 @@ func (m *mockChainProvider) StabilityWindow() uint64 {
 	return m.stabilityWin
 }
 
+// TestLookupClientReturnsSnapshot guards against the race fixed in issue
+// 3267: a caller could take the pointer LookupClient returned and read its
+// fields later while the server goroutine mutated the same live
+// ChainsyncClientState (e.g. clearing NeedsInitialRollback), so the read and
+// the write were unsynchronized.
+//
+// It registers a client, takes a snapshot via LookupClient, then mutates the
+// real client state returned by AddClient (flipping NeedsInitialRollback and
+// overwriting a byte of the cursor hash). The snapshot must still show the
+// pre-mutation values, proving LookupClient copied the data — including a
+// deep copy of the Cursor.Hash byte slice — rather than handing back a
+// pointer an observer could see change underneath it.
+func TestLookupClientReturnsSnapshot(t *testing.T) {
+	provider := &mockChainProvider{}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	conn := newTestConnId(1)
+	point := ocommon.NewPoint(1, []byte{0x01})
+	clientState, err := s.AddClient(conn, point)
+	require.NoError(t, err)
+
+	// Snapshot must be taken before the mutation below to prove it isn't
+	// affected by changes made to the live state afterward.
+	snapshot, ok := s.LookupClient(conn)
+	require.True(t, ok)
+
+	// Mutate the live client state the same way the server does in
+	// production (clearing NeedsInitialRollback) plus a cursor byte, to
+	// confirm neither field aliases the snapshot.
+	clientState.NeedsInitialRollback = false
+	clientState.Cursor.Hash[0] = 0x02
+	require.True(t, snapshot.NeedsInitialRollback)
+	require.Equal(t, []byte{0x01}, snapshot.Cursor.Hash)
+}
+
 // TestAddClient_NilChainProvider_ReturnsError verifies that AddClient returns
 // an error rather than panicking when no ChainProvider has been wired.
 func TestAddClient_NilChainProvider_ReturnsError(t *testing.T) {
