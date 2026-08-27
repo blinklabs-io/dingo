@@ -498,11 +498,13 @@ only enqueues onto the ordered lane, so subscribers cannot observe an Apply
 before storage is durable and their work never runs inline in `Commit`.
 `ledger.block` remains `PublishBlocking` on the handler's own goroutine.
 
-Because a publisher parked on a full lane is released only by the EventBus
-stopping, and a live restore/truncate closes the `LedgerState` while keeping
-the bus running, ledger publishes go through `PublishOrderedContext` with a
-context `LedgerState.Close` cancels first thing. Without it `Close` waits
-unbounded on a `ledger.tx` subscriber that stopped draining.
+An ordinary stalled subscriber detaches after its delivery timeout; a lossless
+subscriber deliberately remains attached until it drains or is stopped, closed,
+or unsubscribed. A live restore/truncate closes the `LedgerState` while keeping
+the bus running, so ledger publishes go through `PublishOrderedContext` with a
+context `LedgerState.Close` cancels first thing. That cancellation releases a
+full ordered lane regardless of whether a subscriber later drains or its
+lifecycle removes it.
 
 This is also the one deliberate exception to the publish-under-lock rule
 above. `rollbackChainAndState` runs under `chainsyncMutex` — it is reached
