@@ -3708,6 +3708,22 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
    changing the queued headers.
 7. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
+Step 4's transaction selection runs inside `LedgerState.WithTxValidationSession`
+(the same mechanism the mempool backend rebuilds use above): one pinned ledger
+generation, one validation reference slot, and one repeatable-read transaction
+cover every mempool transaction considered for the candidate block, not a
+fresh snapshot per transaction. If a block, rollback, or protocol-parameter
+change publishes a newer generation before selection finishes, the whole
+candidate is rejected (`transaction validation snapshot changed`) instead of
+being built from transactions checked against different ledger views.
+Selection also re-reads the primary chain tip once it finishes and compares
+it, by slot, hash, and block number, against the parent point the candidate
+already committed to (`nextBlockNumber`/`prevHash`) before selection started;
+a mismatch — a peer block landing mid-selection — rejects the candidate
+before VRF/KES signing (`selected parent changed during block assembly`)
+rather than relying solely on step 6's `Chain.AddLocalBlock` check, which
+still runs as the final backstop against any race not closed here.
+
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
 
