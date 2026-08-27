@@ -246,6 +246,9 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if err != nil {
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
+	if err := block.Validate(); err != nil {
+		return fmt.Errorf("validate leios endorser block: %w", err)
+	}
 	cacheKeys := []string{leiosBlockKey(point.Hash)}
 	data := &leiosEndorserBlockData{
 		point:      point,
