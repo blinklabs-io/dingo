@@ -760,6 +760,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			existingConn := existing.conn
 			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
+			existingIsNtC := existing.isNtC
 			// Remove the old entry so the evicted connection's
 			// error-watcher goroutine cannot double-decrement
 			// metrics via RemoveConnection.
@@ -774,6 +775,13 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			// The evicted connection's own error-watcher goroutine cannot
+			// deliver this: by the time its ErrorChan fires, RemoveConnection
+			// finds either no entry or the replacement's entry for connId
+			// and returns false without calling ConnClosedFunc. Without this
+			// call, an evicted NtC connection's chainsync server-side client
+			// state (and its live chain iterator) would never be released.
+			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
 			c.connectionsMutex.Lock()
 
 		default:
@@ -799,6 +807,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			existingConn := existing.conn
 			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
+			existingIsNtC := existing.isNtC
 			delete(c.connections, connId)
 			c.connectionsMutex.Unlock()
 			closeConnAndLog(
@@ -810,6 +819,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
 			c.connectionsMutex.Lock()
 		}
 	}
@@ -871,6 +881,33 @@ func (c *ConnectionManager) addConnectionImpl(
 		}
 	}()
 	return true
+}
+
+// errConnectionReplaced is the error reported to ConnClosedFunc for a
+// connection evicted by a ConnectionId collision, rather than a closed
+// transport.
+var errConnectionReplaced = errors.New(
+	"connection replaced by a new connection with the same identity",
+)
+
+// notifyEvictedConnectionClosed calls ConnClosedFunc for a connection just
+// evicted by a ConnectionId collision (addConnectionImpl's replacement
+// branches). The evicted connection's own error-watcher goroutine cannot
+// deliver this itself: by the time its ErrorChan fires, RemoveConnection
+// finds either no entry or the replacement's entry for connId and returns
+// false without calling ConnClosedFunc, so without this call an evicted NtC
+// connection's chainsync server-side client state (and its live chain
+// iterator) would never be released. Called synchronously, before the
+// replacement connection is registered in c.connections, so it cannot race
+// the replacement's own state registration.
+func (c *ConnectionManager) notifyEvictedConnectionClosed(
+	connId ouroboros.ConnectionId,
+	isNtC bool,
+) {
+	if c.config.ConnClosedFunc == nil {
+		return
+	}
+	c.config.ConnClosedFunc(connId, isNtC, errConnectionReplaced)
 }
 
 func (c *ConnectionManager) RemoveConnection(

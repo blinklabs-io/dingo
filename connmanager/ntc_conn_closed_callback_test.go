@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
 )
@@ -55,13 +56,14 @@ func TestConnClosedFunc_ReceivesIsNtCTrueForNtCClose(t *testing.T) {
 	conn.ErrorChan() <- closeErr
 	waitForConnectionManagerWatchers(t, cm)
 
-	select {
-	case c := <-calls:
-		require.True(t, c.isNtC, "NtC connection close must report isNtC=true")
-		require.ErrorIs(t, c.err, closeErr)
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for ConnClosedFunc call")
-	}
+	c := testutil.RequireReceive(
+		t,
+		calls,
+		time.Second,
+		"expected a ConnClosedFunc call for the NtC connection",
+	)
+	require.True(t, c.isNtC, "NtC connection close must report isNtC=true")
+	require.ErrorIs(t, c.err, closeErr)
 }
 
 func TestConnClosedFunc_ReceivesIsNtCFalseForNtNClose(t *testing.T) {
@@ -82,11 +84,12 @@ func TestConnClosedFunc_ReceivesIsNtCFalseForNtNClose(t *testing.T) {
 	conn.ErrorChan() <- closeErr
 	waitForConnectionManagerWatchers(t, cm)
 
-	select {
-	case c := <-calls:
-		require.False(t, c.isNtC, "NtN connection close must report isNtC=false")
-		require.ErrorIs(t, c.err, closeErr)
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for ConnClosedFunc call")
-	}
+	c := testutil.RequireReceive(
+		t,
+		calls,
+		time.Second,
+		"expected a ConnClosedFunc call for the NtN connection",
+	)
+	require.False(t, c.isNtC, "NtN connection close must report isNtC=false")
+	require.ErrorIs(t, c.err, closeErr)
 }
