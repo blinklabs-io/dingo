@@ -143,8 +143,8 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 }
 
 // TestDatabaseSourceGetPoolEpochDataMap mirrors DingoDB's own
-// GetPoolEpochDataMap semantics: DelegatedStake/DelegatorCount come from
-// stakeEpoch, BlocksProduced/FixedCost/Margin from paramEpoch, and
+// GetPoolEpochDataMap semantics: DelegatedStake/DelegatorCount/FixedCost/
+// Margin come from stakeEpoch, BlocksProduced from paramEpoch, and
 // MemberRewardTotal from stakeEpoch's reward_pool_output -- each field
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {

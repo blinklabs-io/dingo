@@ -232,12 +232,14 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 }
 
 // TestComparePoolEpochEmptyDingoSideIsFlagged guards against reintroducing an
-// asymmetry between the fixed_cost and margin guards: once ParamsPresent is
-// true (the reward_pool_input row at the param epoch genuinely exists — the
-// "not ready yet" case is already handled by the outer ParamsPresent check),
+// asymmetry between the fixed_cost and margin guards: once StakePresent is
+// true (the reward_pool_input row at the stake epoch genuinely exists — the
+// "not ready yet" case is already handled by the outer StakePresent check),
 // an unexpectedly empty dingoPool.FixedCost/Margin means a corrupted/partial
 // row, not a legitimate skip condition, and must be reported as a
 // value_mismatch like any other divergence rather than silently passed over.
+// Both fields are read at the stake epoch (dingo #3484), so StakePresent, not
+// ParamsPresent, is the flag that governs them.
 func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
 	now := time.Now()
 	koios := &KoiosPoolEpoch{

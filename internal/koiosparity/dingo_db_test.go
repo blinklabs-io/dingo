@@ -48,8 +48,8 @@ func testPoolKeyHash(t *testing.T, b byte) []byte {
 // TestGetPoolEpochDataMapAlignsRewardScheduleEpochs is a boundary test built
 // directly from Dingo's actual snapshot/reward lifecycle layout — see
 // ledger/snapshot/rotation.go's buildRewardStateInputs (which stamps
-// BlocksProduced/Margin/FixedCost from evt.PreviousEpoch onto the *next*
-// epoch's reward_pool_input row) and ledger/reward_calculation.go's
+// BlocksProduced from evt.PreviousEpoch onto the *next* epoch's
+// reward_pool_input row) and ledger/reward_calculation.go's
 // stakeRewardEpochsForNewEpoch (epochs.snapshot = epochs.performance - 1,
 // with reward_pool_output written at epochs.snapshot alongside the
 // reward_pool_input row actually consumed for that computation) — rather
@@ -187,8 +187,9 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 // TestGetPoolEpochDataMapMissingParamEpochRow proves a pool with a stake
 // -epoch row but no param-epoch row yet still gets an entry, with
 // ParamsPresent left false rather than silently defaulting to a
-// zero-value BlocksProduced/FixedCost/Margin that ComparePoolEpoch could
-// mistake for a real (and wrong) value.
+// zero-value BlocksProduced that ComparePoolEpoch could mistake for a real
+// (and wrong) value. FixedCost/Margin are stake-epoch fields and so are
+// unaffected by the param-epoch row's absence (dingo #3484).
 func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck

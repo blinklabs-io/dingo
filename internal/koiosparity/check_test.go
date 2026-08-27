@@ -356,10 +356,11 @@ func newTestDingoDB(t *testing.T) (dataDir string, gdb *testDB) {
 //
 //   - epoch_summary at epoch 9 (K-1): the mark stake distribution Praos used
 //     as epoch 10's active-stake basis.
-//   - reward_pool_input at epoch 9 (K-1): DelegatedStake/DelegatorCount.
+//   - reward_pool_input at epoch 9 (K-1): DelegatedStake/DelegatorCount,
+//     plus Margin/FixedCost — the parameters in force for epoch 10.
 //   - reward_pool_output at epoch 9 (K-1): MemberRewardTotal.
-//   - reward_pool_input at epoch 11 (K+1): BlocksProduced/Margin/FixedCost,
-//     describing epoch 10 per rotation.go's buildRewardStateInputs.
+//   - reward_pool_input at epoch 11 (K+1): BlocksProduced alone, describing
+//     epoch 10 per rotation.go's buildRewardStateInputs.
 //   - reward_ada_pots at epoch 10 (unshifted — a point-in-time pot balance,
 //     not a delayed reward-calculation input; see ARCHITECTURE.md).
 //   - a decoy reward_pool_input row at epoch 10 itself with wrong values in
