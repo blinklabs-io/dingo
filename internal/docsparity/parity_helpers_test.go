@@ -41,7 +41,7 @@ var contributorDocs = []string{
 	"ARCHITECTURE.md",
 	"DATABASE.md",
 	"GENESIS_SYNC.md",
-	filepath.Join("internal", "test", "devnet", "README.md"),
+	"internal/test/devnet/README.md",
 }
 
 // historicalDocs record past measurements or shipped releases. They describe
@@ -101,12 +101,12 @@ func filesMatching(
 	t.Helper()
 
 	var found []string
-	rootAbs, err := filepath.Abs(root)
+	rootAbs, err := canonicalDiscoveryPath(root)
 	if err != nil {
 		return filesMatchingWalk(t, root, match)
 	}
 	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Output()
-	if err != nil || filepath.Clean(strings.TrimSpace(string(topLevel))) != filepath.Clean(rootAbs) {
+	if err != nil || !sameDiscoveryRoot(rootAbs, strings.TrimSpace(string(topLevel))) {
 		return filesMatchingWalk(t, root, match)
 	}
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
@@ -124,6 +124,41 @@ func filesMatching(
 		}
 	}
 	return found
+}
+
+// canonicalDiscoveryPath resolves aliases and symlinks before comparing
+// repository roots. os.SameFile is used by sameDiscoveryRoot when possible,
+// which handles aliases whose spelling differs even after filepath.Clean.
+func canonicalDiscoveryPath(root string) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func sameDiscoveryRoot(canonicalRoot, gitRoot string) bool {
+	canonicalGitRoot, err := canonicalDiscoveryPath(gitRoot)
+	if err != nil {
+		return false
+	}
+	if rootInfo, err := os.Stat(canonicalRoot); err == nil {
+		if gitInfo, err := os.Stat(canonicalGitRoot); err == nil {
+			return os.SameFile(rootInfo, gitInfo)
+		}
+	}
+	// Windows paths are case-insensitive. EqualFold also makes the fallback
+	// comparison robust when Git and the process use different path casing.
+	left := filepath.ToSlash(filepath.Clean(canonicalRoot))
+	right := filepath.ToSlash(filepath.Clean(canonicalGitRoot))
+	if filepath.Separator == '\\' {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func filesMatchingWalk(
@@ -302,7 +337,7 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 		t.Errorf("dockerfiles() = %v, want %v", got, want)
 	}
 	got, want = workflowFiles(t, root), []string{
-		filepath.Join(".github", "workflows", "tracked.yml"),
+		".github/workflows/tracked.yml",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("workflowFiles() = %v, want %v", got, want)
@@ -312,9 +347,22 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	runGit(t, parent, "init")
 	nested := filepath.Join(parent, "nested")
 	writeTestFile(t, nested, "docs/archive.md")
+	writeTestFile(t, nested, "Dockerfile")
+	writeTestFile(t, nested, ".github/workflows/archive.yml")
+	writeTestFile(t, nested, ".claude/worktrees/scratch/ignored.md")
+	writeTestFile(t, nested, ".claude/worktrees/scratch/Dockerfile")
+	writeTestFile(t, nested, ".claude/worktrees/scratch/ignored.yml")
 	got, want = markdownFiles(t, nested), []string{"docs/archive.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("nested markdownFiles() = %v, want %v", got, want)
+	}
+	got, want = dockerfiles(t, nested), []string{"Dockerfile"}
+	if !slices.Equal(got, want) {
+		t.Errorf("nested dockerfiles() = %v, want %v", got, want)
+	}
+	got, want = workflowFiles(t, nested), []string{".github/workflows/archive.yml"}
+	if !slices.Equal(got, want) {
+		t.Errorf("nested workflowFiles() = %v, want %v", got, want)
 	}
 
 	archive := t.TempDir()
@@ -327,6 +375,31 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	got, want = markdownFiles(t, archive), []string{"docs/tracked.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("archive markdownFiles() = %v, want %v", got, want)
+	}
+}
+
+func TestDocumentationDiscoveryRecognizesAliasedRepositoryRoot(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	writeTestFile(t, root, "docs/tracked.md")
+	writeTestFile(t, root, ".github/workflows/tracked.yml")
+	writeTestFile(t, root, "Dockerfile")
+	writeTestFile(t, root, ".codex/worktrees/ignored.md")
+	runGit(t, root, "add", "docs/tracked.md", ".github/workflows/tracked.yml", "Dockerfile")
+
+	alias := filepath.Join(t.TempDir(), "repo-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+
+	if got, want := markdownFiles(t, alias), []string{"docs/tracked.md"}; !slices.Equal(got, want) {
+		t.Errorf("aliased markdownFiles() = %v, want %v", got, want)
+	}
+	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(got, want) {
+		t.Errorf("aliased dockerfiles() = %v, want %v", got, want)
+	}
+	if got, want := workflowFiles(t, alias), []string{".github/workflows/tracked.yml"}; !slices.Equal(got, want) {
+		t.Errorf("aliased workflowFiles() = %v, want %v", got, want)
 	}
 }
 
