@@ -233,7 +233,7 @@ func normalizeDiscoveryPath(rel string) string {
 
 func isExcludedDiscoveryPath(rel string) bool {
 	rel = normalizeDiscoveryPath(rel)
-	for _, component := range strings.Split(rel, "/") {
+	for component := range strings.SplitSeq(rel, "/") {
 		if slices.Contains(excludedDiscoveryDirectories, component) {
 			return true
 		}
