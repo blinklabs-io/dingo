@@ -718,6 +718,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"sync did not complete; "+
 					"re-run 'dingo mithril sync' to resume",
 				"component", "mithril",
+				"error", err,
 			)
 		}
 	}()
