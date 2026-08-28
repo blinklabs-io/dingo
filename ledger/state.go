@@ -6249,6 +6249,26 @@ func (ls *LedgerState) ledgerProcessBlock(
 					err = nil
 				}
 				if err != nil {
+					var plutusErr conway.PlutusScriptFailedError
+					if errors.As(err, &plutusErr) {
+						ls.config.Logger.Warn(
+							"Plutus evaluation disagrees with block producer (rejecting transaction)",
+							"component",
+							"ledger",
+							"tx_hash",
+							tx.Hash().String(),
+							"block_slot",
+							point.Slot,
+							"script_hash",
+							hex.EncodeToString(plutusErr.ScriptHash[:]),
+							"redeemer_tag",
+							plutusErr.Tag,
+							"redeemer_index",
+							plutusErr.Index,
+							"eval_error",
+							plutusErr.Err.Error(),
+						)
+					}
 					// Attempt to include raw CBOR for diagnostics (if available)
 					var txCborHex string
 					txCbor := tx.Cbor()
