@@ -919,25 +919,40 @@ func (c *Chain) rollbackLocked(
 	if c.persistent && c.manager.securityParam <= 0 {
 		return nil, ErrSecurityParamNotConfigured
 	}
-	// Check headers for rollback point
+	// Check headers for rollback point without mutating them yet: an
+	// over-K rejection below must leave the header queue exactly as it
+	// was, so the deletion this loop computes is only applied once the
+	// rollback is known to be accepted (issue #3516 review). headersEnd
+	// tracks the index, if any, from which headers[headersEnd:] must be
+	// dropped -- everything newer than the rollback point, found by
+	// walking backwards from the tip so each qualifying header's index
+	// is still valid when it is eventually deleted in one bulk pass.
+	headersEnd := -1
+	headersMatched := false
 	if len(c.headers) > 0 {
-		// Iterate backwards to make deletion safe
 		var header queuedHeader
 		for i, v := range slices.Backward(c.headers) {
 			header = v
-			// Remove headers after rollback slot
+			// Headers after the rollback slot must be dropped.
 			if header.point.Slot > point.Slot {
-				c.headers = slices.Delete(c.headers, i, i+1)
+				headersEnd = i
 				continue
 			}
 			if header.point.Slot == point.Slot &&
 				bytes.Equal(header.point.Hash, point.Hash) {
-				return nil, nil
+				headersMatched = true
+				break
 			}
 			if header.point.Slot < point.Slot {
 				return nil, models.ErrBlockNotFound
 			}
 		}
+	}
+	if headersMatched {
+		if headersEnd >= 0 {
+			c.headers = slices.Delete(c.headers, headersEnd, len(c.headers))
+		}
+		return nil, nil
 	}
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
@@ -974,6 +989,11 @@ func (c *Chain) rollbackLocked(
 	// corrupt span fails the rollback whole rather than part-way through.
 	if err := c.checkEphemeralBufferSpan(); err != nil {
 		return nil, err
+	}
+	// The rollback is accepted: now it is safe to drop the headers
+	// found above to be newer than the rollback point.
+	if headersEnd >= 0 {
+		c.headers = slices.Delete(c.headers, headersEnd, len(c.headers))
 	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
@@ -1638,7 +1658,8 @@ func (c *Chain) iterNext(
 			ret.Rollback = true
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
-			if iter.rollbackPoint.Slot > 0 {
+			if iter.rollbackPoint.Slot > 0 ||
+				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point
 				tmpBlock, err := c.manager.blockByPoint(
 					iter.rollbackPoint,

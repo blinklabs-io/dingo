@@ -951,6 +951,19 @@ func TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin(t *testing.T) {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
 		}
 	}
+	// A drained iterator must also treat the retained slot-zero block as
+	// a real, already-delivered block rather than origin: repositioning
+	// on Slot alone re-emits it as if it had never been seen.
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("unexpected error draining chain iterator: %s", err)
+		}
+	}
 	// testBlocks[0] sits at slot 0 but is a real, hash-bearing block, not
 	// the origin sentinel.
 	slotZeroBlock := testBlocks[0]
@@ -975,6 +988,35 @@ func TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin(t *testing.T) {
 	if _, err := db.BlockByIndex(1, nil); err != nil {
 		t.Fatalf(
 			"expected the slot-zero block to remain after rollback: %s",
+			err,
+		)
+	}
+	// The iterator must observe a rollback marker for the slot-zero
+	// block, having already delivered it once as a normal block.
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error calling chain iterator next: %s", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf(
+			"expected a rollback marker from the chain iterator, got: %#v",
+			next,
+		)
+	}
+	if next.Point.Slot != rollbackPoint.Slot ||
+		!bytes.Equal(next.Point.Hash, rollbackPoint.Hash) {
+		t.Fatalf(
+			"iterator rollback point mismatch: got %d.%x, wanted %d.%x",
+			next.Point.Slot, next.Point.Hash,
+			rollbackPoint.Slot, rollbackPoint.Hash,
+		)
+	}
+	// The next call must reach the (now retained) chain tip rather than
+	// re-deliver the slot-zero block a second time.
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		t.Fatalf(
+			"expected ErrIteratorChainTip after the retained slot-zero "+
+				"block, got: %v",
 			err,
 		)
 	}
@@ -1776,6 +1818,69 @@ func TestChainRollbackExceedsSecurityParam(t *testing.T) {
 				"rollback: got slot %d, expected %d",
 			tip.Point.Slot,
 			lastBlock.SlotNumber(),
+		)
+	}
+}
+
+// TestChainRollbackPreservesQueuedHeadersOnOverKRejection covers a
+// no-state-change-on-rejection gap: rollbackLocked used to delete queued
+// headers above the rollback point before computing and enforcing the
+// security-parameter bound, so a rollback correctly rejected for exceeding
+// K still discarded active chainsync header progress. An over-K rewind must
+// leave the header queue exactly as it was, the same as it leaves the
+// persisted chain untouched.
+func TestChainRollbackPreservesQueuedHeadersOnOverKRejection(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// K=2, rolling back 3 blocks (from index 5 to index 2) exceeds it.
+	mustSetLedger(t, cm, 2)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	queuedHeaders := []*MockBlock{
+		{
+			MockBlockNumber: 7,
+			MockSlot:        120,
+			MockHash:        testHashPrefix + "0007",
+			MockPrevHash:    testHashPrefix + "0006",
+		},
+		{
+			MockBlockNumber: 8,
+			MockSlot:        140,
+			MockHash:        testHashPrefix + "0008",
+			MockPrevHash:    testHashPrefix + "0007",
+		},
+	}
+	for _, header := range queuedHeaders {
+		if err := c.AddBlockHeader(header); err != nil {
+			t.Fatalf("unexpected error adding header to chain: %s", err)
+		}
+	}
+	if c.HeaderCount() != len(queuedHeaders) {
+		t.Fatalf(
+			"expected %d queued headers before rollback, got %d",
+			len(queuedHeaders), c.HeaderCount(),
+		)
+	}
+	shallowBlock := testBlocks[2]
+	deepRollbackPoint := ocommon.Point{
+		Slot: shallowBlock.SlotNumber(),
+		Hash: shallowBlock.Hash().Bytes(),
+	}
+	err = c.Rollback(deepRollbackPoint)
+	if !errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf("expected ErrRollbackExceedsSecurityParam, got: %s", err)
+	}
+	if c.HeaderCount() != len(queuedHeaders) {
+		t.Fatalf(
+			"queued headers must survive a rejected rollback: got %d, wanted %d",
+			c.HeaderCount(), len(queuedHeaders),
 		)
 	}
 }

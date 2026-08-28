@@ -8409,18 +8409,18 @@ events on the same `ledger.tx` lane, the moment `ls.chain.Rollback` lands.
 
 `reconcilePrimaryChainTipWithLedgerTip`'s common-ancestor rewind (used by
 startup reconciliation and by the live primary-chain/ledger divergence
-reconciler, see "Ledger/chain reconciliation") follows the
-`transactionEventMutex` + `validateAndEmitRollbackUndo` half of this
-ordering before calling `RewindPrimaryChainToPoint`, so it also emits undo
-events rather than truncating silently (issue #3516). It does not also take
-`drainBlockPipelineBeforeRollback`/`blockPipelineGatherMutex`: unlike
-`rollbackChainAndState`, this reconciler is reachable from `ledgerReadChain`
-itself — the same reader goroutine whose gather-then-submit span holds
-`blockPipelineGatherMutex`'s read lock — so adding the write lock here needs
-its own deadlock audit rather than reusing `rollbackChainAndState`'s
-sequencing by inspection. The narrower race that guard closes (a block the
-pipeline is still applying for the region being discarded can still commit
-with no matching undo) therefore remains open for this rewind path.
+reconciler, see "Ledger/chain reconciliation") follows the same full
+sequence: `blockPipelineGatherMutex`, then `drainBlockPipelineBeforeRollback`,
+then, under `transactionEventMutex`, `validateAndEmitRollbackUndo` and
+`RewindPrimaryChainToPoint`, so it emits undo events and excludes an
+in-flight gathered block the same way, rather than truncating silently
+(issue #3516). Taking `blockPipelineGatherMutex`'s write lock here is safe
+even though this reconciler is reachable from `ledgerReadChain` itself (the
+reader's own goroutine, on a missing chain-iterator start point): that call
+happens before `ledgerReadChain` ever creates the iterator
+`ledgerReadChainIterator` reads under the read lock, and `ledgerReadChain`
+returns immediately afterward without looping back, so the reader never
+holds that read lock while this runs.
 
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts
