@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -146,4 +147,80 @@ func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 	require.False(t, ok)
 	_, ok = o.lookupLeiosEndorserBlock(points[entries-1].Hash)
 	require.True(t, ok)
+}
+
+// Eviction correctness: eviction order must follow actual insertion order
+// (seq), not the wall-clock insertedAt captured before leiosMu is acquired. A
+// delayed goroutine can win the lock later while still carrying an earlier
+// insertedAt than a goroutine that actually inserted first; sorting by seq
+// instead keeps the truly-older entry as the eviction victim.
+func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
+	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 300)
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	tx := func() cbor.RawMessage { return cbor.RawMessage(make([]byte, 200)) }
+
+	firstPoint, firstRaw := testLeiosEndorserBlockRaw(t, 1)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(firstPoint, firstRaw, []cbor.RawMessage{tx()}),
+	)
+
+	// Simulate the race directly: the entry inserted first (and so holding
+	// the lower seq) is given a later wall-clock insertedAt than the entry
+	// about to be inserted second.
+	o.leiosMu.Lock()
+	first := o.leiosEndorserBlocks[leiosBlockKey(firstPoint.Hash)]
+	require.NotNil(t, first)
+	first.insertedAt = time.Now().Add(time.Hour)
+	o.leiosMu.Unlock()
+
+	secondPoint, secondRaw := testLeiosEndorserBlockRaw(t, 2)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			secondPoint,
+			secondRaw,
+			[]cbor.RawMessage{tx()},
+		),
+	)
+
+	// Both entries together exceed the 300-byte aggregate budget, forcing one
+	// eviction. Despite "first" appearing newest by insertedAt, it holds the
+	// lower seq (it was actually inserted first) and must be the one evicted.
+	_, firstStillCached := o.lookupLeiosEndorserBlock(firstPoint.Hash)
+	_, secondStillCached := o.lookupLeiosEndorserBlock(secondPoint.Hash)
+	require.False(t, firstStillCached)
+	require.True(t, secondStillCached)
+}
+
+// Oversized case, partial-retention path: retainLeiosPartialTxs publishes
+// merged partialTxs directly rather than through storeLeiosEndorserBlock, so
+// it needs its own per-entry byte-budget check -- otherwise a peer dribbling
+// enough small partial responses across repeated fetch attempts could grow an
+// entry past the budget without ever going through that check.
+func TestRetainLeiosPartialTxsRejectsMergeOverEntryByteBudget(t *testing.T) {
+	withLowerLeiosEndorserBlockCacheBudgets(t, 1500, 1<<20) // 1.5 KiB / 1 MiB
+	const txCount = 4
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 21, txCount)
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+
+	// A first partial, well under the budget, is retained normally.
+	small := make([]cbor.RawMessage, txCount)
+	small[0] = cbor.RawMessage(make([]byte, 500))
+	o.retainLeiosPartialTxs(point.Hash, small, nil)
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, 1, data.partialTxCount())
+
+	// A second partial that would push the merged entry over the per-entry
+	// byte budget is rejected -- the existing (smaller) partial survives.
+	big := make([]cbor.RawMessage, txCount)
+	big[1] = cbor.RawMessage(make([]byte, 5000))
+	o.retainLeiosPartialTxs(point.Hash, big, nil)
+
+	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, 1, data.partialTxCount())
+	require.LessOrEqual(t, data.approxBytes(), 1500)
 }

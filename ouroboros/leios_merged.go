@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -118,6 +119,13 @@ type leiosEndorserBlockData struct {
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
+	// seq is a monotonic insertion sequence assigned while leiosMu is held
+	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
+	// insertedAt. insertedAt is a wall-clock timestamp captured before the
+	// lock is acquired, so a delayed goroutine can carry an earlier timestamp
+	// into the map after a goroutine that actually inserted first; sorting
+	// eviction by seq instead avoids evicting the truly-newer entry first.
+	seq uint64
 }
 
 func leiosBlockKey(hash []byte) string {
@@ -284,6 +292,8 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+	o.leiosEndorserBlockSeq++
+	data.seq = o.leiosEndorserBlockSeq
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
 		if existing.point.Slot != point.Slot {
 			o.leiosMu.Unlock()
@@ -326,6 +336,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// servable entry and earns the same lifetime as any other.
 		if len(data.partialTxs) > 0 && !data.completeTxCache() {
 			data.insertedAt = existing.insertedAt
+			data.seq = existing.seq
 		}
 	}
 	if data.completeTxCache() {
@@ -560,11 +571,22 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 	if updated.partialTxCount() == 0 {
 		updated.partialTxs = nil
 	}
+	// Bound retained partial-fetch growth the same way storeLeiosEndorserBlock
+	// bounds a full store: a peer that dribbles enough small partial responses
+	// across repeated attempts could otherwise grow partialTxs past the
+	// per-entry byte budget without ever going through that check, since this
+	// path publishes directly rather than via storeLeiosEndorserBlock. Reject
+	// the merge and keep the existing (smaller) cached entry rather than
+	// publish an over-budget one.
+	if n := updated.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		return
+	}
 	for _, cacheKey := range existing.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == existing {
 			o.leiosEndorserBlocks[cacheKey] = &updated
 		}
 	}
+	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 }
 
 func (data *leiosEndorserBlockData) expired(now time.Time) bool {
@@ -602,8 +624,13 @@ func (o *Ouroboros) pruneLeiosEndorserBlockCacheLocked(now time.Time) {
 	for data := range uniqueBlocks {
 		blocks = append(blocks, data)
 	}
+	// Sort by seq, not insertedAt: insertedAt is a wall-clock timestamp
+	// captured before leiosMu is acquired, so a delayed goroutine can carry an
+	// earlier timestamp into the map after a goroutine that actually won the
+	// lock and inserted first. seq is assigned while the lock is held, so it
+	// reflects true insertion order.
 	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
-		return a.insertedAt.Compare(b.insertedAt)
+		return cmp.Compare(a.seq, b.seq)
 	})
 	// Evict oldest-inserted entries first until both the entry-count and the
 	// aggregate byte budget are satisfied. totalBytes is updated as each
@@ -762,6 +789,8 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil ||
 		existing.expired(time.Now()) {
 		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+		o.leiosEndorserBlockSeq++
+		data.seq = o.leiosEndorserBlockSeq
 		for _, key := range cacheKeys {
 			o.leiosEndorserBlocks[key] = data
 		}
