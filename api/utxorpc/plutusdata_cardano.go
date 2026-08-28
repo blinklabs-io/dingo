@@ -35,7 +35,7 @@ func plutusDatumCBORToCardano(raw []byte) (*cardano.PlutusData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode plutus data: %w", err)
 	}
-	proto, err := plutusDataToCardanoChecked(pd)
+	proto, err := plutusDataToCardano(pd)
 	if err != nil {
 		return nil, fmt.Errorf("convert plutus data: %w", err)
 	}
@@ -70,12 +70,8 @@ func redeemerPlutusDataByKey(
 }
 
 // plutusDataToCardano maps plutigo Plutus data to utxorpc.cardano PlutusData.
-func plutusDataToCardano(d pdata.PlutusData) *cardano.PlutusData {
-	proto, err := plutusDataToCardanoChecked(d)
-	if err != nil {
-		return nil
-	}
-	return proto
+func plutusDataToCardano(d pdata.PlutusData) (*cardano.PlutusData, error) {
+	return plutusDataToCardanoChecked(d)
 }
 
 func plutusDataToCardanoChecked(

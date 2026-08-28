@@ -28,7 +28,8 @@ import (
 
 func TestPlutusDataToCardano_IntegerInt64(t *testing.T) {
 	pd := pdata.NewInteger(big.NewInt(-42))
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	intv, ok := proto.GetPlutusData().(*cardano.PlutusData_BigInt)
 	require.True(t, ok)
@@ -40,7 +41,8 @@ func TestPlutusDataToCardano_IntegerInt64(t *testing.T) {
 func TestPlutusDataToCardano_IntegerBigUInt(t *testing.T) {
 	b := new(big.Int).Lsh(big.NewInt(1), 70) // > int64
 	pd := pdata.NewInteger(b)
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	intv, ok := proto.GetPlutusData().(*cardano.PlutusData_BigInt)
 	require.True(t, ok)
@@ -51,7 +53,8 @@ func TestPlutusDataToCardano_IntegerBigUInt(t *testing.T) {
 
 func TestPlutusDataToCardano_ByteString(t *testing.T) {
 	pd := pdata.NewByteString([]byte{0xab, 0xcd})
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	bs, ok := proto.GetPlutusData().(*cardano.PlutusData_BoundedBytes)
 	require.True(t, ok)
@@ -61,7 +64,8 @@ func TestPlutusDataToCardano_ByteString(t *testing.T) {
 func TestPlutusDataToCardano_ConstrAndList(t *testing.T) {
 	inner := pdata.NewList(pdata.NewInteger(big.NewInt(7)))
 	pd := pdata.NewConstr(0, inner)
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
 	require.True(t, ok)
@@ -78,7 +82,8 @@ func TestPlutusDataToCardano_Map(t *testing.T) {
 			{pdata.NewInteger(big.NewInt(1)), pdata.NewByteString([]byte{9})},
 		},
 	)
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	mv, ok := proto.GetPlutusData().(*cardano.PlutusData_Map)
 	require.True(t, ok)
 	require.Len(t, mv.Map.Pairs, 1)
@@ -86,7 +91,8 @@ func TestPlutusDataToCardano_Map(t *testing.T) {
 
 func TestPlutusDataToCardano_ConstrLargeTagUsesAnyConstructor(t *testing.T) {
 	pd := pdata.NewConstrFromBigInt(big.NewInt(200), pdata.NewInteger(big.NewInt(0)))
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
 	require.True(t, ok)
 	require.Equal(t, uint32(0), cv.Constr.Tag)
@@ -128,7 +134,9 @@ func TestPlutusDataToCardano_ConstrMaxTagUsesAnyConstructor(t *testing.T) {
 func TestPlutusDataToCardano_ConstrAboveMaxTagRejected(t *testing.T) {
 	tag := new(big.Int).Lsh(big.NewInt(1), 64)
 	pd := pdata.NewConstrFromBigInt(tag)
-	require.Nil(t, plutusDataToCardano(pd))
+	proto, err := plutusDataToCardano(pd)
+	require.Nil(t, proto)
+	require.Error(t, err)
 	_, err := plutusDataToCardanoChecked(pd)
 	require.EqualError(
 		t,
@@ -139,7 +147,8 @@ func TestPlutusDataToCardano_ConstrAboveMaxTagRejected(t *testing.T) {
 
 func TestPlutusDataToCardano_ConstrNilTagUsesZeroTag(t *testing.T) {
 	pd := &pdata.Constr{}
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
 	require.True(t, ok)
@@ -149,7 +158,9 @@ func TestPlutusDataToCardano_ConstrNilTagUsesZeroTag(t *testing.T) {
 
 func TestPlutusDataToCardano_ConstrNegativeTagRejected(t *testing.T) {
 	pd := pdata.NewConstrFromBigInt(big.NewInt(-1))
-	require.Nil(t, plutusDataToCardano(pd))
+	proto, err := plutusDataToCardano(pd)
+	require.Nil(t, proto)
+	require.Error(t, err)
 	_, err := plutusDataToCardanoChecked(pd)
 	require.EqualError(
 		t,
@@ -174,7 +185,9 @@ func TestPlutusDataToCardanoChecked_PropagatesNestedTagErrors(t *testing.T) {
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {
-			require.Nil(t, plutusDataToCardano(input))
+			proto, err := plutusDataToCardano(input)
+			require.Nil(t, proto)
+			require.Error(t, err)
 			_, err := plutusDataToCardanoChecked(input)
 			require.EqualError(
 				t,
@@ -266,7 +279,8 @@ func TestRedeemerPlutusDataByKey_DecodedWitness(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, bs.Inner)
 
-	proto := plutusDataToCardano(got)
+	proto, err := plutusDataToCardano(got)
+	require.NoError(t, err)
 	pay, ok := proto.GetPlutusData().(*cardano.PlutusData_BoundedBytes)
 	require.True(t, ok)
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, pay.BoundedBytes)
