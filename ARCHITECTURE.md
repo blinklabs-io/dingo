@@ -2450,8 +2450,11 @@ dependency across two points in the pipeline:
   eras (Shelley–Alonzo) enforce only monotonicity, so the gap rule is scoped by
   era rather than by validation mode (`shouldValidate` can be true for
   historical or near-tip TPraos blocks). A pool with no recorded counter has no
-  baseline (genuine first sighting, or a Mithril-restored start) and is accepted
-  as the baseline. Rollback safety is inherited from the per-`(pool, slot)`
+  baseline and is accepted as the baseline. A Mithril restore imports the
+  certified Praos HeaderState counter map at its trusted tip, so each included
+  pool has an authoritative baseline before the first replayed block; only a
+  pool absent from that map can establish a first local counter. Rollback safety
+  is inherited from the per-`(pool, slot)`
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
   is later rolled back.
