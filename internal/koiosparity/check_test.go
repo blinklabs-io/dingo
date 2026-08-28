@@ -1163,6 +1163,52 @@ func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
 func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
 	const network = "preview"
 	const koiosEpoch = uint64(14)
+
+	// The pool is absent from the K+1 pool set: it left, so its epoch-K block
+	// count has no row to live on and the gap is informational.
+	dingoDir, cachePath, _ := seedDepartureFixture(
+		t, network, koiosEpoch, false,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"a departed pool must not put epoch %d into ERROR", koiosEpoch,
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "reward_pool_input_params", mismatches[0].Field)
+	require.Equal(
+		t,
+		CategoryPoolDeparted,
+		mismatches[0].Category,
+		"the uncomparable block count is recorded, not silently skipped",
+	)
+}
+
+// seedDepartureFixture builds the epoch-K comparison fixture used by the
+// departure tests. paramEpochPoolInSet controls whether the pool still appears
+// in the K+1 mark pool_stake_snapshot, which is what separates a pool that
+// left the pool set from one whose reward inputs are missing.
+func seedDepartureFixture(
+	t *testing.T,
+	network string,
+	koiosEpoch uint64,
+	paramEpochPoolInSet bool,
+) (dingoDir, cachePath string, poolBech32 string) {
+	t.Helper()
 	stakeEpoch := koiosEpoch - 1
 	paramEpoch := koiosEpoch + 1
 
@@ -1177,7 +1223,6 @@ func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
 		TotalActiveStake: types.Uint64(5_000_000),
 		SnapshotReady:    true,
 	}).Error)
-	// The K+1 snapshot exists and simply does not contain this pool.
 	require.NoError(t, gdb.Create(&models.EpochSummary{
 		Epoch:            paramEpoch,
 		TotalActiveStake: types.Uint64(5_000_000),
@@ -1203,14 +1248,30 @@ func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
 		Fees:     types.Uint64(300),
 	}).Error)
 
+	// Another pool always sits in the K+1 set, so membership is established
+	// either way and the two cases differ only in this pool's presence.
+	require.NoError(t, gdb.Create(&models.PoolStakeSnapshot{
+		Epoch:        paramEpoch,
+		SnapshotType: "mark",
+		PoolKeyHash:  testPoolKeyHash(t, 0x0a),
+		TotalStake:   types.Uint64(1_000),
+	}).Error)
+	if paramEpochPoolInSet {
+		require.NoError(t, gdb.Create(&models.PoolStakeSnapshot{
+			Epoch:        paramEpoch,
+			SnapshotType: "mark",
+			PoolKeyHash:  poolHash,
+			TotalStake:   types.Uint64(5_000_000),
+		}).Error)
+	}
+
 	sqlDB, err := gdb.DB()
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
 
-	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cachePath = filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
-
 	fetchedAt := time.Now().Add(-time.Hour).UTC()
 	require.NoError(t, cache.CommitEpochData(
 		KoiosEpochInfo{
@@ -1242,6 +1303,26 @@ func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
 		},
 	))
 	require.NoError(t, cache.Close())
+	return dingoDir, cachePath, poolBech32
+}
+
+// TestCheckDegradedActivePoolStillErrors is the reviewer's degraded-active-pool
+// case. buildRewardStateInputs (ledger/snapshot/rotation.go) drops a pool with
+// stale registration data from reward_pool_input so one bad pool cannot wedge
+// the whole boundary capture, and says so explicitly: degraded pools are
+// excluded "and only from it — PoolStakeSnapshot and EpochSummary still
+// reflect the true observed stake".
+//
+// Such a pool is still in the K+1 pool set, so its missing reward-input row is
+// genuine missing input, not departure. Classifying it as pool_departed would
+// turn a real ERROR into a PASS, which is why departure is decided from
+// per-pool pool_stake_snapshot membership rather than from
+// epoch_summary.SnapshotReady (dingo #3485).
+func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixture(t, network, koiosEpoch, true)
 
 	result, err := Check(context.Background(), CheckConfig{
 		Network:   network,
@@ -1249,24 +1330,49 @@ func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
 		CachePath: cachePath,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
-	require.Empty(
+	require.Contains(
 		t,
 		result.ErrorEpochs,
-		"a departed pool must not put epoch %d into ERROR", koiosEpoch,
+		koiosEpoch,
+		"a pool still in the K+1 pool set with no reward-input row is "+
+			"missing input, not a departure",
 	)
-	require.Empty(t, result.FailEpochs)
 
-	cache, err = OpenCache(cachePath, nil)
+	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
 	require.NoError(t, err)
 	require.Len(t, mismatches, 1)
-	require.Equal(t, "reward_pool_input_params", mismatches[0].Field)
-	require.Equal(
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckMissingRewardBundleStillErrors is the reviewer's no-bundle case.
+// saveSnapshotInTxn persists the mark pool_stake_snapshot and epoch summary on
+// every transition "regardless of reward-input availability", so a ready
+// epoch_summary at K+1 is compatible with the entire reward-input bundle
+// having been skipped. Every pool then looks absent from reward_pool_input at
+// once, and none of them departed.
+//
+// The pool set at K+1 still lists them, so each stays an ERROR.
+func TestCheckMissingRewardBundleStillErrors(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// paramEpochPoolInSet: the whole bundle is missing, so no pool has a K+1
+	// reward_pool_input row while all of them remain in the pool set.
+	dingoDir, cachePath, _ := seedDepartureFixture(t, network, koiosEpoch, true)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
 		t,
-		CategoryPoolDeparted,
-		mismatches[0].Category,
-		"the uncomparable block count is recorded, not silently skipped",
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a skipped reward-input bundle must not read as every pool departing",
 	)
 }

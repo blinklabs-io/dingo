@@ -5395,7 +5395,14 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   the uncomparable field is still reported so the coverage gap is visible, but
   both sides agree the pool departed, so it neither fails nor errors the
   epoch. A missing row with no committed K+1 snapshot keeps the stricter
-  classification. The same split applies a third time to `reward_pool_input`'s
+  classification, as does a pool still listed in that set — a degraded active
+  pool is dropped from `reward_pool_input` "without changing
+  `pool_stake_snapshot` or `epoch_summary`" (see DATABASE.md), so only absence
+  from the pool set itself proves departure. `pool_stake_snapshot` is windowed
+  while `reward_pool_input` is retained for the life of the database, so an
+  epoch older than that window has no membership evidence and keeps the
+  stricter classification. The same split applies a third time to
+  `reward_pool_input`'s
   stake-epoch fields (`delegated_stake`/`delegator_count`/`fixed_cost`/
   `margin`, reported together as `reward_pool_input_stake` when absent) via
   `DingoPoolEpochData.StakePresent` — a pool whose stake-epoch row hasn't

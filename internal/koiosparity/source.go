@@ -69,6 +69,19 @@ type RewardParitySource interface {
 		ctx context.Context,
 		stakeEpoch, paramEpoch uint64,
 	) (map[string]*DingoPoolEpochData, error)
+	// GetPoolStakeSnapshotMembers returns the set of pool key hashes (hex)
+	// present in the mark pool_stake_snapshot for epoch, which is written on
+	// every epoch transition regardless of reward-input availability (see
+	// ledger/snapshot/rotation.go's saveSnapshotInTxn). It is therefore the
+	// per-pool evidence of whether a pool was still in the pool set at that
+	// epoch, which epoch_summary.SnapshotReady cannot provide: that flag is
+	// epoch-level and is set even when the whole reward-input bundle was
+	// skipped, and buildRewardStateInputs deliberately omits a degraded
+	// active pool from reward_pool_input while keeping it here.
+	GetPoolStakeSnapshotMembers(
+		ctx context.Context,
+		epoch uint64,
+	) (map[string]struct{}, error)
 	// GetRewardAccountOutputs returns every per-account reward calculation
 	// output row Dingo committed for epoch. Not yet consumed by any
 	// comparison (that is #3097's scope); exposed now so the source
@@ -203,6 +216,43 @@ func (s *DatabaseSource) GetEpochData(
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
 // reporting epoch koiosEpoch — see DingoDB.GetPoolEpochDataMap's doc comment
 // for the stakeEpoch/paramEpoch derivation this mirrors exactly.
+// GetPoolStakeSnapshotMembers implements RewardParitySource by reading the
+// mark pool_stake_snapshot rows for epoch.
+// snapshotTypeMark is the pool_stake_snapshot/reward_snapshot type the parity
+// comparison reads; Dingo writes the boundary capture under this name.
+const snapshotTypeMark = "mark"
+
+func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
+	ctx context.Context,
+	epoch uint64,
+) (map[string]struct{}, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	rows, err := s.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		epoch,
+		snapshotTypeMark,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pool_stake_snapshot epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	members := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		members[hex.EncodeToString(row.PoolKeyHash)] = struct{}{}
+	}
+	return members, nil
+}
+
 func (s *DatabaseSource) GetPoolEpochDataMap(
 	ctx context.Context,
 	stakeEpoch, paramEpoch uint64,

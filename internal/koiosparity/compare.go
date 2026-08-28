@@ -321,11 +321,15 @@ func CompareEpochTotals(
 // epochEndTime is the actual epoch close time (from KoiosEpochInfo.EpochEndTime);
 // zero means unknown. graceHours: if the epoch closed within this many hours and
 // Dingo has no reward_pool_input row, emit reference_lag instead of pool_only_koios.
-// paramEpochCaptured reports whether Dingo has committed the K+1 snapshot the
-// blocks_produced read depends on. It distinguishes a pool that left the pool
-// set -- absent from a snapshot that exists -- from one whose K+1 row simply
-// has not been written yet, which is a genuine gap. Resolved once per epoch by
-// checkEpoch rather than per pool, so every caller agrees on it.
+// departedAtParamEpoch reports whether this pool is provably absent from the
+// K+1 pool set, established from the mark pool_stake_snapshot rather than from
+// epoch_summary.SnapshotReady. That distinction matters: the snapshot writer
+// commits the epoch summary on every transition regardless of reward-input
+// availability, and deliberately omits a degraded active pool from
+// reward_pool_input while keeping it in the pool-stake snapshot. Both are
+// missing input rather than departure, so only per-pool absence from the K+1
+// pool set may downgrade the finding. False whenever membership could not be
+// established, which keeps the stricter classification (dingo #3485).
 func ComparePoolEpoch(
 	network string,
 	epoch uint64,
@@ -334,7 +338,7 @@ func ComparePoolEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
-	paramEpochCaptured bool,
+	departedAtParamEpoch bool,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
@@ -464,13 +468,15 @@ func ComparePoolEpoch(
 	if !dingoPool.ParamsPresent {
 		cat := CategoryDBMissing
 		switch {
-		case dingoPool.StakePresent && paramEpochCaptured:
-			// The pool was in this epoch's stake basis and is absent from a
-			// K+1 snapshot that exists, so it left the pool set. Its epoch-K
-			// block count is stamped onto the K+1 row that will never be
-			// written, so blocks_produced is not comparable for this one
-			// epoch. Recorded rather than skipped, so the gap is visible,
-			// but informational: both sides agree the pool departed.
+		case dingoPool.StakePresent && departedAtParamEpoch:
+			// The pool was in this epoch's stake basis and is absent from the
+			// K+1 pool set itself, so it left the set. Its epoch-K block
+			// count is stamped onto the K+1 row that will never be written,
+			// so blocks_produced is not comparable for this one epoch.
+			// Recorded rather than skipped, so the gap is visible, but
+			// informational: both sides agree the pool departed. A pool still
+			// in the K+1 pool set whose reward-input row is absent is missing
+			// input, not a departure, and falls through to the cases below.
 			cat = CategoryPoolDeparted
 		case graceHours > 0 && !epochEndTime.IsZero() &&
 			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
