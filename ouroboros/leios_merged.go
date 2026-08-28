@@ -56,6 +56,39 @@ var errLeiosClosureUnresolved = errors.New(
 	"leios endorser closure unresolved before timeout",
 )
 
+// leiosConnDoneContext adapts a serving connection's done channel to
+// context.Context so it can be combined with context.WithTimeout via
+// context.WithTimeout(leiosConnDoneContext{done: connDone}, timeout). The
+// resulting context is done when either the timeout elapses or connDone
+// closes, whichever comes first, so a closure wait started for one NtC
+// request or connection cannot outlive it. A nil done channel behaves like
+// context.Background(): it never fires on its own, leaving the timeout as the
+// only bound.
+type leiosConnDoneContext struct {
+	done <-chan struct{}
+}
+
+func (c leiosConnDoneContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c leiosConnDoneContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c leiosConnDoneContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c leiosConnDoneContext) Value(any) any {
+	return nil
+}
+
 // leiosClosureWaitTimeout returns how long the NtC serving path waits for a
 // certifying ranking block's endorser closure. An explicit config override
 // wins (tests/tuning); otherwise it uses the same pipeline timing
@@ -1061,7 +1094,10 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 	if p == nil || p.Mode() != protocol.ProtocolModeNodeToClient {
 		return block.Cbor, nil
 	}
-	return o.serveLeiosRankingBlockCbor(block)
+	// p.DoneChan() ties a pending closure wait to this connection's lifetime:
+	// it closes as soon as the connection ends, so the wait does not remain
+	// parked for the full window after the request it serves is gone.
+	return o.serveLeiosRankingBlockCbor(block, p.DoneChan())
 }
 
 // serveLeiosRankingBlockCbor resolves the NtC representation of a Dijkstra
@@ -1070,9 +1106,12 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 // decision (merge / serve-raw / disconnect) is unit-testable without a live
 // chainsync server. A block whose header is certified is never downgraded to
 // the raw serve path: it is either merged or an error is returned so the
-// connection is closed.
+// connection is closed. connDone, when non-nil, bounds any closure wait to
+// the serving connection's lifetime in addition to the configured timeout; it
+// is nil in tests that do not model a live connection.
 func (o *Ouroboros) serveLeiosRankingBlockCbor(
 	block models.Block,
+	connDone <-chan struct{},
 ) ([]byte, error) {
 	merged, ok, err := o.mergedLeiosRankingBlockCbor(block.Cbor)
 	if err != nil {
@@ -1121,21 +1160,27 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 		)
 	}
 	// Certified and resolved: wait a bounded window for the endorser closure.
-	return o.serveLeiosCertRbWithWait(block, ebHash)
+	return o.serveLeiosCertRbWithWait(block, ebHash, connDone)
 }
 
-// serveLeiosCertRbWithWait waits a bounded window (the ledger's endorser-block
-// wait window, see leiosClosureWaitTimeout) for a certifying ranking block's
-// endorser closure to be cached, returning the merged block if it arrives. On
-// timeout it returns errLeiosClosureUnresolved so the caller closes the
-// connection instead of serving an incomplete (empty-transaction) CertRB — the
-// client then retries the same point, avoiding a permanently-incomplete record.
+// serveLeiosCertRbWithWait waits a bounded window for a certifying ranking
+// block's endorser closure to be cached, returning the merged block if it
+// arrives. The wait is bounded by two independent things, whichever elapses
+// first: the ledger's endorser-block wait window (leiosClosureWaitTimeout),
+// and connDone, the serving connection's done channel. A connection that
+// closes or a request that ends while the wait is pending therefore wakes it
+// immediately rather than holding it parked for the rest of the window. On
+// timeout or cancellation it returns errLeiosClosureUnresolved so the caller
+// closes the connection instead of serving an incomplete (empty-transaction)
+// CertRB — the client then retries the same point, avoiding a
+// permanently-incomplete record.
 func (o *Ouroboros) serveLeiosCertRbWithWait(
 	block models.Block,
 	ebHash lcommon.Blake2b256,
+	connDone <-chan struct{},
 ) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(
-		context.Background(),
+		leiosConnDoneContext{done: connDone},
 		o.leiosClosureWaitTimeout(),
 	)
 	defer cancel()
@@ -1154,8 +1199,18 @@ func (o *Ouroboros) serveLeiosCertRbWithWait(
 		)
 		return merged, nil
 	}
+	// Distinguish why the wait ended: the configured window elapsed
+	// (timeout), or connDone closed first (cancelled) -- e.g. the client
+	// disconnected or the request ended while the closure was still missing.
+	// context.WithTimeout propagates the parent's cancellation cause, so a
+	// parent-driven end reports context.Canceled here even though the
+	// deadline had not yet elapsed.
+	waitOutcome := "timeout"
+	if errors.Is(ctx.Err(), context.Canceled) {
+		waitOutcome = "cancelled"
+	}
 	o.recordLeiosCertRbOutcome("unresolved")
-	o.recordLeiosCertRbWait("timeout", waited)
+	o.recordLeiosCertRbWait(waitOutcome, waited)
 	o.config.Logger.Warn(
 		"endorser closure unresolved for CertRB within wait window; closing NtC chainsync connection so the client retries rather than recording a block with no transactions",
 		"slot",
@@ -1166,13 +1221,16 @@ func (o *Ouroboros) serveLeiosCertRbWithWait(
 		ebHash.String(),
 		"waited",
 		waited,
+		"wait_outcome",
+		waitOutcome,
 	)
 	return nil, fmt.Errorf(
-		"%w: slot %d hash %s eb %s (waited %s)",
+		"%w: slot %d hash %s eb %s (waited %s, %s)",
 		errLeiosClosureUnresolved,
 		block.Slot,
 		hex.EncodeToString(block.Hash),
 		ebHash.String(),
 		waited,
+		waitOutcome,
 	)
 }

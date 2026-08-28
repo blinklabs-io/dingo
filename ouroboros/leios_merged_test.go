@@ -1271,7 +1271,7 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
 	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block)
+	got, err := o.serveLeiosRankingBlockCbor(block, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
@@ -1285,7 +1285,7 @@ func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 6)
 	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block)
+	got, err := o.serveLeiosRankingBlockCbor(block, nil)
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw), got)
 }
@@ -1397,6 +1397,7 @@ func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 	o.recordLeiosCertRbOutcome("unresolved")
 	o.recordLeiosCertRbWait("resolved", 100*time.Millisecond)
 	o.recordLeiosCertRbWait("timeout", 3*time.Second)
+	o.recordLeiosCertRbWait("cancelled", 5*time.Millisecond)
 
 	require.Equal(t, float64(1), promtestutil.ToFloat64(
 		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged"),
@@ -1407,8 +1408,8 @@ func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 	require.Equal(t, float64(2), promtestutil.ToFloat64(
 		o.leiosMetrics.certRbOutcomes.WithLabelValues("unresolved"),
 	))
-	// One histogram series per wait outcome (resolved, timeout).
-	require.Equal(t, 2, promtestutil.CollectAndCount(
+	// One histogram series per wait outcome (resolved, timeout, cancelled).
+	require.Equal(t, 3, promtestutil.CollectAndCount(
 		o.leiosMetrics.certRbWaitSeconds,
 	))
 }
@@ -1456,10 +1457,105 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 		LeiosClosureWaitTimeout: 20 * time.Millisecond,
 	})
 	block := models.Block{Cbor: certRB, Slot: 77, Hash: []byte{0x77}}
-	got, err := o.serveLeiosCertRbWithWait(block, ebHash)
+	got, err := o.serveLeiosCertRbWithWait(block, ebHash, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
+	require.Contains(t, err.Error(), "timeout")
+}
+
+// TestServeLeiosCertRbWithWaitCancelsOnConnectionDone reproduces issue #3514:
+// the closure wait must not remain parked for the full wait window once the
+// serving connection ends. It configures a wait window far longer than the
+// test should ever take, closes connDone immediately, and requires the call
+// to return well within the window with the defined unresolved-closure error.
+func TestServeLeiosCertRbWithWaitCancelsOnConnectionDone(t *testing.T) {
+	certRB := testDijkstraCertRBRaw(t, 78, make([]byte, lcommon.Blake2b256Size))
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xee
+
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios: true,
+		// Far longer than this test's own timeout budget: if connDone did not
+		// bound the wait, the assertions below would time out first.
+		LeiosClosureWaitTimeout: time.Hour,
+	})
+	block := models.Block{Cbor: certRB, Slot: 78, Hash: []byte{0x78}}
+
+	connDone := make(chan struct{})
+	close(connDone)
+
+	done := make(chan struct{})
+	var (
+		got []byte
+		err error
+	)
+	go func() {
+		got, err = o.serveLeiosCertRbWithWait(block, ebHash, connDone)
+		close(done)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"closure wait to cancel promptly when the connection is already done",
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errLeiosClosureUnresolved)
+	require.Nil(t, got)
+	require.Contains(t, err.Error(), "cancelled")
+}
+
+// TestServeLeiosCertRbWithWaitCancelsWhenConnectionEndsMidWait covers the
+// wait actually in progress (not already done) being woken by the connection
+// ending, as distinct from the already-done case above and from a natural
+// timeout.
+func TestServeLeiosCertRbWithWaitCancelsWhenConnectionEndsMidWait(t *testing.T) {
+	certRB := testDijkstraCertRBRaw(t, 79, make([]byte, lcommon.Blake2b256Size))
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xff
+
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosClosureWaitTimeout: time.Hour,
+	})
+	block := models.Block{Cbor: certRB, Slot: 79, Hash: []byte{0x79}}
+
+	connDone := make(chan struct{})
+	done := make(chan struct{})
+	var (
+		got []byte
+		err error
+	)
+	go func() {
+		got, err = o.serveLeiosCertRbWithWait(block, ebHash, connDone)
+		close(done)
+	}()
+
+	// Let the wait actually register before ending the connection.
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			o.leiosMu.RLock()
+			defer o.leiosMu.RUnlock()
+			return len(o.leiosClosureWaiters[leiosBlockKey(ebHash.Bytes())]) > 0
+		},
+		2*time.Second,
+		"closure waiter to register",
+	)
+	close(connDone)
+
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"closure wait to cancel promptly when the connection ends mid-wait",
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errLeiosClosureUnresolved)
+	require.Nil(t, got)
+	require.Contains(t, err.Error(), "cancelled")
 }
 
 // TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs reproduces the
