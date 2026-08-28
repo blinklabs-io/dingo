@@ -147,6 +147,11 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// leiosEndorserBlockSeq is a monotonic counter assigned to a cache entry
+	// while leiosMu is held, so eviction order reflects actual insertion order
+	// even when a delayed goroutine captured an earlier wall-clock insertedAt
+	// but loses the race for the lock. See leiosEndorserBlockData.seq.
+	leiosEndorserBlockSeq uint64
 	// Waiters blocked in the NtC serving path until an endorser block's
 	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
 	// channel is closed once a complete closure is stored for that key.

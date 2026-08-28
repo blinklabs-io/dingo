@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -47,6 +48,30 @@ const (
 	// 20-slot certify-by deadline at the 1s Musashi slot length, so it is not
 	// shorter than the documented healthy closure-delivery path.
 	defaultLeiosClosureWaitTimeout = 20 * time.Second
+)
+
+// leiosEndorserBlockCacheMaxEntryBytes and leiosEndorserBlockCacheMaxBytes are
+// declared as vars, not consts, solely so tests can lower them temporarily
+// (save, override, t.Cleanup restore) to exercise byte-budget rejection and
+// eviction without allocating hundreds of megabytes of test data. Production
+// code only reads them.
+var (
+	// leiosEndorserBlockCacheMaxEntryBytes bounds the retained size (manifest
+	// plus every transaction body held, complete or partial) of a single
+	// cached endorser block. It bounds one oversized or malicious entry
+	// independently of leiosEndorserBlockCacheMaxEntries, which only bounds
+	// entry count. An offer whose declared size already exceeds this, or
+	// whose fetched body would put the entry over it, is rejected rather
+	// than cached; see storeLeiosEndorserBlock and
+	// fetchAndValidateLeiosEbManifest.
+	leiosEndorserBlockCacheMaxEntryBytes = 16 << 20 // 16 MiB
+	// leiosEndorserBlockCacheMaxBytes bounds the aggregate retained size of
+	// the endorser-block cache. leiosEndorserBlockCacheMaxEntries alone would
+	// let leiosEndorserBlockCacheMaxEntries maximally-sized entries retain
+	// several GiB; this bounds actual memory directly. Eviction at either
+	// budget follows the same oldest-inserted-first policy; see
+	// pruneLeiosEndorserBlockCacheLocked.
+	leiosEndorserBlockCacheMaxBytes = 256 << 20 // 256 MiB
 )
 
 // errLeiosClosureUnresolved is returned by the NtC serving path when a
@@ -236,6 +261,13 @@ type leiosEndorserBlockData struct {
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
+	// seq is a monotonic insertion sequence assigned while leiosMu is held
+	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
+	// insertedAt. insertedAt is a wall-clock timestamp captured before the
+	// lock is acquired, so a delayed goroutine can carry an earlier timestamp
+	// into the map after a goroutine that actually inserted first; sorting
+	// eviction by seq instead avoids evicting the truly-newer entry first.
+	seq uint64
 }
 
 func leiosBlockKey(hash []byte) string {
@@ -402,6 +434,8 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+	o.leiosEndorserBlockSeq++
+	data.seq = o.leiosEndorserBlockSeq
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
 		if existing.point.Slot != point.Slot {
 			o.leiosMu.Unlock()
@@ -444,11 +478,24 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// servable entry and earns the same lifetime as any other.
 		if len(data.partialTxs) > 0 && !data.completeTxCache() {
 			data.insertedAt = existing.insertedAt
+			data.seq = existing.seq
 		}
 	}
 	if data.completeTxCache() {
 		// The transaction set is whole; the resume state is now dead weight.
 		data.partialTxs = nil
+	}
+	// Reject rather than cache an entry that would exceed the per-entry byte
+	// budget. Any smaller entry already cached under cacheKeys (e.g. a
+	// manifest-only store) is left untouched, since the map has not been
+	// mutated yet at this point.
+	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		o.leiosMu.Unlock()
+		return fmt.Errorf(
+			"leios endorser block cache: entry size %d exceeds max %d",
+			n,
+			leiosEndorserBlockCacheMaxEntryBytes,
+		)
 	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
@@ -494,6 +541,25 @@ func (o *Ouroboros) leiosDatabase() *database.Database {
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
 	return data != nil && len(data.txsRaw) == data.txCount
+}
+
+// approxBytes estimates the memory retained by one cache entry: the manifest
+// plus every transaction body currently held, complete (txsRaw) or partial
+// (partialTxs). It undercounts slice/map overhead, which is acceptable for a
+// budget meant to bound the dominant cost -- the transaction and manifest
+// payloads themselves -- rather than account for every byte.
+func (data *leiosEndorserBlockData) approxBytes() int {
+	if data == nil {
+		return 0
+	}
+	total := len(data.blockRaw)
+	for _, raw := range data.txsRaw {
+		total += len(raw)
+	}
+	for _, raw := range data.partialTxs {
+		total += len(raw)
+	}
+	return total
 }
 
 // partialTxCount returns how many of the endorser block's transactions are
@@ -647,11 +713,22 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 	if updated.partialTxCount() == 0 {
 		updated.partialTxs = nil
 	}
+	// Bound retained partial-fetch growth the same way storeLeiosEndorserBlock
+	// bounds a full store: a peer that dribbles enough small partial responses
+	// across repeated attempts could otherwise grow partialTxs past the
+	// per-entry byte budget without ever going through that check, since this
+	// path publishes directly rather than via storeLeiosEndorserBlock. Reject
+	// the merge and keep the existing (smaller) cached entry rather than
+	// publish an over-budget one.
+	if n := updated.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		return
+	}
 	for _, cacheKey := range existing.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == existing {
 			o.leiosEndorserBlocks[cacheKey] = &updated
 		}
 	}
+	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 }
 
 func (data *leiosEndorserBlockData) expired(now time.Time) bool {
@@ -680,19 +757,49 @@ func (o *Ouroboros) pruneLeiosEndorserBlockCacheLocked(now time.Time) {
 			delete(uniqueBlocks, data)
 		}
 	}
-	if len(uniqueBlocks) <= leiosEndorserBlockCacheMaxEntries {
+	totalBytes := totalLeiosEndorserBlockBytes(uniqueBlocks)
+	if len(uniqueBlocks) <= leiosEndorserBlockCacheMaxEntries &&
+		totalBytes <= leiosEndorserBlockCacheMaxBytes {
 		return
 	}
 	blocks := make([]*leiosEndorserBlockData, 0, len(uniqueBlocks))
 	for data := range uniqueBlocks {
 		blocks = append(blocks, data)
 	}
+	// Sort by seq, not insertedAt: insertedAt is a wall-clock timestamp
+	// captured before leiosMu is acquired, so a delayed goroutine can carry an
+	// earlier timestamp into the map after a goroutine that actually won the
+	// lock and inserted first. seq is assigned while the lock is held, so it
+	// reflects true insertion order.
 	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
-		return a.insertedAt.Compare(b.insertedAt)
+		return cmp.Compare(a.seq, b.seq)
 	})
-	for _, data := range blocks[:len(blocks)-leiosEndorserBlockCacheMaxEntries] {
+	// Evict oldest-inserted entries first until both the entry-count and the
+	// aggregate byte budget are satisfied. totalBytes is updated as each
+	// victim is chosen instead of being recomputed from scratch.
+	evict := 0
+	for evict < len(blocks) &&
+		(len(blocks)-evict > leiosEndorserBlockCacheMaxEntries ||
+			totalBytes > leiosEndorserBlockCacheMaxBytes) {
+		totalBytes -= blocks[evict].approxBytes()
+		evict++
+	}
+	for _, data := range blocks[:evict] {
 		o.deleteLeiosEndorserBlockDataLocked(data)
 	}
+}
+
+// totalLeiosEndorserBlockBytes sums approxBytes across every unique cached
+// endorser block, for the aggregate byte budget enforced by
+// pruneLeiosEndorserBlockCacheLocked.
+func totalLeiosEndorserBlockBytes(
+	blocks map[*leiosEndorserBlockData]struct{},
+) int {
+	total := 0
+	for data := range blocks {
+		total += data.approxBytes()
+	}
+	return total
 }
 
 func (o *Ouroboros) deleteLeiosEndorserBlockDataLocked(
@@ -815,6 +922,22 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		cacheKeys:  cacheKeys,
 		insertedAt: time.Now(),
 	}
+	// A persisted (or pre-cap-era) blob can exceed the per-entry byte budget
+	// even though storeLeiosEndorserBlock would reject it on the write path;
+	// this reload path must apply the same check rather than let a
+	// leios-fetch MsgBlockRequest for an old point repopulate the cache past
+	// the limit on every cache miss. Serve it to the caller uncached rather
+	// than dropping it outright.
+	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		o.config.Logger.Debug(
+			"leios EB reloaded from blob store exceeds max entry size; serving uncached",
+			"component", "network",
+			"hash", hex.EncodeToString(hash),
+			"size", n,
+			"max_size", leiosEndorserBlockCacheMaxEntryBytes,
+		)
+		return data, true
+	}
 	// Populate the in-memory cache so subsequent lookups skip the DB.
 	o.leiosMu.Lock()
 	if o.leiosEndorserBlocks == nil {
@@ -824,9 +947,16 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil ||
 		existing.expired(time.Now()) {
 		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+		o.leiosEndorserBlockSeq++
+		data.seq = o.leiosEndorserBlockSeq
 		for _, key := range cacheKeys {
 			o.leiosEndorserBlocks[key] = data
 		}
+		// Prune again after inserting so a reload that fits the per-entry
+		// budget but pushes the aggregate over its budget is evicted
+		// promptly, the same way storeLeiosEndorserBlock prunes both before
+		// and after admitting an entry.
+		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	} else {
 		data = existing
 	}
