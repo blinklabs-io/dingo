@@ -258,7 +258,9 @@ func TestNewDingoPostgresStateManagerRestartSurvivesReopen(t *testing.T) {
 
 	schema := fmt.Sprintf("conformance_restart_%d", time.Now().UnixNano())
 	t.Cleanup(func() {
-		_ = dropPostgresSchema(dsn, schema)
+		if err := dropPostgresSchema(dsn, schema); err != nil {
+			t.Errorf("drop postgres restart-test schema %q: %v", schema, err)
+		}
 	})
 
 	m1, err := newDingoPostgresStateManagerAtSchema(dsn, blobDataDir, schema)

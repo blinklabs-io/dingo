@@ -234,7 +234,9 @@ func TestNewDingoMysqlStateManagerRestartSurvivesReopen(t *testing.T) {
 
 	database := fmt.Sprintf("conformance_restart_%d", time.Now().UnixNano())
 	t.Cleanup(func() {
-		_ = dropMysqlDatabase(rootDSN, database)
+		if err := dropMysqlDatabase(rootDSN, database); err != nil {
+			t.Errorf("drop mysql restart-test database %q: %v", database, err)
+		}
 	})
 
 	m1, err := newDingoMysqlStateManagerAtDatabase(
