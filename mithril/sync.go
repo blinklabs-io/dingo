@@ -352,7 +352,7 @@ func markSyncInProgress(db *database.Database, storageMode string) error {
 // download + verify + extract a snapshot, import ledger state and immutable
 // blocks, close the volatile gap, backfill metadata, and mark the sync
 // complete. The resulting database is servable by dingo.Node.Run.
-func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
+func Sync(ctx context.Context, cfg SyncConfig) (result SyncResult, syncErr error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -718,7 +718,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"sync did not complete; "+
 					"re-run 'dingo mithril sync' to resume",
 				"component", "mithril",
-				"error", err,
+				"error", syncErr,
 			)
 		}
 	}()
