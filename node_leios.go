@@ -190,13 +190,9 @@ func leiosCommitteeParamsFromPParams(
 }
 
 // initLeiosVoteManager builds and starts the Leios vote manager and wires
-// it into the ouroboros component's protocol handlers. Invalid voter
-// registry entries are fatal at startup.
+// it into the ouroboros component's protocol handlers. The ledger key provider
+// is authoritative; production composition does not install a static registry.
 func (n *Node) initLeiosVoteManager(ctx context.Context) error {
-	registry, err := leios.NewVoterRegistry(n.config.leiosVoterPublicKeys)
-	if err != nil {
-		return fmt.Errorf("invalid leios voter public keys: %w", err)
-	}
 	stakeAdapter := &leiosStakeDistributionAdapter{
 		inner: stakeDistributionAdapter{
 			ledgerState: n.ledgerState,
@@ -224,7 +220,6 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// timing the pipeline manager uses, so the two components admit
 		// votes over the same window and cannot drift.
 		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
-		Registry:        registry,
 		PromRegistry:    n.config.promRegistry,
 	})
 	if err != nil {
@@ -352,13 +347,8 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
 	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-		// ValidateVotingKey's own error already names which sources it
-		// checked (the on-chain registration and leiosVoterPublicKeys) and
-		// whether the problem was "not found" or "found but mismatched," so
-		// no remedy is added here: the on-chain key takes precedence over
-		// leiosVoterPublicKeys, so directing every failure at the static
-		// registry would be wrong advice whenever the real problem is a key
-		// that no longer matches the pool's on-chain registration.
+		// ValidateVotingKey reports whether the PoP-verified on-chain key is
+		// missing or mismatched. Production has no static-key fallback.
 		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
 	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
