@@ -107,12 +107,12 @@ func filesMatching(
 	}
 	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Output()
 	if err != nil || !sameDiscoveryRoot(rootAbs, strings.TrimSpace(string(topLevel))) {
-		return filesMatchingWalk(t, root, match)
+		return filesMatchingWalk(t, rootAbs, match)
 	}
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
 	output, err := cmd.Output()
 	if err != nil {
-		return filesMatchingWalk(t, root, match)
+		return filesMatchingWalk(t, rootAbs, match)
 	}
 	for rel := range strings.SplitSeq(string(output), "\x00") {
 		if rel == "" {
@@ -434,6 +434,31 @@ func TestDocumentationDiscoveryRecognizesAliasedRepositoryRoot(t *testing.T) {
 	}
 	if got, want := workflowFiles(t, alias), []string{".github/workflows/tracked.yml"}; !slices.Equal(got, want) {
 		t.Errorf("aliased workflowFiles() = %v, want %v", got, want)
+	}
+}
+
+func TestDocumentationDiscoveryFollowsAliasedSourceArchive(t *testing.T) {
+	archive := t.TempDir()
+	writeTestFile(t, archive, "docs/source.md")
+	writeTestFile(t, archive, "Dockerfile")
+	writeTestFile(t, archive, ".github/workflows/source.yml")
+	writeTestFile(t, archive, ".codex/worktrees/scratch/ignored.md")
+	writeTestFile(t, archive, ".codex/worktrees/scratch/Dockerfile")
+	writeTestFile(t, archive, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
+
+	alias := filepath.Join(t.TempDir(), "archive-alias")
+	if err := os.Symlink(archive, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+
+	if got, want := markdownFiles(t, alias), []string{"docs/source.md"}; !slices.Equal(got, want) {
+		t.Errorf("aliased archive markdownFiles() = %v, want %v", got, want)
+	}
+	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(got, want) {
+		t.Errorf("aliased archive dockerfiles() = %v, want %v", got, want)
+	}
+	if got, want := workflowFiles(t, alias), []string{".github/workflows/source.yml"}; !slices.Equal(got, want) {
+		t.Errorf("aliased archive workflowFiles() = %v, want %v", got, want)
 	}
 }
 
