@@ -158,6 +158,33 @@ func TestPlutusDataToCardano_ConstrNegativeTagRejected(t *testing.T) {
 	)
 }
 
+func TestPlutusDataToCardanoChecked_PropagatesNestedTagErrors(t *testing.T) {
+	bad := pdata.NewConstrFromBigInt(new(big.Int).Lsh(big.NewInt(1), 64))
+	cases := map[string]pdata.PlutusData{
+		"constructor field": pdata.NewConstrFromBigInt(big.NewInt(0), bad),
+		"map key": pdata.NewMap([][2]pdata.PlutusData{{
+			bad,
+			pdata.NewInteger(big.NewInt(0)),
+		}}),
+		"map value": pdata.NewMap([][2]pdata.PlutusData{{
+			pdata.NewInteger(big.NewInt(0)),
+			bad,
+		}}),
+		"list item": pdata.NewList(bad),
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			require.Nil(t, plutusDataToCardano(input))
+			_, err := plutusDataToCardanoChecked(input)
+			require.EqualError(
+				t,
+				err,
+				"constructor tag 18446744073709551616 is outside the Word64 CBOR range",
+			)
+		})
+	}
+}
+
 func TestPlutusDatumCBORToCardano_Integer(t *testing.T) {
 	raw, err := pdata.Encode(pdata.NewInteger(big.NewInt(42)))
 	require.NoError(t, err)
