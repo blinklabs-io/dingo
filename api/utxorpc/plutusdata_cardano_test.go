@@ -123,7 +123,8 @@ func TestPlutusDataToCardanoChecked_ConstrTag128UsesAnyConstructor(t *testing.T)
 
 func TestPlutusDataToCardano_ConstrMaxTagUsesAnyConstructor(t *testing.T) {
 	pd := pdata.NewConstrFromBigInt(new(big.Int).SetUint64(^uint64(0)))
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
 	require.True(t, ok)
@@ -137,7 +138,7 @@ func TestPlutusDataToCardano_ConstrAboveMaxTagRejected(t *testing.T) {
 	proto, err := plutusDataToCardano(pd)
 	require.Nil(t, proto)
 	require.Error(t, err)
-	_, err := plutusDataToCardanoChecked(pd)
+	_, err = plutusDataToCardanoChecked(pd)
 	require.EqualError(
 		t,
 		err,
@@ -161,7 +162,7 @@ func TestPlutusDataToCardano_ConstrNegativeTagRejected(t *testing.T) {
 	proto, err := plutusDataToCardano(pd)
 	require.Nil(t, proto)
 	require.Error(t, err)
-	_, err := plutusDataToCardanoChecked(pd)
+	_, err = plutusDataToCardanoChecked(pd)
 	require.EqualError(
 		t,
 		err,
@@ -188,7 +189,7 @@ func TestPlutusDataToCardanoChecked_PropagatesNestedTagErrors(t *testing.T) {
 			proto, err := plutusDataToCardano(input)
 			require.Nil(t, proto)
 			require.Error(t, err)
-			_, err := plutusDataToCardanoChecked(input)
+			_, err = plutusDataToCardanoChecked(input)
 			require.EqualError(
 				t,
 				err,
