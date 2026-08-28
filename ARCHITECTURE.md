@@ -4945,11 +4945,19 @@ configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
 "API security" above.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
-transaction evaluation, and transaction submission. `POST
-/api/v0/utils/txs/evaluate` accepts a serialized CBOR transaction and returns
-the ledger-calculated execution-unit map keyed by redeemer pointer; it does
-not submit or require a fully valid, balanced transaction. The current router
-includes health/root, blocks,
+transaction evaluation, and transaction submission. Transaction evaluation is
+served at `POST /api/v0/utils/txs/evaluate`, which takes the transaction
+encoded as base16 or base64 (raw CBOR bytes are still accepted), and at `POST
+/api/v0/utils/txs/evaluate/utxos`, which takes the JSON body
+`{"cbor": ..., "additionalUtxoSet": [...]}` that off-chain SDKs send. Both
+return the ledger-calculated execution units keyed by redeemer pointer inside
+the Ogmios `EvaluateTx` envelope Blockfrost passes through
+(`result.EvaluationResult`), which is where those SDKs read them; neither
+submits the transaction nor requires it to be fully valid and balanced.
+Evaluation resolves inputs from the ledger's own UTxO set, so a non-empty
+`additionalUtxoSet` is rejected rather than silently ignored, and the
+`version` query parameter accepts only Blockfrost's default of `5`. The
+current router includes health/root, blocks,
 epochs/parameters, network/eras, genesis, assets, pools list, pools/extended,
 retiring pools, pool detail, pool metadata, governance DRep list and lookup, address
 summary, address UTxOs and transactions, metadata label JSON/CBOR,
