@@ -932,6 +932,54 @@ func TestChainRollback(t *testing.T) {
 	}
 }
 
+// TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin covers a real,
+// hash-bearing rollback target at slot 0. Origin is Slot==0 AND an empty
+// Hash (ocommon.NewPointOrigin); a rollback point gating only on
+// `point.Slot > 0` treats any slot-0 target as origin regardless of its
+// hash, silently discarding a real block's hash and truncating the whole
+// chain instead of the requested single block.
+func TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, len(testBlocks))
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// testBlocks[0] sits at slot 0 but is a real, hash-bearing block, not
+	// the origin sentinel.
+	slotZeroBlock := testBlocks[0]
+	rollbackPoint := ocommon.Point{
+		Slot: slotZeroBlock.SlotNumber(),
+		Hash: slotZeroBlock.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("unexpected error rolling back to slot-zero block: %s", err)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != rollbackPoint.Slot ||
+		!bytes.Equal(tip.Point.Hash, rollbackPoint.Hash) {
+		t.Fatalf(
+			"rollback to slot-zero block collapsed to origin: got tip %d.%x, wanted %d.%x",
+			tip.Point.Slot, tip.Point.Hash,
+			rollbackPoint.Slot, rollbackPoint.Hash,
+		)
+	}
+	// The slot-zero block itself must survive the rollback: only the
+	// blocks after it should have been pruned.
+	if _, err := db.BlockByIndex(1, nil); err != nil {
+		t.Fatalf(
+			"expected the slot-zero block to remain after rollback: %s",
+			err,
+		)
+	}
+}
+
 func TestChainHeaderRange(t *testing.T) {
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)

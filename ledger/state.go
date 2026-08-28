@@ -7688,6 +7688,33 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		"ancestor_hash",
 		hex.EncodeToString(ancestor.Hash),
 	)
+	// Emit the ordered ledger.tx undo events for the blocks this rewind is
+	// about to discard before physically truncating anything, the same
+	// validate-then-emit-then-truncate contract rollbackChainAndState
+	// follows for a peer-driven rollback (see validateAndEmitRollbackUndo).
+	// Skipping this left ledger.tx subscribers with no undo for a chain
+	// truncation the live divergence reconciler performed silently.
+	//
+	// This does NOT also take drainBlockPipelineBeforeRollback/
+	// blockPipelineGatherMutex the way rollbackChainAndState does, so a
+	// block the pipeline is still applying for the region being discarded
+	// can still commit with no matching undo, the same narrower race
+	// rollbackChainAndState closes for a peer-driven rollback (see its
+	// doc comment). Reconciliation reaches here from ledgerReadChain
+	// itself (the reader's own goroutine) as well as from other
+	// goroutines, and blockPipelineGatherMutex's read lock is held across
+	// that same reader's gather-then-submit span, so adding the write
+	// lock here needs its own deadlock audit rather than reusing
+	// rollbackChainAndState's sequencing by inspection.
+	ls.transactionEventMutex.Lock()
+	emitErr := ls.validateAndEmitRollbackUndo(ancestor)
+	ls.transactionEventMutex.Unlock()
+	if emitErr != nil {
+		return fmt.Errorf(
+			"validate rewind to common primary-chain ancestor: %w",
+			emitErr,
+		)
+	}
 	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
 		ancestor,
 	); err != nil {

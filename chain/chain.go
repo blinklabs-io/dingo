@@ -872,7 +872,7 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	}
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
-	if point.Slot > 0 {
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		tmpBlock, err := c.rollbackPointBlock(point)
 		if err != nil {
 			return err
@@ -942,7 +942,7 @@ func (c *Chain) rollbackLocked(
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
 	var tmpBlock models.Block
-	if point.Slot > 0 {
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		var err error
 		tmpBlock, err = c.rollbackPointBlock(point)
 		if err != nil {

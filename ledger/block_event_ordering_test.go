@@ -617,6 +617,60 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 	)
 }
 
+// TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating
+// covers the live primary-chain/ledger divergence reconciler
+// (issue #3516): rewinding the primary chain to their common ancestor must
+// follow the same validate-then-emit-then-truncate contract
+// rollbackChainAndState uses for a peer-driven rollback, so ledger.tx
+// subscribers still see an undo for blocks this reconciliation discards.
+// Before this fix the reconciler called RewindPrimaryChainToPoint directly
+// and never read blocksAboveSlot at all, so this decode error -- proof the
+// undo path ran -- was never emitted.
+func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Put the primary chain on a same-height fork of the ledger's current
+	// tip: the ledger tip is no longer on the primary chain, but the
+	// fixture's ancestor still is, so reconciliation rewinds to it.
+	forkHash := testHashBytes("reconcile-undo-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	evt := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"undo-event decode error for the block the rewind discarded",
+	)
+	le, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+}
+
 // TestBlocksAboveSlotServesLedgerErrorOnlySubscribers guards the
 // no-subscriber fast path against suppressing decode failures: a consumer
 // watching only ledger.error still needs to see them.
