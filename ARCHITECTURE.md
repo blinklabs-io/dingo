@@ -5385,26 +5385,35 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   absent) via `DingoPoolEpochData.ParamsPresent`, for the same reason: a
   not-yet-captured param-epoch row must not silently compare as zero blocks
   against Koios's real value. That split has one exception. A pool that was in
-  epoch K's stake basis but is absent from a K+1 snapshot Dingo has already
-  committed did not fail to compute — it left the pool set, and the K+1 row
-  its epoch-K block count would have been stamped onto is never written.
-  `checkEpoch` resolves once per epoch whether the K+1 snapshot exists
-  (`GetEpochData` returns nil unless `epoch_summary.SnapshotReady` is set) and
-  passes that to `ComparePoolEpoch`, which then records `pool_departed`
+  epoch K's stake basis but is absent from the K+1 pool set did not fail to
+  compute — it left the set, and the K+1 row its epoch-K block count would
+  have been stamped onto is never written. `checkEpoch` reads the K+1 mark
+  `pool_stake_snapshot` membership once per epoch through
+  `RewardParitySource.GetPoolStakeSnapshotMembers` and passes each pool's
+  proven absence to `ComparePoolEpoch`, which then records `pool_departed`
   instead. That category is informational, like the account lifecycle ones:
   the uncomparable field is still reported so the coverage gap is visible, but
   both sides agree the pool departed, so it neither fails nor errors the
-  epoch. A missing row with no committed K+1 snapshot keeps the stricter
-  classification, as does a pool still listed in that set — a degraded active
-  pool is dropped from `reward_pool_input` "without changing
-  `pool_stake_snapshot` or `epoch_summary`" (see DATABASE.md), so only absence
-  from the pool set itself proves departure. `pool_stake_snapshot` is windowed
-  while `reward_pool_input` is retained for the life of the database, so an
-  epoch older than that window has no membership evidence and keeps the
-  stricter classification. The same split applies a third time to
-  `reward_pool_input`'s
-  stake-epoch fields (`delegated_stake`/`delegator_count`/`fixed_cost`/
-  `margin`, reported together as `reward_pool_input_stake` when absent) via
+  epoch.
+
+  Membership, not `epoch_summary.SnapshotReady`, is what proves departure.
+  `SnapshotReady` is epoch-level: `saveSnapshotInTxn` writes the epoch summary
+  and the mark `pool_stake_snapshot` on every transition regardless of
+  reward-input availability, so a ready summary is compatible with the whole
+  reward-input bundle having been skipped, and `buildRewardStateInputs` drops
+  a degraded active pool from `reward_pool_input` "without changing
+  `pool_stake_snapshot` or `epoch_summary`" (see DATABASE.md). Both are
+  missing input rather than departure, and both would pass under an
+  epoch-level flag. A pool still listed in the K+1 set therefore keeps the
+  stricter classification, as does an unreadable or empty member set — empty
+  cannot distinguish "captured, no pools" from "not captured". Because
+  `pool_stake_snapshot` is windowed while `reward_pool_input` is retained for
+  the life of the database, an epoch older than that window has no membership
+  evidence and keeps the stricter classification too.
+
+  The same split applies a third time to `reward_pool_input`'s stake-epoch
+  fields (`delegated_stake`/`delegator_count`/`fixed_cost`/`margin`, reported
+  together as `reward_pool_input_stake` when absent) via
   `DingoPoolEpochData.StakePresent` — a pool whose stake-epoch row hasn't
   landed yet (e.g. a freshly registered pool captured first at the param
   epoch) must not silently compare as zero stake/delegators/cost/margin
