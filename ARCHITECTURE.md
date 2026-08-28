@@ -2095,12 +2095,14 @@ because prior pot transitions cannot be repaired safely without replay.
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
-Validated Alonzo, Babbage, and Conway block application runs phase 1 for every
-transaction and re-evaluates phase 2 for both declared validity outcomes before
-applying the transaction delta. A transaction marked valid must execute every
-Plutus script successfully; a transaction marked invalid must produce a local
-script-execution failure. Either mismatch rejects the block transaction before
-its regular-input or collateral effects can commit. Historical blocks already
+Validated Alonzo, Babbage, Conway, and Dijkstra block application runs phase 1
+for every transaction. `ValidateTxDijkstra` evaluates phase 2 independently of
+the declared validity flag, then reconciles the local execution result with
+that declaration before applying the transaction delta. A transaction marked
+valid must execute every Plutus script successfully; a transaction marked
+invalid must produce a local script-execution failure. Either mismatch rejects
+the block transaction before its regular-input or collateral effects can commit.
+Historical blocks already
 at least `k` deep retain the explicit replay-only phase-2 skip; their declared
 outcomes are trusted only inside that immutable replay window.
 
