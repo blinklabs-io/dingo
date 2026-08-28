@@ -117,6 +117,54 @@ func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 	require.Nil(t, got)
 }
 
+// TestDRepDelegationReadsRealBackendNotGovStateMirror proves the audit's
+// "backend bypass" finding is fixed: DRepDelegation must read the real
+// account.drep column through the backend, not the govState pre-validation
+// mirror, so a backend that never persists or returns account.drep
+// correctly cannot hide behind a mirror that happens to agree. Following
+// the reviewer's own probe, this stores one delegation only in govState
+// (the mirror) and a different delegation only in the real backend, then
+// asserts DRepDelegation returns the backend's value.
+func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	cred := common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0x31),
+	}
+
+	// Mirror-only delegation: a script-hash DRep the real backend never
+	// sees.
+	mirrorDrepCredential := testHash28(0x32)
+	m.govState.SetDRepDelegation(cred, common.Drep{
+		Type:       common.DrepTypeScriptHash,
+		Credential: mirrorDrepCredential[:],
+	})
+
+	// Backend-only delegation: always-abstain, written directly to
+	// account.drep_type/account.drep, disagreeing with the mirror above.
+	require.NoError(t, m.db.CreateAccount(nil, &models.Account{
+		StakingKey:    cred.Credential[:],
+		CredentialTag: 0,
+		DrepType:      models.DrepTypeAlwaysAbstain,
+		Active:        true,
+	}))
+
+	provider := NewDingoStateProvider(m)
+	delegation, err := provider.DRepDelegation(cred)
+	require.NoError(t, err)
+	require.NotNil(t, delegation)
+	require.Equal(
+		t,
+		int(models.DrepTypeAlwaysAbstain),
+		delegation.Type,
+		"DRepDelegation must return the real backend's delegation, not the govState mirror's",
+	)
+	require.Empty(t, delegation.Credential)
+}
+
 // TestProcessEpochAgainstRealBackend drives the epoch-boundary path end to
 // end against a real DingoStateManager backend: the real
 // governance.ProcessEpoch orchestration (not exercised by the per-vector

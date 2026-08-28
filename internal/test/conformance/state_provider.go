@@ -18,6 +18,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -564,20 +565,49 @@ func (p *DingoStateProvider) DRepRegistration(
 }
 
 // DRepDelegation returns the DRep a stake credential is vote-delegated to, or
-// nil if it is not delegated. Used to validate reward withdrawals on protocol
-// versions 10 and 11.
+// nil if it is not delegated. Used to validate reward withdrawals on
+// protocol versions 10 and 11. Reads the account's real account.drep column
+// through the real backend, matching production's
+// ledger.LedgerView.DRepDelegation, rather than the govState pre-validation
+// mirror: a real backend that never persists or returns account.drep
+// correctly would still pass every vector here if this read the mirror
+// instead, since ApplyTransaction's certificate processing writes
+// delegation through the real SetTransactionMetadataOnly path regardless of
+// what this read side consults.
 func (p *DingoStateProvider) DRepDelegation(
 	cred common.Credential,
 ) (*common.Drep, error) {
-	delegation, ok := p.manager.govState.DRepDelegationsByCredential[mockledger.NewRewardAccountKey(cred)]
-	if !ok && len(p.manager.govState.DRepDelegationsByCredential) == 0 {
-		delegation, ok = p.manager.govState.DRepDelegations[cred.Credential]
+	credentialTag := conformanceCredentialTag(cred)
+	account, err := withBadConnRetry(func() (*models.Account, error) {
+		return p.manager.db.GetAccountByCredential(
+			credentialTag, cred.Credential[:], false, nil,
+		)
+	})
+	if err != nil {
+		if errors.Is(err, models.ErrAccountNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get account for drep delegation: %w", err)
 	}
-	if !ok {
+	if account == nil {
 		return nil, nil
 	}
-	delegation.Credential = append([]byte(nil), delegation.Credential...)
-	return &delegation, nil
+	// No DRep delegation: an empty credential together with the default
+	// key-hash type. An always-abstain / always-no-confidence delegation
+	// carries no credential but a non-default type, so it is a delegation.
+	if len(account.Drep) == 0 &&
+		account.DrepType == models.DrepTypeAddrKeyHash {
+		return nil, nil
+	}
+	// DrepType is a small ledger enum (0-3); guard the narrowing conversion
+	// so an out-of-range value degrades to "no DRep" rather than wrapping.
+	if account.DrepType > uint64(math.MaxInt) {
+		return nil, nil
+	}
+	return &common.Drep{
+		Type:       int(account.DrepType),
+		Credential: append([]byte(nil), account.Drep...),
+	}, nil
 }
 
 // DRepRegistrations returns all DRep registrations
