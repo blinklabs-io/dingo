@@ -584,6 +584,20 @@ Performance (preview network, ~4M blocks):
 | Backfill historical metadata | — | ~varies |
 | Total | ~50 min | ~50 min + backfill |
 
+### Observed Mithril Bootstrap Timings
+
+The following timings were measured during profiled `core`-mode validation
+runs on 2026-08-26 and 2026-08-28, from bootstrap start through completion:
+
+| Network | Snapshot ready | Bootstrap complete |
+|---------|-----------------|--------------------|
+| mainnet | 41m 51s | 9h 10m 56s |
+| preprod | 4m 07s | 37m 56s |
+| preview | 12m 11s | 46m 22s |
+
+Mainnet's total includes its index rebuild; subsequent restarts reused the
+completed database rather than repeating the bootstrap.
+
 ### Disk Space Requirements
 
 Bootstrapping requires temporary disk space for both the downloaded snapshot and the Dingo database:
