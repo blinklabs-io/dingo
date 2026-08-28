@@ -286,3 +286,83 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 	slices.Reverse(blocks)
 	return blocks
 }
+
+// reconciliationUndoBlocks returns the blocks the ledger itself applied
+// between ancestor (exclusive) and ledgerTipSlot (inclusive), newest first,
+// for the primary-chain/ledger divergence reconciler (issue #3516).
+//
+// It deliberately does not reuse blocksAboveSlot: that helper reads
+// whatever the primary chain's blob store currently holds above a slot,
+// which is correct for a live, not-yet-applied rollback (the blocks being
+// discarded are still there), but wrong here. By the time this reconciler
+// runs, chain selection has already replaced the primary chain's content
+// between ancestor and the ledger's old tip with a different, competing
+// branch -- the blocks the ledger actually applied are gone from that
+// index, not merely about to be removed. Reading "whatever occupies these
+// slots now" would build undo events for the new branch's blocks, which the
+// ledger never applied, instead of the old branch's, which it did.
+//
+// The durable block_nonce rows are the ledger's own record of which points
+// it applied (see durableAppliedFloor), independent of what the primary
+// chain currently holds, so this resolves each one by point through
+// ChainManager.BlockByPoint -- which checks the manager's retained
+// block-cache before the database, so a still-cached abandoned block
+// resolves even after chain selection removed it from the active index.
+// A point that resolves to neither is skipped (logged), the same
+// best-effort degradation blocksAboveSlot uses for a decode failure: the
+// reconciliation is what keeps the ledger correct, and it must not fail
+// because a notification could not be built.
+func (ls *LedgerState) reconciliationUndoBlocks(
+	ancestor ocommon.Point,
+	ledgerTipSlot uint64,
+) []models.Block {
+	if ls.config.EventBus == nil || ls.db == nil ||
+		ls.config.ChainManager == nil {
+		return nil
+	}
+	if !ls.config.EventBus.HasSubscribers(TransactionEventType) &&
+		!ls.config.EventBus.HasSubscribers(LedgerErrorEventType) {
+		return nil
+	}
+	if ledgerTipSlot <= ancestor.Slot {
+		return nil
+	}
+	nonceRows, err := ls.db.GetBlockNoncesInSlotRange(
+		ancestor.Slot,
+		ledgerTipSlot+1,
+		nil,
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read applied block points for reconciliation undo events",
+			"component", "ledger",
+			"error", err,
+			"ancestor_slot", ancestor.Slot,
+			"ledger_tip_slot", ledgerTipSlot,
+		)
+		return nil
+	}
+	blocks := make([]models.Block, 0, len(nonceRows))
+	for _, row := range slices.Backward(nonceRows) {
+		if row.Slot <= ancestor.Slot {
+			// The ancestor's own row: it is being kept, not undone.
+			continue
+		}
+		block, err := ls.config.ChainManager.BlockByPoint(
+			ocommon.NewPoint(row.Slot, row.Hash),
+			nil,
+		)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to resolve applied block for reconciliation undo event",
+				"component", "ledger",
+				"error", err,
+				"slot", row.Slot,
+				"hash", hex.EncodeToString(row.Hash),
+			)
+			continue
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks
+}

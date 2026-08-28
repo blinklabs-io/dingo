@@ -8409,11 +8409,10 @@ events on the same `ledger.tx` lane, the moment `ls.chain.Rollback` lands.
 
 `reconcilePrimaryChainTipWithLedgerTip`'s common-ancestor rewind (used by
 startup reconciliation and by the live primary-chain/ledger divergence
-reconciler, see "Ledger/chain reconciliation") follows the same full
-sequence: `blockPipelineGatherMutex`, then `drainBlockPipelineBeforeRollback`,
-then, under `transactionEventMutex`, `validateAndEmitRollbackUndo` and
-`RewindPrimaryChainToPoint`, so it emits undo events and excludes an
-in-flight gathered block the same way, rather than truncating silently
+reconciler, see "Ledger/chain reconciliation") follows the same
+`blockPipelineGatherMutex`, then `drainBlockPipelineBeforeRollback`, then
+`transactionEventMutex` shape `rollbackChainAndState` uses, so it excludes
+an in-flight gathered block the same way rather than truncating silently
 (issue #3516). Taking `blockPipelineGatherMutex`'s write lock here is safe
 even though this reconciler is reachable from `ledgerReadChain` itself (the
 reader's own goroutine, on a missing chain-iterator start point): that call
@@ -8421,6 +8420,38 @@ happens before `ledgerReadChain` ever creates the iterator
 `ledgerReadChainIterator` reads under the read lock, and `ledgerReadChain`
 returns immediately afterward without looping back, so the reader never
 holds that read lock while this runs.
+
+Unlike `rollbackChainAndState`, it does not pair a dry-run
+`ValidateRollback` with a separately-locked `RewindPrimaryChainToPoint`:
+`Chain.RollbackWithPreTruncateHook` (`chain/chain.go`) instead calls a
+caller-supplied hook from inside `rollbackLocked` itself, once the rewind
+is accepted but still holding `c.mutex`/`c.manager.mutex` continuously
+through to the truncation right after it. A validate-then-separately-
+truncate pairing leaves a real gap open in between: `AddBlock`/
+`AddBlockWithPoint` (blockfetch delivering a new block) takes only those
+same chain locks, independent of `transactionEventMutex`, so the primary
+chain can grow enough between the two calls to invalidate what
+`ValidateRollback` found, letting a hook-free caller publish undo events
+for a rewind that a moment later gets rejected as exceeding the security
+parameter. The hook closes that: nothing needing the same locks can run
+between it publishing and the truncation that follows, so a published undo
+is guaranteed to land. The hook itself must not call back into anything
+that takes those locks (`ChainManager.BlockByPoint` included), which is why
+the reconciler resolves what to undo before entering this whole sequence,
+not from inside the hook.
+
+That resolution is also where the reconciler's undo events diverge from
+`blocksAboveSlot`'s: by the time this rewind runs, chain selection has
+already replaced the primary chain's content between the ancestor and the
+ledger's old tip with a different, competing branch, so reading whatever
+the blob store currently holds at those slots (`blocksAboveSlot`) would
+build undo events for blocks the ledger never applied. `reconciliationUndoBlocks`
+(`ledger/block_event.go`) instead reads the ledger's own `block_nonce`
+rows for the applied points in that range and resolves each one via
+`ChainManager.BlockByPoint`, which checks the manager's retained
+block-cache before the database — so an abandoned block chain selection
+already removed from the active index still resolves as long as the cache
+still holds it.
 
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts

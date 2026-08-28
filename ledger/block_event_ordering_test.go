@@ -646,7 +646,10 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 
 	// Put the primary chain on a same-height fork of the ledger's current
 	// tip: the ledger tip is no longer on the primary chain, but the
-	// fixture's ancestor still is, so reconciliation rewinds to it.
+	// fixture's ancestor still is, so reconciliation rewinds to it. This
+	// also removes fixture.currentTip -- the block the ledger actually
+	// applied -- from the primary chain's active index, retaining it
+	// only in the manager's block cache.
 	forkHash := testHashBytes("reconcile-undo-fork")
 	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
 	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
@@ -664,11 +667,20 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 
 	evt := testutil.RequireReceive(
 		t, errCh, 2*time.Second,
-		"undo-event decode error for the block the rewind discarded",
+		"undo-event decode error for the block the ledger actually applied",
 	)
 	le, ok := evt.Data.(LedgerErrorEvent)
 	require.True(t, ok, "unexpected payload %T", evt.Data)
 	require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+	// The undo must be built from fixture.currentTip -- what the ledger
+	// applied and is rolling back -- not from forkHash, the replacement
+	// branch's block the ledger never applied at all.
+	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"expected exactly one undo decode error",
+	)
 }
 
 // TestBlocksAboveSlotServesLedgerErrorOnlySubscribers guards the

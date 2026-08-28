@@ -426,14 +426,39 @@ func (cm *ChainManager) loadPrimaryChain() error {
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
-	primaryChain, err := cm.primaryChain()
+	primaryChain, err := cm.persistentPrimaryChain()
 	if err != nil {
 		return err
 	}
-	if !primaryChain.persistent {
-		return errors.New("primary chain is not persistent")
-	}
 	return primaryChain.Rollback(point)
+}
+
+// RewindPrimaryChainToPointWithHook behaves like RewindPrimaryChainToPoint,
+// but calls hook atomically with the rewind's acceptance -- see
+// Chain.RollbackWithPreTruncateHook. Use this instead of
+// RewindPrimaryChainToPoint whenever the caller needs to publish its own
+// side effects (e.g. ledger.tx undo events) exactly when, and only when,
+// this specific rewind is guaranteed to actually land.
+func (cm *ChainManager) RewindPrimaryChainToPointWithHook(
+	point ocommon.Point,
+	hook func(rollbackBlockIndex uint64, forkDepth uint64) error,
+) error {
+	primaryChain, err := cm.persistentPrimaryChain()
+	if err != nil {
+		return err
+	}
+	return primaryChain.RollbackWithPreTruncateHook(point, hook)
+}
+
+func (cm *ChainManager) persistentPrimaryChain() (*Chain, error) {
+	primaryChain, err := cm.primaryChain()
+	if err != nil {
+		return nil, err
+	}
+	if !primaryChain.persistent {
+		return nil, errors.New("primary chain is not persistent")
+	}
+	return primaryChain, nil
 }
 
 func (cm *ChainManager) addBlock(
