@@ -48,6 +48,30 @@ const (
 	defaultLeiosClosureWaitTimeout = 20 * time.Second
 )
 
+// leiosEndorserBlockCacheMaxEntryBytes and leiosEndorserBlockCacheMaxBytes are
+// declared as vars, not consts, solely so tests can lower them temporarily
+// (save, override, t.Cleanup restore) to exercise byte-budget rejection and
+// eviction without allocating hundreds of megabytes of test data. Production
+// code only reads them.
+var (
+	// leiosEndorserBlockCacheMaxEntryBytes bounds the retained size (manifest
+	// plus every transaction body held, complete or partial) of a single
+	// cached endorser block. It bounds one oversized or malicious entry
+	// independently of leiosEndorserBlockCacheMaxEntries, which only bounds
+	// entry count. An offer whose declared size already exceeds this, or
+	// whose fetched body would put the entry over it, is rejected rather
+	// than cached; see storeLeiosEndorserBlock and
+	// fetchAndValidateLeiosEbManifest.
+	leiosEndorserBlockCacheMaxEntryBytes = 16 << 20 // 16 MiB
+	// leiosEndorserBlockCacheMaxBytes bounds the aggregate retained size of
+	// the endorser-block cache. leiosEndorserBlockCacheMaxEntries alone would
+	// let leiosEndorserBlockCacheMaxEntries maximally-sized entries retain
+	// several GiB; this bounds actual memory directly. Eviction at either
+	// budget follows the same oldest-inserted-first policy; see
+	// pruneLeiosEndorserBlockCacheLocked.
+	leiosEndorserBlockCacheMaxBytes = 256 << 20 // 256 MiB
+)
+
 // errLeiosClosureUnresolved is returned by the NtC serving path when a
 // certifying ranking block's endorser closure does not arrive within the wait
 // window. The caller closes the connection rather than serving an incomplete
@@ -308,6 +332,18 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// The transaction set is whole; the resume state is now dead weight.
 		data.partialTxs = nil
 	}
+	// Reject rather than cache an entry that would exceed the per-entry byte
+	// budget. Any smaller entry already cached under cacheKeys (e.g. a
+	// manifest-only store) is left untouched, since the map has not been
+	// mutated yet at this point.
+	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		o.leiosMu.Unlock()
+		return fmt.Errorf(
+			"leios endorser block cache: entry size %d exceeds max %d",
+			n,
+			leiosEndorserBlockCacheMaxEntryBytes,
+		)
+	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
 	}
@@ -352,6 +388,25 @@ func (o *Ouroboros) leiosDatabase() *database.Database {
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
 	return data != nil && len(data.txsRaw) == data.txCount
+}
+
+// approxBytes estimates the memory retained by one cache entry: the manifest
+// plus every transaction body currently held, complete (txsRaw) or partial
+// (partialTxs). It undercounts slice/map overhead, which is acceptable for a
+// budget meant to bound the dominant cost -- the transaction and manifest
+// payloads themselves -- rather than account for every byte.
+func (data *leiosEndorserBlockData) approxBytes() int {
+	if data == nil {
+		return 0
+	}
+	total := len(data.blockRaw)
+	for _, raw := range data.txsRaw {
+		total += len(raw)
+	}
+	for _, raw := range data.partialTxs {
+		total += len(raw)
+	}
+	return total
 }
 
 // partialTxCount returns how many of the endorser block's transactions are
@@ -538,7 +593,9 @@ func (o *Ouroboros) pruneLeiosEndorserBlockCacheLocked(now time.Time) {
 			delete(uniqueBlocks, data)
 		}
 	}
-	if len(uniqueBlocks) <= leiosEndorserBlockCacheMaxEntries {
+	totalBytes := totalLeiosEndorserBlockBytes(uniqueBlocks)
+	if len(uniqueBlocks) <= leiosEndorserBlockCacheMaxEntries &&
+		totalBytes <= leiosEndorserBlockCacheMaxBytes {
 		return
 	}
 	blocks := make([]*leiosEndorserBlockData, 0, len(uniqueBlocks))
@@ -548,9 +605,32 @@ func (o *Ouroboros) pruneLeiosEndorserBlockCacheLocked(now time.Time) {
 	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
 		return a.insertedAt.Compare(b.insertedAt)
 	})
-	for _, data := range blocks[:len(blocks)-leiosEndorserBlockCacheMaxEntries] {
+	// Evict oldest-inserted entries first until both the entry-count and the
+	// aggregate byte budget are satisfied. totalBytes is updated as each
+	// victim is chosen instead of being recomputed from scratch.
+	evict := 0
+	for evict < len(blocks) &&
+		(len(blocks)-evict > leiosEndorserBlockCacheMaxEntries ||
+			totalBytes > leiosEndorserBlockCacheMaxBytes) {
+		totalBytes -= blocks[evict].approxBytes()
+		evict++
+	}
+	for _, data := range blocks[:evict] {
 		o.deleteLeiosEndorserBlockDataLocked(data)
 	}
+}
+
+// totalLeiosEndorserBlockBytes sums approxBytes across every unique cached
+// endorser block, for the aggregate byte budget enforced by
+// pruneLeiosEndorserBlockCacheLocked.
+func totalLeiosEndorserBlockBytes(
+	blocks map[*leiosEndorserBlockData]struct{},
+) int {
+	total := 0
+	for data := range blocks {
+		total += data.approxBytes()
+	}
+	return total
 }
 
 func (o *Ouroboros) deleteLeiosEndorserBlockDataLocked(
