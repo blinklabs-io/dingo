@@ -5405,11 +5405,23 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `pool_stake_snapshot` or `epoch_summary`" (see DATABASE.md). Both are
   missing input rather than departure, and both would pass under an
   epoch-level flag. A pool still listed in the K+1 set therefore keeps the
-  stricter classification, as does an unreadable or empty member set — empty
-  cannot distinguish "captured, no pools" from "not captured". Because
-  `pool_stake_snapshot` is windowed while `reward_pool_input` is retained for
-  the life of the database, an epoch older than that window has no membership
-  evidence and keeps the stricter classification too.
+  stricter classification.
+
+  Absence only proves departure against a set known to be complete, so the
+  member count is checked against the K+1 `epoch_summary.TotalPoolCount`
+  before it is trusted. `saveSnapshotInTxn` writes that count and those mark
+  rows from the same `StakeDistribution`, so equality between them is what
+  establishes completeness — deliberately the epoch summary's count and not
+  `RewardSnapshot.TotalPoolCount`, which counts the reduced reward
+  distribution with degraded pools already excluded. Without that check a
+  summary declaring two pools with only one readable mark row would make the
+  missing pool look departed and hide a `dingo_db_missing`. Anything short of
+  equality leaves membership unproven and keeps the stricter classification:
+  a read error, an empty set (which cannot distinguish "captured, no pools"
+  from "not captured"), no ready summary, a zero count, or a disagreeing
+  count. Because `pool_stake_snapshot` is windowed while `reward_pool_input`
+  is retained for the life of the database, an epoch older than that window
+  has no membership evidence and keeps the stricter classification too.
 
   The same split applies a third time to `reward_pool_input`'s stake-epoch
   fields (`delegated_stake`/`delegator_count`/`fixed_cost`/`margin`, reported

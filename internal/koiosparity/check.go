@@ -526,21 +526,54 @@ func checkEpoch(
 	// Resolved once here so every pool in this epoch is judged against the
 	// same read. A lookup error or an empty set leaves membership unproven,
 	// which keeps the stricter dingo_db_missing classification (dingo #3485).
+	// Absence is only departure proof when the set it is measured against is
+	// known complete. A non-empty read is not enough on its own: if the K+1
+	// summary declares two pools and only one mark row comes back, the
+	// missing one would look departed and hide a dingo_db_missing. The
+	// epoch summary's TotalPoolCount is written from the same
+	// StakeDistribution as those rows (rotation.go), so equality between the
+	// two is what establishes completeness. Anything short of that -- a read
+	// error, an empty set, no ready summary, a zero count, or a count that
+	// disagrees -- leaves membership unproven and keeps the stricter
+	// dingo_db_missing classification (dingo #3485).
 	var paramEpochPools map[string]struct{}
-	if members, pErr := dingo.GetPoolStakeSnapshotMembers(
-		ctx, paramEpoch,
-	); pErr != nil {
+	members, membersErr := dingo.GetPoolStakeSnapshotMembers(ctx, paramEpoch)
+	switch {
+	case membersErr != nil:
 		logger.Debug(
 			"koiosparity: could not resolve param-epoch pool-set membership",
 			"network", network,
 			"epoch", epoch,
 			"param_epoch", paramEpoch,
-			"error", pErr,
+			"error", membersErr,
 		)
-	} else if len(members) > 0 {
-		// An empty set cannot distinguish "captured, no pools" from "not
-		// captured at all", so it is not treated as proof of capture.
-		paramEpochPools = members
+	case len(members) == 0:
+		// Cannot distinguish "captured, no pools" from "not captured".
+	default:
+		paramSummary, sErr := dingo.GetEpochData(ctx, paramEpoch)
+		switch {
+		case sErr != nil:
+			logger.Debug(
+				"koiosparity: could not resolve param-epoch pool count",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"error", sErr,
+			)
+		case paramSummary == nil || paramSummary.TotalPoolCount == 0:
+			// No ready summary, or no declared count to verify against.
+		case uint64(len(members)) != paramSummary.TotalPoolCount:
+			logger.Debug(
+				"koiosparity: param-epoch pool set is incomplete",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"members", len(members),
+				"declared", paramSummary.TotalPoolCount,
+			)
+		default:
+			paramEpochPools = members
+		}
 	}
 	if dingoPoolErr != nil {
 		// Record the DB failure and skip all per-pool comparisons.

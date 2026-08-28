@@ -1209,6 +1209,23 @@ func seedDepartureFixture(
 	paramEpochPoolInSet bool,
 ) (dingoDir, cachePath string, poolBech32 string) {
 	t.Helper()
+	return seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, paramEpochPoolInSet, 0,
+	)
+}
+
+// seedDepartureFixtureWithCount is seedDepartureFixture with control over the
+// K+1 epoch_summary's declared TotalPoolCount. declaredPools of 0 means "match
+// the mark rows actually written", i.e. a complete set; a larger value
+// simulates a set that was only partially read.
+func seedDepartureFixtureWithCount(
+	t *testing.T,
+	network string,
+	koiosEpoch uint64,
+	paramEpochPoolInSet bool,
+	declaredPools uint64,
+) (dingoDir, cachePath string, poolBech32 string) {
+	t.Helper()
 	stakeEpoch := koiosEpoch - 1
 	paramEpoch := koiosEpoch + 1
 
@@ -1223,9 +1240,20 @@ func seedDepartureFixture(
 		TotalActiveStake: types.Uint64(5_000_000),
 		SnapshotReady:    true,
 	}).Error)
+	// One mark row is always written for another pool; the subject pool adds
+	// a second when it is still in the set. The summary declares that same
+	// count unless the caller is simulating a partial read.
+	markRows := uint64(1)
+	if paramEpochPoolInSet {
+		markRows = 2
+	}
+	if declaredPools == 0 {
+		declaredPools = markRows
+	}
 	require.NoError(t, gdb.Create(&models.EpochSummary{
 		Epoch:            paramEpoch,
 		TotalActiveStake: types.Uint64(5_000_000),
+		TotalPoolCount:   declaredPools,
 		SnapshotReady:    true,
 	}).Error)
 	require.NoError(t, gdb.Create(&models.RewardPoolInput{
@@ -1375,4 +1403,46 @@ func TestCheckMissingRewardBundleStillErrors(t *testing.T) {
 		koiosEpoch,
 		"a skipped reward-input bundle must not read as every pool departing",
 	)
+}
+
+// TestCheckIncompleteParamEpochPoolSetStillErrors is the completeness case: a
+// non-empty pool-set read does not prove the set was fully recorded or fully
+// read.
+//
+// The K+1 epoch summary here declares two pools while only one mark row is
+// present. The absent pool would look departed against that partial set, which
+// would pass the epoch and hide a dingo_db_missing. Membership is only trusted
+// when the number of readable mark rows equals the count the summary declares,
+// both being written from the same StakeDistribution (dingo #3485).
+func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// The pool is absent from the mark rows — which alone would read as
+	// departure — but the summary declares a pool that was never recorded, so
+	// the set is incomplete and absence proves nothing.
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"an incomplete K+1 pool set must not let absence read as departure",
+	)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
 }

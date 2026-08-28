@@ -51,7 +51,15 @@ type DingoDBConfig struct {
 // DingoEpochData holds epoch-level aggregates read directly from Dingo's database.
 type DingoEpochData struct {
 	TotalActiveStake string // lovelace decimal string (matches Koios format)
-	Fees             string // lovelace decimal string; empty when reward_ada_pots row absent
+	// TotalPoolCount is epoch_summary.total_pool_count: the number of pools
+	// in the distribution the mark pool_stake_snapshot rows for this epoch
+	// were written from (rotation.go sets both from the same
+	// StakeDistribution), so it is how many of those rows must be readable
+	// for the set to be complete. Deliberately not RewardSnapshot's
+	// TotalPoolCount, which counts the reduced reward distribution with
+	// degraded pools already excluded.
+	TotalPoolCount uint64
+	Fees           string // lovelace decimal string; empty when reward_ada_pots row absent
 	// TotalRewards is reward_ada_pots.rewards for this epoch alone: a fresh
 	// per-epoch FLOW value (rewards.Result.TotalRewardPot, overwritten every
 	// epoch — see ledger/reward_calculation.go:389,1955 and
@@ -242,6 +250,7 @@ func (d *DingoDB) GetEpochData(
 			uint64(summary.TotalActiveStake),
 			10,
 		),
+		TotalPoolCount: summary.TotalPoolCount,
 	}
 
 	var pots models.RewardAdaPots

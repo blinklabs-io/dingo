@@ -197,6 +197,7 @@ func (s *DatabaseSource) GetEpochData(
 			uint64(summary.TotalActiveStake),
 			10,
 		),
+		TotalPoolCount: summary.TotalPoolCount,
 	}
 
 	pots, err := meta.GetRewardAdaPots(epoch, txn.Metadata())
