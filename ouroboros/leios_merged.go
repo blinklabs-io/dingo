@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -56,14 +57,21 @@ var errLeiosClosureUnresolved = errors.New(
 	"leios endorser closure unresolved before timeout",
 )
 
-// leiosConnDoneContext adapts a serving connection's done channel to
+// leiosConnDoneContext adapts a serving connection's release channel to
 // context.Context so it can be combined with context.WithTimeout via
 // context.WithTimeout(leiosConnDoneContext{done: connDone}, timeout). The
 // resulting context is done when either the timeout elapses or connDone
 // closes, whichever comes first, so a closure wait started for one NtC
-// request or connection cannot outlive it. A nil done channel behaves like
+// request cannot outlive the connection it serves. A nil channel behaves like
 // context.Background(): it never fires on its own, leaving the timeout as the
 // only bound.
+//
+// The channel must come from registerLeiosServeWaiter, not from
+// Protocol.DoneChan(). The chainsync server callback runs inside gouroboros's
+// recvLoop, and recvLoop closes recvDoneChan only after the callback returns;
+// doneChan in turn closes only after recvDoneChan does. DoneChan() therefore
+// cannot close while this wait is in progress, and using it here would leave
+// the wait bounded by the timeout alone.
 type leiosConnDoneContext struct {
 	done <-chan struct{}
 }
@@ -87,6 +95,107 @@ func (c leiosConnDoneContext) Err() error {
 
 func (c leiosConnDoneContext) Value(any) any {
 	return nil
+}
+
+// registerLeiosServeWaiter returns a channel closed when connId's connection
+// goes away, so an NtC serving wait on that connection is released as soon as
+// the client disconnects. The returned cancel function deregisters the waiter
+// and must always be called.
+//
+// The liveness re-check after registration closes the race with a connection
+// that is already going away: connmanager removes the connection from its map
+// before invoking ConnClosedFunc, so a nil lookup here means either the
+// release has already run (and would have closed a registered channel) or it
+// is about to. Either way the caller must not wait, so the channel is closed
+// before it is returned.
+func (o *Ouroboros) registerLeiosServeWaiter(
+	connId ouroboros.ConnectionId,
+) (done <-chan struct{}, cancel func()) {
+	ch := make(chan struct{})
+	o.leiosServeWaitersMu.Lock()
+	if o.leiosServeWaiters == nil {
+		o.leiosServeWaiters = make(
+			map[ouroboros.ConnectionId][]chan struct{},
+		)
+	}
+	o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
+	o.leiosServeWaitersMu.Unlock()
+
+	cancel = func() {
+		o.leiosServeWaitersMu.Lock()
+		defer o.leiosServeWaitersMu.Unlock()
+		waiters := o.leiosServeWaiters[connId]
+		for i, w := range waiters {
+			if w == ch {
+				o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
+				break
+			}
+		}
+		if len(o.leiosServeWaiters[connId]) == 0 {
+			delete(o.leiosServeWaiters, connId)
+		}
+	}
+
+	// The connection manager is absent in unit tests that exercise the
+	// serving decision directly; there is no liveness to check, so the
+	// timeout remains the only bound.
+	if o.connManager != nil &&
+		o.connManager.GetConnectionById(connId) == nil {
+		o.releaseLeiosServeWaiter(connId, ch)
+	}
+	return ch, cancel
+}
+
+// releaseLeiosServeWaiter deregisters one waiter channel and closes it, both
+// under the lock so it cannot double-close against a concurrent
+// ReleaseLeiosServeWaiters: whichever runs first removes the channel, and the
+// other no longer finds it.
+func (o *Ouroboros) releaseLeiosServeWaiter(
+	connId ouroboros.ConnectionId,
+	ch chan struct{},
+) {
+	o.leiosServeWaitersMu.Lock()
+	defer o.leiosServeWaitersMu.Unlock()
+	waiters := o.leiosServeWaiters[connId]
+	for i, w := range waiters {
+		if w == ch {
+			o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
+			if len(o.leiosServeWaiters[connId]) == 0 {
+				delete(o.leiosServeWaiters, connId)
+			}
+			close(ch)
+			return
+		}
+	}
+}
+
+// ReleaseLeiosServeWaiters wakes every NtC serving wait pending on connId and
+// clears them. It is called from the node's connection-closed callback, which
+// connmanager drives from a per-connection goroutine blocked on the
+// connection's ErrorChan. That goroutine is independent of the chainsync
+// server callback, so it still runs while the callback is parked waiting for
+// an endorser closure -- which is precisely why the release cannot come from
+// the protocol's own done channel.
+func (o *Ouroboros) ReleaseLeiosServeWaiters(
+	connId ouroboros.ConnectionId,
+) {
+	o.leiosServeWaitersMu.Lock()
+	waiters := o.leiosServeWaiters[connId]
+	delete(o.leiosServeWaiters, connId)
+	o.leiosServeWaitersMu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
+}
+
+// RegisterLeiosServeWaiterForTesting exposes registerLeiosServeWaiter so the
+// root package can prove its connection-closed callback actually releases a
+// parked NtC serving wait. The release wiring spans two packages, so the
+// assertion cannot be made from inside either one alone.
+func (o *Ouroboros) RegisterLeiosServeWaiterForTesting(
+	connId ouroboros.ConnectionId,
+) (done <-chan struct{}, cancel func()) {
+	return o.registerLeiosServeWaiter(connId)
 }
 
 // leiosClosureWaitTimeout returns how long the NtC serving path waits for a
@@ -1094,10 +1203,11 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 	if p == nil || p.Mode() != protocol.ProtocolModeNodeToClient {
 		return block.Cbor, nil
 	}
-	// p.DoneChan() ties a pending closure wait to this connection's lifetime:
-	// it closes as soon as the connection ends, so the wait does not remain
-	// parked for the full window after the request it serves is gone.
-	return o.serveLeiosRankingBlockCbor(block, p.DoneChan())
+	// The connection id, not p.DoneChan(): this callback runs inside
+	// gouroboros's recvLoop, which cannot finish (and so cannot close
+	// DoneChan) until the callback returns. A pending closure wait is
+	// released through connmanager's per-connection watcher instead.
+	return o.serveLeiosRankingBlockCbor(block, ctx.ConnectionId)
 }
 
 // serveLeiosRankingBlockCbor resolves the NtC representation of a Dijkstra
@@ -1106,12 +1216,12 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 // decision (merge / serve-raw / disconnect) is unit-testable without a live
 // chainsync server. A block whose header is certified is never downgraded to
 // the raw serve path: it is either merged or an error is returned so the
-// connection is closed. connDone, when non-nil, bounds any closure wait to
-// the serving connection's lifetime in addition to the configured timeout; it
-// is nil in tests that do not model a live connection.
+// connection is closed. connId identifies the serving connection so that any
+// closure wait is bounded by that connection's lifetime in addition to the
+// configured timeout.
 func (o *Ouroboros) serveLeiosRankingBlockCbor(
 	block models.Block,
-	connDone <-chan struct{},
+	connId ouroboros.ConnectionId,
 ) ([]byte, error) {
 	merged, ok, err := o.mergedLeiosRankingBlockCbor(block.Cbor)
 	if err != nil {
@@ -1160,25 +1270,27 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 		)
 	}
 	// Certified and resolved: wait a bounded window for the endorser closure.
-	return o.serveLeiosCertRbWithWait(block, ebHash, connDone)
+	return o.serveLeiosCertRbWithWait(block, ebHash, connId)
 }
 
 // serveLeiosCertRbWithWait waits a bounded window for a certifying ranking
 // block's endorser closure to be cached, returning the merged block if it
 // arrives. The wait is bounded by two independent things, whichever elapses
 // first: the ledger's endorser-block wait window (leiosClosureWaitTimeout),
-// and connDone, the serving connection's done channel. A connection that
-// closes or a request that ends while the wait is pending therefore wakes it
-// immediately rather than holding it parked for the rest of the window. On
-// timeout or cancellation it returns errLeiosClosureUnresolved so the caller
-// closes the connection instead of serving an incomplete (empty-transaction)
-// CertRB — the client then retries the same point, avoiding a
-// permanently-incomplete record.
+// and the lifetime of the serving connection connId. A client that
+// disconnects while the wait is pending therefore wakes it immediately rather
+// than leaving it parked for the rest of the window. On timeout or
+// cancellation it returns errLeiosClosureUnresolved so the caller closes the
+// connection instead of serving an incomplete (empty-transaction) CertRB —
+// the client then retries the same point, avoiding a permanently-incomplete
+// record.
 func (o *Ouroboros) serveLeiosCertRbWithWait(
 	block models.Block,
 	ebHash lcommon.Blake2b256,
-	connDone <-chan struct{},
+	connId ouroboros.ConnectionId,
 ) ([]byte, error) {
+	connDone, cancelWaiter := o.registerLeiosServeWaiter(connId)
+	defer cancelWaiter()
 	ctx, cancel := context.WithTimeout(
 		leiosConnDoneContext{done: connDone},
 		o.leiosClosureWaitTimeout(),

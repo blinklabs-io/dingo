@@ -138,15 +138,45 @@ func newChainsyncServerFixture(
 	mode csmock.Mode,
 ) *chainsyncServerFixture {
 	t.Helper()
+	return newChainsyncServerFixtureWithConfig(t, mode, OuroborosConfig{})
+}
+
+// newChainsyncServerFixtureWithConfig is newChainsyncServerFixture with extra
+// OuroborosConfig fields (EnableLeios, LeiosClosureWaitTimeout, ...) folded in.
+// ConnManager, EventBus and Logger are always supplied by the fixture and
+// override anything set in cfg.
+//
+// The connection manager's ConnClosedFunc is wired to the same
+// ReleaseLeiosServeWaiters call the node makes, so a disconnect releases a
+// parked NtC serving wait exactly as it does in production. The callback
+// closes over the o variable rather than a value because the manager has to
+// exist before newOuroboros can be given it; it can only fire after
+// AddConnection below, by which point o is assigned.
+func newChainsyncServerFixtureWithConfig(
+	t *testing.T,
+	mode csmock.Mode,
+	cfg OuroborosConfig,
+) *chainsyncServerFixture {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
 
+	var o *Ouroboros
 	ledgerState := newTestLedgerState(t)
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			EventBus: bus,
 			Logger:   logger,
+			ConnClosedFunc: func(
+				connId ouroboros.ConnectionId,
+				_ bool,
+				_ error,
+			) {
+				if o != nil {
+					o.ReleaseLeiosServeWaiters(connId)
+				}
+			},
 		},
 	)
 	t.Cleanup(func() {
@@ -158,11 +188,10 @@ func newChainsyncServerFixture(
 		_ = connManager.Stop(stopCtx)
 	})
 
-	o := newOuroboros(OuroborosConfig{
-		ConnManager: connManager,
-		EventBus:    bus,
-		Logger:      logger,
-	})
+	cfg.ConnManager = connManager
+	cfg.EventBus = bus
+	cfg.Logger = logger
+	o = newOuroboros(cfg)
 	o.ledgerState = ledgerState
 	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 

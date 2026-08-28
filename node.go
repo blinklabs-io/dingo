@@ -1761,8 +1761,9 @@ func taintValue(relaxed bool) string {
 }
 
 // handleConnManagerClosed releases the chainsync server-side (N2C) client
-// state -- including its live chain iterator -- for a node-to-client
-// connection that just closed.
+// state -- including its live chain iterator -- and any pending Leios
+// endorser-closure serving wait, for a node-to-client connection that just
+// closed.
 //
 // NtC closes are deliberately excluded from the ConnectionClosedEventType
 // fan-out (see the connection manager's publish site) because every current
@@ -1782,6 +1783,13 @@ func (n *Node) handleConnManagerClosed(
 	}
 	if n.chainsyncState != nil {
 		n.chainsyncState.RemoveClient(connId)
+	}
+	// Wake any NtC chainsync server callback parked waiting for this
+	// connection's certified endorser closure. connmanager drives this
+	// callback from its own per-connection goroutine, so it runs even while
+	// that server callback still owns gouroboros's receive loop.
+	if o := n.ouroboros(); o != nil {
+		o.ReleaseLeiosServeWaiters(connId)
 	}
 }
 
