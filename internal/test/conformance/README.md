@@ -113,11 +113,11 @@ call the metadata store's own `Resettable.Reset` (`database/plugin/metadata/post
 `resetDatabase`): that callback drops tables outright, without recreating
 them, requiring a fresh migration run before the store is usable again --
 and, more importantly, scans and drops tables across *every* non-system
-schema in the target database, not just `conformance`, so calling it here
-would also destroy `database/plugin/metadata/postgres`'s own concurrently
-running tests' tables in the shared `dingo_test` database. Reset instead
-`TRUNCATE`s every table in the `conformance` schema in place, over a
-separate admin connection, discovering the table list from
+schema in the target database, not just the process-scoped conformance
+schema, so calling it here would also destroy `database/plugin/metadata/postgres`'s
+own concurrently running tests' tables in the shared `dingo_test` database.
+Reset instead `TRUNCATE`s every table in that process-scoped schema in
+place, over a separate admin connection, discovering the table list from
 `information_schema` rather than hardcoding it (see
 `state_manager_postgres.go`'s `wipeMetadata`). This keeps the already-open
 store's connection pool live throughout -- no close, no reopen, no
