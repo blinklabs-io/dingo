@@ -38,6 +38,9 @@ var (
 	ErrDescendingKeysetUnsupported = errors.New(
 		"keyset pagination (After) does not support Descending",
 	)
+	ErrOffsetKeysetUnsupported = errors.New(
+		"keyset pagination (After) does not support Offset",
+	)
 	ErrOffsetRequiresCoarseMatch = errors.New(
 		"offset requires address patterns that do not need exact-address CBOR filtering",
 	)
@@ -330,7 +333,7 @@ type UtxoOrderingCursor struct {
 // After + Limit: keyset pagination; Limit <= 0 means no SQL LIMIT. SearchUtxos sets Limit to
 // effective page size + 1. Mutually exclusive with Offset and Descending (both page-number
 // pagination controls); GetUtxosByAddressWithOrdering errors if After is combined with
-// Descending.
+// either one.
 //
 // Offset: page-number pagination; > 0 means SQL OFFSET. Only valid when the address
 // patterns do not require CBOR-based exact-address filtering (see

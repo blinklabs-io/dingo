@@ -8998,23 +8998,6 @@ func (ls *LedgerState) UtxosByAddressWithOrdering(
 	return utxos, nil
 }
 
-// CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
-// q's coarse SQL predicate. See Database.CountUtxosByAddressWithOrdering.
-func (ls *LedgerState) CountUtxosByAddressWithOrdering(
-	q *models.UtxoWithOrderingQuery,
-) (int, error) {
-	return ls.db.CountUtxosByAddressWithOrdering(q, nil)
-}
-
-// MatchingUtxoRefsByAddressWithOrdering returns the references of every
-// live UTxO matching q's address patterns. See
-// Database.MatchingUtxoRefsByAddressWithOrdering.
-func (ls *LedgerState) MatchingUtxoRefsByAddressWithOrdering(
-	q *models.UtxoWithOrderingQuery,
-) ([]models.UtxoId, error) {
-	return ls.db.MatchingUtxoRefsByAddressWithOrdering(q, nil)
-}
-
 // UtxosByAddressAtSlot returns all UTxOs belonging to the
 // specified address that existed at the given slot.
 func (ls *LedgerState) UtxosByAddressAtSlot(

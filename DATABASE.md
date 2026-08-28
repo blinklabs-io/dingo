@@ -1772,11 +1772,15 @@ alternative to keyset (`After`) pagination. `Offset` is rejected whenever the
 address patterns require CBOR-based exact-address filtering
 (`RequiresExactAddressFilter`): the coarse SQL predicate over-matches address
 forms sharing a credential (pointer addresses), so `OFFSET` would skip a
-different set of rows than skipping exact matches would. `Descending` is
-rejected combined with `After`, since the cursor's comparison operators
-assume ascending order. `SkipAssets` omits a row's native assets from the
-result, for a candidate scan whose rows are discarded or only used to
-confirm a match and never returned to a caller reading `Utxo.Assets`.
+different set of rows than skipping exact matches would. `Descending` and
+`Offset` are each rejected combined with `After`: `Descending` because the
+cursor's comparison operators assume ascending order, and `Offset` because
+applying both would filter to rows after the cursor and then additionally
+skip `Offset` rows within that filtered set, silently returning a page
+shifted by both controls instead of the one either alone describes.
+`SkipAssets` omits a row's native assets from the result, for a candidate
+scan whose rows are discarded or only used to confirm a match and never
+returned to a caller reading `Utxo.Assets`.
 
 `CountUtxosByAddressWithOrdering` returns a plain `COUNT(*)` over the coarse
 predicate and is rejected for exact-address patterns, since the coarse
@@ -1797,6 +1801,16 @@ that page via `GetUtxosByRefs`. This bounds the expensive part (asset
 loading, full-row retention) to one page instead of the address's entire
 live UTxO history, while the CBOR-decode-only candidate scan remains
 unavoidable for the total.
+
+Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
+(`Database.Transaction(false)`) and pass it to both their count/scan call
+and their page-fetch call, rather than leaving each to open its own
+(`Transaction`/`ReadTransaction` begin the underlying SQL transaction
+eagerly, so the shared `Txn` fixes a single snapshot at that point). Two
+separate implicit transactions would each see whatever was most recently
+committed independently, so a write landing between them (a live node
+adding or spending a UTxO for the same address mid-request) could make the
+reported total and the returned page describe different UTxO sets.
 
 ### `GetTransactionsByMetadataLabel`
 

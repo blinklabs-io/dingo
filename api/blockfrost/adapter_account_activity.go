@@ -42,8 +42,15 @@ func (a *NodeAdapter) AccountUTXOs(
 	if err != nil {
 		return nil, 0, err
 	}
+	// Shared across the existence check, count, and page fetch below so
+	// the total and the returned page describe the same snapshot: two
+	// separate (nil-txn) calls could otherwise straddle a concurrent
+	// commit and return a page inconsistent with the reported total.
+	txn := a.ledgerState.Database().Transaction(false)
+	defer txn.Release()
+
 	if _, err := a.ledgerState.Database().
-		GetAccountByCredential(credentialTag, stakeKey, true, nil); err != nil {
+		GetAccountByCredential(credentialTag, stakeKey, true, txn); err != nil {
 		return nil, 0, err
 	}
 
@@ -56,8 +63,9 @@ func (a *NodeAdapter) AccountUTXOs(
 	addressPatterns := []models.UtxoAddressPattern{
 		{DelegationPart: stakeKey},
 	}
-	total, err := a.ledgerState.CountUtxosByAddressWithOrdering(
+	total, err := a.ledgerState.Database().CountUtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{AddressPatterns: addressPatterns},
+		txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -71,13 +79,14 @@ func (a *NodeAdapter) AccountUTXOs(
 		return []AccountUTXOInfo{}, total, nil
 	}
 
-	paged, err := a.ledgerState.UtxosByAddressWithOrdering(
+	paged, err := a.ledgerState.Database().UtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: addressPatterns,
 			Limit:           params.Count,
 			Offset:          offset,
 			Descending:      params.Order == PaginationOrderDesc,
 		},
+		txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(

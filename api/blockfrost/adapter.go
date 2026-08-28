@@ -3306,16 +3306,24 @@ func (a *NodeAdapter) AddressUTXOs(
 	if err != nil {
 		return nil, 0, err
 	}
+	// Shared between the reference scan and the page fetch below so the
+	// total and the returned page describe the same snapshot: two
+	// separate (nil-txn) calls could otherwise straddle a concurrent
+	// commit and return a page inconsistent with the reported total.
+	txn := a.ledgerState.Database().Transaction(false)
+	defer txn.Release()
+
 	// Exact-address matching requires decoding output CBOR (see
 	// models.RequiresExactAddressFilter), so getting an accurate total
 	// requires visiting every coarse candidate either way. Fetch only
 	// references (no assets, no full rows) for that pass, and materialize
 	// full UTxO data via UtxosByRefs for just the requested page, instead
 	// of loading the address's entire UTxO history in full.
-	refs, err := a.ledgerState.MatchingUtxoRefsByAddressWithOrdering(
+	refs, err := a.ledgerState.Database().MatchingUtxoRefsByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
+		txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3339,7 +3347,7 @@ func (a *NodeAdapter) AddressUTXOs(
 		pageRefs = refs[start:end]
 	}
 
-	paged, err := a.orderedUtxosByRefs(pageRefs)
+	paged, err := a.orderedUtxosByRefs(pageRefs, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",
@@ -3396,20 +3404,23 @@ func (a *NodeAdapter) AddressUTXOs(
 }
 
 // orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in
-// a single batch and returns them in refs' order. A ref whose UTxO was
-// spent between the reference scan and this fetch is simply omitted, the
-// same "missing entries degrade" tolerance the rest of this file applies to
-// concurrently-changing chain state. The returned ordering metadata
-// (TxSlot, TxBlockIndex) is left zero-valued: callers of this helper only
-// need it for its embedded Utxo fields, which UtxosByRefs already
-// populates in full.
+// a single batch, within txn (pass the same transaction the caller
+// resolved refs from, so this reads the identical snapshot rather than a
+// later one that may have since spent one of them), and returns them in
+// refs' order. A ref whose UTxO was spent before txn's snapshot was taken
+// is simply omitted, the same "missing entries degrade" tolerance the
+// rest of this file applies to concurrently-changing chain state. The
+// returned ordering metadata (TxSlot, TxBlockIndex) is left zero-valued:
+// callers of this helper only need it for its embedded Utxo fields, which
+// UtxosByRefs already populates in full.
 func (a *NodeAdapter) orderedUtxosByRefs(
 	refs []models.UtxoId,
+	txn *database.Txn,
 ) ([]models.UtxoWithOrdering, error) {
 	if len(refs) == 0 {
 		return []models.UtxoWithOrdering{}, nil
 	}
-	utxos, err := a.ledgerState.UtxosByRefs(refs)
+	utxos, err := a.ledgerState.Database().UtxosByRefs(refs, txn)
 	if err != nil {
 		return nil, err
 	}

@@ -1089,6 +1089,12 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			models.ErrDescendingKeysetUnsupported,
 		)
 	}
+	if query.After != nil && query.Offset > 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetKeysetUnsupported,
+		)
+	}
 	if query.Offset > 0 && models.RequiresExactAddressFilter(query.AddressPatterns) {
 		return nil, fmt.Errorf(
 			"GetUtxosByAddressWithOrdering: %w",

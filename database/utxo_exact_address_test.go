@@ -491,6 +491,95 @@ func TestUtxosByAddressWithOrderingRejectsDescendingKeyset(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrDescendingKeysetUnsupported)
 }
 
+// TestUtxosByAddressWithOrderingRejectsOffsetKeyset proves Offset cannot be
+// combined with keyset (After) pagination: applying both would filter to
+// rows after the cursor and then additionally skip Offset rows within that
+// filtered set, silently returning a page shifted by both controls instead
+// of the single, well-defined page either one alone describes.
+func TestUtxosByAddressWithOrderingRejectsOffsetKeyset(t *testing.T) {
+	db := openTestDB(t)
+
+	_, err := db.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			MatchAllAddresses: true,
+			Offset:            10,
+			After:             &models.UtxoOrderingCursor{Slot: 1},
+			Limit:             10,
+		},
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrOffsetKeysetUnsupported)
+}
+
+// TestCountAndFetchShareSnapshotWithinOneTxn proves the fix for a review
+// finding on AccountUTXOs/AddressUTXOs: a count and a subsequent page fetch
+// against a nil Txn each open their own transaction, so a commit landing
+// between them could make the reported total and the returned page
+// describe different UTxO sets. Passing one Txn to both calls instead
+// (what the adapter now does) must keep them on the same snapshot even
+// when a conflicting write commits in between.
+func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	stakeKey := bytes.Repeat([]byte{0x81}, lcommon.AddressHashSize)
+	payment := bytes.Repeat([]byte{0x82}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		stakeKey,
+	)
+	require.NoError(t, err)
+	for i := range 5 {
+		seedExactAddressUtxo(t, db, raw, addr, uint64(i)+1, byte(i)+1)
+	}
+
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{
+			{DelegationPart: stakeKey},
+		},
+	}
+
+	// Opens its transaction eagerly (sqlstore.Store.transaction calls
+	// BeginTx before returning), fixing its snapshot right here, before
+	// the extra rows below exist.
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	before, err := db.CountUtxosByAddressWithOrdering(query, txn)
+	require.NoError(t, err)
+	require.Equal(t, 5, before)
+
+	// A conflicting write commits out-of-band, as a live node's chain
+	// processing would between an API request's two calls.
+	for i := range 3 {
+		seedExactAddressUtxo(t, db, raw, addr, uint64(100+i), byte(100+i))
+	}
+
+	// A fresh (nil-txn) read observes the new rows...
+	after, err := db.CountUtxosByAddressWithOrdering(query, nil)
+	require.NoError(t, err)
+	require.Equal(t, 8, after)
+
+	// ...but reusing the original txn still sees only the original
+	// snapshot: the count and the page fetch below cannot disagree about
+	// how many rows exist.
+	stillBefore, err := db.CountUtxosByAddressWithOrdering(query, txn)
+	require.NoError(t, err)
+	require.Equal(t, 5, stillBefore)
+
+	rows, err := db.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: query.AddressPatterns,
+			Limit:           100,
+		},
+		txn,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 5)
+}
+
 // TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings proves
 // MatchingUtxoRefsByAddressWithOrdering applies the same CBOR-based exact
 // match as UtxosByAddressWithOrdering: it returns exactly the enterprise
