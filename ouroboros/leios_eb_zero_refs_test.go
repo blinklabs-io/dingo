@@ -167,7 +167,7 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 	emptyManifest := []byte{0xa0}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
+	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil, leiosStoreAuthoritative)
 	require.Error(t, err)
 	require.ErrorContains(
 		t,
@@ -202,7 +202,7 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 	pipeline := &recordingLeiosPipelineHandler{}
 	o.leiosVotes = votes
 	o.leiosPipeline = pipeline
-	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
+	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil, leiosStoreAuthoritative)
 	require.Error(t, err)
 	require.ErrorContains(
 		t,
@@ -222,7 +222,7 @@ func TestStoreLeiosEndorserBlockValidManifestStillStores(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 15, 300)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)

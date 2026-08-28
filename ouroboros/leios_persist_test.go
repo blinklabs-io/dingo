@@ -40,8 +40,8 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 
 	// First the manifest only (no txs yet), as the backfiller's manifest fetch
 	// does; then the complete block once its txs are fetched.
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw, leiosStoreAuthoritative))
 
 	// Drain the async writer so all queued persistence has committed.
 	o.StopLeiosPersistWriter()
@@ -114,7 +114,7 @@ func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
 
 	// Start the writer via a real enqueue, then drain and stop it.
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 	o.StopLeiosPersistWriter()
 
 	// The drained map must be empty now.

@@ -420,7 +420,14 @@ func (o *Ouroboros) BroadcastEndorserBlock(
 			txsRaw = append(txsRaw, cbor.RawMessage(wrapped))
 		}
 	}
-	if err := o.storeLeiosEndorserBlock(point, data, txsRaw); err != nil {
+	// Locally forged: dingo chose this slot itself, so the binding is
+	// authoritative without waiting for the announcement it queues next.
+	if err := o.storeLeiosEndorserBlock(
+		point,
+		data,
+		txsRaw,
+		leiosStoreAuthoritative,
+	); err != nil {
 		return fmt.Errorf("store forged endorser block: %w", err)
 	}
 	o.leiosEBLog.append(
@@ -624,6 +631,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				point,
 				respBlock.BlockRaw,
 				nil,
+				leiosStorePeerOffered,
 			); err != nil {
 				o.config.Logger.Debug(
 					"failed to store leios EB manifest",
@@ -712,6 +720,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 					point,
 					respBlock.BlockRaw,
 					nil,
+					leiosStorePeerOffered,
 				); err != nil {
 					o.config.Logger.Debug(
 						"failed to store leios EB manifest on txs offer",
@@ -768,6 +777,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				point,
 				data.blockRaw,
 				txs,
+				leiosStorePeerOffered,
 			); err != nil {
 				o.config.Logger.Debug(
 					"failed to store leios EB transactions",
@@ -1510,8 +1520,36 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 
 // recordLeiosAnnouncement performs the consistency checks shared by local
 // announcements and peer announcements, and optionally queues a valid
-// announcement for relay.
+// announcement for relay. A recorded announcement is authoritative for its
+// endorser block's slot, so it also reconciles any endorser block cached before
+// it arrived: the relay (and dingo's own forge path) offer the block before
+// announcing it, so the cached entry routinely carries an as-yet-unverified
+// peer-supplied slot (issue #3513).
 func (o *Ouroboros) recordLeiosAnnouncement(
+	raw []byte,
+	ebHash lcommon.Blake2b256,
+	ebSize uint64,
+	header *gdijkstra.DijkstraBlockHeader,
+	source string,
+	relay bool,
+) error {
+	if err := o.recordLeiosAnnouncementLocked(
+		raw,
+		ebHash,
+		ebSize,
+		header,
+		source,
+		relay,
+	); err != nil {
+		return err
+	}
+	// Runs with leiosAnnouncementsMu released: the binding takes leiosMu, and
+	// storeLeiosEndorserBlock acquires the two in the opposite order.
+	o.bindLeiosEndorserBlockSlot(ebHash.Bytes(), header.SlotNumber())
+	return nil
+}
+
+func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	raw []byte,
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,

@@ -111,8 +111,15 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	ebSlot uint64,
 	ebHash []byte,
 ) error {
+	// The caller's point comes from the ranking block being applied, so it is
+	// authoritative for this endorser block's slot. Reconcile any entry cached
+	// from a peer offer before an announcement corroborated it: a matching
+	// entry is promoted (and published) here, a contradicting one is evicted so
+	// the fetch below replaces it rather than serving a poisoned slot to the
+	// ledger (issue #3513).
+	o.bindLeiosEndorserBlockSlot(ebHash, ebSlot)
 	if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-		data.completeTxCache() {
+		data.completeTxCache() && data.slotVerified {
 		return nil
 	}
 	if o.connManager == nil {
@@ -231,6 +238,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			point,
 			blk.BlockRaw,
 			nil,
+			leiosStoreAuthoritative,
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
@@ -259,7 +267,12 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
 		return fmt.Errorf("validate tx references: %w", err)
 	}
-	if err := o.storeLeiosEndorserBlock(point, data.blockRaw, txs); err != nil {
+	if err := o.storeLeiosEndorserBlock(
+		point,
+		data.blockRaw,
+		txs,
+		leiosStoreAuthoritative,
+	); err != nil {
 		return fmt.Errorf("store txs: %w", err)
 	}
 	return nil

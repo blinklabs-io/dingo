@@ -77,7 +77,7 @@ func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
 	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
@@ -106,7 +106,7 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 11, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 
 	first := &diffusingBlockTxsRequester{available: diffused}
 	_, err := o.fetchLeiosEbTxsBatched(first, point, txCount, nil)
@@ -129,7 +129,7 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 
 	// Completing the block stores it through the unchanged path, so the
 	// existing tip gate applies it exactly as a single-attempt fetch would.
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txs))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txs, leiosStoreAuthoritative))
 	slot, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, point.Slot, slot)
@@ -155,14 +155,14 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 13, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
 	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 
 	for range 3 {
-		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 		data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 		require.True(t, ok)
 		require.Equal(
@@ -181,7 +181,7 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 	const txCount = 100
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 17, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 
 	head := make([]cbor.RawMessage, txCount)
 	tail := make([]cbor.RawMessage, txCount)
@@ -227,7 +227,7 @@ func TestRetainLeiosPartialTxsPublishesSanitizedHeldEntries(t *testing.T) {
 	require.NoError(t, err)
 	point := ocommon.NewPoint(23, lcommon.Blake2b256Hash(manifestRaw).Bytes())
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
 
 	// Seed index 0 with the body for index 1. The validation callback below
 	// must clear it even though this attempt offers no replacement body.
@@ -265,7 +265,7 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 19, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
 	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
@@ -281,7 +281,7 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	o.leiosMu.Unlock()
 
 	for range 3 {
-		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 	}
 	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
@@ -307,7 +307,7 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 		require.NoError(t, err)
 		full[i] = cbor.RawMessage(enc)
 	}
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full, leiosStoreAuthoritative))
 	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.True(t, data.completeTxCache())

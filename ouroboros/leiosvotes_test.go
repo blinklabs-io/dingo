@@ -274,7 +274,7 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 	require.Len(t, handler.ebs, 1)
 	assert.Equal(t, uint64(10), handler.ebs[0].slot)
 	assert.Equal(t, point.Hash, handler.ebs[0].ebHash.Bytes())
@@ -290,11 +290,11 @@ func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 
 	mismatchedPoint := point
 	mismatchedPoint.Slot++
-	err := o.storeLeiosEndorserBlock(mismatchedPoint, blockRaw, nil)
+	err := o.storeLeiosEndorserBlock(mismatchedPoint, blockRaw, nil, leiosStoreAuthoritative)
 	require.ErrorContains(
 		t,
 		err,
@@ -307,7 +307,7 @@ func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
 func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 }
 
 func TestLeiosVotesClientRequestSizeIsIncremental(t *testing.T) {

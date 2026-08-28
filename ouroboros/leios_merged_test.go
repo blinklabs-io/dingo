@@ -274,6 +274,7 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -298,6 +299,7 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -569,6 +571,7 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 			point,
 			blockRaw,
 			[]cbor.RawMessage{txRaw},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -593,6 +596,7 @@ func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
 		point,
 		blockRaw,
 		[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+		leiosStoreAuthoritative,
 	))
 
 	got, ok := o.EndorserBlockTxHashesByHash(point.Hash)
@@ -628,7 +632,7 @@ func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 	}
 
 	o := newTestOuroborosWithLeiosDB(t)
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw, leiosStoreAuthoritative))
 
 	// Endorser-block persistence is asynchronous: storeLeiosEndorserBlock
 	// queues the blob write on a background writer. Drain it so the blob store
@@ -681,7 +685,7 @@ func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
 	point.Hash[0] ^= 0xff
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	err := o.storeLeiosEndorserBlock(point, blockRaw, nil)
+	err := o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative)
 	require.ErrorContains(
 		t,
 		err,
@@ -695,7 +699,7 @@ func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
 func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	point, raw := testLeiosEndorserBlockRaw(t, 1)
-	require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil, leiosStoreAuthoritative))
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 
@@ -715,7 +719,7 @@ func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	oldPoint, oldRaw := testLeiosEndorserBlockRaw(t, 1)
-	require.NoError(t, o.storeLeiosEndorserBlock(oldPoint, oldRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(oldPoint, oldRaw, nil, leiosStoreAuthoritative))
 	oldData, ok := o.lookupLeiosEndorserBlock(oldPoint.Hash)
 	require.True(t, ok)
 
@@ -725,7 +729,7 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	o.leiosMu.Unlock()
 
 	newPoint, newRaw := testLeiosEndorserBlockRaw(t, 2)
-	require.NoError(t, o.storeLeiosEndorserBlock(newPoint, newRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(newPoint, newRaw, nil, leiosStoreAuthoritative))
 
 	_, ok = o.lookupLeiosEndorserBlock(oldPoint.Hash)
 	require.False(t, ok)
@@ -738,7 +742,7 @@ func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 	var lastPoint ocommon.Point
 	for idx := range leiosEndorserBlockCacheMaxEntries + 1 {
 		point, raw := testLeiosEndorserBlockRaw(t, idx)
-		require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
+		require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil, leiosStoreAuthoritative))
 		lastPoint = point
 	}
 
@@ -992,7 +996,7 @@ func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(t *testing.T) 
 	require.NoError(t, err)
 	point := ocommon.NewPoint(123, lcommon.Blake2b256Hash(manifestRaw).Bytes())
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
 
 	// Seed index 0 with the body for index 1. A resumed fetch must discard it
 	// before computing its request bitmap, then replace it in the retained set.
@@ -1026,7 +1030,7 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(t *testing.T) 
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
 	o := newOuroboros(OuroborosConfig{})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
 
 	_, err = o.fetchLeiosEbTxsBatched(
 		manifestTxRequester{txs: []cbor.RawMessage{tx2, tx1}},
@@ -1048,7 +1052,7 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(t *testing.T) 
 	)
 	require.NoError(t, err)
 	require.NoError(t, validateLeiosEndorserBlockTxs(manifestRaw, txs))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, txs))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, txs, leiosStoreAuthoritative))
 	cached, ok = o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.True(t, cached.completeTxCache())
@@ -1300,6 +1304,7 @@ func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -1341,6 +1346,7 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -1482,8 +1488,8 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
 	// One connection delivers the manifest, another completes the txs.
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw, leiosStoreAuthoritative))
 	_, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, txsRaw, gotTxs)
@@ -1491,7 +1497,7 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 	// Every remaining connection's redundant manifest fetch must leave the
 	// completed transaction set intact.
 	for range 3 {
-		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
 		data, found := o.lookupLeiosEndorserBlock(point.Hash)
 		require.True(t, found)
 		require.True(
@@ -1530,8 +1536,11 @@ func TestStoreLeiosEndorserBlockKeepsLargerTxSet(t *testing.T) {
 	}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full[:1]))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full, leiosStoreAuthoritative))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(point, blockRaw, full[:1], leiosStoreAuthoritative),
+	)
 
 	_, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
 	require.True(t, ok)

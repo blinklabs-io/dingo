@@ -94,7 +94,30 @@ type leiosEndorserBlockData struct {
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
+	// slotVerified reports whether point.Slot has been corroborated by a
+	// source dingo trusts, rather than being the offering connection's
+	// unchecked claim. Everything keyed on the slot -- vote emission,
+	// pipeline observation, blob persistence, and the slot handed to the
+	// ledger by EndorserBlockTxsByHash -- is withheld until it is true, so a
+	// peer cannot bind an authentic manifest to a fabricated slot by offering
+	// it before its announcement arrives (issue #3513).
+	slotVerified bool
 }
+
+// leiosStoreOrigin records whether a store's point is already authoritative.
+type leiosStoreOrigin uint8
+
+const (
+	// leiosStorePeerOffered is a store driven by a peer's leios-notify offer.
+	// The point is that connection's claim, so it must be corroborated by a
+	// validated announcement or the ledger's chain-derived reference before
+	// anything keyed on its slot is published.
+	leiosStorePeerOffered leiosStoreOrigin = iota
+	// leiosStoreAuthoritative is a store whose slot dingo established itself:
+	// a locally forged endorser block, or a by-point backfill whose point came
+	// from the ranking block the ledger is applying.
+	leiosStoreAuthoritative
+)
 
 func leiosBlockKey(hash []byte) string {
 	return string(hash)
@@ -222,6 +245,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
 	txsRaw []cbor.RawMessage,
+	origin leiosStoreOrigin,
 ) error {
 	if len(blockRaw) == 0 {
 		return errors.New("leios endorser block cache: empty block")
@@ -242,25 +266,30 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if !slices.Equal(blockHash.Bytes(), point.Hash) {
 		return errors.New("leios endorser block cache: point hash mismatch")
 	}
-	// Bind the entry to the slot its announcement actually vouched for, when
-	// one is known. Without this, the first store for a hash decided the
-	// cached slot on a first-writer-wins basis (later stores were only
-	// checked against that first store, never against the announcement), so
-	// a single connection offering a real, previously-announced endorser
-	// block at a fabricated slot could poison the entry before any
-	// conflicting offer arrived to trip the existing-entry check below
-	// (issue #3513). A hash with no recorded announcement (backfill of an
-	// old block whose announcement already expired the bounded window, or a
-	// locally-forged block not sourced from a peer announcement at all)
-	// skips this check; it still gets the existing-entry and body-hash
-	// checks above and below.
-	if announcedSlot, ok := o.leiosAnnouncedSlot(point.Hash); ok &&
-		announcedSlot != point.Slot {
-		return fmt.Errorf(
-			"leios endorser block cache: point slot does not match announced point: announced %d, got %d",
-			announcedSlot,
-			point.Slot,
-		)
+	// Bind the entry to the slot its announcement actually vouched for. A
+	// peer-offered point is only that connection's claim: the manifest is
+	// content-addressed, so an authentic endorser block can be replayed under
+	// any slot. Reject a store that contradicts a recorded announcement, and
+	// mark the entry verified only when a trusted source establishes the slot
+	// (issue #3513).
+	//
+	// The announcement need not have arrived yet -- the relay, and dingo's own
+	// forge path, queue the block offer before the ranking-block announcement
+	// -- so an unannounced peer-offered store is cached but left unverified
+	// rather than rejected, which would drop endorser blocks on the normal
+	// ordering. slotVerified gates everything keyed on the slot; the binding is
+	// reconciled later by bindLeiosEndorserBlockSlot when the announcement (or
+	// the ledger's chain-derived reference) arrives.
+	verified := origin == leiosStoreAuthoritative
+	if announcedSlot, ok := o.leiosAnnouncedSlot(point.Hash); ok {
+		if announcedSlot != point.Slot {
+			return fmt.Errorf(
+				"leios endorser block cache: point slot does not match announced point: announced %d, got %d",
+				announcedSlot,
+				point.Slot,
+			)
+		}
+		verified = true
 	}
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	if err != nil {
@@ -268,12 +297,13 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	}
 	cacheKeys := []string{leiosBlockKey(point.Hash)}
 	data := &leiosEndorserBlockData{
-		point:      point,
-		blockRaw:   slices.Clone(blockRaw),
-		txsRaw:     cloneRawMessages(txsRaw),
-		txCount:    len(block.TransactionReferences),
-		cacheKeys:  cacheKeys,
-		insertedAt: time.Now(),
+		point:        point,
+		blockRaw:     slices.Clone(blockRaw),
+		txsRaw:       cloneRawMessages(txsRaw),
+		txCount:      len(block.TransactionReferences),
+		cacheKeys:    cacheKeys,
+		insertedAt:   time.Now(),
+		slotVerified: verified,
 	}
 	o.leiosMu.Lock()
 	if o.leiosEndorserBlocks == nil {
@@ -323,6 +353,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		if len(data.partialTxs) > 0 && !data.completeTxCache() {
 			data.insertedAt = existing.insertedAt
 		}
+		// A binding already established for this hash survives a later
+		// peer-offered store. The slots are equal (checked above), so an
+		// unverified store cannot demote an entry a trusted source already
+		// bound.
+		data.slotVerified = data.slotVerified || existing.slotVerified
 	}
 	if data.completeTxCache() {
 		// The transaction set is whole; the resume state is now dead weight.
@@ -342,6 +377,25 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosMu.Unlock()
+	// Withhold everything keyed on the slot until the binding is verified. An
+	// unverified entry is published by bindLeiosEndorserBlockSlot once its
+	// announcement (or the ledger's chain-derived reference) corroborates the
+	// slot, so a peer that offers before announcing cannot make dingo vote,
+	// track pipeline timing, or persist a blob under a slot of its choosing.
+	if data.slotVerified {
+		o.publishLeiosEndorserBlock(point, blockRaw, blockHash, data)
+	}
+	return nil
+}
+
+// publishLeiosEndorserBlock performs the side effects keyed on a verified
+// endorser-block slot. It must be called with leiosMu released.
+func (o *Ouroboros) publishLeiosEndorserBlock(
+	point ocommon.Point,
+	blockRaw []byte,
+	blockHash lcommon.Blake2b256,
+	data *leiosEndorserBlockData,
+) {
 	// Queue manifest and (when complete) txs for asynchronous persistence to
 	// the blob store so they can be served to downstream peers after the
 	// in-memory cache expires. Best-effort and off the hot path: the write
@@ -358,7 +412,48 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if o.leiosPipeline != nil {
 		o.leiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
 	}
-	return nil
+}
+
+// bindLeiosEndorserBlockSlot reconciles a cached endorser block against an
+// authoritative slot -- a validated ranking-block announcement, or the point a
+// ranking block the ledger is applying references. An entry cached before that
+// authority arrived carries the offering connection's unverified claim, so it is
+// promoted when the slot agrees and evicted when it does not, before anything
+// keyed on the slot is published (issue #3513).
+func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
+	o.leiosMu.Lock()
+	data, ok := o.leiosEndorserBlocks[leiosBlockKey(ebHash)]
+	if !ok || data == nil || data.slotVerified {
+		o.leiosMu.Unlock()
+		return
+	}
+	if data.point.Slot != slot {
+		// The cached entry was bound to a slot this authority contradicts.
+		// Drop it: its bytes are content-addressed and refetchable, and
+		// keeping it would leave a poisoned slot in the cache for the
+		// leios-fetch server and any later store to inherit.
+		o.deleteLeiosEndorserBlockDataLocked(data)
+		o.leiosMu.Unlock()
+		o.config.Logger.Debug(
+			"evicted leios EB cached under a slot its announcement contradicts",
+			"component", "network",
+			"protocol", "leios-notify",
+			"cached_slot", data.point.Slot,
+			"announced_slot", slot,
+			"hash", hex.EncodeToString(ebHash),
+		)
+		return
+	}
+	data.slotVerified = true
+	point := data.point
+	blockRaw := data.blockRaw
+	o.leiosMu.Unlock()
+	o.publishLeiosEndorserBlock(
+		point,
+		blockRaw,
+		lcommon.Blake2b256Hash(blockRaw),
+		data,
+	)
 }
 
 // leiosDatabase returns the underlying Database when the LedgerState is wired
@@ -764,13 +859,15 @@ func validateLeiosTxBitmap(count int, bitmaps map[uint16]uint64) error {
 // EndorserBlockTxsByHash returns the slot and the complete set of standalone
 // transaction CBORs of the cached endorser block with the given hash, for the
 // ledger to apply when the referencing Dijkstra ranking block is processed. ok
-// is false when the endorser block is not cached or its transactions are
-// incomplete. It satisfies ledger.EndorserBlockProviderFunc.
+// is false when the endorser block is not cached, its transactions are
+// incomplete, or its slot binding is not yet verified -- the ledger keys the
+// endorser blob it persists on this slot, so an unverified peer claim must not
+// reach it (issue #3513). It satisfies ledger.EndorserBlockProviderFunc.
 func (o *Ouroboros) EndorserBlockTxsByHash(
 	ebHash []byte,
 ) (uint64, []cbor.RawMessage, bool) {
 	data, ok := o.lookupLeiosEndorserBlock(ebHash)
-	if !ok || !data.completeTxCache() {
+	if !ok || !data.completeTxCache() || !data.slotVerified {
 		return 0, nil, false
 	}
 	return data.point.Slot, cloneRawMessages(data.txsRaw), true
