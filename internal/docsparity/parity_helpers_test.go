@@ -206,9 +206,15 @@ var excludedDiscoveryRoots = []string{
 	".agents/worktrees",
 	".claude/worktrees",
 	".codex/worktrees",
-	".git",
 	".tools",
 	".worktrees",
+}
+
+// excludedDiscoveryDirectories are generic dependency and VCS directories
+// that may occur below any fallback-discovery root. Unlike generated worktree
+// roots, these must be excluded recursively at every path depth.
+var excludedDiscoveryDirectories = []string{
+	".git",
 	"node_modules",
 }
 
@@ -227,6 +233,11 @@ func normalizeDiscoveryPath(rel string) string {
 
 func isExcludedDiscoveryPath(rel string) bool {
 	rel = normalizeDiscoveryPath(rel)
+	for _, component := range strings.Split(rel, "/") {
+		if slices.Contains(excludedDiscoveryDirectories, component) {
+			return true
+		}
+	}
 	for _, root := range excludedDiscoveryRoots {
 		if rel == root || strings.HasPrefix(rel, root+"/") {
 			return true
@@ -374,6 +385,10 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	writeTestFile(t, archive, ".agents/worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".tools/scratch/ignored.md")
+	writeTestFile(t, archive, "vendor/project/.git/config")
+	writeTestFile(t, archive, "vendor/project/.git/README.md")
+	writeTestFile(t, archive, "vendor/project/node_modules/pkg/README.md")
+	writeTestFile(t, archive, "vendor/project/node_modules/pkg/Dockerfile")
 	got, want = markdownFiles(t, archive), []string{"docs/tracked.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("archive markdownFiles() = %v, want %v", got, want)
