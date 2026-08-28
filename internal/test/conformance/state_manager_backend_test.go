@@ -212,6 +212,72 @@ func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
 	)
 }
 
+// TestPoolCurrentStatePendingRetirement proves PoolCurrentState's pending
+// retirement epoch tracks the pool's latest retirement certificate by
+// insertion order (AddedSlot), not the maximum epoch value across every
+// retirement row on the pool: a later retirement certificate replaces the
+// prior schedule even when it targets an earlier epoch, and a later pool
+// registration cancels a pending retirement entirely -- matching
+// ledger.LedgerView.PoolCurrentState's own fix for the same defect (see
+// ledger/view_test.go's TestLedgerViewPoolCurrentStatePendingRetirement).
+func TestPoolCurrentStatePendingRetirement(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	poolKeyHash := common.PoolKeyHash(testHash28(0x61))
+
+	registrationCert := func() *common.PoolRegistrationCertificate {
+		return &common.PoolRegistrationCertificate{
+			CertType:   uint(common.CertificateTypePoolRegistration),
+			Operator:   poolKeyHash,
+			VrfKeyHash: common.VrfKeyHash(testHash32(0x62)[:32]),
+		}
+	}
+	retirementCert := func(epoch uint64) *common.PoolRetirementCertificate {
+		return &common.PoolRetirementCertificate{
+			CertType:    uint(common.CertificateTypePoolRetirement),
+			PoolKeyHash: poolKeyHash,
+			Epoch:       epoch,
+		}
+	}
+	applyCert := func(slot uint64, seed string, cert common.Certificate) {
+		tx, err := syntheticTransaction(seed, []common.Certificate{cert})
+		require.NoError(t, err)
+		require.NoError(t, m.ApplyTransaction(tx, slot))
+	}
+
+	applyCert(1, "pool-register-initial", registrationCert())
+
+	// A retirement targeting epoch 10, then a later retirement targeting an
+	// EARLIER epoch (5): the later certificate must win regardless of its
+	// epoch value being smaller than the one it replaces.
+	applyCert(2, "pool-retire-10", retirementCert(10))
+	applyCert(3, "pool-retire-5", retirementCert(5))
+
+	provider := NewDingoStateProvider(m)
+	_, pendingEpoch, err := provider.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.NotNil(t, pendingEpoch)
+	require.Equal(
+		t,
+		uint64(5),
+		*pendingEpoch,
+		"a later retirement certificate must replace the prior schedule even when it moves the target epoch earlier",
+	)
+
+	// A later re-registration cancels the pending retirement entirely.
+	applyCert(4, "pool-reregister", registrationCert())
+
+	_, pendingEpoch, err = provider.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		pendingEpoch,
+		"a later pool registration must cancel a pending retirement",
+	)
+}
+
 // TestDRepRegistrationPropagatesBackendErrors proves DRepRegistration
 // returns a real backend error instead of swallowing it as "not
 // registered": only models.ErrDrepNotFound (a real "no such row" result)

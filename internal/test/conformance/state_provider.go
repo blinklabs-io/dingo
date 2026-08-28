@@ -201,7 +201,7 @@ func (p *DingoStateProvider) TimeToSlot(t time.Time) (uint64, error) {
 // rows) at certificate-application time via SetTransactionMetadataOnly in
 // ApplyTransaction, so there is nothing further to read at epoch-boundary
 // time -- see ProcessEpochBoundary's doc comment. The pending retirement
-// epoch, when any, is reported unconditionally (matching
+// epoch, when any, is derived by pendingPoolRetirementEpoch (matching
 // ledger.LedgerView.PoolCurrentState); whether the pool is still
 // considered actively registered is decided by poolIsActive -- see its
 // doc comment.
@@ -217,7 +217,7 @@ func (p *DingoStateProvider) PoolCurrentState(
 	if err != nil {
 		return nil, nil, fmt.Errorf("lookup pool: %w", err)
 	}
-	pendingEpoch := latestPoolRetirementEpoch(pool)
+	pendingEpoch := pendingPoolRetirementEpoch(pool)
 	if !poolIsActive(pool, p.manager.currentEpoch) {
 		return nil, pendingEpoch, nil
 	}
@@ -261,9 +261,19 @@ func poolIsActive(pool *models.Pool, currentEpoch uint64) bool {
 	if ret == nil {
 		return true
 	}
-	registrationSupersedesRetirement := reg.AddedSlot > ret.AddedSlot ||
+	return registrationSupersedesRetirement(reg, ret) || currentEpoch < ret.Epoch
+}
+
+// registrationSupersedesRetirement reports whether reg was added after ret,
+// meaning a later re-registration cancels ret as a pending retirement --
+// the metadata store's certificate application never separately deletes a
+// stale retirement row when a pool re-registers.
+func registrationSupersedesRetirement(
+	reg *models.PoolRegistration,
+	ret *models.PoolRetirement,
+) bool {
+	return reg.AddedSlot > ret.AddedSlot ||
 		(reg.AddedSlot == ret.AddedSlot && reg.CertificateID > ret.CertificateID)
-	return registrationSupersedesRetirement || currentEpoch < ret.Epoch
 }
 
 // latestPoolRegistrationRow returns the most recently added registration
@@ -302,18 +312,22 @@ func latestPoolRetirementRow(pool *models.Pool) *models.PoolRetirement {
 	return latest
 }
 
-// latestPoolRetirementEpoch returns the most recently recorded retirement
-// epoch for pool, or nil if it has none.
-func latestPoolRetirementEpoch(pool *models.Pool) *uint64 {
-	if len(pool.Retirement) == 0 {
+// pendingPoolRetirementEpoch returns the target epoch of pool's latest
+// retirement certificate (by AddedSlot, then CertificateID) -- not the
+// maximum epoch value across every retirement row: a later retirement
+// certificate replaces the prior schedule even when it targets an earlier
+// epoch. A later pool registration cancels the retirement entirely,
+// mirroring poolIsActive's ordering rule above.
+func pendingPoolRetirementEpoch(pool *models.Pool) *uint64 {
+	ret := latestPoolRetirementRow(pool)
+	if ret == nil {
 		return nil
 	}
-	epoch := pool.Retirement[0].Epoch
-	for _, retirement := range pool.Retirement[1:] {
-		if retirement.Epoch > epoch {
-			epoch = retirement.Epoch
-		}
+	if reg := latestPoolRegistrationRow(pool); reg != nil &&
+		registrationSupersedesRetirement(reg, ret) {
+		return nil
 	}
+	epoch := ret.Epoch
 	return &epoch
 }
 
