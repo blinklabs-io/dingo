@@ -77,26 +77,34 @@ Postgres variant runs automatically as part of the existing tagged
 
 **Schema isolation.** `database/plugin/metadata/postgres`'s own tests
 connect to the same `dingo_test` database. Since `go test ./...` runs
-different packages as separate, concurrent processes, sharing the default
-`public` schema would let the two suites race on the same tables.
-`NewDingoPostgresStateManager` migrates into a dedicated `conformance`
-schema instead (`CREATE SCHEMA IF NOT EXISTS` plus a connection-level
-`search_path` pinned to that schema via `PostgresDSNWithSearchPath` --
-baked into the DSN's connection startup parameters, so it applies to every
-connection the pool opens, not just one).
+different packages as separate, concurrent processes, and a local run can
+overlap another `go test` invocation (or two CI shards) against the same
+server, sharing one fixed schema across every process would let those
+processes race on the same tables and truncate each other's in-progress
+state. `NewDingoPostgresStateManager` instead migrates into a schema unique
+to this one test binary process (`conformance_<pid>_<timestamp>`, computed
+once at package load and shared by every call within that process --
+`CREATE SCHEMA IF NOT EXISTS` plus a connection-level `search_path` pinned
+to that schema via `PostgresDSNWithSearchPath`, baked into the DSN's
+connection startup parameters so it applies to every connection the pool
+opens, not just one).
 
-**Local blob directory.** The metadata store is remote and persistent
-across separate test runs (the `conformance` schema is truncated, never
-dropped, between ordinary constructions -- see the next paragraph), so the
-local Badger blob store paired with it must persist too: `database.New`'s
-commit-timestamp consistency check requires both stores in one `Database`
-to have last committed the same timestamp, and a fresh, empty local
-directory paired with an already-advanced remote schema fails that check.
-`NewDingoPostgresStateManager` therefore uses a stable directory
-(`$TMPDIR/dingo-conformance-postgres-blob`), not a new temporary one per
-call, and that directory is never cleared (stale blob entries are keyed by
-a truncated vector's own transaction hashes and are simply never looked
-up again -- harmless, see `state_manager_postgres.go`'s doc comment).
+**Local blob directory.** The metadata store is remote and persistent for
+this process's lifetime (the process schema is truncated, never dropped,
+between ordinary constructions -- see the next paragraph), so the local
+Badger blob store paired with it must persist for that same lifetime:
+`database.New`'s commit-timestamp consistency check requires both stores
+in one `Database` to have last committed the same timestamp, and a fresh,
+empty local directory paired with an already-advanced remote schema fails
+that check. `NewDingoPostgresStateManager` creates one `os.MkdirTemp`
+directory the first time it's called in a process (via `sync.Once`) and
+reuses it for every later call in that same process, rather than a new
+temporary one per call; that directory is never cleared between vectors
+(stale blob entries are keyed by a truncated vector's own transaction
+hashes and are simply never looked up again -- harmless, see
+`state_manager_postgres.go`'s doc comment). `TestMain` drops the process
+schema and removes this directory once, after every test in the process
+has finished -- see `conformance_main_test.go`.
 
 **Reset semantics.** Between vectors, `DingoStateManager.Reset()` does not
 call the metadata store's own `Resettable.Reset` (`database/plugin/metadata/postgres`'s
@@ -149,22 +157,27 @@ official `mysql` image's bootstrap grants access to *only* that database, so
 this suite can't reuse that user to carve out an isolated namespace the way
 the Postgres one does with `CREATE SCHEMA`. Instead,
 `NewDingoMysqlStateManager` authenticates as `root` (the one account
-guaranteed to have `CREATE DATABASE` privileges) and migrates into its own
-dedicated `dingo_conformance_test` database (the mysql metadata plugin's own
+guaranteed to have `CREATE DATABASE` privileges) and migrates into a
+database unique to this one test binary process
+(`dingo_conformance_<pid>_<timestamp>`, computed once at package load and
+shared by every call within that process; the mysql metadata plugin's own
 `openStore` provisions it automatically -- `CREATE DATABASE IF NOT EXISTS`,
 via its `ensureDatabaseExists` step -- whenever the DSN it's given names a
 database). This is why the MySQL tests key off `MYSQL_ROOT_PASSWORD`
 specifically rather than the `MYSQL_PASSWORD` the plugin's own tests use.
 
 **Local blob directory and reset semantics** follow the same reasoning as
-the Postgres backend above: `NewDingoMysqlStateManager` uses a stable local
-Badger directory (`$TMPDIR/dingo-conformance-mysql-blob`) paired with the
-persistent `dingo_conformance_test` database, and `Reset()` `TRUNCATE`s
-every table in that database in place, over a separate admin connection
-(rather than calling `Resettable.Reset`, which drops tables individually
-without recreating them), keeping the already-open store's connection
-pool live throughout instead of paying for a close/reopen/re-migrate cycle
-on every vector.
+the Postgres backend above: `NewDingoMysqlStateManager` creates one
+`os.MkdirTemp` directory the first time it's called in a process (via
+`sync.Once`) and reuses it for every later call in that same process,
+paired with the process-scoped database, and `Reset()` `TRUNCATE`s every
+table in that database in place, over a separate admin connection (rather
+than calling `Resettable.Reset`, which drops tables individually without
+recreating them), keeping the already-open store's connection pool live
+throughout instead of paying for a close/reopen/re-migrate cycle on every
+vector. `TestMain` drops the process database and removes this directory
+once, after every test in the process has finished -- see
+`conformance_main_test.go`.
 
 `TestRulesConformanceVectorsWithResultsMysql` follows the same
 count-comparison approach as the Postgres variant, for the same reason.
@@ -213,6 +226,7 @@ Cross-repo change cascades that must re-run this suite:
 | `conformance_test.go` | Go test entry points, SQLite backend (`TestRulesConformanceVectors`, `…WithResults`) |
 | `conformance_postgres_test.go` | Go test entry points, PostgreSQL backend, including restart/rollback/invalid-DSN acceptance tests (`dingo_extra_plugins` build tag) |
 | `conformance_mysql_test.go` | Go test entry points, MySQL backend, including restart/rollback/invalid-DSN acceptance tests (`dingo_extra_plugins` build tag) |
+| `conformance_main_test.go` | `TestMain` — drops this process's Postgres schema and MySQL database and removes their paired blob directories once, after every test in the process has finished (`dingo_extra_plugins` build tag) |
 | `database.go` | `openRealDatabase`/`closeRealDatabase` — composes a real blob+metadata `database.Database` via `plugin.Resolve`, shared by all three backend constructors |
 | `state_manager.go`    | `DingoStateManager` — implements `conformance.StateManager` against a real Dingo `database.Database` and `ledger/governance`, reusing production persistence code |
 | `state_manager_postgres.go` | `NewDingoPostgresStateManager` — same `DingoStateManager`, real Postgres connection with schema isolation (`dingo_extra_plugins` build tag) |
