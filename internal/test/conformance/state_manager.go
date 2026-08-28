@@ -562,7 +562,10 @@ func (m *DingoStateManager) createUtxo(
 	if utxo.Output == nil {
 		return nil
 	}
-	utxoModel := models.UtxoLedgerToModel(utxo, slot)
+	utxoModel, err := models.UtxoLedgerToModel(utxo, slot)
+	if err != nil {
+		return fmt.Errorf("convert utxo to model: %w", err)
+	}
 	if err := m.db.CreateUtxo(txn, &utxoModel); err != nil {
 		return fmt.Errorf("create utxo metadata: %w", err)
 	}
