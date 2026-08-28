@@ -1590,22 +1590,34 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	source string,
 	relay bool,
 ) error {
-	if err := o.recordLeiosAnnouncementLocked(
+	// leiosAnnouncementsMu is held across both the record and the
+	// reconciliation below, not just the record: bindLeiosEndorserBlockSlot
+	// runs at most once per distinct announcement (a re-announcement of an
+	// already-recorded header returns nil without re-binding), so if a
+	// concurrent storeLeiosEndorserBlock could observe "not yet announced"
+	// after this record commits but reconcile before this call reaches it,
+	// the resulting entry would never be verified by anything. Holding the
+	// lock across both closes that window; storeLeiosEndorserBlock takes the
+	// same lock (announcementsMu before leiosMu) across its own check and
+	// insertion for the same reason (issue #3513 review).
+	o.leiosAnnouncementsMu.Lock()
+	err := o.recordLeiosAnnouncementLocked(
 		raw,
 		ebHash,
 		ebSize,
 		header,
 		source,
 		relay,
-	); err != nil {
-		return err
+	)
+	if err == nil {
+		o.bindLeiosEndorserBlockSlot(ebHash.Bytes(), header.SlotNumber())
 	}
-	// Runs with leiosAnnouncementsMu released: the binding takes leiosMu, and
-	// storeLeiosEndorserBlock acquires the two in the opposite order.
-	o.bindLeiosEndorserBlockSlot(ebHash.Bytes(), header.SlotNumber())
-	return nil
+	o.leiosAnnouncementsMu.Unlock()
+	return err
 }
 
+// recordLeiosAnnouncementLocked is recordLeiosAnnouncement's implementation.
+// The caller must hold leiosAnnouncementsMu.
 func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	raw []byte,
 	ebHash lcommon.Blake2b256,
@@ -1615,8 +1627,6 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	relay bool,
 ) error {
 	key := string(header.Hash().Bytes())
-	o.leiosAnnouncementsMu.Lock()
-	defer o.leiosAnnouncementsMu.Unlock()
 	if o.leiosAnnouncements == nil {
 		o.leiosAnnouncements = make(map[string]leiosAnnouncement)
 	}
@@ -1682,16 +1692,38 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	return nil
 }
 
-// leiosAnnouncedSlot returns the slot a previously observed ranking-block
-// announcement recorded for the endorser block identified by ebHash, and
-// whether one is known. It lets a leios-fetch offer or store be bound to the
-// point its announcement actually vouched for, rather than trusting whatever
-// point the offering connection supplies for that hash (issue #3513).
-func (o *Ouroboros) leiosAnnouncedSlot(ebHash []byte) (uint64, bool) {
-	o.leiosAnnouncementsMu.Lock()
-	defer o.leiosAnnouncementsMu.Unlock()
+// leiosAnnouncedSlotLocked returns the slot a previously observed,
+// still-live ranking-block announcement recorded for the endorser block
+// identified by ebHash, and whether one is known. It lets a leios-fetch
+// offer or store be bound to the point its announcement actually vouched
+// for, rather than trusting whatever point the offering connection supplies
+// for that hash (issue #3513). The caller must hold leiosAnnouncementsMu:
+// every caller already needs it held across a wider check-then-act sequence
+// (storeLeiosEndorserBlock's announcement check through its cache insertion;
+// recordLeiosAnnouncement's record through its reconciliation), so this has
+// no separate lock-acquiring wrapper.
+func (o *Ouroboros) leiosAnnouncedSlotLocked(ebHash []byte) (uint64, bool) {
 	slot, ok := o.leiosAnnouncementSlots[string(ebHash)]
-	return slot, ok
+	if !ok {
+		return 0, false
+	}
+	// leiosAnnouncementSlots is only actively pruned when pruneLeiosAnnouncements
+	// runs, and that runs solely as a side effect of a new announcement being
+	// accepted -- so an idle node retains a stale binding well past the
+	// leiosNotifyMaxAnnouncementAge window this same check enforces
+	// elsewhere. Treating an expired binding as still authoritative would
+	// reject a later offer or announcement for the same hash as a conflict
+	// forever, instead of just leaving it unverified like a hash with no
+	// binding at all (issue #3513 review). Entries recorded without a ledger
+	// wired (unit tests) never expire, matching pruneLeiosAnnouncements' own
+	// no-op when the ledger is absent.
+	if !isNilInterface(o.leiosAnnouncementLedger) {
+		start, err := o.leiosAnnouncementLedger.SlotToTime(slot)
+		if err != nil || time.Since(start) > leiosNotifyMaxAnnouncementAge {
+			return 0, false
+		}
+	}
+	return slot, true
 }
 
 // EnqueueLeiosBlockAnnouncement validates and queues a locally forged

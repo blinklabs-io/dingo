@@ -459,9 +459,22 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// ordering. slotVerified gates everything keyed on the slot; the binding is
 	// reconciled later by bindLeiosEndorserBlockSlot when the announcement (or
 	// the ledger's chain-derived reference) arrives.
+	//
+	// leiosAnnouncementsMu is held from this check through the cache
+	// insertion below, not just for the read: recordLeiosAnnouncement holds
+	// the same lock across recording an announcement and reconciling any
+	// already-cached entry for it (bindLeiosEndorserBlockSlot), and that
+	// reconciliation is one-shot -- it only runs once, when the announcement
+	// is recorded. Without a shared lock, a concurrent announcement could be
+	// recorded and reconciled against a cache that does not contain this
+	// entry yet (it is inserted below), see this check find nothing, and then
+	// insert an entry nothing will ever come back to verify. Lock order is
+	// always leiosAnnouncementsMu before leiosMu.
+	o.leiosAnnouncementsMu.Lock()
 	verified := origin == leiosStoreAuthoritative
-	if announcedSlot, ok := o.leiosAnnouncedSlot(point.Hash); ok {
+	if announcedSlot, ok := o.leiosAnnouncedSlotLocked(point.Hash); ok {
 		if announcedSlot != point.Slot {
+			o.leiosAnnouncementsMu.Unlock()
 			return fmt.Errorf(
 				"leios endorser block cache: point slot does not match announced point: announced %d, got %d",
 				announcedSlot,
@@ -472,6 +485,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	}
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	if err != nil {
+		o.leiosAnnouncementsMu.Unlock()
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
 	cacheKeys := []string{leiosBlockKey(point.Hash)}
@@ -494,6 +508,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
 		if existing.point.Slot != point.Slot {
 			o.leiosMu.Unlock()
+			o.leiosAnnouncementsMu.Unlock()
 			return fmt.Errorf(
 				"leios endorser block cache: point slot mismatch for hash: cached %d, got %d",
 				existing.point.Slot,
@@ -551,6 +566,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// mutated yet at this point.
 	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
 		o.leiosMu.Unlock()
+		o.leiosAnnouncementsMu.Unlock()
 		return fmt.Errorf(
 			"leios endorser block cache: entry size %d exceeds max %d",
 			n,
@@ -571,6 +587,9 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosMu.Unlock()
+	// The announcement/store race window this lock closes ends at the cache
+	// insertion above; publishing has no further need for it.
+	o.leiosAnnouncementsMu.Unlock()
 	// Withhold everything keyed on the slot until the binding is verified. An
 	// unverified entry is published by bindLeiosEndorserBlockSlot once its
 	// announcement (or the ledger's chain-derived reference) corroborates the
@@ -638,15 +657,24 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
 		)
 		return
 	}
-	data.slotVerified = true
-	point := data.point
-	blockRaw := data.blockRaw
+	// Cached entries are replaced, never mutated in place: lookupLeiosEndorserBlock
+	// hands out this pointer and readers use it without leiosMu held, so
+	// flipping slotVerified here directly would race a concurrent unlocked
+	// read of the same field. Publish a copy instead, the same pattern
+	// retainLeiosPartialTxs uses.
+	verified := *data
+	verified.slotVerified = true
+	for _, key := range data.cacheKeys {
+		if o.leiosEndorserBlocks[key] == data {
+			o.leiosEndorserBlocks[key] = &verified
+		}
+	}
 	o.leiosMu.Unlock()
 	o.publishLeiosEndorserBlock(
-		point,
-		blockRaw,
-		lcommon.Blake2b256Hash(blockRaw),
-		data,
+		verified.point,
+		verified.blockRaw,
+		lcommon.Blake2b256Hash(verified.blockRaw),
+		&verified,
 	)
 }
 
@@ -1041,6 +1069,15 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		txCount:    len(block.TransactionReferences),
 		cacheKeys:  cacheKeys,
 		insertedAt: time.Now(),
+		// The blob store is written only from publishLeiosEndorserBlock,
+		// which never runs before slotVerified is true (see
+		// storeLeiosEndorserBlock and bindLeiosEndorserBlockSlot), so a
+		// persisted (slot, hash) pair is already an authoritatively bound
+		// one. Reconstructing it as unverified would withhold it from
+		// EndorserBlockTxsByHash until something re-verifies a hash whose
+		// announcement may have long since aged out of the acceptance
+		// window (issue #3513 review).
+		slotVerified: true,
 	}
 	// A persisted (or pre-cap-era) blob can exceed the per-entry byte budget
 	// even though storeLeiosEndorserBlock would reject it on the write path;

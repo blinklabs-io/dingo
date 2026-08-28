@@ -107,6 +107,7 @@ func TestStoreLeiosEndorserBlockRejectsOversizedEntry(t *testing.T) {
 		point,
 		blockRaw,
 		[]cbor.RawMessage{oversizedTx},
+		leiosStoreAuthoritative,
 	)
 	require.ErrorContains(t, err, "exceeds max")
 
@@ -131,7 +132,12 @@ func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 		tx := cbor.RawMessage(make([]byte, 600))
 		require.NoError(
 			t,
-			o.storeLeiosEndorserBlock(point, blockRaw, []cbor.RawMessage{tx}),
+			o.storeLeiosEndorserBlock(
+				point,
+				blockRaw,
+				[]cbor.RawMessage{tx},
+				leiosStoreAuthoritative,
+			),
 		)
 	}
 
@@ -163,7 +169,12 @@ func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
 	firstPoint, firstRaw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(
 		t,
-		o.storeLeiosEndorserBlock(firstPoint, firstRaw, []cbor.RawMessage{tx()}),
+		o.storeLeiosEndorserBlock(
+			firstPoint,
+			firstRaw,
+			[]cbor.RawMessage{tx()},
+			leiosStoreAuthoritative,
+		),
 	)
 
 	// Simulate the race directly: the entry inserted first (and so holding
@@ -182,6 +193,7 @@ func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
 			secondPoint,
 			secondRaw,
 			[]cbor.RawMessage{tx()},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -204,7 +216,10 @@ func TestRetainLeiosPartialTxsRejectsMergeOverEntryByteBudget(t *testing.T) {
 	const txCount = 4
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 21, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative),
+	)
 
 	// A first partial, well under the budget, is retained normally.
 	small := make([]cbor.RawMessage, txCount)

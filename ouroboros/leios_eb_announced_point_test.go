@@ -15,7 +15,9 @@
 package ouroboros
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -362,4 +364,194 @@ func TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger(
 	slot, _, provOk := o.EndorserBlockTxsByHash(point.Hash)
 	require.True(t, provOk)
 	require.Equal(t, point.Slot, slot)
+}
+
+// TestEndorserBlockTxsByHashAvailableAfterDBReload is the store -> drain ->
+// clear-memory -> provider regression from review: a verified, persisted
+// endorser block reloaded from the blob store after the in-memory cache is
+// cleared must remain available to the ledger provider immediately, not
+// only after some later event happens to re-verify it. loadLeiosEBFromDB
+// must reconstruct the reload as already bound, since the blob store is
+// only ever written from a verified entry in the first place.
+func TestEndorserBlockTxsByHashAvailableAfterDBReload(t *testing.T) {
+	tx0, ref0 := testLeiosManifestTx(t, 0)
+	blockRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref0},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(55, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	txsRaw := []cbor.RawMessage{tx0}
+
+	o := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		txsRaw,
+		leiosStoreAuthoritative,
+	))
+
+	// Endorser-block persistence is asynchronous; drain the writer so the
+	// blob store reflects the stored block before forcing a DB reload.
+	o.StopLeiosPersistWriter()
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
+
+	slot, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	require.True(
+		t,
+		ok,
+		"a reloaded, previously-verified entry must be immediately available",
+	)
+	require.Equal(t, point.Slot, slot)
+	require.Equal(t, txsRaw, gotTxs)
+}
+
+// TestBindLeiosEndorserBlockSlotDoesNotMutateSharedEntry guards the copy-on-
+// write invariant this file otherwise depends on throughout: lookupLeiosEndorserBlock
+// hands out a pointer after leiosMu is released, and readers use it without
+// the lock, so bindLeiosEndorserBlockSlot must publish a distinct copy on
+// verification rather than flipping slotVerified on the pointer a caller
+// already holds. Concurrent unlocked reads of that already-held pointer must
+// see it unmodified.
+func TestBindLeiosEndorserBlockSlotDoesNotMutateSharedEntry(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 63)
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+
+	held, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.False(t, held.slotVerified)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			_ = held.slotVerified
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot)
+	}()
+	wg.Wait()
+
+	require.False(
+		t,
+		held.slotVerified,
+		"the pointer a caller already held must never be mutated",
+	)
+	fresh, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.True(t, fresh.slotVerified, "a fresh lookup sees the published copy")
+}
+
+// TestStoreAndAnnouncementRaceAlwaysEndsVerified is the coordinated store /
+// announcement regression from review: whichever of a peer-offered store and
+// its matching announcement runs first, the entry must end up verified.
+// recordLeiosAnnouncement's reconciliation runs at most once per distinct
+// announcement, so if it can run before the store inserts its entry (seeing
+// nothing to reconcile) while the store's own announcement check ran before
+// the announcement was recorded (seeing nothing to bind to), the entry is
+// stuck unverified forever. Run across many independent hashes concurrently
+// under -race to exercise both interleavings.
+func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
+	const n = 64
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+
+	points := make([]ocommon.Point, n)
+	blocks := make([][]byte, n)
+	headers := make([][]byte, n)
+	for i := range n {
+		point, blockRaw := testLeiosEndorserBlockRaw(t, 100+i)
+		points[i] = point
+		blocks[i] = blockRaw
+		headers[i] = testDijkstraAnnouncementHeaderRawFor(
+			t,
+			point.Slot,
+			testEbHash(point),
+			uint64(len(blockRaw)),
+		)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2 * n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			_ = o.storeLeiosEndorserBlock(
+				points[i],
+				blocks[i],
+				nil,
+				leiosStorePeerOffered,
+			)
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			recordTestLeiosAnnouncement(t, o, headers[i])
+		}(i)
+	}
+	wg.Wait()
+
+	for i := range n {
+		data, ok := o.lookupLeiosEndorserBlock(points[i].Hash)
+		require.True(t, ok)
+		require.True(
+			t,
+			data.slotVerified,
+			"entry %d must end up verified regardless of race order",
+			i,
+		)
+	}
+}
+
+// TestLeiosAnnouncedSlotIgnoresExpiredBinding is the idle-expiry regression
+// from review: leiosAnnouncementSlots is only actively pruned as a side
+// effect of a *new* announcement being accepted (pruneLeiosAnnouncements), so
+// on an otherwise-idle node a binding can sit long past the acceptance window
+// pruneLeiosAnnouncements itself enforces. A lookup that does not also check
+// that age would treat a stale, long-expired binding as still authoritative
+// -- rejecting a legitimate later offer or announcement for the same hash as
+// a conflict instead of leaving it merely unverified, the same as a hash
+// with no binding at all.
+func TestLeiosAnnouncedSlotIgnoresExpiredBinding(t *testing.T) {
+	ledger := &fakeLeiosAnnouncementLedger{
+		// SlotToTime always answers as if the binding's slot occurred long
+		// enough ago to have aged out of leiosNotifyMaxAnnouncementAge.
+		slotTime: time.Now().Add(-2 * leiosNotifyMaxAnnouncementAge),
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ledger,
+	})
+
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 200, 1)
+	ebHash := testEbHash(point)
+	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(blockRaw))
+
+	slot, ok := o.leiosAnnouncedSlotLocked(point.Hash)
+	require.False(
+		t,
+		ok,
+		"an expired binding must read as unknown, not as a live conflict",
+	)
+	require.Zero(t, slot)
+
+	// A later offer for the same hash at an unrelated slot must be accepted
+	// (left unverified, pending its own announcement) rather than rejected
+	// against the stale binding.
+	later := ocommon.Point{Slot: point.Slot + 100_000, Hash: point.Hash}
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		later,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
 }

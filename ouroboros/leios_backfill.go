@@ -166,7 +166,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			continue
 		}
 		if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-			data.completeTxCache() {
+			data.completeTxCache() && data.slotVerified {
 			return nil
 		}
 		lastErr = errors.New(
@@ -244,6 +244,21 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		}
 		if data, ok = o.lookupLeiosEndorserBlock(point.Hash); !ok {
 			return errors.New("manifest stored but not found in cache")
+		}
+	} else if !data.slotVerified {
+		// The entry already exists -- e.g. cached from a peer offer that
+		// raced ahead of its announcement -- but was never bound to an
+		// authoritative slot. point is ledger-derived and authoritative for
+		// this hash, and the bytes are already held, so bind it in place
+		// rather than falling through: completeTxCache() below would
+		// otherwise return nil on every connection this backfill tries
+		// without any of them ever verifying the entry, since none would
+		// take the !ok branch above (issue #3513 review).
+		o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot)
+		if data, ok = o.lookupLeiosEndorserBlock(point.Hash); !ok {
+			return errors.New(
+				"manifest evicted while binding to authoritative point",
+			)
 		}
 	}
 	if data.txCount == 0 || data.completeTxCache() {
