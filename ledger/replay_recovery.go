@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -388,6 +389,9 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // non-terminal for exactly that reason.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
 		return true
 	}
 	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
