@@ -293,7 +293,16 @@ func (s *submitServiceServer) EvalTx(
 			},
 		}
 		if pd, ok := redeemerData[key]; ok {
-			r.Payload = plutusDataToCardano(pd)
+			payload, payloadErr := plutusDataToCardano(pd)
+			if payloadErr != nil {
+				s.utxorpc.config.Logger.Warn(
+					"Could not map redeemer Plutus data",
+					"error",
+					payloadErr,
+				)
+			} else {
+				r.Payload = payload
+			}
 		}
 		tmpRedeemers = append(tmpRedeemers, r)
 	}

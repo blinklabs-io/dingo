@@ -6187,8 +6187,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 				blockDonation = 0
 			}
 		}
-		// Validate phase-1 and require the locally evaluated phase-2 result to
-		// match the declared validity flag before applying any transaction state.
+		// Era validators run phase-1 rules for every transaction, then require
+		// the locally evaluated phase-2 result to match the declared validity
+		// flag before applying any transaction state. Phase-2-invalid
+		// transactions still need valid intervals, fees, collateral, witnesses,
+		// and other structural checks.
 		if shouldValidate {
 			validationEra, err := resolveValidationEra(
 				tx,
