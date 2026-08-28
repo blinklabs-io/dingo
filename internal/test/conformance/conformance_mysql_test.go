@@ -31,6 +31,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// mysqlConformanceDatabase is a fixed database name used only to build a
+// plausible-looking DSN for the negative "unreachable host"/"bad
+// credentials" acceptance tests below, where the connection is expected to
+// fail before any database name would matter -- it is never used to
+// actually create, migrate, or query a database. Real constructions
+// (NewDingoMysqlStateManager) use a process-unique name instead; see
+// mysqlProcessDatabase's doc comment in state_manager_mysql.go for why.
+const mysqlConformanceDatabase = "dingo_conformance_test"
+
 // isMysqlConformanceConfigured checks whether a MySQL root DSN has been
 // supplied via environment variables. Unlike
 // database/plugin/metadata/mysql's isMysqlConfigured (which only needs
@@ -208,25 +217,21 @@ func TestNewDingoMysqlStateManagerRestartSurvivesReopen(t *testing.T) {
 
 	// Both manager instances share one local blob directory: the local
 	// Badger blob store and the remote MySQL metadata store are paired at
-	// construction (see newDingoMysqlStateManagerAt's doc comment), so m2
-	// must reuse m1's blob directory to reopen against the same
-	// already-populated metadata store without tripping that pairing
-	// check.
+	// construction (see newDingoMysqlStateManagerAtDatabase's doc comment),
+	// so m2 must reuse m1's blob directory to reopen against the same
+	// already-populated metadata store without tripping that pairing check.
+	// NewDingoMysqlStateManager shares one database/blob-directory pair
+	// across every call in its process and never drops the database on
+	// Close (see mysqlProcessDatabase's doc comment in
+	// state_manager_mysql.go) -- reusing it here would work today, but only
+	// by accident, since nothing stops a sibling test elsewhere in this same
+	// process from resetting it concurrently. Manage a database explicitly
+	// instead, unique to this test run so it cannot collide with
+	// mysqlProcessDatabase or any other test's database, and clean it up
+	// once both managers are done.
 	blobDataDir := t.TempDir()
 	rootDSN := mysqlConformanceRootDSN()
 
-	// blobDataDir is always a fresh, empty t.TempDir(), so this test needs
-	// an equally fresh, empty metadata side to pair with it -- reusing
-	// mysqlConformanceDatabase (the database every other test in this suite
-	// shares) would trip database.New's commit-timestamp consistency check
-	// against whatever those other tests have already committed there, and
-	// truncating that shared database here would just move the same
-	// mismatch onto the *other* tests instead (they pair the stable,
-	// suite-shared mysqlConformanceBlobDir with that database, and this
-	// test's own commits -- made through blobDataDir, not that stable
-	// directory -- would advance the shared database's commit timestamp
-	// out from under them). A database unique to this test run sidesteps
-	// the problem entirely: nothing else ever touches it.
 	database := fmt.Sprintf("conformance_restart_%d", time.Now().UnixNano())
 	t.Cleanup(func() {
 		_ = dropMysqlDatabase(rootDSN, database)
@@ -372,12 +377,12 @@ func TestNewDingoMysqlStateManagerBadCredentialsFails(t *testing.T) {
 
 // dropMysqlDatabase drops database over an admin connection built from
 // rootDSN (with DBName cleared, matching truncateMysqlConformanceDatabase's
-// reasoning). Used to tear down a test-owned, uniquely named database
-// created via newDingoMysqlStateManagerAtDatabase (see
-// TestNewDingoMysqlStateManagerRestartSurvivesReopen) -- unlike the
-// suite-shared mysqlConformanceDatabase, a per-test database has no other
-// caller relying on it surviving, so cleanup is a plain drop rather than
-// truncateMysqlConformanceDatabase's in-place empty.
+// reasoning). Used to tear down the restart test's own explicitly managed
+// database (see TestNewDingoMysqlStateManagerRestartSurvivesReopen) and,
+// by TestMain (conformance_main_test.go), this whole process's
+// mysqlProcessDatabase once every test has finished. Either way cleanup is
+// a plain drop rather than truncateMysqlConformanceDatabase's in-place
+// empty: nothing else needs the database to keep existing afterward.
 func dropMysqlDatabase(rootDSN, database string) error {
 	cfg, err := mysqldriver.ParseDSN(rootDSN)
 	if err != nil {

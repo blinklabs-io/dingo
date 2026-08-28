@@ -208,7 +208,15 @@ func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 
 // Close releases state-manager resources: the database, its provider host,
 // and -- for a manager-owned data directory (the plain NewDingoStateManager
-// constructor) -- the directory itself.
+// constructor) -- the directory itself. It never drops a remote schema or
+// database: NewDingoPostgresStateManager/NewDingoMysqlStateManager share one
+// schema/database across every call in their process (see
+// postgresProcessSchema's doc comment in state_manager_postgres.go and
+// mysqlProcessDatabase's in state_manager_mysql.go), so an individual
+// manager's Close must not drop a resource a sibling manager elsewhere in
+// the same process may still be using -- that cleanup belongs to TestMain
+// (conformance_main_test.go), once, after every test in the process has
+// finished.
 func (m *DingoStateManager) Close() error {
 	err := closeRealDatabase(m.db, m.host)
 	if m.ownsDataDir && m.dataDir != "" {

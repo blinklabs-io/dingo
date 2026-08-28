@@ -241,25 +241,21 @@ func TestNewDingoPostgresStateManagerRestartSurvivesReopen(t *testing.T) {
 
 	// Both manager instances share one local blob directory: the local
 	// Badger blob store and the remote Postgres metadata store are paired
-	// at construction (see newDingoPostgresStateManagerAt's doc comment),
-	// so m2 must reuse m1's blob directory to reopen against the same
-	// already-populated metadata store without tripping that pairing
-	// check.
+	// at construction (see newDingoPostgresStateManagerAtSchema's doc
+	// comment), so m2 must reuse m1's blob directory to reopen against the
+	// same already-populated metadata store without tripping that pairing
+	// check. NewDingoPostgresStateManager shares one schema/blob-directory
+	// pair across every call in its process and never drops the schema on
+	// Close (see postgresProcessSchema's doc comment in
+	// state_manager_postgres.go) -- reusing it here would work today, but
+	// only by accident, since nothing stops a sibling test elsewhere in this
+	// same process from resetting it concurrently. Manage a schema
+	// explicitly instead, unique to this test run so it cannot collide with
+	// postgresProcessSchema or any other test's schema, and clean it up once
+	// both managers are done.
 	blobDataDir := t.TempDir()
 	dsn := postgresConformanceDSN()
 
-	// blobDataDir is always a fresh, empty t.TempDir(), so this test needs
-	// an equally fresh, empty metadata side to pair with it -- reusing
-	// postgresConformanceSchema (the schema every other test in this suite
-	// shares) would trip database.New's commit-timestamp consistency check
-	// against whatever those other tests have already committed there, and
-	// truncating that shared schema here would just move the same mismatch
-	// onto the *other* tests instead (they pair the stable, suite-shared
-	// postgresConformanceBlobDir with that schema, and this test's own
-	// commits -- made through blobDataDir, not that stable directory --
-	// would advance the shared schema's commit timestamp out from under
-	// them). A schema unique to this test run sidesteps the problem
-	// entirely: nothing else ever touches it.
 	schema := fmt.Sprintf("conformance_restart_%d", time.Now().UnixNano())
 	t.Cleanup(func() {
 		_ = dropPostgresSchema(dsn, schema)
@@ -388,21 +384,23 @@ func TestNewDingoPostgresStateManagerBadCredentialsFails(t *testing.T) {
 }
 
 // dropPostgresSchema drops schema (and everything in it) over an ordinary,
-// unscoped connection to dsn. Used to tear down a test-owned, uniquely
-// named schema created via newDingoPostgresStateManagerAtSchema (see
-// TestNewDingoPostgresStateManagerRestartSurvivesReopen) -- unlike the
-// suite-shared postgresConformanceSchema, a per-test schema has no other
-// caller relying on it surviving, so cleanup is a plain drop rather than
-// truncatePostgresConformanceSchema's in-place empty.
+// unscoped connection to dsn. Used to tear down the restart test's own
+// explicitly managed schema (see
+// TestNewDingoPostgresStateManagerRestartSurvivesReopen) and, by TestMain
+// (conformance_main_test.go), this whole process's postgresProcessSchema
+// once every test has finished. Either way cleanup is a plain drop rather
+// than truncatePostgresConformanceSchema's in-place empty: nothing else
+// needs the schema to keep existing afterward.
 func dropPostgresSchema(dsn, schema string) error {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return fmt.Errorf("open postgres admin connection: %w", err)
 	}
 	defer db.Close()
-	// schema is always Go-generated (a test-owned unique name), never
-	// operator/DSN input, so string concatenation here carries no
-	// injection risk -- same reasoning as ensurePostgresConformanceSchema.
+	// schema is always Go-generated (a process-and-time-derived unique
+	// name), never operator/DSN input, so string concatenation here
+	// carries no injection risk -- same reasoning as
+	// ensurePostgresConformanceSchema.
 	if _, err := db.Exec(
 		"DROP SCHEMA IF EXISTS " + schema + " CASCADE",
 	); err != nil {
