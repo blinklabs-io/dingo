@@ -93,6 +93,71 @@ func TestPlutusDataToCardano_ConstrLargeTagUsesAnyConstructor(t *testing.T) {
 	require.Equal(t, uint64(200), cv.Constr.AnyConstructor)
 }
 
+func TestPlutusDataToCardanoChecked_ConstrTag127UsesTag(t *testing.T) {
+	pd := pdata.NewConstrFromBigInt(big.NewInt(127))
+	proto, err := plutusDataToCardanoChecked(pd)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(127), cv.Constr.Tag)
+	require.Equal(t, uint64(0), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardanoChecked_ConstrTag128UsesAnyConstructor(t *testing.T) {
+	pd := pdata.NewConstrFromBigInt(big.NewInt(128))
+	proto, err := plutusDataToCardanoChecked(pd)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(0), cv.Constr.Tag)
+	require.Equal(t, uint64(128), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardano_ConstrMaxTagUsesAnyConstructor(t *testing.T) {
+	pd := pdata.NewConstrFromBigInt(new(big.Int).SetUint64(^uint64(0)))
+	proto := plutusDataToCardano(pd)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(0), cv.Constr.Tag)
+	require.Equal(t, ^uint64(0), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardano_ConstrAboveMaxTagRejected(t *testing.T) {
+	tag := new(big.Int).Lsh(big.NewInt(1), 64)
+	pd := pdata.NewConstrFromBigInt(tag)
+	require.Nil(t, plutusDataToCardano(pd))
+	_, err := plutusDataToCardanoChecked(pd)
+	require.EqualError(
+		t,
+		err,
+		"constructor tag 18446744073709551616 is outside the Word64 CBOR range",
+	)
+}
+
+func TestPlutusDataToCardano_ConstrNilTagUsesZeroTag(t *testing.T) {
+	pd := &pdata.Constr{}
+	proto := plutusDataToCardano(pd)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(0), cv.Constr.Tag)
+	require.Equal(t, uint64(0), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardano_ConstrNegativeTagRejected(t *testing.T) {
+	pd := pdata.NewConstrFromBigInt(big.NewInt(-1))
+	require.Nil(t, plutusDataToCardano(pd))
+	_, err := plutusDataToCardanoChecked(pd)
+	require.EqualError(
+		t,
+		err,
+		"constructor tag -1 is outside the Word64 CBOR range",
+	)
+}
+
 func TestPlutusDatumCBORToCardano_Integer(t *testing.T) {
 	raw, err := pdata.Encode(pdata.NewInteger(big.NewInt(42)))
 	require.NoError(t, err)
