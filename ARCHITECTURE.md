@@ -2965,10 +2965,11 @@ it. Dingo implements this as a **corroboration gate**
   header-queue verification (that only runs for headers actually applied).
   Verification is skipped under the same fast-sync/Mithril-import exemptions
   the ledger's own header-queue path already applies, and a result showing
-  local state has not caught up to the header's slot (`IsHeaderVerification-
-  Deferred`) still leaves the header eligible — both preserve legitimate
-  catch-up behavior. Only a definite failure excludes the header from
-  observation and publishes `ledger.ConnectionRecycleRequestedEventType`
+  local state has not caught up to the header's slot
+  (`IsHeaderVerificationDeferred`) still leaves the header eligible — both
+  preserve legitimate catch-up behavior. Only a definite failure excludes the
+  header from observation and publishes
+  `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).
   The check is two derived closures on `Ouroboros`
