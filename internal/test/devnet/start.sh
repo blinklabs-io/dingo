@@ -27,6 +27,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=compose-project.sh
+source "${SCRIPT_DIR}/compose-project.sh"
+devnet_compose_project
+export DEVNET_COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME}"
+devnet_render_topology
 
 # Mode selection precedence: CLI, COMPOSE_PROFILES, then dingo.
 MODE=""
@@ -65,6 +70,8 @@ if [[ "${ACCELERATED}" == "true" ]]; then
   fi
   echo "Using accelerated network spec: ${ACTIVE_SPEC}"
   echo "Run the scenario with:"
+  echo "  COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} \\"
+  echo "  DEVNET_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME} \\"
   echo "  DEVNET_ACCELERATED=1 \\"
   echo "  DEVNET_TESTNET_YAML=${SCRIPT_DIR}/${ACTIVE_SPEC#./} \\"
   echo "  DEVNET_COMPOSE_FILE=${SCRIPT_DIR}/docker-compose.yml \\"
@@ -72,7 +79,7 @@ if [[ "${ACCELERATED}" == "true" ]]; then
   echo "    -timeout 8m ./internal/test/devnet/scenarios/"
 fi
 
-echo "Starting DevNet containers (mode: ${MODE})..."
+echo "Starting DevNet containers (mode: ${MODE}, project: ${COMPOSE_PROJECT_NAME}, net: ${DEVNET_NET_BASE}.0/24)..."
 docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
 
 echo ""
@@ -98,5 +105,5 @@ else
   echo "  dingo-relay: localhost:${DINGO_RELAY_PORT}"
 fi
 echo ""
-echo "View logs:  docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs -f"
-echo "Stop:       ${SCRIPT_DIR}/stop.sh"
+echo "View logs:  COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs -f"
+echo "Stop:       COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} ${SCRIPT_DIR}/stop.sh"

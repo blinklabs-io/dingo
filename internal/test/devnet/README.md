@@ -354,10 +354,12 @@ submits to, so mempool traffic keeps flowing through the outage.
 To drive it by hand against a network you brought up yourself:
 
 ```bash
+export COMPOSE_PROJECT_NAME=dingo-devnet-manual
 ./start.sh --accelerated
 DEVNET_ACCELERATED=1 \
   DEVNET_TESTNET_YAML=$PWD/testnet-dingo-accelerated.yaml \
   DEVNET_COMPOSE_FILE=$PWD/docker-compose.yml \
+  DEVNET_COMPOSE_PROJECT=$COMPOSE_PROJECT_NAME \
   go test -tags devnet -run TestAcceleratedScenarioTimeline -timeout 8m \
   ./internal/test/devnet/scenarios/
 ./stop.sh --accelerated
@@ -578,6 +580,7 @@ harness and the compose port mappings always agree.
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |
+| `compose-project.sh`         | Derives a stable, worktree-specific Compose project name, bridge subnet, and rendered topology directory |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full bring-up → test → tear-down cycle used by CI; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
@@ -598,15 +601,41 @@ harness and the compose port mappings always agree.
 
 ## Cleanup
 
-`stop.sh` and the `run-tests.sh` trap both run `docker compose down -v`
-scoped to the active `COMPOSE_PROFILES`, which removes that mode's config
-and data volumes. Genesis is regenerated on every start, so this is the
-desired default — there's no state worth preserving between runs. If a
-previous run left orphaned containers or volumes around:
+`start.sh`, `stop.sh`, and `run-tests.sh` derive `COMPOSE_PROJECT_NAME` from
+the worktree's absolute path. Compose therefore gives each worktree distinct
+containers, networks, volumes, and project state. Set `COMPOSE_PROJECT_NAME`
+explicitly to run more than one DevNet in the same worktree. `NodeControl`
+receives that project as `DEVNET_COMPOSE_PROJECT`, resolves service containers
+inside it, and still uses direct `docker stop`/`docker start` for disruption
+phases.
+
+A distinct network *name* isn't enough on its own: the compose network's
+subnet is a separate axis, and Docker refuses to create two networks with an
+overlapping subnet even under different project names ("Pool overlaps with
+other one on this address space"). The same three scripts also derive
+`DEVNET_NET_BASE`, a worktree-specific `172.24-172.31.x` /24 (distinct from
+the ranges the antithesis/archive-demo and erastest stacks pin), and use it
+for the compose network's subnet and each service's static IP — the topology
+still needs static IPs because the peer lists in `topology/*.json` are
+static, checked-in files. `devnet_render_topology` rewrites a worktree-local
+copy of those files with the run's `DEVNET_NET_BASE` into
+`DEVNET_TOPOLOGY_DIR`, which `docker-compose.yml` mounts instead of the
+checked-in `./topology` (its fallback default, so a bare `docker compose up`
+without going through these scripts still works — for a single run at a
+time). Set `DEVNET_NET_BASE` explicitly for the same reason you'd set
+`COMPOSE_PROJECT_NAME`.
+
+`stop.sh` and the `run-tests.sh` trap run `docker compose down -v` only for
+that project, removing its config and data volumes without touching another
+worktree's run, and remove that project's rendered topology directory.
+Genesis is regenerated on every start, so this is the desired default —
+there's no state worth preserving between runs. If a previous run left
+orphaned containers or volumes around, use the same project name:
 
 ```bash
-docker compose -f docker-compose.yml down -v --remove-orphans
+COMPOSE_PROJECT_NAME=<project> docker compose -f docker-compose.yml down -v --remove-orphans
 docker volume ls | grep devnet                       # inspect leftovers
+docker network ls | grep dingo-devnet                # inspect leftover networks
 ```
 
 ## Troubleshooting
@@ -642,7 +671,8 @@ docker volume ls | grep devnet                       # inspect leftovers
   `epochLength: 500`, `slotLength: 1s`.
 - The accelerated scenario fails at `NewNodeControl`. It needs to reach
   Docker Compose to stop and start nodes. Run it through `run-tests.sh`,
-  which exports `DEVNET_COMPOSE_FILE`, or set that variable yourself. It
+  which exports `DEVNET_COMPOSE_FILE` and `DEVNET_COMPOSE_PROJECT`, or set
+  both variables yourself. It
   fails rather than skipping the disruption phases on purpose — a pass
   that quietly omitted them would not be release evidence.
 - `TestCIP50PledgeLeverageRewardEffect` skips. It requires
