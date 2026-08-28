@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,8 +89,33 @@ func postgresConformanceDSN() string {
 
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
-		host, port, user, os.Getenv("POSTGRES_PASSWORD"), database, sslMode,
+		storagetest.EscapeLibpqValue(host),
+		storagetest.EscapeLibpqValue(port),
+		storagetest.EscapeLibpqValue(user),
+		storagetest.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")),
+		storagetest.EscapeLibpqValue(database),
+		storagetest.EscapeLibpqValue(sslMode),
 	)
+}
+
+// TestPostgresConformanceDSNEscapesSpecialCharacterPassword proves
+// postgresConformanceDSN survives a legal libpq password containing a
+// space, a quote, and a backslash -- exactly the class of credential
+// storagetest.EscapeLibpqValue exists to handle, and exactly what a
+// reviewer's probe found broken here before every DSN component was passed
+// through it: an unquoted, unescaped keyword/value pair ends at the first
+// whitespace, so pgx.ParseConfig(postgresConformanceDSN()) silently
+// truncated this password to just "review" -- a real POSTGRES_PASSWORD
+// value like this would authenticate with the wrong (truncated) password
+// against a live server rather than fail DSN parsing outright.
+func TestPostgresConformanceDSNEscapesSpecialCharacterPassword(t *testing.T) {
+	const specialPassword = "review pass'word\\tail"
+	t.Setenv("POSTGRES_DSN", "")
+	t.Setenv("POSTGRES_PASSWORD", specialPassword)
+
+	cfg, err := pgx.ParseConfig(postgresConformanceDSN())
+	require.NoError(t, err, "postgresConformanceDSN produced an unparseable DSN")
+	require.Equal(t, specialPassword, cfg.Password)
 }
 
 // newTestPostgresConformanceManager creates a Postgres-backed
