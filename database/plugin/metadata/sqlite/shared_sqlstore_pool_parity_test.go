@@ -43,6 +43,11 @@ type poolStore interface {
 		lcommon.PoolKeyHash,
 		types.Txn,
 	) (uint64, bool, error)
+	LatestPoolOpCertSequenceAtOrBefore(
+		lcommon.PoolKeyHash,
+		uint64,
+		types.Txn,
+	) (uint64, bool, error)
 	GetPoolBlockIssuersInSlotRange(
 		uint64,
 		uint64,
@@ -81,22 +86,24 @@ type poolStore interface {
 }
 
 type poolState struct {
-	Pool         *models.Pool
-	ByVRF        *models.Pool
-	Pools        []models.Pool
-	Missing      *models.Pool
-	Sequence     uint64
-	SequenceSet  bool
-	Issuers      []models.PoolOpCertSequence
-	Counts       map[string]uint64
-	Total        uint64
-	Active       [][]byte
-	ActiveAtSlot [][]byte
-	Retiring     []models.PoolRetiringRow
-	Stake        uint64
-	Delegators   uint64
-	StakeMap     map[string]uint64
-	DelegatorMap map[string]uint64
+	Pool                  *models.Pool
+	ByVRF                 *models.Pool
+	Pools                 []models.Pool
+	Missing               *models.Pool
+	Sequence              uint64
+	SequenceSet           bool
+	HistoricalSequence    uint64
+	HistoricalSequenceSet bool
+	Issuers               []models.PoolOpCertSequence
+	Counts                map[string]uint64
+	Total                 uint64
+	Active                [][]byte
+	ActiveAtSlot          [][]byte
+	Retiring              []models.PoolRetiringRow
+	Stake                 uint64
+	Delegators            uint64
+	StakeMap              map[string]uint64
+	DelegatorMap          map[string]uint64
 }
 
 func TestSharedSQLStorePoolParity(t *testing.T) {
@@ -184,6 +191,9 @@ func exercisePoolStore(t *testing.T, store poolStore) poolState {
 		poolKeyHash,
 		nil,
 	)
+	require.NoError(t, err)
+	ret.HistoricalSequence, ret.HistoricalSequenceSet, err =
+		store.LatestPoolOpCertSequenceAtOrBefore(poolKeyHash, 20, nil)
 	require.NoError(t, err)
 	ret.Issuers, err = store.GetPoolBlockIssuersInSlotRange(20, 21, nil)
 	require.NoError(t, err)

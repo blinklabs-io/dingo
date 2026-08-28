@@ -67,6 +67,13 @@ func (p *Pump) Run(ctx context.Context) error {
 		startup = startupTimer.C
 	}
 	ready := false
+	// A healthy node can accept an N2C connection before the network's
+	// configured system start. Keep the first submission behind the genesis
+	// boundary so an accepted pre-genesis transaction is not later discarded
+	// when forging and ledger revalidation begin.
+	if err := p.waitForGenesis(ctx, startup); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -131,6 +138,33 @@ func (p *Pump) Run(ctx context.Context) error {
 		if !p.cooldown(ctx) {
 			return ctx.Err()
 		}
+	}
+}
+
+// waitForGenesis blocks transaction generation until the configured network
+// start. The startup deadline remains active while waiting, so a bad runtime
+// genesis timestamp fails readiness instead of leaving txpump hung forever.
+func (p *Pump) waitForGenesis(
+	ctx context.Context,
+	startup <-chan time.Time,
+) error {
+	delay := time.Until(p.genesisTime)
+	if delay <= 0 {
+		return nil
+	}
+	p.logger.Info("waiting for genesis start", "delay", delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-startup:
+		return fmt.Errorf(
+			"txpump readiness timeout after %s: genesis has not started",
+			p.cfg.StartupTimeout,
+		)
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -202,12 +236,16 @@ func enabledTypes(
 	return enabled
 }
 
-// currentSlot returns the number of 1-second slots elapsed since the Pump was
-// created.  Using elapsed time (rather than Unix epoch seconds) ensures that
-// the slot counter starts near 0 and epoch gating works correctly for devnet
-// testing, where epochs are only 500 slots long.
+// currentSlot returns the number of 1-second slots elapsed since genesis.
+// Using elapsed time (rather than Unix epoch seconds) ensures that the slot
+// counter starts near 0 and epoch gating works correctly for devnet testing,
+// where epochs are only 500 slots long. Before genesis, report slot 0 rather
+// than converting a negative duration to a near-MaxUint64 slot.
 func (p *Pump) currentSlot() uint64 {
 	elapsed := time.Since(p.genesisTime)
+	if elapsed <= 0 {
+		return 0
+	}
 	return uint64(elapsed.Seconds())
 }
 

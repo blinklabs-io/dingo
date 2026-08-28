@@ -546,14 +546,18 @@ type Config struct {
 	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
 	// certificates (mTLS) against. Required whenever the database lifecycle
 	// service is mounted (databaseLifecycle.snapshotDir set alongside
-	// barkPort): its destructive DatabaseService RPCs (CreateSnapshot,
-	// DeleteSnapshot, VerifySnapshot, Restore, Truncate, CancelOperation)
-	// refuse any caller whose connection didn't present a certificate
-	// verified against this CA — see bark.Bark.Start and bark/auth.go. Also
-	// requires TlsCertFilePath/TlsKeyFilePath to be set.
-	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath"         envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
-	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins"           envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort          uint     `yaml:"metricsPort"                                                                    split_words:"true"`
+	// barkPort): every DatabaseService RPC requires a certificate verified
+	// against this CA. Destructive methods additionally require an explicit
+	// BarkOperatorCertificateFingerprints match. Also requires
+	// TlsCertFilePath/TlsKeyFilePath to be set.
+	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"         envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
+	// for destructive DatabaseService RPCs. Every DatabaseService caller must
+	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate
+	// fingerprints may invoke destructive methods.
+	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints" envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
+	CORSAllowedOrigins                  []string `yaml:"corsAllowedOrigins"                    envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort                         uint     `yaml:"metricsPort"                                                                    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -1046,38 +1050,39 @@ type DatabaseLifecycleConfig struct {
 var configMu sync.RWMutex
 
 var globalConfig = &Config{
-	Plugins:              defaultPluginsConfig(),
-	BindAddr:             "0.0.0.0",
-	CardanoConfig:        "", // Will be set dynamically based on network
-	DatabasePath:         ".dingo",
-	SocketPath:           "dingo.socket",
-	IntersectTip:         false,
-	ValidateHistorical:   true,
-	StrictUtxoValidation: true,
-	Tracing:              false,
-	TracingStdout:        false,
-	Network:              "preview",
-	NetworkMagic:         0,
-	MetricsPort:          12798,
-	DebugBindAddr:        DefaultDebugBindAddr,
-	DebugPort:            0,
-	PrivateBindAddr:      "127.0.0.1",
-	PrivatePort:          3002,
-	RelayPort:            3001,
-	BarkBaseUrl:          "",
-	BarkPort:             0,
-	BarkHost:             "",
-	BarkClientCAFilePath: "",
-	CORSAllowedOrigins:   []string{"*"},
-	Topology:             "",
-	TlsCertFilePath:      "",
-	TlsKeyFilePath:       "",
-	StorageMode:          "core",
-	RunMode:              RunModeServe,
-	StartEra:             StartEraDefault,
-	ImmutableDbPath:      "",
-	ShutdownTimeout:      DefaultShutdownTimeout,
-	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+	Plugins:                             defaultPluginsConfig(),
+	BindAddr:                            "0.0.0.0",
+	CardanoConfig:                       "", // Will be set dynamically based on network
+	DatabasePath:                        ".dingo",
+	SocketPath:                          "dingo.socket",
+	IntersectTip:                        false,
+	ValidateHistorical:                  true,
+	StrictUtxoValidation:                true,
+	Tracing:                             false,
+	TracingStdout:                       false,
+	Network:                             "preview",
+	NetworkMagic:                        0,
+	MetricsPort:                         12798,
+	DebugBindAddr:                       DefaultDebugBindAddr,
+	DebugPort:                           0,
+	PrivateBindAddr:                     "127.0.0.1",
+	PrivatePort:                         3002,
+	RelayPort:                           3001,
+	BarkBaseUrl:                         "",
+	BarkPort:                            0,
+	BarkHost:                            "",
+	BarkClientCAFilePath:                "",
+	BarkOperatorCertificateFingerprints: nil,
+	CORSAllowedOrigins:                  []string{"*"},
+	Topology:                            "",
+	TlsCertFilePath:                     "",
+	TlsKeyFilePath:                      "",
+	StorageMode:                         "core",
+	RunMode:                             RunModeServe,
+	StartEra:                            StartEraDefault,
+	ImmutableDbPath:                     "",
+	ShutdownTimeout:                     DefaultShutdownTimeout,
+	LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
 	// Defaults for database worker pool and API backfill tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
@@ -1199,6 +1204,10 @@ func cloneConfig(cfg *Config) *Config {
 	clone.BarkBlockDownloadHosts = append(
 		[]string(nil),
 		cfg.BarkBlockDownloadHosts...,
+	)
+	clone.BarkOperatorCertificateFingerprints = append(
+		[]string(nil),
+		cfg.BarkOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
 	if cfg.PeerSharing != nil {

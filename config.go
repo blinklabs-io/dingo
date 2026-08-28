@@ -219,6 +219,7 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
+	barkOperatorCertificateFingerprints                                                 []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	koiosParity                                                                         KoiosParityConfig
@@ -557,6 +558,28 @@ func (n *Node) configValidate() error {
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}
+	// A peer snapshot carries the network magic it was taken on. During
+	// Genesis selection its relays replace the configured bootstrap peers, so
+	// a snapshot from another network aims the node at that network's relays
+	// and discards the addresses that would have worked. Those relays are then
+	// each denied at the handshake for a magic mismatch, leaving the node with
+	// no peers and no route back to the bootstrap list -- an outage-shaped
+	// failure with a configuration cause. Reject it at startup instead.
+	if n.config.topologyConfig != nil &&
+		n.config.topologyConfig.PeerSnapshot != nil &&
+		internalconfig.PeerSnapshotNetworkMismatch(
+			n.config.topologyConfig.PeerSnapshot.NetworkMagic,
+			n.config.cfg.NetworkMagic,
+		) {
+		return fmt.Errorf(
+			"peer snapshot network mismatch: snapshot networkMagic %d does "+
+				"not match the configured networkMagic %d; its relays would "+
+				"replace the configured bootstrap peers and then be refused "+
+				"at the handshake",
+			n.config.topologyConfig.PeerSnapshot.NetworkMagic,
+			n.config.cfg.NetworkMagic,
+		)
+	}
 	// The block-decode pipeline's vendored decode stage
 	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
 	// directly and has no hook for dingo's Leios-extended-header Conway
@@ -712,6 +735,9 @@ func (c *Config) syncCompatFields() {
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
+	c.barkOperatorCertificateFingerprints = slices.Clone(
+		c.cfg.BarkOperatorCertificateFingerprints,
+	)
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
@@ -1488,14 +1514,24 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkClientCAFilePath sets the PEM CA bundle Bark verifies client
-// certificates (mTLS) against. Required whenever the database lifecycle
-// service is mounted — see BarkConfig.TlsClientCAFilePath's doc comment in
-// bark/bark.go for what this gates.
+// WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
+// every DatabaseService caller. Destructive methods additionally require an
+// allowlisted fingerprint set by WithBarkOperatorCertificateFingerprints.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
+	}
+}
+
+// WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
+// fingerprints authorized to invoke destructive DatabaseService RPCs.
+func WithBarkOperatorCertificateFingerprints(
+	fingerprints []string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.barkOperatorCertificateFingerprints = slices.Clone(fingerprints)
 	}
 }
 
@@ -1790,6 +1826,12 @@ func (c *Config) BarkBaseUrl() string {
 // BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
+}
+
+// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
+// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
+func (c *Config) BarkOperatorCertificateFingerprints() []string {
+	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
 }
 
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.

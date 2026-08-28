@@ -370,7 +370,12 @@ var flagSpecs = []flagSpec{
 		"BarkClientCAFilePath",
 		"bark-client-ca-file-path",
 		"",
-		"path to a PEM CA bundle; client certs verified against it authenticate Bark's destructive DatabaseService RPCs (required whenever the database lifecycle service is enabled)",
+		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+	),
+	stringSliceFlag(
+		"BarkOperatorCertificateFingerprints",
+		"bark-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
 	),
 
 	// History expiry

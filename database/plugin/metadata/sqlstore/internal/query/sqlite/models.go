@@ -293,6 +293,8 @@ type PoolStakeSnapshot struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool

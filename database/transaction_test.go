@@ -321,7 +321,9 @@ func TestDeleteTxBlobsCountsFailedBatchCommit(t *testing.T) {
 	}
 
 	txHashes := [][]byte{{0x01}, {0x02}, {0x03}}
-	require.NoError(t, deleteTxBlobs(db, txHashes, nil))
+	err := deleteTxBlobs(db, txHashes, nil)
+	require.Error(t, err, "an uncommitted batch leaves unreachable objects")
+	require.ErrorIs(t, err, ErrBlobDeleteIncomplete)
 	require.Len(t, store.txns, 1)
 	require.Equal(t, 1, store.txns[0].commitCount)
 	require.Contains(t, logs.String(), "\"failed\":3")
@@ -350,7 +352,9 @@ func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
 		{TxId: []byte{0x02}, OutputIdx: 1},
 		{TxId: []byte{0x03}, OutputIdx: 2},
 	}
-	require.NoError(t, deleteUtxoBlobs(db, utxos, nil))
+	err := deleteUtxoBlobs(db, utxos, nil)
+	require.Error(t, err, "an uncommitted batch leaves unreachable objects")
+	require.ErrorIs(t, err, ErrBlobDeleteIncomplete)
 	require.Len(t, store.txns, 1)
 	require.Equal(t, 1, store.txns[0].commitCount)
 	require.Contains(t, logs.String(), "\"failed\":3")

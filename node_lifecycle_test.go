@@ -31,12 +31,12 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -54,19 +54,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// liveLifecycleTestDataDir returns the immutable testdata directory used
-// elsewhere in the repo (internal/integration, database package tests) —
-// real preview-testnet blocks.
-func liveLifecycleTestDataDir() string {
-	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(
-		filepath.Dir(thisFile),
-		"database",
-		"immutable",
-		"testdata",
-	)
-}
 
 // newLiveLifecycleTestNode hand-builds a partial but real *Node — real
 // database, chain manager, ledger state (loaded with real blocks), event
@@ -262,32 +249,19 @@ func newLiveLifecycleTestNodeWithGenesis(
 	return n, points
 }
 
-// loadLiveLifecycleTestBlocks loads numBlocks real blocks from the
-// immutable testdata into c, mirroring
-// internal/integration.loadBlocksFromImmutable (a different package, so
-// not directly reusable).
+// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c.
+// The lifecycle tests configure the Babbage hard-fork override where needed.
 func loadLiveLifecycleTestBlocks(
 	t *testing.T,
 	c *chain.Chain,
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	imm, err := immutable.New(liveLifecycleTestDataDir())
+	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
 	require.NoError(t, err)
-
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err)
-	defer iter.Close()
 
 	var points []ocommon.Point
-	for range numBlocks {
-		immBlock, err := iter.Next()
-		require.NoError(t, err)
-		if immBlock == nil {
-			break
-		}
-		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		require.NoError(t, err)
+	for _, block := range blocks {
 		require.NoError(t, c.AddBlock(block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
@@ -295,51 +269,19 @@ func loadLiveLifecycleTestBlocks(
 		})
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
-	if len(points) < numBlocks {
-		t.Skipf(
-			"not enough blocks in testdata: got %d, need %d",
-			len(points),
-			numBlocks,
-		)
-	}
+	require.Len(t, points, numBlocks)
 	return points
 }
 
-// loadRawLiveLifecycleTestBlocks loads the first numBlocks real blocks from
-// the immutable testdata WITHOUT adding them to any chain, so a caller can
-// feed them in one at a time later (e.g. to simulate new blocks arriving
-// live after a truncate/restore, extending from whatever tip the operation
-// left rather than from the original full chain).
+// loadRawLiveLifecycleTestBlocks loads generated blocks without adding them to
+// a chain, so callers can feed them in one at a time later.
 func loadRawLiveLifecycleTestBlocks(
 	t *testing.T,
 	numBlocks int,
 ) []gledger.Block {
 	t.Helper()
-	imm, err := immutable.New(liveLifecycleTestDataDir())
+	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
 	require.NoError(t, err)
-
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err)
-	defer iter.Close()
-
-	var blocks []gledger.Block
-	for range numBlocks {
-		immBlock, err := iter.Next()
-		require.NoError(t, err)
-		if immBlock == nil {
-			break
-		}
-		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		require.NoError(t, err)
-		blocks = append(blocks, block)
-	}
-	if len(blocks) < numBlocks {
-		t.Skipf(
-			"not enough blocks in testdata: got %d, need %d",
-			len(blocks),
-			numBlocks,
-		)
-	}
 	return blocks
 }
 
@@ -1686,6 +1628,13 @@ func smallEpochGenesisCfgForLifecycleTest(
 	cfg := newNodeTestCardanoNodeCfg(t)
 	require.NotNil(t, cfg.ShelleyGenesis())
 	cfg.ShelleyGenesis().EpochLength = 100
+	// The generated lifecycle blocks are valid Babbage blocks. Enable the
+	// Babbage-era test override so the live ledger pipeline accepts them after
+	// a truncate; preview otherwise stops at Alonzo.
+	enabled := true
+	epoch := uint64(0)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestBabbageHardForkAtEpoch = &epoch
 	return cfg
 }
 

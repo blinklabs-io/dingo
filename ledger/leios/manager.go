@@ -89,18 +89,10 @@ type StakeDistributionProvider interface {
 // "keyless" committee seat: it still occupies a stake-weighted voter id,
 // but can never contribute a verified signature).
 //
-// This is a current-state lookup, not frozen to a snapshot epoch: it reads
-// whatever is registered against poolKeyHashes right now, the same
-// simplification already made for VRF key hash in PoolDistr2 (see
-// poolVrfKeyHashes). A key registered or rotated between when the epoch's
-// stake snapshot was captured and when this is called becomes visible
-// immediately. On a live network with one canonical current state this
-// distinction rarely matters, but two nodes computing the same epoch's
-// committee at different wall-clock times around a key rotation could
-// still cache different resolved keys for that epoch (committeeAndParamsForEpoch
-// memoizes per epoch on first use) -- acceptable for the current prototype,
-// worth revisiting if this needs to reproduce a specific historical epoch's
-// resolution exactly.
+// The lookup is frozen to snapshotEpoch: implementations must return the key
+// stored with the same historical stake snapshot used to select the committee.
+// A key registered or rotated after that boundary is not visible until a later
+// snapshot captures it.
 //
 // poolKeyHashes names exactly the epoch's committee members (the
 // stake-coverage prefix ComputeCommittee already selected from the
@@ -113,6 +105,7 @@ type StakeDistributionProvider interface {
 // trip on every new-epoch committee computation.
 type LeiosKeyProvider interface {
 	GetLeiosKeys(
+		snapshotEpoch uint64,
 		poolKeyHashes []string,
 	) (map[string]*lcommon.LeiosKey, error)
 }
@@ -725,7 +718,7 @@ func (m *VoteManager) resolveOnChainKeys(
 	if m.keyProvider == nil {
 		return verified, nil
 	}
-	raw, err := m.keyProvider.GetLeiosKeys(poolKeyHashes)
+	raw, err := m.keyProvider.GetLeiosKeys(snapshotEpoch, poolKeyHashes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve on-chain leios keys for snapshot epoch %d: %w",

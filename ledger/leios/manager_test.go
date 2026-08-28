@@ -70,16 +70,19 @@ func (f *fakeStakeProvider) setError(err error) {
 }
 
 type fakeLeiosKeyProvider struct {
-	mu   sync.Mutex
-	keys map[string]*lcommon.LeiosKey
-	err  error
+	mu            sync.Mutex
+	keys          map[string]*lcommon.LeiosKey
+	err           error
+	snapshotEpoch uint64
 }
 
 func (f *fakeLeiosKeyProvider) GetLeiosKeys(
+	snapshotEpoch uint64,
 	_ []string,
 ) (map[string]*lcommon.LeiosKey, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.snapshotEpoch = snapshotEpoch
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -1247,6 +1250,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
 	var member CommitteeMember
+	var keyProvider *fakeLeiosKeyProvider
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
@@ -1254,7 +1258,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 			emptyRegistry, regErr := NewVoterRegistry(nil)
 			require.NoError(t, regErr)
 			cfg.Registry = emptyRegistry
-			cfg.KeyProvider = &fakeLeiosKeyProvider{
+			keyProvider = &fakeLeiosKeyProvider{
 				keys: map[string]*lcommon.LeiosKey{
 					hex.EncodeToString(member.PoolKeyHash): {
 						PublicKey:       key.PublicKeyBytes(),
@@ -1262,6 +1266,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 					},
 				},
 			}
+			cfg.KeyProvider = keyProvider
 		},
 	)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -1273,6 +1278,15 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 		VoterId:           member.VoterId,
 		VoteSignature:     sig,
 	}))
+	keyProvider.mu.Lock()
+	resolvedSnapshotEpoch := keyProvider.snapshotEpoch
+	keyProvider.mu.Unlock()
+	require.Equal(
+		t,
+		CommitteeSnapshotEpoch(5),
+		resolvedSnapshotEpoch,
+		"key lookup must use the same snapshot epoch as committee stake",
+	)
 	fixture.mgr.mu.Lock()
 	stored, ok := fixture.mgr.votesById[lcommon.LeiosVoteId{
 		SlotNo: 577, VoterId: member.VoterId,

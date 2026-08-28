@@ -491,7 +491,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"reward_snapshot_epoch", app.epochs.snapshot,
 		"performance_epoch", app.epochs.performance,
 		"pots_epoch", app.epochs.pots,
-		"pparams_type", fmt.Sprintf("%T", app.pparams),
+		"performance_pparams_type", fmt.Sprintf("%T", app.pparams),
 		"precomputed", app.precomputed,
 		"total_reward_pot", app.totalRewardPot,
 		"available_rewards", app.availableRewards,
@@ -2612,15 +2612,6 @@ func (ls *LedgerState) rewardParameters(
 			performanceEpoch,
 		)
 	}
-	performanceDecentralization, err := rewardDecentralizationFromPParams(
-		performancePParams,
-	)
-	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"get decentralization for reward performance epoch %d: %w",
-			performanceEpoch, err,
-		)
-	}
 	calculationEpochRow, err := ls.db.Metadata().GetEpoch(
 		calculationEpoch,
 		txn.Metadata(),
@@ -2638,33 +2629,27 @@ func (ls *LedgerState) rewardParameters(
 			calculationEpoch,
 		)
 	}
-	eraDesc, ok := ls.eraById(calculationEpochRow.EraId)
-	if !ok || eraDesc == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"unknown era ID %d for reward calculation epoch %d",
-			calculationEpochRow.EraId, calculationEpoch,
-		)
-	}
-	pparams, err := ls.db.GetPParams(
-		calculationEpoch,
-		eraDesc.Id,
-		eraDesc.DecodePParamsFunc,
-		txn,
-	)
-	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"get pparams for reward calculation epoch %d: %w",
-			calculationEpoch, err,
-		)
-	}
-	if pparams == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"missing pparams for reward calculation epoch %d",
-			calculationEpoch,
-		)
-	}
+	// Every protocol-parameter input to the reward calculation comes from the
+	// performance epoch, not the calculation epoch. cardano-ledger's startStep
+	// (LedgerState/PulsingReward.hs) binds `pr = es ^. prevPParamsEpochStateL`
+	// and reads d, rho and tau from it, then hands that same `pr` to
+	// mkPoolRewardInfo for the pool-level parameters; updateRewards reads the
+	// protocol version from it too. `prevPParams` during the epoch that
+	// computes the update is the parameter set in force over the epoch whose
+	// blocks are being counted, which is exactly this round's performance
+	// epoch.
+	//
+	// Only the epoch length is the calculation epoch's, matching the
+	// slotsPerEpoch the RUPD rule passes for the epoch it runs in.
+	//
+	// The two agree whenever the parameters did not change across the
+	// boundary, which is why reading the calculation epoch's went unnoticed.
+	// They diverge on preview at the 2->3 round: d is 1 at the performance
+	// epoch (1) and 0 at the calculation epoch (2), and taking 0 dropped the
+	// d >= 0.8 short circuit, leaving eta at 0 and suppressing that epoch's
+	// entire monetary expansion (dingo #3481).
 	params, err := rewardParametersFromPParams(
-		pparams,
+		performancePParams,
 		ls.config.CardanoNodeConfig,
 		uint64(calculationEpochRow.LengthInSlots),
 	)
@@ -2690,7 +2675,7 @@ func (ls *LedgerState) rewardParameters(
 			params.MaxLovelaceSupply,
 		)
 	}
-	return pparams, params, performanceDecentralization, nil
+	return performancePParams, params, params.Decentralization, nil
 }
 
 // applyFullPotConfig copies the CIP-0163 full-pot feature gate from the ledger
@@ -3571,45 +3556,6 @@ func rewardParametersFromPParams(
 		return rewards.Parameters{}, err
 	}
 	return params, nil
-}
-
-func rewardDecentralizationFromPParams(
-	pparams lcommon.ProtocolParameters,
-) (*big.Rat, error) {
-	var decentralization *big.Rat
-	switch pp := pparams.(type) {
-	case *shelley.ShelleyProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *mary.MaryProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *alonzo.AlonzoProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *babbage.BabbageProtocolParameters,
-		*conway.ConwayProtocolParameters,
-		*dijkstra.DijkstraProtocolParameters:
-		decentralization = new(big.Rat)
-	default:
-		return nil, fmt.Errorf("unsupported reward pparams type %T", pparams)
-	}
-	if decentralization == nil {
-		return nil, fmt.Errorf(
-			"%w: missing decentralization",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	if decentralization.Sign() < 0 {
-		return nil, fmt.Errorf(
-			"%w: negative decentralization",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	if decentralization.Cmp(big.NewRat(1, 1)) > 0 {
-		return nil, fmt.Errorf(
-			"%w: decentralization greater than one",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	return decentralization, nil
 }
 
 func rewardEpochFees(
