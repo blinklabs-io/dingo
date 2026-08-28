@@ -377,11 +377,16 @@ func (p *DingoStateProvider) RewardAccountBalance(
 // ========== common.GovState ==========
 
 // CommitteeMember looks up a constitutional committee member by credential
-// hash. Enacted (real, committed) members are read from the backend
-// directly; a member proposed by a pending (not yet enacted) UpdateCommittee
-// action falls back to the govState pre-validation mirror, matching the
-// upstream harness's own distinction between committed and merely-proposed
-// committee membership.
+// hash. Enacted (real, committed) members -- including the vector's initial
+// committee, loaded into the backend by LoadInitialState -- are read from
+// the backend directly and never fall back to the govState mirror:
+// govState.CommitteeMembers holds that same initial/enacted set (see
+// LoadFromParsedState and enactProposal), so falling back to it here would
+// let a backend that drops or cannot read a committee_member row still
+// report the vector as passing. A member proposed by a pending (not yet
+// enacted) UpdateCommittee action is the one case with no real
+// committee_member row to read yet, so that alone still falls back to the
+// govState mirror.
 func (p *DingoStateProvider) CommitteeMember(
 	coldKey common.Blake2b224,
 ) (*common.CommitteeMember, error) {
@@ -391,19 +396,6 @@ func (p *DingoStateProvider) CommitteeMember(
 	}
 	if member != nil {
 		return member, nil
-	}
-
-	// Check proposed members from governance state
-	if memberInfo := p.manager.govState.GetCommitteeMember(coldKey); memberInfo != nil {
-		result := &common.CommitteeMember{
-			ColdKey:     coldKey,
-			ExpiryEpoch: memberInfo.ExpiryEpoch,
-			Resigned:    memberInfo.Resigned,
-		}
-		if memberInfo.HotKey != nil {
-			result.HotKey = memberInfo.HotKey
-		}
-		return result, nil
 	}
 
 	// Check if member is proposed in a pending UpdateCommittee action
@@ -475,7 +467,15 @@ func (p *DingoStateProvider) realCommitteeMember(
 	return result, nil
 }
 
-// CommitteeMembers returns all committee members
+// CommitteeMembers returns every enacted committee member -- including the
+// vector's initial committee, loaded into the backend by LoadInitialState --
+// read from the backend directly. It never merges in govState.CommitteeMembers:
+// that map holds the same initial/enacted set (see LoadFromParsedState and
+// enactProposal), so merging it here would let a backend that drops or
+// cannot read a committee_member row still report the vector as passing.
+// Unlike CommitteeMember, there is no per-credential caller asking about a
+// specific pending UpdateCommittee proposal here, so there is no
+// commit-free case left to fall back for.
 func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error) {
 	var members []common.CommitteeMember
 
@@ -512,29 +512,6 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 			return nil, fmt.Errorf("lookup committee resignation: %w", err)
 		}
 		member.Resigned = resigned
-		members = append(members, member)
-	}
-
-	// Add members from governance state (proposed, not yet enacted)
-	for coldKey, memberInfo := range p.manager.govState.CommitteeMembers {
-		found := false
-		for _, m := range members {
-			if m.ColdKey == coldKey {
-				found = true
-				break
-			}
-		}
-		if found {
-			continue
-		}
-		member := common.CommitteeMember{
-			ColdKey:     coldKey,
-			ExpiryEpoch: memberInfo.ExpiryEpoch,
-			Resigned:    memberInfo.Resigned,
-		}
-		if memberInfo.HotKey != nil {
-			member.HotKey = memberInfo.HotKey
-		}
 		members = append(members, member)
 	}
 

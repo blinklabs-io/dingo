@@ -165,6 +165,53 @@ func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
 	require.Empty(t, delegation.Credential)
 }
 
+// TestCommitteeMemberReadsRealBackendNotGovStateMirror proves the audit's
+// "backend bypass" finding class also applied to committee members:
+// CommitteeMember/CommitteeMembers must never fall back to
+// govState.CommitteeMembers for a member the real backend doesn't have --
+// that map holds the same initial/enacted set LoadInitialState and
+// enactProposal write to the real backend (see both functions' doc
+// comments), so a real backend that drops or never persists a
+// committee_member row correctly could still pass every vector here if
+// either method fell back to the mirror for a "missing" member instead of
+// reporting it absent. This stores a member only in govState -- exactly the
+// shape LoadInitialState always leaves behind once the harness reads it,
+// but with no corresponding real committee_member row, simulating a
+// backend that dropped it -- and asserts CommitteeMember reports it absent
+// and CommitteeMembers excludes it, rather than serving the mirror's copy.
+func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	coldKey := testHash28(0x51)
+
+	// Mirror-only member: the real backend never received a matching
+	// committee_member row for this credential.
+	m.govState.CommitteeMembers[coldKey] = &conformance.CommitteeMemberInfo{
+		ColdKey:     coldKey,
+		ExpiryEpoch: 999,
+	}
+
+	provider := NewDingoStateProvider(m)
+
+	member, err := provider.CommitteeMember(coldKey)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		member,
+		"CommitteeMember must not serve the govState mirror's copy of a member the real backend doesn't have",
+	)
+
+	members, err := provider.CommitteeMembers()
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		members,
+		"CommitteeMembers must not include the govState mirror's copy of a member the real backend doesn't have",
+	)
+}
+
 // TestDRepRegistrationPropagatesBackendErrors proves DRepRegistration
 // returns a real backend error instead of swallowing it as "not
 // registered": only models.ErrDrepNotFound (a real "no such row" result)
