@@ -165,6 +165,27 @@ func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
 	require.Empty(t, delegation.Credential)
 }
 
+// TestDRepRegistrationPropagatesBackendErrors proves DRepRegistration
+// returns a real backend error instead of swallowing it as "not
+// registered": only models.ErrDrepNotFound (a real "no such row" result)
+// should continue the credential-tag loop and end in (nil, nil); any other
+// error (a dropped connection, a query failure) must be returned, or a
+// vector could pass by having every backend failure look identical to "no
+// DRep."
+func TestDRepRegistrationPropagatesBackendErrors(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	require.NoError(t, m.Close())
+
+	provider := NewDingoStateProvider(m)
+	_, err = provider.DRepRegistration(testHash28(0x41))
+	require.Error(
+		t,
+		err,
+		"DRepRegistration must surface a real backend error, not report it as an absent registration",
+	)
+}
+
 // TestProcessEpochAgainstRealBackend drives the epoch-boundary path end to
 // end against a real DingoStateManager backend: the real
 // governance.ProcessEpoch orchestration (not exercised by the per-vector

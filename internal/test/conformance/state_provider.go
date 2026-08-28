@@ -555,7 +555,10 @@ func (p *DingoStateProvider) DRepRegistration(
 			)
 		})
 		if err != nil {
-			continue
+			if errors.Is(err, models.ErrDrepNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("lookup drep registration: %w", err)
 		}
 		if drep != nil && drep.Active {
 			return &common.DRepRegistration{Credential: credential}, nil
