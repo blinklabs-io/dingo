@@ -104,6 +104,7 @@ func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 	cred := testHash28(0xbb)
 
 	txn := m.db.Transaction(true)
+	defer txn.Release()
 	account := &models.Account{
 		StakingKey:    cred[:],
 		CredentialTag: 0,
@@ -285,6 +286,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	boundarySlot := conformanceSlotsPerEpoch
 
 	txn := m.db.Transaction(true)
+	defer txn.Release()
 
 	_, err = governance.ProcessEpoch(&governance.EpochInput{
 		DB:           m.db,

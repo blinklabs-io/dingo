@@ -313,6 +313,7 @@ func TestNewDingoPostgresStateManagerRollbackDiscardsWrites(t *testing.T) {
 	cred := testHash28(0xa2)
 
 	txn := m.db.Transaction(true)
+	defer txn.Release()
 	account := &models.Account{
 		StakingKey:    cred[:],
 		CredentialTag: 0,
@@ -359,6 +360,12 @@ func TestNewDingoPostgresStateManagerUnreachableHostFails(t *testing.T) {
 // failure is specifically credential rejection.
 func TestNewDingoPostgresStateManagerBadCredentialsFails(t *testing.T) {
 	skipIfPostgresConformanceNotConfigured(t)
+	if os.Getenv("POSTGRES_DSN") != "" {
+		t.Skip(
+			"Skipping postgres bad-credentials test: POSTGRES_DSN is an " +
+				"opaque override this test cannot safely mutate a password into",
+		)
+	}
 
 	host := "localhost"
 	if v := os.Getenv("POSTGRES_HOST"); v != "" {

@@ -297,6 +297,7 @@ func TestNewDingoMysqlStateManagerRollbackDiscardsWrites(t *testing.T) {
 	cred := testHash28(0xb2)
 
 	txn := m.db.Transaction(true)
+	defer txn.Release()
 	account := &models.Account{
 		StakingKey:    cred[:],
 		CredentialTag: 0,
