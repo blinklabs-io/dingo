@@ -20,6 +20,8 @@ import (
 	"log"
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestMain drops this process's Postgres schema and MySQL database, and
@@ -42,6 +44,14 @@ import (
 func TestMain(m *testing.M) {
 	code := m.Run()
 
+	// cleanupFailed tracks whether any step below failed, without letting a
+	// failure skip the steps after it: every cleanup path below always
+	// runs, and only the final exit code reflects a failure, so one failed
+	// drop/removal never leaves a sibling resource (e.g. the blob directory
+	// paired with a schema that failed to drop) uncleaned as a side effect
+	// of returning early.
+	cleanupFailed := false
+
 	if postgresProcessBlobDir != "" {
 		if isPostgresConformanceConfigured() {
 			if err := dropPostgresSchema(
@@ -53,6 +63,7 @@ func TestMain(m *testing.M) {
 					postgresProcessSchema,
 					err,
 				)
+				cleanupFailed = true
 			}
 		}
 		if err := os.RemoveAll(postgresProcessBlobDir); err != nil {
@@ -61,6 +72,7 @@ func TestMain(m *testing.M) {
 				postgresProcessBlobDir,
 				err,
 			)
+			cleanupFailed = true
 		}
 	}
 
@@ -75,6 +87,7 @@ func TestMain(m *testing.M) {
 					mysqlProcessDatabase,
 					err,
 				)
+				cleanupFailed = true
 			}
 		}
 		if err := os.RemoveAll(mysqlProcessBlobDir); err != nil {
@@ -83,8 +96,41 @@ func TestMain(m *testing.M) {
 				mysqlProcessBlobDir,
 				err,
 			)
+			cleanupFailed = true
 		}
 	}
 
-	os.Exit(code)
+	os.Exit(processCleanupExitCode(code, cleanupFailed))
+}
+
+// processCleanupExitCode folds a process-cleanup failure into the test run's
+// own exit code. A cleanup failure must fail the run even when every test
+// passed -- otherwise the leaked schema/database/directory this exists to
+// catch is invisible to anything that only checks the exit code (CI, a
+// local `go test && echo ok`). A real test failure's exit code is never
+// downgraded, only upgraded from 0.
+func processCleanupExitCode(testExitCode int, cleanupFailed bool) int {
+	if cleanupFailed && testExitCode == 0 {
+		return 1
+	}
+	return testExitCode
+}
+
+// TestProcessCleanupExitCodeFailsOnCleanupFailure proves a process-cleanup
+// failure (a schema/database drop or blob directory removal error) makes
+// TestMain report a nonzero exit code even when every test in the process
+// passed -- a reviewer's forced RemoveAll permission failure otherwise
+// logged "permission denied" but left `go test` exiting 0, silently
+// leaking the per-run schema/database/directory this cleanup exists to
+// remove.
+func TestProcessCleanupExitCodeFailsOnCleanupFailure(t *testing.T) {
+	require.Equal(t, 0, processCleanupExitCode(0, false))
+	require.Equal(t, 1, processCleanupExitCode(0, true))
+	require.Equal(
+		t,
+		2,
+		processCleanupExitCode(2, true),
+		"a genuine test failure's exit code must never be downgraded",
+	)
+	require.Equal(t, 2, processCleanupExitCode(2, false))
 }
