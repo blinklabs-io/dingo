@@ -7695,6 +7695,15 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	// Skipping this left ledger.tx subscribers with no undo for a chain
 	// truncation the live divergence reconciler performed silently.
 	//
+	// transactionEventMutex is held across the validate+emit AND the
+	// truncation, not just the emit: releasing it in between would let a
+	// concurrent block-apply commit (submitBlockApplyDBTxn also takes
+	// this mutex) advance the chain tip after validateAndEmitRollbackUndo
+	// re-checked the security-parameter bound but before
+	// RewindPrimaryChainToPoint re-checks it again, which could publish
+	// undo events for a rewind that then gets rejected, or let the ledger
+	// race ahead of the truncated chain (issue #3516 review).
+	//
 	// This does NOT also take drainBlockPipelineBeforeRollback/
 	// blockPipelineGatherMutex the way rollbackChainAndState does, so a
 	// block the pipeline is still applying for the region being discarded
@@ -7706,18 +7715,14 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	// that same reader's gather-then-submit span, so adding the write
 	// lock here needs its own deadlock audit rather than reusing
 	// rollbackChainAndState's sequencing by inspection.
-	ls.transactionEventMutex.Lock()
-	emitErr := ls.validateAndEmitRollbackUndo(ancestor)
-	ls.transactionEventMutex.Unlock()
-	if emitErr != nil {
-		return fmt.Errorf(
-			"validate rewind to common primary-chain ancestor: %w",
-			emitErr,
-		)
-	}
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-		ancestor,
-	); err != nil {
+	if err := func() error {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		if err := ls.validateAndEmitRollbackUndo(ancestor); err != nil {
+			return err
+		}
+		return ls.config.ChainManager.RewindPrimaryChainToPoint(ancestor)
+	}(); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to common primary-chain ancestor: %w",
 			err,

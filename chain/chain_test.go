@@ -2135,11 +2135,10 @@ func TestRewindPrimaryChainToPointSignalsRollback(t *testing.T) {
 			rewindPoint.Hash,
 		)
 	}
-	select {
-	case extra := <-rollbackEvents:
-		t.Fatalf("expected exactly one rollback event, got extra: %#v", extra)
-	case <-time.After(50 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t, rollbackEvents, 50*time.Millisecond,
+		"expected exactly one rollback event",
+	)
 }
 
 // TestRewindPrimaryChainToPointConcurrentRewinds exercises concurrent

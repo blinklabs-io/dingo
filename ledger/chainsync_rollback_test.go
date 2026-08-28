@@ -400,6 +400,13 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
 	})
 
+	// A subscriber must exist for blocksAboveSlot to read anything at
+	// all; asserting it sees nothing is what proves the declined,
+	// over-K reconciliation never emitted an undo for the common
+	// ancestor it did not actually rewind to.
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
 	preReconcileChainTip := fixture.ls.chain.Tip()
 
 	require.NoError(t, fixture.ls.handleEventChainsyncRollback(
@@ -441,6 +448,15 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 	)
 	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, e.Reason)
 	assert.Equal(t, fixture.connId, e.ConnectionId)
+
+	// The declined over-K reconciliation must not have emitted an undo
+	// for the common ancestor: validateAndEmitRollbackUndo's own
+	// ValidateRollback pre-check rejects the rewind before it reads or
+	// publishes anything.
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"a declined over-K reconciliation must not publish undo events",
+	)
 }
 
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
