@@ -219,7 +219,30 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(pastEra), cbor.RawMessage(currentEra),
 	})
 	require.NoError(t, err)
-	headerState, err := cbor.Encode([]any{[]any{}, []any{}})
+	neutralNonce, err := cbor.Encode([]any{uint64(0)})
+	require.NoError(t, err)
+	praosState, err := cbor.Encode([]any{
+		uint64(0),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+	})
+	require.NoError(t, err)
+	praosCurrentEra, err := cbor.Encode([]any{
+		cbor.RawMessage(bound), cbor.RawMessage(praosState),
+	})
+	require.NoError(t, err)
+	praosTelescope, err := cbor.Encode([]any{
+		cbor.RawMessage(pastEra), cbor.RawMessage(praosCurrentEra),
+	})
+	require.NoError(t, err)
+	headerState, err := cbor.Encode([]any{
+		[]any{}, cbor.RawMessage(praosTelescope),
+	})
 	require.NoError(t, err)
 	snapshot, err := cbor.Encode([]any{
 		cbor.RawMessage(telescope), cbor.RawMessage(headerState),

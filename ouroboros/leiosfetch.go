@@ -130,9 +130,10 @@ func (o *Ouroboros) leiosfetchServerBlockRequest(
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
 		return nil, fmt.Errorf(
-			"leios endorser block not found: %d.%x",
+			"leios endorser block not found: %d.%x: %w",
 			point.Slot,
 			point.Hash,
+			oleiosfetch.ErrBlockNotFound,
 		)
 	}
 	return oleiosfetch.NewMsgBlock(cbor.RawMessage(data.blockRaw)), nil
@@ -146,18 +147,20 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
 		return nil, fmt.Errorf(
-			"leios endorser block not available: %d.%x",
+			"leios endorser block not available: %d.%x: %w",
 			point.Slot,
 			point.Hash,
+			oleiosfetch.ErrBlockTxsNotFound,
 		)
 	}
 	if !data.completeTxCache() {
 		return nil, fmt.Errorf(
-			"leios endorser block txs not available: %d.%x: have %d of %d txs",
+			"leios endorser block txs not available: %d.%x: have %d of %d txs: %w",
 			point.Slot,
 			point.Hash,
 			len(data.txsRaw),
 			data.txCount,
+			oleiosfetch.ErrBlockTxsNotFound,
 		)
 	}
 	if err := validateLeiosTxBitmap(len(data.txsRaw), txBitmap); err != nil {
@@ -173,7 +176,10 @@ func (o *Ouroboros) leiosfetchServerVotesRequest(
 	voteIds []oleiosfetch.MsgVotesRequestVoteId,
 ) (protocol.Message, error) {
 	if o.leiosVotes == nil {
-		return nil, errLeiosVotesUnavailable
+		// Unknown vote IDs are already omitted from this response. Treat an
+		// unavailable vote manager as an empty result instead of failing the
+		// shared bearer.
+		return oleiosfetch.NewMsgVotes(make([]cbor.RawMessage, 0)), nil
 	}
 	// MsgVotesRequestVoteId aliases lcommon.LeiosVoteId; unknown ids
 	// are omitted from the response.

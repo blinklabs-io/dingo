@@ -339,7 +339,15 @@ func (s *Store) AddUtxos(
 	}
 	items := make([]models.Utxo, len(utxos))
 	for i := range utxos {
-		items[i] = models.UtxoLedgerToModel(utxos[i].Utxo, utxos[i].Slot)
+		item, err := models.UtxoLedgerToModel(utxos[i].Utxo, utxos[i].Slot)
+		if err != nil {
+			return fmt.Errorf(
+				"convert utxo %d: %w",
+				utxos[i].Utxo.Id.Index(),
+				err,
+			)
+		}
+		items[i] = item
 	}
 	return s.importUtxos(items, txn, false)
 }

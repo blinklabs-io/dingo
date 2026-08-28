@@ -534,6 +534,7 @@ func LoadWithDB(
 			ChainManager:       cm,
 			Logger:             logger,
 			CardanoNodeConfig:  nodeCfg,
+			Network:            cfg.Network,
 			ValidateHistorical: cfg.ValidateHistorical,
 			// CIP-0163 full-pot reward distribution is consensus-affecting and
 			// deterministically changes the reward state written during replay,

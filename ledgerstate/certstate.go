@@ -1126,20 +1126,23 @@ func parsePoolParamsOrDistr(
 //	2  owners (set of addr_keyhash)
 //	3  reserved: a second stake-shaped figure, unused here
 //	4  vrf_keyhash
-//	5  pledge (coin)
-//	6  cost (coin)
-//	7  margin (unit interval)
-//	8  reserved: a small counter, unused here
-//	9  reward account credential
-const snapshotPoolParamsFields = 10
+//	5  optional Leios key (w32 and later only)
+//	6  pledge (coin)
+//	7  cost (coin)
+//	8  margin (unit interval)
+//	9  reserved: a small counter, unused here
+//	10 reward account credential
+//
+// Pre-w32 records omit field 5 and therefore contain ten fields.
+const (
+	snapshotPoolParamsFieldsLegacy = 10
+	snapshotPoolParamsFieldsLeios  = 11
+)
 
 const (
-	snapshotPoolOwnersIdx        = 2
-	snapshotPoolVrfIdx           = 4
-	snapshotPoolPledgeIdx        = 5
-	snapshotPoolCostIdx          = 6
-	snapshotPoolMarginIdx        = 7
-	snapshotPoolRewardAccountIdx = 9
+	snapshotPoolOwnersIdx   = 2
+	snapshotPoolVrfIdx      = 4
+	snapshotPoolLeiosKeyIdx = 5
 )
 
 // parseSnapshotPoolParams decodes the registration parameters a UTxO-HD
@@ -1165,12 +1168,32 @@ func parseSnapshotPoolParams(
 	poolKeyHash []byte,
 	fields [][]byte,
 ) (*ParsedPool, error) {
-	if len(fields) != snapshotPoolParamsFields {
+	if len(fields) != snapshotPoolParamsFieldsLegacy &&
+		len(fields) != snapshotPoolParamsFieldsLeios {
 		return nil, fmt.Errorf(
-			"%w: snapshot pool params has %d fields, expected %d",
-			ErrNotPoolParams, len(fields), snapshotPoolParamsFields,
+			"%w: snapshot pool params has %d fields, expected %d or %d",
+			ErrNotPoolParams,
+			len(fields),
+			snapshotPoolParamsFieldsLegacy,
+			snapshotPoolParamsFieldsLeios,
 		)
 	}
+	leiosOffset := 0
+	var leiosKey *lcommon.LeiosKey
+	if len(fields) == snapshotPoolParamsFieldsLeios {
+		leiosOffset = 1
+		var err error
+		leiosKey, err = decodeOptionalLeiosKey(
+			fields[snapshotPoolLeiosKeyIdx],
+		)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrNotPoolParams, err)
+		}
+	}
+	pledgeIdx := 5 + leiosOffset
+	costIdx := 6 + leiosOffset
+	marginIdx := 7 + leiosOffset
+	rewardAccountIdx := 9 + leiosOffset
 
 	var vrfKeyHash []byte
 	if _, err := cbor.Decode(
@@ -1184,20 +1207,20 @@ func parseSnapshotPoolParams(
 
 	var pledge, cost uint64
 	if _, err := cbor.Decode(
-		fields[snapshotPoolPledgeIdx], &pledge,
+		fields[pledgeIdx], &pledge,
 	); err != nil {
 		return nil, fmt.Errorf(
 			"%w: decoding pledge: %w", ErrNotPoolParams, err,
 		)
 	}
-	if _, err := cbor.Decode(fields[snapshotPoolCostIdx], &cost); err != nil {
+	if _, err := cbor.Decode(fields[costIdx], &cost); err != nil {
 		return nil, fmt.Errorf(
 			"%w: decoding cost: %w", ErrNotPoolParams, err,
 		)
 	}
 
 	marginNum, marginDen, ok := parseRational(
-		fields[snapshotPoolMarginIdx],
+		fields[marginIdx],
 	)
 	// A margin outside [0,1] means this field is not a margin. The gate
 	// downstream rejects such a basis anyway; failing here instead keeps a
@@ -1205,17 +1228,17 @@ func parseSnapshotPoolParams(
 	if !ok || marginDen == 0 || marginNum > marginDen {
 		return nil, fmt.Errorf(
 			"%w: field %d is not a unit interval",
-			ErrNotPoolParams, snapshotPoolMarginIdx,
+			ErrNotPoolParams, marginIdx,
 		)
 	}
 
 	rewardAccount, err := parseCredential(
-		fields[snapshotPoolRewardAccountIdx],
+		fields[rewardAccountIdx],
 	)
 	if err != nil || len(rewardAccount.Hash) != credentialHashSize {
 		return nil, fmt.Errorf(
 			"%w: field %d is not a credential",
-			ErrNotPoolParams, snapshotPoolRewardAccountIdx,
+			ErrNotPoolParams, rewardAccountIdx,
 		)
 	}
 
@@ -1226,7 +1249,7 @@ func parseSnapshotPoolParams(
 		)
 	}
 
-	return &ParsedPool{
+	pool := &ParsedPool{
 		PoolKeyHash:   slices.Clone(poolKeyHash),
 		VrfKeyHash:    vrfKeyHash,
 		Pledge:        pledge,
@@ -1237,7 +1260,41 @@ func parseSnapshotPoolParams(
 		// #nosec G115 -- credential type is 0 or 1
 		RewardAccountCredentialTag: uint8(rewardAccount.Type),
 		Owners:                     owners,
-	}, nil
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
+		pool.LeiosKeyPossessionProof = append(
+			[]byte(nil), leiosKey.PossessionProof...,
+		)
+	}
+	return pool, nil
+}
+
+func decodeOptionalLeiosKey(data []byte) (*lcommon.LeiosKey, error) {
+	if len(data) == 0 || (len(data) == 1 && data[0] == 0xf6) {
+		return nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf("decoding optional Leios key: %w", err)
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	keyData := data
+	if len(fields) == 1 {
+		keyData = fields[0]
+	} else if len(fields) != 2 {
+		return nil, fmt.Errorf(
+			"optional Leios key has %d fields, expected 0 or 1",
+			len(fields),
+		)
+	}
+	var key lcommon.LeiosKey
+	if _, err := cbor.Decode(keyData, &key); err != nil {
+		return nil, fmt.Errorf("decoding Leios key: %w", err)
+	}
+	return &key, nil
 }
 
 // parseSnapshotPoolOwners decodes the owner set, which is a CBOR set (tag

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -946,6 +947,9 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			cfg.DatabaseLifecycle.SnapshotDir = dir
 			cfg.BarkPort = 8091
 			cfg.BarkClientCAFilePath = "/certs/ca.crt"
+			cfg.BarkOperatorCertificateFingerprints = []string{
+				strings.Repeat("00", 32),
+			}
 			cfg.TlsCertFilePath = "/certs/tls.crt"
 			cfg.TlsKeyFilePath = "/certs/tls.key"
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
@@ -956,6 +960,58 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			}
 		},
 	)
+}
+
+func TestValidateBarkDatabaseServiceSecurity(t *testing.T) {
+	newConfig := func(t *testing.T) *Config {
+		t.Helper()
+		cfg := validTestConfig()
+		cfg.BarkPort = 8091
+		cfg.DatabaseLifecycle.SnapshotDir = t.TempDir()
+		cfg.BarkClientCAFilePath = "/certs/ca.crt"
+		cfg.BarkOperatorCertificateFingerprints = []string{
+			strings.Repeat("AB:", 31) + "AB",
+		}
+		cfg.TlsCertFilePath = "/certs/tls.crt"
+		cfg.TlsKeyFilePath = "/certs/tls.key"
+		return cfg
+	}
+
+	t.Run("complete policy", func(t *testing.T) {
+		require.NoError(
+			t,
+			newConfig(t).validate(RunModeServe, minUnprivilegedPort),
+		)
+	})
+
+	t.Run("missing client CA", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkClientCAFilePath = ""
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(t, err, "barkClientCaFilePath is required")
+	})
+
+	t.Run("missing operator allowlist", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkOperatorCertificateFingerprints = nil
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"barkOperatorCertificateFingerprints requires at least one",
+		)
+	})
+
+	t.Run("invalid operator fingerprint", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkOperatorCertificateFingerprints = []string{"not-a-fingerprint"}
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"must be a 32-byte SHA-256 certificate fingerprint",
+		)
+	})
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {

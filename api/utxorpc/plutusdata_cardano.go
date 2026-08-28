@@ -73,7 +73,7 @@ func plutusDataToCardano(d pdata.PlutusData) *cardano.PlutusData {
 	}
 	switch v := d.(type) {
 	case *pdata.Constr:
-		if v == nil {
+		if v == nil || v.Tag == nil || !v.Tag.IsUint64() {
 			return nil
 		}
 		fields := make([]*cardano.PlutusData, len(v.Fields))
@@ -82,11 +82,12 @@ func plutusDataToCardano(d pdata.PlutusData) *cardano.PlutusData {
 		}
 		var tag uint32
 		var anyAlt uint64
-		if v.Tag > 127 {
+		constructorTag := v.Tag.Uint64()
+		if constructorTag > 127 {
 			tag = 0
-			anyAlt = uint64(v.Tag)
+			anyAlt = constructorTag
 		} else {
-			tag = uint32(v.Tag)
+			tag = uint32(constructorTag)
 		}
 		return &cardano.PlutusData{
 			PlutusData: &cardano.PlutusData_Constr{

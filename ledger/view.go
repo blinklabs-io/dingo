@@ -1054,33 +1054,46 @@ func (lv *LedgerView) GetStakeDistribution(
 	return dist, nil
 }
 
-// GetLeiosKeys returns the registered Dijkstra/Leios BLS key for each named
-// pool that has one, keyed by lowercase-hex pool key hash. A pool absent
-// from the result has no registered leios_key. The returned keys are raw
-// (gouroboros length-validated only); callers must verify proof of
-// possession themselves before treating a key as usable -- this mirrors
-// poolVrfKeyHashes, which similarly resolves current pool params rather
-// than the historical stake snapshot GetStakeDistribution reads.
+// GetLeiosKeys returns the Dijkstra/Leios BLS key frozen with each named pool's
+// Mark stake snapshot for epoch. A pool absent from the result has no captured
+// key. The returned keys are raw; callers must verify proof of possession
+// before treating a key as usable.
 func (lv *LedgerView) GetLeiosKeys(
+	epoch uint64,
 	poolKeyHashes []lcommon.PoolKeyHash,
 ) (map[string]*lcommon.LeiosKey, error) {
 	out := make(map[string]*lcommon.LeiosKey, len(poolKeyHashes))
 	if len(poolKeyHashes) == 0 {
 		return out, nil
 	}
-	pools, err := lv.ls.db.Metadata().
-		GetPools(poolKeyHashes, (*lv.txn).Metadata())
-	if err != nil {
-		return nil, fmt.Errorf("get pools: %w", err)
+	rawPoolKeyHashes := make([][]byte, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		rawPoolKeyHashes = append(
+			rawPoolKeyHashes,
+			append([]byte(nil), poolKeyHash[:]...),
+		)
 	}
-	for _, pool := range pools {
-		if len(pool.LeiosKeyPublic) == 0 ||
-			len(pool.LeiosKeyPossessionProof) == 0 {
+	snapshots, err := lv.ls.db.Metadata().GetPoolStakeSnapshotsForPools(
+		epoch,
+		models.PoolStakeSnapshotTypeMark,
+		rawPoolKeyHashes,
+		(*lv.txn).Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
+	}
+	for _, snapshot := range snapshots {
+		if len(snapshot.LeiosKeyPublic) == 0 ||
+			len(snapshot.LeiosKeyPossessionProof) == 0 {
 			continue
 		}
-		out[hex.EncodeToString(pool.PoolKeyHash)] = &lcommon.LeiosKey{
-			PublicKey:       pool.LeiosKeyPublic,
-			PossessionProof: pool.LeiosKeyPossessionProof,
+		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{
+			PublicKey: append(
+				[]byte(nil), snapshot.LeiosKeyPublic...,
+			),
+			PossessionProof: append(
+				[]byte(nil), snapshot.LeiosKeyPossessionProof...,
+			),
 		}
 	}
 	return out, nil

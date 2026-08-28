@@ -48,13 +48,23 @@ var errExactAddressCandidateScanLimit = errors.New(
 	"exact address candidate scan limit reached",
 )
 
-// deleteUtxoBlobs performs best-effort deletion of blob data for the given
-// [models.Utxo] entries. Metadata remains the authoritative source of truth;
-// blob deletions are supplementary. The caller [*Txn] is ignored — this
-// function always creates and commits its own blob-only batches via the
-// [Database], so callers should not expect blob deletes to participate in any
-// outer transaction.
-func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
+// deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
+// Metadata remains the authoritative source of truth; blob deletions are
+// supplementary. The caller [*Txn] is ignored — this function always creates
+// and commits its own blob-only batches via the [Database], so callers should
+// not expect blob deletes to participate in any outer transaction.
+//
+// Failures do not stop the remaining deletes, but they are counted and
+// reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
+// metadata that names these objects, after which nothing can reach them
+// again.
+//
+// txn is used only to time that count. An object is not stranded until the
+// metadata naming it is durably gone, so the counter is incremented from an
+// after-commit callback; if the enclosing transaction rolls back, the row
+// still names the blob and nothing was orphaned. A nil txn has no commit to
+// wait for and counts immediately.
+func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 	const batchSize = 500
 	blob := d.Blob()
 	if blob == nil {
@@ -93,11 +103,18 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
 		}
 	}
 	if deleteErrors > 0 {
+		recordBlobOrphansOnCommit(txn, deleteErrors)
 		d.logger.Warn(
 			"UTxO blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
+			len(utxos),
+		)
+		return fmt.Errorf(
+			"%w: %d of %d UTxO blobs",
+			ErrBlobDeleteIncomplete,
+			deleteErrors,
 			len(utxos),
 		)
 	}
@@ -868,8 +885,18 @@ func (d *Database) UtxosDeleteConsumed(
 		deleteUtxos[idx] = models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx}
 	}
 
-	// Delete blob data first (best effort)
-	_ = deleteUtxoBlobs(d, utxos, txn)
+	// Delete blob data first. A failure here does not stop the metadata
+	// delete below: metadata is the source of truth, and leaving a consumed
+	// UTxO in the live set to keep its blob reachable would be the worse
+	// outcome. The objects it strands are counted and logged rather than
+	// passed over, because nothing reclaims them afterwards.
+	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
+		d.logger.Error(
+			"consumed UTxO blob delete left unreachable objects",
+			"error", blobErr,
+			"utxos", len(utxos),
+		)
+	}
 
 	// Then delete metadata (source of truth)
 	err = d.utxoStore().DeleteUtxos(deleteUtxos, txn.Metadata())
@@ -906,8 +933,17 @@ func (d *Database) UtxosDeleteRolledback(
 		return err
 	}
 
-	// Delete blob data first (best effort)
-	_ = deleteUtxoBlobs(d, utxos, txn)
+	// Delete blob data first. As above, a failure must not stop the metadata
+	// delete: a rolled-back UTxO cannot stay in the live set. The stranded
+	// objects are counted and logged instead of ignored.
+	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
+		d.logger.Error(
+			"rolled-back UTxO blob delete left unreachable objects",
+			"error", blobErr,
+			"slot", slot,
+			"utxos", len(utxos),
+		)
+	}
 
 	// Then delete metadata (source of truth)
 	err = d.utxoStore().DeleteUtxosAfterSlot(slot, txn.Metadata())

@@ -260,6 +260,9 @@ services:
       TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
       TXPUMP_LOG_DIR: "/logs"
+      # The configurator writes the effective system start here. txpump waits
+      # for it even when Docker reports all Dingo services healthy earlier.
+      TXPUMP_GENESIS_FILE: "/utxo-keys/runtime-genesis"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
       - logs:/logs
@@ -394,6 +397,9 @@ services:
       TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
       TXPUMP_LOG_DIR: "/logs"
+      # Use the configurator's effective start rather than treating an early
+      # healthy N2C endpoint as permission to submit transactions.
+      TXPUMP_GENESIS_FILE: "/utxo-keys/runtime-genesis"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
       - logs:/logs
