@@ -218,6 +218,26 @@ func TestPlutusDatumCBORToCardano_EmptyRaw(t *testing.T) {
 	require.Nil(t, proto)
 }
 
+func TestPlutusDatumCBORToCardano_NestedInvalidConstructorTag(t *testing.T) {
+	// The decoder rejects invalid constructor alternatives before conversion.
+	raw := []byte{
+		0xd8, 0x79, // constructor 0
+		0x81,       // one field
+		0xd8, 0x66, // constructor 102
+		0x82, // [alternative, fields]
+		0x20, // negative integer -1: invalid alternative
+		0x80, // empty fields
+	}
+
+	proto, err := plutusDatumCBORToCardano(raw)
+	require.Nil(t, proto)
+	require.EqualError(
+		t,
+		err,
+		"decode plutus data: failed to decode CBOR: expected CBOR type 0x00",
+	)
+}
+
 // TestRedeemerPlutusDataByKey_DecodedWitness verifies that redeemer
 // Plutus data from a decoded Conway transaction is keyed identically to
 // ledger evaluation (tag + index).
