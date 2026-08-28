@@ -1766,6 +1766,38 @@ index. Full-address transaction reads resolve participating UTxO CBOR, compare
 complete address bytes, and scan candidate pages before applying the requested
 offset and limit.
 
+`UtxoWithOrderingQuery.Offset` and `.Descending` give `GetUtxosByAddressWithOrdering`
+page-number pagination (SQL `OFFSET` and a reversed `ORDER BY`) as an
+alternative to keyset (`After`) pagination. `Offset` is rejected whenever the
+address patterns require CBOR-based exact-address filtering
+(`RequiresExactAddressFilter`): the coarse SQL predicate over-matches address
+forms sharing a credential (pointer addresses), so `OFFSET` would skip a
+different set of rows than skipping exact matches would. `Descending` is
+rejected combined with `After`, since the cursor's comparison operators
+assume ascending order. `SkipAssets` omits a row's native assets from the
+result, for a candidate scan whose rows are discarded or only used to
+confirm a match and never returned to a caller reading `Utxo.Assets`.
+
+`CountUtxosByAddressWithOrdering` returns a plain `COUNT(*)` over the coarse
+predicate and is rejected for exact-address patterns, since the coarse
+predicate over-counts them. Blockfrost's `AccountUTXOs` adapter
+(`api/blockfrost/adapter_account_activity.go`) uses `Offset`, `Descending`,
+and this count for a stake credential's UTxOs, since a credential-only
+pattern never needs exact-address filtering.
+
+`AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact
+total requires CBOR-decoding every coarse candidate either way. Instead
+`MatchingUtxoRefsByAddressWithOrdering` scans coarse candidates in keyset
+batches (mirroring `GetUtxosByAddressWithOrdering`'s own exact-filter loop)
+with `SkipAssets` set, CBOR-decodes each only to confirm the match, and
+returns bare `(TxId, OutputIdx)` references rather than full rows — the
+result's length is the accurate total, and the caller slices it for one
+page's worth of references and fetches full rows (with assets) for just
+that page via `GetUtxosByRefs`. This bounds the expensive part (asset
+loading, full-row retention) to one page instead of the address's entire
+live UTxO history, while the CBOR-decode-only candidate scan remains
+unavoidable for the total.
+
 ### `GetTransactionsByMetadataLabel`
 
 Transactions by metadata label:

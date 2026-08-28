@@ -3306,7 +3306,13 @@ func (a *NodeAdapter) AddressUTXOs(
 	if err != nil {
 		return nil, 0, err
 	}
-	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(
+	// Exact-address matching requires decoding output CBOR (see
+	// models.RequiresExactAddressFilter), so getting an accurate total
+	// requires visiting every coarse candidate either way. Fetch only
+	// references (no assets, no full rows) for that pass, and materialize
+	// full UTxO data via UtxosByRefs for just the requested page, instead
+	// of loading the address's entire UTxO history in full.
+	refs, err := a.ledgerState.MatchingUtxoRefsByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
@@ -3318,14 +3324,29 @@ func (a *NodeAdapter) AddressUTXOs(
 			err,
 		)
 	}
-	total := len(utxos)
+	total := len(refs)
+	start, end := paginationRange(total, params)
+	var pageRefs []models.UtxoId
 	if params.Order == PaginationOrderDesc {
-		for left, right := 0, len(utxos)-1; left < right; left, right = left+1, right-1 {
-			utxos[left], utxos[right] = utxos[right], utxos[left]
-		}
+		// Page N in descending order is ascending index range
+		// [total-end, total-start), reversed.
+		pageRefs = append(
+			[]models.UtxoId(nil),
+			refs[total-end:total-start]...,
+		)
+		slices.Reverse(pageRefs)
+	} else {
+		pageRefs = refs[start:end]
 	}
 
-	paged := paginateUtxos(utxos, params)
+	paged, err := a.orderedUtxosByRefs(pageRefs)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get address UTxOs for %q: %w",
+			address,
+			err,
+		)
+	}
 	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3372,6 +3393,47 @@ func (a *NodeAdapter) AddressUTXOs(
 		})
 	}
 	return ret, total, nil
+}
+
+// orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in
+// a single batch and returns them in refs' order. A ref whose UTxO was
+// spent between the reference scan and this fetch is simply omitted, the
+// same "missing entries degrade" tolerance the rest of this file applies to
+// concurrently-changing chain state. The returned ordering metadata
+// (TxSlot, TxBlockIndex) is left zero-valued: callers of this helper only
+// need it for its embedded Utxo fields, which UtxosByRefs already
+// populates in full.
+func (a *NodeAdapter) orderedUtxosByRefs(
+	refs []models.UtxoId,
+) ([]models.UtxoWithOrdering, error) {
+	if len(refs) == 0 {
+		return []models.UtxoWithOrdering{}, nil
+	}
+	utxos, err := a.ledgerState.UtxosByRefs(refs)
+	if err != nil {
+		return nil, err
+	}
+	byRef := make(map[database.UtxoRef]models.Utxo, len(utxos))
+	for _, utxo := range utxos {
+		byRef[utxoRef(utxo)] = utxo
+	}
+	ret := make([]models.UtxoWithOrdering, 0, len(refs))
+	for _, ref := range refs {
+		utxo, ok := byRef[utxoIdRef(ref)]
+		if !ok {
+			continue
+		}
+		ret = append(ret, models.UtxoWithOrdering{Utxo: utxo})
+	}
+	return ret, nil
+}
+
+// utxoIdRef converts a models.UtxoId to the database.UtxoRef key shape
+// utxoRef uses, so results keyed by one can be looked up by the other.
+func utxoIdRef(id models.UtxoId) database.UtxoRef {
+	var txID [32]byte
+	copy(txID[:], id.Hash)
+	return database.UtxoRef{TxId: txID, OutputIdx: id.Idx}
 }
 
 // addressUtxoCbor resolves the raw output CBOR for the given UTxOs in a single
@@ -5184,17 +5246,6 @@ func bigIntString(v *big.Int) string {
 		return "0"
 	}
 	return v.String()
-}
-
-func paginateUtxos(
-	utxos []models.UtxoWithOrdering,
-	params PaginationParams,
-) []models.UtxoWithOrdering {
-	start, end := paginationRange(len(utxos), params)
-	if start >= end {
-		return []models.UtxoWithOrdering{}
-	}
-	return utxos[start:end]
 }
 
 func paginationRange(

@@ -56,8 +56,25 @@ func seedExactAddressUtxo(
 	hashByte byte,
 ) models.Utxo {
 	t.Helper()
+	return seedExactAddressUtxoWithHash(
+		t, db, raw, addr, slot, bytes.Repeat([]byte{hashByte}, 32),
+	)
+}
+
+// seedExactAddressUtxoWithHash is seedExactAddressUtxo with an explicit
+// 32-byte transaction hash, for callers seeding more than 256 rows: a
+// single repeated hashByte collides past that count, since it is the
+// transaction table's hash.
+func seedExactAddressUtxoWithHash(
+	t *testing.T,
+	db *Database,
+	raw *sql.DB,
+	addr lcommon.Address,
+	slot uint64,
+	txHash []byte,
+) models.Utxo {
+	t.Helper()
 	txID := uint(slot)
-	txHash := bytes.Repeat([]byte{hashByte}, 32)
 	_, err := raw.Exec(`
 INSERT INTO "transaction" (
     id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
@@ -310,6 +327,265 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	hasEnterpriseTx, err := db.HasTransactionsByAddress(enterprise, nil)
 	require.NoError(t, err)
 	assert.True(t, hasEnterpriseTx)
+}
+
+// TestCountAndPageUtxosByAddressWithOrderingCoarseMatch seeds a stake
+// credential with a large number of live UTxOs (standing in for a "large
+// address", the scenario dingo/3520 flags for unbounded pagination work) and
+// proves CountUtxosByAddressWithOrdering and Offset/Descending pagination on
+// GetUtxosByAddressWithOrdering return correct, tightly bounded windows
+// without loading the full result set: the shared credential pattern here
+// never needs CBOR-based exact-address filtering, so a cheap SQL COUNT and a
+// LIMIT/OFFSET fetch are the entire answer, matching how NodeAdapter.AccountUTXOs
+// (api/blockfrost) now queries a stake credential's UTxOs.
+func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	const total = 250
+	stake := bytes.Repeat([]byte{0xfe}, lcommon.AddressHashSize)
+	for i := range total {
+		payment := make([]byte, lcommon.AddressHashSize)
+		binary.BigEndian.PutUint32(payment, uint32(i)+1)
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			lcommon.AddressNetworkTestnet,
+			payment,
+			stake,
+		)
+		require.NoError(t, err)
+		slot := uint64(i) + 1
+		seedExactAddressUtxo(t, db, raw, addr, slot, byte(i))
+	}
+
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{{DelegationPart: stake}},
+	}
+
+	count, err := db.CountUtxosByAddressWithOrdering(query, nil)
+	require.NoError(t, err)
+	assert.Equal(t, total, count)
+
+	t.Run("ascending page stops at the requested window", func(t *testing.T) {
+		page, err := db.UtxosByAddressWithOrdering(
+			&models.UtxoWithOrderingQuery{
+				AddressPatterns: query.AddressPatterns,
+				Limit:           10,
+				Offset:          20,
+			},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, page, 10)
+		// Ascending order by producing slot: offset 20 lands on the 21st
+		// seeded row (slot 21), not the 1st.
+		assert.Equal(t, uint64(21), page[0].TxSlot)
+		assert.Equal(t, uint64(30), page[len(page)-1].TxSlot)
+	})
+
+	t.Run("descending page returns newest first without a full reverse", func(t *testing.T) {
+		page, err := db.UtxosByAddressWithOrdering(
+			&models.UtxoWithOrderingQuery{
+				AddressPatterns: query.AddressPatterns,
+				Limit:           10,
+				Descending:      true,
+			},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, page, 10)
+		assert.Equal(t, uint64(total), page[0].TxSlot)
+		assert.Equal(t, uint64(total-9), page[len(page)-1].TxSlot)
+	})
+
+	t.Run("offset past the end returns an empty page", func(t *testing.T) {
+		page, err := db.UtxosByAddressWithOrdering(
+			&models.UtxoWithOrderingQuery{
+				AddressPatterns: query.AddressPatterns,
+				Limit:           10,
+				Offset:          total,
+			},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, page)
+	})
+}
+
+// TestCountUtxosByAddressWithOrderingRejectsExactAddress proves
+// CountUtxosByAddressWithOrdering refuses to compute a count for
+// exact-address patterns: the coarse SQL predicate over-matches address
+// forms that share a payment/delegation credential (pointer addresses being
+// the concrete case), so a plain COUNT(*) against it would silently report
+// too many UTxOs instead of failing loudly.
+func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
+	db := openTestDB(t)
+
+	payment := bytes.Repeat([]byte{0x11}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+
+	_, err = db.CountUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrExactAddressRequiresCbor)
+}
+
+// TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress proves Offset
+// pagination is refused for exact-address patterns, for the same reason
+// CountUtxosByAddressWithOrdering is: SQL OFFSET would skip coarse
+// candidates, not exact matches, so the skipped count would not equal
+// Offset for an address whose coarse predicate over-matches.
+func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
+	db := openTestDB(t)
+
+	payment := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+
+	_, err = db.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           10,
+			Offset:          10,
+		},
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrOffsetRequiresCoarseMatch)
+}
+
+// TestUtxosByAddressWithOrderingRejectsDescendingKeyset proves Descending
+// cannot be combined with keyset (After) pagination: the After predicate's
+// comparison operators assume ascending order, so silently accepting both
+// would return rows in the wrong direction from the cursor instead of
+// failing loudly.
+func TestUtxosByAddressWithOrderingRejectsDescendingKeyset(t *testing.T) {
+	db := openTestDB(t)
+
+	_, err := db.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			MatchAllAddresses: true,
+			Descending:        true,
+			After:             &models.UtxoOrderingCursor{Slot: 1},
+			Limit:             10,
+		},
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrDescendingKeysetUnsupported)
+}
+
+// TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings proves
+// MatchingUtxoRefsByAddressWithOrdering applies the same CBOR-based exact
+// match as UtxosByAddressWithOrdering: it returns exactly the enterprise
+// address's own UTxOs, in ascending order, excluding pointer-address
+// siblings that share its payment credential.
+func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	pointerOne := exactAddressTestPointer(t, payment, 0x01)
+
+	rows := []struct {
+		addr lcommon.Address
+		slot uint64
+		hash byte
+	}{
+		{pointerOne, 1, 0x01},
+		{enterprise, 2, 0x02},
+		{enterprise, 4, 0x04},
+		{enterprise, 6, 0x06},
+	}
+	seeded := make([]models.Utxo, len(rows))
+	for i := range rows {
+		seeded[i] = seedExactAddressUtxo(
+			t, db, raw, rows[i].addr, rows[i].slot, rows[i].hash,
+		)
+	}
+
+	pattern, err := models.ExactUtxoAddressPattern(enterprise)
+	require.NoError(t, err)
+	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, refs, 3)
+	assert.Equal(t, seeded[1].TxId, refs[0].Hash)
+	assert.Equal(t, seeded[2].TxId, refs[1].Hash)
+	assert.Equal(t, seeded[3].TxId, refs[2].Hash)
+}
+
+// TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary seeds more
+// exact-address UTxOs than the internal scan's per-batch size (1024) and
+// proves the keyset-cursor continuation across batches neither drops nor
+// duplicates a match -- the risk a batched scan carries that a single
+// unbounded fetch does not.
+func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0x71}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	const total = 1100
+	wantHashes := make([][]byte, total)
+	for i := range total {
+		txHash := make([]byte, 32)
+		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+		row := seedExactAddressUtxoWithHash(
+			t, db, raw, addr, uint64(i)+1, txHash,
+		)
+		wantHashes[i] = row.TxId
+	}
+
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, refs, total)
+	gotHashes := make([][]byte, len(refs))
+	for i := range refs {
+		gotHashes[i] = refs[i].Hash
+	}
+	assert.Equal(t, wantHashes, gotHashes)
 }
 
 // TestUtxosByAddressLoadsAssets proves GetUtxosByAddress still attaches

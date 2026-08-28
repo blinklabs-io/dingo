@@ -723,6 +723,133 @@ func (d *Database) UtxosByAddressWithOrdering(
 	return ret, nil
 }
 
+// MatchingUtxoRefsByAddressWithOrdering returns the (TxId, OutputIdx)
+// references of every live UTxO matching q's address patterns, in ascending
+// producing-transaction-position order, without loading assets or
+// retaining full rows. Unlike CountUtxosByAddressWithOrdering, this works
+// for exact-address patterns too: it scans coarse SQL candidates in keyset
+// batches (see UtxosByAddressWithOrdering's identical loop) and CBOR-decodes
+// each to confirm the match, which is the same per-candidate cost the
+// coarse predicate alone cannot avoid, but skips the asset loading and full
+// UtxoWithOrdering retention a straight fetch would pay for every candidate
+// instead of only the page a caller goes on to request via UtxosByRefs.
+//
+// The result both is the accurate total (its length) and can be sliced for
+// a page's worth of references to pass to UtxosByRefs, letting a caller
+// avoid materializing more than one page of an address's UTxO history.
+func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
+	q *models.UtxoWithOrderingQuery,
+	txn *Txn,
+) ([]models.UtxoId, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	if q == nil {
+		return nil, models.ErrNilUtxoWithOrderingQuery
+	}
+	if q.MatchAllAddresses || !models.RequiresExactAddressFilter(q.AddressPatterns) {
+		scanQuery := *q
+		scanQuery.SkipAssets = true
+		utxos, err := d.utxoStore().GetUtxosByAddressWithOrdering(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		refs := make([]models.UtxoId, len(utxos))
+		for i := range utxos {
+			refs[i] = models.UtxoId{Hash: utxos[i].TxId, Idx: utxos[i].OutputIdx}
+		}
+		return refs, nil
+	}
+
+	scanQuery := *q
+	scanQuery.Limit = 1024
+	scanQuery.SkipAssets = true
+	scanQuery.Offset = 0
+	scanQuery.Descending = false
+	refs := []models.UtxoId{}
+	candidatesProcessed := 0
+	for {
+		remainingCandidates := exactAddressCandidateScanLimit -
+			candidatesProcessed
+		if remainingCandidates <= 0 {
+			return refs, errExactAddressCandidateScanLimit
+		}
+		scanQuery.Limit = min(1024, remainingCandidates)
+		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		candidatesProcessed += len(batch)
+		for i := range batch {
+			if err := loadCbor(&batch[i].Utxo, txn); err != nil {
+				return nil, err
+			}
+			output, err := batch[i].Decode()
+			if err != nil {
+				return nil, fmt.Errorf(
+					"decode UTxO %x#%d for exact address match: %w",
+					batch[i].TxId,
+					batch[i].OutputIdx,
+					err,
+				)
+			}
+			match, err := models.MatchesUtxoAddressPatterns(
+				output.Address(),
+				q.AddressPatterns,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if match {
+				refs = append(refs, models.UtxoId{
+					Hash: batch[i].TxId,
+					Idx:  batch[i].OutputIdx,
+				})
+			}
+		}
+		if len(batch) < scanQuery.Limit || len(batch) == 0 {
+			break
+		}
+		last := batch[len(batch)-1]
+		scanQuery.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+		}
+	}
+	return refs, nil
+}
+
+// CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
+// q's coarse SQL predicate. See MetadataStore.CountUtxosByAddressWithOrdering:
+// it errors if q's address patterns require CBOR-based exact-address
+// filtering, since Dingo has no cheap way to compute an exact-address total
+// without decoding every coarse candidate's output CBOR.
+func (d *Database) CountUtxosByAddressWithOrdering(
+	q *models.UtxoWithOrderingQuery,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	if q == nil {
+		return 0, models.ErrNilUtxoWithOrderingQuery
+	}
+	count, err := d.utxoStore().CountUtxosByAddressWithOrdering(q, txn.Metadata())
+	if err != nil {
+		return 0, fmt.Errorf("count utxos by address: %w", err)
+	}
+	return count, nil
+}
+
 func (d *Database) UtxosByAddressAtSlot(
 	addr lcommon.Address,
 	slot uint64,

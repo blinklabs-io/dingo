@@ -47,11 +47,36 @@ func (a *NodeAdapter) AccountUTXOs(
 		return nil, 0, err
 	}
 
-	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(
+	// A stake credential's UTxO set is matched entirely by SQL (payment_key
+	// is irrelevant; staking_key alone is exact), so it does not need the
+	// CBOR-based exact-address filtering that AddressUTXOs does. That makes
+	// a cheap SQL COUNT and a LIMIT/OFFSET-bound fetch safe: unlike
+	// AddressUTXOs, this query never has to materialize the full UTxO
+	// history to page or total a large stake account.
+	addressPatterns := []models.UtxoAddressPattern{
+		{DelegationPart: stakeKey},
+	}
+	total, err := a.ledgerState.CountUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{AddressPatterns: addressPatterns},
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count account UTxOs for %q: %w",
+			stakeAddress,
+			err,
+		)
+	}
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= total {
+		return []AccountUTXOInfo{}, total, nil
+	}
+
+	paged, err := a.ledgerState.UtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
-			AddressPatterns: []models.UtxoAddressPattern{
-				{DelegationPart: stakeKey},
-			},
+			AddressPatterns: addressPatterns,
+			Limit:           params.Count,
+			Offset:          offset,
+			Descending:      params.Order == PaginationOrderDesc,
 		},
 	)
 	if err != nil {
@@ -61,14 +86,7 @@ func (a *NodeAdapter) AccountUTXOs(
 			err,
 		)
 	}
-	total := len(utxos)
-	if params.Order == PaginationOrderDesc {
-		for left, right := 0, len(utxos)-1; left < right; left, right = left+1, right-1 {
-			utxos[left], utxos[right] = utxos[right], utxos[left]
-		}
-	}
 
-	paged := paginateUtxos(utxos, params)
 	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
