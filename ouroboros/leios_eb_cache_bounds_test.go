@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -223,4 +224,49 @@ func TestRetainLeiosPartialTxsRejectsMergeOverEntryByteBudget(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 1, data.partialTxCount())
 	require.LessOrEqual(t, data.approxBytes(), 1500)
+}
+
+// Oversized case, persisted-reload path: loadLeiosEBFromDB reloads a manifest
+// and transaction set the blob store already holds -- e.g. a legacy or
+// pre-cap-era persisted endorser block -- independently of
+// storeLeiosEndorserBlock's admission check. It must apply the same per-entry
+// byte budget rather than let a leios-fetch MsgBlockRequest for that point
+// repopulate the in-memory cache past the limit on every cache miss: the
+// reloaded entry is still served to the caller, but left uncached.
+func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
+	const txCount = 20
+	refs := make([]lcommon.LeiosTransactionReference, txCount)
+	txs := make([]cbor.RawMessage, txCount)
+	for i := range txCount {
+		tx, ref := testLeiosManifestTx(t, byte(i))
+		txs[i] = tx
+		refs[i] = ref
+	}
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: refs,
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(33, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+
+	withLowerLeiosEndorserBlockCacheBudgets(t, 200, 1<<20)
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	require.NoError(
+		t,
+		db.SetLeiosEB(point.Slot, point.Hash, manifestRaw, txs),
+	)
+
+	// The reload still succeeds and returns the complete set to the caller...
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.True(t, data.completeTxCache())
+	require.Greater(t, data.approxBytes(), 200)
+
+	// ...but the oversized entry must not have been admitted into the
+	// in-memory cache.
+	o.leiosMu.RLock()
+	_, cached := o.leiosEndorserBlocks[leiosBlockKey(point.Hash)]
+	o.leiosMu.RUnlock()
+	require.False(t, cached)
 }

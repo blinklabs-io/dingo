@@ -780,6 +780,22 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		cacheKeys:  cacheKeys,
 		insertedAt: time.Now(),
 	}
+	// A persisted (or pre-cap-era) blob can exceed the per-entry byte budget
+	// even though storeLeiosEndorserBlock would reject it on the write path;
+	// this reload path must apply the same check rather than let a
+	// leios-fetch MsgBlockRequest for an old point repopulate the cache past
+	// the limit on every cache miss. Serve it to the caller uncached rather
+	// than dropping it outright.
+	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		o.config.Logger.Debug(
+			"leios EB reloaded from blob store exceeds max entry size; serving uncached",
+			"component", "network",
+			"hash", hex.EncodeToString(hash),
+			"size", n,
+			"max_size", leiosEndorserBlockCacheMaxEntryBytes,
+		)
+		return data, true
+	}
 	// Populate the in-memory cache so subsequent lookups skip the DB.
 	o.leiosMu.Lock()
 	if o.leiosEndorserBlocks == nil {
@@ -794,6 +810,11 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		for _, key := range cacheKeys {
 			o.leiosEndorserBlocks[key] = data
 		}
+		// Prune again after inserting so a reload that fits the per-entry
+		// budget but pushes the aggregate over its budget is evicted
+		// promptly, the same way storeLeiosEndorserBlock prunes both before
+		// and after admitting an entry.
+		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	} else {
 		data = existing
 	}
