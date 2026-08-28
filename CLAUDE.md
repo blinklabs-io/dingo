@@ -28,10 +28,8 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 ## Pre-commit
 
 ```shell
-golangci-lint run ./...
-nilaway ./...
-modernize ./...   # --fix to auto-apply
-make import-boundaries
+make lint         # import-boundaries, all modules, windows, nilaway, modernize
+modernize --fix ./...   # optional: auto-apply modernize's findings
 make docs-parity
 make golines
 make sql-check    # only when database/sql queries or sqlc.yaml changed

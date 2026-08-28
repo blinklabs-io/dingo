@@ -5,6 +5,10 @@ ROOT_DIR=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 # worktrees so sibling checkouts do not affect formatting or rebuild inputs.
 GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name '*.go' -print)
 
+# Gather every Go module directory. Nested modules have their own go.mod and
+# are therefore outside the root module's ./..., so they need their own run.
+GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
+
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 
@@ -73,8 +77,16 @@ format: mod-tidy ## Run mod-tidy, then format code
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
+# golangci-lint covers one module for one GOOS per run. The loop reaches every
+# nested module, and the GOOS=windows run reaches files behind
+# `//go:build windows`, which the host build excludes. CI runs the same scopes
+# in .github/workflows/golangci-lint.yml.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
-	golangci-lint run ./...
+	@for dir in $(GO_MODULE_DIRS); do \
+		echo "golangci-lint run ./... ($$dir)"; \
+		(cd $$dir && golangci-lint run ./...) || exit 1; \
+	done
+	GOOS=windows golangci-lint run ./...
 	nilaway $(GO_TAG_FLAGS) ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
