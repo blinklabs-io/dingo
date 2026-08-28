@@ -172,17 +172,18 @@ func TestPlutusDataToCardano_ConstrNegativeTagRejected(t *testing.T) {
 
 func TestPlutusDataToCardanoChecked_PropagatesNestedTagErrors(t *testing.T) {
 	bad := pdata.NewConstrFromBigInt(new(big.Int).Lsh(big.NewInt(1), 64))
+	nestedBad := pdata.NewConstrFromBigInt(big.NewInt(0), bad)
 	cases := map[string]pdata.PlutusData{
-		"constructor field": pdata.NewConstrFromBigInt(big.NewInt(0), bad),
+		"constructor field": nestedBad,
 		"map key": pdata.NewMap([][2]pdata.PlutusData{{
-			bad,
+			nestedBad,
 			pdata.NewInteger(big.NewInt(0)),
 		}}),
 		"map value": pdata.NewMap([][2]pdata.PlutusData{{
 			pdata.NewInteger(big.NewInt(0)),
-			bad,
+			nestedBad,
 		}}),
-		"list item": pdata.NewList(bad),
+		"list item": pdata.NewList(nestedBad),
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {
