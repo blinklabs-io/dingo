@@ -260,6 +260,8 @@ func (r *validityOutcomeRedeemers) Value(
 func newConwayValidityOutcomeTx(
 	t *testing.T,
 	valid bool,
+	version lang.LanguageVersion,
+	scriptFails bool,
 	exUnits lcommon.ExUnits,
 ) *declaredValidityConwayTx {
 	t.Helper()
@@ -275,9 +277,42 @@ func newConwayValidityOutcomeTx(
 	require.NoError(t, err)
 	scriptBytes, err := cbor.Encode(flatProgram)
 	require.NoError(t, err)
+	if scriptFails {
+		// This malformed Flat payload reaches the evaluator rather than the
+		// budget check, exercising the execution-error outcome path.
+		scriptBytes = []byte{0x41, 0x00}
+	}
 
-	plutusScript := lcommon.PlutusV1Script(scriptBytes)
-	scriptHash := plutusScript.Hash()
+	var script lcommon.Script
+	witnesses := &mockWitnessSet{redeemers: &validityOutcomeRedeemers{
+		mockRedeemers: &mockRedeemers{
+			entries: []struct {
+				key lcommon.RedeemerKey
+				val lcommon.RedeemerValue
+			}{
+				{
+					key: lcommon.RedeemerKey{
+						Tag:   lcommon.RedeemerTagMint,
+						Index: 0,
+					},
+					val: lcommon.RedeemerValue{ExUnits: exUnits},
+				},
+			},
+		},
+	}}
+	switch version {
+	case lang.LanguageVersionV1:
+		plutusScript := lcommon.PlutusV1Script(scriptBytes)
+		script = plutusScript
+		witnesses.plutusV1Scripts = []lcommon.PlutusV1Script{plutusScript}
+	case lang.LanguageVersionV2:
+		plutusScript := lcommon.PlutusV2Script(scriptBytes)
+		script = plutusScript
+		witnesses.plutusV2Scripts = []lcommon.PlutusV2Script{plutusScript}
+	default:
+		t.Fatalf("unsupported Plutus version %v", version)
+	}
+	scriptHash := script.Hash()
 	assetMint := lcommon.NewMultiAsset[lcommon.MultiAssetTypeMint](
 		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeMint{
 			lcommon.Blake2b224(scriptHash): {
@@ -289,24 +324,8 @@ func newConwayValidityOutcomeTx(
 		valid: valid,
 		mockConwayFeeTx: &mockConwayFeeTx{
 			mockFeeTx: mockFeeTx{
-				txType: txTypeAlonzo,
-				witnesses: &mockWitnessSet{
-					plutusV1Scripts: []lcommon.PlutusV1Script{plutusScript},
-					redeemers: &validityOutcomeRedeemers{mockRedeemers: &mockRedeemers{
-						entries: []struct {
-							key lcommon.RedeemerKey
-							val lcommon.RedeemerValue
-						}{
-							{
-								key: lcommon.RedeemerKey{
-									Tag:   lcommon.RedeemerTagMint,
-									Index: 0,
-								},
-								val: lcommon.RedeemerValue{ExUnits: exUnits},
-							},
-						},
-					}},
-				},
+				txType:    txTypeAlonzo,
+				witnesses: witnesses,
 			},
 			assetMint: &assetMint,
 		},
@@ -335,10 +354,12 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 
 	tests := []struct {
 		name     string
+		version  lang.LanguageVersion
 		validate func(lcommon.Transaction) error
 	}{
 		{
-			name: "alonzo",
+			name:    "alonzo Plutus V1",
+			version: lang.LanguageVersionV1,
 			validate: func(tx lcommon.Transaction) error {
 				return ValidateTxAlonzo(
 					tx,
@@ -355,7 +376,8 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 			},
 		},
 		{
-			name: "babbage",
+			name:    "babbage Plutus V1",
+			version: lang.LanguageVersionV1,
 			validate: func(tx lcommon.Transaction) error {
 				return ValidateTxBabbage(
 					tx,
@@ -372,7 +394,46 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 			},
 		},
 		{
-			name: "conway",
+			name:    "babbage Plutus V2",
+			version: lang.LanguageVersionV2,
+			validate: func(tx lcommon.Transaction) error {
+				return ValidateTxBabbage(
+					tx,
+					0,
+					newMockLedgerState(),
+					&babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+						MaxTxExUnits: lcommon.ExUnits{
+							Steps:  10_000_000,
+							Memory: 10_000_000,
+						},
+					},
+				)
+			},
+		},
+		{
+			name:    "conway Plutus V1",
+			version: lang.LanguageVersionV1,
+			validate: func(tx lcommon.Transaction) error {
+				return ValidateTxConway(
+					tx,
+					0,
+					newMockLedgerState(),
+					&conway.ConwayProtocolParameters{
+						ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+							Major: 9,
+						},
+						MaxTxExUnits: lcommon.ExUnits{
+							Steps:  10_000_000,
+							Memory: 10_000_000,
+						},
+					},
+				)
+			},
+		},
+		{
+			name:    "conway Plutus V2",
+			version: lang.LanguageVersionV2,
 			validate: func(tx lcommon.Transaction) error {
 				return ValidateTxConway(
 					tx,
@@ -397,6 +458,8 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 				tx := newConwayValidityOutcomeTx(
 					t,
 					true,
+					test.version,
+					false,
 					lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
 				)
 				require.NoError(t, test.validate(tx))
@@ -405,6 +468,8 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 			t.Run("declared invalid but scripts succeed", func(t *testing.T) {
 				tx := newConwayValidityOutcomeTx(
 					t,
+					false,
+					test.version,
 					false,
 					lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
 				)
@@ -417,14 +482,49 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 			})
 
 			t.Run("declared valid but scripts fail", func(t *testing.T) {
-				tx := newConwayValidityOutcomeTx(t, true, lcommon.ExUnits{})
+				tx := newConwayValidityOutcomeTx(
+					t,
+					true,
+					test.version,
+					false,
+					lcommon.ExUnits{},
+				)
 				err := test.validate(tx)
 				_, ok := errors.AsType[conway.PlutusScriptFailedError](err)
 				require.True(t, ok, "expected Plutus script failure, got %v", err)
 			})
 
 			t.Run("declared invalid and scripts fail", func(t *testing.T) {
-				tx := newConwayValidityOutcomeTx(t, false, lcommon.ExUnits{})
+				tx := newConwayValidityOutcomeTx(
+					t,
+					false,
+					test.version,
+					false,
+					lcommon.ExUnits{},
+				)
+				require.NoError(t, test.validate(tx))
+			})
+
+			t.Run("declared valid but evaluator errors", func(t *testing.T) {
+				tx := newConwayValidityOutcomeTx(
+					t,
+					true,
+					test.version,
+					true,
+					lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+				)
+				var scriptErr conway.PlutusScriptFailedError
+				require.ErrorAs(t, test.validate(tx), &scriptErr)
+			})
+
+			t.Run("declared invalid and evaluator errors", func(t *testing.T) {
+				tx := newConwayValidityOutcomeTx(
+					t,
+					false,
+					test.version,
+					true,
+					lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+				)
 				require.NoError(t, test.validate(tx))
 			})
 		})
