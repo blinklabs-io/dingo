@@ -6187,13 +6187,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 				blockDonation = 0
 			}
 		}
-		// Validate transaction
-		// Skip validation for phase-2 failed TXs (isValid=false).
-		// These are consensus-valid: the block producer already
-		// determined the script failure, collateral is consumed
-		// instead of regular inputs, and tx.Consumed()/Produced()
-		// return the correct collateral-based UTxO sets.
-		if shouldValidate && tx.IsValid() {
+		// Validate transaction. Era validators run phase-1 rules for every
+		// transaction and skip only phase-2 evaluation when isValid=false.
+		// Phase-2-invalid transactions still need valid intervals, fees,
+		// collateral, witnesses, and other structural checks.
+		if shouldValidate {
 			validationEra, err := resolveValidationEra(
 				tx,
 				currentEra,

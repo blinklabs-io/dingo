@@ -147,10 +147,24 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// leiosEndorserBlockSeq is a monotonic counter assigned to a cache entry
+	// while leiosMu is held, so eviction order reflects actual insertion order
+	// even when a delayed goroutine captured an earlier wall-clock insertedAt
+	// but loses the race for the lock. See leiosEndorserBlockData.seq.
+	leiosEndorserBlockSeq uint64
 	// Waiters blocked in the NtC serving path until an endorser block's
 	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
 	// channel is closed once a complete closure is stored for that key.
 	leiosClosureWaiters map[string][]chan struct{}
+	// Waiters blocked in the NtC serving path, keyed by the serving
+	// connection rather than by endorser block. Closed when that connection
+	// goes away, so a closure wait cannot outlive the connection it serves.
+	// The chainsync server callback owns gouroboros's receive loop while it
+	// runs, so Protocol.DoneChan() cannot close underneath it; the release
+	// signal has to come from connmanager's per-connection ErrorChan watcher
+	// instead (see ReleaseLeiosServeWaiters).
+	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaitersMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -415,12 +429,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),
-		futureHeaderResyncCtx:      futureHeaderResyncCtx,
-		futureHeaderResyncCancel:   futureHeaderResyncCancel,
-		blockDecodeCache:           newDecodeCache[gledger.Block](),
-		headerDecodeCache:          newDecodeCache[gledger.BlockHeader](),
-		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
-		leiosClosureWaiters:        make(map[string][]chan struct{}),
+		futureHeaderResyncCtx:    futureHeaderResyncCtx,
+		futureHeaderResyncCancel: futureHeaderResyncCancel,
+		blockDecodeCache:         newDecodeCache[gledger.Block](),
+		headerDecodeCache:        newDecodeCache[gledger.BlockHeader](),
+		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters:      make(map[string][]chan struct{}),
+		leiosServeWaiters: make(
+			map[ouroboros.ConnectionId][]chan struct{},
+		),
 		leiosEBLog:                 newLeiosForgedEBLog(),
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),

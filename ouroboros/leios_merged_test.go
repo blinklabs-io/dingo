@@ -1275,7 +1275,7 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
 	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block)
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
@@ -1289,7 +1289,7 @@ func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 6)
 	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block)
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw), got)
 }
@@ -1403,6 +1403,7 @@ func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 	o.recordLeiosCertRbOutcome("unresolved")
 	o.recordLeiosCertRbWait("resolved", 100*time.Millisecond)
 	o.recordLeiosCertRbWait("timeout", 3*time.Second)
+	o.recordLeiosCertRbWait("cancelled", 5*time.Millisecond)
 
 	require.Equal(t, float64(1), promtestutil.ToFloat64(
 		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged"),
@@ -1413,8 +1414,8 @@ func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 	require.Equal(t, float64(2), promtestutil.ToFloat64(
 		o.leiosMetrics.certRbOutcomes.WithLabelValues("unresolved"),
 	))
-	// One histogram series per wait outcome (resolved, timeout).
-	require.Equal(t, 2, promtestutil.CollectAndCount(
+	// One histogram series per wait outcome (resolved, timeout, cancelled).
+	require.Equal(t, 3, promtestutil.CollectAndCount(
 		o.leiosMetrics.certRbWaitSeconds,
 	))
 }
@@ -1462,10 +1463,11 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 		LeiosClosureWaitTimeout: 20 * time.Millisecond,
 	})
 	block := models.Block{Cbor: certRB, Slot: 77, Hash: []byte{0x77}}
-	got, err := o.serveLeiosCertRbWithWait(block, ebHash)
+	got, err := o.serveLeiosCertRbWithWait(block, ebHash, gouroboros.ConnectionId{})
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
+	require.Contains(t, err.Error(), "timeout")
 }
 
 // TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs reproduces the
