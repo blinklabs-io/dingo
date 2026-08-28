@@ -6187,10 +6187,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 				blockDonation = 0
 			}
 		}
-		// Validate transaction. Era validators run phase-1 rules for every
-		// transaction and skip only phase-2 evaluation when isValid=false.
-		// Phase-2-invalid transactions still need valid intervals, fees,
-		// collateral, witnesses, and other structural checks.
+		// Era validators run phase-1 rules for every transaction, then require
+		// the locally evaluated phase-2 result to match the declared validity
+		// flag before applying any transaction state. Phase-2-invalid
+		// transactions still need valid intervals, fees, collateral, witnesses,
+		// and other structural checks.
 		if shouldValidate {
 			validationEra, err := resolveValidationEra(
 				tx,
@@ -6231,35 +6232,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 					lv,
 					pp,
 				)
-				// When a TX has isValid=true, the block producer's
-				// Plutus evaluator verified the script passed. For
-				// pre-Dijkstra eras, log a local evaluator disagreement
-				// and trust the block producer. Standard Dijkstra keeps
-				// the validation error so invalid Leios blocks are rejected;
-				// the Musashi prototype retains its explicit trust bypass.
-				var plutusErr conway.PlutusScriptFailedError
-				if err != nil && errors.As(err, &plutusErr) &&
-					(validationEra.Id != dijkstra.EraIdDijkstra ||
-						ls.trustDijkstraTxValidationError(validationEra.Id)) {
-					ls.config.Logger.Warn(
-						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
-						"component",
-						"ledger",
-						"tx_hash",
-						tx.Hash().String(),
-						"block_slot",
-						point.Slot,
-						"script_hash",
-						hex.EncodeToString(plutusErr.ScriptHash[:]),
-						"redeemer_tag",
-						plutusErr.Tag,
-						"redeemer_index",
-						plutusErr.Index,
-						"eval_error",
-						plutusErr.Err.Error(),
-					)
-					err = nil
-				}
 				// The Musashi prototype trusts remaining Dijkstra validation
 				// disagreements because its certificate-driven closure is still
 				// evolving. Standard profiles leave the error intact and reject
@@ -6280,6 +6252,26 @@ func (ls *LedgerState) ledgerProcessBlock(
 					err = nil
 				}
 				if err != nil {
+					var plutusErr conway.PlutusScriptFailedError
+					if errors.As(err, &plutusErr) {
+						ls.config.Logger.Warn(
+							"Plutus evaluation disagrees with block producer (rejecting transaction)",
+							"component",
+							"ledger",
+							"tx_hash",
+							tx.Hash().String(),
+							"block_slot",
+							point.Slot,
+							"script_hash",
+							hex.EncodeToString(plutusErr.ScriptHash[:]),
+							"redeemer_tag",
+							plutusErr.Tag,
+							"redeemer_index",
+							plutusErr.Index,
+							"eval_error",
+							plutusErr.Err.Error(),
+						)
+					}
 					// Attempt to include raw CBOR for diagnostics (if available)
 					var txCborHex string
 					txCbor := tx.Cbor()

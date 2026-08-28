@@ -201,19 +201,18 @@ func ParseVoterPublicKey(hexStr string) (*bls12381.G2Affine, error) {
 	return &point, nil
 }
 
-// VoterRegistry maps pool key hashes to their registered BLS voting public
-// keys. CIP-0164's key registration/rotation mechanism is not yet
-// specified, so the registry is populated from static configuration
-// (devnet-style). Voters absent from the registry can still have their
-// committee membership checked, but not their signatures.
+// VoterRegistry maps pool key hashes to BLS voting public keys for the
+// explicit private test/devnet mode where VoteManager has no LeiosKeyProvider.
+// Production/reference-compatible managers always supply a key provider and
+// ignore this registry. Voters absent from the active trust source can still
+// have their committee membership checked, but not their signatures.
 //
-// SECURITY: the registry is the trust root that discharges the
+// SECURITY: in private mode the registry is the trust root that discharges the
 // proof-of-possession requirement of BLS aggregate verification
-// (VerifyAggregateSignature): operators vouch for the keys they
-// configure. Any registration mechanism that replaces this static
-// configuration must verify a proof of possession before a key enters
-// the registry, or aggregate certificate verification becomes forgeable
-// via rogue-key attacks.
+// (VerifyAggregateSignature): the harness constructing it vouches for every
+// key. Any broader private-network registration mechanism must verify a proof
+// of possession before a key enters the registry, or aggregate certificate
+// verification becomes forgeable via rogue-key attacks.
 type VoterRegistry struct {
 	mu   sync.RWMutex
 	keys map[string]*bls12381.G2Affine // lowercase-hex pool key hash -> pubkey
@@ -273,7 +272,7 @@ func (r *VoterRegistry) PublicKeyFor(
 	return pub, ok
 }
 
-// RegisterPublicKey adds a locally configured public key to the registry.
+// RegisterPublicKey adds a private-harness public key to the registry.
 // Existing entries must agree so a local signing key cannot silently diverge
 // from the verification trust root shared with peers.
 func (r *VoterRegistry) RegisterPublicKey(

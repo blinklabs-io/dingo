@@ -37,6 +37,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1803,6 +1804,37 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 		250*time.Millisecond,
 		"canonical deterministic rejection must not request another fresh intersection",
 	)
+}
+
+func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("plutus-failing-block")),
+		TxHash:     testHashBytes("plutus-failing-tx"),
+		Cause: conway.PlutusScriptFailedError{
+			ScriptHash: lcommon.Blake2b224Hash([]byte("plutus-script")),
+			Tag:        lcommon.RedeemerTagMint,
+			Index:      0,
+			Err:        errors.New("local evaluator disagrees with declared validity"),
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"deterministic Plutus rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
 // A duplicate-input failure reaching the deterministic branch while the node

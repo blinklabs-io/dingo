@@ -697,6 +697,5 @@ func buildDingoConfig(
 		dingo.WithLeiosVoteSigningKeyFile(
 			cfg.LeiosVoteSigningKeyFile,
 		),
-		dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
 	)
 }
