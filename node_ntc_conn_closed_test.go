@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
@@ -204,21 +205,21 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 	done, cancel := o.RegisterLeiosServeWaiterForTesting(connId)
 	t.Cleanup(cancel)
 
-	select {
-	case <-done:
-		t.Fatal("precondition: waiter must not be released before the close")
-	default:
-	}
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"waiter must not be released before the close",
+	)
 
 	n.handleConnManagerClosed(connId, true, nil)
 
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal(
-			"NtC close must release the parked Leios endorser-closure serving wait",
-		)
-	}
+	testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"NtC close must release the parked Leios endorser-closure serving wait",
+	)
 }
 
 // TestHandleConnManagerClosed_NilOuroboros guards the same restore window as
