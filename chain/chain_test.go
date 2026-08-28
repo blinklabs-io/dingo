@@ -1893,6 +1893,7 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 			err,
 		)
 	}
+	mustSetLedger(t, cm, len(testBlocks))
 	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -1942,6 +1943,223 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 				"expected block index %d to be pruned after rewind, got: %v",
 				idx,
 				err,
+			)
+		}
+	}
+}
+
+// TestRewindPrimaryChainToPointRejectsOverLimitRewind covers issue #3516's
+// rollback-depth bound: RewindPrimaryChainToPoint must reject a rewind whose
+// depth exceeds the configured security parameter K, and must leave the
+// chain and every block it holds untouched when it does, so NtC clients stay
+// consistent after a rejected rewind.
+func TestRewindPrimaryChainToPointRejectsOverLimitRewind(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// K=2, but rewinding to testBlocks[2] removes 3 blocks (indexes 4-6).
+	mustSetLedger(t, cm, 2)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	err = cm.RewindPrimaryChainToPoint(rewindPoint)
+	if err == nil {
+		t.Fatal(
+			"expected rewind to be rejected when depth exceeds security param",
+		)
+	}
+	if !errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf("expected ErrRollbackExceedsSecurityParam, got: %s", err)
+	}
+	// The rejected rewind must not have touched the chain tip or deleted
+	// any block.
+	tip := c.Tip()
+	lastBlock := testBlocks[len(testBlocks)-1]
+	if tip.Point.Slot != lastBlock.SlotNumber() {
+		t.Fatalf(
+			"chain tip should be unchanged after rejected rewind: got slot %d, expected %d",
+			tip.Point.Slot,
+			lastBlock.SlotNumber(),
+		)
+	}
+	for idx := uint64(1); idx <= uint64(len(testBlocks)); idx++ {
+		if _, err := db.BlockByIndex(idx, nil); err != nil {
+			t.Fatalf(
+				"expected block index %d to remain after rejected rewind: %s",
+				idx,
+				err,
+			)
+		}
+	}
+}
+
+// TestRewindPrimaryChainToPointSignalsRollback covers the other half of
+// issue #3516: a rewind within the security parameter must publish
+// ChainRollbackEvent exactly once and wake/mark any chain iterator with the
+// rollback, the same signal downstream NtC consumers rely on for a live
+// Chain.Rollback.
+func TestRewindPrimaryChainToPointSignalsRollback(t *testing.T) {
+	db := newTestDB(t)
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := chain.NewManager(db, eventBus)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, len(testBlocks))
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// Drain the iterator to the tip before rewinding.
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("unexpected error draining chain iterator: %s", err)
+		}
+	}
+	rollbackEvents := make(chan chain.ChainRollbackEvent, 10)
+	eventBus.SubscribeFunc(
+		chain.ChainUpdateEventType,
+		func(evt event.Event) {
+			if rb, ok := evt.Data.(chain.ChainRollbackEvent); ok {
+				rollbackEvents <- rb
+			}
+		},
+	)
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	if err := cm.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+		t.Fatalf("unexpected error rewinding primary chain: %s", err)
+	}
+	// The iterator must observe a rollback marker for the rewind point.
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error calling chain iterator next: %s", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf(
+			"expected a rollback marker from the chain iterator, got: %#v",
+			next,
+		)
+	}
+	if next.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(next.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"iterator rollback point mismatch: got %d.%x, wanted %d.%x",
+			next.Point.Slot,
+			next.Point.Hash,
+			rewindPoint.Slot,
+			rewindPoint.Hash,
+		)
+	}
+	// Exactly one ChainRollbackEvent must have been published, for the
+	// rewind point actually reached.
+	evt := testutil.RequireReceive(
+		t, rollbackEvents, time.Second,
+		"expected ChainRollbackEvent after rewind",
+	)
+	if evt.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(evt.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"rollback event point mismatch: got %d.%x, wanted %d.%x",
+			evt.Point.Slot,
+			evt.Point.Hash,
+			rewindPoint.Slot,
+			rewindPoint.Hash,
+		)
+	}
+	select {
+	case extra := <-rollbackEvents:
+		t.Fatalf("expected exactly one rollback event, got extra: %#v", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestRewindPrimaryChainToPointConcurrentRewinds exercises concurrent
+// callers rewinding the same persistent primary chain to the same point.
+// Racing to different points is expected to leave the loser observing that
+// its target is no longer on the chain (the earlier caller already pruned
+// it) — that is the existing not-on-chain contract, not a #3516 concern.
+// What #3516 requires here is that every concurrent caller targeting the
+// same still-resolvable point gets the same outcome (an idempotent success)
+// with no corruption or deadlock; run with -race to catch any lock-ordering
+// regression reintroduced around the shared rollback path.
+func TestRewindPrimaryChainToPointConcurrentRewinds(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, len(testBlocks))
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			// Every goroutine targets the same, still-resolvable point,
+			// so every call must succeed whether it performs the rewind
+			// or observes it already done.
+			if err := cm.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+				t.Errorf(
+					"unexpected error from concurrent rewind to %d.%x: %s",
+					rewindPoint.Slot, rewindPoint.Hash, err,
+				)
+			}
+		})
+	}
+	wg.Wait()
+	tip := c.Tip()
+	if tip.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(tip.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"chain tip after concurrent rewinds: got %d.%x, wanted %d.%x",
+			tip.Point.Slot, tip.Point.Hash,
+			rewindPoint.Slot, rewindPoint.Hash,
+		)
+	}
+	for idx := uint64(1); idx <= uint64(len(testBlocks)-3); idx++ {
+		if _, err := db.BlockByIndex(idx, nil); err != nil {
+			t.Fatalf(
+				"expected block index %d to remain after rewind: %s",
+				idx, err,
+			)
+		}
+	}
+	for idx := uint64(len(testBlocks)-2); idx <= uint64(len(testBlocks)); idx++ {
+		if _, err := db.BlockByIndex(idx, nil); !errors.Is(
+			err, models.ErrBlockNotFound,
+		) {
+			t.Fatalf(
+				"expected block index %d to be pruned after rewind, got: %v",
+				idx, err,
 			)
 		}
 	}

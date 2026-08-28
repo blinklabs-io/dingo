@@ -15,7 +15,6 @@
 package chain
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -35,9 +34,6 @@ type ChainId uint64
 
 const (
 	primaryChainId ChainId = 1
-	// primaryChainRewindBatchSize bounds startup reconciliation work per
-	// write transaction when pruning a speculative primary-chain tail.
-	primaryChainRewindBatchSize = 512
 )
 
 type ChainManager struct {
@@ -412,10 +408,21 @@ func (cm *ChainManager) loadPrimaryChain() error {
 	return nil
 }
 
-// RewindPrimaryChainToPoint silently prunes the persistent primary chain back
-// to the specified point without emitting rollback/fork events. This is used
-// during startup to discard speculative blob-only blocks that were never
-// committed into the authoritative ledger metadata tip.
+// RewindPrimaryChainToPoint prunes the persistent primary chain back to the
+// specified point. It is used both during startup reconciliation, to discard
+// speculative blob-only blocks that were never committed into the
+// authoritative ledger metadata tip, and by the live primary-chain/ledger
+// divergence reconciler.
+//
+// It shares its bound and side effects with a live Chain.Rollback rather
+// than pruning blocks directly: the rewind is rejected outright, without
+// touching any state, when it would exceed the configured security
+// parameter K, and a successful rewind publishes ChainRollbackEvent (and a
+// ChainForkEvent when it actually removed blocks) and wakes/marks any chain
+// iterators exactly once, the same signal NtC clients rely on for a live
+// rollback. Previously this deleted blocks directly with no depth bound and
+// no rollback/iterator signal, silently truncating the chain out from under
+// downstream consumers (issue #3516).
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
@@ -423,91 +430,10 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 	if err != nil {
 		return err
 	}
-	primaryChain.mutex.Lock()
-	defer primaryChain.mutex.Unlock()
-	cm.mutex.Lock()
-	defer cm.mutex.Unlock()
-	if cm.primaryChainLocked() != primaryChain {
-		return errors.New("primary chain changed during rewind")
-	}
 	if !primaryChain.persistent {
 		return errors.New("primary chain is not persistent")
 	}
-
-	rollbackIndex := uint64(0)
-	rollbackBlockNumber := uint64(0)
-	targetTip := ochainsync.Tip{}
-	err = func() error {
-		if point.Slot > 0 || len(point.Hash) > 0 {
-			readTxn := cm.db.BlobTxn(false)
-			defer readTxn.Rollback() //nolint:errcheck
-			tmpBlock, err := cm.blockByPoint(point, readTxn)
-			if err != nil {
-				return fmt.Errorf("lookup rewind point: %w", err)
-			}
-			rollbackIndex = tmpBlock.ID
-			rollbackBlockNumber = tmpBlock.Number
-			if primaryChain.tipBlockIndex < rollbackIndex {
-				return fmt.Errorf(
-					"primary chain tip index %d is behind rewind point index %d",
-					primaryChain.tipBlockIndex,
-					rollbackIndex,
-				)
-			}
-			if primaryChain.tipBlockIndex == rollbackIndex &&
-				primaryChain.currentTip.Point.Slot == point.Slot &&
-				bytes.Equal(primaryChain.currentTip.Point.Hash, point.Hash) {
-				targetTip = primaryChain.currentTip
-				return nil
-			}
-			targetTip = ochainsync.Tip{
-				Point:       point,
-				BlockNumber: rollbackBlockNumber,
-			}
-		}
-		currentIndex := primaryChain.tipBlockIndex
-		for currentIndex > rollbackIndex {
-			batchFloor := rollbackIndex
-			if currentIndex-rollbackIndex > primaryChainRewindBatchSize {
-				batchFloor = currentIndex - primaryChainRewindBatchSize
-			}
-			txn := cm.db.BlobTxn(true)
-			if err := txn.Do(func(txn *database.Txn) error {
-				for idx := currentIndex; idx > batchFloor; idx-- {
-					currentBlock, err := cm.db.BlockByIndex(idx, txn)
-					if err != nil {
-						return fmt.Errorf(
-							"lookup current primary block by index %d: %w",
-							idx,
-							err,
-						)
-					}
-					if err := database.BlockDeleteTxn(txn, currentBlock); err != nil {
-						return fmt.Errorf(
-							"delete primary block %d: %w",
-							currentBlock.ID,
-							err,
-						)
-					}
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-			currentIndex = batchFloor
-		}
-		if targetTip.Point.Slot == 0 && len(targetTip.Point.Hash) == 0 {
-			targetTip = ochainsync.Tip{}
-		}
-		return nil
-	}()
-	if err != nil {
-		return err
-	}
-	primaryChain.headers = primaryChain.headers[:0]
-	primaryChain.tipBlockIndex = rollbackIndex
-	primaryChain.currentTip = targetTip
-	return nil
+	return primaryChain.Rollback(point)
 }
 
 func (cm *ChainManager) addBlock(

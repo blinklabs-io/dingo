@@ -7772,6 +7772,30 @@ func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 		hex.EncodeToString(ledgerTip.Point.Hash),
 	)
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			// The common ancestor sits more than K blocks behind the
+			// primary chain tip. Rewinding that far live is exactly what
+			// issue #3516 bounds against, so treat this the same as "no
+			// safe reconciliation available" and let the caller's
+			// existing over-K handling (chainsync.go) reject the peer
+			// chain and force a fresh intersection instead of silently
+			// truncating the chain past K.
+			ls.config.Logger.Error(
+				"primary chain and ledger diverged beyond security "+
+					"parameter K, declining to reconcile live",
+				"component",
+				"ledger",
+				"reason",
+				reason,
+				"connection_id",
+				connId.String(),
+				"chain_tip_slot",
+				chainTip.Point.Slot,
+				"ledger_tip_slot",
+				ledgerTip.Point.Slot,
+			)
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil

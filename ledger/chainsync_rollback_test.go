@@ -48,6 +48,7 @@ type chainsyncRollbackFixture struct {
 	ancestorTip   ochainsync.Tip
 	currentTip    ochainsync.Tip
 	ancestorNonce []byte
+	currentNonce  []byte
 	forkPoint     ocommon.Point
 }
 
@@ -364,11 +365,42 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
-func TestHandleEventChainsyncRollbackExceedsKReconcilesDivergedLedgerTip(
+// TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTip
+// covers issue #3516's rollback-depth bound: the common ancestor between the
+// diverged primary chain and the stale ledger tip here sits 3 blocks behind
+// the primary chain's tip, beyond the fixture's K=2. Live reconciliation
+// must decline rather than force that rewind through, leaving chain and
+// ledger state untouched, and fall back to the existing over-K handling
+// that rejects the peer chain and requests a fresh intersection.
+func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTip(
 	t *testing.T,
 ) {
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-rollback")
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	preReconcileChainTip := fixture.ls.chain.Tip()
 
 	require.NoError(t, fixture.ls.handleEventChainsyncRollback(
 		ChainsyncEvent{
@@ -378,18 +410,20 @@ func TestHandleEventChainsyncRollbackExceedsKReconcilesDivergedLedgerTip(
 		nil,
 	))
 
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	// Nothing was rewound: the primary chain, ledger tip, and durable
+	// nonces are all exactly as they were before the declined
+	// reconciliation.
+	assert.Equal(t, preReconcileChainTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 	assert.True(
 		t,
-		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+		bytes.Equal(fixture.currentNonce, fixture.ls.currentTipBlockNonce),
 	)
 	assert.Equal(t, SyncingChainsyncState, fixture.ls.chainsyncState)
-	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
-	assert.Equal(t, fixture.ancestorTip, dbTip)
+	assert.Equal(t, fixture.currentTip, dbTip)
 
 	rows, err := fixture.ls.db.GetBlockNoncesInSlotRange(
 		fixture.ancestorTip.Point.Slot,
@@ -397,8 +431,16 @@ func TestHandleEventChainsyncRollbackExceedsKReconcilesDivergedLedgerTip(
 		nil,
 	)
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
+	require.Len(t, rows, 2)
+
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected over-K resync event",
+	)
+	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, e.Reason)
+	assert.Equal(t, fixture.connId, e.ConnectionId)
 }
 
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
@@ -710,9 +752,39 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 	}
 }
 
-func TestTryResolveForkExceedsKReconcilesDivergedLedgerTip(t *testing.T) {
+// TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip covers
+// issue #3516's rollback-depth bound from the fork-resolution call site: the
+// common ancestor here sits 3 blocks behind the fixture's K=2, so live
+// reconciliation must decline the rewind rather than force it through, and
+// fork resolution must fall back to rejecting the fork and requesting a
+// fresh intersection instead of silently truncating past K.
+func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
+	t *testing.T,
+) {
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-fork-resolution")
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
 
 	localTip := fixture.ls.chain.Tip()
 	forkHash := testHashBytes("over-k-fork-resolution-block")
@@ -746,20 +818,38 @@ func TestTryResolveForkExceedsKReconcilesDivergedLedgerTip(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
+	// The not-fit error was handled (a resync was requested), even though
+	// the fork itself was rejected rather than adopted.
 	require.True(t, resolved)
 
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	// Nothing was rewound: the primary chain, ledger tip, and durable
+	// nonces are all exactly as they were before the declined
+	// reconciliation.
+	assert.Equal(t, localTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 	assert.True(
 		t,
-		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+		bytes.Equal(fixture.currentNonce, fixture.ls.currentTipBlockNonce),
 	)
 	assert.Zero(t, fixture.ls.headerMismatchCount)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
-	assert.Equal(t, fixture.ancestorTip, dbTip)
+	assert.Equal(t, fixture.currentTip, dbTip)
+
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected over-K fork-resolution resync event",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		e.Reason,
+	)
+	assert.Equal(t, fixture.connId, e.ConnectionId)
 }
 
 func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
@@ -2456,6 +2546,7 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		ancestorTip:   ancestorTip,
 		currentTip:    currentTip,
 		ancestorNonce: ancestorNonce,
+		currentNonce:  currentNonce,
 		forkPoint: ocommon.NewPoint(
 			currentBlock.Slot+10,
 			testHashBytes("fork-point"),
