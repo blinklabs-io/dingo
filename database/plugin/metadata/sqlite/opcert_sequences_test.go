@@ -76,6 +76,36 @@ func TestLatestPoolOpCertSequencesEmpty(t *testing.T) {
 	assert.Empty(t, sequences)
 }
 
+func TestLatestPoolOpCertSequenceAfter(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xC3}, 28)),
+	)
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 1, 100, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 490, 101, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 491, 102, nil))
+
+	sequence, found, err := store.LatestPoolOpCertSequenceAfter(
+		poolKeyHash,
+		100,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, uint64(491), sequence)
+
+	sequence, found, err = store.LatestPoolOpCertSequenceAfter(
+		poolKeyHash,
+		102,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Zero(t, sequence)
+}
+
 func TestLatestPoolOpCertSequenceAtOrBefore(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)

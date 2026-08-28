@@ -6008,7 +6008,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// the per-(pool,slot) PoolOpCertSequence store, which drops rows past
 		// the rollback slot and recomputes the latest counter.
 		if shouldValidate {
-			stored, found, err := ls.db.LatestPoolOpCertSequence(
+			stored, found, err := ls.latestOpCertCounterForValidation(
 				opCertPoolKeyHash,
 				txn,
 			)
@@ -6380,6 +6380,31 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	return delta, nil
+}
+
+// latestOpCertCounterForValidation returns the highest observed counter after
+// the Mithril boundary, or the certified counter at the boundary when no later
+// row exists. Rows before the boundary are not part of the certified state.
+func (ls *LedgerState) latestOpCertCounterForValidation(
+	poolKeyHash lcommon.PoolKeyHash,
+	txn *database.Txn,
+) (uint64, bool, error) {
+	if ls.mithrilLedgerSlot > 0 {
+		sequence, found, err := ls.db.LatestPoolOpCertSequenceAfter(
+			poolKeyHash,
+			ls.mithrilLedgerSlot,
+			txn,
+		)
+		if err != nil || found {
+			return sequence, found, err
+		}
+		return ls.db.LatestPoolOpCertSequenceAfter(
+			poolKeyHash,
+			ls.mithrilLedgerSlot-1,
+			txn,
+		)
+	}
+	return ls.db.LatestPoolOpCertSequence(poolKeyHash, txn)
 }
 
 func (ls *LedgerState) logLeiosEndorserBlockApplyResult(

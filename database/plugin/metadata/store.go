@@ -1604,6 +1604,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// LatestPoolOpCertSequenceAfter returns the highest observed op-cert
+	// sequence for a pool strictly after the given slot.
+	LatestPoolOpCertSequenceAfter(
+		lcommon.PoolKeyHash,
+		uint64, // afterSlot
+		types.Txn,
+	) (uint64, bool, error)
+
 	// LatestPoolOpCertSequenceAtOrBefore returns the highest op-cert sequence
 	// observed for a pool no later than the supplied canonical-chain slot.
 	// This is the chain-dependent counter view at a historical point; pools

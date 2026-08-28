@@ -343,13 +343,17 @@ func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
 func UtxoLedgerToModel(
 	utxo ledger.Utxo,
 	slot uint64,
-) Utxo {
+) (Utxo, error) {
 	outAddr := utxo.Output.Address()
+	amount, err := checkedUint64FromBigInt(utxo.Output.Amount())
+	if err != nil {
+		return Utxo{}, fmt.Errorf("utxo amount: %w", err)
+	}
 	ret := Utxo{
 		TxId:      utxo.Id.Id().Bytes(),
 		Cbor:      utxo.Output.Cbor(),
 		AddedSlot: slot,
-		Amount:    types.Uint64(utxo.Output.Amount().Uint64()),
+		Amount:    types.Uint64(amount),
 		OutputIdx: utxo.Id.Index(),
 	}
 	var zeroHash ledger.Blake2b224
@@ -376,10 +380,14 @@ func UtxoLedgerToModel(
 		ret.DatumHash = append([]byte(nil), dh[:]...)
 	}
 	if multiAsset := utxo.Output.Assets(); multiAsset != nil {
-		ret.Assets = ConvertMultiAssetToModels(multiAsset)
+		assets, err := ConvertMultiAssetToModels(multiAsset)
+		if err != nil {
+			return Utxo{}, fmt.Errorf("utxo assets: %w", err)
+		}
+		ret.Assets = assets
 	}
 
-	return ret
+	return ret, nil
 }
 
 func StakeCredentialTagFromAddress(addr ledger.Address) (uint8, bool) {
