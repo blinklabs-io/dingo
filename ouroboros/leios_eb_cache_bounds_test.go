@@ -226,6 +226,31 @@ func TestRetainLeiosPartialTxsRejectsMergeOverEntryByteBudget(t *testing.T) {
 	require.LessOrEqual(t, data.approxBytes(), 1500)
 }
 
+// leiosPersistedTestEntry builds a valid manifest and complete transaction set
+// (txCount distinct, correctly hashed/sized transactions seeded from seedBase)
+// suitable for validateLeiosEndorserBlockTxs, and returns the point it will be
+// cached under.
+func leiosPersistedTestEntry(
+	t *testing.T,
+	slot uint64,
+	seedBase, txCount int,
+) (ocommon.Point, []byte, []cbor.RawMessage) {
+	t.Helper()
+	refs := make([]lcommon.LeiosTransactionReference, txCount)
+	txs := make([]cbor.RawMessage, txCount)
+	for i := range txCount {
+		tx, ref := testLeiosManifestTx(t, byte(seedBase+i))
+		txs[i] = tx
+		refs[i] = ref
+	}
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: refs,
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(slot, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	return point, manifestRaw, txs
+}
+
 // Oversized case, persisted-reload path: loadLeiosEBFromDB reloads a manifest
 // and transaction set the blob store already holds -- e.g. a legacy or
 // pre-cap-era persisted endorser block -- independently of
@@ -234,19 +259,7 @@ func TestRetainLeiosPartialTxsRejectsMergeOverEntryByteBudget(t *testing.T) {
 // repopulate the in-memory cache past the limit on every cache miss: the
 // reloaded entry is still served to the caller, but left uncached.
 func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
-	const txCount = 20
-	refs := make([]lcommon.LeiosTransactionReference, txCount)
-	txs := make([]cbor.RawMessage, txCount)
-	for i := range txCount {
-		tx, ref := testLeiosManifestTx(t, byte(i))
-		txs[i] = tx
-		refs[i] = ref
-	}
-	manifestRaw, err := lcommon.LeiosEndorserBlock{
-		TransactionReferences: refs,
-	}.MarshalCBOR()
-	require.NoError(t, err)
-	point := ocommon.NewPoint(33, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	point, manifestRaw, txs := leiosPersistedTestEntry(t, 33, 0, 20)
 
 	withLowerLeiosEndorserBlockCacheBudgets(t, 200, 1<<20)
 	o := newTestOuroborosWithLeiosDB(t)
@@ -269,4 +282,47 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 	_, cached := o.leiosEndorserBlocks[leiosBlockKey(point.Hash)]
 	o.leiosMu.RUnlock()
 	require.False(t, cached)
+}
+
+// Eviction case, persisted-reload path: two persisted endorser blocks that
+// each individually fit the per-entry budget, but not both at once together,
+// must still trigger aggregate-budget eviction of the oldest one when
+// reloaded. This exercises loadLeiosEBFromDB's post-insert prune specifically
+// -- removing that call would let both entries stay cached (over budget)
+// without failing TestLoadLeiosEBFromDBServesOversizedEntryUncached above,
+// since that test only reaches the per-entry early return.
+func TestLoadLeiosEBFromDBPrunesAggregateBudgetAfterReload(t *testing.T) {
+	point1, manifest1, txs1 := leiosPersistedTestEntry(t, 1, 0, 20)
+	point2, manifest2, txs2 := leiosPersistedTestEntry(t, 2, 100, 20)
+
+	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 1500)
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	require.NoError(t, db.SetLeiosEB(point1.Slot, point1.Hash, manifest1, txs1))
+	require.NoError(t, db.SetLeiosEB(point2.Slot, point2.Hash, manifest2, txs2))
+
+	data1, ok := o.lookupLeiosEndorserBlock(point1.Hash)
+	require.True(t, ok)
+	require.LessOrEqual(t, data1.approxBytes(), 1500)
+
+	data2, ok := o.lookupLeiosEndorserBlock(point2.Hash)
+	require.True(t, ok)
+	require.LessOrEqual(t, data2.approxBytes(), 1500)
+	require.Greater(t, data1.approxBytes()+data2.approxBytes(), 1500)
+
+	// Both entries together exceed the 1500-byte aggregate budget: the older
+	// (point1) reload must have been evicted by the post-insert prune when
+	// point2 was admitted, and total retained bytes stay within budget.
+	o.leiosMu.RLock()
+	_, point1Cached := o.leiosEndorserBlocks[leiosBlockKey(point1.Hash)]
+	_, point2Cached := o.leiosEndorserBlocks[leiosBlockKey(point2.Hash)]
+	totalBytes := 0
+	for _, d := range o.leiosEndorserBlocks {
+		totalBytes += d.approxBytes()
+	}
+	o.leiosMu.RUnlock()
+	require.False(t, point1Cached)
+	require.True(t, point2Cached)
+	require.LessOrEqual(t, totalBytes, 1500)
 }
