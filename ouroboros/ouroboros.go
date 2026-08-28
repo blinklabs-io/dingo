@@ -179,6 +179,11 @@ type Ouroboros struct {
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64
+	// leiosAnnouncementSlots records the slot each announced endorser-block
+	// hash was declared at, so a later leios-fetch offer or store can be
+	// bound to the point its announcement actually vouched for instead of
+	// trusting whatever point the offering connection supplies (issue #3513).
+	leiosAnnouncementSlots map[string]uint64
 	// LeiosNotify permits at most two distinct announcements for one election
 	// (slot plus issuer) from each peer. Keep that bound per source so one
 	// equivocating peer cannot inject an unbounded stream without suppressing
@@ -420,6 +425,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
+		leiosAnnouncementSlots:     make(map[string]uint64),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	if o.ledgerState != nil {

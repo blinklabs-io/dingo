@@ -242,6 +242,26 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if !slices.Equal(blockHash.Bytes(), point.Hash) {
 		return errors.New("leios endorser block cache: point hash mismatch")
 	}
+	// Bind the entry to the slot its announcement actually vouched for, when
+	// one is known. Without this, the first store for a hash decided the
+	// cached slot on a first-writer-wins basis (later stores were only
+	// checked against that first store, never against the announcement), so
+	// a single connection offering a real, previously-announced endorser
+	// block at a fabricated slot could poison the entry before any
+	// conflicting offer arrived to trip the existing-entry check below
+	// (issue #3513). A hash with no recorded announcement (backfill of an
+	// old block whose announcement already expired the bounded window, or a
+	// locally-forged block not sourced from a peer announcement at all)
+	// skips this check; it still gets the existing-entry and body-hash
+	// checks above and below.
+	if announcedSlot, ok := o.leiosAnnouncedSlot(point.Hash); ok &&
+		announcedSlot != point.Slot {
+		return fmt.Errorf(
+			"leios endorser block cache: point slot does not match announced point: announced %d, got %d",
+			announcedSlot,
+			point.Slot,
+		)
+	}
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	if err != nil {
 		return fmt.Errorf("decode leios endorser block: %w", err)

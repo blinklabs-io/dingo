@@ -1490,9 +1490,15 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 		map[string]uint64,
 		len(o.leiosAnnouncements),
 	)
+	o.leiosAnnouncementSlots = make(
+		map[string]uint64,
+		len(o.leiosAnnouncements),
+	)
 	o.leiosAnnouncementElections = make(map[string]map[string]struct{})
 	for key, announcement := range o.leiosAnnouncements {
-		o.leiosAnnouncementSizes[string(announcement.ebHash.Bytes())] = announcement.ebSize
+		ebKey := string(announcement.ebHash.Bytes())
+		o.leiosAnnouncementSizes[ebKey] = announcement.ebSize
+		o.leiosAnnouncementSlots[ebKey] = announcement.slot
 		election := o.leiosAnnouncementElections[announcement.electionKey]
 		if election == nil {
 			election = make(map[string]struct{})
@@ -1522,6 +1528,9 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	if o.leiosAnnouncementSizes == nil {
 		o.leiosAnnouncementSizes = make(map[string]uint64)
 	}
+	if o.leiosAnnouncementSlots == nil {
+		o.leiosAnnouncementSlots = make(map[string]uint64)
+	}
 	if o.leiosAnnouncementElections == nil {
 		o.leiosAnnouncementElections = make(map[string]map[string]struct{})
 	}
@@ -1530,6 +1539,13 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		previousSize != ebSize {
 		return errors.New(
 			"announcement size is inconsistent with a previously observed endorser block",
+		)
+	}
+	slot := header.SlotNumber()
+	if previousSlot, exists := o.leiosAnnouncementSlots[ebKey]; exists &&
+		previousSlot != slot {
+		return errors.New(
+			"announcement slot is inconsistent with a previously observed endorser block",
 		)
 	}
 	if previous, exists := o.leiosAnnouncements[key]; exists {
@@ -1542,7 +1558,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		return nil
 	}
 	issuer := header.IssuerVkey()
-	electionKey := fmt.Sprintf("%s:%d:%x", source, header.SlotNumber(), issuer)
+	electionKey := fmt.Sprintf("%s:%d:%x", source, slot, issuer)
 	electionAnnouncements := o.leiosAnnouncementElections[electionKey]
 	if electionAnnouncements == nil {
 		electionAnnouncements = make(map[string]struct{})
@@ -1555,18 +1571,32 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	}
 	electionAnnouncements[key] = struct{}{}
 	o.leiosAnnouncements[key] = leiosAnnouncement{
-		raw: append(
-			[]byte(nil),
-			raw...), ebHash: ebHash, ebSize: ebSize, slot: header.SlotNumber(),
+		raw:         append([]byte(nil), raw...),
+		ebHash:      ebHash,
+		ebSize:      ebSize,
+		slot:        slot,
 		electionKey: electionKey,
 	}
 	o.leiosAnnouncementSizes[ebKey] = ebSize
+	o.leiosAnnouncementSlots[ebKey] = slot
 	if relay {
 		o.leiosEBLog.append(
 			leiosForgedEBEntry{announcement: append([]byte(nil), raw...)},
 		)
 	}
 	return nil
+}
+
+// leiosAnnouncedSlot returns the slot a previously observed ranking-block
+// announcement recorded for the endorser block identified by ebHash, and
+// whether one is known. It lets a leios-fetch offer or store be bound to the
+// point its announcement actually vouched for, rather than trusting whatever
+// point the offering connection supplies for that hash (issue #3513).
+func (o *Ouroboros) leiosAnnouncedSlot(ebHash []byte) (uint64, bool) {
+	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
+	slot, ok := o.leiosAnnouncementSlots[string(ebHash)]
+	return slot, ok
 }
 
 // EnqueueLeiosBlockAnnouncement validates and queues a locally forged
