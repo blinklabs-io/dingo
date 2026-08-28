@@ -2486,3 +2486,9 @@ WHERE atx.payment_key = UNHEX(?)
 ORDER BY t.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 50;
 ```
+# Historical API backfill withdrawals
+
+API-mode Mithril backfill replays historical withdrawal transactions after
+importing the snapshot's current reward balances. Its transaction-ingest
+option records the withdrawal history without applying the live-path
+balance-sufficiency check; normal ledger ingestion retains that validation.

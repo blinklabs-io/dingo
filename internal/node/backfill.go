@@ -1158,6 +1158,11 @@ func (b *Backfill) processBlockTxsBatched(
 				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
 				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
 				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
+				// Historical replay follows the snapshot's complete reward
+				// state, not the balance at each historical slot. Preserve
+				// withdrawal history without applying the live-path balance
+				// sufficiency check.
+				SkipWithdrawalBalanceValidation: true,
 			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)
