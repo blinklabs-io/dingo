@@ -505,16 +505,31 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosEndorserBlockSeq++
 	data.seq = o.leiosEndorserBlockSeq
-	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
-		if existing.point.Slot != point.Slot {
-			o.leiosMu.Unlock()
-			o.leiosAnnouncementsMu.Unlock()
-			return fmt.Errorf(
-				"leios endorser block cache: point slot mismatch for hash: cached %d, got %d",
-				existing.point.Slot,
-				point.Slot,
-			)
-		}
+	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil &&
+		existing.point.Slot != point.Slot && origin != leiosStoreAuthoritative {
+		// A peer-offered store contradicting whatever is currently cached is
+		// rejected outright; a peer's claim alone must not override a
+		// resident entry, whether that entry is itself verified, unverified,
+		// or a reload from the blob store.
+		o.leiosMu.Unlock()
+		o.leiosAnnouncementsMu.Unlock()
+		return fmt.Errorf(
+			"leios endorser block cache: point slot mismatch for hash: cached %d, got %d",
+			existing.point.Slot,
+			point.Slot,
+		)
+	} else if existing != nil && existing.point.Slot != point.Slot {
+		// origin == leiosStoreAuthoritative here: an authoritative source (a
+		// locally forged block, or a ledger-driven by-point backfill)
+		// supersedes whatever is currently cached for this hash, including a
+		// stale entry reloaded from the blob store. The manifest is
+		// content-addressed, so the same hash can legitimately recur at a
+		// different slot, and the cached occurrence's slot binding does not
+		// apply to this one (issue #3513 review). Nothing is carried
+		// forward from it below -- the old occurrence's transaction set and
+		// partial-fetch state belong to a different slot -- data (already
+		// built fresh above) fully replaces it when inserted.
+	} else if existing != nil {
 		// Never regress a cached transaction set. The relay offers each
 		// endorser block on every connection, so a manifest-only store
 		// (txsRaw nil) routinely arrives after another connection has already
@@ -634,27 +649,50 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 // promoted when the slot agrees and evicted when it does not, before anything
 // keyed on the slot is published (issue #3513).
 func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
-	o.leiosMu.Lock()
-	data, ok := o.leiosEndorserBlocks[leiosBlockKey(ebHash)]
-	if !ok || data == nil || data.slotVerified {
-		o.leiosMu.Unlock()
+	// lookupLeiosEndorserBlock, not a direct map read: an entry may exist
+	// only in the blob store (evicted from memory by TTL, or never loaded
+	// this run), and loadLeiosEBFromDB reconstructs a reload as already
+	// verified -- for whatever occurrence wrote it, which this authority can
+	// still contradict (issue #3513 review; see the slot check below).
+	data, ok := o.lookupLeiosEndorserBlock(ebHash)
+	if !ok || data == nil {
 		return
 	}
 	if data.point.Slot != slot {
-		// The cached entry was bound to a slot this authority contradicts.
-		// Drop it: its bytes are content-addressed and refetchable, and
-		// keeping it would leave a poisoned slot in the cache for the
-		// leios-fetch server and any later store to inherit.
-		o.deleteLeiosEndorserBlockDataLocked(data)
+		// The cached (or just-reloaded) entry was bound to a slot this
+		// authority contradicts. This is checked before, and regardless of,
+		// data.slotVerified: "verified" only means the slot was correct for
+		// whatever occurrence established it, and the manifest is
+		// content-addressed, so the same hash can legitimately recur at a
+		// different slot later. Drop it: its bytes are content-addressed and
+		// refetchable, and keeping it would leave a poisoned or stale slot in
+		// the cache for the leios-fetch server, the ledger provider, and any
+		// later store to inherit.
+		o.leiosMu.Lock()
+		if cur := o.leiosEndorserBlocks[leiosBlockKey(ebHash)]; cur != nil &&
+			cur == data {
+			o.deleteLeiosEndorserBlockDataLocked(cur)
+		}
 		o.leiosMu.Unlock()
 		o.config.Logger.Debug(
-			"evicted leios EB cached under a slot its announcement contradicts",
+			"evicted leios EB cached under a slot this authority contradicts",
 			"component", "network",
 			"protocol", "leios-notify",
 			"cached_slot", data.point.Slot,
-			"announced_slot", slot,
+			"authoritative_slot", slot,
 			"hash", hex.EncodeToString(ebHash),
 		)
+		return
+	}
+	if data.slotVerified {
+		return
+	}
+	o.leiosMu.Lock()
+	cur, ok := o.leiosEndorserBlocks[leiosBlockKey(ebHash)]
+	if !ok || cur != data {
+		// Superseded (or evicted) by a concurrent update since the lookup
+		// above; nothing to promote.
+		o.leiosMu.Unlock()
 		return
 	}
 	// Cached entries are replaced, never mutated in place: lookupLeiosEndorserBlock

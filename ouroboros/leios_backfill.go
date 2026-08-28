@@ -118,8 +118,16 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	// the fetch below replaces it rather than serving a poisoned slot to the
 	// ledger (issue #3513).
 	o.bindLeiosEndorserBlockSlot(ebHash, ebSlot)
+	// bindLeiosEndorserBlockSlot's eviction above does not stop a reload of
+	// the same stale blob-store entry a moment later: loadLeiosEBFromDB
+	// reconstructs any reload as verified for whatever occurrence wrote it,
+	// which need not be this one -- the manifest is content-addressed, so
+	// the same hash can legitimately recur at a different slot. Requiring
+	// the point to actually match ebSlot here (not just completeness and
+	// verified) is what stops that stale reload from satisfying this check
+	// (issue #3513 review).
 	if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-		data.completeTxCache() && data.slotVerified {
+		data.completeTxCache() && data.slotVerified && data.point.Slot == ebSlot {
 		return nil
 	}
 	if o.connManager == nil {
@@ -166,7 +174,8 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			continue
 		}
 		if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-			data.completeTxCache() && data.slotVerified {
+			data.completeTxCache() && data.slotVerified &&
+			data.point.Slot == ebSlot {
 			return nil
 		}
 		lastErr = errors.New(
@@ -221,6 +230,20 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	}()
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
+		data = nil
+	} else if data.point.Slot != point.Slot {
+		// Stale relative to this attempt's authoritative point: the manifest
+		// is content-addressed, so the same hash can legitimately recur at a
+		// different slot, and whatever is cached (in memory, or reloaded
+		// from the blob store) for that other occurrence must not be
+		// trusted for this one. Treat it exactly like a cache miss so the
+		// fetch below re-populates -- and, via storeLeiosEndorserBlock's
+		// authoritative-origin override, re-persists -- under the correct
+		// slot instead of leaving the stale entry (and blob) in place
+		// (issue #3513 review).
+		data = nil
+	}
+	if data == nil {
 		reqCtx, cancel := leiosFetchRequestContext(deadline)
 		resp, err := client.BlockRequest(reqCtx, point)
 		cancel()
@@ -242,7 +265,8 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
-		if data, ok = o.lookupLeiosEndorserBlock(point.Hash); !ok {
+		data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+		if !ok || data == nil {
 			return errors.New("manifest stored but not found in cache")
 		}
 	} else if !data.slotVerified {
@@ -255,7 +279,8 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		// without any of them ever verifying the entry, since none would
 		// take the !ok branch above (issue #3513 review).
 		o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot)
-		if data, ok = o.lookupLeiosEndorserBlock(point.Hash); !ok {
+		data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+		if !ok || data == nil {
 			return errors.New(
 				"manifest evicted while binding to authoritative point",
 			)

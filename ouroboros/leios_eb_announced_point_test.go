@@ -555,3 +555,69 @@ func TestLeiosAnnouncedSlotIgnoresExpiredBinding(t *testing.T) {
 		leiosStorePeerOffered,
 	))
 }
+
+// TestFetchEndorserBlockByPointRejectsStaleReloadedSlot is the P1 regression
+// from the second review round: a hash persisted (and so already verified)
+// under one slot must not be silently accepted as satisfying a later,
+// authoritative request for the same hash at a different slot. The manifest
+// is content-addressed, so the same hash can legitimately recur at a
+// different slot; loadLeiosEBFromDB trusts a reload's persisted slot as
+// verified for whatever occurrence wrote it, but FetchEndorserBlockByPoint
+// must still compare that slot against the one it was actually asked about
+// before treating the reload as already satisfying the request.
+func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
+	tx0, ref0 := testLeiosManifestTx(t, 0)
+	blockRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref0},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	hash := lcommon.Blake2b256Hash(blockRaw).Bytes()
+	staleSlot := uint64(41)
+	authoritativeSlot := uint64(42)
+
+	o := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		ocommon.NewPoint(staleSlot, hash),
+		blockRaw,
+		[]cbor.RawMessage{tx0},
+		leiosStoreAuthoritative,
+	))
+
+	// Endorser-block persistence is asynchronous; drain the writer so the
+	// blob store reflects the stale-slot store, then clear the in-memory
+	// cache so the next lookup must reload from the blob store.
+	o.StopLeiosPersistWriter()
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
+
+	// o.connManager is nil, so a genuine cache miss (or a correctly-rejected
+	// stale reload) must return an error here, not silently succeed --
+	// there is no way to actually fetch anything without a connection.
+	err = o.FetchEndorserBlockByPoint(authoritativeSlot, hash)
+	require.Error(
+		t,
+		err,
+		"must not silently accept a reload bound to a different slot",
+	)
+	// Without a connection to actually re-fetch and re-persist, the blob
+	// store's single-slot-per-hash record is unchanged, so a fully
+	// independent EndorserBlockTxsByHash query may still report the stale
+	// slot -- there is nothing here that could have corrected it. The
+	// contract this test guards is narrower: FetchEndorserBlockByPoint
+	// itself must not have claimed the authoritative slot was satisfied.
+
+	// Once a real fetch *does* succeed (simulated here directly), the
+	// authoritative store must override the stale entry rather than being
+	// rejected by it, and the blob's single record for this hash is
+	// corrected going forward.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		ocommon.NewPoint(authoritativeSlot, hash),
+		blockRaw,
+		[]cbor.RawMessage{tx0},
+		leiosStoreAuthoritative,
+	))
+	slot, _, ok := o.EndorserBlockTxsByHash(hash)
+	require.True(t, ok)
+	require.Equal(t, authoritativeSlot, slot)
+}
