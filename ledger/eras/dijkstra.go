@@ -301,7 +301,7 @@ func dijkstraTransactionForPhase2(
 	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
 	if !ok || dijkstraTx == nil {
 		return nil, fmt.Errorf(
-			"Dijkstra phase-2 validation requires *dijkstra.DijkstraTransaction, got %T",
+			"dijkstra phase-2 validation requires *dijkstra.DijkstraTransaction, got %T",
 			tx,
 		)
 	}
