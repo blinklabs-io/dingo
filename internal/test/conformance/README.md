@@ -73,7 +73,9 @@ Without a `POSTGRES_PASSWORD` or `POSTGRES_DSN` set, both Postgres tests
 skip (they never fail a plain `go test ./...`). CI's `go-test-linux` job
 already runs a `postgres:16` service with those exact env vars, so the
 Postgres variant runs automatically as part of the existing tagged
-`go test -race ./...` step.
+`go test -tags dingo_extra_plugins ./...` step (`.github/workflows/go-test.yml`'s
+pull-request job omits `-race` to keep PR feedback fast; `-race` only runs
+during publish/release validation).
 
 **Schema isolation.** `database/plugin/metadata/postgres`'s own tests
 connect to the same `dingo_test` database. Since `go test ./...` runs
@@ -148,7 +150,9 @@ MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_ROOT_PASSWORD=mysql \
 Without a `MYSQL_ROOT_PASSWORD` or `MYSQL_DSN` set, both MySQL tests skip.
 CI's `go-test-linux` job already runs a `mysql:8` service and sets
 `MYSQL_ROOT_PASSWORD`, so the MySQL variant runs automatically as part of
-the existing tagged `go test -race ./...` step.
+the existing tagged `go test -tags dingo_extra_plugins ./...` step
+(`.github/workflows/go-test.yml`'s pull-request job omits `-race` to keep
+PR feedback fast; `-race` only runs during publish/release validation).
 
 **Database isolation.** MySQL has no schema/database distinction the way
 Postgres does — a MySQL "schema" *is* a database. `database/plugin/metadata/mysql`'s
