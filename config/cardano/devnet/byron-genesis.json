@@ -1,12 +1,12 @@
 {
     "protocolConsts": {
-        "k": 60,
+        "k": 100,
         "protocolMagic": 42
     },
     "startTime": 1657186415,
     "blockVersionData": {
         "scriptVersion": 0,
-        "slotDuration": "1000",
+        "slotDuration": "600",
         "maxBlockSize": "2000000",
         "maxHeaderSize": "2000000",
         "maxTxSize": "4096",

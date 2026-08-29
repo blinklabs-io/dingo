@@ -247,17 +247,23 @@ func TestDevnetGenesisIsUsable(t *testing.T) {
 
 	byronGenesis := cfg.ByronGenesis()
 	require.NotNil(t, byronGenesis)
+	// Every real network holds both invariants at once: the two eras
+	// declare the same security parameter, and a Byron epoch (10k slots at
+	// the Byron slot duration) lasts as long as a Shelley epoch. Byron
+	// slots are 20s against 1s Shelley slots on mainnet, preprod, preview
+	// and musashi, which is what lets both hold there; here the 600ms Byron
+	// slot is what makes 10k of them span the same 600s.
 	require.Equal(
 		t,
-		60,
+		shelleyGenesis.SecurityParam,
 		byronGenesis.ProtocolConsts.K,
-		"a Byron epoch is 10k slots, so k must match the Shelley epoch length",
+		"the two eras must declare the same security parameter",
 	)
 	require.Equal(
 		t,
-		1000,
+		600,
 		byronGenesis.BlockVersionData.SlotDuration,
-		"Byron slot duration is milliseconds and must match the one second Shelley slot",
+		"10k Byron slots at this duration span one Shelley epoch",
 	)
 }
 
