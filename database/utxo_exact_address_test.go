@@ -677,6 +677,190 @@ func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(t *testing.T)
 	assert.Equal(t, wantHashes, gotHashes)
 }
 
+// seedExactAddressImportedUtxo seeds an exact-address UTxO with no producing
+// transaction row, so GetUtxosByAddressWithOrdering's COALESCE falls back to
+// added_slot and block index zero -- the snapshot-import case described on
+// UtxoOrderingCursor. Real snapshot imports can share slot, block index, and
+// output index across many rows, differing only by tx_id.
+func seedExactAddressImportedUtxo(
+	t *testing.T,
+	raw *sql.DB,
+	addr lcommon.Address,
+	slot uint64,
+	outputIdx uint32,
+	txHash []byte,
+) {
+	t.Helper()
+	var paymentKey any = addr.PaymentKeyHash().Bytes()
+	if addr.PaymentKeyHash() == lcommon.NewBlake2b224(nil) {
+		paymentKey = nil
+	}
+	var stakingKey any
+	if stake := addr.StakeKeyHash(); stake != lcommon.NewBlake2b224(nil) {
+		stakingKey = stake.Bytes()
+	}
+	_, err := raw.Exec(`
+INSERT INTO utxo (
+    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (NULL, ?, ?, ?, 0, ?, 0, ?, ?, FALSE)`,
+		txHash,
+		paymentKey,
+		stakingKey,
+		slot,
+		strconv.FormatUint(slot*1_000_000, 10),
+		outputIdx,
+	)
+	require.NoError(t, err)
+}
+
+// TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak seeds more
+// snapshot-imported exact-address UTxOs sharing one slot, block index, and
+// output index than the internal scan's per-batch size (1024), so the
+// keyset cursor can only resume correctly past the batch boundary by
+// carrying the last row's tx_id. Without it, the next batch's predicate
+// re-matches (duplicating) or excludes (dropping) every tied row instead of
+// resuming after the one already returned.
+func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0x9a}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	const total = 1200
+	const importSlot = 42
+	wantHashes := make(map[string]bool, total)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		for i := range total {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			seedExactAddressImportedUtxo(t, raw, addr, importSlot, 0, txHash)
+			wantHashes[string(txHash)] = true
+			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr,
+				OutputAmount:  1_000_000,
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(
+		t, refs, total,
+		"tied snapshot-imported rows must not be dropped or duplicated "+
+			"across the scan's batch boundary",
+	)
+	got := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		require.False(t, got[string(ref.Hash)], "duplicate ref for tx %x", ref.Hash)
+		got[string(ref.Hash)] = true
+	}
+	assert.Equal(t, wantHashes, got)
+}
+
+// TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit
+// seeds more exact-address UTxOs than the page-fill scan's
+// exactAddressCandidateScanLimit (10,000). AddressUTXOs relies on this scan
+// for an exact-address total, which -- unlike a page fetch -- cannot stop
+// once a page is full; applying that same cap here previously turned a
+// valid, merely large, address listing into a hard error instead of
+// completing it.
+func TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit(
+	t *testing.T,
+) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0x5c}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	const total = 10_050
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		tx, err := raw.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck
+		for i := range total {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			txID := uint(i + 1)
+			slot := uint64(i) + 1
+			amount := slot * 1_000_000
+			if _, err := tx.Exec(`
+INSERT INTO "transaction" (
+    id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
+) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
+				txID, txHash, slot,
+			); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`
+INSERT INTO utxo (
+    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (?, ?, ?, NULL, 0, ?, 0, ?, 0, FALSE)`,
+				txID,
+				txHash,
+				addr.PaymentKeyHash().Bytes(),
+				slot,
+				strconv.FormatUint(amount, 10),
+			); err != nil {
+				return err
+			}
+			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr,
+				OutputAmount:  amount,
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}))
+
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Len(t, refs, total)
+}
+
 // TestUtxosByAddressLoadsAssets proves GetUtxosByAddress still attaches
 // native assets to its results after candidate selection was split from
 // asset loading (assets are now loaded once on the deduplicated result set

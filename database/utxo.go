@@ -765,20 +765,21 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 		return refs, nil
 	}
 
+	// Unlike UtxosByAddressWithOrdering's page-fill scan, this loop must
+	// visit every coarse candidate to produce an accurate total and cannot
+	// stop early once a page's worth of matches is found, so it does not
+	// apply exactAddressCandidateScanLimit: that cap bounds work spent
+	// filling one bounded page, and applying it here would turn a valid
+	// high-cardinality address listing into a server error instead of
+	// bounding cost, which SkipAssets and the reference-only result
+	// already do.
 	scanQuery := *q
 	scanQuery.Limit = 1024
 	scanQuery.SkipAssets = true
 	scanQuery.Offset = 0
 	scanQuery.Descending = false
 	refs := []models.UtxoId{}
-	candidatesProcessed := 0
 	for {
-		remainingCandidates := exactAddressCandidateScanLimit -
-			candidatesProcessed
-		if remainingCandidates <= 0 {
-			return refs, errExactAddressCandidateScanLimit
-		}
-		scanQuery.Limit = min(1024, remainingCandidates)
 		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
 			&scanQuery,
 			txn.Metadata(),
@@ -786,7 +787,6 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 		if err != nil {
 			return nil, err
 		}
-		candidatesProcessed += len(batch)
 		for i := range batch {
 			if err := loadCbor(&batch[i].Utxo, txn); err != nil {
 				return nil, err
@@ -822,6 +822,7 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 			Slot:       last.TxSlot,
 			BlockIndex: last.TxBlockIndex,
 			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
 		}
 	}
 	return refs, nil
