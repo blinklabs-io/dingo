@@ -313,6 +313,17 @@ func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(t *testi
 			validationEnabled: true,
 			deepHistorical:    true,
 		},
+		{
+			name:           "disabled validation does not skip an unvalidated block",
+			shouldValidate: false,
+			deepHistorical: true,
+		},
+		{
+			name:              "non-historical block does not skip phase two",
+			validationEnabled: true,
+			shouldValidate:    true,
+			deepHistorical:    false,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
