@@ -1162,7 +1162,7 @@ func (b *Backfill) processBlockTxsBatched(
 				// state, not the balance at each historical slot. Preserve
 				// withdrawal history without applying the live-path balance
 				// sufficiency check.
-				SkipWithdrawalBalanceValidation: true,
+				HistoricalBackfill: true,
 			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)

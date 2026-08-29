@@ -109,18 +109,18 @@ type BatchedTxIngestOpts struct {
 	// unconditional write for any caller that does not opt in.
 	SkipWithdrawalWitnessWrite bool
 
-	// SkipWithdrawalBalanceValidation allows historical backfill to record
-	// withdrawals against the snapshot-boundary reward balance. Live ledger
-	// ingestion must leave this false so excessive withdrawals are rejected.
-	SkipWithdrawalBalanceValidation bool
+	// HistoricalBackfill records already-ledger-validated historical
+	// withdrawals without replaying account state over the imported snapshot.
+	// Live ledger ingestion leaves this false and enforces balance sufficiency.
+	HistoricalBackfill bool
 }
 
 type batchStatsSetter interface {
 	SetBackfillStats(*types.BackfillHotPathStats)
 }
 
-type transactionStoreWithdrawalOptions interface {
-	SetTransactionBatchedWithOpts(
+type transactionStoreHistoricalBackfill interface {
+	SetTransactionBatchedHistorical(
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32,
@@ -304,11 +304,11 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		setter.SetBackfillStats(opts.Stats)
 	}
 	var metadataErr error
-	if store, ok := d.transactionStore().(transactionStoreWithdrawalOptions); ok {
-		metadataErr = store.SetTransactionBatchedWithOpts(
+	if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
+		metadataErr = store.SetTransactionBatchedHistorical(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,
-			opts.SkipWithdrawalBalanceValidation,
+			opts.HistoricalBackfill,
 			acc, metadataTxn,
 		)
 	} else {

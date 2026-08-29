@@ -35,7 +35,7 @@ type transactionWriteStore interface {
 		bool,
 		types.Txn,
 	) error
-	SetTransactionBatchedWithOpts(
+	SetTransactionBatchedHistorical(
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32,
@@ -218,7 +218,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 		isValid:     true,
 		withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(1235)},
 	}
-	require.NoError(t, store.SetTransactionBatchedWithOpts(
+	require.NoError(t, store.SetTransactionBatchedHistorical(
 		backfillTx,
 		ocommon.Point{Slot: 12, Hash: bytes.Repeat([]byte{0xd6}, 32)},
 		0,
