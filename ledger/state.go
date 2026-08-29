@@ -3851,6 +3851,18 @@ func (ls *LedgerState) shouldSkipPhase2ValidationForBlockAtCurrentTip(
 	)
 }
 
+// shouldSkipConfiguredPhase2Validation preserves the trusted-replay shortcut
+// only when historical validation is disabled. When ValidateHistorical is
+// enabled, local phase-2 evaluation is the purpose of that setting and must
+// remain active across the stability boundary.
+func shouldSkipConfiguredPhase2Validation(
+	validationEnabled bool,
+	shouldValidateBlock bool,
+	deepHistoricalBlock bool,
+) bool {
+	return !validationEnabled && shouldValidateBlock && deepHistoricalBlock
+}
+
 // StabilityWindow returns the Ouroboros security stability window for the
 // current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
 // It is safe to call from multiple goroutines.
@@ -5614,11 +5626,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							continue
 						}
 						// Process block
-						skipPhase2Validation := shouldValidateBlock &&
+						skipPhase2Validation := shouldSkipConfiguredPhase2Validation(
+							snapshotValidationEnabled,
+							shouldValidateBlock,
 							ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
 								next.BlockNumber(),
 								snapshotEra.Id,
-							)
+							),
+						)
 						delta, err = ls.ledgerProcessBlock(
 							txn,
 							tmpPoint,

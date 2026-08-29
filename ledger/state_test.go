@@ -286,6 +286,46 @@ func TestShouldSkipPhase2ValidationForBlockRequiresSecurityParam(t *testing.T) {
 	))
 }
 
+func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		validationEnabled bool
+		shouldValidate    bool
+		deepHistorical    bool
+		wantSkip          bool
+	}{
+		{
+			name:              "historical validation keeps phase two enabled",
+			validationEnabled: true,
+			shouldValidate:    true,
+			deepHistorical:    true,
+		},
+		{
+			name:           "trusted replay skips deep historical phase two",
+			shouldValidate: true,
+			deepHistorical: true,
+			wantSkip:       true,
+		},
+		{
+			name:              "unvalidated block does not skip phase two",
+			validationEnabled: true,
+			deepHistorical:    true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.wantSkip, shouldSkipConfiguredPhase2Validation(
+				test.validationEnabled,
+				test.shouldValidate,
+				test.deepHistorical,
+			))
+		})
+	}
+}
+
 func TestShouldSkipPhase2ValidationForBlockAtCurrentTipRefreshesChainTip(
 	t *testing.T,
 ) {
