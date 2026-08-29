@@ -24,6 +24,7 @@ import (
 )
 
 type transactionWriteStore interface {
+	NewBatchAccumulator() types.MetadataBatchAccumulator
 	CreateAccount(types.Txn, *models.Account) error
 	CreateUtxo(types.Txn, *models.Utxo) error
 	SetTransaction(
@@ -32,6 +33,16 @@ type transactionWriteStore interface {
 		uint32,
 		map[int]uint64,
 		bool,
+		types.Txn,
+	) error
+	SetTransactionBatchedHistorical(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32,
+		map[int]uint64,
+		bool,
+		bool,
+		types.MetadataBatchAccumulator,
 		types.Txn,
 	) error
 	GetTransactionByHash([]byte, types.Txn) (*models.Transaction, error)
@@ -198,6 +209,32 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	require.ErrorContains(t, err, "reward withdrawal amount 1236 exceeds")
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
+
+	// Historical API backfill must retain the live snapshot balance while
+	// recording a withdrawal whose amount reflects an earlier chain state.
+	backfillHash := lcommon.Blake2b256{0xd5}
+	backfillTx := &mockTransaction{
+		hash:        backfillHash,
+		isValid:     true,
+		withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(1235)},
+	}
+	require.NoError(t, store.SetTransactionBatchedHistorical(
+		backfillTx,
+		ocommon.Point{Slot: 12, Hash: bytes.Repeat([]byte{0xd6}, 32)},
+		0,
+		nil,
+		true,
+		true,
+		store.NewBatchAccumulator(),
+		nil,
+	))
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1234), uint64(account.Reward))
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM account_reward_delta WHERE tx_hash = ?",
+		backfillHash.Bytes(),
+	).Scan(&deltas))
+	require.Equal(t, 1, deltas)
 }
 
 func TestSharedSQLStoreWithdrawalCredentialTagsRemainDistinct(t *testing.T) {
