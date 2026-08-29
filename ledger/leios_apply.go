@@ -664,7 +664,9 @@ func requiredCertifiedEndorserBlocks(
 				[]byte(info.prevHash),
 			)
 		}
-		key := string(r.hash.Bytes())
+		// The same endorser-block hash may be required at distinct slots;
+		// retain each slot-bound reference independently.
+		key := fmt.Sprintf("%d:%s", r.slot, r.hash.String())
 		if _, ok := seen[key]; ok {
 			continue
 		}

@@ -857,3 +857,25 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	require.Empty(t, backfill)
 	require.Len(t, tipWait, 3) // ebA, ebB, ebE (all announcements)
 }
+
+func TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots(t *testing.T) {
+	parentA := leiosTestHash(0xA2)
+	parentB := leiosTestHash(0xB2)
+	sharedHash := lcommon.NewBlake2b256(leiosTestHash(0xC2))
+	required, err := requiredCertifiedEndorserBlocks(
+		[]leiosBlockInfo{
+			{prevHash: string(parentA), slot: 100, certifies: true},
+			{prevHash: string(parentB), slot: 200, certifies: true},
+		},
+		map[string]leiosEbRef{
+			string(parentA): {slot: 100, hash: sharedHash},
+			string(parentB): {slot: 200, hash: sharedHash},
+		},
+		true,
+	)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []leiosEbRef{
+		{slot: 100, hash: sharedHash},
+		{slot: 200, hash: sharedHash},
+	}, required)
+}
