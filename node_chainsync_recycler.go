@@ -225,16 +225,15 @@ func (n *Node) recyclerComponents() chainsyncrecycler.ComponentProvider {
 // lifecycle work holds liveLifecycleMu while it discards and rebuilds the
 // state, and blocking a background ledger callback there can deadlock the
 // quiesce that waits for the callback's goroutine to exit.
-func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) bool {
+func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) {
 	if !n.liveLifecycleMu.TryLock() {
-		return false
+		return
 	}
 	defer n.liveLifecycleMu.Unlock()
 	if n.chainsyncState == nil {
-		return false
+		return
 	}
 	fn(n.chainsyncState)
-	return true
 }
 
 // WithLiveComponents runs fn against the node's current ledger, chainsync
