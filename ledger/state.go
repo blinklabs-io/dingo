@@ -7689,10 +7689,11 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		hex.EncodeToString(ancestor.Hash),
 	)
 	// Resolve the ledger's own applied blocks between the ancestor and its
-	// old tip before taking any lock below: reconciliationUndoBlocks
-	// reads through ChainManager.BlockByPoint, which takes the same
-	// manager lock the rewind below holds continuously, so it must run
-	// before that hold starts, not from inside it.
+	// old tip before taking any lock below: reconciliationUndoBlocks reads
+	// through ChainManager.BlockByPoint, which takes the chain's own
+	// c.mutex/c.manager.mutex, so it must not run from inside a section
+	// that also holds those (see the same constraint noted on
+	// emitRollbackTransactionEvents below).
 	undoBlocks := ls.reconciliationUndoBlocks(ancestor, ledgerTip.Point.Slot)
 	// Rewind the primary chain to the common ancestor through the same
 	// gather-exclude, then drain sequencing rollbackChainAndState uses
@@ -7719,23 +7720,38 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	if err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
-		// The hook runs while the chain still holds its own locks,
-		// atomically with this rewind's acceptance: nothing that also
-		// needs those locks -- including a concurrent
-		// AddBlock/AddBlockWithPoint growing the primary chain -- can
-		// run between the hook publishing these undo events and the
-		// truncation right after it, so a rewind that publishes an
-		// undo is guaranteed to actually land (issue #3516 review).
-		// The hook itself must not call back into anything that takes
-		// those locks (like ChainManager.BlockByPoint), which is why
-		// undoBlocks was already resolved above.
-		return ls.config.ChainManager.RewindPrimaryChainToPointWithHook(
+		// RewindPrimaryChainToPoint's own K-check and truncation run
+		// under one continuous hold of the chain's own locks (see
+		// Chain.rollbackLocked), so calling it directly here -- with no
+		// separate dry-run pre-check -- is already atomic with respect
+		// to a concurrent AddBlock/AddBlockWithPoint growing the primary
+		// chain: nothing can invalidate an acceptance this call itself
+		// just decided. A dry-run ValidateRollback followed by a
+		// separately locked truncation leaves exactly that gap open
+		// (issue #3516 review): the chain can grow enough in between to
+		// invalidate what validation found, so publishing undo events
+		// from a hook run before this call returns can outrun a rewind
+		// that the same growth then causes to be rejected.
+		//
+		// Emitting the precomputed undoBlocks only strictly after this
+		// call returns success -- not from inside it -- also keeps
+		// emitRollbackTransactionEvents from running while c.mutex/
+		// c.manager.mutex are held: it can publish LedgerErrorEventType
+		// synchronously (EventBus.Publish invokes subscribers on the
+		// caller's own goroutine), and the chain package itself only
+		// ever publishes its own events after releasing those same
+		// locks for exactly this reason (see Chain.Rollback). Both
+		// calls still share transactionEventMutex with
+		// submitBlockApplyDBTxn's forward-apply commit, which is what
+		// keeps the undo ahead of any forward ledger.tx event on the
+		// same ordered lane regardless of this internal ordering.
+		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
 			ancestor,
-			func(uint64, uint64) error {
-				ls.emitRollbackTransactionEvents(undoBlocks)
-				return nil
-			},
-		)
+		); err != nil {
+			return err
+		}
+		ls.emitRollbackTransactionEvents(undoBlocks)
+		return nil
 	}(); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to common primary-chain ancestor: %w",

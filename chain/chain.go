@@ -689,47 +689,10 @@ func (c *Chain) notifyWaitingIterators() {
 }
 
 func (c *Chain) Rollback(point ocommon.Point) error {
-	return c.rollback(point, nil)
-}
-
-// RollbackWithPreTruncateHook behaves like Rollback, but calls hook with the
-// resolved rollback block index and fork depth after the rollback has been
-// validated and accepted (all of Rollback's own checks passed) but before
-// any header or block is deleted, while still holding the chain and manager
-// locks Rollback holds throughout.
-//
-// That placement is what makes it useful to a caller that needs to publish
-// its own side effects (e.g. ledger.tx undo events) atomically with respect
-// to this acceptance: nothing that also needs c.mutex/c.manager.mutex —
-// including a concurrent AddBlock/AddBlockWithPoint growing this chain —
-// can run between hook's invocation and the truncation that follows it, so
-// what hook observed staying true cannot be invalidated by the time this
-// rollback actually lands. Resolving a dry-run ValidateRollback and then
-// separately calling Rollback (or RewindPrimaryChainToPoint) leaves exactly
-// that gap open: the chain can grow between the two calls, so a hook-free
-// caller can publish undo events for a rollback that a moment later gets
-// rejected as exceeding the security parameter (issue #3516 review).
-//
-// A non-nil error from hook aborts the rollback before any state changes,
-// the same as any other rejection.
-func (c *Chain) RollbackWithPreTruncateHook(
-	point ocommon.Point,
-	hook func(rollbackBlockIndex uint64, forkDepth uint64) error,
-) error {
-	if hook == nil {
-		return errors.New("hook must not be nil")
-	}
-	return c.rollback(point, hook)
-}
-
-func (c *Chain) rollback(
-	point ocommon.Point,
-	preTruncateHook func(rollbackBlockIndex uint64, forkDepth uint64) error,
-) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	pendingEvents, err := c.rollbackLocked(point, preTruncateHook)
+	pendingEvents, err := c.rollbackLocked(point)
 	if err != nil {
 		return err
 	}
@@ -941,15 +904,8 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 
 // rollbackLocked performs all rollback logic under locks and returns
 // events to be published by the caller after locks are released.
-//
-// preTruncateHook, when non-nil, is called with the resolved rollback block
-// index and fork depth once the rollback is accepted but before anything is
-// mutated, while c.mutex/c.manager.mutex are still held continuously from
-// the acceptance check through to the truncation right after it -- see
-// RollbackWithPreTruncateHook.
 func (c *Chain) rollbackLocked(
 	point ocommon.Point,
-	preTruncateHook func(rollbackBlockIndex uint64, forkDepth uint64) error,
 ) ([]event.Event, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -1034,19 +990,8 @@ func (c *Chain) rollbackLocked(
 	if err := c.checkEphemeralBufferSpan(); err != nil {
 		return nil, err
 	}
-	// The rollback is accepted. Call the caller's hook now, still holding
-	// both locks: this is the last point before anything is mutated, and
-	// the last point a concurrent AddBlock/AddBlockWithPoint (which also
-	// needs these locks) could still grow the chain out from under an
-	// external acceptance check like ValidateRollback. A hook error
-	// aborts before any state changes, the same as any other rejection.
-	if preTruncateHook != nil {
-		if err := preTruncateHook(rollbackBlockIndex, forkDepth); err != nil {
-			return nil, err
-		}
-	}
-	// Now it is safe to drop the headers found above to be newer than
-	// the rollback point.
+	// The rollback is accepted: now it is safe to drop the headers found
+	// above to be newer than the rollback point.
 	if headersEnd >= 0 {
 		c.headers = slices.Delete(c.headers, headersEnd, len(c.headers))
 	}

@@ -8422,23 +8422,40 @@ returns immediately afterward without looping back, so the reader never
 holds that read lock while this runs.
 
 Unlike `rollbackChainAndState`, it does not pair a dry-run
-`ValidateRollback` with a separately-locked `RewindPrimaryChainToPoint`:
-`Chain.RollbackWithPreTruncateHook` (`chain/chain.go`) instead calls a
-caller-supplied hook from inside `rollbackLocked` itself, once the rewind
-is accepted but still holding `c.mutex`/`c.manager.mutex` continuously
-through to the truncation right after it. A validate-then-separately-
-truncate pairing leaves a real gap open in between: `AddBlock`/
-`AddBlockWithPoint` (blockfetch delivering a new block) takes only those
-same chain locks, independent of `transactionEventMutex`, so the primary
-chain can grow enough between the two calls to invalidate what
-`ValidateRollback` found, letting a hook-free caller publish undo events
-for a rewind that a moment later gets rejected as exceeding the security
-parameter. The hook closes that: nothing needing the same locks can run
-between it publishing and the truncation that follows, so a published undo
-is guaranteed to land. The hook itself must not call back into anything
-that takes those locks (`ChainManager.BlockByPoint` included), which is why
-the reconciler resolves what to undo before entering this whole sequence,
-not from inside the hook.
+`ValidateRollback` with a separately-locked `RewindPrimaryChainToPoint`
+call: it resolves what to undo first (`reconciliationUndoBlocks`, below),
+then calls `RewindPrimaryChainToPoint` directly with no earlier check, and
+only calls `emitRollbackTransactionEvents` after that single call returns
+success. A validate-then-separately-truncate pairing leaves a real gap
+open in between the two locked calls: `AddBlock`/`AddBlockWithPoint`
+(blockfetch delivering a new block) takes only the chain's own
+`c.mutex`/`c.manager.mutex`, independent of `transactionEventMutex`, so the
+primary chain can grow enough between the two calls to invalidate what
+`ValidateRollback` found, letting a two-call caller publish undo events for
+a rewind that a moment later gets rejected as exceeding the security
+parameter (issue #3516 review). `RewindPrimaryChainToPoint`'s own K-check
+and truncation already run under one continuous hold of those locks (see
+`Chain.rollbackLocked`), so calling it alone, with nothing external to
+invalidate, is already atomic — no second, separately-timed check is
+needed, and none is taken.
+
+The emit is deliberately placed after that call returns, not threaded into
+it as a callback run while still holding `c.mutex`/`c.manager.mutex`: an
+earlier version of this fix did exactly that, and `emitRollbackTransactionEvents`
+can publish `LedgerErrorEventType` via `EventBus.Publish`, which invokes
+subscribers synchronously on the caller's own goroutine — precisely the
+reentrancy `Chain.Rollback` itself avoids by publishing its own
+`ChainRollbackEvent`/`ChainForkEvent` only after releasing those locks
+(see the comment on that publish). A future `LedgerErrorEventType`
+subscriber calling back into any chain method taking those locks would
+deadlock against a callback run from inside them. Emitting strictly after
+`RewindPrimaryChainToPoint` returns keeps this call symmetric with
+`rollbackChainAndState`'s own emit, which likewise runs after
+`ValidateRollback` has already released the chain's locks. Both still
+share `transactionEventMutex` with `submitBlockApplyDBTxn`'s forward-apply
+commit, which is what keeps the undo ahead of any forward `ledger.tx` event
+on the same ordered lane, regardless of this internal before/after
+ordering relative to the truncation itself.
 
 That resolution is also where the reconciler's undo events diverge from
 `blocksAboveSlot`'s: by the time this rewind runs, chain selection has

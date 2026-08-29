@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -680,6 +681,92 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 	testutil.RequireNoReceive(
 		t, errCh, 250*time.Millisecond,
 		"expected exactly one undo decode error",
+	)
+}
+
+// TestReconciliationUndoDegradesGracefullyAfterRestart covers the restart
+// case reconciliationUndoBlocks cannot fully solve: the manager's block
+// cache is purely in-memory, so a process restart after chain selection
+// already replaced an applied block leaves that block resolvable through
+// neither the primary chain's active index nor the cache. Reconciliation
+// must still complete and roll the ledger back correctly -- refusing to
+// reconcile over a missing notification would, at this function's call
+// sites, mean refusing to start the node or halting the block-processing
+// reader goroutine, considerably worse than an incomplete notification
+// (issue #3516 review). The gap must be observable, not silent: an
+// error-level log and the reconciliationUndoUnresolved counter.
+func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as in the test above: this
+	// removes fixture.currentTip from the active index, retaining it
+	// only in the (about to be discarded) manager's block cache.
+	forkHash := testHashBytes("reconcile-undo-restart-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Simulate a restart: a brand new ChainManager over the same
+	// database has an empty block cache, so it cannot answer for a
+	// block chain selection already replaced before this process
+	// started, the same as after a real process restart.
+	restartedCM, err := chain.NewManager(fixture.ls.db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		restartedCM.SetLedger(testSecurityParamLedger{securityParam: 2}),
+	)
+	ls.config.ChainManager = restartedCM
+	ls.chain = restartedCM.PrimaryChain()
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	// The reconciliation still lands: the ledger tip moves to the
+	// ancestor even though its undo notification could not be built.
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
+
+	// No undo event of any kind was published for the unresolvable
+	// block: there is nothing to decode-fail on, since it could not be
+	// read at all. Silence here is correct; the gap must show up
+	// through the log and the counter instead, not as a fabricated or
+	// wrong-branch event.
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"no transaction event for an unresolvable block",
+	)
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"no decode-failure event for an unresolvable block",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved),
+		"reconciliationUndoUnresolved must count the unresolvable block",
 	)
 }
 

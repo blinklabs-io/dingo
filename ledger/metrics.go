@@ -60,6 +60,16 @@ type stateMetrics struct {
 	// the local applied chain. A rising value means a peer is feeding the
 	// node a continuation from a fork it never applied. See issue #3005.
 	continuationInputUnresolved prometheus.Counter
+	// Incremented when the primary-chain/ledger divergence reconciler
+	// cannot resolve one of the ledger's own applied block_nonce points to
+	// build its ledger.tx undo events, typically because chain selection
+	// already replaced that block and, after a process restart, the
+	// manager's block cache no longer retains it either. The reconciler
+	// still rolls the ledger back correctly; only the undo notification for
+	// that block is missing, so a rising value means ledger.tx subscribers
+	// may be carrying stale derived state for an abandoned branch. See
+	// issue #3516.
+	reconciliationUndoUnresolved prometheus.Counter
 	// Observed for every Praos leader-eligibility decision on an inbound
 	// header: (threshold - leaderValue) / threshold. Positive is eligible,
 	// and the magnitude is the headroom. dingo derives its leadership stake
@@ -364,6 +374,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_continuation_input_unresolved_total",
 			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
+		},
+	)
+	m.reconciliationUndoUnresolved = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_reconciliation_undo_unresolved_total",
+			Help: "applied blocks the primary-chain/ledger divergence reconciler could not resolve to build ledger.tx undo events (block already replaced by chain selection and no longer cached, typically after a restart)",
 		},
 	)
 	m.leaderThresholdMargin = promautoFactory.NewHistogram(

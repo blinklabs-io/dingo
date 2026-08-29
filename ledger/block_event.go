@@ -308,10 +308,20 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 // ChainManager.BlockByPoint -- which checks the manager's retained
 // block-cache before the database, so a still-cached abandoned block
 // resolves even after chain selection removed it from the active index.
-// A point that resolves to neither is skipped (logged), the same
-// best-effort degradation blocksAboveSlot uses for a decode failure: the
-// reconciliation is what keeps the ledger correct, and it must not fail
-// because a notification could not be built.
+//
+// The block cache does not survive a restart, so a point chain selection
+// already replaced before this process started (and whose blob row is
+// therefore already gone) cannot be resolved at all -- there is no other
+// durable copy of an abandoned block's bytes to fall back to. Rather than
+// fail the reconciliation over a notification gap -- which, at this
+// function's three call sites, means refusing to start the node, halting
+// the block-processing reader goroutine, or dropping a live chainsync
+// connection, all considerably worse than an incomplete notification -- an
+// unresolved point is skipped, logged at error level, and counted via
+// reconciliationUndoUnresolved so the gap is observable rather than silent.
+// This is the same best-effort degradation blocksAboveSlot uses for a
+// decode failure: the reconciliation is what keeps the ledger correct, and
+// it must not fail because a notification could not be built.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,
@@ -353,13 +363,20 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 			nil,
 		)
 		if err != nil {
-			ls.config.Logger.Warn(
-				"failed to resolve applied block for reconciliation undo event",
+			ls.config.Logger.Error(
+				"reconciliation cannot build an undo event for an applied "+
+					"block: it is no longer resolvable (likely already "+
+					"replaced by chain selection and, after a restart, no "+
+					"longer cached either); ledger.tx subscribers will not "+
+					"see this block undone",
 				"component", "ledger",
 				"error", err,
 				"slot", row.Slot,
 				"hash", hex.EncodeToString(row.Hash),
 			)
+			if ls.metrics.reconciliationUndoUnresolved != nil {
+				ls.metrics.reconciliationUndoUnresolved.Inc()
+			}
 			continue
 		}
 		blocks = append(blocks, block)
