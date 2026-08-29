@@ -1821,6 +1821,9 @@ func TestReplayRecoveryHaltsOnWithdrawalStateDivergence(t *testing.T) {
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
 	assert.False(t, recovered)
 	assert.ErrorContains(t, err, "reward withdrawal state diverged during replay")
+	var withdrawalErr shelley.IncorrectWithdrawalAmountError
+	require.ErrorAs(t, err, &withdrawalErr)
+	require.Equal(t, uint64(399088479), withdrawalErr.Balance)
 }
 
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
