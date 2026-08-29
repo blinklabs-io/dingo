@@ -520,6 +520,41 @@ func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 	require.Contains(t, err.Error(), "no endorser block provider configured")
 }
 
+// TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot is the
+// P1 regression from review: ensureReferencedEndorserBlocks (via
+// endorserBlockAvailableAt) discarded the provider's returned slot and
+// treated ok=true alone as availability. The manifest is content-addressed,
+// so the same hash can legitimately be cached or persisted under a different,
+// stale slot; a provider result for a hash the certified reference requires
+// at slot 100, bound instead to slot 101, must be treated as unavailable
+// the same as ok=false, not accepted as satisfying the certified closure.
+func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
+	t *testing.T,
+) {
+	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				hash []byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				if !bytes.Equal(hash, ebHash.Bytes()) {
+					return 0, nil, false
+				}
+				// Bound to a slot other than the one the certified reference
+				// (parent.SlotNumber(), 100) actually requires.
+				return parent.SlotNumber() + 1, nil, true
+			},
+			EndorserBlockWaitSlots: 0,
+		},
+	}
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+}
+
 func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
 	t *testing.T,
 ) {
@@ -595,7 +630,7 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 		string(hashD): {slot: 100_000, hash: ebB},
 		string(hashE): {slot: 200, hash: ebE},
 	}
-	neverCached := func(lcommon.Blake2b256) bool { return false }
+	neverCached := func(leiosEbRef) bool { return false }
 
 	// Haskell/cert-driven path. wallSlot 100050, waitSlots 100: slots 100/140/200
 	// are settled backlog, slot 100000 is within the head window.
@@ -649,7 +684,7 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	// A cached endorser block is not refetched.
 	backfill, _ = classifyEndorserBlockFetches(
 		infos, annByHash, 100_050, true, 100, true,
-		func(h lcommon.Blake2b256) bool { return h == ebA },
+		func(r leiosEbRef) bool { return r.hash == ebA },
 	)
 	require.Empty(t, backfill)
 

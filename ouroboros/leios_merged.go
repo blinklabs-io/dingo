@@ -474,14 +474,25 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	verified := origin == leiosStoreAuthoritative
 	if announcedSlot, ok := o.leiosAnnouncedSlotLocked(point.Hash); ok {
 		if announcedSlot != point.Slot {
-			o.leiosAnnouncementsMu.Unlock()
-			return fmt.Errorf(
-				"leios endorser block cache: point slot does not match announced point: announced %d, got %d",
-				announcedSlot,
-				point.Slot,
-			)
+			if origin != leiosStoreAuthoritative {
+				o.leiosAnnouncementsMu.Unlock()
+				return fmt.Errorf(
+					"leios endorser block cache: point slot does not match announced point: announced %d, got %d",
+					announcedSlot,
+					point.Slot,
+				)
+			}
+			// An authoritative source overrides a live announcement record
+			// that contradicts it, for the same reason it overrides a
+			// contradicting cache entry below: the manifest is
+			// content-addressed, so the same hash can legitimately recur at
+			// a different slot, and a peer-supplied announcement is not
+			// trustworthy enough to reject a source the ledger or the local
+			// forge path has already established as correct (issue #3513
+			// review). verified is already true from origin.
+		} else {
+			verified = true
 		}
-		verified = true
 	}
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	if err != nil {

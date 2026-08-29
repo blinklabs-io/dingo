@@ -6053,7 +6053,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 				}
 			}
 		} else {
-			ebHash, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(block)
+			ebHash, ebSlot, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(
+				block,
+			)
 			switch {
 			case refErr != nil:
 				if !ls.config.LeiosApplyEndorserBlockTxs {
@@ -6071,9 +6073,30 @@ func (ls *LedgerState) ledgerProcessBlock(
 					"error", refErr,
 				)
 			case referenced:
-				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+				// ebSlot is the expected slot leiosEndorserBlockForApply
+				// derived structurally (the endorser block shares its
+				// announcing ranking block's slot), not whatever the
+				// provider itself reports: the manifest is content-addressed
+				// and the same hash can legitimately recur at a different
+				// slot, so a provider result bound to a different slot is a
+				// stale occurrence of this hash and must be treated as
+				// unavailable here, the same as EndorserBlockProvider
+				// returning ok=false (issue #3513 review).
+				gotSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
 					ebHash.Bytes(),
-				); ok {
+				)
+				if ok && gotSlot != ebSlot {
+					ls.config.Logger.Debug(
+						"discarding endorser block provider result bound to a different slot",
+						"component", "ledger",
+						"slot", point.Slot,
+						"eb_hash", ebHash.String(),
+						"expected_eb_slot", ebSlot,
+						"got_eb_slot", gotSlot,
+					)
+					ok = false
+				}
+				if ok {
 					var donation uint64
 					applied, donation, err := ls.applyEndorserBlock(
 						txn,

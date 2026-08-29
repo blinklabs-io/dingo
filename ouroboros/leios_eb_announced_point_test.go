@@ -621,3 +621,47 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, authoritativeSlot, slot)
 }
+
+// TestStoreLeiosEndorserBlockAuthoritativeOverridesStaleAnnouncement covers a
+// gap symmetric to the stale-cache-entry override above: a live (unexpired)
+// announcement record for a hash, at a slot an authoritative source now
+// contradicts, must not block that authoritative store either. Without this,
+// an authoritative fetch for a genuine new occurrence of a recurring hash
+// could be rejected by a stale peer-supplied announcement record for up to
+// the full ten-minute acceptance window.
+func TestStoreLeiosEndorserBlockAuthoritativeOverridesStaleAnnouncement(
+	t *testing.T,
+) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 300)
+	ebHash := testEbHash(point)
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	// A live announcement binds this hash to an older, unrelated slot.
+	announceTestEndorserBlock(t, o, point.Slot-50, ebHash, len(blockRaw))
+
+	// The ledger (or the local forge path) now authoritatively establishes
+	// the hash at a different slot; it must not be rejected by the stale
+	// announcement.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStoreAuthoritative,
+	))
+
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, point.Slot, data.point.Slot)
+	require.True(t, data.slotVerified)
+
+	// A peer-offered store still must not override the live announcement --
+	// only an authoritative source does.
+	peerConflict := ocommon.Point{Slot: point.Slot - 50, Hash: point.Hash}
+	err := o.storeLeiosEndorserBlock(
+		peerConflict,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	)
+	require.Error(t, err)
+}

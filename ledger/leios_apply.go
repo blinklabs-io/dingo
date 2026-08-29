@@ -483,9 +483,11 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	}
 	ensureRequiredAvailable := func() error {
 		for _, r := range required {
-			if _, _, ok := ls.config.EndorserBlockProvider(
+			if endorserBlockAvailableAt(
+				ls.config.EndorserBlockProvider,
 				r.hash.Bytes(),
-			); ok {
+				r.slot,
+			) {
 				continue
 			}
 			return fmt.Errorf(
@@ -520,9 +522,12 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// wallSlot is the current wall-clock slot (the live head). A block more than
 	// the wait window below it is settled backlog.
 	wallSlot, wallErr := ls.CurrentSlot()
-	cached := func(ebHash lcommon.Blake2b256) bool {
-		_, _, ok := ls.config.EndorserBlockProvider(ebHash.Bytes())
-		return ok
+	cached := func(r leiosEbRef) bool {
+		return endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			r.hash.Bytes(),
+			r.slot,
+		)
 	}
 	backfill, tipWait := classifyEndorserBlockFetches(
 		infos,
@@ -544,21 +549,33 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			ls.leiosBackfill.spawn(r)
 		}
 		for _, r := range backfill {
-			if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); ok {
+			if endorserBlockAvailableAt(
+				ls.config.EndorserBlockProvider,
+				r.hash.Bytes(),
+				r.slot,
+			) {
 				continue
 			}
 			ls.leiosBackfill.awaitFetch(ctx, r, poll)
 		}
 	}
 	for _, r := range tipWait {
-		if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); ok {
+		if endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			r.hash.Bytes(),
+			r.slot,
+		) {
 			continue
 		}
 		ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
 		if ls.config.EndorserBlockFetcher == nil {
 			continue
 		}
-		if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); !ok {
+		if !endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			r.hash.Bytes(),
+			r.slot,
+		) {
 			if err := ls.config.EndorserBlockFetcher(
 				r.slot,
 				r.hash.Bytes(),
@@ -581,6 +598,28 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 type leiosEbRef struct {
 	slot uint64
 	hash lcommon.Blake2b256
+}
+
+// endorserBlockAvailableAt reports whether provider already holds the
+// endorser block identified by hash bound to the given slot -- not merely
+// present under some slot. The manifest is content-addressed, so the same
+// hash can legitimately recur at a different slot (issue #3513); every call
+// site here already knows the slot its own reference requires (leiosEbRef
+// pairs them), so a provider result for a different slot is treated as
+// unavailable rather than trusted. Without this, a stale cached or persisted
+// occurrence of the hash could silently satisfy a reference for a different
+// one, and the caller would go on to apply its closure under the wrong slot
+// instead of triggering the authoritative fetch.
+func endorserBlockAvailableAt(
+	provider EndorserBlockProviderFunc,
+	hash []byte,
+	slot uint64,
+) bool {
+	if provider == nil {
+		return false
+	}
+	gotSlot, _, ok := provider(hash)
+	return ok && gotSlot == slot
 }
 
 // leiosBlockInfo is the subset of a ranking block the endorser-block fetch
@@ -687,8 +726,10 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 //
 // annByHash resolves a CertRB's parent announcement (block hash -> announced
 // endorser block); the caller supplies parents outside the batch. cached
-// reports whether an endorser block is already available, so it is not
-// refetched. When the wall-clock slot is unknown (wallKnown=false) every block
+// reports whether an endorser block is already available *at r's slot*, so a
+// stale occurrence of the hash under a different slot is not mistaken for
+// availability and is fetched like any other missing reference (issue #3513
+// review). When the wall-clock slot is unknown (wallKnown=false) every block
 // is treated as near-head, preserving announcement-driven behavior rather than
 // silently dropping fetches.
 func classifyEndorserBlockFetches(
@@ -698,13 +739,13 @@ func classifyEndorserBlockFetches(
 	wallKnown bool,
 	waitSlots uint64,
 	certDrivenHistorical bool,
-	cached func(ebHash lcommon.Blake2b256) bool,
+	cached func(r leiosEbRef) bool,
 ) (backfill, tipWait []leiosEbRef) {
 	backfillSeen := make(map[string]struct{})
 	tipWaitSeen := make(map[string]struct{})
 	appendRef := func(dst *[]leiosEbRef, seen map[string]struct{}, r leiosEbRef) {
 		key := string(r.hash.Bytes())
-		if _, ok := seen[key]; ok || cached(r.hash) {
+		if _, ok := seen[key]; ok || cached(r) {
 			return
 		}
 		seen[key] = struct{}{}
@@ -772,34 +813,42 @@ func leiosAnnouncementFromBlockCbor(
 // announced by the certifying block's parent. A w29 CertRB may also announce a
 // new EB, so its current announcement must not be mistaken for the certified
 // one.
+// The returned expectedSlot is the slot the referenced endorser block must be
+// bound to: the endorser block shares its announcing ranking block's slot
+// (see leiosEbRef), which is this block's own slot on the CIP path or the
+// certifying block's parent's slot on the Musashi path. Callers must check a
+// provider result against it (endorserBlockAvailableAt) rather than trust
+// whatever slot the provider itself reports, since the manifest is
+// content-addressed and the same hash can legitimately recur at a different
+// slot (issue #3513 review).
 func (ls *LedgerState) leiosEndorserBlockForApply(
 	block ledger.Block,
-) (lcommon.Blake2b256, uint64, bool, error) {
+) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
 	if ls.config.LeiosApplyEndorserBlockTxs {
 		ref, ok := block.Header().(leiosEndorserBlockReferencer)
 		if !ok {
-			return lcommon.Blake2b256{}, 0, false, nil
+			return lcommon.Blake2b256{}, 0, 0, false, nil
 		}
-		hash, size, announced := ref.LeiosAnnouncement()
-		return hash, size, announced, nil
+		hash, size, announced = ref.LeiosAnnouncement()
+		return hash, block.SlotNumber(), size, announced, nil
 	}
 	certifier, ok := block.Header().(leiosEndorserBlockCertifier)
 	if !ok {
-		return lcommon.Blake2b256{}, 0, false, nil
+		return lcommon.Blake2b256{}, 0, 0, false, nil
 	}
 	certified, present := certifier.LeiosCertified()
 	if !present || !certified {
-		return lcommon.Blake2b256{}, 0, false, nil
+		return lcommon.Blake2b256{}, 0, 0, false, nil
 	}
-	parent, err := ls.BlockByHash(block.PrevHash().Bytes())
-	if err != nil {
-		return lcommon.Blake2b256{}, 0, false, fmt.Errorf(
+	parent, perr := ls.BlockByHash(block.PrevHash().Bytes())
+	if perr != nil {
+		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(
 			"resolve certifying block parent: %w",
-			err,
+			perr,
 		)
 	}
-	hash, size, announced := leiosAnnouncementFromBlockCbor(parent.Cbor)
-	return hash, size, announced, nil
+	hash, size, announced = leiosAnnouncementFromBlockCbor(parent.Cbor)
+	return hash, parent.Slot, size, announced, nil
 }
 
 // leiosBackfillConcurrency bounds how many historical endorser blocks are
@@ -853,7 +902,7 @@ func (b *leiosBackfiller) spawn(r leiosEbRef) {
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
-	if _, _, ok := b.provider(r.hash.Bytes()); ok {
+	if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 		b.inflight.Delete(key)
 		return
 	}
@@ -863,7 +912,7 @@ func (b *leiosBackfiller) spawn(r leiosEbRef) {
 			<-b.sem
 			b.inflight.Delete(key)
 		}()
-		if _, _, ok := b.provider(r.hash.Bytes()); ok {
+		if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 			return
 		}
 		if err := b.fetch(r.slot, r.hash.Bytes()); err != nil {
@@ -894,9 +943,11 @@ func (ls *LedgerState) waitForEndorserBlock(
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	for {
-		if _, _, ok := ls.config.EndorserBlockProvider(
+		if endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
 			ebHash.Bytes(),
-		); ok {
+			rbSlot,
+		) {
 			return
 		}
 		select {
@@ -948,7 +999,7 @@ func (b *leiosBackfiller) awaitFetch(
 	defer ticker.Stop()
 	key := string(r.hash.Bytes())
 	for {
-		if _, _, ok := b.provider(r.hash.Bytes()); ok {
+		if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 			return // cached: the referencing block can apply it
 		}
 		if _, inFlight := b.inflight.Load(key); !inFlight {
