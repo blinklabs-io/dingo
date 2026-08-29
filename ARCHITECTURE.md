@@ -2961,6 +2961,36 @@ it. Dingo implements this as a **corroboration gate**
   the historical default), preserving prior behavior for nodes that do not opt
   into the Genesis trust model. While the gate is disabled the per-peer hash
   frontier is not tracked, so normal Praos operation carries no extra state.
+- **Header-crypto verification gates observation, independent of
+  corroboration.** Density and the corroboration hash frontier are both
+  populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
+  observation in the roll-forward handler — so with `corroborationPeers = 0`
+  (or before any corroboration state exists), density alone previously came
+  from peer-reported headers that had not passed any check. The roll-forward
+  handler now verifies a header's VRF/KES cryptography and, once local ledger
+  state has caught up, its leader eligibility
+  (`LedgerState.ValidateChainSelectionHeaderCrypto`, gated by
+  `ShouldVerifyChainSelectionHeaderCrypto`) *before* it is observed, for every
+  ingress-eligible peer — not only the currently apply-eligible one, since a
+  competing candidate's headers never reach the ledger's own chainsync
+  header-queue verification (that only runs for headers actually applied).
+  Verification is skipped under the same fast-sync/Mithril-import exemptions
+  the ledger's own header-queue path already applies, and a result showing
+  local state has not caught up to the header's slot
+  (`IsHeaderVerificationDeferred`) still leaves the header eligible — both
+  preserve legitimate catch-up behavior. Only a definite failure excludes the
+  header from observation and publishes
+  `ledger.ConnectionRecycleRequestedEventType`
+  (`"header_verification_failure"`, translated to a connmanager recycle by
+  node composition, the same as the ledger's own header-queue failures).
+  The check is two derived closures on `Ouroboros`
+  (`chainSelectionShouldVerifyHeaderCrypto`/`chainSelectionVerifyHeaderCrypto`),
+  set from `ledgerState` the same way `chainsyncHeaderAdmission` already is —
+  so a test exercising the roll-forward handler alone can override either
+  seam directly instead of standing up a full `LedgerState`.
+  `chainselection/` itself is unchanged: the gate runs entirely in
+  `ouroboros/chainsync.go` before a header is ever handed to
+  `chainselection`.
 
 **Supported GSA-style configuration**: a trustable `localRoots` peer (the fast
 source) plus a ledger peer snapshot (`peerSnapshotFile`) that seeds
