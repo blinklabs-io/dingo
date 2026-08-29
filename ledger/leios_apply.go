@@ -863,9 +863,11 @@ const leiosBackfillConcurrency = 8
 
 // leiosBackfiller fetches historical Leios endorser blocks by point, paced one
 // block-application chunk at a time, so a from-scratch sync builds a complete
-// UTxO set. It dedups in-flight fetches by endorser-block hash and bounds their
-// concurrency. The prototype relay serves any endorser block by point on
-// demand, so availability is not the constraint; pacing is.
+// UTxO set. It dedups in-flight fetches by (slot, hash) -- not hash alone,
+// since the same hash can legitimately be required at two different slots
+// concurrently -- and bounds their concurrency. The prototype relay serves
+// any endorser block by point on demand, so availability is not the
+// constraint; pacing is.
 type leiosBackfiller struct {
 	fetch    EndorserBlockFetcherFunc
 	provider EndorserBlockProviderFunc
@@ -893,12 +895,26 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 	}
 }
 
+// leiosBackfillInflightKey is the in-flight dedup key for r: the slot and the
+// hash, not the hash alone. The manifest is content-addressed, so the same
+// hash can legitimately be required at two different slots concurrently
+// (issue #3513 review); a hash-only key let the second requirement's spawn
+// find the first already in flight and silently no-op, and then let its
+// awaitFetch's "not in flight" skip-fast fire the moment the *first*
+// requirement's fetch cleared the (shared) key -- even though the second
+// requirement's slot was never fetched at all.
+func leiosBackfillInflightKey(r leiosEbRef) string {
+	return fmt.Sprintf("%d:%s", r.slot, r.hash.Bytes())
+}
+
 // spawn starts a background by-point fetch of the endorser block referenced by
 // r unless it is already cached or a fetch is already in flight. It returns
-// immediately. Deduping by hash means the read-batch prefetch and the per-chunk
-// gate never fetch the same endorser block twice.
+// immediately. Deduping by (slot, hash) means the read-batch prefetch and the
+// per-chunk gate never fetch the same endorser-block requirement twice, while
+// two different slots requiring the same hash are still dispatched
+// independently.
 func (b *leiosBackfiller) spawn(r leiosEbRef) {
-	key := string(r.hash.Bytes())
+	key := leiosBackfillInflightKey(r)
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
@@ -997,7 +1013,7 @@ func (b *leiosBackfiller) awaitFetch(
 	defer cancel()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
-	key := string(r.hash.Bytes())
+	key := leiosBackfillInflightKey(r)
 	for {
 		if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 			return // cached: the referencing block can apply it

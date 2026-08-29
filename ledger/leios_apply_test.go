@@ -19,7 +19,9 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -598,6 +600,146 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 	require.Error(t, err)
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
 	require.Contains(t, err.Error(), "no resolvable parent announcement")
+}
+
+// TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently is the concurrency
+// regression from review: the manifest is content-addressed, so the same
+// hash can legitimately be required at two different slots at once (issue
+// #3513). Deduping in-flight fetches by hash alone let a still-in-flight
+// fetch for one slot silently suppress spawn for a different slot of the
+// same hash; awaitFetch's "not in flight" skip-fast then fired the moment
+// the *first* slot's fetch cleared the shared key, leaving the second slot's
+// requirement never fetched at all.
+func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
+	var mu sync.Mutex
+	var calls []uint64
+	release := make(chan struct{})
+
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xAB))
+	b := &leiosBackfiller{
+		fetch: func(slot uint64, _ []byte) error {
+			mu.Lock()
+			calls = append(calls, slot)
+			mu.Unlock()
+			<-release
+			return nil
+		},
+		provider: func([]byte) (uint64, []cbor.RawMessage, bool) {
+			return 0, nil, false
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+	defer close(release)
+
+	callCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(calls)
+	}
+
+	// Slot 100's fetch starts and blocks inside fetch (simulating a live
+	// in-flight network request).
+	b.spawn(leiosEbRef{slot: 100, hash: hash})
+	require.Eventually(
+		t,
+		func() bool { return callCount() == 1 },
+		time.Second,
+		time.Millisecond,
+	)
+
+	// Slot 200 requires the same hash while slot 100's fetch is still in
+	// flight. It must be dispatched independently, not suppressed.
+	b.spawn(leiosEbRef{slot: 200, hash: hash})
+	require.Eventually(
+		t,
+		func() bool { return callCount() == 2 },
+		time.Second,
+		time.Millisecond,
+	)
+
+	mu.Lock()
+	require.ElementsMatch(t, []uint64{100, 200}, calls)
+	mu.Unlock()
+}
+
+// TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion is the
+// companion regression targeting awaitFetch directly: with both slots' fetches
+// genuinely in flight at once, slot 100 finishing (and clearing its own
+// in-flight marker) must not make awaitFetch for slot 200 -- a different
+// reference to the same hash -- skip-fast and report completion before slot
+// 200's own fetch has actually finished.
+func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
+	t *testing.T,
+) {
+	var mu sync.Mutex
+	completed := map[uint64]bool{}
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xCD))
+
+	b := &leiosBackfiller{
+		fetch: func(slot uint64, _ []byte) error {
+			switch slot {
+			case 100:
+				<-releaseA
+			case 200:
+				<-releaseB
+			}
+			mu.Lock()
+			completed[slot] = true
+			mu.Unlock()
+			return nil
+		},
+		provider: func([]byte) (uint64, []cbor.RawMessage, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			if completed[200] {
+				return 200, nil, true
+			}
+			return 0, nil, false
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+
+	// Both slots' fetches are genuinely in flight at once.
+	b.spawn(leiosEbRef{slot: 100, hash: hash})
+	b.spawn(leiosEbRef{slot: 200, hash: hash})
+
+	// Slot 100 finishes first, while slot 200 is still in flight.
+	close(releaseA)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return completed[100]
+	}, time.Second, time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		b.awaitFetch(
+			t.Context(),
+			leiosEbRef{slot: 200, hash: hash},
+			time.Millisecond,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal(
+			"awaitFetch for slot 200 returned before slot 200 actually completed",
+		)
+	case <-time.After(150 * time.Millisecond):
+		// Still correctly waiting on slot 200's own fetch.
+	}
+
+	close(releaseB)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("awaitFetch for slot 200 did not return after it completed")
+	}
 }
 
 // TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
