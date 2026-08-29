@@ -212,6 +212,51 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 	return account != nil && account.Active
 }
 
+// StakeCredentialDeposit returns the registration deposit currently held for
+// a registered stake credential. The account lookup preserves the live
+// registration semantics used by IsStakeCredentialRegistered, while the
+// registration history carries the deposit actually paid rather than the
+// current protocol-parameter value.
+func (lv *LedgerView) StakeCredentialDeposit(
+	cred lcommon.Credential,
+) (*uint64, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if account == nil || !account.Active {
+		return nil, nil
+	}
+	history, err := lv.ls.db.GetAccountRegistrationHistoryByCredential(
+		credentialTag,
+		cred.Credential[:],
+		1,
+		0,
+		"desc",
+		lv.txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(history) == 0 || history[0].Action != "registered" {
+		return nil, nil
+	}
+	deposit := history[0].Deposit
+	return &deposit, nil
+}
+
 // It returns the most recent active pool registration certificate
 // and the epoch of any pending retirement for the given pool key hash.
 func (lv *LedgerView) PoolCurrentState(
