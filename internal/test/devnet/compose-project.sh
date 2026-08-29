@@ -40,13 +40,34 @@ _devnet_cidr_overlaps() {
   [[ ${a_lo} -le ${b_hi} && ${b_lo} -le ${a_hi} ]]
 }
 
-# Every subnet Docker currently has allocated, one per line. Best-effort:
-# an unreachable daemon just yields no exclusions, same as today.
+# True (exit 0) when the string is a dotted-decimal IPv4 CIDR ("a.b.c.d/n").
+# Docker networks can be IPv6 (a ULA /64, /8, etc.), and _devnet_ip_to_int
+# only understands IPv4 — an IPv6 subnet reaching it would abort
+# start.sh/run-tests.sh with a bash arithmetic error before Compose ever
+# runs, rather than just being (correctly) treated as no constraint on our
+# IPv4-only range.
+_devnet_is_ipv4_cidr() {
+  [[ "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]
+}
+
+# Every IPv4 subnet Docker currently has allocated, one per line. IPv6
+# subnets are filtered out (see _devnet_is_ipv4_cidr). Best-effort: an
+# unreachable daemon just yields no exclusions, same as today.
 _devnet_used_subnets() {
   local name
   docker network ls --format '{{.Name}}' 2>/dev/null | while read -r name; do
     docker network inspect "${name}" \
       --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>/dev/null
+  done | while read -r subnet; do
+    # Not `_devnet_is_ipv4_cidr "${subnet}" && printf ...`: under
+    # pipefail+errexit, a false condition on the very last line (the
+    # closing "no subnet" line every `docker network inspect` emits for a
+    # network without one) makes `&&` short-circuit non-zero, which kills
+    # the whole run-tests.sh/start.sh process right here. `if` doesn't
+    # have that problem — a false condition with no `else` still exits 0.
+    if _devnet_is_ipv4_cidr "${subnet}"; then
+      printf '%s\n' "${subnet}"
+    fi
   done
 }
 
@@ -161,14 +182,18 @@ _devnet_port_free() {
 # (3010/3013-3015, 3020-3023, and conformance's 3010-3012) collide outright
 # with "port is already allocated". Skips entirely if the caller has
 # already set any of _DEVNET_PORT_VARS, so a manual override stays in full
-# manual control.
+# manual control. Sets DEVNET_PORTS_AUTO=1 when it actually derived the
+# block, so devnet_compose_up knows it's safe to pick a new one on a bind
+# failure rather than fighting a caller's explicit choice.
 devnet_ports() {
+  DEVNET_PORTS_AUTO=""
   local var
   for var in "${_DEVNET_PORT_VARS[@]}"; do
     if [[ -n "${!var:-}" ]]; then
       return
     fi
   done
+  DEVNET_PORTS_AUTO=1
 
   local project_root project_hash block_size base attempt candidate i port all_free
   project_root="$(cd "${SCRIPT_DIR}/../../.." && pwd -P)"
@@ -200,11 +225,30 @@ devnet_ports() {
   return 1
 }
 
-# `docker compose up -d`, retrying if this run's subnet lost a race with a
-# concurrent worktree between devnet_net_base's check and the network
-# actually being created. On that failure the losing worktree's network
-# now shows up in `docker network ls`, so recomputing DEVNET_NET_BASE (and
-# re-rendering topology against it) naturally avoids it on the next try.
+# True (exit 0) when docker compose's failure output looks like a host port
+# already being bound, as opposed to some other bring-up failure. Docker's
+# wording for this varies by version/OS ("port is already allocated" on
+# older Docker, "Ports are not available: ... already in use" on newer).
+_devnet_looks_like_port_conflict() {
+  case "$1" in
+    *"port is already allocated"* | *"Ports are not available"* | \
+      *"address already in use"*)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# `docker compose up -d`, retrying twice if this run's subnet or host ports
+# lost a race with a concurrent worktree between the earlier check
+# (devnet_net_base / devnet_ports) and Docker actually claiming them:
+#
+#   - subnet: a "Pool overlaps" failure means the losing worktree's network
+#     now shows up in `docker network ls`, so recomputing DEVNET_NET_BASE
+#     (and re-rendering topology against it) naturally avoids it next try.
+#   - ports: a port-bind failure only gets retried when devnet_ports itself
+#     derived the block (DEVNET_PORTS_AUTO=1) — a caller's explicit port
+#     override is never second-guessed, so that case still fails through.
 devnet_compose_up() {
   local compose_file="$1" attempt out
   for (( attempt = 1; attempt <= 3; attempt++ )); do
@@ -213,12 +257,27 @@ devnet_compose_up() {
       return 0
     fi
     printf '%s\n' "${out}" >&2
-    if [[ "${out}" != *"Pool overlaps"* ]] || [[ ${attempt} -eq 3 ]]; then
+    if [[ ${attempt} -eq 3 ]]; then
       return 1
     fi
-    echo "[compose-project] subnet collided with a concurrent worktree;" \
-      "picking a new one and retrying (attempt ${attempt}/3)" >&2
-    unset DEVNET_NET_BASE
-    devnet_render_topology
+    if [[ "${out}" == *"Pool overlaps"* ]]; then
+      echo "[compose-project] subnet collided with a concurrent worktree;" \
+        "picking a new one and retrying (attempt ${attempt}/3)" >&2
+      unset DEVNET_NET_BASE
+      devnet_render_topology
+      continue
+    fi
+    if [[ "${DEVNET_PORTS_AUTO:-}" == "1" ]] &&
+      _devnet_looks_like_port_conflict "${out}"; then
+      echo "[compose-project] host port collided with a concurrent" \
+        "worktree; picking a new block and retrying (attempt ${attempt}/3)" >&2
+      local var
+      for var in "${_DEVNET_PORT_VARS[@]}"; do
+        unset "${var}"
+      done
+      devnet_ports
+      continue
+    fi
+    return 1
   done
 }

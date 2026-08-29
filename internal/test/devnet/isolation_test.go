@@ -149,29 +149,28 @@ func TestComposeTopologyMountsUseRenderedDirectory(t *testing.T) {
 }
 
 // Mirrors TestComposeProjectIsStableAndWorktreeSpecific for the network
-// subnet: devnet_net_base must be stable for one worktree, distinct across
-// worktrees (this is what a live `docker network create` collision test
-// confirmed manually — two worktrees deriving the same base would race to
-// create the same Docker network), fall inside the reserved 172.24-172.31
-// range, and respect a caller override.
+// subnet: devnet_net_base must be stable for one worktree, fall inside the
+// reserved 172.24-172.31 range, and respect a caller override.
+//
+// It does NOT assert that two worktrees hash to different starting
+// candidates — with 2048 possible /24s, an occasional hash collision
+// between two arbitrary paths is expected, not a bug: neither call here
+// creates a real Docker network, so nothing actually collides yet.
+// TestNetBaseAvoidsSubnetsDockerReports and TestComposeUpRetriesOnPoolOverlap
+// cover what devnet_net_base and devnet_compose_up actually guarantee —
+// that a subnet already in use gets skipped, and a collision surfaced by
+// `docker compose up` gets retried onto a different one.
 func TestNetBaseIsStableAndWorktreeSpecific(t *testing.T) {
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 
 	worktreeA := filepath.Join(t.TempDir(), "worktree-a")
-	worktreeB := filepath.Join(t.TempDir(), "worktree-b")
-	for _, root := range []string{worktreeA, worktreeB} {
-		require.NoError(t, os.MkdirAll(
-			filepath.Join(root, "internal", "test", "devnet"), 0o755,
-		))
-	}
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(worktreeA, "internal", "test", "devnet"), 0o755,
+	))
 
 	baseA := deriveNetBase(t, helper, worktreeA, "")
 	require.Equal(t, baseA, deriveNetBase(t, helper, worktreeA, ""))
-	baseB := deriveNetBase(t, helper, worktreeB, "")
-	require.NotEqual(t, baseA, baseB,
-		"two worktrees derived the same subnet; concurrent runs would race"+
-			" to create the same Docker network")
 	require.Regexp(t, `^172\.(2[4-9]|3[01])\.\d{1,3}$`, baseA)
 	require.Equal(t, "10.0.0", deriveNetBase(t, helper, worktreeA, "10.0.0"))
 }
@@ -237,6 +236,25 @@ func TestNetBaseAvoidsSubnetsDockerReports(t *testing.T) {
 	require.NotEqual(t, unblocked, blocked,
 		"a subnet Docker already reports as taken must not be reused")
 	require.Regexp(t, `^172\.(2[4-9]|3[01])\.\d{1,3}$`, blocked)
+}
+
+// Docker networks can be IPv6 (a ULA /64, /8, etc.), and the CIDR helpers
+// only understand IPv4. devnet_net_base must skip a subnet like that
+// instead of aborting on it with a bash arithmetic error, and still land
+// on a valid IPv4 candidate.
+func TestNetBaseIgnoresIPv6Subnets(t *testing.T) {
+	helper, err := filepath.Abs("compose-project.sh")
+	require.NoError(t, err)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(worktree, "internal", "test", "devnet"), 0o755,
+	))
+
+	fakeBin := t.TempDir()
+	writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerNetworkScript("fd00::/64"))
+
+	base := deriveNetBaseWithPath(t, helper, worktree, fakeBin)
+	require.Regexp(t, `^172\.(2[4-9]|3[01])\.\d{1,3}$`, base)
 }
 
 // devnet_ports must skip a host port something is already listening on,
@@ -367,6 +385,138 @@ case " $* " in
       printf '%s.0/24\n' "$(cat "${FAKE_BLOCKED_SUBNET_FILE}")"
     fi
     ;;
+  *) exit 0 ;;
+esac
+`
+
+// A host port can slip through devnet_ports' check-then-bind window the
+// same way a subnet can slip through devnet_net_base's: two concurrent
+// runs can both see a port as free and only one wins. devnet_compose_up
+// must react to a port-bind failure by unsetting every _DEVNET_PORT_VARS
+// entry and calling devnet_ports again — but only when devnet_ports
+// allocated the ports in the first place (DEVNET_PORTS_AUTO=1); a caller's
+// explicit port override must never be retried away.
+//
+// This shadows devnet_ports with a stub rather than relying on a real,
+// timing-sensitive socket race (which is already covered, independently,
+// by TestPortsAvoidOccupiedPorts): the stub proves devnet_compose_up's own
+// retry wiring — that it unsets the vars first (the real devnet_ports
+// would otherwise see them still set and silently no-op) and calls
+// devnet_ports again exactly once per port-conflict failure.
+func TestComposeUpRetriesOnPortConflict(t *testing.T) {
+	repoDevnetDir, err := filepath.Abs(".")
+	require.NoError(t, err)
+
+	t.Run("auto-derived ports are retried", func(t *testing.T) {
+		tempRoot := t.TempDir()
+		fakeBin := filepath.Join(tempRoot, "bin")
+		require.NoError(t, os.Mkdir(fakeBin, 0o755))
+		upCountFile := filepath.Join(tempRoot, "up-attempts")
+		portsCountFile := filepath.Join(tempRoot, "ports-calls")
+		wasUnsetFile := filepath.Join(tempRoot, "was-unset")
+		writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerFailsOnceWithPortConflict)
+
+		script := `source "$1"
+devnet_ports() {
+  local count=0
+  [[ -f "${FAKE_PORTS_COUNT_FILE}" ]] && count=$(cat "${FAKE_PORTS_COUNT_FILE}")
+  count=$((count + 1))
+  printf '%s' "${count}" >"${FAKE_PORTS_COUNT_FILE}"
+  if [[ -n "${DEVNET_DINGO1_PORT:-}" ]]; then
+    printf 'not-unset' >"${FAKE_WAS_UNSET_FILE}"
+  else
+    printf 'unset' >"${FAKE_WAS_UNSET_FILE}"
+  fi
+  DEVNET_PORTS_AUTO=1
+  export DEVNET_DINGO1_PORT=$((30000 + count))
+}
+devnet_ports
+before="$DEVNET_DINGO1_PORT"
+devnet_compose_up "/fake/compose.yml"
+status=$?
+printf '%s %s %s\n' "$before" "$DEVNET_DINGO1_PORT" "$status"`
+		cmd := exec.Command("bash", "-c", script, "bash", filepath.Join(repoDevnetDir, "compose-project.sh"))
+		cmd.Env = append(os.Environ(),
+			"SCRIPT_DIR="+repoDevnetDir,
+			"COMPOSE_PROJECT_NAME=dingo-devnet-port-retry-test",
+			"DEVNET_NET_BASE=172.30.99",
+			"FAKE_UP_COUNT_FILE="+upCountFile,
+			"FAKE_PORTS_COUNT_FILE="+portsCountFile,
+			"FAKE_WAS_UNSET_FILE="+wasUnsetFile,
+			"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		require.NoError(t, err, "stderr: %s", stderr.String())
+
+		fields := strings.Fields(strings.TrimSpace(string(out)))
+		require.Len(t, fields, 3, "unexpected output: %q (stderr: %q)", out, stderr.String())
+		before, after, status := fields[0], fields[1], fields[2]
+
+		require.Equal(t, "0", status,
+			"devnet_compose_up must succeed once the retry calls devnet_ports again")
+		require.NotEqual(t, before, after,
+			"a retry after a port-bind failure must call devnet_ports again")
+
+		portsCalls, err := os.ReadFile(portsCountFile)
+		require.NoError(t, err)
+		require.Equal(t, "2", strings.TrimSpace(string(portsCalls)),
+			"devnet_ports should have been called exactly twice: once to derive, once to retry")
+
+		wasUnset, err := os.ReadFile(wasUnsetFile)
+		require.NoError(t, err)
+		require.Equal(t, "unset", string(wasUnset),
+			"devnet_compose_up must unset the port vars before retrying, or the"+
+				" real devnet_ports would see them still set and silently no-op")
+	})
+
+	t.Run("a caller's port override is never retried away", func(t *testing.T) {
+		tempRoot := t.TempDir()
+		fakeBin := filepath.Join(tempRoot, "bin")
+		require.NoError(t, os.Mkdir(fakeBin, 0o755))
+		upCountFile := filepath.Join(tempRoot, "up-attempts")
+		writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerFailsOnceWithPortConflict)
+
+		script := `source "$1"
+devnet_ports
+devnet_compose_up "/fake/compose.yml"
+printf '%s\n' "$?"`
+		cmd := exec.Command("bash", "-c", script, "bash", filepath.Join(repoDevnetDir, "compose-project.sh"))
+		cmd.Env = append(os.Environ(),
+			"SCRIPT_DIR="+repoDevnetDir,
+			"COMPOSE_PROJECT_NAME=dingo-devnet-port-retry-test-override",
+			"DEVNET_NET_BASE=172.30.99",
+			"FAKE_UP_COUNT_FILE="+upCountFile,
+			"DEVNET_DINGO1_PORT=9999",
+			"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		require.NoError(t, err, "stderr: %s", stderr.String())
+		require.Equal(t, "1", strings.TrimSpace(string(out)),
+			"devnet_compose_up must not retry away a caller-supplied port override")
+	})
+}
+
+const fakeDockerFailsOnceWithPortConflict = `#!/usr/bin/env bash
+case " $* " in
+  *" up -d "*)
+    count=0
+    [[ -f "${FAKE_UP_COUNT_FILE}" ]] && count=$(cat "${FAKE_UP_COUNT_FILE}")
+    count=$((count + 1))
+    printf '%s' "${count}" >"${FAKE_UP_COUNT_FILE}"
+    if [[ "${count}" -eq 1 ]]; then
+      echo "Error response from daemon: driver failed programming external" \
+        "connectivity: Bind for 0.0.0.0:${DEVNET_DINGO1_PORT}:" \
+        "port is already allocated" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *" network ls "*) printf 'x\n' ;;
+  *" network inspect "*) printf '' ;;
   *) exit 0 ;;
 esac
 `
