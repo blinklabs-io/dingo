@@ -269,7 +269,11 @@ func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 	if stalePeerSlot > ls.syncUpstreamTipSlot.Load() {
 		ls.syncUpstreamTipSlot.Store(stalePeerSlot)
 	}
-	assert.Equal(t, uint64(114220800), ls.UpstreamTipSlot())
+	assert.Equal(t, uint64(114220800), ls.syncUpstreamTipSlot.Load())
+	assert.Zero(t, ls.UpstreamTipSlot())
+	target, active := ls.UpstreamSyncStatus()
+	assert.True(t, active)
+	assert.Zero(t, target)
 }
 
 func TestAdvanceUpstreamTipSlotDoesNotPublishWithoutAdmittedTarget(t *testing.T) {

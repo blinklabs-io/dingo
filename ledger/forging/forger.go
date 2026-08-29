@@ -623,9 +623,13 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		(upstreamTip > tipSlot &&
 			upstreamTip-tipSlot > f.forgeSyncToleranceSlots)) {
 		if f.metrics != nil {
+			gap := uint64(0)
+			if upstreamTip > tipSlot {
+				gap = upstreamTip - tipSlot
+			}
 			f.metrics.forgeSyncSkip.Inc()
 			f.metrics.tipGapSlots.Set(
-				float64(upstreamTip - tipSlot),
+				float64(gap),
 			)
 		}
 		f.logger.Debug(
