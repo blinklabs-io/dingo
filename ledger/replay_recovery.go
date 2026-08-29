@@ -222,7 +222,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		validationErr.Cause,
 	); ok {
 		return false, fmt.Errorf(
-			"reward withdrawal state diverged during replay: %w (%v)",
+			"reward withdrawal state diverged during replay: %w (%w)",
 			errHaltLedgerPipeline,
 			validationErr.Cause,
 		)
