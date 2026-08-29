@@ -15,25 +15,34 @@
 # limitations under the License.
 
 # Fail when the network configs embedded in the dingo binary have drifted
-# from blinklabs-io/docker-cardano-configs.
+# from the docker-cardano-configs copy the release image ships.
 #
 # The two copies must stay byte-identical because they are the same config
 # reached by two different runtime paths. `CARDANO_NETWORK=<net>` with no
 # config file serves the copy embedded here via config/cardano/embed.go,
 # while the release image ships the docker-cardano-configs copy as
-# /opt/cardano/config/ (see the cardano-configs stage in the Dockerfile) and
-# downstream tooling copies it out of there. A change landing in only one of
-# them makes the Docker and binary deployments run different chains under
-# the same network name.
+# /opt/cardano/config/ and downstream tooling copies it out of there. A
+# change landing in only one of them makes the Docker and binary
+# deployments run different chains under the same network name.
 #
-# Set CARDANO_CONFIGS_DIR to an existing checkout to skip the clone; CI
-# passes the path from actions/checkout. CARDANO_CONFIGS_REF selects the ref
-# to clone when it does not.
+# The default comparison is against the cardano-configs image tag the
+# Dockerfile pins, not against that repository's main branch, because the
+# pinned tag is what a built image actually contains. That also makes the
+# check satisfiable inside a single dingo pull request: bump the pinned tag
+# and update the embedded copy together and it goes green, with no window
+# where it is red waiting on another repository to merge. Comparing against
+# main instead would go green the moment that branch moved, while the image
+# this repository builds still shipped the old config.
+#
+# Sources, in precedence order:
+#   CARDANO_CONFIGS_DIR  an existing checkout or extracted /config tree
+#   CARDANO_CONFIGS_REF  a git ref of the repository, cloned here
+#   (default)            the image tag pinned in the Dockerfile
 
 set -euo pipefail
 
 configs_repo="https://github.com/blinklabs-io/docker-cardano-configs"
-configs_ref="${CARDANO_CONFIGS_REF:-main}"
+configs_image="ghcr.io/blinklabs-io/cardano-configs"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
@@ -44,19 +53,40 @@ dingo_only=(
 )
 
 configs_dir="${CARDANO_CONFIGS_DIR:-}"
+configs_ref="${CARDANO_CONFIGS_REF:-}"
+source_desc=""
 cleanup_dir=""
-if [[ -z "${configs_dir}" ]]; then
+if [[ -n "${configs_dir}" ]]; then
+	source_desc="${configs_dir}"
+else
 	cleanup_dir="$(mktemp -d)"
-	# shellcheck disable=SC2064 # expand configs_dir now, not at trap time
+	# shellcheck disable=SC2064 # expand cleanup_dir now, not at trap time
 	trap "rm -rf '${cleanup_dir}'" EXIT
-	echo "cloning ${configs_repo} at ${configs_ref}"
-	git clone --quiet --depth 1 --branch "${configs_ref}" \
-		"${configs_repo}" "${cleanup_dir}/configs"
-	configs_dir="${cleanup_dir}/configs"
+	if [[ -n "${configs_ref}" ]]; then
+		source_desc="${configs_repo} at ${configs_ref}"
+		echo "cloning ${source_desc}"
+		git clone --quiet --depth 1 --branch "${configs_ref}" \
+			"${configs_repo}" "${cleanup_dir}/configs"
+		configs_dir="${cleanup_dir}/configs"
+	else
+		tag="$(sed -n "s|^FROM ${configs_image}:\\([^ ]*\\) .*|\\1|p" Dockerfile | head -1)"
+		if [[ -z "${tag}" ]]; then
+			echo "error: no ${configs_image} tag found in Dockerfile" >&2
+			exit 1
+		fi
+		source_desc="${configs_image}:${tag}"
+		echo "extracting /config from ${source_desc}"
+		container="$(docker create "${source_desc}")"
+		# shellcheck disable=SC2064 # expand both now, not at trap time
+		trap "docker rm --force '${container}' >/dev/null 2>&1 || true; rm -rf '${cleanup_dir}'" EXIT
+		mkdir -p "${cleanup_dir}/configs"
+		docker cp "${container}:/config" "${cleanup_dir}/configs/config"
+		configs_dir="${cleanup_dir}/configs"
+	fi
 fi
 
 if [[ ! -d "${configs_dir}/config" ]]; then
-	echo "error: ${configs_dir} does not look like a docker-cardano-configs checkout" >&2
+	echo "error: ${configs_dir} has no config/ directory" >&2
 	exit 1
 fi
 
@@ -74,7 +104,7 @@ checked=0
 for network in "${networks[@]}"; do
 	upstream="${configs_dir}/config/${network}"
 	if [[ ! -d "${upstream}" ]]; then
-		echo "DRIFT ${network}: not present in docker-cardano-configs"
+		echo "DRIFT ${network}: not present in ${source_desc}"
 		drift=$((drift + 1))
 		continue
 	fi
@@ -88,12 +118,12 @@ for network in "${networks[@]}"; do
 		checked=$((checked + 1))
 		counterpart="${configs_dir}/config/${relative}"
 		if [[ ! -e "${counterpart}" ]]; then
-			echo "DRIFT ${relative}: missing from docker-cardano-configs"
+			echo "DRIFT ${relative}: missing from ${source_desc}"
 			drift=$((drift + 1))
 			continue
 		fi
 		if ! diff -u "${counterpart}" "${tracked}" \
-			--label "docker-cardano-configs/config/${relative}" \
+			--label "cardano-configs/config/${relative}" \
 			--label "dingo/config/cardano/${relative}"; then
 			drift=$((drift + 1))
 		fi
@@ -103,13 +133,14 @@ done
 if [[ ${drift} -ne 0 ]]; then
 	cat >&2 <<EOF
 
-${drift} file(s) differ from ${configs_repo} at ${configs_ref}.
+${drift} file(s) differ from ${source_desc}.
 
-Land the same change in both repositories. The copy embedded here serves
-CARDANO_NETWORK without a config file; the docker-cardano-configs copy is
-what the release image ships as /opt/cardano/config/.
+Both copies must change together. Land the change in
+${configs_repo}, release a
+cardano-configs image containing it, then in this repository bump the
+pinned tag in the Dockerfile and update config/cardano/ in the same commit.
 EOF
 	exit 1
 fi
 
-echo "${checked} file(s) across ${#networks[@]} network(s) match ${configs_repo} at ${configs_ref}"
+echo "${checked} file(s) across ${#networks[@]} network(s) match ${source_desc}"
