@@ -3261,6 +3261,10 @@ func (ls *LedgerState) recordAdmittedHeaderFrontier(
 	ls.publishAdmittedUpstreamTarget(e)
 }
 
+func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
+	return ls.shouldEnforceBlockPipelineCrypto(slot)
+}
+
 // shouldEnforceBlockPipelineCrypto mirrors the serial header path's
 // validation-state gates for blocks read back from the primary chain. The
 // pipeline workers still run for every submitted block, but their result must
