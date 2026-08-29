@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -306,6 +307,30 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 	active := state.GetClientConnId()
 	require.NotNil(t, active)
 	assert.Equal(t, connA, *active)
+}
+
+func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(t *testing.T) {
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connId := newNodeTestConnId(3001)
+	state.SetClientConnId(connId)
+	n := &Node{
+		chainsyncState: state,
+		config:         Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+
+	active := config.GetActiveConnectionFunc()
+	require.NotNil(t, active)
+	assert.Equal(t, connId, *active)
+
+	n.liveLifecycleMu.Lock()
+	active = config.GetActiveConnectionFunc()
+	n.liveLifecycleMu.Unlock()
+	assert.Nil(t, active)
 }
 
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {

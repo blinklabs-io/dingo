@@ -1031,11 +1031,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// 64-bit platforms.
 		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
 	}
+	// LedgerState.Start above starts its slot-clock goroutine before Run
+	// creates chainsync state. Use the same lock live Restore/Truncate use
+	// for this initial publication so late-bound ledger callbacks cannot
+	// observe the state while its constructor is still writing it.
+	n.liveLifecycleMu.Lock()
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
 		chainsyncCfg,
 	)
+	n.liveLifecycleMu.Unlock()
 	n.eventBus.SubscribeFunc(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
