@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // seedRetentionRows writes one row per epoch in [0, throughEpoch] into every
@@ -318,4 +319,94 @@ func TestCleanupOldSnapshotsBelowWindowKeepsEverything(t *testing.T) {
 		require.NoError(t, err, "get pool stake snapshots %d", epoch)
 		require.Len(t, snapshots, 1, "pool_stake_snapshot %d retained", epoch)
 	}
+}
+
+// TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation exercises the
+// production Mark->Set addressing path: epoch 9 uses mark[8], even after the
+// live pool row has rotated to a new key. The committee key must remain the one
+// frozen with mark[8], not whichever key the pool carries when it is queried.
+func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{{
+		EpochId:       7,
+		StartSlot:     100,
+		LengthInSlots: 100,
+	}})
+
+	poolKeyHash := bytes.Repeat([]byte{0x41}, 28)
+	oldPublic := bytes.Repeat([]byte{0x51}, 96)
+	oldProof := bytes.Repeat([]byte{0x61}, 48)
+	importPool := func(slot uint64, public, proof []byte) {
+		t.Helper()
+		pool := &models.Pool{
+			PoolKeyHash:             append([]byte(nil), poolKeyHash...),
+			VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+			LeiosKeyPublic:          append([]byte(nil), public...),
+			LeiosKeyPossessionProof: append([]byte(nil), proof...),
+		}
+		registration := &models.PoolRegistration{
+			PoolKeyHash:             append([]byte(nil), poolKeyHash...),
+			VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+			AddedSlot:               slot,
+			LeiosKeyPublic:          append([]byte(nil), public...),
+			LeiosKeyPossessionProof: append([]byte(nil), proof...),
+		}
+		require.NoError(t, db.ImportPool(nil, pool, registration))
+	}
+	importPool(50, oldPublic, oldProof)
+
+	var poolHash lcommon.PoolKeyHash
+	copy(poolHash[:], poolKeyHash)
+	distribution := &StakeDistribution{
+		Slot:           199,
+		PoolStakes:     map[lcommon.PoolKeyHash]uint64{poolHash: 100},
+		DelegatorCount: map[lcommon.PoolKeyHash]uint64{poolHash: 1},
+		TotalStake:     100,
+		TotalPools:     1,
+	}
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	saved, err := mgr.saveSnapshot(
+		context.Background(),
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		distribution,
+		event.EpochTransitionEvent{
+			PreviousEpoch: 7,
+			NewEpoch:      8,
+			BoundarySlot:  200,
+			SnapshotSlot:  199,
+		},
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	require.True(t, saved)
+
+	newPublic := bytes.Repeat([]byte{0x52}, 96)
+	newProof := bytes.Repeat([]byte{0x62}, 48)
+	importPool(250, newPublic, newProof)
+	current, err := db.Metadata().GetPools(
+		[]lcommon.PoolKeyHash{poolHash}, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, current, 1)
+	require.Equal(t, newPublic, current[0].LeiosKeyPublic)
+
+	// This is the production rotation path: Set/Go are addressed by older Mark
+	// epoch numbers instead of copying rows to new snapshot_type values.
+	mgr.rotateSnapshots(context.Background(), 9)
+	stored, err := db.Metadata().GetPoolStakeSnapshot(
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, oldPublic, stored.LeiosKeyPublic,
+		"mark[8] must retain the key captured before the live rotation")
+	require.Equal(t, oldProof, stored.LeiosKeyPossessionProof)
 }

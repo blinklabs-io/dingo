@@ -5,6 +5,10 @@ ROOT_DIR=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 # worktrees so sibling checkouts do not affect formatting or rebuild inputs.
 GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name '*.go' -print)
 
+# Gather every Go module directory. Nested modules have their own go.mod and
+# are therefore outside the root module's ./..., so they need their own run.
+GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
+
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 
@@ -40,7 +44,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck gorm-check test bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck gorm-check test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -73,8 +77,16 @@ format: mod-tidy ## Run mod-tidy, then format code
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
+# golangci-lint covers one module for one GOOS per run. The loop reaches every
+# nested module, and the GOOS=windows run reaches files behind
+# `//go:build windows`, which the host build excludes. CI runs the same scopes
+# in .github/workflows/golangci-lint.yml.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
-	golangci-lint run ./...
+	@for dir in $(GO_MODULE_DIRS); do \
+		echo "golangci-lint run ./... ($$dir)"; \
+		(cd $$dir && golangci-lint run ./...) || exit 1; \
+	done
+	GOOS=windows golangci-lint run ./...
 	nilaway $(GO_TAG_FLAGS) ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
@@ -130,6 +142,9 @@ $(PROTOC):
 
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
 	go test $(GO_TAG_FLAGS) -v -race -timeout 20m ./...
+
+test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
+	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .
 
 bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...

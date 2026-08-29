@@ -19,10 +19,7 @@ The default target formats and builds; tests are a separate target.
 ## Pre-commit
 
 ```
-golangci-lint run ./...
-nilaway ./...
-modernize ./...
-make import-boundaries
+make lint         # import-boundaries, all modules, windows, nilaway, modernize
 make docs-parity
 make golines
 make sql-check    # only when database/sql queries or sqlc.yaml changed
@@ -33,6 +30,7 @@ make govulncheck  # reachable Go vulnerabilities; needs network
 ## Testing rules
 
 - No `time.Sleep()` for sync — use `internal/test/testutil/` (`WaitForCondition`, `RequireReceive`, `context.WithTimeout`).
+- Live two-node lifecycle integration tests use the shared `dingo_db_integration` build tag; run them with `make test-live-lifecycle`.
 - Integration tests: `internal/integration/` + `database/immutable/testdata/` (real blocks, slots 0–1.3M).
 - Mock fixtures come from `github.com/blinklabs-io/ouroboros-mock` (`fixtures/`, `ledger/`, `conformance/`). Never duplicate mocks inside dingo — extend the shared library so every Blink Labs app (dingo, gouroboros, adder, ...) reuses the same test surface.
 - DevNet end-to-end (`internal/test/devnet/run-tests.sh`): default run is an all-dingo network (three Dingo producers + relay) with `txpump` driving the mempool; it validates the generic consensus and liveness suite dingo-vs-dingo and hosts dingo-only feature tests (CIP-50 pledge leverage) that have no cardano-node reference. Use it for any change touching consensus, block production, header/VRF/KES/OpCert verification, chain selection, mempool, tx submission, NtN/NtC protocols, epoch boundaries, or nonce computation. `./run-tests.sh --conformance` runs Dingo beside `cardano-node` for compatibility and conformance with the reference. Conformance tests in `internal/test/conformance/` are still mandatory after every change.

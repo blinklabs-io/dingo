@@ -48,6 +48,21 @@ const (
 	// headroom so legitimate sync is never rejected.
 	chainsyncMaxFindIntersectPoints = 1000
 
+	// chainsyncFindIntersectBudgetRate bounds the sustained rate (points per
+	// second) of database lookup work a single ChainSync peer connection may
+	// trigger via repeated FindIntersect requests. Cost is charged per point
+	// actually looked up, after deduplication, so this bounds cumulative
+	// work across many requests, not just the size of one request. Honest
+	// clients issue FindIntersect rarely — on connect, and on resync after a
+	// rollback we cannot follow — so this is far above legitimate use.
+	chainsyncFindIntersectBudgetRate = 200
+
+	// chainsyncFindIntersectBudgetBurst allows a peer to spend its entire
+	// FindIntersect work budget on one immediate request up to
+	// chainsyncMaxFindIntersectPoints, matching the point-count cap above so
+	// a single in-bounds request is never rejected by the budget alone.
+	chainsyncFindIntersectBudgetBurst = float64(chainsyncMaxFindIntersectPoints)
+
 	// chainsyncRestartTimeout bounds how long the restart of a
 	// chainsync client can take before we give up and close the
 	// connection. Increase this for slow or congested networks.
@@ -578,6 +593,27 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		)
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
+	// Deduplicate before charging the work budget or performing any lookup.
+	// GetIntersectPoint's running-best-match scan only skips a point once a
+	// higher-or-equal-slot match has already been found, so a peer resending
+	// the same point many times (or an equal-slot point with a different
+	// hash) would otherwise force one redundant database lookup per repeat.
+	// The intersection result is independent of point order (the highest
+	// matching slot always wins), so deduplicating here changes no outcome.
+	points = normalizeIntersectPoints(points)
+	if o.chainsyncFindIntersectLimiter != nil &&
+		!o.chainsyncFindIntersectLimiter.Allow(ctx.ConnectionId, len(points)) {
+		o.config.Logger.Warn(
+			"chainsync server: rejecting FindIntersect over per-connection work budget",
+			"component",
+			"ouroboros",
+			"connection_id",
+			ctx.ConnectionId.String(),
+			"num_points",
+			len(points),
+		)
+		return retPoint, tip, ochainsync.ErrIntersectNotFound
+	}
 	intersectPoint, err := o.ledgerState.GetIntersectPoint(points)
 	if err != nil {
 		o.config.Logger.Error(
@@ -642,6 +678,13 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			err,
 		)
 	}
+	// LookupClient snapshots this same field under clientState's own lock,
+	// scoped to this one connection rather than the whole chainsync State,
+	// so a slow RollBackward send here cannot stall AddClient/LookupClient/
+	// RemoveClient for other connections. Held through the send and state
+	// transition so observers cannot read the pending flag after
+	// RollBackward is visible but before it is cleared.
+	clientState.LockRollbackState()
 	if clientState.NeedsInitialRollback {
 		o.config.Logger.Debug(
 			"chainsync server: initial rollback",
@@ -653,11 +696,14 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			tip,
 		)
 		if err != nil {
+			clientState.UnlockRollbackState()
 			return err
 		}
 		clientState.NeedsInitialRollback = false
+		clientState.UnlockRollbackState()
 		return nil
 	}
+	clientState.UnlockRollbackState()
 	// Check for available block
 	next, err := clientState.ChainIter.Next(false)
 	if err != nil {
@@ -997,6 +1043,58 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					"connection_id", ctx.ConnectionId.String(),
 				)
 				return nil
+			}
+		}
+		// Verify header crypto (VRF/KES and, once local state has caught up,
+		// leader eligibility) before this header is allowed to influence
+		// Genesis chain-selection density or corroboration. Without this
+		// gate, an untrusted peer-reported header could steer fork selection
+		// using data that has not passed the same checks as the applied
+		// chain (dingo #3517). This runs for every ingress-eligible peer, not
+		// only the one currently apply-eligible: a competing candidate's
+		// headers never reach the ledger's own chainsync header-queue
+		// verification, since that only runs for headers actually applied.
+		//
+		// Verification is skipped under the same conditions the ledger's own
+		// header pipeline already skips it (bulk historical/catch-up
+		// loading, or a Mithril-covered slot), so fast sync and a
+		// Mithril-restored bootstrap are unaffected. A deferred result (local
+		// state has not caught up to this header's slot yet) also leaves the
+		// header eligible -- that is the normal shape of a peer legitimately
+		// racing ahead of local ledger application, not a peer fault. Only a
+		// definite crypto/eligibility failure excludes the header from
+		// observation and recycles the connection.
+		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
+			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
+			if verifyErr := o.chainSelectionVerifyHeaderCrypto(v); verifyErr != nil {
+				if ledger.IsHeaderVerificationDeferred(verifyErr) {
+					o.config.Logger.Debug(
+						"chainsync: header verification deferred for chain selection",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"connection_id", ctx.ConnectionId.String(),
+						"error", verifyErr,
+					)
+				} else {
+					o.config.Logger.Warn(
+						"chainsync: excluding header from chain selection after verification failure",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"connection_id", ctx.ConnectionId.String(),
+						"error", verifyErr,
+					)
+					o.eventBus.Publish(
+						ledger.ConnectionRecycleRequestedEventType,
+						event.NewEvent(
+							ledger.ConnectionRecycleRequestedEventType,
+							ledger.ConnectionRecycleRequestedEvent{
+								ConnectionId: ctx.ConnectionId,
+								Reason:       "header_verification_failure",
+							},
+						),
+					)
+					ingressEligible = false
+				}
 			}
 		}
 		// Observe the tip for chain selection FIRST, so the apply-eligibility

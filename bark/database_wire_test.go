@@ -132,6 +132,9 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: caCertPath,
+		OperatorCertificateFingerprints: []string{
+			testCertificateFingerprint(t, clientCertPath),
+		},
 	})
 	require.NoError(t, err)
 

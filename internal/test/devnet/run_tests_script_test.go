@@ -147,10 +147,43 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 	}
 }
 
+// TestRunTestsPreservesCallerOwnedStakeDirectory verifies cleanup ownership:
+// the runner may inherit STAKE_KEYS_HOST_DIR from its caller, but it must only
+// remove a stake-key directory that this invocation created with mktemp.
+func TestRunTestsPreservesCallerOwnedStakeDirectory(t *testing.T) {
+	callerDir := t.TempDir()
+	marker := filepath.Join(callerDir, "keep")
+	require.NoError(t, os.WriteFile(marker, []byte("caller-owned"), 0o600))
+
+	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+		"MODE":                "conformance",
+		"STAKE_KEYS_HOST_DIR": callerDir,
+	})
+	require.Equal(t, 0, result.exitCode, result.output)
+	contents, err := os.ReadFile(marker)
+	require.NoError(t, err, "runner removed a stake directory it did not create")
+	assert.Equal(t, "caller-owned", string(contents))
+}
+
 func runFakeDevnet(
 	t *testing.T,
 	testExit int,
 	failRm bool,
+	runnerArgs ...string,
+) fakeDevnetResult {
+	t.Helper()
+	return runFakeDevnetWithEnv(t, testExit, failRm, nil, runnerArgs...)
+}
+
+// runFakeDevnetWithEnv runs the shell harness against fake Docker and Go
+// binaries while allowing a test to model inherited runner state. Keeping the
+// overrides inside cleanRunnerEnv prevents the developer's real environment
+// from accidentally deciding which directory the cleanup trap removes.
+func runFakeDevnetWithEnv(
+	t *testing.T,
+	testExit int,
+	failRm bool,
+	envOverrides map[string]string,
 	runnerArgs ...string,
 ) fakeDevnetResult {
 	t.Helper()
@@ -184,13 +217,17 @@ func runFakeDevnet(
 	args = append(args, runnerArgs...)
 	cmd := exec.CommandContext(ctx, "bash", args...)
 	cmd.Dir = root
-	cmd.Env = cleanRunnerEnv(map[string]string{
+	env := map[string]string{
 		"FAKE_DOCKER_LOG": filepath.Join(tempRoot, "docker.log"),
 		"FAKE_GO_EXIT":    strconv.Itoa(testExit),
 		"MODE":            "dingo",
 		"PATH":            fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"TMPDIR":          tempRoot,
-	})
+	}
+	for key, value := range envOverrides {
+		env[key] = value
+	}
+	cmd.Env = cleanRunnerEnv(env)
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -242,6 +279,7 @@ func cleanRunnerEnv(overrides map[string]string) []string {
 		"FAKE_GO_EXIT":        {},
 		"MODE":                {},
 		"PATH":                {},
+		"STAKE_KEYS_HOST_DIR": {},
 		"TMPDIR":              {},
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides))

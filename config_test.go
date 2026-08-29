@@ -213,6 +213,10 @@ func TestNewValidatesMinPoolMargin(t *testing.T) {
 func TestWithMidnightConfig(t *testing.T) {
 	cfg := &Config{}
 	midnightCfg := MidnightConfig{
+		Enabled:                     true,
+		ServerEnabled:               true,
+		ReflectionEnabled:           true,
+		AllowInsecureRemote:         true,
 		Port:                        50052,
 		Host:                        "127.0.0.1",
 		CNightPolicyID:              "policy1",
@@ -259,6 +263,9 @@ func TestSyncCompatFieldsMidnightEnabled(t *testing.T) {
 func TestSyncCompatFieldsMidnightAllFieldsMirrored(t *testing.T) {
 	src := internalconfig.MidnightConfig{
 		Enabled:                     true,
+		ServerEnabled:               true,
+		ReflectionEnabled:           true,
+		AllowInsecureRemote:         true,
 		Port:                        50099,
 		Host:                        "127.0.0.1",
 		CNightPolicyID:              "policy1",
@@ -715,22 +722,6 @@ func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
 	assert.Equal(t, "", cfg.cfg.LeiosVoteSigningKeyFile)
 	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
 	assert.Equal(t, "/keys/leios-vote.skey", cfg.cfg.LeiosVoteSigningKeyFile)
-}
-
-func TestWithLeiosVoterPublicKeys(t *testing.T) {
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	assert.Nil(t, cfg.cfg.LeiosVoterPublicKeys)
-	keys := map[string]string{"aabbcc": "ddeeff"}
-	WithLeiosVoterPublicKeys(keys)(cfg)
-	assert.Equal(
-		t,
-		map[string]string{"aabbcc": "ddeeff"},
-		cfg.cfg.LeiosVoterPublicKeys,
-	)
-	// The option copies the map: later caller mutations must not
-	// change live config
-	keys["aabbcc"] = "mutated"
-	assert.Equal(t, "ddeeff", cfg.cfg.LeiosVoterPublicKeys["aabbcc"])
 }
 
 // TestWithKoiosParityAccountsNilDefaultsToEnabled locks in

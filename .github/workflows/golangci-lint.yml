@@ -23,6 +23,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
+          cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
@@ -31,5 +32,35 @@ jobs:
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
-      - name: golangci-lint
+      # One step per Go module, plus a second root-module run for the
+      # windows build constraint.
+      #
+      # These are steps of a single `lint` job rather than a matrix on
+      # purpose. Branch protection matches a required context by name, and a
+      # matrix would render `lint (root)`, `lint (examples/dingo-gov-lens)`
+      # and so on. `lint` is not a required context today -- only
+      # `go-test (Linux) (1.26.x)` is -- so one job is what keeps the name
+      # stable for the point at which it is made required, rather than
+      # leaving a renamed context to be noticed later.
+      #
+      # internal/docsparity's TestLintCoversEveryGoModule derives the module
+      # list from the tree and fails until every go.mod has a step here, so a
+      # nested module added later cannot go unlinted just because these steps
+      # are written out by hand.
+      - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+      - name: golangci-lint (internal/test/antithesis)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        with:
+          working-directory: internal/test/antithesis
+      - name: golangci-lint (examples/dingo-gov-lens)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        with:
+          working-directory: examples/dingo-gov-lens
+      # Files behind `//go:build windows` are excluded from the linux build,
+      # so every linter above is blind to them. keystore/keyfile_windows.go is
+      # the bulk of that code.
+      - name: golangci-lint (root, GOOS=windows)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        env:
+          GOOS: windows

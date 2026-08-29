@@ -141,6 +141,33 @@ func (s *Store) SaveRewardSnapshot(
 	return nil
 }
 
+func (s *Store) DeleteProvisionalRewardSnapshot(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) error {
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	err = s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			return s.operationalQueries(db).DeleteProvisionalRewardSnapshot(
+				ctx,
+				sqlitequery.DeleteProvisionalRewardSnapshotParams{
+					Epoch:        sqlEpoch,
+					SnapshotType: snapshotType,
+				},
+			)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("delete provisional reward snapshot: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) ClaimFallbackRewardSnapshot(
 	snapshot *models.RewardSnapshot,
 	txn types.Txn,

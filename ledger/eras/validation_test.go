@@ -276,6 +276,7 @@ type mockRedeemers struct {
 		key lcommon.RedeemerKey
 		val lcommon.RedeemerValue
 	}
+	valueOverride *lcommon.RedeemerValue
 }
 
 func (m *mockRedeemers) Indexes(
@@ -288,6 +289,9 @@ func (m *mockRedeemers) Value(
 	_ uint,
 	_ lcommon.RedeemerTag,
 ) lcommon.RedeemerValue {
+	if m.valueOverride != nil {
+		return *m.valueOverride
+	}
 	return lcommon.RedeemerValue{}
 }
 
@@ -343,10 +347,11 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 
 func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// A zero declared budget is intentional: restrictive validation should
-	// execute this script with the enormous budget and classify the resulting
-	// overage as a Plutus disagreement. The script is small enough that its CEK
-	// steps remain in the trailing slippage batch. Haskell flushes that batch on
-	// a successful return, producing the complete 112100 CPU / 800 memory cost.
+	// execute this script with the protocol transaction budget and classify the
+	// resulting overage as a Plutus disagreement. The script is small enough
+	// that its CEK steps remain in the trailing slippage batch. Haskell flushes
+	// that batch on a successful return, producing the complete 112100 CPU / 800
+	// memory cost.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -364,18 +369,19 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		validate func(lcommon.Transaction, lcommon.LedgerState) error
+		validate func(lcommon.Transaction, lcommon.LedgerState, lcommon.ExUnits) error
 		reset    func()
 	}{
 		{
 			name: "alonzo",
-			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState, maxTxExUnits lcommon.ExUnits) error {
 				return ValidateTxAlonzo(
 					tx,
 					0,
 					ls,
 					&alonzo.AlonzoProtocolParameters{
 						ProtocolMajor: 5,
+						MaxTxExUnits:  maxTxExUnits,
 					},
 				)
 			},
@@ -385,13 +391,14 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		},
 		{
 			name: "babbage",
-			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState, maxTxExUnits lcommon.ExUnits) error {
 				return ValidateTxBabbage(
 					tx,
 					0,
 					ls,
 					&babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
+						MaxTxExUnits:  maxTxExUnits,
 					},
 				)
 			},
@@ -462,7 +469,10 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					addr:       addr,
 				},
 			)
-			err = tc.validate(tx, ls)
+			err = tc.validate(tx, ls, lcommon.ExUnits{
+				Steps:  1_000_000,
+				Memory: 1_000_000,
+			})
 			require.Error(t, err)
 
 			var plutusErr conway.PlutusScriptFailedError
@@ -475,6 +485,27 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 				plutusErr.Err.Error(),
 				"script exceeded declared budget: used (112100 cpu, 800 mem)",
 			)
+
+			t.Run("restrictive evaluation is capped by protocol transaction budget", func(t *testing.T) {
+				err := tc.validate(tx, ls, lcommon.ExUnits{
+					Steps:  1_000,
+					Memory: 100,
+				})
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "out of budget")
+			})
+
+			t.Run("valid execution remains accepted within both budgets", func(t *testing.T) {
+				value := lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
+					Steps:  112_100,
+					Memory: 800,
+				}}
+				witnesses.redeemers.(*mockRedeemers).valueOverride = &value
+				require.NoError(t, tc.validate(tx, ls, lcommon.ExUnits{
+					Steps:  1_000_000,
+					Memory: 1_000_000,
+				}))
+			})
 		})
 	}
 }
@@ -1269,24 +1300,21 @@ func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(t *testing.T
 	require.NoError(t, err)
 
 	// ShelleyBlock.Transactions constructs this shape from the separately
-	// decoded body and witness components. Its generic CBOR encoder expands
-	// the protocol-update body, but the fee calculation must use the preserved
-	// component bytes instead.
+	// decoded body and witness components. The upstream transaction body now
+	// preserves its original wire bytes, so rebuilding the transaction retains
+	// the canonical encoding used for fee calculation.
 	blockTx := &shelley.ShelleyTransaction{
 		Body:       wireTx.Body,
 		WitnessSet: wireTx.WitnessSet,
 	}
 	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
-	assert.Len(t, blockTx.Cbor(), 1_366)
+	assert.Len(t, blockTx.Cbor(), 1_156)
 	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
 }
 
 // TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes covers the
-// same defect in Allegra. AllegraProtocolParameterUpdate is an alias for
-// ShelleyProtocolParameterUpdate and AllegraTransactionBody also has no
-// MarshalCBOR, so an Allegra protocol-update transaction rebuilt from block
-// components is inflated by the same 210 bytes. The preprod fixture body uses
-// only fields Allegra shares with Shelley, so it decodes in both eras.
+// same wire-byte preservation in Allegra. The preprod fixture body uses only
+// fields Allegra shares with Shelley, so it decodes in both eras.
 func TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes(
 	t *testing.T,
 ) {
@@ -1301,15 +1329,16 @@ func TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes(
 		WitnessSet: wireTx.WitnessSet,
 	}
 	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
-	assert.Len(t, blockTx.Cbor(), 1_366)
+	assert.Len(t, blockTx.Cbor(), 1_156)
 	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
 }
 
 // TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection pins the reason Mary
-// is excluded from preAlonzoRebuiltWireSize: MaryTransactionBody implements
-// MarshalCBOR and returns its preserved bytes, so a rebuilt Mary transaction
-// already encodes to its wire size. If upstream loses that method this test
-// fails and Mary has to be added to preAlonzoRebuiltWireSize.
+// is excluded from preAlonzoRebuiltWireSize: MaryTransactionBody also
+// implements MarshalCBOR and returns its preserved bytes, so a rebuilt Mary
+// transaction already encodes to its wire size. If upstream loses that method,
+// this test fails and the helper's supported transaction types must be
+// reconsidered.
 func TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection(t *testing.T) {
 	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
 	require.NoError(t, err)
@@ -1442,21 +1471,18 @@ func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
 
 // TestValidateTxPreAlonzoRebuiltUpdateTxSizes drives ValidateTxShelley and
 // ValidateTxAllegra with the preprod protocol-update transaction rebuilt the
-// way a block delivers it. The upstream fee and max-size rules size it from
-// len(tx.Cbor()), which is 1366 bytes for a rebuilt transaction; the Dingo
-// replacements size it from TxSizeForFee, which is the 1156 bytes that were on
-// the wire. The empty mock ledger state fails other rules, so each assertion
-// is on the fee or size message specifically.
+// way a block delivers it. Both the upstream and Dingo fee and max-size rules
+// must use the 1156 bytes that were on the wire. The empty mock ledger state
+// fails other rules, so each assertion is on the fee or size message
+// specifically.
 func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 	const (
 		preprodMinFeeA   = 44
 		preprodMinFeeB   = 155_381
 		preprodMaxTxSize = 16_384
 
-		dingoFeeTooSmall     = "is less than the calculated minimum fee"
-		dingoSizeTooLarge    = "exceeds maximum"
-		upstreamFeeTooSmall  = "fee too small: provided 206245, minimum 215485"
-		upstreamSizeTooLarge = "transaction size too large: size 1366"
+		dingoFeeTooSmall  = "is less than the calculated minimum fee"
+		dingoSizeTooLarge = "exceeds maximum"
 	)
 
 	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
@@ -1497,7 +1523,7 @@ func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ls := newMockLedgerState()
-			require.Len(t, tc.tx.Cbor(), 1_366)
+			require.Len(t, tc.tx.Cbor(), 1_156)
 			require.Equal(t, uint64(1_156), TxSizeForFee(tc.tx))
 
 			pparams := &shelley.ShelleyProtocolParameters{
@@ -1505,13 +1531,9 @@ func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 				MinFeeB:   preprodMinFeeB,
 				MaxTxSize: preprodMaxTxSize,
 			}
-			// The upstream fee rule this era replaces rejects the rebuilt
-			// transaction at the inflated size.
-			require.ErrorContains(
-				t,
-				tc.upstreamFeeRule(tc.tx, 0, ls, pparams),
-				upstreamFeeTooSmall,
-			)
+			// Upstream and Dingo both size the rebuilt transaction from its
+			// preserved component bytes.
+			require.NoError(t, tc.upstreamFeeRule(tc.tx, 0, ls, pparams))
 			err := tc.validateTx(tc.tx, 0, ls, pparams)
 			require.Error(t, err, "unresolvable inputs must still fail")
 			assert.NotContains(t, err.Error(), dingoFeeTooSmall)
@@ -1531,19 +1553,15 @@ func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
 				dingoFeeTooSmall,
 			)
 
-			// Fee and max-size must be judged against the same size. A limit
-			// between the wire size and the rebuilt size is exceeded by the
-			// upstream rule and not by the replacement.
+			// Fee and max-size must be judged against the same preserved wire
+			// size. A limit between the old re-encoded size and the wire size
+			// is accepted by both implementations.
 			narrowSize := &shelley.ShelleyProtocolParameters{
 				MinFeeA:   preprodMinFeeA,
 				MinFeeB:   preprodMinFeeB,
 				MaxTxSize: 1_200,
 			}
-			require.ErrorContains(
-				t,
-				tc.upstreamSizeRule(tc.tx, 0, ls, narrowSize),
-				upstreamSizeTooLarge,
-			)
+			require.NoError(t, tc.upstreamSizeRule(tc.tx, 0, ls, narrowSize))
 			err = tc.validateTx(tc.tx, 0, ls, narrowSize)
 			require.Error(t, err)
 			assert.NotContains(t, err.Error(), dingoSizeTooLarge)

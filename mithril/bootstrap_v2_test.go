@@ -219,7 +219,30 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(pastEra), cbor.RawMessage(currentEra),
 	})
 	require.NoError(t, err)
-	headerState, err := cbor.Encode([]any{[]any{}, []any{}})
+	neutralNonce, err := cbor.Encode([]any{uint64(0)})
+	require.NoError(t, err)
+	praosState, err := cbor.Encode([]any{
+		uint64(0),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+		cbor.RawMessage(neutralNonce),
+	})
+	require.NoError(t, err)
+	praosCurrentEra, err := cbor.Encode([]any{
+		cbor.RawMessage(bound), cbor.RawMessage(praosState),
+	})
+	require.NoError(t, err)
+	praosTelescope, err := cbor.Encode([]any{
+		cbor.RawMessage(pastEra), cbor.RawMessage(praosCurrentEra),
+	})
+	require.NoError(t, err)
+	headerState, err := cbor.Encode([]any{
+		[]any{}, cbor.RawMessage(praosTelescope),
+	})
 	require.NoError(t, err)
 	snapshot, err := cbor.Encode([]any{
 		cbor.RawMessage(telescope), cbor.RawMessage(headerState),
@@ -256,13 +279,14 @@ type v2Fixture struct {
 	immutableContent     map[string][]byte
 	ancillaryArchive     []byte
 	ancillaryVKey        string
+	genesisVKey          string
 	immutableHits        atomic.Int32
 }
 
 // newV2Fixture fabricates a complete, internally-consistent v2 mock
 // aggregator: immutable archives, certified digest list, ancillary
 // archive with a signed manifest, and a leaf+genesis certificate
-// chain (structural verification).
+// chain with a genuine STM proof and pinned genesis signature.
 func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	t.Helper()
 	fixture := &v2Fixture{
@@ -462,19 +486,18 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	}
 	fixture.artifact = artifact
 
-	// Certificate chain (genesis <- leaf), structural verification
-	_, _, g1, g2 := bls12381.Generators()
-	g1Hex := hex.EncodeToString(g1.Marshal())
+	// Certificate chain (genesis <- leaf), full STM verification
+	genesisVKey, genesisPrivateKey := testGenesisKeyPair(t)
+	fixture.genesisVKey = genesisVKey
+	_, _, _, g2 := bls12381.Generators()
 	g2Hex := hex.EncodeToString(g2.Marshal())
-	params := ProtocolParameters{K: 1, M: 2, PhiF: 0.5}
+	params := ProtocolParameters{K: 1, M: 1, PhiF: 1.0}
 	certMerkleRoot := merkleRoot
 	if opts.tamperCertMerkleRoot {
 		certMerkleRoot = strings.Repeat("e", 64)
 	}
 	leaf := Certificate{
-		Epoch:                    294,
-		AggregateVerificationKey: g2Hex,
-		MultiSignature:           g1Hex,
+		Epoch: 294,
 		SignedEntityType: SignedEntityType{
 			raw: json.RawMessage(fmt.Sprintf(
 				`{"CardanoDatabase":{"epoch":294,"immutable_file_number":%d}}`,
@@ -498,8 +521,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		},
 	}
 	genesis := Certificate{
-		Epoch:            293,
-		GenesisSignature: "genesis_sig",
+		Epoch: 293,
 		Metadata: CertificateMetadata{
 			Parameters:  params,
 			InitiatedAt: "2026-06-11T00:00:00Z",
@@ -507,15 +529,18 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		},
 		ProtocolMessage: ProtocolMessage{
 			MessageParts: map[string]string{
-				"current_epoch":                   "293",
-				"next_aggregate_verification_key": g2Hex,
-				"next_protocol_parameters":        params.ComputeHash(),
+				"current_epoch":            "293",
+				"next_protocol_parameters": params.ComputeHash(),
 			},
 		},
 	}
-	finalizeTestCertificate(t, &genesis)
-	genesis.PreviousHash = genesis.Hash
-	finalizeTestCertificate(t, &genesis)
+	leaf.SignedMessage = leaf.ProtocolMessage.ComputeHash()
+	leaf.AggregateVerificationKey, leaf.MultiSignature =
+		testCreateEncodedSTMProof(t, []byte(leaf.SignedMessage))
+	genesis.ProtocolMessage.
+		MessageParts["next_aggregate_verification_key"] =
+		leaf.AggregateVerificationKey
+	signTestGenesisCertificate(t, &genesis, genesisPrivateKey)
 	leaf.PreviousHash = genesis.Hash
 	finalizeTestCertificate(t, &leaf)
 	fixture.certs[genesis.Hash] = genesis
@@ -643,6 +668,7 @@ func (f *v2Fixture) bootstrapConfig(downloadDir string) BootstrapConfig {
 		AllowInsecureHTTP:        true,
 		DownloadDir:              downloadDir,
 		VerifyCertificateChain:   true,
+		GenesisVerificationKey:   f.genesisVKey,
 		AncillaryVerificationKey: f.ancillaryVKey,
 	}
 }

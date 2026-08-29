@@ -233,6 +233,12 @@ services:
     depends_on:
       dingo-1:
         condition: service_healthy
+      dingo-2:
+        condition: service_healthy
+      dingo-3:
+        condition: service_healthy
+      dingo-relay:
+        condition: service_healthy
     environment:
       # Connect over the node-to-client TCP port (3002) rather than the
       # in-container unix socket. The dingo node creates /ipc/dingo.socket
@@ -243,14 +249,20 @@ services:
       # via DINGO_PRIVATE_BIND_ADDR.
       TXPUMP_NODE_ADDR: "dingo-1:3002"
       TXPUMP_NETWORK_MAGIC: "42"
-      TXPUMP_TX_COUNT_MIN: "10"
-      TXPUMP_TX_COUNT_MAX: "50"
+      # Submit one transaction per round so txpump cannot immediately spend
+      # an unconfirmed output from an earlier transaction in the same batch.
+      TXPUMP_TX_COUNT_MIN: "1"
+      TXPUMP_TX_COUNT_MAX: "1"
+      TXPUMP_CONFIRMATION_SLOTS: "600"
       # txpump interprets cooldowns as milliseconds. Keep this at the
       # 5-15 second cadence documented in README.md.
       TXPUMP_COOLDOWN_MIN: "5000"
       TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
       TXPUMP_LOG_DIR: "/logs"
+      # The configurator writes the effective system start here. txpump waits
+      # for it even when Docker reports all Dingo services healthy earlier.
+      TXPUMP_GENESIS_FILE: "/utxo-keys/runtime-genesis"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
       - logs:/logs
@@ -361,6 +373,10 @@ services:
     depends_on:
       dingo-producer:
         condition: service_healthy
+      cardano-producer:
+        condition: service_healthy
+      cardano-relay:
+        condition: service_healthy
     environment:
       # Connect over the node-to-client TCP port (3002) rather than the
       # in-container unix socket. The dingo node creates the socket 0755
@@ -370,14 +386,20 @@ services:
       # antithesis dingo-praos TCP N2C path.
       TXPUMP_NODE_ADDR: "dingo-producer:3002"
       TXPUMP_NETWORK_MAGIC: "42"
-      TXPUMP_TX_COUNT_MIN: "10"
-      TXPUMP_TX_COUNT_MAX: "50"
+      # Submit one transaction per round so txpump cannot immediately spend
+      # an unconfirmed output from an earlier transaction in the same batch.
+      TXPUMP_TX_COUNT_MIN: "1"
+      TXPUMP_TX_COUNT_MAX: "1"
+      TXPUMP_CONFIRMATION_SLOTS: "600"
       # txpump interprets cooldowns as milliseconds. Keep this at the
       # 5-15 second cadence documented in README.md.
       TXPUMP_COOLDOWN_MIN: "5000"
       TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
       TXPUMP_LOG_DIR: "/logs"
+      # Use the configurator's effective start rather than treating an early
+      # healthy N2C endpoint as permission to submit transactions.
+      TXPUMP_GENESIS_FILE: "/utxo-keys/runtime-genesis"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
       - logs:/logs

@@ -71,6 +71,11 @@ type RawLedgerState struct {
 	GovStateData cbor.RawMessage
 	// PParamsData is the deferred CBOR for protocol parameters.
 	PParamsData cbor.RawMessage
+	// PrevPParamsData is the deferred CBOR for the protocol parameters that
+	// were in force during the preceding epoch. Cardano ledger state keeps
+	// this alongside the current parameters because delayed reward
+	// calculation consumes it after the epoch has ended.
+	PrevPParamsData cbor.RawMessage
 	// SnapShotsData is the deferred CBOR for mark/set/go stake snapshots.
 	SnapShotsData cbor.RawMessage
 	// PoolDistrData is the deferred CBOR for the active consensus pool
@@ -103,6 +108,10 @@ type RawLedgerState struct {
 	// LastEpochBlockNonce is the Praos last applied block hash from
 	// consensus state (used in epoch nonce calculation).
 	LastEpochBlockNonce []byte
+	// OpCertCounters is the certified per-pool operational-certificate
+	// counter state from the Praos HeaderState. Keys are 28-byte pool cold-key
+	// hashes encoded as strings so they remain comparable.
+	OpCertCounters map[string]uint64
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to
 	// the single-epoch path.
@@ -288,10 +297,12 @@ type ParsedSnapShot struct {
 // StakeNumerator/StakeDenominator are the exact sigma fraction used by
 // Praos leader eligibility.
 type ParsedActivePoolStake struct {
-	PoolKeyHash      []byte
-	StakeNumerator   uint64
-	StakeDenominator uint64
-	VrfKeyHash       []byte
+	PoolKeyHash             []byte
+	StakeNumerator          uint64
+	StakeDenominator        uint64
+	VrfKeyHash              []byte
+	LeiosKeyPublic          []byte
+	LeiosKeyPossessionProof []byte
 }
 
 // ImportProgress reports progress during ledger state import.
@@ -1658,6 +1669,11 @@ func seedImportedRewardBasis(
 		txn.Metadata(),
 		snapshots,
 		resolveParams,
+		func(target uint64) error {
+			return validateImportedRewardPParams(
+				cfg, txn.Metadata(), target,
+			)
+		},
 		epoch,
 		slot,
 		cfg.Logger,
@@ -2038,12 +2054,18 @@ func ActivePoolDistributionSnapshots(
 			continue
 		}
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:              epoch,
-			SnapshotType:       models.PoolStakeSnapshotTypeActive,
-			PoolKeyHash:        slices.Clone(pool.PoolKeyHash),
-			TotalStake:         types.Uint64(pool.StakeNumerator),
-			StakeDenominator:   types.Uint64(pool.StakeDenominator),
-			CapturedSlot:       capturedSlot,
+			Epoch:            epoch,
+			SnapshotType:     models.PoolStakeSnapshotTypeActive,
+			PoolKeyHash:      slices.Clone(pool.PoolKeyHash),
+			TotalStake:       types.Uint64(pool.StakeNumerator),
+			StakeDenominator: types.Uint64(pool.StakeDenominator),
+			CapturedSlot:     capturedSlot,
+			LeiosKeyPublic: append(
+				[]byte(nil), pool.LeiosKeyPublic...,
+			),
+			LeiosKeyPossessionProof: append(
+				[]byte(nil), pool.LeiosKeyPossessionProof...,
+			),
 			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
@@ -2150,6 +2172,16 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		return fmt.Errorf("setting tip: %w", err)
 	}
 
+	// The HeaderState counters are certified at the snapshot tip. Persist them
+	// in the same transaction as the tip so post-snapshot block validation has
+	// the authoritative baseline and never treats an arbitrary first replayed
+	// certificate as one.
+	if err := importOpCertCounters(
+		store, cfg.State.OpCertCounters, tip.Slot, txn.Metadata(),
+	); err != nil {
+		return err
+	}
+
 	// Store evolving nonce as the tip block nonce so that
 	// subsequent block processing starts from the correct rolling
 	// nonce. Without this, the node falls back to the Shelley
@@ -2210,6 +2242,30 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 			"commit transaction in importTip: %w",
 			err,
 		)
+	}
+	return nil
+}
+
+func importOpCertCounters(
+	store metadata.MetadataStore,
+	counters map[string]uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	for poolKey, sequence := range counters {
+		if len(poolKey) != len(lcommon.PoolKeyHash{}) {
+			return fmt.Errorf(
+				"certified opcert pool key has length %d, expected 28",
+				len(poolKey),
+			)
+		}
+		var poolKeyHash lcommon.PoolKeyHash
+		copy(poolKeyHash[:], poolKey)
+		if err := store.UpdatePoolOpCertSequence(
+			poolKeyHash, sequence, slot, txn,
+		); err != nil {
+			return fmt.Errorf("storing certified opcert counter: %w", err)
+		}
 	}
 	return nil
 }
@@ -2586,20 +2642,150 @@ func resolveEraParams(
 	return 0, epochLength
 }
 
-// importPParams decodes and stores protocol parameters from the
-// snapshot.
+// validateImportedRewardPParams checks the parameter rows that will be read
+// when one imported Mark basis is consumed. Mark for E needs only future live
+// rows; Set for E-1 needs the imported current row E; Go for E-2 additionally
+// needs historical row E-1. A valid row already in the database satisfies the
+// same lookup and makes catch-up/reconcile re-entry safe.
+func validateImportedRewardPParams(
+	cfg ImportConfig,
+	txn types.Txn,
+	rewardEpoch uint64,
+) error {
+	if cfg.State == nil {
+		return errors.New(
+			"checking imported reward pparams: ledger state is nil",
+		)
+	}
+	currentEpoch := cfg.State.Epoch
+	if rewardEpoch == currentEpoch {
+		return nil
+	}
+	needsCurrent := currentEpoch > 0 && rewardEpoch == currentEpoch-1
+	needsPrevious := currentEpoch > 1 && rewardEpoch == currentEpoch-2
+	if !needsCurrent && !needsPrevious {
+		return fmt.Errorf(
+			"%w: reward epoch %d is outside snapshot epoch %d's Mark/Set/Go window",
+			errRewardPParamsUnavailable,
+			rewardEpoch,
+			currentEpoch,
+		)
+	}
+
+	store := cfg.Database.Metadata()
+	currentAvailable, err := importedPParamsAvailable(
+		store,
+		txn,
+		currentEpoch,
+		cfg.State.EraIndex,
+		[]byte(cfg.State.PParamsData),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"checking protocol parameters for epoch %d: %w",
+			currentEpoch, err,
+		)
+	}
+	if !currentAvailable {
+		return fmt.Errorf(
+			"%w: current protocol parameters for epoch %d are unavailable",
+			errRewardPParamsUnavailable,
+			currentEpoch,
+		)
+	}
+	if !needsPrevious {
+		return nil
+	}
+
+	previousEpoch := currentEpoch - 1
+	previousEra, ok := importedEraForEpoch(cfg.State, previousEpoch)
+	if !ok {
+		return fmt.Errorf(
+			"%w: era for historical protocol parameters epoch %d cannot be determined",
+			errRewardPParamsUnavailable,
+			previousEpoch,
+		)
+	}
+	previousAvailable, err := importedPParamsAvailable(
+		store,
+		txn,
+		previousEpoch,
+		previousEra,
+		[]byte(cfg.State.PrevPParamsData),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"checking historical protocol parameters for epoch %d: %w",
+			previousEpoch, err,
+		)
+	}
+	if !previousAvailable {
+		return fmt.Errorf(
+			"%w: historical protocol parameters for epoch %d are unavailable in era %s",
+			errRewardPParamsUnavailable,
+			previousEpoch,
+			EraName(previousEra),
+		)
+	}
+	return nil
+}
+
+func importedPParamsAvailable(
+	store metadata.MetadataStore,
+	txn types.Txn,
+	epoch uint64,
+	era int,
+	payload []byte,
+) (bool, error) {
+	if era < 0 {
+		return false, nil
+	}
+	if len(payload) > 0 && pparamsDataIsValid(era, payload) {
+		return true, nil
+	}
+	stored, err := storedValidPParams(store, txn, epoch, era)
+	if err != nil {
+		return false, err
+	}
+	return stored != nil, nil
+}
+
+func storedValidPParams(
+	store metadata.MetadataStore,
+	txn types.Txn,
+	epoch uint64,
+	era int,
+) (*models.PParams, error) {
+	if era < 0 {
+		return nil, nil
+	}
+	// #nosec G115 -- era was checked non-negative above.
+	rows, err := store.GetPParams(epoch, uint(era), txn)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	if !pparamsDataIsValid(era, rows[0].Cbor) {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+func pparamsDataIsValid(era int, payload []byte) bool {
+	return validatePParamsData(era, payload) == nil
+}
+
+// importPParams validates and stores the snapshot's compatible protocol
+// parameters. Eligibility for an imported reward basis is decided earlier,
+// while that basis can still be skipped independently.
 func importPParams(
 	ctx context.Context,
 	cfg ImportConfig,
 ) error {
-	if cfg.State.PParamsData == nil {
-		return nil
-	}
-
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf(
-			"pparams import cancelled: %w", err,
-		)
+		return fmt.Errorf("pparams import cancelled: %w", err)
 	}
 
 	cfg.Logger.Info(
@@ -2607,46 +2793,164 @@ func importPParams(
 		"component", "ledgerstate",
 	)
 
-	pparamsCbor := []byte(cfg.State.PParamsData)
-	if err := validatePParamsData(
-		cfg.State.EraIndex,
-		pparamsCbor,
-	); err != nil {
-		return fmt.Errorf(
-			"validating protocol parameters: %w",
-			err,
-		)
-	}
-
 	store := cfg.Database.Metadata()
 	txn := cfg.Database.MetadataTxn(true)
 	defer txn.Release()
-	pparamsSlot := snapshotEpochAnchorSlot(
-		cfg,
-		cfg.State.Epoch,
-	)
 
-	// #nosec G115
-	if err := store.SetPParams(
-		pparamsCbor,
-		pparamsSlot,
-		cfg.State.Epoch,
-		uint(cfg.State.EraIndex),
+	pparamsCbor := []byte(cfg.State.PParamsData)
+	currentStored, err := storedValidPParams(
+		store,
 		txn.Metadata(),
-	); err != nil {
+		cfg.State.Epoch,
+		cfg.State.EraIndex,
+	)
+	if err != nil {
 		return fmt.Errorf(
-			"storing protocol parameters: %w",
-			err,
+			"checking stored protocol parameters for epoch %d: %w",
+			cfg.State.Epoch, err,
 		)
+	}
+	writeCurrent := false
+	if len(pparamsCbor) > 0 {
+		if err := validatePParamsData(cfg.State.EraIndex, pparamsCbor); err != nil {
+			if currentStored == nil {
+				return fmt.Errorf(
+					"validating protocol parameters for epoch %d: %w",
+					cfg.State.Epoch,
+					err,
+				)
+			}
+			cfg.Logger.Warn(
+				"not importing incompatible current protocol parameters from snapshot; retaining the existing valid row",
+				"component",
+				"ledgerstate",
+				"epoch",
+				cfg.State.Epoch,
+				"era",
+				EraName(cfg.State.EraIndex),
+				"error",
+				err.Error(),
+			)
+		} else {
+			writeCurrent = currentStored == nil ||
+				!bytes.Equal(currentStored.Cbor, pparamsCbor)
+		}
+	}
+
+	var (
+		previousEpoch uint64
+		previousEra   int
+		previousCbor  = []byte(cfg.State.PrevPParamsData)
+		writePrevious bool
+	)
+	if cfg.State.Epoch > 0 && len(previousCbor) > 0 {
+		previousEpoch = cfg.State.Epoch - 1
+		var previousEraKnown bool
+		previousEra, previousEraKnown = importedEraForEpoch(
+			cfg.State, previousEpoch,
+		)
+		if !previousEraKnown {
+			cfg.Logger.Warn(
+				"not importing historical protocol parameters from snapshot because the epoch's era cannot be determined",
+				"component",
+				"ledgerstate",
+				"epoch",
+				previousEpoch,
+			)
+		} else if validationErr := validatePParamsData(
+			previousEra, previousCbor,
+		); validationErr != nil {
+			cfg.Logger.Warn(
+				"not importing historical protocol parameters from snapshot because the payload is incompatible with the epoch's era",
+				"component", "ledgerstate",
+				"epoch", previousEpoch,
+				"era", EraName(previousEra),
+				"error", validationErr.Error(),
+			)
+		} else {
+			previousStored, err := storedValidPParams(
+				store,
+				txn.Metadata(),
+				previousEpoch,
+				previousEra,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"checking stored historical protocol parameters for epoch %d: %w",
+					previousEpoch, err,
+				)
+			}
+			writePrevious = previousStored == nil ||
+				!bytes.Equal(previousStored.Cbor, previousCbor)
+		}
+	}
+	if !writePrevious && !writeCurrent {
+		return nil
+	}
+
+	if writePrevious {
+		previousSlot := snapshotEpochAnchorSlot(cfg, previousEpoch)
+		// #nosec G115 -- previousEra is a non-negative era index returned by
+		// importedEraForEpoch.
+		if err := store.SetPParams(
+			previousCbor,
+			previousSlot,
+			previousEpoch,
+			uint(previousEra),
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"storing historical protocol parameters for epoch %d: %w",
+				previousEpoch,
+				err,
+			)
+		}
+	}
+
+	if writeCurrent {
+		pparamsSlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
+		// #nosec G115 -- the parser only accepts known non-negative era indexes.
+		if err := store.SetPParams(
+			pparamsCbor,
+			pparamsSlot,
+			cfg.State.Epoch,
+			uint(cfg.State.EraIndex),
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("storing protocol parameters: %w", err)
+		}
 	}
 
 	if err := txn.Commit(); err != nil {
-		return fmt.Errorf(
-			"commit transaction in importPParams: %w",
-			err,
-		)
+		return fmt.Errorf("commit transaction in importPParams: %w", err)
 	}
 	return nil
+}
+
+// importedEraForEpoch resolves an imported epoch against the era telescope
+// carried by the ledger state. The last bound at or before the epoch wins,
+// which also handles zero-epoch eras on Preview. Without the full telescope,
+// only epochs at or after the current era's known bound are defensible.
+func importedEraForEpoch(state *RawLedgerState, epoch uint64) (int, bool) {
+	if state == nil {
+		return 0, false
+	}
+	if len(state.EraBounds) > 0 {
+		if epoch < state.EraBounds[0].Epoch {
+			return 0, false
+		}
+		era := -1
+		for i := range state.EraBounds {
+			if state.EraBounds[i].Epoch <= epoch {
+				era = i
+			}
+		}
+		return era, era >= 0
+	}
+	if epoch < state.EraBoundEpoch {
+		return 0, false
+	}
+	return state.EraIndex, state.EraIndex >= 0
 }
 
 // importGovState imports governance state (constitution, committee

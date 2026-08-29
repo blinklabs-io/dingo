@@ -16,10 +16,15 @@ package badger
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
+	badgerdb "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -177,4 +182,74 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 	require.False(t, store.compressionEnabled)
 	require.True(t, store.gcEnabled)
 	require.Equal(t, 7, store.compressionLevel)
+}
+
+func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
+	host := plugin.NewHost()
+	require.NoError(t, RegisterProvider(host))
+	store, err := plugin.Resolve[*BlobStoreBadger](
+		context.Background(),
+		host,
+		plugin.CapabilityStorageBlob,
+		"badger",
+		map[string]any{"gc": true},
+		blob.ProviderDependencies{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+
+	gcStarted := make(chan struct{})
+	releaseGC := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseGC) }) }
+	defer func() {
+		release()
+		_ = store.Close()
+	}()
+
+	var attempts atomic.Int32
+	store.runValueLogGC = func(float64) error {
+		if attempts.Add(1) == 1 {
+			close(gcStarted)
+			<-releaseGC
+			return nil
+		}
+		return badgerdb.ErrNoRewrite
+	}
+	gcTicks := make(chan time.Time, 1)
+	store.gcWg.Add(1)
+	go store.blobGc(gcTicks, store.gcStopCh)
+	gcTicks <- time.Time{}
+	testutil.RequireReceive(
+		t, gcStarted, 5*time.Second,
+		"value-log GC did not start",
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- host.Stop(ctx)
+	}()
+	stopErr := testutil.RequireReceive(
+		t, stopDone, 5*time.Second,
+		"provider stop exceeded its context",
+	)
+
+	release()
+	require.Eventually(
+		t,
+		store.DB().IsClosed,
+		5*time.Second,
+		10*time.Millisecond,
+		"provider-owned close did not finish after value-log GC drained",
+	)
+
+	require.ErrorIs(t, stopErr, context.DeadlineExceeded)
+	require.Equal(t, int32(1), attempts.Load())
+	require.True(t, store.DB().IsClosed())
+	require.ErrorIs(
+		t,
+		host.Stop(context.Background()),
+		context.DeadlineExceeded,
+	)
 }

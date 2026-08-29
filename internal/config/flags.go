@@ -325,10 +325,25 @@ var flagSpecs = []flagSpec{
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
 	),
+	boolFlag(
+		"Midnight.ServerEnabled",
+		"midnight-server-enabled",
+		`enable the Midnight gRPC server (requires storageMode "api")`,
+	),
+	boolFlag(
+		"Midnight.ReflectionEnabled",
+		"midnight-reflection-enabled",
+		"enable Midnight gRPC reflection",
+	),
+	boolFlag(
+		"Midnight.AllowInsecureRemote",
+		"midnight-allow-insecure-remote",
+		"allow plaintext Midnight gRPC on a non-loopback address",
+	),
 	uintFlag(
 		"Midnight.Port",
 		"midnight-port",
-		"Midnight gRPC port (0 disables gRPC server)",
+		"Midnight gRPC port (must be non-zero when the server is enabled)",
 	),
 	stringFlag(
 		"Midnight.Host",
@@ -355,7 +370,12 @@ var flagSpecs = []flagSpec{
 		"BarkClientCAFilePath",
 		"bark-client-ca-file-path",
 		"",
-		"path to a PEM CA bundle; client certs verified against it authenticate Bark's destructive DatabaseService RPCs (required whenever the database lifecycle service is enabled)",
+		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+	),
+	stringSliceFlag(
+		"BarkOperatorCertificateFingerprints",
+		"bark-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
 	),
 
 	// History expiry
@@ -714,12 +734,6 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar",
 	),
-	stringToStringFlag(
-		"LeiosVoterPublicKeys",
-		"leios-voter-public-keys",
-		"Leios voter public key registry: pool key hash hex=public key hex",
-	),
-
 	// Mithril
 	boolFlag(
 		"Mithril.Enabled",
@@ -906,29 +920,6 @@ func stringSliceFlag(field, name, help string) flagSpec {
 				return nil
 			}
 			v, err := f.GetStringSlice(name)
-			if err != nil {
-				return err
-			}
-			targetValue(cfg, field).Set(reflect.ValueOf(v))
-			return nil
-		},
-	}
-}
-
-func stringToStringFlag(field, name, help string) flagSpec {
-	return flagSpec{
-		field: field,
-		name:  name,
-		register: func(f *pflag.FlagSet, defaults *Config) {
-			def, _ := defaultValue(defaults, field).
-				Interface().(map[string]string)
-			f.StringToString(name, def, help)
-		},
-		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
-			v, err := f.GetStringToString(name)
 			if err != nil {
 				return err
 			}

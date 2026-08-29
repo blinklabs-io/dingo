@@ -92,9 +92,13 @@ type Ouroboros struct {
 	eventBus       *event.EventBus
 	mempool        mempool.Service
 	ledgerState    *ledger.LedgerState
-	leiosVotes     LeiosVoteHandler
-	leiosPipeline  LeiosPipelineHandler
-	config         OuroborosConfig
+	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
+	// LeiosNotify. It returns validation facts only; this package owns peer,
+	// publication, and relay semantics.
+	leiosAnnouncementLedger LeiosAnnouncementLedger
+	leiosVotes              LeiosVoteHandler
+	leiosPipeline           LeiosPipelineHandler
+	config                  OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
 	registerer *trackingRegisterer
@@ -123,7 +127,16 @@ type Ouroboros struct {
 	// the connection; one earliest-onset timer is retained per connection.
 	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
 	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
-	chainsyncScheduleAt      chainsyncScheduleAtFunc
+	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
+	// gate whether a peer-reported header may influence Genesis chain-selection
+	// density or corroboration before its VRF/KES cryptography (and, once local
+	// state has caught up, leader eligibility) has been checked (dingo #3517).
+	// Derived from ledgerState the same way chainsyncHeaderAdmission is, so
+	// tests exercising a single protocol handler can override either seam
+	// directly instead of standing up a full LedgerState.
+	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
+	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) error
+	chainsyncScheduleAt                    chainsyncScheduleAtFunc
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -136,15 +149,31 @@ type Ouroboros struct {
 	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
+	// Per-peer work-budget limiter for ChainSync FindIntersect
+	chainsyncFindIntersectLimiter *chainsyncFindIntersectRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// leiosEndorserBlockSeq is a monotonic counter assigned to a cache entry
+	// while leiosMu is held, so eviction order reflects actual insertion order
+	// even when a delayed goroutine captured an earlier wall-clock insertedAt
+	// but loses the race for the lock. See leiosEndorserBlockData.seq.
+	leiosEndorserBlockSeq uint64
 	// Waiters blocked in the NtC serving path until an endorser block's
 	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
 	// channel is closed once a complete closure is stored for that key.
 	leiosClosureWaiters map[string][]chan struct{}
+	// Waiters blocked in the NtC serving path, keyed by the serving
+	// connection rather than by endorser block. Closed when that connection
+	// goes away, so a closure wait cannot outlive the connection it serves.
+	// The chainsync server callback owns gouroboros's receive loop while it
+	// runs, so Protocol.DoneChan() cannot close underneath it; the release
+	// signal has to come from connmanager's per-connection ErrorChan watcher
+	// instead (see ReleaseLeiosServeWaiters).
+	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaitersMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -327,10 +356,14 @@ type OuroborosConfig struct {
 	// Ouroboros, connmanager takes ConfigureListeners and OutboundConnOpts,
 	// and peergov takes RequestPeersFromPeer. Ouroboros must therefore be
 	// built before any of them exists.
-	LedgerState    *ledger.LedgerState
-	Mempool        mempool.Service
-	ChainsyncState *chainsync.State
-	PeerGov        *peergov.PeerGovernor
+	LedgerState *ledger.LedgerState
+	// LeiosAnnouncementLedger is the narrow ledger read/validation boundary
+	// required when EnableLeios is true. Node composition supplies the same
+	// LedgerState instance through this restricted surface.
+	LeiosAnnouncementLedger LeiosAnnouncementLedger
+	Mempool                 mempool.Service
+	ChainsyncState          *chainsync.State
+	PeerGov                 *peergov.PeerGovernor
 }
 
 type blockfetchMetrics struct {
@@ -383,15 +416,16 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
-		config:           cfg,
-		registerer:       newTrackingRegisterer(cfg.PromRegistry),
-		eventBus:         cfg.EventBus,
-		connManager:      cfg.ConnManager,
-		ledgerState:      cfg.LedgerState,
-		mempool:          cfg.Mempool,
-		chainsyncState:   cfg.ChainsyncState,
-		peerGov:          cfg.PeerGov,
-		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
+		config:                  cfg,
+		registerer:              newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                cfg.EventBus,
+		connManager:             cfg.ConnManager,
+		ledgerState:             cfg.LedgerState,
+		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
 		),
@@ -403,12 +437,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),
-		futureHeaderResyncCtx:      futureHeaderResyncCtx,
-		futureHeaderResyncCancel:   futureHeaderResyncCancel,
-		blockDecodeCache:           newDecodeCache[gledger.Block](),
-		headerDecodeCache:          newDecodeCache[gledger.BlockHeader](),
-		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
-		leiosClosureWaiters:        make(map[string][]chan struct{}),
+		futureHeaderResyncCtx:    futureHeaderResyncCtx,
+		futureHeaderResyncCancel: futureHeaderResyncCancel,
+		blockDecodeCache:         newDecodeCache[gledger.Block](),
+		headerDecodeCache:        newDecodeCache[gledger.BlockHeader](),
+		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters:      make(map[string][]chan struct{}),
+		leiosServeWaiters: make(
+			map[ouroboros.ConnectionId][]chan struct{},
+		),
 		leiosEBLog:                 newLeiosForgedEBLog(),
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
@@ -418,6 +455,8 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if o.ledgerState != nil {
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
+		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -429,6 +468,14 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			burst,
 		)
 	}
+	// Initialize per-peer ChainSync FindIntersect work-budget limiter.
+	// Unlike TxSubmission, FindIntersect is driven entirely by the peer
+	// rather than paced by us, so this always runs; see the constants'
+	// doc comments in chainsync.go for the sizing rationale.
+	o.chainsyncFindIntersectLimiter = newChainsyncFindIntersectRateLimiter(
+		chainsyncFindIntersectBudgetRate,
+		chainsyncFindIntersectBudgetBurst,
+	)
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
@@ -701,6 +748,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	// Clean up TxSubmission rate limiter state
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
+	}
+	// Clean up ChainSync FindIntersect work-budget limiter state
+	if o.chainsyncFindIntersectLimiter != nil {
+		o.chainsyncFindIntersectLimiter.RemovePeer(connId)
 	}
 	// Clean up Leios vote serving state
 	if o.leiosVotes != nil {

@@ -49,7 +49,7 @@ type ProposalTally struct {
 	CCYesCount     int
 	CCNoCount      int
 	CCAbstainCount int
-	CCTotalCount   int // active, non-resigned members
+	CCTotalCount   int // active, seated, authorized members
 }
 
 // TallyContext carries the inputs needed to tally a proposal.
@@ -78,9 +78,9 @@ type TallyContext struct {
 	DelegatorInactivityOn bool
 }
 
-// CommitteeVotingState is the ratification view of the seated CC:
-// non-expired, non-deleted cold credentials count in the denominator,
-// while only members with a current hot-key authorization may cast votes.
+// CommitteeVotingState is the ratification view of the seated CC. A member
+// counts in the denominator only while its cold credential is seated, its term
+// is current, and it has an active hot-key authorization.
 type CommitteeVotingState struct {
 	ActiveMemberCount     int
 	MemberHotCredentials  []string
@@ -104,14 +104,11 @@ func LoadCommitteeVotingState(
 		return nil, fmt.Errorf("get seated committee members: %w", err)
 	}
 	// Collect non-expired cold credentials so we can batch-check
-	// resignation status. ExpiresEpoch is the first epoch the member
-	// is no longer active; a member with ExpiresEpoch == currentEpoch
-	// has just aged out and must not contribute to the CC denominator
-	// this epoch (matches Cardano-ledger Haskell: active iff
-	// currentEpoch < termEpoch).
+	// resignation status. A member remains active through ExpiresEpoch
+	// (matching Cardano-ledger: currentEpoch <= termEpoch).
 	coldKeys := make([][]byte, 0, len(members))
 	for _, member := range members {
-		if member.ExpiresEpoch <= currentEpoch {
+		if member.ExpiresEpoch < currentEpoch {
 			continue
 		}
 		coldKeys = append(coldKeys, member.ColdCredHash)
@@ -148,7 +145,7 @@ func LoadCommitteeVotingState(
 	}
 
 	return &CommitteeVotingState{
-		ActiveMemberCount:     len(seated),
+		ActiveMemberCount:     len(memberHotCredentials),
 		MemberHotCredentials:  memberHotCredentials,
 		HotCredentialPresence: hotCredentialPresence,
 	}, nil
@@ -305,11 +302,31 @@ func LoadDRepVotingState(
 	}, nil
 }
 
+// addUint64 returns a+b, or an error instead of wrapping when the sum
+// would overflow uint64. Stake values are lovelace amounts; ADA's fixed
+// ~45B supply keeps real sums far below the limit, but ratification
+// arithmetic must fail closed on corrupt or adversarial snapshot data
+// rather than silently wrap into an incorrect tally.
+func addUint64(a, b uint64) (uint64, error) {
+	if b > ^uint64(0)-a {
+		return 0, fmt.Errorf("stake sum overflows uint64: %d + %d", a, b)
+	}
+	return a + b, nil
+}
+
 // tallyDRepVotes sums voting power for regular DReps and the predefined
 // AlwaysAbstain / AlwaysNoConfidence DRep options. Non-voting regular
 // DReps are not counted toward any bucket. The proposal-independent
 // voting power is taken from ctx.DRepState when present (precomputed
 // once per epoch by ProcessEpoch); otherwise it is loaded lazily.
+//
+// Every DRepTotalStake addition below runs before the corresponding
+// DRepYes/No/AbstainStake addition for the same power value, so
+// DRepTotalStake stays >= every bucket at all times: its addUint64 check
+// always fires first (or ties) whenever a bucket-specific addition would
+// have overflowed. The per-bucket checks are kept anyway as defense in
+// depth against a future reordering of this function, not because they are
+// independently reachable today.
 func tallyDRepVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,
@@ -343,7 +360,11 @@ func tallyDRepVotes(
 				Key: drep.Credential,
 			}
 			power := state.Powers[ref.MapKey()]
-			tally.DRepTotalStake += power
+			var err error
+			tally.DRepTotalStake, err = addUint64(tally.DRepTotalStake, power)
+			if err != nil {
+				return fmt.Errorf("drep total stake: %w", err)
+			}
 
 			vote, voted := voteByCred[ref.MapKey()]
 			if !voted {
@@ -351,25 +372,56 @@ func tallyDRepVotes(
 			}
 			switch vote {
 			case models.VoteYes:
-				tally.DRepYesStake += power
+				tally.DRepYesStake, err = addUint64(tally.DRepYesStake, power)
+				if err != nil {
+					return fmt.Errorf("drep yes stake: %w", err)
+				}
 			case models.VoteNo:
-				tally.DRepNoStake += power
+				tally.DRepNoStake, err = addUint64(tally.DRepNoStake, power)
+				if err != nil {
+					return fmt.Errorf("drep no stake: %w", err)
+				}
 			case models.VoteAbstain:
-				tally.DRepAbstainStake += power
+				tally.DRepAbstainStake, err = addUint64(
+					tally.DRepAbstainStake, power,
+				)
+				if err != nil {
+					return fmt.Errorf("drep abstain stake: %w", err)
+				}
 			}
 		}
 	}
 
 	abstainPower := state.AbstainPower
 	noConfidencePower := state.NoConfidencePower
-	tally.DRepTotalStake += abstainPower + noConfidencePower
-	tally.DRepAbstainStake += abstainPower
+	virtualPower, err := addUint64(abstainPower, noConfidencePower)
+	if err != nil {
+		return fmt.Errorf("drep virtual power: %w", err)
+	}
+	tally.DRepTotalStake, err = addUint64(tally.DRepTotalStake, virtualPower)
+	if err != nil {
+		return fmt.Errorf("drep total stake: %w", err)
+	}
+	tally.DRepAbstainStake, err = addUint64(tally.DRepAbstainStake, abstainPower)
+	if err != nil {
+		return fmt.Errorf("drep abstain stake: %w", err)
+	}
 	if noConfidencePower > 0 {
 		if lcommon.GovActionType(tally.ActionType) ==
 			lcommon.GovActionTypeNoConfidence {
-			tally.DRepYesStake += noConfidencePower
+			tally.DRepYesStake, err = addUint64(
+				tally.DRepYesStake, noConfidencePower,
+			)
+			if err != nil {
+				return fmt.Errorf("drep yes stake: %w", err)
+			}
 		} else {
-			tally.DRepNoStake += noConfidencePower
+			tally.DRepNoStake, err = addUint64(
+				tally.DRepNoStake, noConfidencePower,
+			)
+			if err != nil {
+				return fmt.Errorf("drep no stake: %w", err)
+			}
 		}
 	}
 	return nil
@@ -434,7 +486,10 @@ func LoadSPOVotingState(
 	}
 	var total uint64
 	for _, s := range dist {
-		total += uint64(s.TotalStake)
+		total, err = addUint64(total, uint64(s.TotalStake))
+		if err != nil {
+			return nil, fmt.Errorf("spo total stake: %w", err)
+		}
 	}
 	return &SPOVotingState{Dist: dist, TotalStake: total}, nil
 }
@@ -471,15 +526,27 @@ func tallySPOVotes(
 
 	for _, s := range dist {
 		stake := uint64(s.TotalStake)
+		var err error
 
 		if v, voted := voteByPool[string(s.PoolKeyHash)]; voted {
 			switch v {
 			case models.VoteYes:
-				tally.SPOYesStake += stake
+				tally.SPOYesStake, err = addUint64(tally.SPOYesStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo yes stake: %w", err)
+				}
 			case models.VoteNo:
-				tally.SPONoStake += stake
+				tally.SPONoStake, err = addUint64(tally.SPONoStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo no stake: %w", err)
+				}
 			case models.VoteAbstain:
-				tally.SPOAbstainStake += stake
+				tally.SPOAbstainStake, err = addUint64(
+					tally.SPOAbstainStake, stake,
+				)
+				if err != nil {
+					return fmt.Errorf("spo abstain stake: %w", err)
+				}
 			}
 			continue
 		}
@@ -495,12 +562,21 @@ func tallySPOVotes(
 		}
 		switch s.RewardAccountAutoVote {
 		case models.PoolRewardAccountAutoVoteAbstain:
-			tally.SPOAbstainStake += stake
+			tally.SPOAbstainStake, err = addUint64(tally.SPOAbstainStake, stake)
+			if err != nil {
+				return fmt.Errorf("spo abstain stake: %w", err)
+			}
 		case models.PoolRewardAccountAutoVoteNoConfidence:
 			if isNoConfidenceAction {
-				tally.SPOYesStake += stake
+				tally.SPOYesStake, err = addUint64(tally.SPOYesStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo yes stake: %w", err)
+				}
 			} else {
-				tally.SPONoStake += stake
+				tally.SPONoStake, err = addUint64(tally.SPONoStake, stake)
+				if err != nil {
+					return fmt.Errorf("spo no stake: %w", err)
+				}
 			}
 		case models.PoolRewardAccountAutoVoteNone:
 			// No auto-vote: pool contributes only to SPOTotalStake
@@ -510,9 +586,8 @@ func tallySPOVotes(
 	return nil
 }
 
-// tallyCCVotes counts per-member votes restricted to currently active
-// (non-resigned) CC members. CC members vote via their hot credential
-// after key authorization.
+// tallyCCVotes counts per-member votes restricted to currently active,
+// seated, hot-key-authorized CC members.
 func tallyCCVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,

@@ -87,6 +87,13 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 }
 
 func (n *Node) shutdown() error {
+	// Run holds this gate until startup has either completed or rolled back.
+	// In particular, a signal can reach Stop while Run is still unwinding a
+	// failed startup; waiting here keeps the phase-ordered shutdown from
+	// concurrently closing a component the startup stack is stopping.
+	n.startupLifecycleMu.Lock()
+	defer n.startupLifecycleMu.Unlock()
+
 	shutdownStart := time.Now()
 	shutdownTimeout := n.configuredShutdownTimeout()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)

@@ -27,6 +27,16 @@ import (
 // insecureSIDs maps SDDL SID abbreviations and full SID strings to
 // human-readable names for groups that must not have access to key
 // files.
+//
+// Superseded by the handle-based checkOpenFilePermissions chain, which
+// resolves the descriptor from an open handle rather than a path (so it is
+// not open to a TOCTOU swap) and allowlists permitted trustees instead of
+// denylisting known-insecure ones. This path-based chain is reachable only
+// from keyfile_windows_test.go; `run.tests: false` hides those callers from
+// the linter, so the report is accurate about production reachability.
+// Retained until its cases are migrated to the handle-based path.
+//
+//nolint:unused
 var insecureSIDs = map[string]string{
 	"WD":           "Everyone",
 	"S-1-1-0":      "Everyone",
@@ -67,6 +77,16 @@ func isKnownNonGrantACEType(aceType string) bool {
 // the unsafe package, so security descriptor and SID lifetimes stay owned by
 // that package. https://go.dev/issue/73199 was a dangling pointer inside
 // those helpers and was fixed there; hand-rolling them here would reopen it.
+//
+// Superseded by the handle-based checkOpenFilePermissions chain, which
+// resolves the descriptor from an open handle rather than a path (so it is
+// not open to a TOCTOU swap) and allowlists permitted trustees instead of
+// denylisting known-insecure ones. This path-based chain is reachable only
+// from keyfile_windows_test.go; `run.tests: false` hides those callers from
+// the linter, so the report is accurate about production reachability.
+// Retained until its cases are migrated to the handle-based path.
+//
+//nolint:unused
 func checkFilePermissions(path string) error {
 	sd, err := windows.GetNamedSecurityInfo(
 		path,
@@ -85,6 +105,17 @@ func checkFilePermissions(path string) error {
 	return checkSecurityDescriptor(path, sd)
 }
 
+// checkSecurityDescriptor validates a path-derived security descriptor.
+//
+// Superseded by the handle-based checkOpenFilePermissions chain, which
+// resolves the descriptor from an open handle rather than a path (so it is
+// not open to a TOCTOU swap) and allowlists permitted trustees instead of
+// denylisting known-insecure ones. This path-based chain is reachable only
+// from keyfile_windows_test.go; `run.tests: false` hides those callers from
+// the linter, so the report is accurate about production reachability.
+// Retained until its cases are migrated to the handle-based path.
+//
+//nolint:unused
 func checkSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) error {
 	sddl := sd.String()
 	if sddl == "" {
@@ -330,6 +361,16 @@ func sddlSection(sddl, section string) string {
 // checkSDDL parses an SDDL string and returns an error if the DACL
 // contains any allow ACEs granting access to well-known insecure
 // groups.
+//
+// Superseded by the handle-based checkOpenFilePermissions chain, which
+// resolves the descriptor from an open handle rather than a path (so it is
+// not open to a TOCTOU swap) and allowlists permitted trustees instead of
+// denylisting known-insecure ones. This path-based chain is reachable only
+// from keyfile_windows_test.go; `run.tests: false` hides those callers from
+// the linter, so the report is accurate about production reachability.
+// Retained until its cases are migrated to the handle-based path.
+//
+//nolint:unused
 func checkSDDL(path, sddl string) error {
 	// Extract the DACL portion ("D:" up to the next section).
 	daclIdx := strings.Index(sddl, "D:")

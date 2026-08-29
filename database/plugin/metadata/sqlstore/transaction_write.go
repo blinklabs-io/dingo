@@ -194,7 +194,14 @@ RETURNING id`,
 			)
 			producedStakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
-				model := models.UtxoLedgerToModel(produced, point.Slot)
+				model, err := models.UtxoLedgerToModel(produced, point.Slot)
+				if err != nil {
+					return fmt.Errorf(
+						"convert output %d: %w",
+						produced.Id.Index(),
+						err,
+					)
+				}
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
 					id := uint(transactionID)
@@ -365,7 +372,14 @@ RETURNING id`,
 			collateralReturn := transaction.CollateralReturn()
 			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
-				model := models.UtxoLedgerToModel(produced, point.Slot)
+				model, err := models.UtxoLedgerToModel(produced, point.Slot)
+				if err != nil {
+					return fmt.Errorf(
+						"convert output %d: %w",
+						produced.Id.Index(),
+						err,
+					)
+				}
 				id := uint(transactionID)
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
