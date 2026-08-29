@@ -1398,8 +1398,9 @@ selection can recover the canonical branch.
 When the ledger tip is not on the primary chain at all (the fork-beyond-the-
 ledger shape, as opposed to the blob-behind-metadata shape above),
 reconciliation instead prunes the primary chain back to their common
-ancestor with `ChainManager.RewindPrimaryChainToPoint`. That call shares its
-bound and side effects with a live `Chain.Rollback` rather than deleting
+ancestor with `ChainManager.RewindPrimaryChainToPoint`, once
+`ChainManager.SecurityParamConfigured()` reports K is set. That call shares
+its bound and side effects with a live `Chain.Rollback` rather than deleting
 blocks directly: it is rejected outright, without touching any state, when
 the ancestor sits more than the security parameter K behind the chain tip,
 and a rewind it does perform publishes `ChainRollbackEvent`/`ChainForkEvent`
@@ -1409,6 +1410,26 @@ truncating the chain out from under them silently. `reconcileLivePrimaryChainLed
 treats that rejection the same as "no divergence found," leaving the caller's
 existing over-K handling (chainsync re-sync, or connection recycling from the
 plateau watchdog above) to recover instead (issue #3516).
+
+This same reconciliation also runs from `NewLedgerState` at startup, before
+`node.go` (or `internal/node/load.go`'s load-mode composition) has called
+`ChainManager.SetLedger` — the state load that constructs `LedgerState`
+runs first, and `SetLedger` needs that constructed value to read
+`SecurityParam()` from, so it necessarily runs after. Before that call
+`SecurityParamConfigured()` is false, and `RewindPrimaryChainToPoint` would
+return `ErrSecurityParamNotConfigured` rather than silently pruning without
+a bound — which would fail node startup outright over a local,
+already-durable divergence that has nothing to do with an untrusted peer.
+For that case reconciliation instead calls
+`ChainManager.RewindPrimaryChainAtStartup` (`Chain.RollbackUnbounded`
+underneath), which skips only the K-configured and K-exceeded checks and
+otherwise behaves identically — same header/block deletion, same
+`ChainRollbackEvent`/`ChainForkEvent` publish, same iterator wake. Nothing
+reachable from an untrusted peer may ever call the unbounded path: every
+chainsync-driven caller of this reconciliation runs after `SetLedger`, since
+`node.go` constructs the ouroboros layer — and every chainsync-reachable
+goroutine with it — only once `SetLedger` has already returned (issue #3516
+review).
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a

@@ -770,6 +770,52 @@ func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 	)
 }
 
+// TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger covers a
+// startup regression: NewLedgerState calls reconcilePrimaryChainTipWithLedgerTip
+// before node.go's ChainManager.SetLedger has configured the security
+// parameter K (see node.go: state, err := ledger.NewLedgerState(...) runs,
+// then n.chainManager.SetLedger(n.ledgerState) -- in that order). Routing
+// the ancestor rewind through RewindPrimaryChainToPoint unconditionally
+// would return ErrSecurityParamNotConfigured here and fail node startup
+// outright for exactly the local, already-durable divergence this function
+// exists to repair (issue #3516 review). Reconciliation must still land.
+func TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	// Diverge the primary chain exactly as in the tests above.
+	forkHash := testHashBytes("reconcile-undo-presetledger-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Simulate the pre-SetLedger startup window: a brand new
+	// ChainManager over the same database, with SetLedger never
+	// called, the same as NewLedgerState sees it in node.go.
+	presetupCM, err := chain.NewManager(fixture.ls.db, nil)
+	require.NoError(t, err)
+	require.False(t, presetupCM.SecurityParamConfigured())
+	ls.config.ChainManager = presetupCM
+	ls.chain = presetupCM.PrimaryChain()
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
+}
+
 // TestBlocksAboveSlotServesLedgerErrorOnlySubscribers guards the
 // no-subscriber fast path against suppressing decode failures: a consumer
 // watching only ledger.error still needs to see them.

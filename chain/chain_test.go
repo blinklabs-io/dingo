@@ -2348,6 +2348,54 @@ func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
 	}
 }
 
+// TestChainRollbackUnboundedSkipsSecurityParamCheck covers issue #3516's
+// review: RewindPrimaryChainAtStartup (backed by Chain.RollbackUnbounded)
+// must succeed with no security parameter configured at all, since
+// NewLedgerState reconciles the primary chain against the ledger's own
+// applied tip before node.go's ChainManager.SetLedger has run. Routing that
+// startup reconciliation through the bounded Rollback/RewindPrimaryChainToPoint
+// path instead would fail node startup outright over a local, already-durable
+// divergence that has nothing to do with an untrusted peer.
+func TestChainRollbackUnboundedSkipsSecurityParamCheck(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	if cm.SecurityParamConfigured() {
+		t.Fatal("expected security parameter to be unconfigured before SetLedger")
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// This rewind removes 3 blocks (index 6 down to index 3), which would
+	// be rejected by a bounded rollback under a small K -- but no K is
+	// configured at all here, and RollbackUnbounded must not care.
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	if err := c.RollbackUnbounded(rewindPoint); err != nil {
+		t.Fatalf(
+			"unexpected error from unbounded rollback with K unconfigured: %s",
+			err,
+		)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(tip.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"chain tip after unbounded rollback: got %d.%x, wanted %d.%x",
+			tip.Point.Slot, tip.Point.Hash,
+			rewindPoint.Slot, rewindPoint.Hash,
+		)
+	}
+}
+
 func TestChainRollbackEphemeralChainNotRestricted(
 	t *testing.T,
 ) {

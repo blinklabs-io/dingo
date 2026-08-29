@@ -409,20 +409,23 @@ func (cm *ChainManager) loadPrimaryChain() error {
 }
 
 // RewindPrimaryChainToPoint prunes the persistent primary chain back to the
-// specified point. It is used both during startup reconciliation, to discard
-// speculative blob-only blocks that were never committed into the
-// authoritative ledger metadata tip, and by the live primary-chain/ledger
-// divergence reconciler.
+// specified point. It is used by the live primary-chain/ledger divergence
+// reconciler, once ChainManager.SetLedger has configured the security
+// parameter K.
 //
 // It shares its bound and side effects with a live Chain.Rollback rather
 // than pruning blocks directly: the rewind is rejected outright, without
-// touching any state, when it would exceed the configured security
-// parameter K, and a successful rewind publishes ChainRollbackEvent (and a
-// ChainForkEvent when it actually removed blocks) and wakes/marks any chain
-// iterators exactly once, the same signal NtC clients rely on for a live
-// rollback. Previously this deleted blocks directly with no depth bound and
-// no rollback/iterator signal, silently truncating the chain out from under
-// downstream consumers (issue #3516).
+// touching any state, when it would exceed K, and a successful rewind
+// publishes ChainRollbackEvent (and a ChainForkEvent when it actually
+// removed blocks) and wakes/marks any chain iterators exactly once, the
+// same signal NtC clients rely on for a live rollback. Previously this
+// deleted blocks directly with no depth bound and no rollback/iterator
+// signal, silently truncating the chain out from under downstream
+// consumers (issue #3516).
+//
+// Do not call this before SetLedger: it returns ErrSecurityParamNotConfigured
+// rather than silently pruning without a bound. RewindPrimaryChainAtStartup
+// is for that case.
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
@@ -431,6 +434,44 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 		return err
 	}
 	return primaryChain.Rollback(point)
+}
+
+// RewindPrimaryChainAtStartup prunes the persistent primary chain back to
+// the specified point without requiring the security parameter K to be
+// configured, for reconciling the primary chain against the ledger's own
+// applied tip during startup -- before SetLedger has run (issue #3516
+// review). It still publishes ChainRollbackEvent/ChainForkEvent and
+// wakes/marks chain iterators exactly once, the same as
+// RewindPrimaryChainToPoint; it only skips the K bound, since a startup
+// gap between two already-durable local stores is not the untrusted-peer
+// scenario that bound protects against. Never call this for a rollback an
+// untrusted peer requested -- use RewindPrimaryChainToPoint (or
+// SecurityParamConfigured to check readiness first) for anything reachable
+// from chainsync.
+func (cm *ChainManager) RewindPrimaryChainAtStartup(
+	point ocommon.Point,
+) error {
+	primaryChain, err := cm.persistentPrimaryChain()
+	if err != nil {
+		return err
+	}
+	return primaryChain.RollbackUnbounded(point)
+}
+
+// SecurityParamConfigured reports whether SetLedger has configured the
+// security parameter K yet. A caller reachable both before and after
+// startup (e.g. the primary-chain/ledger divergence reconciler) uses this
+// to choose between RewindPrimaryChainAtStartup and
+// RewindPrimaryChainToPoint.
+//
+// This reads securityParam without cm.mutex, matching SetLedger's own
+// unguarded write: both rely on SetLedger completing, during single-
+// threaded startup composition, before any goroutine that could reach
+// either side of this field exists (node.go constructs the ouroboros
+// layer -- and with it every chainsync-reachable goroutine -- only after
+// SetLedger returns).
+func (cm *ChainManager) SecurityParamConfigured() bool {
+	return cm.securityParam > 0
 }
 
 func (cm *ChainManager) persistentPrimaryChain() (*Chain, error) {

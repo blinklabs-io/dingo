@@ -7745,10 +7745,31 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// submitBlockApplyDBTxn's forward-apply commit, which is what
 		// keeps the undo ahead of any forward ledger.tx event on the
 		// same ordered lane regardless of this internal ordering.
-		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-			ancestor,
-		); err != nil {
-			return err
+		//
+		// This reconciler runs both at startup (from NewLedgerState,
+		// before node.go's ChainManager.SetLedger has configured the
+		// security parameter K) and live (always after SetLedger), so
+		// it cannot unconditionally require K the way a peer-driven
+		// rollback must: RewindPrimaryChainToPoint alone would return
+		// ErrSecurityParamNotConfigured and fail node startup outright
+		// for exactly the local, already-durable divergence this
+		// function exists to repair (issue #3516 review).
+		// RewindPrimaryChainAtStartup skips the K bound for that
+		// pre-SetLedger case only -- it is never reachable from an
+		// untrusted peer, since every chainsync-driven path runs after
+		// SetLedger.
+		rewindErr := func() error {
+			if ls.config.ChainManager.SecurityParamConfigured() {
+				return ls.config.ChainManager.RewindPrimaryChainToPoint(
+					ancestor,
+				)
+			}
+			return ls.config.ChainManager.RewindPrimaryChainAtStartup(
+				ancestor,
+			)
+		}()
+		if rewindErr != nil {
+			return rewindErr
 		}
 		ls.emitRollbackTransactionEvents(undoBlocks)
 		return nil
