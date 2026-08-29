@@ -15,9 +15,12 @@
 package devnet
 
 import (
+	"bytes"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -89,6 +92,13 @@ func TestDevNetScriptsSelectComposeProject(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, string(data), "devnet_render_topology",
 			"%s must render worktree-specific topology before bringing containers up", file)
+		require.Contains(t, string(data), "devnet_ports",
+			"%s must derive a worktree-specific host port block, or a second"+
+				" worktree's `docker compose up` fails with"+
+				" \"port is already allocated\"", file)
+		require.Contains(t, string(data), "devnet_compose_up",
+			"%s must bring containers up through devnet_compose_up, which"+
+				" retries a subnet collision instead of failing the run", file)
 	}
 	data, err := os.ReadFile("stop.sh")
 	require.NoError(t, err)
@@ -166,6 +176,201 @@ func TestNetBaseIsStableAndWorktreeSpecific(t *testing.T) {
 	require.Equal(t, "10.0.0", deriveNetBase(t, helper, worktreeA, "10.0.0"))
 }
 
+// _devnet_cidr_overlaps must catch every way two /24-or-wider CIDRs can
+// intersect (identical, one nested inside a wider block), and correctly
+// clear two blocks that plainly don't.
+func TestCidrOverlapDetection(t *testing.T) {
+	helper, err := filepath.Abs("compose-project.sh")
+	require.NoError(t, err)
+
+	cases := []struct {
+		name        string
+		a, b        string
+		wantOverlap bool
+	}{
+		{"identical /24s", "172.20.0.0/24", "172.20.0.0/24", true},
+		{"adjacent /24s", "172.20.0.0/24", "172.21.0.0/24", false},
+		{"candidate inside a wider existing /12", "172.24.5.0/24", "172.16.0.0/12", true},
+		{"unrelated ranges", "172.24.5.0/24", "10.0.0.0/8", false},
+		{"wider candidate containing a narrower existing block", "172.17.0.0/16", "172.17.5.0/24", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := exec.Command(
+				"bash", "-c",
+				`source "$1"; _devnet_cidr_overlaps "$2" "$3"`,
+				"bash", helper, c.a, c.b,
+			)
+			err := cmd.Run()
+			if c.wantOverlap {
+				require.NoError(t, err, "%s and %s should overlap", c.a, c.b)
+			} else {
+				require.Error(t, err, "%s and %s should not overlap", c.a, c.b)
+			}
+		})
+	}
+}
+
+// A hash of the worktree path is only a starting point: two different
+// worktrees can hash to the same /24, and this range isn't reserved for
+// DevNet, so an unrelated Docker network could already sit on it. Stub
+// `docker network ls`/`inspect` to report the exact subnet a fake
+// worktree's hash would otherwise pick, and confirm devnet_net_base walks
+// forward to a different, still-in-range candidate instead of assuming
+// the hash was free.
+func TestNetBaseAvoidsSubnetsDockerReports(t *testing.T) {
+	helper, err := filepath.Abs("compose-project.sh")
+	require.NoError(t, err)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(worktree, "internal", "test", "devnet"), 0o755,
+	))
+
+	unblocked := deriveNetBase(t, helper, worktree, "")
+
+	fakeBin := t.TempDir()
+	writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerNetworkScript(
+		unblocked+".0/24",
+	))
+
+	blocked := deriveNetBaseWithPath(t, helper, worktree, fakeBin)
+	require.NotEqual(t, unblocked, blocked,
+		"a subnet Docker already reports as taken must not be reused")
+	require.Regexp(t, `^172\.(2[4-9]|3[01])\.\d{1,3}$`, blocked)
+}
+
+// devnet_ports must skip a host port something is already listening on,
+// shifting its whole block forward rather than handing out a port that
+// would make `docker compose up` fail with "port is already allocated".
+func TestPortsAvoidOccupiedPorts(t *testing.T) {
+	helper, err := filepath.Abs("compose-project.sh")
+	require.NoError(t, err)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(worktree, "internal", "test", "devnet"), 0o755,
+	))
+
+	unblocked := derivePorts(t, helper, worktree, nil)
+	occupiedPort := unblocked["DEVNET_DINGO1_PORT"]
+
+	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(occupiedPort))
+	require.NoError(t, err)
+	defer listener.Close()
+
+	blocked := derivePorts(t, helper, worktree, nil)
+	for name, port := range blocked {
+		require.NotEqual(t, occupiedPort, port,
+			"%s reused the occupied port %d instead of shifting the block",
+			name, occupiedPort)
+	}
+	require.Equal(t, unblocked["DEVNET_DINGO1_PORT"]+len(unblocked), blocked["DEVNET_DINGO1_PORT"],
+		"the whole block should shift forward by its own size, not just skip one port")
+}
+
+// A caller who has already set even one of the port variables gets full
+// manual control: devnet_ports must not touch any of the others either.
+func TestPortsRespectPartialOverride(t *testing.T) {
+	helper, err := filepath.Abs("compose-project.sh")
+	require.NoError(t, err)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(worktree, "internal", "test", "devnet"), 0o755,
+	))
+
+	ports := derivePorts(t, helper, worktree, map[string]string{
+		"DEVNET_DINGO1_PORT": "9999",
+	})
+	require.Equal(t, 9999, ports["DEVNET_DINGO1_PORT"])
+	_, stillUnset := ports["DEVNET_DINGO2_PORT"]
+	require.False(t, stillUnset,
+		"a partial override must leave every other port var untouched")
+}
+
+// The window between devnet_net_base checking a subnet and `docker compose
+// up` actually creating the network is a real race: two worktrees can both
+// see the same subnet as free and only one wins. devnet_compose_up must
+// recover from that by recomputing DEVNET_NET_BASE (which will now see the
+// winner's network via docker network ls) and retrying, rather than
+// failing the whole run over a race it can detect and correct.
+func TestComposeUpRetriesOnPoolOverlap(t *testing.T) {
+	repoDevnetDir, err := filepath.Abs(".")
+	require.NoError(t, err)
+
+	tempRoot := t.TempDir()
+	fakeBin := filepath.Join(tempRoot, "bin")
+	require.NoError(t, os.Mkdir(fakeBin, 0o755))
+	writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerFailsOnceWithPoolOverlap)
+
+	countFile := filepath.Join(tempRoot, "up-attempts")
+	blockedSubnetFile := filepath.Join(tempRoot, "blocked-subnet")
+	// The fake docker doesn't know, ahead of time, which subnet the hash
+	// will pick, so the script tells it: write out the first pick, then
+	// have `docker network ls/inspect` report it as taken from then on,
+	// modeling the concurrent worktree that won the race.
+	script := `source "$1"
+devnet_render_topology
+before="$DEVNET_NET_BASE"
+printf '%s' "$before" >"${FAKE_BLOCKED_SUBNET_FILE}"
+devnet_compose_up "/fake/compose.yml"
+status=$?
+printf '%s %s %s\n' "$before" "$DEVNET_NET_BASE" "$status"`
+	cmd := exec.Command("bash", "-c", script, "bash", filepath.Join(repoDevnetDir, "compose-project.sh"))
+	cmd.Env = append(os.Environ(),
+		"SCRIPT_DIR="+repoDevnetDir,
+		"TMPDIR="+tempRoot,
+		"COMPOSE_PROJECT_NAME=dingo-devnet-retry-test",
+		"DEVNET_NET_BASE=",
+		"FAKE_UP_COUNT_FILE="+countFile,
+		"FAKE_BLOCKED_SUBNET_FILE="+blockedSubnetFile,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	require.NoError(t, err, "stderr: %s", stderr.String())
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	last := lines[len(lines)-1]
+	fields := strings.Fields(last)
+	require.Len(t, fields, 3, "unexpected final line: %q (full stdout: %q, stderr: %q)",
+		last, out, stderr.String())
+	before, after, status := fields[0], fields[1], fields[2]
+
+	require.Equal(t, "0", status, "devnet_compose_up must succeed once the retry lands on a free subnet")
+	require.NotEqual(t, before, after,
+		"a retry after a pool-overlap failure must pick a different subnet")
+
+	attempts, err := os.ReadFile(countFile)
+	require.NoError(t, err)
+	require.Equal(t, "2", strings.TrimSpace(string(attempts)),
+		"docker compose up should have been tried exactly twice: once to hit the collision, once to succeed")
+}
+
+const fakeDockerFailsOnceWithPoolOverlap = `#!/usr/bin/env bash
+case " $* " in
+  *" up -d "*)
+    count=0
+    [[ -f "${FAKE_UP_COUNT_FILE}" ]] && count=$(cat "${FAKE_UP_COUNT_FILE}")
+    count=$((count + 1))
+    printf '%s' "${count}" >"${FAKE_UP_COUNT_FILE}"
+    if [[ "${count}" -eq 1 ]]; then
+      echo "Error response from daemon: invalid pool request: Pool overlaps with other one on this address space" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *" network ls "*)
+    printf 'busy-net\n'
+    ;;
+  *" network inspect "*)
+    if [[ -f "${FAKE_BLOCKED_SUBNET_FILE:-}" ]]; then
+      printf '%s.0/24\n' "$(cat "${FAKE_BLOCKED_SUBNET_FILE}")"
+    fi
+    ;;
+  *) exit 0 ;;
+esac
+`
+
 // devnet_render_topology must rewrite every checked-in topology/*.json file
 // into DEVNET_TOPOLOGY_DIR with this run's DEVNET_NET_BASE substituted for
 // the hardcoded 172.20.0.x addresses, and must never modify the checked-in
@@ -239,6 +444,94 @@ func deriveNetBase(
 	out, err := cmd.Output()
 	require.NoError(t, err)
 	return string(out)
+}
+
+// deriveNetBaseWithPath is deriveNetBase with an extra directory prepended
+// to PATH, so a stubbed `docker` (see fakeDockerNetworkScript) is used
+// instead of the real one.
+func deriveNetBaseWithPath(
+	t *testing.T,
+	helper string,
+	worktree string,
+	extraPathDir string,
+) string {
+	t.Helper()
+	scriptDir := filepath.Join(worktree, "internal", "test", "devnet")
+	cmd := exec.Command(
+		"bash", "-c",
+		`source "$1"; devnet_net_base; printf '%s' "$DEVNET_NET_BASE"`,
+		"bash", helper,
+	)
+	cmd.Env = append(os.Environ(),
+		"SCRIPT_DIR="+scriptDir,
+		"DEVNET_NET_BASE=",
+		"PATH="+extraPathDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return string(out)
+}
+
+// fakeDockerNetworkScript is a stand-in `docker` that reports a single
+// existing network with the given subnet — enough for
+// _devnet_used_subnets, which only calls `docker network ls` and
+// `docker network inspect`.
+func fakeDockerNetworkScript(subnet string) string {
+	return "#!/usr/bin/env bash\n" +
+		"case \"$1 $2\" in\n" +
+		"  \"network ls\") printf 'busy-net\\n' ;;\n" +
+		"  \"network inspect\") printf '" + subnet + "\\n' ;;\n" +
+		"esac\n"
+}
+
+var devnetPortVarNames = []string{
+	"DEVNET_DINGO1_PORT", "DEVNET_DINGO2_PORT", "DEVNET_DINGO3_PORT",
+	"DEVNET_DINGO_RELAY_PORT", "DEVNET_DINGO1_NTC_PORT",
+	"DEVNET_DINGO2_NTC_PORT", "DEVNET_DINGO3_NTC_PORT",
+	"DEVNET_DINGO_RELAY_NTC_PORT", "DEVNET_DINGO_PORT",
+	"DEVNET_CARDANO_PORT", "DEVNET_RELAY_PORT",
+}
+
+// derivePorts sources compose-project.sh with SCRIPT_DIR pointed at a fake
+// worktree, calls devnet_ports, and returns whichever of the 11 port vars
+// ended up set (only the caller-supplied ones, if any override is given
+// and devnet_ports therefore leaves the rest alone).
+func derivePorts(
+	t *testing.T,
+	helper string,
+	worktree string,
+	overrides map[string]string,
+) map[string]int {
+	t.Helper()
+	scriptDir := filepath.Join(worktree, "internal", "test", "devnet")
+	script := `source "$1"; devnet_ports
+for v in "${_DEVNET_PORT_VARS[@]}"; do
+  if [[ -n "${!v:-}" ]]; then printf '%s=%s\n' "$v" "${!v}"; fi
+done`
+	cmd := exec.Command("bash", "-c", script, "bash", helper)
+	env := append(os.Environ(), "SCRIPT_DIR="+scriptDir)
+	for _, name := range devnetPortVarNames {
+		env = append(env, name+"=")
+	}
+	for k, v := range overrides {
+		env = append(env, k+"="+v)
+	}
+	cmd.Env = env
+	out, err := cmd.Output()
+	require.NoError(t, err)
+
+	result := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		require.True(t, ok, "malformed output line %q", line)
+		port, err := strconv.Atoi(value)
+		require.NoError(t, err)
+		result[name] = port
+	}
+	return result
 }
 
 // deriveComposeProject sources compose-project.sh with SCRIPT_DIR pointed

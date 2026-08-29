@@ -46,6 +46,7 @@ COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 source "${SCRIPT_DIR}/compose-project.sh"
 devnet_compose_project
 devnet_render_topology
+devnet_ports
 
 # Parse arguments
 KEEP_UP=false
@@ -216,7 +217,8 @@ log "Building DevNet Docker images..."
 docker compose -f "${COMPOSE_FILE}" build
 
 log "Starting DevNet containers..."
-docker compose -f "${COMPOSE_FILE}" up -d
+devnet_compose_up "${COMPOSE_FILE}"
+log "Compose network (final): ${DEVNET_NET_BASE}.0/24"
 
 # --------------------------------------------------------------------------- #
 # Wait for all nodes to become healthy
