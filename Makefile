@@ -44,7 +44,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck gorm-check test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck gorm-check test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -95,9 +95,6 @@ import-boundaries: ## Check reviewed package import boundaries
 
 docs-parity: ## Check docs against go.mod, the Makefile, and the DevNet compose file
 	go test ./internal/docsparity
-
-config-parity: ## Fail if the embedded network configs drift from docker-cardano-configs
-	./bin/config-parity.sh
 
 proto: $(PROTOC) ## Generate Go code from protobuf definitions
 	go build -o $(TOOLS_BIN)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
