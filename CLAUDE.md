@@ -31,6 +31,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 make lint         # import-boundaries, all modules, windows, nilaway, modernize
 modernize --fix ./...   # optional: auto-apply modernize's findings
 make docs-parity
+make config-parity  # embedded network configs vs docker-cardano-configs; needs network
 make golines
 make sql-check    # only when database/sql queries or sqlc.yaml changed
 make gorm-check

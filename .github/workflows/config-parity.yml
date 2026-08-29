@@ -1,0 +1,45 @@
+name: config-parity
+
+# The network configs under config/cardano/ exist twice: embedded in the
+# binary here (config/cardano/embed.go), and in
+# blinklabs-io/docker-cardano-configs, which the release image ships as
+# /opt/cardano/config/ (see the cardano-configs stage in the Dockerfile) and
+# which downstream tooling copies out of the image to generate a devnet. The
+# same network name must mean the same chain on both paths, so the two copies
+# have to stay byte-identical.
+#
+# A pull_request run catches drift introduced here. Drift introduced in
+# docker-cardano-configs produces no event in this repository, so the weekly
+# schedule covers that direction.
+on:
+  pull_request:
+  schedule:
+    - cron: '0 7 * * 1' # Monday 07:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  config-parity:
+    name: config-parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: blinklabs-io/docker-cardano-configs
+          ref: main
+          path: .cardano-configs
+          persist-credentials: false
+      - name: config-parity
+        # Run through the Makefile so this CI check and `make config-parity`
+        # cannot drift apart. CARDANO_CONFIGS_DIR points the script at the
+        # checkout above instead of having it clone the repository itself.
+        env:
+          CARDANO_CONFIGS_DIR: ${{ github.workspace }}/.cardano-configs
+        run: make config-parity
