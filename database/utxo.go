@@ -718,6 +718,7 @@ func (d *Database) UtxosByAddressWithOrdering(
 			Slot:       last.TxSlot,
 			BlockIndex: last.TxBlockIndex,
 			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
 		}
 	}
 	return ret, nil
@@ -748,7 +749,8 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 	if q == nil {
 		return nil, models.ErrNilUtxoWithOrderingQuery
 	}
-	if q.MatchAllAddresses || !models.RequiresExactAddressFilter(q.AddressPatterns) {
+	if q.MatchAllAddresses ||
+		!models.RequiresExactAddressFilter(q.AddressPatterns) {
 		scanQuery := *q
 		scanQuery.SkipAssets = true
 		utxos, err := d.utxoStore().GetUtxosByAddressWithOrdering(
@@ -760,7 +762,10 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 		}
 		refs := make([]models.UtxoId, len(utxos))
 		for i := range utxos {
-			refs[i] = models.UtxoId{Hash: utxos[i].TxId, Idx: utxos[i].OutputIdx}
+			refs[i] = models.UtxoId{
+				Hash: utxos[i].TxId,
+				Idx:  utxos[i].OutputIdx,
+			}
 		}
 		return refs, nil
 	}
@@ -844,7 +849,8 @@ func (d *Database) CountUtxosByAddressWithOrdering(
 	if q == nil {
 		return 0, models.ErrNilUtxoWithOrderingQuery
 	}
-	count, err := d.utxoStore().CountUtxosByAddressWithOrdering(q, txn.Metadata())
+	count, err := d.utxoStore().
+		CountUtxosByAddressWithOrdering(q, txn.Metadata())
 	if err != nil {
 		return 0, fmt.Errorf("count utxos by address: %w", err)
 	}

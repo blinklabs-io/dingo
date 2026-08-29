@@ -383,20 +383,23 @@ func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 		assert.Equal(t, uint64(30), page[len(page)-1].TxSlot)
 	})
 
-	t.Run("descending page returns newest first without a full reverse", func(t *testing.T) {
-		page, err := db.UtxosByAddressWithOrdering(
-			&models.UtxoWithOrderingQuery{
-				AddressPatterns: query.AddressPatterns,
-				Limit:           10,
-				Descending:      true,
-			},
-			nil,
-		)
-		require.NoError(t, err)
-		require.Len(t, page, 10)
-		assert.Equal(t, uint64(total), page[0].TxSlot)
-		assert.Equal(t, uint64(total-9), page[len(page)-1].TxSlot)
-	})
+	t.Run(
+		"descending page returns newest first without a full reverse",
+		func(t *testing.T) {
+			page, err := db.UtxosByAddressWithOrdering(
+				&models.UtxoWithOrderingQuery{
+					AddressPatterns: query.AddressPatterns,
+					Limit:           10,
+					Descending:      true,
+				},
+				nil,
+			)
+			require.NoError(t, err)
+			require.Len(t, page, 10)
+			assert.Equal(t, uint64(total), page[0].TxSlot)
+			assert.Equal(t, uint64(total-9), page[len(page)-1].TxSlot)
+		},
+	)
 
 	t.Run("offset past the end returns an empty page", func(t *testing.T) {
 		page, err := db.UtxosByAddressWithOrdering(
@@ -585,7 +588,9 @@ func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
 // match as UtxosByAddressWithOrdering: it returns exactly the enterprise
 // address's own UTxOs, in ascending order, excluding pointer-address
 // siblings that share its payment credential.
-func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(t *testing.T) {
+func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(
+	t *testing.T,
+) {
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -636,7 +641,9 @@ func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(t *testing
 // proves the keyset-cursor continuation across batches neither drops nor
 // duplicates a match -- the risk a batched scan carries that a single
 // unbounded fetch does not.
-func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(t *testing.T) {
+func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(
+	t *testing.T,
+) {
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -773,7 +780,12 @@ func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 	)
 	got := make(map[string]bool, len(refs))
 	for _, ref := range refs {
-		require.False(t, got[string(ref.Hash)], "duplicate ref for tx %x", ref.Hash)
+		require.False(
+			t,
+			got[string(ref.Hash)],
+			"duplicate ref for tx %x",
+			ref.Hash,
+		)
 		got[string(ref.Hash)] = true
 	}
 	assert.Equal(t, wantHashes, got)
@@ -859,6 +871,94 @@ INSERT INTO utxo (
 	)
 	require.NoError(t, err)
 	assert.Len(t, refs, total)
+}
+
+// TestUtxosByAddressWithOrderingSnapshotTieBreak seeds enough
+// snapshot-imported candidates sharing one slot, block index, and output
+// index -- 118 pointer-address siblings followed by 12 exact-address
+// matches, all tied and ordered only by tx_id -- that UtxosByAddressWithOrdering's
+// exact-address page-fill scan (batch size 128) splits the 12 matches
+// across its batch boundary: the first batch's last row and the second
+// batch's first candidates all tie on slot/block index/output index. The
+// keyset cursor can only resume past that boundary without revisiting it by
+// carrying the last row's tx_id.
+func TestUtxosByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0x4d}, lcommon.AddressHashSize)
+	target, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	sibling := exactAddressTestPointer(t, payment, 0x01)
+
+	const (
+		importSlot   = 7
+		siblingCount = 118
+		matchCount   = 12
+	)
+	wantHashes := make(map[string]bool, matchCount)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		seedRow := func(addr lcommon.Address, txID uint32) error {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], txID)
+			seedExactAddressImportedUtxo(t, raw, addr, importSlot, 0, txHash)
+			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr,
+				OutputAmount:  1_000_000,
+			})
+			if err != nil {
+				return err
+			}
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+		}
+		txID := uint32(1)
+		for range siblingCount {
+			if err := seedRow(sibling, txID); err != nil {
+				return err
+			}
+			txID++
+		}
+		for range matchCount {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], txID)
+			wantHashes[string(txHash)] = true
+			if err := seedRow(target, txID); err != nil {
+				return err
+			}
+			txID++
+		}
+		return nil
+	}))
+
+	pattern, err := models.ExactUtxoAddressPattern(target)
+	require.NoError(t, err)
+	got, err := db.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           matchCount,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(
+		t, got, matchCount,
+		"tied snapshot-imported matches must not be dropped across the "+
+			"scan's batch boundary",
+	)
+	seen := make(map[string]bool, len(got))
+	for _, u := range got {
+		require.False(
+			t, seen[string(u.TxId)],
+			"duplicate UTxO for tx %x", u.TxId,
+		)
+		seen[string(u.TxId)] = true
+		require.True(t, wantHashes[string(u.TxId)], "unexpected tx %x", u.TxId)
+	}
 }
 
 // TestUtxosByAddressLoadsAssets proves GetUtxosByAddress still attaches
