@@ -16,7 +16,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
@@ -24,7 +23,6 @@ import (
 
 func versionRun(_ *cobra.Command, _ []string) {
 	fmt.Println(version.GetVersionString())
-	os.Exit(0)
 }
 
 func versionCommand() *cobra.Command {

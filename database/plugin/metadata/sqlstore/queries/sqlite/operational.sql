@@ -298,24 +298,28 @@ WHERE deleted_slot > ?;
 -- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, calculation_version,
+    delegator_count, captured_slot, leios_key_public,
+    leios_key_possession_proof, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, calculation_version,
+    delegator_count, captured_slot, leios_key_public,
+    leios_key_possession_proof, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
     delegator_count = excluded.delegator_count,
     captured_slot = excluded.captured_slot,
+    leios_key_public = excluded.leios_key_public,
+    leios_key_possession_proof = excluded.leios_key_possession_proof,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -325,6 +329,7 @@ RETURNING id;
 -- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
+       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -333,6 +338,7 @@ WHERE epoch = ? AND snapshot_type = ? AND pool_key_hash = ?;
 -- name: GetPoolStakeSnapshotsByEpoch :many
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
+       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -421,6 +427,10 @@ ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     authoritative = excluded.authoritative,
     calculation_version = excluded.calculation_version
 RETURNING id;
+
+-- name: DeleteProvisionalRewardSnapshot :exec
+DELETE FROM reward_snapshot
+WHERE epoch = ? AND snapshot_type = ? AND authoritative = false;
 
 -- name: InsertRewardSnapshot :one
 INSERT INTO reward_snapshot (
@@ -1148,3 +1158,49 @@ SELECT COUNT(*) AS count,
        CAST(COALESCE(MAX(slot), 0) AS INTEGER) AS last_slot
 FROM block_nonce
 WHERE slot >= ? AND slot <= ?;
+
+-- name: UpsertTokenRegistryEntry :exec
+-- A later sync is authoritative for the whole subject: every property column
+-- is overwritten from the incoming row, so a property the registry has since
+-- dropped stops being served rather than lingering from an earlier sync.
+INSERT INTO token_registry_entry (
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject) DO UPDATE SET
+    name = excluded.name,
+    ticker = excluded.ticker,
+    description = excluded.description,
+    url = excluded.url,
+    logo = excluded.logo,
+    decimals = excluded.decimals,
+    updated_at = excluded.updated_at;
+
+-- name: GetTokenRegistryEntry :one
+SELECT
+    id,
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+FROM token_registry_entry
+WHERE subject = ?;
+
+-- name: PruneTokenRegistryEntriesStaleBefore :execrows
+-- Reconciles the table against a completed snapshot: every row the snapshot
+-- carried was stamped with its timestamp, so anything older was not in the
+-- snapshot and is no longer published upstream.
+DELETE FROM token_registry_entry
+WHERE updated_at < ?;

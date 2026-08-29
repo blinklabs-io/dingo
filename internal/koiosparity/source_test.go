@@ -16,6 +16,8 @@ package koiosparity
 
 import (
 	"context"
+	"encoding/hex"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -141,8 +143,8 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 }
 
 // TestDatabaseSourceGetPoolEpochDataMap mirrors DingoDB's own
-// GetPoolEpochDataMap semantics: DelegatedStake/DelegatorCount come from
-// stakeEpoch, BlocksProduced/FixedCost/Margin from paramEpoch, and
+// GetPoolEpochDataMap semantics: DelegatedStake/DelegatorCount/FixedCost/
+// Margin come from stakeEpoch, BlocksProduced from paramEpoch, and
 // MemberRewardTotal from stakeEpoch's reward_pool_output -- each field
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
@@ -156,13 +158,16 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 		PoolKeyHash:    poolKeyHash,
 		DelegatedStake: types.Uint64(500_000),
 		DelegatorCount: 3,
+		Cost:           types.Uint64(340_000_000),
 	}).Error)
 	blocksProduced := uint64(7)
+	// The param-epoch row owns blocks_produced only; its cost belongs to a
+	// later epoch and must not surface (dingo #3484).
 	require.NoError(t, gormDB.Create(&models.RewardPoolInput{
 		Epoch:          12,
 		PoolKeyHash:    poolKeyHash,
 		BlocksProduced: &blocksProduced,
-		Cost:           types.Uint64(340_000_000),
+		Cost:           types.Uint64(999_000_000),
 	}).Error)
 	require.NoError(t, gormDB.Create(&models.RewardPoolOutput{
 		Epoch:             10,
@@ -331,4 +336,80 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 	accounts, err = source.GetRewardAccountOutputs(context.Background(), epoch)
 	require.NoError(t, err)
 	require.Empty(t, accounts)
+}
+
+// TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams is the
+// in-process counterpart of dingo_db_test.go's
+// TestGetPoolEpochDataMapTracksChangingPoolParams. Both implementations of
+// RewardParitySource must resolve the same field-to-epoch mapping, and only
+// this one runs inside the node — the standalone CLI reads SQLite directly.
+//
+// The two drifted once: dingo #3484 was fixed in DingoDB while
+// DatabaseSource kept reading Margin/FixedCost from the param epoch, so the
+// unit tests passed while a live preview replay still failed at epoch 13.
+func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
+	t *testing.T,
+) {
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	const (
+		koiosEpoch = uint64(13)
+		stakeEpoch = koiosEpoch - 1
+		paramEpoch = koiosEpoch + 1
+	)
+	poolHash := testPoolKeyHash(t, 0x11)
+	blocksAtParamEpoch := uint64(10)
+	meta := db.Metadata()
+
+	// Stake epoch (12): the parameters in force for Koios epoch 13.
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(5_000_000),
+		DelegatorCount: 1,
+		Cost:           types.Uint64(411_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 20)},
+	}}, nil))
+
+	// Param epoch (14): owns blocks_produced for epoch 13. Its own cost and
+	// margin belong to a later epoch and must not surface.
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+		Epoch:          paramEpoch,
+		PoolKeyHash:    poolHash,
+		Cost:           types.Uint64(412_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 25)},
+		BlocksProduced: &blocksAtParamEpoch,
+	}}, nil))
+
+	m, err := source.GetPoolEpochDataMap(
+		context.Background(),
+		stakeEpoch,
+		paramEpoch,
+	)
+	require.NoError(t, err)
+
+	data, ok := m[hex.EncodeToString(poolHash)]
+	require.True(t, ok)
+	require.Equal(
+		t,
+		"411000000",
+		data.FixedCost,
+		"the cost in force for epoch %d is on the stake-epoch row",
+		koiosEpoch,
+	)
+	require.Equal(
+		t,
+		"1/20",
+		data.Margin,
+		"the margin in force for epoch %d is on the stake-epoch row",
+		koiosEpoch,
+	)
+	require.Equal(
+		t,
+		blocksAtParamEpoch,
+		data.BlocksProduced,
+		"blocks_produced still comes from the param epoch",
+	)
 }

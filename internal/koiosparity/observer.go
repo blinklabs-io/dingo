@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -65,11 +66,31 @@ type ObserverConfig struct {
 	// (see dingo.KoiosParityConfig / DefaultKoiosParityConfig), not that
 	// non-strict mode is forbidden to exist.
 	Strict bool
+	// AccountsEnabled runs #3097's per-account exact-parity fetch+check
+	// phase (FetchAccountRewardsForEpoch / CompareAccountEpoch) alongside
+	// the existing epoch-aggregate/pool phases, for every epoch this
+	// observer processes. Unlike the standalone CLI's opt-in-only default
+	// (see FetchConfig.AccountsEnabled/CheckConfig.AccountsEnabled), the
+	// in-process observer is the operationally-real, continuously-driven
+	// path #3098 exists to make possible, so this defaults to true at the
+	// dingo.KoiosParityConfig/DefaultKoiosParityConfig level (not here --
+	// ObserverConfig itself has no zero-value magic, matching Strict's own
+	// pattern) -- set false explicitly to keep the observer pool-level-only,
+	// e.g. to bound Koios request volume on a resource-constrained
+	// deployment.
+	AccountsEnabled bool
 	// GraceHours is forwarded to CheckEpoch/CompareEpochAggregates: the
 	// window after an epoch closes during which a missing Dingo-side row is
 	// reference/sync lag, not a failure. 0 selects the check package's own
 	// default handling (no grace window).
 	GraceHours int
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request by both address count and encoded
+	// body size. <=0 means "use the package default"
+	// (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault). Unused when
+	// AccountsEnabled is false.
+	AccountChunkSize     int
+	AccountChunkMaxBytes int
 	// FatalFunc is invoked at most once, with a non-nil error, the first
 	// time Strict validation fails. Wired by the caller (typically
 	// node.go's n.cancel) to stop/cancel the driving Dingo instance. May be
@@ -219,7 +240,10 @@ func (o *Observer) Start(ctx context.Context) error {
 		// epochs strictly before it are safely closed — mirrors Fetch's own
 		// "tipEpoch - 1" bound.
 		throughEpoch := latest - 1
-		needing, err := o.cache.GetEpochsNeedingCheck(o.cfg.Network)
+		needing, err := o.cache.GetEpochsNeedingCheck(
+			o.cfg.Network,
+			o.cfg.AccountsEnabled,
+		)
 		if err != nil {
 			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 		}
@@ -237,6 +261,34 @@ func (o *Observer) Start(ctx context.Context) error {
 			o.pending[e] = struct{}{}
 		}
 		o.mu.Unlock()
+
+		// An epoch whose pool data/check status is already fine can still be
+		// missing #3097's per-account coverage entirely (e.g. it was fetched
+		// before AccountsEnabled was turned on) — neither GetEpochsNeedingCheck
+		// nor GetUncachedEpochs above would ever flag it purely for that
+		// reason once accountsEnabled's own staleness branch is satisfied by a
+		// prior check. Add those epochs to the backlog too, independent of why
+		// GetEpochsNeedingCheck/GetUncachedEpochs may or may not have already
+		// selected them, the same way fetchIfNeeded's fetchAccountsIfNeeded
+		// gates on account coverage independently of fetchPoolsIfNeeded.
+		if o.cfg.AccountsEnabled {
+			missingAccounts, err := o.cache.GetEpochsMissingAccountCoverage(
+				o.cfg.Network,
+				0,
+				throughEpoch,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"seed koiosparity observer backlog: %w",
+					err,
+				)
+			}
+			o.mu.Lock()
+			for _, e := range missingAccounts {
+				o.pending[e] = struct{}{}
+			}
+			o.mu.Unlock()
+		}
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -402,6 +454,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.cfg.Network,
 		epoch,
 		o.cfg.GraceHours,
+		o.cfg.AccountsEnabled,
 		o.cfg.Logger,
 	)
 	if err != nil {
@@ -486,7 +539,25 @@ func (o *Observer) reportError(epoch uint64, err error) {
 // fetchIfNeeded fetches Koios reference data for epoch only if it is not
 // already cached — a historical epoch's Koios reference never changes, so a
 // re-request (e.g. after a Dingo-side rollback re-signals the same epoch)
-// would just be wasted work.
+// would just be wasted work. It fetches the pool-level reference data first
+// (fetchPoolsIfNeeded), then — when cfg.AccountsEnabled — the per-account
+// reference data (fetchAccountsIfNeeded, #3097), since the two are gated by
+// independent cache state (koios_epoch_info presence vs.
+// koios_account_coverage completeness) and either can need (re)fetching
+// independently of the other (e.g. AccountsEnabled being turned on after
+// pool-level data for this epoch was already fetched).
+func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
+	if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
+		return err
+	}
+	if !o.cfg.AccountsEnabled {
+		return nil
+	}
+	return o.fetchAccountsIfNeeded(ctx, epoch)
+}
+
+// fetchPoolsIfNeeded fetches Koios pool/epoch-info/totals reference data for
+// epoch only if it is not already cached.
 //
 // The pool universe (poolIDs/firstActiveEpochs) is resolved at most once
 // across this call's whole retry loop and reused via FetchEpochWithPools:
@@ -499,7 +570,7 @@ func (o *Observer) reportError(epoch uint64, err error) {
 // so a transient failure fetching the pool universe is retried exactly like
 // a transient per-epoch fetch failure would be, instead of failing the whole
 // call on the first attempt.
-func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
+func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 	uncached, err := o.cache.GetUncachedEpochs(o.cfg.Network, epoch, epoch)
 	if err != nil {
 		return fmt.Errorf("check cache for epoch %d: %w", epoch, err)
@@ -560,6 +631,104 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 	}
 	return fmt.Errorf(
 		"epoch %d: fetch failed after %d attempt(s): %w",
+		epoch, o.cfg.FetchRetryAttempts, lastErr,
+	)
+}
+
+// fetchAccountsIfNeeded fetches #3097's per-account Koios reference data for
+// epoch only if koios_account_coverage is not already marked complete for
+// it — independent of fetchPoolsIfNeeded's own koios_epoch_info gate, so
+// turning AccountsEnabled on after pool-level data was already fetched for
+// this epoch still triggers an account fetch rather than being silently
+// skipped.
+//
+// Koios's full account-address list is resolved at most once across this
+// call's retry loop (mirroring fetchPoolsIfNeeded's identical pool-universe
+// resolution pattern) and unioned with Dingo's own known addresses via
+// BuildAccountAddressUniverse on every attempt (cheap: a single in-process
+// RewardParitySource call, not a Koios request). A cached pre-staking marker
+// returns before both the coverage lookup and account-universe request: those
+// epochs have no account parity surface and intentionally no coverage row.
+func (o *Observer) fetchAccountsIfNeeded(
+	ctx context.Context,
+	epoch uint64,
+) error {
+	info, infoErr := o.cache.GetEpochInfo(o.cfg.Network, epoch)
+	if infoErr != nil && !errors.Is(infoErr, sql.ErrNoRows) {
+		return fmt.Errorf("get epoch info before account fetch: %w", infoErr)
+	}
+	if info != nil && info.PreStaking {
+		return nil
+	}
+
+	cov, covErr := o.cache.GetAccountCoverage(o.cfg.Network, epoch)
+	// sql.ErrNoRows ("no fetch attempted yet") is legitimately incomplete
+	// coverage and falls through to the fetch loop below; any other error is
+	// a genuine cache/DB failure and must propagate rather than being
+	// silently treated as "needs fetching".
+	if covErr != nil && !errors.Is(covErr, sql.ErrNoRows) {
+		return fmt.Errorf("get account coverage: %w", covErr)
+	}
+	if covErr == nil && cov != nil && cov.Complete {
+		return nil
+	}
+
+	var koiosAddrs []string
+	var addrsResolved bool
+	var lastErr error
+	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
+		if !addrsResolved {
+			addrs, err := ResolveKoiosAccountUniverse(ctx, o.koios)
+			if err != nil {
+				if errors.Is(err, ErrKoiosPermanent) {
+					return err
+				}
+				lastErr = err
+				if attempt == o.cfg.FetchRetryAttempts-1 {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(o.cfg.FetchRetryDelay):
+				}
+				continue
+			}
+			koiosAddrs = addrs
+			addrsResolved = true
+		}
+		_, err := FetchEpochAccountsWithAddrs(
+			ctx,
+			o.koios,
+			o.cache,
+			o.cfg.Network,
+			epoch,
+			o.cfg.Source,
+			koiosAddrs,
+			o.cfg.GraceHours,
+			o.cfg.AccountChunkSize,
+			o.cfg.AccountChunkMaxBytes,
+			false,
+			o.cfg.Logger,
+		)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, ErrKoiosPermanent) {
+			return err
+		}
+		lastErr = err
+		if attempt == o.cfg.FetchRetryAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(o.cfg.FetchRetryDelay):
+		}
+	}
+	return fmt.Errorf(
+		"epoch %d: account fetch failed after %d attempt(s): %w",
 		epoch, o.cfg.FetchRetryAttempts, lastErr,
 	)
 }

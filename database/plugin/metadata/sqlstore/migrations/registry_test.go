@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 2)
+	require.Len(t, registry, 5)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -43,6 +43,89 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[1].SQL["sqlite"].Expand,
 		"ALTER TABLE `pool` ADD COLUMN `leios_key_public` blob",
 	)
+	require.Equal(t, 3, registry[2].Version)
+	require.Equal(t, "token-registry-metadata", registry[2].Name)
+	require.Contains(
+		t,
+		registry[2].SQL["sqlite"].Expand,
+		"CREATE UNIQUE INDEX IF NOT EXISTS `idx_token_registry_entry_subject`"+
+			" ON `token_registry_entry`(`subject`)",
+	)
+	require.Equal(t, 4, registry[3].Version)
+	require.Equal(t, "account-import-baseline", registry[3].Name)
+	require.Len(t, registry[3].SQL["sqlite"].Expand, 2)
+	require.Contains(
+		t,
+		registry[3].SQL["sqlite"].Expand[0],
+		"CREATE TABLE IF NOT EXISTS `account_import_baseline`",
+	)
+	require.Contains(
+		t,
+		registry[3].SQL["sqlite"].Expand[1],
+		"INSERT INTO `account_import_baseline`",
+	)
+	require.Equal(t, 5, registry[4].Version)
+	require.Equal(t, "leios-snapshot-keys", registry[4].Name)
+	require.Equal(t, []string{
+		"ALTER TABLE `pool_stake_snapshot` ADD COLUMN `leios_key_public` blob",
+		"ALTER TABLE `pool_stake_snapshot` ADD COLUMN `leios_key_possession_proof` blob",
+	}, registry[4].SQL["sqlite"].Expand)
+}
+
+// TestMySQLRegistryPrefixesAccountBaselinePrimaryKey guards the v4 migration's
+// dialect hazard: `staking_key` is a blob in the composite primary key, and
+// MySQL rejects a key over a VARBINARY column without a prefix length. The
+// backfill statement in the same migration must not be rewritten at all.
+func TestMySQLRegistryPrefixesAccountBaselinePrimaryKey(t *testing.T) {
+	t.Parallel()
+	registry, err := MySQLRegistry()
+	require.NoError(t, err)
+	expand := registry[3].SQL["mysql"].Expand
+	require.Len(t, expand, 2)
+	require.Contains(t, expand[0], "`staking_key` blob NOT NULL")
+	require.Contains(t, expand[0], "`staking_key`(255)")
+	require.NotContains(t, expand[1], "ON DUPLICATE KEY")
+	require.Contains(t, expand[1], "LEFT JOIN `account_import_baseline`")
+	// The certificate-history filters must survive as plain subqueries: they
+	// read tables other than the INSERT's target, which is what keeps MySQL
+	// from raising error 1093, and no key prefix belongs in a predicate.
+	require.Equal(t, 10, strings.Count(expand[1], "NOT EXISTS (SELECT 1 FROM"))
+	require.NotContains(t, expand[1], "cert.`staking_key`(255)")
+}
+
+// TestPostgresRegistryTypesAccountBaseline checks the v4 table picks up the
+// PostgreSQL type translation, and that the backfill's identifiers are
+// requoted rather than left as MySQL backticks.
+func TestPostgresRegistryTypesAccountBaseline(t *testing.T) {
+	t.Parallel()
+	registry, err := PostgresRegistry()
+	require.NoError(t, err)
+	expand := registry[3].SQL["postgres"].Expand
+	require.Len(t, expand, 2)
+	require.Contains(t, expand[0], `"staking_key" BYTEA NOT NULL`)
+	require.Contains(t, expand[0], `"active" BOOLEAN NOT NULL DEFAULT true`)
+	require.NotContains(t, expand[0], "`")
+	require.NotContains(t, expand[1], "`")
+	require.Contains(t, expand[1], `LEFT JOIN "account_import_baseline"`)
+	require.Equal(t, 10, strings.Count(expand[1], "NOT EXISTS (SELECT 1 FROM"))
+	require.Contains(t, expand[1], `FROM "stake_vote_registration_delegation"`)
+}
+
+// TestMySQLRegistryPrefixesTokenRegistrySubjectIndex guards the token registry
+// migration's one dialect hazard: `subject` is a TEXT column, and MySQL
+// rejects a unique index on TEXT without a prefix length. The translation
+// derives that prefix from the CREATE TABLE in the same migration, so this
+// breaks if v3 ever stops carrying its own table definition.
+func TestMySQLRegistryPrefixesTokenRegistrySubjectIndex(t *testing.T) {
+	t.Parallel()
+	registry, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		registry[2].SQL["mysql"].Expand,
+		"CREATE UNIQUE INDEX `idx_token_registry_entry_subject`"+
+			" ON `token_registry_entry`(`subject`(255))",
+	)
 }
 
 func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
@@ -50,7 +133,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 2)
+	require.Len(t, registry, 5)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

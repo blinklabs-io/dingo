@@ -153,7 +153,7 @@ func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
 	// pairs with a reinit that calls initLeiosVoteManager again).
 	require.NoError(t, n.initLeiosVoteManager(context.Background()))
 
-	require.Zero(t, n.ouroboros.LeiosVoteEnqueueCount())
+	require.Zero(t, n.ouroboros().LeiosVoteEnqueueCount())
 	n.eventBus.Publish(leios.VoteEmittedEventType, event.NewEvent(
 		leios.VoteEmittedEventType,
 		leios.VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{}},
@@ -167,7 +167,7 @@ func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
 	// the time any poll first observes the count reaching 1 -- no
 	// additional settle-time sleep is needed to catch it.
 	require.Eventually(t, func() bool {
-		return n.ouroboros.LeiosVoteEnqueueCount() == 1
+		return n.ouroboros().LeiosVoteEnqueueCount() == 1
 	}, 2*time.Second, 10*time.Millisecond,
 		"exactly one vote must be enqueued for the single published event, "+
 			"not once per accumulated live-lifecycle cycle")

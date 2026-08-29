@@ -16,6 +16,8 @@ package peergov
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -45,6 +47,16 @@ const (
 	// wedging the node while the ledger still lists plenty of relays.
 	defaultEmergencyLedgerPeerRefreshInterval = 30 * time.Second
 	defaultEmergencyDiscoveryCheckInterval    = 30 * time.Second
+
+	// emergencyLedgerRefreshBackoffFactor escalates the emergency refresh
+	// interval once starvation stops being transient. The emergency cadence
+	// exists to recover a collapsed peer pool in seconds; a node that is
+	// still short of upstreams after many rounds is not going to be rescued
+	// by a faster cadence, and re-running discovery every base interval for
+	// hours re-walks the whole relay set each time. The escalated interval
+	// is capped at LedgerPeerRefreshInterval, so an urgent node never
+	// discovers less often than a healthy one.
+	emergencyLedgerRefreshBackoffFactor = 2
 
 	// Default peer targets match cardano-node config.json defaults.
 	defaultTargetNumberOfKnownPeers       = 150
@@ -122,6 +134,17 @@ const (
 	// remain stale after interface or routing changes while avoiding a
 	// per-dial interface scan.
 	dialFamilyCacheTTL = 1 * time.Minute
+	// negativeDNSCacheTTL bounds how long a failed ledger-relay resolution
+	// suppresses further lookups for the same hostname. Ledger discovery
+	// re-offers the full relay set every round, and a pool that published a
+	// dead hostname usually keeps publishing it, so without this every dead
+	// entry is re-resolved on every round forever. The TTL keeps a hostname
+	// that starts resolving from being pinned as dead.
+	negativeDNSCacheTTL = 15 * time.Minute
+	// negativeDNSCacheMaxEntries bounds the negative cache. Relay hostnames
+	// come from on-chain pool registrations and are untrusted input, so the
+	// cache must not be able to grow without limit.
+	negativeDNSCacheMaxEntries = 1024
 )
 
 // Peer source priority values for removal decisions.
@@ -141,14 +164,31 @@ type PeerGovernor struct {
 	publicRootChurnTicker *time.Ticker
 	stopCh                chan struct{}
 	ctx                   context.Context      // Context for cancellation
+	cancel                context.CancelFunc   // Cancels the context owned by Start
 	denyList              map[string]time.Time // address -> expiry time
+	permanentDenyList     map[string]struct{}  // address -> process-lifetime denial
 	peers                 []*Peer
 	config                PeerGovernorConfig
 	lastLedgerPeerRefresh atomic.Int64        // UnixNano timestamp of last ledger peer discovery
 	ledgerKnownAddrs      map[string]struct{} // addresses seen from ledger discovery
-	bootstrapExited       bool                // Whether bootstrap peers have been exited
-	lastBootstrapExit     time.Time           // Timestamp of most recent bootstrap exit
-	inboundPruned         int                 // cumulative inbound prunes since start
+	// emergencyRefreshRounds counts consecutive emergency ledger-discovery
+	// rounds since the node last had enough upstreams. It drives the
+	// escalating emergency refresh interval and resets on recovery.
+	emergencyRefreshRounds atomic.Uint32
+	// ledgerDiscoveryInFlight holds the generation of the discovery currently
+	// querying or processing ledger relays. Zero means idle. A generation keeps
+	// deferred release ownership explicit across cancellation and panic paths.
+	ledgerDiscoveryInFlight   atomic.Uint64
+	ledgerDiscoveryGeneration atomic.Uint64
+	// negativeDNS caches ledger relay hostnames that failed to resolve,
+	// keyed by lowercased hostname, valued by cache expiry. Guarded by
+	// negativeDNSMu rather than mu: resolution happens outside the peer
+	// lock, and must stay that way.
+	negativeDNSMu     sync.Mutex
+	negativeDNS       map[string]time.Time
+	bootstrapExited   bool      // Whether bootstrap peers have been exited
+	lastBootstrapExit time.Time // Timestamp of most recent bootstrap exit
+	inboundPruned     int       // cumulative inbound prunes since start
 	// lastEligibleUpstreamSkipLogged edge-triggers the gossip-churn log
 	// that fires when the node is down to its last eligible upstream. The
 	// condition persists across churn intervals, so the INFO line is
@@ -412,10 +452,12 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{
-		config:           cfg,
-		peers:            []*Peer{},
-		denyList:         make(map[string]time.Time),
-		ledgerKnownAddrs: make(map[string]struct{}),
+		config:            cfg,
+		peers:             []*Peer{},
+		denyList:          make(map[string]time.Time),
+		permanentDenyList: make(map[string]struct{}),
+		ledgerKnownAddrs:  make(map[string]struct{}),
+		negativeDNS:       make(map[string]time.Time),
 	}
 	if cfg.PromRegistry != nil {
 		p.initMetrics()
@@ -424,6 +466,8 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 }
 
 func (p *PeerGovernor) Start(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+
 	// Setup connmanager event listeners
 	if p.config.EventBus != nil {
 		inboundConnSubId := p.config.EventBus.SubscribeFunc(
@@ -448,7 +492,8 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	publicRootChurnTicker := time.NewTicker(p.config.PublicRootChurnInterval)
 
 	p.mu.Lock()
-	p.ctx = ctx
+	p.ctx = runCtx
+	p.cancel = cancel
 	p.reconcileTicker = ticker
 	p.gossipChurnTicker = gossipChurnTicker
 	p.publicRootChurnTicker = publicRootChurnTicker
@@ -463,10 +508,10 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 		for {
 			select {
 			case <-t.C:
-				p.reconcile(ctx)
+				p.reconcile(runCtx)
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -483,7 +528,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 				p.gossipChurn()
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -500,7 +545,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 				p.publicRootChurn()
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -522,11 +567,11 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 			select {
 			case <-t.C:
 				if p.ledgerPeersUrgent() {
-					p.discoverLedgerPeers()
+					p.discoverLedgerPeersContext(runCtx)
 				}
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -543,10 +588,10 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 		defer p.wg.Done()
 		select {
 		case <-time.After(initialReconnectDelay):
-			p.reconcile(ctx)
+			p.reconcile(runCtx)
 		case <-stop:
 			return
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			return
 		}
 	}(stopCh)
@@ -554,8 +599,9 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down the peer governor
-func (p *PeerGovernor) Stop() {
+// Stop gracefully shuts down the peer governor, waiting for its background
+// workers until ctx is canceled or reaches its deadline.
+func (p *PeerGovernor) Stop(ctx context.Context) error {
 	p.mu.Lock()
 
 	// Stop all tickers
@@ -578,26 +624,45 @@ func (p *PeerGovernor) Stop() {
 	}
 	inboundConnSubId := p.inboundConnSubId
 	connClosedSubId := p.connClosedSubId
+	cancel := p.cancel
+	p.cancel = nil
 	p.inboundConnSubId = 0
 	p.connClosedSubId = 0
 	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 
 	// PeerGovernor instances are replaced during a live database
 	// restore/truncate while the EventBus remains running. Remove the
 	// old instance's handlers before its replacement starts so a delayed
 	// connection event cannot mutate stale peer state and publish a
 	// conflicting chain-selection update after reconnection.
+	//
+	// Bounded by ctx: the unsubscribe itself always happens, but a handler
+	// already in flight is waited for only until ctx is done, so one stuck
+	// connection-event handler cannot overrun the shutdown deadline here
+	// before the worker wait below even starts.
+	var unsubErr error
 	if p.config.EventBus != nil {
 		if inboundConnSubId != 0 {
-			p.config.EventBus.UnsubscribeAndWait(
-				connmanager.InboundConnectionEventType,
-				inboundConnSubId,
+			unsubErr = errors.Join(
+				unsubErr,
+				p.config.EventBus.UnsubscribeAndWaitContext(
+					ctx,
+					connmanager.InboundConnectionEventType,
+					inboundConnSubId,
+				),
 			)
 		}
 		if connClosedSubId != 0 {
-			p.config.EventBus.UnsubscribeAndWait(
-				connmanager.ConnectionClosedEventType,
-				connClosedSubId,
+			unsubErr = errors.Join(
+				unsubErr,
+				p.config.EventBus.UnsubscribeAndWaitContext(
+					ctx,
+					connmanager.ConnectionClosedEventType,
+					connClosedSubId,
+				),
 			)
 		}
 	}
@@ -606,5 +671,21 @@ func (p *PeerGovernor) Stop() {
 	// take p.mu themselves, so waiting while still holding it would
 	// deadlock. See the wg field's doc comment for why this wait matters
 	// beyond a clean process shutdown.
-	p.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return unsubErr
+	case <-ctx.Done():
+		// Unprefixed: every caller already wraps this with its own
+		// "peer governor shutdown: %w", matching how the other
+		// components' Stop errors are reported.
+		return errors.Join(
+			unsubErr,
+			fmt.Errorf("waiting for background workers: %w", ctx.Err()),
+		)
+	}
 }

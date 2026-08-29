@@ -78,7 +78,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 	connOpts := make(
 		[]ouroboros.ConnectionOptionFunc,
 		0,
-		2+len(c.config.OutboundConnOpts),
+		2+len(c.outboundConnOptList()),
 	)
 	connOpts = append(connOpts,
 		ouroboros.WithConnection(tmpConn),
@@ -86,7 +86,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 	)
 	connOpts = append(
 		connOpts,
-		c.config.OutboundConnOpts...,
+		c.outboundConnOptList()...,
 	)
 	// Setup Ouroboros connection
 	c.config.Logger.Debug(
@@ -97,8 +97,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 		connOpts...,
 	)
 	if err != nil {
-		tmpConn.Close()
-		return nil, err
+		return nil, joinCloseErr(err, tmpConn)
 	}
 	c.config.Logger.Info(
 		"connected ouroboros to "+address,
@@ -120,11 +119,11 @@ func (c *ConnectionManager) CreateOutboundConn(
 		"connection_id", oConn.Id().String(),
 	)
 	if !c.AddConnection(oConn, false, peerAddr) {
-		oConn.Close()
-		return nil, fmt.Errorf(
+		rejectErr := fmt.Errorf(
 			"connection rejected (shutdown or collision): %s",
 			address,
 		)
+		return nil, joinCloseErr(rejectErr, oConn)
 	}
 	return oConn, nil
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -42,10 +44,30 @@ import (
 // Path is relative to this file (top-level dingo package).
 const devnetKeysDir = "config/cardano/devnet/keys"
 
-func devnetCredPaths() (vrf, kes, opcert string) {
-	return filepath.Join(devnetKeysDir, "vrf.skey"),
-		filepath.Join(devnetKeysDir, "kes.skey"),
-		filepath.Join(devnetKeysDir, "opcert.cert")
+func devnetCredPaths(t testing.TB) (vrf, kes, opcert string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	copyFixture := func(name string, mode os.FileMode) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(devnetKeysDir, name))
+		if err != nil {
+			t.Fatalf("read devnet credential fixture %s: %v", name, err)
+		}
+		path := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(path, data, mode); err != nil {
+			t.Fatalf("copy devnet credential fixture %s: %v", name, err)
+		}
+		return path
+	}
+
+	vrf = copyFixture("vrf.skey", 0o600)
+	kes = copyFixture("kes.skey", 0o600)
+	testutil.RestrictFileToCurrentUser(t, vrf)
+	testutil.RestrictFileToCurrentUser(t, kes)
+	// OpCerts contain only public artifacts and intentionally remain exempt
+	// from the secret-key permission policy.
+	opcert = copyFixture("opcert.cert", 0o644)
+	return vrf, kes, opcert
 }
 
 // shelleyGenesisCfgForBP returns a CardanoNodeConfig with a Shelley
@@ -92,7 +114,7 @@ func newTestNodeForBP(
 }
 
 func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
 	creds, err := n.validateBlockProducerStartupAtSlot(0)
@@ -105,7 +127,7 @@ func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
 }
 
 func TestValidateBlockProducerStartup_NoCardanoConfig(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	vrf, kes, opcert := devnetCredPaths(t)
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, nil)
 	_, err := n.validateBlockProducerStartup()
 	if err == nil {
@@ -121,7 +143,7 @@ func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
 	// many KES periods have elapsed; maxKESEvolutions=1 makes anything
 	// past period 1 expired, so the devnet opcert (KESPeriod=0) is well
 	// outside its validity window and validation must reject it.
-	vrf, kes, opcert := devnetCredPaths()
+	vrf, kes, opcert := devnetCredPaths(t)
 	cfg := &cardano.CardanoNodeConfig{}
 	systemStart := time.Now().Add(-365 * 24 * time.Hour)
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
@@ -189,7 +211,7 @@ func mismatchedVRFHash() [32]byte {
 }
 
 func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
 	n.config.network = "preview"
@@ -210,7 +232,7 @@ func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
 }
 
 func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
 	n.config.network = "devnet"

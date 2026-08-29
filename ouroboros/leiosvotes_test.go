@@ -136,7 +136,7 @@ func testLeiosVote(voterId uint64) lcommon.LeiosVote {
 }
 
 func TestLeiosVotesServerRequestNextUnavailableWithoutHandler(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	votes, err := o.leiosvotesServerRequestNext(
 		oleiosvotes.CallbackContext{},
 		3,
@@ -146,14 +146,14 @@ func TestLeiosVotesServerRequestNextUnavailableWithoutHandler(t *testing.T) {
 }
 
 func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{
 		nextVotes: []lcommon.LeiosVote{
 			testLeiosVote(0),
 			testLeiosVote(1),
 		},
 	}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	votes, err := o.leiosvotesServerRequestNext(
 		oleiosvotes.CallbackContext{},
@@ -167,9 +167,9 @@ func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
 }
 
 func TestLeiosVotesClientVoteDelegates(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	vote := testLeiosVote(7)
 	require.NoError(
@@ -191,11 +191,11 @@ func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
 		conn.ErrorChan() <- errors.New("test connection closed")
 	}()
 	handler := &fakeLeiosVoteHandler{}
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		ConnManager: cm,
 		EnableLeios: true,
 	})
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 	vote := lcommon.LeiosPrototypeVote{
 		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
 		VoterId:          7,
@@ -219,7 +219,7 @@ func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
 }
 
 func TestLeiosVotesClientVoteWithoutHandlerLogsOnly(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
 		o.leiosvotesClientVote(
@@ -230,12 +230,12 @@ func TestLeiosVotesClientVoteWithoutHandlerLogsOnly(t *testing.T) {
 }
 
 func TestLeiosFetchServerVotesRequestDelegates(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	raw := mustCbor(t, "vote-cbor")
 	handler := &fakeLeiosVoteHandler{
 		rawVotes: []cbor.RawMessage{raw},
 	}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	ids := []oleiosfetch.MsgVotesRequestVoteId{
 		{SlotNo: 123, VoterId: 0},
@@ -253,20 +253,26 @@ func TestLeiosFetchServerVotesRequestDelegates(t *testing.T) {
 }
 
 func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	msg, err := o.leiosfetchServerVotesRequest(
 		oleiosfetch.CallbackContext{},
 		[]oleiosfetch.MsgVotesRequestVoteId{{SlotNo: 1, VoterId: 2}},
 	)
-	require.ErrorIs(t, err, errLeiosVotesUnavailable)
-	assert.Nil(t, msg)
+	require.NoError(t, err)
+	votesMsg, ok := msg.(*oleiosfetch.MsgVotes)
+	require.True(t, ok)
+	assert.NotNil(t, votesMsg.VotesRaw)
+	assert.Empty(t, votesMsg.VotesRaw)
+	wire, err := cbor.Encode(votesMsg)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x82, 0x05, 0x80}, wire)
 }
 
 func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 	require.Len(t, handler.ebs, 1)
@@ -280,9 +286,9 @@ func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
 	t *testing.T,
 ) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
-	o.LeiosVotes = handler
+	o.leiosVotes = handler
 
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
@@ -300,12 +306,12 @@ func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
 
 func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 }
 
 func TestLeiosVotesClientRequestSizeIsIncremental(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	cfg := oleiosvotes.NewConfig(o.leiosvotesClientConnOpts()...)
 	require.Equal(t, uint64(1), cfg.RequestNextCount)
 }

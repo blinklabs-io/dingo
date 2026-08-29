@@ -25,8 +25,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -97,6 +100,25 @@ const maxAtTipRecoveryDescents = 2
 // security-parameter window and holds at the applied tip while forcing a fresh
 // ChainSync connection (issue #3005).
 const maxReplayRecoveryNoProgress = 2
+
+// maxMithrilBoundaryRecoveryRejections bounds how many successful validation
+// recovery attempts may refuse a rewind at the Mithril trust boundary without
+// advancing the applied ledger tip before the failure is declared
+// unrepairable (issues #3261, #3301, and #3318).
+//
+// The bound covers the whole legal rewind space. A boundary rejection rewinds
+// to the applied ledger tip -- the deepest point recovery may reach without
+// crossing the anchor -- and asks ChainSync for a fresh intersection, so one
+// rejection per scheduled rewind depth exhausts every target the schedule can
+// produce, plus one for the capped retry the schedule settles on. Past that,
+// every legal target has been replayed and returned the same verdict.
+const maxMithrilBoundaryRecoveryRejections = maxAtTipRecoveryAttempts + 1
+
+type mithrilBoundaryRecoveryProgress struct {
+	highWaterTipSlot uint64
+	rejections       int
+	halted           bool
+}
 
 type atTipRecoveryAttempt struct {
 	BlockPoint ocommon.Point
@@ -186,6 +208,9 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	var validationErr *txValidationError
 	if !errors.As(err, &validationErr) {
 		return false, nil
+	}
+	if isDeterministicTxValidationError(validationErr.Cause) {
+		return ls.recoverFromDeterministicTxValidationError(validationErr)
 	}
 	if ls.IsAtTip() {
 		return ls.recoverAtTipFromTxValidationError(validationErr)
@@ -343,6 +368,239 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	return true, nil
 }
 
+// isDeterministicTxValidationError identifies transaction-structure failures
+// that cannot be repaired by replaying a different local UTxO history. A
+// duplicate input is invalid regardless of which chain produced the input,
+// so treating it as an unresolved producer sends recovery down the fallback
+// path and can repeatedly rediscover the same rejected block.
+//
+// Every Shelley-family era delegates the rule to
+// shelley.UtxoValidateNoDuplicateInputs and therefore reports
+// shelley.DuplicateInputError for a duplicated regular, collateral, or
+// reference input. Byron has its own rule in ledger/eras and reports
+// eras.DuplicateInputByronError, which is the same structural verdict and
+// must not fall through to state-dependent producer resolution.
+//
+// Deterministic is not the same as correct. The Shelley-family rule
+// deduplicates unconditionally while the CBOR decoder leaves untagged
+// pre-Conway array fields unchecked, so a canonical pre-Conway block can carry
+// a wire-level duplicate cardano-node coalesces and this verdict rejects
+// (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
+// non-terminal for exactly that reason.
+func isDeterministicTxValidationError(err error) bool {
+	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
+	return ok
+}
+
+// deterministicTxRecoveryLatch records the single fresh-intersection request
+// already spent on one failing block at one applied ledger tip. Keyed on the
+// failing block and transaction as well as the tip, so a different rejected
+// block on a newly selected branch gets its own peer rotation instead of
+// inheriting a latch that was never about it -- the same identity the sibling
+// at-tip escalation keys on (atTipRecoveryAttempt.matches).
+type deterministicTxRecoveryLatch struct {
+	TipSlot    uint64
+	BlockPoint ocommon.Point
+	TxHash     []byte
+}
+
+func newDeterministicTxRecoveryLatch(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) *deterministicTxRecoveryLatch {
+	blockPoint := validationErr.BlockPoint
+	blockPoint.Hash = append([]byte(nil), blockPoint.Hash...)
+	return &deterministicTxRecoveryLatch{
+		TipSlot:    tipSlot,
+		BlockPoint: blockPoint,
+		TxHash:     append([]byte(nil), validationErr.TxHash...),
+	}
+}
+
+func (l *deterministicTxRecoveryLatch) matches(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) bool {
+	return l != nil &&
+		tipSlot <= l.TipSlot &&
+		validationErr.BlockPoint.Slot == l.BlockPoint.Slot &&
+		bytes.Equal(validationErr.BlockPoint.Hash, l.BlockPoint.Hash) &&
+		bytes.Equal(validationErr.TxHash, l.TxHash)
+}
+
+// deterministicTxRecoveryResyncSpentLocked reports whether the one fresh
+// ChainSync intersection for this failing block at this applied tip has
+// already been requested. Callers hold at least the read lock.
+func (ls *LedgerState) deterministicTxRecoveryResyncSpentLocked(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) bool {
+	return ls.deterministicTxRecoveryResync.matches(tipSlot, validationErr)
+}
+
+// markDeterministicTxRecoveryResync records the fresh-intersection request.
+// The latch is written under the write lock because resetDeterministicTxRecovery
+// clears it from inside the tip-advance critical section in
+// ledgerProcessBlocksFromSource, so both sides of the field use the same lock
+// rather than relying on the two callers staying on one goroutine.
+func (ls *LedgerState) markDeterministicTxRecoveryResync(
+	tipSlot uint64,
+	validationErr *txValidationError,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.deterministicTxRecoveryResync = newDeterministicTxRecoveryLatch(
+		tipSlot,
+		validationErr,
+	)
+}
+
+// recoverFromDeterministicTxValidationError drops a primary-chain block that
+// contains a transaction with a deterministic structural error. The ledger
+// tip is the last applied good point; rewinding both stores to it rejects the
+// branch and lets ChainSync obtain a fresh intersection. This is deliberately
+// separate from unresolved-input recovery: the latter is state-dependent and
+// still needs producer resolution and the security-parameter fallback.
+//
+// The rejection is never terminal. Rejecting the chain that contains a block
+// this node believes is invalid, and continuing to reject it, is the response
+// tryRecoverFromHeaderValidationError already gives a block whose deferred
+// header checks fail (see header_validation_recovery.go): a local
+// false-positive verdict must leave the node able to follow a chain a peer
+// later offers. What is bounded is peer rotation, not the rejection -- a
+// repeat rejection of the same failing block at the same applied tip rewinds
+// again but does not request another fresh intersection, because chain
+// selection has already been given its alternate-branch opportunity for that
+// block and further rotations only close connections. Repeated rejections
+// therefore make no tip progress, which is what the pipeline's own
+// no-progress accounting (trackPipelineProgress / ledgerPipelineBackoff)
+// escalates and exports as dingo_ledger_pipeline_stuck. Whether a validation
+// failure should ever become terminal, and what terminal must report, is
+// issue #3261 rather than this path.
+func (ls *LedgerState) recoverFromDeterministicTxValidationError(
+	validationErr *txValidationError,
+) (bool, error) {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return false, nil
+	}
+
+	ls.RLock()
+	ledgerTip := ls.currentTip
+	resyncSpent := ls.deterministicTxRecoveryResyncSpentLocked(
+		ledgerTip.Point.Slot,
+		validationErr,
+	)
+	ls.RUnlock()
+	rewindPoint := ledgerTip.Point
+	if rewindPoint.Slot >= validationErr.BlockPoint.Slot {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"deterministic transaction validation rejected a block at or behind the ledger tip; no rewind target precedes it",
+				"component", "ledger",
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"ledger_tip_slot", rewindPoint.Slot,
+				"error", validationErr.Cause,
+			)
+		}
+		return false, nil
+	}
+	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
+		return false, nil
+	}
+
+	// Chain selection can abandon the ledger tip between the snapshot above
+	// and the rewind. If the point is already gone, the rejected block was
+	// removed by that chain choice and the pipeline can safely restart.
+	if err := ls.chain.ValidateRollback(rewindPoint); err != nil &&
+		errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"chain selection moved the primary chain off the deterministic transaction recovery point; the rejected block is already gone",
+				"component", "ledger",
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"rewind_target_slot", rewindPoint.Slot,
+				"error", err,
+			)
+		}
+		return true, nil
+	}
+
+	if ls.config.Logger != nil {
+		ls.config.Logger.Warn(
+			"deterministic transaction validation rejected a block on the primary chain; rewinding so chain selection can offer another candidate",
+			"component", "ledger",
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot", validationErr.BlockPoint.Slot,
+			"rewind_target_slot", rewindPoint.Slot,
+			"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+			"error", validationErr.Cause,
+		)
+	}
+	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
+		if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+			return true, nil
+		}
+		return false, fmt.Errorf(
+			"rewind primary chain after deterministic transaction validation failure: %w",
+			err,
+		)
+	}
+	if err := ls.rollback(rewindPoint); err != nil {
+		return false, fmt.Errorf(
+			"rollback ledger state after deterministic transaction validation failure: %w",
+			err,
+		)
+	}
+	if resyncSpent {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"deterministic transaction validation rejected the same block again at the same applied tip; rejecting the branch without rotating peers",
+				"component", "ledger",
+				"tx_hash", hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"ledger_tip_slot", rewindPoint.Slot,
+				"hint", "peers are serving a transaction this node rejects; the pipeline keeps rejecting it and reports no tip progress",
+			)
+		}
+		return true, nil
+	}
+	ls.markDeterministicTxRecoveryResync(rewindPoint.Slot, validationErr)
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					Reason: event.
+						ChainsyncResyncReasonDeterministicTxValidationRecovery,
+					Point: rewindPoint,
+				},
+			),
+		)
+	}
+	return true, nil
+}
+
+// resetDeterministicTxRecovery clears the one-resync latch only after the
+// ledger advances beyond the tip at which the deterministic rejection was
+// recorded. Replaying up to that same tip is not evidence that a valid branch
+// was found. Called from the tip-advance critical section in
+// ledgerProcessBlocksFromSource, so it takes no lock of its own; the paired
+// write goes through markDeterministicTxRecoveryResync.
+func (ls *LedgerState) resetDeterministicTxRecovery(newTipSlot uint64) {
+	if ls.deterministicTxRecoveryResync == nil ||
+		newTipSlot <= ls.deterministicTxRecoveryResync.TipSlot {
+		return
+	}
+	ls.deterministicTxRecoveryResync = nil
+}
+
 // observeReplayRecoveryTip records the applied tip seen immediately before an
 // unresolved-producer fallback. Recovery is non-converging when repeated
 // attempts fail to exceed the first observed high-water mark, even if peers
@@ -419,6 +677,10 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if securityParam <= 0 {
 		return chain.ErrSecurityParamNotConfigured
 	}
+	// Keep every Undo enqueue and its corresponding chain truncation atomic
+	// with respect to a block-apply commit's AfterCommit Apply publication.
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
 
 	targetIndex := uint64(0)
 	if point.Slot > 0 || len(point.Hash) > 0 {
@@ -458,6 +720,19 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			)
 		}
 		nextPoint := ocommon.NewPoint(nextBlock.Slot, nextBlock.Hash)
+		// Validate, then emit undo events, before each window's
+		// truncation. This function's own doc comment notes the chain can
+		// move between reading the tip and rewinding to it, so the
+		// rejection here is reachable, not theoretical: emitting without
+		// it would tell subscribers to undo blocks the failed rewind
+		// leaves applied. See validateAndEmitRollbackUndo.
+		if err := ls.validateAndEmitRollbackUndo(nextPoint); err != nil {
+			return fmt.Errorf(
+				"rollback primary chain to intermediate point %d: %w",
+				nextIndex,
+				err,
+			)
+		}
 		if err := ls.chain.Rollback(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
@@ -466,6 +741,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			)
 		}
 		tipIndex = nextIndex
+	}
+	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
 	if err := ls.chain.Rollback(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
@@ -488,6 +766,7 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 ) error {
 	return ls.rejectRecoveryAtMithrilBoundary(
 		"replay recovery rollback exceeds Mithril trust boundary",
+		validationErr,
 		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
 			ls.config.Logger.Warn(
 				"detected replay recovery below Mithril trust boundary, rejecting peer chain",
@@ -524,9 +803,10 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 // the ledger has made forward progress past the failing region. Called from the
 // block-apply success path when the tip advances beyond the last recorded
 // at-tip failure slot, so a later, unrelated at-tip failure starts with a fresh
-// recovery budget instead of inheriting a stale hold. Runs on the ledger
-// pipeline goroutine, the same goroutine that mutates these fields during
-// recovery, so no additional locking is required.
+// recovery budget instead of inheriting a stale hold or same-failure rewind
+// depth. Same-tip replay preserves both schedules. Runs on the ledger pipeline
+// goroutine, the same goroutine that mutates these fields during recovery, so
+// no additional locking is required.
 func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 	if ls.atTipRecoveryLastFailSlot == 0 {
 		return
@@ -537,6 +817,7 @@ func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 	ls.atTipRecoveryLastFailSlot = 0
 	ls.atTipRecoveryDescentCount = 0
 	ls.atTipRecoveryHolding = false
+	ls.lastAtTipRecovery = nil
 }
 
 func (ls *LedgerState) recoverAtTipFromTxValidationError(
@@ -729,6 +1010,7 @@ func (ls *LedgerState) rejectAtTipRecoveryAtMithrilBoundary(
 ) error {
 	return ls.rejectRecoveryAtMithrilBoundary(
 		"at-tip recovery rollback exceeds Mithril trust boundary",
+		validationErr,
 		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
 			ls.config.Logger.Warn(
 				"at-tip validation recovery would cross Mithril trust boundary, rejecting peer chain",
@@ -765,8 +1047,75 @@ func (ls *LedgerState) rejectAtTipRecoveryAtMithrilBoundary(
 	)
 }
 
+// observeMithrilBoundaryRejection tallies consecutive successful boundary
+// recovery attempts that do not advance the applied ledger high-water mark and
+// reports whether the legal rewind space is exhausted.
+//
+// This is the repairability decision for a validation failure, and it is
+// deliberately not a list of error types (issue #3261). Recovery has exactly
+// one lever for any validation rule: rewind below the failing block and replay,
+// so the ledger re-derives the state that block reads. The Mithril trust
+// boundary is a hard floor on that lever -- blocks at or below
+// mithrilLedgerSlot were accepted on certificate evidence rather than replay,
+// so their state cannot be re-derived at all. When the failing block sits only
+// a short distance past the anchor, every target the rewind schedule produces
+// falls inside the protected window and is refused; the only legal target left
+// is the applied ledger tip, which each refusal already rewinds to. Once that
+// has been replayed for every scheduled depth and the same failure comes back,
+// no local history remains that could change the verdict, whatever rule
+// rejected the block -- a Conway rule 45 delegation failure against imported
+// account state reaches this point exactly as a structural error would.
+//
+// The escape a refusal offers is peer rotation, and that is what makes the loop
+// unbounded rather than merely slow: it cannot help when the block is
+// canonical, because the next peer serves the same block. Deepening the rewind
+// to the anchor itself is not an alternative -- it costs a full replay of the
+// protected window and still reads the same imported state.
+//
+// The applied tip is the convergence signal rather than the failing block or
+// transaction identity. Replay can encounter different, slowly advancing
+// failures while rebuilding to the same applied tip; rearming the budget on
+// each identity would let that sequence retry forever (issues #3301 and
+// #3318).
+//
+// Runs on the ledger pipeline goroutine, like its at-tip and replay siblings,
+// so the tally needs no additional locking. Callers record an attempt only
+// after the local rewind succeeds, so a rollback mechanics error cannot consume
+// the validation-recovery budget.
+func (ls *LedgerState) observeMithrilBoundaryRejection(
+	tipSlot uint64,
+) (int, bool) {
+	if ls.mithrilBoundaryRecovery == nil ||
+		tipSlot > ls.mithrilBoundaryRecovery.highWaterTipSlot {
+		ls.mithrilBoundaryRecovery = &mithrilBoundaryRecoveryProgress{
+			highWaterTipSlot: tipSlot,
+			rejections:       1,
+		}
+	} else {
+		ls.mithrilBoundaryRecovery.rejections++
+	}
+	rejections := ls.mithrilBoundaryRecovery.rejections
+	if rejections > maxMithrilBoundaryRecoveryRejections {
+		ls.mithrilBoundaryRecovery.halted = true
+	}
+	return rejections, ls.mithrilBoundaryRecovery.halted
+}
+
+// resetMithrilBoundaryRejections clears the boundary-rejection tally once the
+// applied ledger tip advances beyond the high-water mark the refusals could
+// not cross. Peer rotation found a chain this node can follow, so the trust
+// window is no longer wedged and a later failure starts with a fresh budget.
+func (ls *LedgerState) resetMithrilBoundaryRejections(newTipSlot uint64) {
+	if ls.mithrilBoundaryRecovery == nil ||
+		newTipSlot <= ls.mithrilBoundaryRecovery.highWaterTipSlot {
+		return
+	}
+	ls.mithrilBoundaryRecovery = nil
+}
+
 func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 	errContext string,
+	validationErr *txValidationError,
 	logRejection func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point),
 ) error {
 	ls.RLock()
@@ -780,12 +1129,46 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 			ErrRollbackExceedsMithrilBoundary,
 		)
 	}
+	if ls.mithrilBoundaryRecovery != nil &&
+		ls.mithrilBoundaryRecovery.halted {
+		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
+	}
 	logRejection(mithrilLedgerSlot, rewindPoint)
 	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to Mithril trust boundary: %w",
 			err,
 		)
+	}
+	rejections, exhausted := ls.observeMithrilBoundaryRejection(
+		rewindPoint.Slot,
+	)
+	if exhausted {
+		ls.metrics.incMithrilTrustWindowUnrepairable()
+		ls.config.Logger.Error(
+			"validation failure inside the Mithril trust window cannot be repaired by replaying local history, halting ledger pipeline",
+			"component",
+			"ledger",
+			"tx_hash",
+			hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot",
+			validationErr.BlockPoint.Slot,
+			"failing_block_hash",
+			hex.EncodeToString(validationErr.BlockPoint.Hash),
+			"ledger_tip_slot",
+			rewindPoint.Slot,
+			"ledger_tip_hash",
+			hex.EncodeToString(rewindPoint.Hash),
+			"mithril_ledger_slot",
+			mithrilLedgerSlot,
+			"boundary_rejections",
+			rejections,
+			"error",
+			validationErr.Cause,
+			"hint",
+			"the node has stopped following the chain; the state this block needs was established at or before the Mithril anchor and cannot be re-derived without crossing it, so re-bootstrap from a newer Mithril snapshot or resync from genesis",
+		)
+		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
 	}
 	ls.chainsyncMutex.Lock()
 	ls.resetChainsyncResyncState()

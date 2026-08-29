@@ -28,7 +28,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -1345,6 +1347,218 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	fixture.ls.blockfetchRequestRangeCleanup()
 }
 
+// TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn asserts the
+// active-peer fallback moves the blockfetch selection, not just the one request
+// it issues. nextBlockfetchConnId prefers selectedBlockfetchConnId, so a
+// selection left on the failed recovery connection sends the next batch of a
+// multi-batch replay straight back to the connection that just failed, and the
+// first batch is the only one that ever arrives.
+func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6001},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	fixture.ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &activeConnId
+	}
+	// The recovery connection is gone; only the active best peer answers.
+	var requested []ouroboros.ConnectionId
+	fixture.ls.config.BlockfetchRequestRangeFunc = func(
+		connId ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) error {
+		requested = append(requested, connId)
+		if sameConnectionId(connId, activeConnId) {
+			return nil
+		}
+		return errBlockfetchNoBlocks
+	}
+
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("rollback-retarget"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+		BlockHeader: header,
+	})
+
+	fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	require.Len(
+		t, requested, 2,
+		"the failed recovery connection then the active best peer",
+	)
+	assert.True(
+		t, sameConnectionId(requested[1], activeConnId),
+		"the fallback request must go to the active best peer",
+	)
+	assert.True(
+		t,
+		sameConnectionId(
+			fixture.ls.selectedBlockfetchConnId,
+			activeConnId,
+		),
+		"the blockfetch selection must follow the fallback, so the next "+
+			"batch does not return to the failed connection",
+	)
+}
+
+// TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails asserts
+// the blockfetch selection is not left pointing at a connection that just failed
+// to serve the replayed range. handleEventChainsync clears it when its own
+// fallbacks are exhausted; this path now does the same, so nothing downstream
+// has to depend on being the next writer of the field.
+func TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6002},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3003},
+	}
+	fixture.ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &activeConnId
+	}
+	// Nothing can serve the range: neither the recovery connection nor the
+	// active best peer the fallback reaches for.
+	fixture.ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) error {
+		return errBlockfetchNoBlocks
+	}
+
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("rollback-clear-selection"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+		BlockHeader: header,
+	})
+
+	result := fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+	require.False(t, result.Recovered)
+
+	assert.Empty(
+		t, connIdKey(fixture.ls.selectedBlockfetchConnId),
+		"an exhausted recovery must not leave the selection on a "+
+			"connection that failed to serve the range",
+	)
+}
+
+func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+	requestCount := 0
+	fixture.ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) error {
+		requestCount++
+		return errBlockfetchNoBlocks
+	}
+
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("rollback-no-blocks")),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+		BlockHeader: header,
+	})
+
+	result := fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	assert.False(t, result.Recovered)
+	assert.False(t, result.SkipConnectionClose)
+	assert.Equal(t, 1, requestCount)
+	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+}
+
 func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(
 	t *testing.T,
 ) {
@@ -1820,6 +2034,7 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.NoError(t, err)
@@ -1850,6 +2065,7 @@ func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
 	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
 
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.NoError(t, err)
@@ -1866,6 +2082,7 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 
 	currentNonce := append([]byte(nil), fixture.ls.currentTipBlockNonce...)
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
@@ -1908,6 +2125,7 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	require.NotEqual(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 
 	err := fixture.ls.processChainIteratorRollback(
+		t.Context(),
 		fixture.ancestorTip.Point,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
@@ -1940,6 +2158,204 @@ func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
 		readChainResultCh,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
+}
+
+func TestHandleEventChainsyncBlockHeaderIgnoresHistoricalPrimaryHeader(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		return true, 100
+	}
+
+	// Leave the applied ledger at currentTip while extending the authoritative
+	// primary chain two blocks farther. A replayed header for the first of those
+	// blocks is historical relative to the primary tip, but it is not a fork.
+	block3Hash := testHashBytes("historical-primary-block-3")
+	block4Hash := testHashBytes("historical-primary-block-4")
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        30,
+			Hash:        block3Hash,
+			BlockNumber: 3,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+		{
+			Slot:        40,
+			Hash:        block4Hash,
+			BlockNumber: 4,
+			Type:        1,
+			PrevHash:    block3Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        ocommon.NewPoint(30, block3Hash),
+		BlockHeader: mockHeader{
+			hash:        lcommon.NewBlake2b256(block3Hash),
+			prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+			blockNumber: 3,
+			slot:        30,
+		},
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(40, block4Hash),
+			BlockNumber: 4,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(
+		t,
+		ochainsync.Tip{
+			Point:       ocommon.NewPoint(40, block4Hash),
+			BlockNumber: 4,
+		},
+		fixture.ls.chain.Tip(),
+	)
+}
+
+// A Byron epoch-boundary block sits at slot 0 with a real hash, so rejecting
+// every slot-zero point would classify a replay of that block as a fork.
+// Only the origin point, which carries no hash, is rejected outright.
+func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
+	)
+	genesisHash := testHashBytes("byron-boundary-slot-zero")
+	abandonedHash := testHashBytes("abandoned-slot-zero-fork")
+	// Persist the abandoned block first at ID 1. Adding the primary block
+	// below reuses ID 1 for the authoritative index while retaining this blob,
+	// matching the append-only fork shape primaryChainContainsBlock must reject.
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   0,
+		Hash:   abandonedHash,
+		Cbor:   []byte{0x80},
+		Type:   1,
+		Number: 0,
+	}, nil))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+			{
+				Slot:        0,
+				Hash:        genesisHash,
+				BlockNumber: 0,
+				Type:        1,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
+	ls, err := NewLedgerState(
+		LedgerStateConfig{
+			Database:          db,
+			ChainManager:      cm,
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	)
+	require.NoError(t, err)
+	localTip := ls.chain.Tip()
+	require.Equal(t, uint64(0), localTip.Point.Slot)
+	require.Equal(t, genesisHash, localTip.Point.Hash)
+
+	assert.True(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPoint(0, genesisHash)},
+		localTip,
+	))
+	// Blob presence is insufficient: the abandoned block is still retrievable
+	// by hash, but ID 1 now indexes the primary block above.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPoint(0, abandonedHash)},
+		localTip,
+	))
+	// The origin point is not a block and is not evidence of a duplicate.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPointOrigin()},
+		localTip,
+	))
+	// A competing slot-zero block is still a candidate fork.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				0,
+				testHashBytes("competing-slot-zero"),
+			),
+		},
+		localTip,
+	))
+}
+
+func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+	lookupCalls := 0
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		lookupCalls++
+		return models.Block{}, models.ErrBlockNotFound
+	}
+
+	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				localTip.Point.Slot,
+				testHashBytes("unknown-fork-header"),
+			),
+		},
+		localTip,
+	))
+	assert.Equal(t, 1, lookupCalls)
+}
+
+func TestHeaderAlreadyOnPrimaryChainSupportsLegacyHashIndexMiss(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+
+	txn := fixture.ls.db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return fixture.ls.db.Blob().Delete(
+			txn.Blob(),
+			types.BlockHashIndexKey(localTip.Point.Hash),
+		)
+	}))
+
+	assert.True(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: localTip.Point},
+		localTip,
+	))
+}
+
+func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+	lookupCalled := false
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		lookupCalled = true
+		return models.Block{}, errors.New("unexpected lookup")
+	}
+
+	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				localTip.Point.Slot+1,
+				testHashBytes("header-beyond-local-tip"),
+			),
+		},
+		localTip,
+	))
+	assert.False(t, lookupCalled)
 }
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {

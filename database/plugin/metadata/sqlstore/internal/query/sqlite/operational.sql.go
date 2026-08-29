@@ -390,10 +390,11 @@ func (q *Queries) CreateMidnightRegistration(ctx context.Context, arg CreateMidn
 const createPoolStakeSnapshot = `-- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, calculation_version,
+    delegator_count, captured_slot, leios_key_public,
+    leios_key_possession_proof, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -405,6 +406,8 @@ type CreatePoolStakeSnapshotParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -419,6 +422,8 @@ func (q *Queries) CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolSta
 		arg.StakeDenominator,
 		arg.DelegatorCount,
 		arg.CapturedSlot,
+		arg.LeiosKeyPublic,
+		arg.LeiosKeyPossessionProof,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -799,6 +804,21 @@ type DeletePoolStakeSnapshotsForEpochParams struct {
 
 func (q *Queries) DeletePoolStakeSnapshotsForEpoch(ctx context.Context, arg DeletePoolStakeSnapshotsForEpochParams) error {
 	_, err := q.db.ExecContext(ctx, deletePoolStakeSnapshotsForEpoch, arg.Epoch, arg.SnapshotType)
+	return err
+}
+
+const deleteProvisionalRewardSnapshot = `-- name: DeleteProvisionalRewardSnapshot :exec
+DELETE FROM reward_snapshot
+WHERE epoch = ? AND snapshot_type = ? AND authoritative = false
+`
+
+type DeleteProvisionalRewardSnapshotParams struct {
+	Epoch        int64
+	SnapshotType string
+}
+
+func (q *Queries) DeleteProvisionalRewardSnapshot(ctx context.Context, arg DeleteProvisionalRewardSnapshotParams) error {
+	_, err := q.db.ExecContext(ctx, deleteProvisionalRewardSnapshot, arg.Epoch, arg.SnapshotType)
 	return err
 }
 
@@ -2702,6 +2722,7 @@ func (q *Queries) GetPParams(ctx context.Context, arg GetPParamsParams) ([]Ppara
 const getPoolStakeSnapshot = `-- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
+       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2726,6 +2747,8 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 		&i.StakeDenominator,
 		&i.DelegatorCount,
 		&i.CapturedSlot,
+		&i.LeiosKeyPublic,
+		&i.LeiosKeyPossessionProof,
 		&i.CalculationVersion,
 		&i.RewardAccountAutoVote,
 		&i.RewardAccountAutoVoteResolved,
@@ -2736,6 +2759,7 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 const getPoolStakeSnapshotsByEpoch = `-- name: GetPoolStakeSnapshotsByEpoch :many
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
+       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2766,6 +2790,8 @@ func (q *Queries) GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolS
 			&i.StakeDenominator,
 			&i.DelegatorCount,
 			&i.CapturedSlot,
+			&i.LeiosKeyPublic,
+			&i.LeiosKeyPossessionProof,
 			&i.CalculationVersion,
 			&i.RewardAccountAutoVote,
 			&i.RewardAccountAutoVoteResolved,
@@ -3100,6 +3126,53 @@ func (q *Queries) GetTip(ctx context.Context) (GetTipRow, error) {
 		&i.Hash,
 		&i.Slot,
 		&i.BlockNumber,
+	)
+	return i, err
+}
+
+const getTokenRegistryEntry = `-- name: GetTokenRegistryEntry :one
+SELECT
+    id,
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+FROM token_registry_entry
+WHERE subject = ?
+`
+
+type GetTokenRegistryEntryRow struct {
+	ID          int64
+	Subject     string
+	Name        sql.NullString
+	Ticker      sql.NullString
+	Description sql.NullString
+	Url         sql.NullString
+	Logo        sql.NullString
+	Decimals    sql.NullInt64
+	CreatedAt   sql.NullTime
+	UpdatedAt   sql.NullTime
+}
+
+func (q *Queries) GetTokenRegistryEntry(ctx context.Context, subject string) (GetTokenRegistryEntryRow, error) {
+	row := q.db.QueryRowContext(ctx, getTokenRegistryEntry, subject)
+	var i GetTokenRegistryEntryRow
+	err := row.Scan(
+		&i.ID,
+		&i.Subject,
+		&i.Name,
+		&i.Ticker,
+		&i.Description,
+		&i.Url,
+		&i.Logo,
+		&i.Decimals,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -3740,6 +3813,22 @@ func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnap
 	return id, err
 }
 
+const pruneTokenRegistryEntriesStaleBefore = `-- name: PruneTokenRegistryEntriesStaleBefore :execrows
+DELETE FROM token_registry_entry
+WHERE updated_at < ?
+`
+
+// Reconciles the table against a completed snapshot: every row the snapshot
+// carried was stamped with its timestamp, so anything older was not in the
+// snapshot and is no longer published upstream.
+func (q *Queries) PruneTokenRegistryEntriesStaleBefore(ctx context.Context, updatedAt sql.NullTime) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneTokenRegistryEntriesStaleBefore, updatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const releaseFallbackRewardSnapshotGuard = `-- name: ReleaseFallbackRewardSnapshotGuard :execrows
 DELETE FROM reward_snapshot
 WHERE id = ? AND authoritative = FALSE
@@ -3818,15 +3907,18 @@ func (q *Queries) SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryPara
 const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, calculation_version,
+    delegator_count, captured_slot, leios_key_public,
+    leios_key_possession_proof, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
     delegator_count = excluded.delegator_count,
     captured_slot = excluded.captured_slot,
+    leios_key_public = excluded.leios_key_public,
+    leios_key_possession_proof = excluded.leios_key_possession_proof,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -3842,6 +3934,8 @@ type SavePoolStakeSnapshotParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -3856,6 +3950,8 @@ func (q *Queries) SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSn
 		arg.StakeDenominator,
 		arg.DelegatorCount,
 		arg.CapturedSlot,
+		arg.LeiosKeyPublic,
+		arg.LeiosKeyPossessionProof,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -4753,4 +4849,56 @@ func (q *Queries) UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertM
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const upsertTokenRegistryEntry = `-- name: UpsertTokenRegistryEntry :exec
+INSERT INTO token_registry_entry (
+    subject,
+    name,
+    ticker,
+    description,
+    url,
+    logo,
+    decimals,
+    created_at,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject) DO UPDATE SET
+    name = excluded.name,
+    ticker = excluded.ticker,
+    description = excluded.description,
+    url = excluded.url,
+    logo = excluded.logo,
+    decimals = excluded.decimals,
+    updated_at = excluded.updated_at
+`
+
+type UpsertTokenRegistryEntryParams struct {
+	Subject     string
+	Name        sql.NullString
+	Ticker      sql.NullString
+	Description sql.NullString
+	Url         sql.NullString
+	Logo        sql.NullString
+	Decimals    sql.NullInt64
+	CreatedAt   sql.NullTime
+	UpdatedAt   sql.NullTime
+}
+
+// A later sync is authoritative for the whole subject: every property column
+// is overwritten from the incoming row, so a property the registry has since
+// dropped stops being served rather than lingering from an earlier sync.
+func (q *Queries) UpsertTokenRegistryEntry(ctx context.Context, arg UpsertTokenRegistryEntryParams) error {
+	_, err := q.db.ExecContext(ctx, upsertTokenRegistryEntry,
+		arg.Subject,
+		arg.Name,
+		arg.Ticker,
+		arg.Description,
+		arg.Url,
+		arg.Logo,
+		arg.Decimals,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
 }

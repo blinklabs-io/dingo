@@ -293,6 +293,8 @@ type PoolStakeSnapshot struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -429,6 +431,19 @@ type Tip struct {
 	ID          int64
 	Slot        sql.NullInt64
 	BlockNumber sql.NullInt64
+}
+
+type TokenRegistryEntry struct {
+	CreatedAt   sql.NullTime
+	UpdatedAt   sql.NullTime
+	Subject     string
+	Name        sql.NullString
+	Ticker      sql.NullString
+	Description sql.NullString
+	Url         sql.NullString
+	Logo        sql.NullString
+	ID          int64
+	Decimals    sql.NullInt64
 }
 
 type Transaction struct {

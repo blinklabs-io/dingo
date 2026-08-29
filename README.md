@@ -22,6 +22,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
 - Fast bootstrapping via built-in Mithril client
+- Optional Midnight event indexing and MidnightState gRPC service
 - Multiple external interfaces: general-purpose APIs (UTxO RPC, Blockfrost-compatible REST, Mesh/Rosetta) plus Bark for Dingo-to-Dingo C2 and archive services
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
@@ -29,6 +30,19 @@ Note: On Windows systems, named pipes are used instead of Unix sockets for node-
 <div align="center">
   <img src="./.github/dingo-20241210.png" alt="dingo screenshot" width="640">
 </div>
+
+## Documentation
+
+Start with the [Dingo documentation index](docs/README.md). It maps the
+versioned documentation in this repository, the package comments exposed by
+`go doc`, and the public operator guides at
+[docs.blinklabs.io](https://docs.blinklabs.io/guides/dingo/001-dingo/).
+
+For code-level questions, use the [Go code reference](docs/code-reference.md)
+to find package `doc.go` files and commands that render documentation from the
+exact revision checked out. Automated tools can also use the public
+[LLM documentation index](https://docs.blinklabs.io/llms.txt) or the focused
+[Cardano nodes and operations set](https://docs.blinklabs.io/_llms-txt/cardano-nodes-and-operations.txt).
 
 ## Running
 
@@ -89,6 +103,18 @@ The following environment variables modify Dingo's behavior:
   - Comma-separated HTTPS hostnames additionally allowed for Bark-supplied
     block download URLs. The allowlist always includes the
     `DINGO_BARK_BASE_URL` hostname.
+- `DINGO_BARK_CLIENT_CA_FILE_PATH`
+  - PEM CA bundle used to authenticate every Bark DatabaseService caller.
+- `DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS`
+  - Comma-separated SHA-256 client certificate fingerprints authorized for
+    destructive Bark DatabaseService RPCs.
+- `DINGO_DEBUG_BIND_ADDR`
+  - IP address to bind for unauthenticated pprof endpoints (default:
+    `127.0.0.1`)
+  - This is independent of the public and private node bind addresses; set a
+    wildcard address only when an external network control protects it
+- `DINGO_DEBUG_PORT`
+  - TCP port for pprof endpoints (default: `0`, disabled)
 - `DINGO_HISTORY_EXPIRY_ENABLED`
   - Enable local expiry of immutable block CBOR older than the ledger stability
     window (default: `false`)
@@ -112,9 +138,26 @@ The following environment variables modify Dingo's behavior:
   - Log output format: `text` (default, human-readable) or `json` (machine-parseable, for ELK/Loki ingestion)
 - `DINGO_LOGGING_LEVEL`
   - Minimum log level: `debug`, `info` (default), `warn`, or `error` (the `--debug` flag overrides this to `debug`)
-- `TLS_CERT_FILE_PATH` - TLS certificate used by the built-in UTxO RPC
-  listener, requires `TLS_KEY_FILE_PATH` (default: empty)
-- `TLS_KEY_FILE_PATH` - TLS private key used by the built-in UTxO RPC listener
+- `DINGO_MIDNIGHT_ENABLED`
+  - Enable Midnight indexing in API storage mode (default: `false`)
+- `DINGO_MIDNIGHT_SERVER_ENABLED`
+  - Independently enable the Midnight gRPC server in API storage mode
+    (default: `false`)
+- `DINGO_MIDNIGHT_REFLECTION_ENABLED`
+  - Enable gRPC reflection on the Midnight server; requires the server
+    (default: `false`)
+- `DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE`
+  - Permit a plaintext Midnight listener on a wildcard, hostname, or concrete
+    non-loopback address (default: `false`)
+- `DINGO_MIDNIGHT_HOST`
+  - Midnight gRPC listen address (default: `127.0.0.1`)
+- `DINGO_MIDNIGHT_PORT`
+  - Midnight gRPC listen port; must be non-zero when the server is enabled
+    (default: `50051`)
+- `TLS_CERT_FILE_PATH` - TLS certificate used directly by an enabled Midnight
+  gRPC listener and as the built-in UTxO RPC compatibility default; requires
+  `TLS_KEY_FILE_PATH` (default: empty)
+- `TLS_KEY_FILE_PATH` - matching TLS private key for those listeners
   (default: empty)
 
 ### Block Production (SPO Mode)
@@ -171,7 +214,9 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 | 3000 | Blockfrost REST API | Disabled |
 | 8080 | Mesh (Rosetta) REST API | Disabled |
 | 9090 | UTxO RPC (gRPC) | Disabled |
+| 50051 | Midnight state (gRPC) | Disabled |
 | — | Bark archive (gRPC) | Disabled (example when enabled: 9091) |
+| — | pprof debug endpoints | Disabled (`DINGO_DEBUG_PORT=0`; loopback when enabled) |
 
 ## Storage Modes
 
@@ -203,12 +248,23 @@ storageMode: "api"
 
 ## API Servers and Bark
 
-Dingo includes three general-purpose external APIs plus Bark. UTxO RPC,
-Blockfrost, and Mesh are client-facing APIs and require `storageMode: "api"`.
+Dingo includes three general-purpose external APIs, an Acropolis-compatible
+Midnight state service, and Bark. UTxO RPC, Blockfrost, and Mesh are
+client-facing APIs and require `storageMode: "api"`.
 Their built-in providers are registered with the instance-owned plugin host,
 start on their provider defaults in API mode, and can be configured
 independently under `plugins.api`. Set an individual port to 0 to disable that
 interface.
+
+Midnight indexing and serving are separate opt-ins. `midnight.enabled` starts
+the indexer, while `midnight.serverEnabled` starts the gRPC listener for rows
+already present in the Midnight tables; either may be enabled independently in
+API storage mode. The listener defaults to `127.0.0.1:50051`. Reflection is
+available only with `midnight.reflectionEnabled`. Plaintext wildcard, hostname,
+and concrete non-loopback binds are rejected unless
+`midnight.allowInsecureRemote` is set; configuring both
+`tlsCertFilePath` and `tlsKeyFilePath` permits a remote TLS listener. Dingo does
+not add authentication to this Acropolis-compatible service.
 
 Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
@@ -228,6 +284,7 @@ takes precedence.
 | UTxO RPC | `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT` | 9090 | gRPC | General-purpose client API (v1alpha and v1beta) |
 | Blockfrost | `DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT` | 3000 | REST | General-purpose client API |
 | Mesh (Rosetta) | `DINGO_PLUGINS_API_MESH_CONFIG_PORT` | 8080 | REST | General-purpose client API |
+| Midnight | `DINGO_MIDNIGHT_PORT` | 50051 (server off) | gRPC | Acropolis-compatible Midnight state API |
 | Bark | `DINGO_BARK_PORT` | disabled | Connect/gRPC | Dingo-to-Dingo C2/archive protocol |
 
 ```bash
@@ -333,17 +390,18 @@ Credential locations:
   names are.
 
 The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a
-supported, **UTxO RPC-only** compatibility default. They merge in as the
-lowest-priority input, field by field, alongside the shared `api.tls`
-default and UTxO RPC's own `tls` config — not as an all-or-nothing fallback
-that only applies when both of those are completely unset. For example, if
-the shared `api.tls` sets only `mode: server` with no `certFilePath`/
-`keyFilePath` of its own, UTxO RPC still inherits those two fields from the
-legacy root settings. They are not promoted onto Blockfrost or Mesh, since
-doing so would silently switch a previously plaintext listener to TLS on
-upgrade. `bindAddr` and `corsAllowedOrigins` are unrelated to this policy
-and remain root-level settings shared by all listeners (`bindAddr` is also
-used by the relay/NtN listener, not just the APIs).
+supported compatibility input with two consumers. The Midnight gRPC server
+uses the pair directly when explicitly enabled. UTxO RPC merges it as the
+lowest-priority policy, field by field, alongside the shared `api.tls` default
+and its own `tls` config — not as an all-or-nothing fallback that applies only
+when both newer scopes are completely unset. For example, if shared `api.tls`
+sets only `mode: server` with no `certFilePath`/`keyFilePath`, UTxO RPC still
+inherits the two paths from the legacy root settings. The root pair is not
+promoted onto Blockfrost or Mesh, since doing so would silently switch a
+previously plaintext listener to TLS on upgrade. `bindAddr` and
+`corsAllowedOrigins` are unrelated to this policy and remain root-level
+settings shared by all listeners (`bindAddr` is also used by the relay/NtN
+listener, not just the APIs).
 
 ### Archive And History Expiry Nodes
 
@@ -472,6 +530,11 @@ Or use the subcommand form for more control:
 ./dingo -n preview mithril sync
 ```
 
+The Docker entrypoint manages both a first-run or resumed Mithril sync and the
+subsequent `serve` process as direct children. It forwards SIGINT and SIGTERM
+to whichever child is active, waits for that child to finish, and returns the
+child's exit status instead of masking an interrupted bootstrap as success.
+
 The default `v2` backend restores incremental per-immutable-file archives only
 after checking the genesis-rooted certificate chain, certified Merkle root, and
 each immutable-file digest. It also requires the ancillary archive: its
@@ -558,9 +621,13 @@ a target beyond the security parameter, because it exists for disaster-recovery
 scenarios (see CIP-0135) where the chain must be rewound further than Ouroboros
 Praos allows. The resulting database is resync-ready from the target point.
 
-The same operations are also exposed remotely through the Bark
-`DatabaseService`. Bark has no built-in authentication, so do not expose its
-port outside a trusted network.
+The same operations are also exposed remotely through Bark's
+`DatabaseService`. Every `DatabaseService` RPC requires a client certificate
+verified against `barkClientCaFilePath`; destructive RPCs also require the
+certificate's SHA-256 fingerprint in
+`barkOperatorCertificateFingerprints`. Bark's read-only `ArchiveService`
+remains public on the same listener, so expose the Bark port only to the
+intended network.
 
 ## Database Plugins
 
@@ -813,6 +880,7 @@ validation record.
   - [ ] WIP Blockfrost-compatible REST API (required endpoint families are
         implemented; compatibility hardening and reward parity are ongoing)
   - [x] Mesh (Coinbase Rosetta) API
+  - [x] Optional Midnight event indexer and MidnightState gRPC service
 - [x] Mithril Bootstrap
   - [x] Built-in Mithril client
   - [x] Ledger state import (UTxOs, accounts, pools, DReps, epochs)
@@ -878,7 +946,17 @@ make test-load-profile
 # Analyze
 go tool pprof cpu.prof
 go tool pprof mem.prof
+
+# Enable live pprof on loopback for serve or Mithril sync
+DINGO_DEBUG_PORT=6060 ./dingo
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
 ```
+
+The live pprof server has no authentication or TLS. Its dedicated
+`debugBindAddr` defaults to `127.0.0.1` even when `bindAddr` or
+`privateBindAddr` uses a wildcard. External exposure therefore requires an
+explicit `--debug-bind-addr`, `DINGO_DEBUG_BIND_ADDR`, or `debugBindAddr`
+override and should be protected by a firewall or equivalent network policy.
 
 ## DevNet
 

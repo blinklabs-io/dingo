@@ -105,7 +105,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 							peer.Connection.Id,
 						)
 						if conn != nil {
-							conn.Close()
+							closeConnAndLog(
+								p.config.Logger,
+								conn,
+								"error closing connection for bootstrap peer after exit",
+								"address",
+								peer.Address,
+							)
 						}
 					}
 					peer.Connection = nil
@@ -499,7 +505,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Discover peers from ledger (stake pool relays) before peer sharing,
 	// which can block on unresponsive peers.
-	p.discoverLedgerPeers()
+	p.discoverLedgerPeersContext(ctx)
 
 	for i := range eligiblePeersCopy {
 		addrs := p.config.PeerRequestFunc(&eligiblePeersCopy[i])
@@ -626,7 +632,13 @@ func (p *PeerGovernor) enforceStateLimit(
 		if peer.Connection != nil && p.config.ConnManager != nil {
 			conn := p.config.ConnManager.GetConnectionById(peer.Connection.Id)
 			if conn != nil {
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing connection for peer removed due to limit exceeded",
+					"address",
+					peer.Address,
+				)
 			}
 		}
 		events = append(events, pendingEvent{

@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -48,6 +50,30 @@ const (
 	defaultLeiosClosureWaitTimeout = 20 * time.Second
 )
 
+// leiosEndorserBlockCacheMaxEntryBytes and leiosEndorserBlockCacheMaxBytes are
+// declared as vars, not consts, solely so tests can lower them temporarily
+// (save, override, t.Cleanup restore) to exercise byte-budget rejection and
+// eviction without allocating hundreds of megabytes of test data. Production
+// code only reads them.
+var (
+	// leiosEndorserBlockCacheMaxEntryBytes bounds the retained size (manifest
+	// plus every transaction body held, complete or partial) of a single
+	// cached endorser block. It bounds one oversized or malicious entry
+	// independently of leiosEndorserBlockCacheMaxEntries, which only bounds
+	// entry count. An offer whose declared size already exceeds this, or
+	// whose fetched body would put the entry over it, is rejected rather
+	// than cached; see storeLeiosEndorserBlock and
+	// fetchAndValidateLeiosEbManifest.
+	leiosEndorserBlockCacheMaxEntryBytes = 16 << 20 // 16 MiB
+	// leiosEndorserBlockCacheMaxBytes bounds the aggregate retained size of
+	// the endorser-block cache. leiosEndorserBlockCacheMaxEntries alone would
+	// let leiosEndorserBlockCacheMaxEntries maximally-sized entries retain
+	// several GiB; this bounds actual memory directly. Eviction at either
+	// budget follows the same oldest-inserted-first policy; see
+	// pruneLeiosEndorserBlockCacheLocked.
+	leiosEndorserBlockCacheMaxBytes = 256 << 20 // 256 MiB
+)
+
 // errLeiosClosureUnresolved is returned by the NtC serving path when a
 // certifying ranking block's endorser closure does not arrive within the wait
 // window. The caller closes the connection rather than serving an incomplete
@@ -55,6 +81,147 @@ const (
 var errLeiosClosureUnresolved = errors.New(
 	"leios endorser closure unresolved before timeout",
 )
+
+// leiosConnDoneContext adapts a serving connection's release channel to
+// context.Context so it can be combined with context.WithTimeout via
+// context.WithTimeout(leiosConnDoneContext{done: connDone}, timeout). The
+// resulting context is done when either the timeout elapses or connDone
+// closes, whichever comes first, so a closure wait started for one NtC
+// request cannot outlive the connection it serves. A nil channel behaves like
+// context.Background(): it never fires on its own, leaving the timeout as the
+// only bound.
+//
+// The channel must come from registerLeiosServeWaiter, not from
+// Protocol.DoneChan(). The chainsync server callback runs inside gouroboros's
+// recvLoop, and recvLoop closes recvDoneChan only after the callback returns;
+// doneChan in turn closes only after recvDoneChan does. DoneChan() therefore
+// cannot close while this wait is in progress, and using it here would leave
+// the wait bounded by the timeout alone.
+type leiosConnDoneContext struct {
+	done <-chan struct{}
+}
+
+func (c leiosConnDoneContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c leiosConnDoneContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c leiosConnDoneContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c leiosConnDoneContext) Value(any) any {
+	return nil
+}
+
+// registerLeiosServeWaiter returns a channel closed when connId's connection
+// goes away, so an NtC serving wait on that connection is released as soon as
+// the client disconnects. The returned cancel function deregisters the waiter
+// and must always be called.
+//
+// The liveness re-check after registration closes the race with a connection
+// that is already going away: connmanager removes the connection from its map
+// before invoking ConnClosedFunc, so a nil lookup here means either the
+// release has already run (and would have closed a registered channel) or it
+// is about to. Either way the caller must not wait, so the channel is closed
+// before it is returned.
+func (o *Ouroboros) registerLeiosServeWaiter(
+	connId ouroboros.ConnectionId,
+) (done <-chan struct{}, cancel func()) {
+	ch := make(chan struct{})
+	o.leiosServeWaitersMu.Lock()
+	if o.leiosServeWaiters == nil {
+		o.leiosServeWaiters = make(
+			map[ouroboros.ConnectionId][]chan struct{},
+		)
+	}
+	o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
+	o.leiosServeWaitersMu.Unlock()
+
+	cancel = func() {
+		o.leiosServeWaitersMu.Lock()
+		defer o.leiosServeWaitersMu.Unlock()
+		waiters := o.leiosServeWaiters[connId]
+		for i, w := range waiters {
+			if w == ch {
+				o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
+				break
+			}
+		}
+		if len(o.leiosServeWaiters[connId]) == 0 {
+			delete(o.leiosServeWaiters, connId)
+		}
+	}
+
+	// The connection manager is absent in unit tests that exercise the
+	// serving decision directly; there is no liveness to check, so the
+	// timeout remains the only bound.
+	if o.connManager != nil &&
+		o.connManager.GetConnectionById(connId) == nil {
+		o.releaseLeiosServeWaiter(connId, ch)
+	}
+	return ch, cancel
+}
+
+// releaseLeiosServeWaiter deregisters one waiter channel and closes it, both
+// under the lock so it cannot double-close against a concurrent
+// ReleaseLeiosServeWaiters: whichever runs first removes the channel, and the
+// other no longer finds it.
+func (o *Ouroboros) releaseLeiosServeWaiter(
+	connId ouroboros.ConnectionId,
+	ch chan struct{},
+) {
+	o.leiosServeWaitersMu.Lock()
+	defer o.leiosServeWaitersMu.Unlock()
+	waiters := o.leiosServeWaiters[connId]
+	for i, w := range waiters {
+		if w == ch {
+			o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
+			if len(o.leiosServeWaiters[connId]) == 0 {
+				delete(o.leiosServeWaiters, connId)
+			}
+			close(ch)
+			return
+		}
+	}
+}
+
+// ReleaseLeiosServeWaiters wakes every NtC serving wait pending on connId and
+// clears them. It is called from the node's connection-closed callback, which
+// connmanager drives from a per-connection goroutine blocked on the
+// connection's ErrorChan. That goroutine is independent of the chainsync
+// server callback, so it still runs while the callback is parked waiting for
+// an endorser closure -- which is precisely why the release cannot come from
+// the protocol's own done channel.
+func (o *Ouroboros) ReleaseLeiosServeWaiters(
+	connId ouroboros.ConnectionId,
+) {
+	o.leiosServeWaitersMu.Lock()
+	waiters := o.leiosServeWaiters[connId]
+	delete(o.leiosServeWaiters, connId)
+	o.leiosServeWaitersMu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
+}
+
+// RegisterLeiosServeWaiterForTesting exposes registerLeiosServeWaiter so the
+// root package can prove its connection-closed callback actually releases a
+// parked NtC serving wait. The release wiring spans two packages, so the
+// assertion cannot be made from inside either one alone.
+func (o *Ouroboros) RegisterLeiosServeWaiterForTesting(
+	connId ouroboros.ConnectionId,
+) (done <-chan struct{}, cancel func()) {
+	return o.registerLeiosServeWaiter(connId)
+}
 
 // leiosClosureWaitTimeout returns how long the NtC serving path waits for a
 // certifying ranking block's endorser closure. An explicit config override
@@ -67,8 +234,8 @@ func (o *Ouroboros) leiosClosureWaitTimeout() time.Duration {
 	if o.config.LeiosClosureWaitTimeout > 0 {
 		return o.config.LeiosClosureWaitTimeout
 	}
-	if o.LedgerState != nil {
-		if d := o.LedgerState.EndorserBlockWaitDuration(); d > 0 {
+	if o.ledgerState != nil {
+		if d := o.ledgerState.EndorserBlockWaitDuration(); d > 0 {
 			return d
 		}
 	}
@@ -94,6 +261,13 @@ type leiosEndorserBlockData struct {
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
+	// seq is a monotonic insertion sequence assigned while leiosMu is held
+	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
+	// insertedAt. insertedAt is a wall-clock timestamp captured before the
+	// lock is acquired, so a delayed goroutine can carry an earlier timestamp
+	// into the map after a goroutine that actually inserted first; sorting
+	// eviction by seq instead avoids evicting the truly-newer entry first.
+	seq uint64
 }
 
 func leiosBlockKey(hash []byte) string {
@@ -109,6 +283,113 @@ func cloneRawMessages(in []cbor.RawMessage) []cbor.RawMessage {
 		out[i] = slices.Clone(in[i])
 	}
 	return out
+}
+
+// validateLeiosEndorserBlockTxs binds fetched transaction wire values to the
+// manifest before the complete set is cached or applied. Leios transaction
+// references use the Cardano transaction ID (the hash of the transaction body)
+// and the complete transaction's encoded size, while leios-fetch carries each
+// transaction either directly or in a CBOR byte-string wrapper.
+func validateLeiosEndorserBlockTxs(
+	manifestRaw []byte,
+	txsRaw []cbor.RawMessage,
+) error {
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	if err != nil {
+		return fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if err := block.Validate(); err != nil {
+		return fmt.Errorf("validate leios endorser block references: %w", err)
+	}
+	if len(txsRaw) != len(block.TransactionReferences) {
+		return fmt.Errorf(
+			"leios endorser block transaction count mismatch: got %d, want %d",
+			len(txsRaw),
+			len(block.TransactionReferences),
+		)
+	}
+	for i, raw := range txsRaw {
+		if err := validateLeiosEndorserBlockTx(
+			i,
+			block.TransactionReferences[i],
+			raw,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateLeiosEndorserBlockTx(
+	index int,
+	ref lcommon.LeiosTransactionReference,
+	raw cbor.RawMessage,
+) error {
+	txCbor := []byte(raw)
+	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
+		var inner []byte
+		bytesRead, err := cbor.Decode(txCbor, &inner)
+		if err != nil {
+			return fmt.Errorf("unwrap endorser tx %d: %w", index, err)
+		}
+		if bytesRead != len(txCbor) {
+			return fmt.Errorf("endorser tx %d has trailing wrapper bytes", index)
+		}
+		txCbor = inner
+	}
+	var txElems []cbor.RawMessage
+	bytesRead, err := cbor.Decode(txCbor, &txElems)
+	if err != nil {
+		return fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
+	}
+	if bytesRead != len(txCbor) {
+		return fmt.Errorf("endorser tx %d has trailing envelope bytes", index)
+	}
+	if len(txElems) == 0 {
+		return fmt.Errorf("endorser tx %d has no body", index)
+	}
+	if len(txCbor) != int(ref.TransactionSize) {
+		return fmt.Errorf(
+			"endorser tx %d size mismatch: got %d, want %d",
+			index,
+			len(txCbor),
+			ref.TransactionSize,
+		)
+	}
+	if bodyHash := lcommon.Blake2b256Hash(txElems[0]); bodyHash != ref.TransactionHash {
+		return fmt.Errorf("endorser tx %d body hash mismatch", index)
+	}
+	return nil
+}
+
+func leiosEndorserBlockTxValidator(
+	manifestRaw []byte,
+	txCount int,
+) (func(int, cbor.RawMessage) error, error) {
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	if err != nil {
+		return nil, fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if err := block.Validate(); err != nil {
+		return nil, fmt.Errorf("validate leios endorser block references: %w", err)
+	}
+	if len(block.TransactionReferences) != txCount {
+		return nil, fmt.Errorf(
+			"leios endorser block transaction count mismatch: got %d, want %d",
+			txCount,
+			len(block.TransactionReferences),
+		)
+	}
+	return func(index int, raw cbor.RawMessage) error {
+		if index < 0 || index >= len(block.TransactionReferences) {
+			return fmt.Errorf("endorser tx index %d out of range", index)
+		}
+		return validateLeiosEndorserBlockTx(
+			index,
+			block.TransactionReferences[index],
+			raw,
+		)
+	}, nil
 }
 
 func (o *Ouroboros) storeLeiosEndorserBlock(
@@ -153,6 +434,8 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+	o.leiosEndorserBlockSeq++
+	data.seq = o.leiosEndorserBlockSeq
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
 		if existing.point.Slot != point.Slot {
 			o.leiosMu.Unlock()
@@ -195,11 +478,24 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// servable entry and earns the same lifetime as any other.
 		if len(data.partialTxs) > 0 && !data.completeTxCache() {
 			data.insertedAt = existing.insertedAt
+			data.seq = existing.seq
 		}
 	}
 	if data.completeTxCache() {
 		// The transaction set is whole; the resume state is now dead weight.
 		data.partialTxs = nil
+	}
+	// Reject rather than cache an entry that would exceed the per-entry byte
+	// budget. Any smaller entry already cached under cacheKeys (e.g. a
+	// manifest-only store) is left untouched, since the map has not been
+	// mutated yet at this point.
+	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		o.leiosMu.Unlock()
+		return fmt.Errorf(
+			"leios endorser block cache: entry size %d exceeds max %d",
+			n,
+			leiosEndorserBlockCacheMaxEntryBytes,
+		)
 	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
@@ -223,13 +519,13 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	o.enqueueLeiosPersist(point, blockRaw, data)
 	// Trigger local vote emission for the stored block, outside the
 	// cache lock
-	if o.LeiosVotes != nil {
-		o.LeiosVotes.HandleEndorserBlock(point.Slot, blockHash)
+	if o.leiosVotes != nil {
+		o.leiosVotes.HandleEndorserBlock(point.Slot, blockHash)
 	}
 	// Register the block into the Leios pipeline for stage/timing
 	// tracking and EB equivocation detection
-	if o.LeiosPipeline != nil {
-		o.LeiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
+	if o.leiosPipeline != nil {
+		o.leiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
 	}
 	return nil
 }
@@ -237,14 +533,33 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 // leiosDatabase returns the underlying Database when the LedgerState is wired
 // up, or nil when running without a database (unit tests, etc.).
 func (o *Ouroboros) leiosDatabase() *database.Database {
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return nil
 	}
-	return o.LedgerState.Database()
+	return o.ledgerState.Database()
 }
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
 	return data != nil && len(data.txsRaw) == data.txCount
+}
+
+// approxBytes estimates the memory retained by one cache entry: the manifest
+// plus every transaction body currently held, complete (txsRaw) or partial
+// (partialTxs). It undercounts slice/map overhead, which is acceptable for a
+// budget meant to bound the dominant cost -- the transaction and manifest
+// payloads themselves -- rather than account for every byte.
+func (data *leiosEndorserBlockData) approxBytes() int {
+	if data == nil {
+		return 0
+	}
+	total := len(data.blockRaw)
+	for _, raw := range data.txsRaw {
+		total += len(raw)
+	}
+	for _, raw := range data.partialTxs {
+		total += len(raw)
+	}
+	return total
 }
 
 // partialTxCount returns how many of the endorser block's transactions are
@@ -289,16 +604,27 @@ func mergeLeiosPartialTxs(
 // by an earlier caller); partialTxs is sparse.
 func (data *leiosEndorserBlockData) seedLeiosPartialTxsLocked(
 	result []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	for idx, raw := range data.txsRaw {
 		if idx >= len(result) || raw == nil {
 			break
+		}
+		if validate != nil {
+			if err := validate(idx, raw); err != nil {
+				continue
+			}
 		}
 		result[idx] = raw
 	}
 	for idx, raw := range data.partialTxs {
 		if idx >= len(result) || raw == nil || result[idx] != nil {
 			continue
+		}
+		if validate != nil {
+			if err := validate(idx, raw); err != nil {
+				continue
+			}
 		}
 		result[idx] = raw
 	}
@@ -312,6 +638,7 @@ func (data *leiosEndorserBlockData) seedLeiosPartialTxsLocked(
 func (o *Ouroboros) seedLeiosPartialTxs(
 	hash []byte,
 	result []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	if len(result) == 0 {
 		return
@@ -322,7 +649,7 @@ func (o *Ouroboros) seedLeiosPartialTxs(
 	if !ok || data == nil || data.expired(time.Now()) {
 		return
 	}
-	data.seedLeiosPartialTxsLocked(result)
+	data.seedLeiosPartialTxsLocked(result, validate)
 }
 
 // retainLeiosPartialTxs merges an incomplete fetch result into the cached
@@ -333,6 +660,7 @@ func (o *Ouroboros) seedLeiosPartialTxs(
 func (o *Ouroboros) retainLeiosPartialTxs(
 	hash []byte,
 	partial []cbor.RawMessage,
+	validate func(int, cbor.RawMessage) error,
 ) {
 	if len(partial) == 0 {
 		return
@@ -345,12 +673,34 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 		existing.txCount <= 0 {
 		return
 	}
+	held := existing.partialTxs
+	add := partial
+	removedHeld := false
+	if validate != nil {
+		held = cloneRawMessages(held)
+		for idx, raw := range held {
+			if raw != nil {
+				if err := validate(idx, raw); err != nil {
+					held[idx] = nil
+					removedHeld = true
+				}
+			}
+		}
+		add = cloneRawMessages(add)
+		for idx, raw := range add {
+			if raw != nil {
+				if err := validate(idx, raw); err != nil {
+					add[idx] = nil
+				}
+			}
+		}
+	}
 	merged, added := mergeLeiosPartialTxs(
-		existing.partialTxs,
-		partial,
+		held,
+		add,
 		existing.txCount,
 	)
-	if added == 0 {
+	if added == 0 && !removedHeld {
 		return
 	}
 	// Cached entries are replaced, never mutated in place: lookups hand out the
@@ -360,11 +710,25 @@ func (o *Ouroboros) retainLeiosPartialTxs(
 	// indefinitely.
 	updated := *existing
 	updated.partialTxs = merged
+	if updated.partialTxCount() == 0 {
+		updated.partialTxs = nil
+	}
+	// Bound retained partial-fetch growth the same way storeLeiosEndorserBlock
+	// bounds a full store: a peer that dribbles enough small partial responses
+	// across repeated attempts could otherwise grow partialTxs past the
+	// per-entry byte budget without ever going through that check, since this
+	// path publishes directly rather than via storeLeiosEndorserBlock. Reject
+	// the merge and keep the existing (smaller) cached entry rather than
+	// publish an over-budget one.
+	if n := updated.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		return
+	}
 	for _, cacheKey := range existing.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == existing {
 			o.leiosEndorserBlocks[cacheKey] = &updated
 		}
 	}
+	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 }
 
 func (data *leiosEndorserBlockData) expired(now time.Time) bool {
@@ -393,19 +757,49 @@ func (o *Ouroboros) pruneLeiosEndorserBlockCacheLocked(now time.Time) {
 			delete(uniqueBlocks, data)
 		}
 	}
-	if len(uniqueBlocks) <= leiosEndorserBlockCacheMaxEntries {
+	totalBytes := totalLeiosEndorserBlockBytes(uniqueBlocks)
+	if len(uniqueBlocks) <= leiosEndorserBlockCacheMaxEntries &&
+		totalBytes <= leiosEndorserBlockCacheMaxBytes {
 		return
 	}
 	blocks := make([]*leiosEndorserBlockData, 0, len(uniqueBlocks))
 	for data := range uniqueBlocks {
 		blocks = append(blocks, data)
 	}
+	// Sort by seq, not insertedAt: insertedAt is a wall-clock timestamp
+	// captured before leiosMu is acquired, so a delayed goroutine can carry an
+	// earlier timestamp into the map after a goroutine that actually won the
+	// lock and inserted first. seq is assigned while the lock is held, so it
+	// reflects true insertion order.
 	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
-		return a.insertedAt.Compare(b.insertedAt)
+		return cmp.Compare(a.seq, b.seq)
 	})
-	for _, data := range blocks[:len(blocks)-leiosEndorserBlockCacheMaxEntries] {
+	// Evict oldest-inserted entries first until both the entry-count and the
+	// aggregate byte budget are satisfied. totalBytes is updated as each
+	// victim is chosen instead of being recomputed from scratch.
+	evict := 0
+	for evict < len(blocks) &&
+		(len(blocks)-evict > leiosEndorserBlockCacheMaxEntries ||
+			totalBytes > leiosEndorserBlockCacheMaxBytes) {
+		totalBytes -= blocks[evict].approxBytes()
+		evict++
+	}
+	for _, data := range blocks[:evict] {
 		o.deleteLeiosEndorserBlockDataLocked(data)
 	}
+}
+
+// totalLeiosEndorserBlockBytes sums approxBytes across every unique cached
+// endorser block, for the aggregate byte budget enforced by
+// pruneLeiosEndorserBlockCacheLocked.
+func totalLeiosEndorserBlockBytes(
+	blocks map[*leiosEndorserBlockData]struct{},
+) int {
+	total := 0
+	for data := range blocks {
+		total += data.approxBytes()
+	}
+	return total
 }
 
 func (o *Ouroboros) deleteLeiosEndorserBlockDataLocked(
@@ -503,6 +897,21 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		)
 		return nil, false
 	}
+	if len(txsRaw) > 0 {
+		if err := validateLeiosEndorserBlockTxs(manifestRaw, txsRaw); err != nil {
+			// Transaction blobs written before manifest binding was enforced (or
+			// corrupted afterward) are only a historical-serving cache. Keep the
+			// content-addressed manifest, but discard the untrusted bodies so the
+			// normal by-point path fetches and persists a verified replacement.
+			o.config.Logger.Debug(
+				"discarding leios EB txs that mismatch persisted manifest",
+				"component", "network",
+				"hash", hex.EncodeToString(hash),
+				"error", err,
+			)
+			txsRaw = nil
+		}
+	}
 
 	cacheKeys := []string{leiosBlockKey(hash)}
 	data := &leiosEndorserBlockData{
@@ -513,6 +922,22 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		cacheKeys:  cacheKeys,
 		insertedAt: time.Now(),
 	}
+	// A persisted (or pre-cap-era) blob can exceed the per-entry byte budget
+	// even though storeLeiosEndorserBlock would reject it on the write path;
+	// this reload path must apply the same check rather than let a
+	// leios-fetch MsgBlockRequest for an old point repopulate the cache past
+	// the limit on every cache miss. Serve it to the caller uncached rather
+	// than dropping it outright.
+	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+		o.config.Logger.Debug(
+			"leios EB reloaded from blob store exceeds max entry size; serving uncached",
+			"component", "network",
+			"hash", hex.EncodeToString(hash),
+			"size", n,
+			"max_size", leiosEndorserBlockCacheMaxEntryBytes,
+		)
+		return data, true
+	}
 	// Populate the in-memory cache so subsequent lookups skip the DB.
 	o.leiosMu.Lock()
 	if o.leiosEndorserBlocks == nil {
@@ -522,9 +947,16 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil ||
 		existing.expired(time.Now()) {
 		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+		o.leiosEndorserBlockSeq++
+		data.seq = o.leiosEndorserBlockSeq
 		for _, key := range cacheKeys {
 			o.leiosEndorserBlocks[key] = data
 		}
+		// Prune again after inserting so a reload that fits the per-entry
+		// budget but pushes the aggregate over its budget is evicted
+		// promptly, the same way storeLeiosEndorserBlock prunes both before
+		// and after admitting an entry.
+		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	} else {
 		data = existing
 	}
@@ -675,11 +1107,11 @@ func (o *Ouroboros) certifiedEndorserBlockHash(
 	}
 	// The header is certified from here on; a resolution failure below keeps
 	// certified=true so the caller disconnects instead of serving raw.
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return lcommon.Blake2b256{}, true, false
 	}
 	prevHash := header.PrevHash()
-	parent, err := o.LedgerState.BlockByHash(prevHash.Bytes())
+	parent, err := o.ledgerState.BlockByHash(prevHash.Bytes())
 	if err != nil {
 		return lcommon.Blake2b256{}, true, false
 	}
@@ -901,7 +1333,11 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 	if p == nil || p.Mode() != protocol.ProtocolModeNodeToClient {
 		return block.Cbor, nil
 	}
-	return o.serveLeiosRankingBlockCbor(block)
+	// The connection id, not p.DoneChan(): this callback runs inside
+	// gouroboros's recvLoop, which cannot finish (and so cannot close
+	// DoneChan) until the callback returns. A pending closure wait is
+	// released through connmanager's per-connection watcher instead.
+	return o.serveLeiosRankingBlockCbor(block, ctx.ConnectionId)
 }
 
 // serveLeiosRankingBlockCbor resolves the NtC representation of a Dijkstra
@@ -910,9 +1346,12 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 // decision (merge / serve-raw / disconnect) is unit-testable without a live
 // chainsync server. A block whose header is certified is never downgraded to
 // the raw serve path: it is either merged or an error is returned so the
-// connection is closed.
+// connection is closed. connId identifies the serving connection so that any
+// closure wait is bounded by that connection's lifetime in addition to the
+// configured timeout.
 func (o *Ouroboros) serveLeiosRankingBlockCbor(
 	block models.Block,
+	connId ouroboros.ConnectionId,
 ) ([]byte, error) {
 	merged, ok, err := o.mergedLeiosRankingBlockCbor(block.Cbor)
 	if err != nil {
@@ -961,21 +1400,29 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 		)
 	}
 	// Certified and resolved: wait a bounded window for the endorser closure.
-	return o.serveLeiosCertRbWithWait(block, ebHash)
+	return o.serveLeiosCertRbWithWait(block, ebHash, connId)
 }
 
-// serveLeiosCertRbWithWait waits a bounded window (the ledger's endorser-block
-// wait window, see leiosClosureWaitTimeout) for a certifying ranking block's
-// endorser closure to be cached, returning the merged block if it arrives. On
-// timeout it returns errLeiosClosureUnresolved so the caller closes the
-// connection instead of serving an incomplete (empty-transaction) CertRB — the
-// client then retries the same point, avoiding a permanently-incomplete record.
+// serveLeiosCertRbWithWait waits a bounded window for a certifying ranking
+// block's endorser closure to be cached, returning the merged block if it
+// arrives. The wait is bounded by two independent things, whichever elapses
+// first: the ledger's endorser-block wait window (leiosClosureWaitTimeout),
+// and the lifetime of the serving connection connId. A client that
+// disconnects while the wait is pending therefore wakes it immediately rather
+// than leaving it parked for the rest of the window. On timeout or
+// cancellation it returns errLeiosClosureUnresolved so the caller closes the
+// connection instead of serving an incomplete (empty-transaction) CertRB —
+// the client then retries the same point, avoiding a permanently-incomplete
+// record.
 func (o *Ouroboros) serveLeiosCertRbWithWait(
 	block models.Block,
 	ebHash lcommon.Blake2b256,
+	connId ouroboros.ConnectionId,
 ) ([]byte, error) {
+	connDone, cancelWaiter := o.registerLeiosServeWaiter(connId)
+	defer cancelWaiter()
 	ctx, cancel := context.WithTimeout(
-		context.Background(),
+		leiosConnDoneContext{done: connDone},
 		o.leiosClosureWaitTimeout(),
 	)
 	defer cancel()
@@ -994,8 +1441,18 @@ func (o *Ouroboros) serveLeiosCertRbWithWait(
 		)
 		return merged, nil
 	}
+	// Distinguish why the wait ended: the configured window elapsed
+	// (timeout), or connDone closed first (cancelled) -- e.g. the client
+	// disconnected or the request ended while the closure was still missing.
+	// context.WithTimeout propagates the parent's cancellation cause, so a
+	// parent-driven end reports context.Canceled here even though the
+	// deadline had not yet elapsed.
+	waitOutcome := "timeout"
+	if errors.Is(ctx.Err(), context.Canceled) {
+		waitOutcome = "cancelled"
+	}
 	o.recordLeiosCertRbOutcome("unresolved")
-	o.recordLeiosCertRbWait("timeout", waited)
+	o.recordLeiosCertRbWait(waitOutcome, waited)
 	o.config.Logger.Warn(
 		"endorser closure unresolved for CertRB within wait window; closing NtC chainsync connection so the client retries rather than recording a block with no transactions",
 		"slot",
@@ -1006,13 +1463,16 @@ func (o *Ouroboros) serveLeiosCertRbWithWait(
 		ebHash.String(),
 		"waited",
 		waited,
+		"wait_outcome",
+		waitOutcome,
 	)
 	return nil, fmt.Errorf(
-		"%w: slot %d hash %s eb %s (waited %s)",
+		"%w: slot %d hash %s eb %s (waited %s, %s)",
 		errLeiosClosureUnresolved,
 		block.Slot,
 		hex.EncodeToString(block.Hash),
 		ebHash.String(),
 		waited,
+		waitOutcome,
 	)
 }

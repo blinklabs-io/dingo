@@ -292,6 +292,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
+			false,
 		)
 		return rolloverErr
 	}))

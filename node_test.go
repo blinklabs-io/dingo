@@ -15,11 +15,14 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -352,6 +356,81 @@ func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
 	require.Equal(t, firstErr, secondErr)
 }
 
+// TestStartupFailureCleanupCancelsBeforeAllowingShutdown verifies the
+// signal-during-startup lifecycle boundary. Run owns startupLifecycleMu while
+// it unwinds its LIFO stack; shutdown must wait for that rollback rather than
+// closing the same partially initialized resource concurrently.
+func TestStartupFailureCleanupCancelsBeforeAllowingShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rollbackStarted := make(chan struct{})
+	releaseRollback := make(chan struct{})
+	var releaseRollbackOnce sync.Once
+	release := func() { releaseRollbackOnce.Do(func() { close(releaseRollback) }) }
+	defer release()
+	rollbackDone := make(chan struct{})
+	shutdownFuncStarted := make(chan struct{})
+	shutdownDone := make(chan error, 1)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ctx:    ctx,
+		cancel: cancel,
+		shutdownFuncs: []func(context.Context) error{
+			func(context.Context) error {
+				close(shutdownFuncStarted)
+				return nil
+			},
+		},
+	}
+
+	// Match Run's startup section: cleanupFailedStartup owns the gate until
+	// every started component's rollback completes.
+	n.startupLifecycleMu.Lock()
+	go func() {
+		defer close(rollbackDone)
+		n.cleanupFailedStartup([]func(){func() {
+			close(rollbackStarted)
+			<-releaseRollback
+		}})
+	}()
+	testutil.RequireReceive(
+		t,
+		rollbackStarted,
+		time.Second,
+		"startup rollback to begin",
+	)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+
+	go func() {
+		shutdownDone <- n.shutdown()
+	}()
+	// If shutdown did not take the same gate, its phase-four callback would
+	// run while the startup rollback is intentionally blocked above.
+	testutil.RequireNoReceive(
+		t,
+		shutdownFuncStarted,
+		50*time.Millisecond,
+		"normal shutdown while startup rollback owns the lifecycle gate",
+	)
+
+	release()
+	testutil.RequireReceive(
+		t,
+		rollbackDone,
+		time.Second,
+		"startup rollback completion",
+	)
+	testutil.RequireReceive(
+		t,
+		shutdownFuncStarted,
+		time.Second,
+		"normal shutdown after startup rollback completion",
+	)
+	require.NoError(t, <-shutdownDone)
+}
+
 func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
 	const eventType event.EventType = "test.shutdown.order"
 
@@ -382,7 +461,9 @@ func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
 				case <-publishDone:
 					return nil
 				case <-time.After(time.Second):
-					return errors.New("event bus was not closed before final cleanup")
+					return errors.New(
+						"event bus was not closed before final cleanup",
+					)
 				}
 			},
 		},
@@ -425,6 +506,51 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 		time.Second,
 		"close function completion",
 	)
+}
+
+// TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed protects the
+// storage safety boundary shared with live Restore/Truncate. LedgerState.Close
+// can time out while a database worker is still using the database; normal
+// shutdown must not close the database or its provider-owned stores in that
+// state.
+func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(t *testing.T) {
+	n, _ := newLiveLifecycleTestNodeWithGenesis(
+		t,
+		1,
+		nil,
+		ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: 1, TaskQueueSize: 1},
+	)
+
+	origTimeout := ledger.CloseDBWorkerPoolShutdownTimeout
+	ledger.CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { ledger.CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	defer func() {
+		close(release)
+		testutil.RequireReceive(t, workerDone, time.Second, "database worker drain")
+	}()
+	go func() {
+		defer close(workerDone)
+		_ = n.ledgerState.SubmitAsyncDBOperation(func(*database.Database) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	shutdownErr := n.shutdown()
+	require.Error(t, shutdownErr)
+	require.ErrorContains(t, shutdownErr, "database worker pool")
+	require.ErrorContains(t, shutdownErr, "database close skipped")
+
+	// The ledger worker is still blocked, so the database must remain usable.
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, make([]byte, 32)),
+	}, nil))
 }
 
 // newChainSelectorSubscriptionTestNode builds the minimal node
@@ -535,4 +661,41 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 		5*time.Millisecond,
 		"higher-priority peer must win equal-tip selection after priority event",
 	)
+}
+
+// A close/stop failure surfaced during the startup-cleanup unwind must
+// actually reach the log, not just be swallowed by the caller's `_ =`.
+func TestLogErrIfNotNilLogsOnError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(
+		logger,
+		"failed to stop leader election during cleanup",
+		errors.New("epoch transition in flight"),
+	)
+
+	out := buf.String()
+	if !strings.Contains(out, "failed to stop leader election during cleanup") {
+		t.Fatalf("expected log message in output, got: %s", out)
+	}
+	if !strings.Contains(out, "epoch transition in flight") {
+		t.Fatalf("expected error detail in output, got: %s", out)
+	}
+}
+
+// The common case -- a clean stop -- must stay silent, or every successful
+// shutdown would log a spurious error line.
+func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(logger, "failed to stop leader election during cleanup", nil)
+
+	if buf.Len() != 0 {
+		t.Fatalf(
+			"expected no log output for a nil error, got: %s",
+			buf.String(),
+		)
+	}
 }

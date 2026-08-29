@@ -16,11 +16,13 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,9 +33,12 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pdata "github.com/blinklabs-io/plutigo/data"
@@ -1702,6 +1707,360 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	assert.Equal(t, ls.Tip().Point, window.forkPoint)
+}
+
+func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5000},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 5001},
+	}
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &activeConnId
+	}
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubID := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if ok && resync.Reason ==
+				event.ChainsyncResyncReasonDeterministicTxValidationRecovery {
+				resyncCh <- resync
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	ls.config.EventBus = bus
+	duplicate := shelley.DuplicateInputError{
+		Input: &replayRecoveryInput{
+			txId:  testHashBytes("duplicate-reference"),
+			index: 0,
+		},
+		InputType: "reference",
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: errors.Join(
+			fmt.Errorf("conway UTxO rule: %w", duplicate),
+			errors.New("unrelated joined validation detail"),
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	// The unresolved input would select the security-parameter fallback and
+	// rewind farther back. A deterministic duplicate must instead reject only
+	// the bad block and preserve the last applied ledger tip.
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.False(t, ls.replayRecoveryTipTracked)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"deterministic transaction recovery must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+	assert.Equal(t, ouroboros.ConnectionId{}, resync.ConnectionId)
+
+	// A canonical invalid block can be redelivered by every peer. Once the
+	// one alternate-branch opportunity has been used, recovery keeps
+	// rejecting the branch but stops rotating peers for it. It must not
+	// become terminal: the verdict can be a local false positive, and the
+	// node has to stay able to follow a chain a peer later offers, which is
+	// the same reason tryRecoverFromHeaderValidationError rejects rather
+	// than halts. The resulting lack of tip progress is what the pipeline's
+	// no-progress accounting escalates.
+	recovered, err = ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause:      duplicate,
+	})
+	require.NoError(t, err)
+	assert.NotErrorIs(
+		t,
+		err,
+		errHaltLedgerPipeline,
+		"a duplicate-input verdict must not halt the ledger pipeline",
+	)
+	assert.True(
+		t,
+		recovered,
+		"a repeat rejection must still reject the branch containing the block",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"canonical deterministic rejection must not request another fresh intersection",
+	)
+}
+
+func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("plutus-failing-block")),
+		TxHash:     testHashBytes("plutus-failing-tx"),
+		Cause: conway.PlutusScriptFailedError{
+			ScriptHash: lcommon.Blake2b224Hash([]byte("plutus-script")),
+			Tag:        lcommon.RedeemerTagMint,
+			Index:      0,
+			Err:        errors.New("local evaluator disagrees with declared validity"),
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"deterministic Plutus rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+// A duplicate-input failure reaching the deterministic branch while the node
+// is at tip takes that branch rather than recoverAtTipFromTxValidationError's
+// escalating-depth schedule. Deepening the rewind cannot change a verdict that
+// does not read UTxO history, so the escalation must stay unarmed -- and this
+// transition is what the deterministic check being placed before IsAtTip
+// changes.
+func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
+	t *testing.T,
+) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.reachedTip.Store(true)
+	require.True(t, ls.IsAtTip())
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	failing := &txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause: shelley.DuplicateInputError{
+			Input: &replayRecoveryInput{
+				txId:  testHashBytes("duplicate-reference"),
+				index: 0,
+			},
+			InputType: "reference",
+		},
+	}
+	recovered, err := ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Nil(
+		t,
+		ls.lastAtTipRecovery,
+		"the deterministic branch must not arm the at-tip rewind schedule",
+	)
+	assert.Zero(t, ls.atTipRecoveryDescentCount)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"an at-tip deterministic rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+
+	// Redelivery of the same block at the same tip stays non-terminal at tip
+	// too, and spends no further peer rotation.
+	recovered, err = ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	assert.True(t, recovered)
+	assert.Nil(t, ls.lastAtTipRecovery)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"a repeat at-tip rejection must not rotate peers again",
+	)
+}
+
+// The latch bounds peer rotation per failing block, not per tip. Chain
+// selection can deliver a different branch whose own first block is also
+// rejected; keying the latch on the tip alone denied that block the fresh
+// intersection it had never had.
+func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+	duplicate := shelley.DuplicateInputError{
+		Input: &replayRecoveryInput{
+			txId:  testHashBytes("duplicate-reference"),
+			index: 0,
+		},
+		InputType: "regular",
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause:      duplicate,
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+	testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"the first failing block must request a fresh ChainSync intersection",
+	)
+
+	// Same applied tip, different rejected block: its own opportunity.
+	recovered, err = ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(170, testHashBytes("audit-other-failing")),
+		TxHash:     testHashBytes("other-duplicate-input-tx"),
+		Cause:      duplicate,
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+	testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a different rejected block must get its own fresh intersection",
+	)
+}
+
+// The latch is cleared inside ledgerProcessBlocksFromSource's tip-advance
+// critical section, so it is written under the same lock rather than relying
+// on both callers staying on the pipeline goroutine. Run under -race.
+func TestReplayRecoveryDeterministicLatchConcurrentAccess(t *testing.T) {
+	ls := &LedgerState{}
+	failing := &txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("latch-failing")),
+		TxHash:     testHashBytes("latch-failing-tx"),
+	}
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			ls.markDeterministicTxRecoveryResync(140, failing)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := range iterations {
+			ls.Lock()
+			ls.resetDeterministicTxRecovery(uint64(141 + i))
+			ls.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			ls.RLock()
+			ls.deterministicTxRecoveryResyncSpentLocked(140, failing)
+			ls.RUnlock()
+		}
+	}()
+	wg.Wait()
+}
+
+// deterministicResyncChannel subscribes ls's event bus to the deterministic
+// recovery resync reason and returns the delivered events.
+func deterministicResyncChannel(
+	t *testing.T,
+	ls *LedgerState,
+	bus *event.EventBus,
+) chan event.ChainsyncResyncEvent {
+	t.Helper()
+	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
+	subID := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if ok && resync.Reason ==
+				event.ChainsyncResyncReasonDeterministicTxValidationRecovery {
+				resyncCh <- resync
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subID)
+	})
+	ls.config.EventBus = bus
+	return resyncCh
+}
+
+// Byron does not share the Shelley duplicate-input rule: ledger/eras returns
+// DuplicateInputByronError. The verdict is the same structural one, so a Byron
+// duplicate must take the deterministic branch instead of the state-dependent
+// unresolved-producer fallback that repeatedly rediscovers the same block.
+func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubID := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if ok && resync.Reason ==
+				event.ChainsyncResyncReasonDeterministicTxValidationRecovery {
+				resyncCh <- resync
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	ls.config.EventBus = bus
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("byron-duplicate-input-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: errors.Join(
+			fmt.Errorf(
+				"byron UTxO rule: %w",
+				eras.DuplicateInputByronError{
+					TxId:  hex.EncodeToString(testHashBytes("byron-dup")),
+					Index: 0,
+				},
+			),
+			errors.New("unrelated joined validation detail"),
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.False(t, ls.replayRecoveryTipTracked)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"Byron deterministic recovery must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {

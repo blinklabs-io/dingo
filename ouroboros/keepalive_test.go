@@ -31,7 +31,7 @@ import (
 func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
 	_, evtCh := bus.Subscribe(chainselection.PeerActivityEventType)
-	o := NewOuroboros(OuroborosConfig{EventBus: bus})
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 3001},
@@ -57,7 +57,7 @@ func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
 // returns the pong-wait Timeout that its keepaliveConnOpts produce, resolved
 // through gouroboros' NewConfig (which starts from the 10s default).
 func keepaliveTimeoutFor(cfgTimeout time.Duration) time.Duration {
-	o := NewOuroboros(OuroborosConfig{KeepAliveTimeout: cfgTimeout})
+	o := newOuroboros(OuroborosConfig{KeepAliveTimeout: cfgTimeout})
 	return okeepalive.NewConfig(o.keepaliveConnOpts()...).Timeout
 }
 

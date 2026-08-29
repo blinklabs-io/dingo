@@ -22,10 +22,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -68,16 +71,21 @@ func createTestKeys(t *testing.T) (string, string, string) {
 	require.NoError(t, os.WriteFile(vrfPath, []byte(testVRFSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(kesPath, []byte(testKESSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(opCertPath, []byte(testOpCertJSON), 0o600))
+	testutil.RestrictFileToCurrentUser(t, vrfPath)
+	testutil.RestrictFileToCurrentUser(t, kesPath)
 
 	return vrfPath, kesPath, opCertPath
 }
 
 func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	loadedVRF, err := loadSecretKeyFromFile(vrfPath)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Base(vrfPath), loadedVRF.File)
 
 	// Load credentials
 	pc := NewPoolCredentials()
-	err := pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
+	err = pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
 	require.NoError(t, err)
 
 	// Verify VRF keys
@@ -110,6 +118,84 @@ func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 
 	// Verify IsLoaded
 	assert.True(t, pc.IsLoaded())
+}
+
+func TestPoolCredentialsRejectsPermissiveSecretKeyModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode test; Windows DACL checks are covered by keystore tests")
+	}
+
+	tests := []struct {
+		name      string
+		keyName   string
+		selectKey func(vrfPath, kesPath string) string
+	}{
+		{
+			name:    "VRF",
+			keyName: "VRF signing key",
+			selectKey: func(vrfPath, _ string) string {
+				return vrfPath
+			},
+		},
+		{
+			name:    "KES",
+			keyName: "KES signing key",
+			selectKey: func(_, kesPath string) string {
+				return kesPath
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			vrfPath, kesPath, opCertPath := createTestKeys(t)
+			keyPath := test.selectKey(vrfPath, kesPath)
+			require.NoError(t, os.Chmod(keyPath, 0o644))
+
+			err := NewPoolCredentials().LoadFromFiles(
+				vrfPath,
+				kesPath,
+				opCertPath,
+			)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, keystore.ErrInsecureFileMode)
+			assert.Contains(t, err.Error(), "failed to load "+test.keyName)
+			assert.Contains(t, err.Error(), "mode 0644")
+			assert.Contains(t, err.Error(), "group/other access not permitted")
+		})
+	}
+}
+
+func TestPoolCredentialsAllowsPermissiveOpCertMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode test")
+	}
+
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	require.NoError(t, os.Chmod(opCertPath, 0o644))
+
+	err := NewPoolCredentials().LoadFromFiles(vrfPath, kesPath, opCertPath)
+	require.NoError(t, err)
+}
+
+func TestLoadSecretKeyRejectsNonRegularFile(t *testing.T) {
+	_, err := loadSecretKeyFromFile(t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a regular file")
+}
+
+func TestLoadSecretKeyRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.skey")
+	require.NoError(t, os.WriteFile(
+		path,
+		make([]byte, maxSecretKeyFileSize+1),
+		0o600,
+	))
+	testutil.RestrictFileToCurrentUser(t, path)
+
+	_, err := loadSecretKeyFromFile(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum size")
 }
 
 func TestVRFProve(t *testing.T) {
@@ -208,6 +294,28 @@ func TestKESPeriodUpdateExhaustedKey(t *testing.T) {
 	require.NoError(t, err)
 	ok := kes.VerifySignedKES(pc.kesVKey, 63, message, signature)
 	assert.True(t, ok, "key should still be usable after failed evolution")
+}
+
+func TestKESPeriodUpdatePartialFailureRetainsNewestKey(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.UpdateKESPeriod(62))
+
+	// The update to period 64 first succeeds from 62 to 63, then fails
+	// because a depth-6 key cannot evolve beyond period 63. The successful
+	// successor is the only key that remains usable after forward evolution.
+	err := pc.UpdateKESPeriod(64)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "key is exhausted at period 63")
+	require.Equal(t, uint64(63), pc.kesSKey.Period)
+	require.NotEmpty(t, pc.kesSKey.Data)
+
+	message := []byte("test message after partial evolution failure")
+	signature, err := pc.KESSign(63, message)
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(pc.kesVKey, 63, message, signature))
 }
 
 func TestKESPeriodUpdateBackward(t *testing.T) {

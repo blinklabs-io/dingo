@@ -168,6 +168,12 @@ var flagSpecs = []flagSpec{
 	),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
+	stringFlag(
+		"DebugBindAddr",
+		"debug-bind-addr",
+		"",
+		"pprof bind address (wildcard exposure requires an explicit override)",
+	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
 	boolPtrFlag(
 		"PeerSharing",
@@ -268,14 +274,76 @@ var flagSpecs = []flagSpec{
 		"allow off-chain metadata fetches to private, loopback, and link-local addresses",
 	),
 	boolFlag(
+		"TokenRegistry.Enabled",
+		"token-registry-enabled",
+		`enable the CIP-26 token registry sync (requires storageMode "api")`,
+	),
+	stringFlag(
+		"TokenRegistry.SourceURL",
+		"token-registry-source-url",
+		"",
+		"CIP-26 token registry tarball URL (empty = select by network)",
+	),
+	durationFlag(
+		"TokenRegistry.Interval",
+		"token-registry-interval",
+		"CIP-26 token registry sync interval (0 = default)",
+	),
+	durationFlag(
+		"TokenRegistry.RequestTimeout",
+		"token-registry-request-timeout",
+		"CIP-26 token registry download timeout (0 = default)",
+	),
+	stringFlag(
+		"TokenRegistry.UserAgent",
+		"token-registry-user-agent",
+		"",
+		"CIP-26 token registry HTTP user agent (empty = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxBytes",
+		"token-registry-max-bytes",
+		"CIP-26 token registry max compressed download bytes (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxEntryBytes",
+		"token-registry-max-entry-bytes",
+		"CIP-26 token registry max bytes per mapping (0 = default)",
+	),
+	boolFlag(
+		"TokenRegistry.StoreLogos",
+		"token-registry-store-logos",
+		"persist CIP-26 token registry logos (roughly 90% of registry bytes)",
+	),
+	boolFlag(
+		"TokenRegistry.AllowPrivateAddresses",
+		"token-registry-allow-private-addresses",
+		"allow token registry sync from private, loopback, and link-local addresses",
+	),
+	boolFlag(
 		"Midnight.Enabled",
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
 	),
+	boolFlag(
+		"Midnight.ServerEnabled",
+		"midnight-server-enabled",
+		`enable the Midnight gRPC server (requires storageMode "api")`,
+	),
+	boolFlag(
+		"Midnight.ReflectionEnabled",
+		"midnight-reflection-enabled",
+		"enable Midnight gRPC reflection",
+	),
+	boolFlag(
+		"Midnight.AllowInsecureRemote",
+		"midnight-allow-insecure-remote",
+		"allow plaintext Midnight gRPC on a non-loopback address",
+	),
 	uintFlag(
 		"Midnight.Port",
 		"midnight-port",
-		"Midnight gRPC port (0 disables gRPC server)",
+		"Midnight gRPC port (must be non-zero when the server is enabled)",
 	),
 	stringFlag(
 		"Midnight.Host",
@@ -302,7 +370,12 @@ var flagSpecs = []flagSpec{
 		"BarkClientCAFilePath",
 		"bark-client-ca-file-path",
 		"",
-		"path to a PEM CA bundle; client certs verified against it authenticate Bark's destructive DatabaseService RPCs (required whenever the database lifecycle service is enabled)",
+		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+	),
+	stringSliceFlag(
+		"BarkOperatorCertificateFingerprints",
+		"bark-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
 	),
 
 	// History expiry
@@ -352,6 +425,21 @@ var flagSpecs = []flagSpec{
 		"koios-parity-grace-hours",
 		"hours after an epoch closes during which a missing Dingo-side row is treated as sync lag, not a failure",
 	),
+	boolFlag(
+		"KoiosParity.Accounts",
+		"koios-parity-accounts",
+		"also validate #3097 per-account exact reward parity for every epoch (default: true)",
+	),
+	intFlag(
+		"KoiosParity.AccountChunkSize",
+		"koios-parity-account-chunk-size",
+		"max stake addresses per /account_reward_history request (0 = package default, 100)",
+	),
+	intFlag(
+		"KoiosParity.AccountChunkMaxBytes",
+		"koios-parity-account-chunk-max-bytes",
+		"max encoded body size per /account_reward_history request (0 = package default, 4KiB)",
+	),
 
 	// Peer governance
 	intFlag(
@@ -368,6 +456,11 @@ var flagSpecs = []flagSpec{
 		"TargetNumberOfActivePeers",
 		"target-active-peers",
 		"target number of active peers",
+	),
+	intFlag(
+		"TargetNumberOfRootPeers",
+		"target-root-peers",
+		"target number of root peers",
 	),
 	intFlag(
 		"ActivePeersTopologyQuota",
@@ -541,6 +634,11 @@ var flagSpecs = []flagSpec{
 		"block-pipeline-enabled",
 		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default off)",
 	),
+	boolFlag(
+		"BlockPipelineValidateEnabled",
+		"block-pipeline-validate-enabled",
+		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
+	),
 
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
@@ -636,12 +734,6 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar",
 	),
-	stringToStringFlag(
-		"LeiosVoterPublicKeys",
-		"leios-voter-public-keys",
-		"Leios voter public key registry: pool key hash hex=public key hex",
-	),
-
 	// Mithril
 	boolFlag(
 		"Mithril.Enabled",
@@ -828,29 +920,6 @@ func stringSliceFlag(field, name, help string) flagSpec {
 				return nil
 			}
 			v, err := f.GetStringSlice(name)
-			if err != nil {
-				return err
-			}
-			targetValue(cfg, field).Set(reflect.ValueOf(v))
-			return nil
-		},
-	}
-}
-
-func stringToStringFlag(field, name, help string) flagSpec {
-	return flagSpec{
-		field: field,
-		name:  name,
-		register: func(f *pflag.FlagSet, defaults *Config) {
-			def, _ := defaultValue(defaults, field).
-				Interface().(map[string]string)
-			f.StringToString(name, def, help)
-		},
-		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
-			v, err := f.GetStringToString(name)
 			if err != nil {
 				return err
 			}

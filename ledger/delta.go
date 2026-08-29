@@ -20,7 +20,6 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -239,41 +238,66 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			return err
 		}
 	} else {
-		d.accumulateNetworkDonations(appliedTxs)
+		if err := d.accumulateNetworkDonations(appliedTxs); err != nil {
+			return err
+		}
 	}
 
-	// Emit transaction events only after all processing succeeds,
-	// so subscribers never see an "applied" event for a transaction
-	// whose governance processing failed and caused the apply to abort.
-	if ls.config.EventBus != nil {
-		for i, tr := range d.Transactions {
-			if !appliedTxs[i] {
-				continue
-			}
-			ls.config.EventBus.PublishAsync(
-				TransactionEventType,
-				event.NewEvent(
-					TransactionEventType,
-					TransactionEvent{
-						Transaction: tr.Tx,
-						Point:       d.Point,
-						BlockNumber: d.BlockNumber,
-						TxIndex:     uint32(tr.Index), //nolint:gosec
-						Rollback:    false,
-					},
-				),
-			)
+	// Stage transaction events only after all delta processing succeeds, then
+	// publish them once the database transaction commits durably. A later delta
+	// failure, rollback, or commit failure discards the callback, so subscribers
+	// never derive state from an Apply that did not persist. AfterCommit runs
+	// callbacks in registration order, and this callback walks transactions in
+	// index order before handing each event to the ledger.tx ordered lane. See
+	// publishTransactionEvent.
+	applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
+	for i, tr := range d.Transactions {
+		if !appliedTxs[i] {
+			continue
 		}
+		applyEvents = append(applyEvents, TransactionEvent{
+			Transaction: tr.Tx,
+			Point:       d.Point,
+			BlockNumber: d.BlockNumber,
+			TxIndex:     uint32(tr.Index), //nolint:gosec
+			Rollback:    false,
+		})
+	}
+	if len(applyEvents) > 0 {
+		txn.AfterCommit(func() {
+			if ls.beforeTransactionApplyPublish != nil {
+				ls.beforeTransactionApplyPublish()
+			}
+			for _, evt := range applyEvents {
+				ls.publishTransactionEvent(evt)
+			}
+		})
 	}
 
 	return nil
 }
 
-func (d *LedgerDelta) donate(amount uint64) {
-	d.donation += amount
+// addUint64 returns a+b, or an error instead of wrapping when the sum
+// would overflow uint64. Treasury donation and block-donation accumulators
+// must fail closed on a corrupt or adversarial value rather than silently
+// wrap the recorded amount.
+func addUint64(a, b uint64) (uint64, error) {
+	if b > ^uint64(0)-a {
+		return 0, fmt.Errorf("donation sum overflows uint64: %d + %d", a, b)
+	}
+	return a + b, nil
 }
 
-func (d *LedgerDelta) accumulateNetworkDonations(appliedTxs []bool) {
+func (d *LedgerDelta) donate(amount uint64) error {
+	sum, err := addUint64(d.donation, amount)
+	if err != nil {
+		return fmt.Errorf("accumulate donation: %w", err)
+	}
+	d.donation = sum
+	return nil
+}
+
+func (d *LedgerDelta) accumulateNetworkDonations(appliedTxs []bool) error {
 	// Accumulate Conway treasury donations from this block. Donations move
 	// into the treasury at the next epoch boundary (see processEpochRollover);
 	// they are recorded here keyed by block slot so a rollback drops them.
@@ -288,11 +312,23 @@ func (d *LedgerDelta) accumulateNetworkDonations(appliedTxs []bool) {
 		if !tr.Tx.IsValid() {
 			continue
 		}
-		if don := tr.Tx.Donation(); don != nil && don.Sign() > 0 {
-			donation += don.Uint64()
+		don := tr.Tx.Donation()
+		if don == nil || don.Sign() <= 0 {
+			continue
+		}
+		if !don.IsUint64() {
+			return fmt.Errorf(
+				"treasury donation exceeds uint64 range: %s",
+				don.String(),
+			)
+		}
+		var err error
+		donation, err = addUint64(donation, don.Uint64())
+		if err != nil {
+			return fmt.Errorf("accumulate treasury donation: %w", err)
 		}
 	}
-	d.donate(donation)
+	return d.donate(donation)
 }
 
 func (d *LedgerDelta) recordNetworkDonations(
@@ -306,7 +342,9 @@ func (d *LedgerDelta) recordNetworkDonations(
 	// Only valid transactions contribute: an invalid (phase-2 failed)
 	// transaction consumes collateral and its body, including any donation,
 	// is not applied.
-	d.accumulateNetworkDonations(appliedTxs)
+	if err := d.accumulateNetworkDonations(appliedTxs); err != nil {
+		return err
+	}
 	donation := d.donation
 	if donation == 0 {
 		return nil

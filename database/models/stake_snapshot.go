@@ -87,6 +87,13 @@ type PoolStakeSnapshot struct {
 	StakeDenominator types.Uint64
 	DelegatorCount   uint64
 	CapturedSlot     uint64
+	// LeiosKeyPublic and LeiosKeyPossessionProof freeze the pool's optional
+	// Dijkstra/Leios voting key at the same boundary as its stake. Both are
+	// nil for a keyless seat and for legacy snapshots captured before the key
+	// was stored here. Consumers must verify the proof of possession before
+	// using the key.
+	LeiosKeyPublic          []byte
+	LeiosKeyPossessionProof []byte
 	// CalculationVersion identifies the stake-accounting algorithm used to
 	// produce Mark/Set/Go rows. Zero denotes a pre-provenance snapshot.
 	CalculationVersion uint

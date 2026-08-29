@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"math/big"
@@ -189,7 +190,7 @@ func testGapHash28(seed string) []byte {
 	return hash
 }
 
-func TestValidateStoredGapBlocks(t *testing.T) {
+func TestValidateCompleteGapBlocks(t *testing.T) {
 	immutableTip := models.Block{
 		Slot: 10,
 		Hash: testGapHash32("immutable-tip"),
@@ -204,13 +205,21 @@ func TestValidateStoredGapBlocks(t *testing.T) {
 		Hash:     testGapHash32("second-gap"),
 		PrevHash: first.Hash,
 	}
+	start := ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash)
+	end := ocommon.NewPoint(second.Slot, second.Hash)
+
+	require.ErrorContains(
+		t,
+		validateCompleteGapBlocks(nil, start, end),
+		"gap is empty",
+	)
 
 	require.NoError(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{first, second},
-			immutableTip,
-			second.Hash,
+			start,
+			end,
 		),
 	)
 
@@ -218,35 +227,120 @@ func TestValidateStoredGapBlocks(t *testing.T) {
 	brokenFirst.PrevHash = testGapHash32("wrong-prev")
 	require.ErrorContains(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{brokenFirst, second},
-			immutableTip,
-			second.Hash,
+			start,
+			end,
 		),
 		"does not match immutable tip",
 	)
+
+	for _, slot := range []uint64{start.Slot, start.Slot - 1} {
+		nonIncreasingFirst := first
+		nonIncreasingFirst.Slot = slot
+		require.ErrorContains(
+			t,
+			validateCompleteGapBlocks(
+				[]models.Block{nonIncreasingFirst, second},
+				start,
+				end,
+			),
+			"does not follow start slot",
+		)
+	}
 
 	brokenSecond := second
 	brokenSecond.PrevHash = testGapHash32("wrong-link")
 	require.ErrorContains(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{first, brokenSecond},
-			immutableTip,
-			second.Hash,
+			start,
+			end,
 		),
 		"does not match previous block",
 	)
 
+	for _, slot := range []uint64{first.Slot, first.Slot - 1} {
+		nonIncreasingSecond := second
+		nonIncreasingSecond.Slot = slot
+		require.ErrorContains(
+			t,
+			validateCompleteGapBlocks(
+				[]models.Block{first, nonIncreasingSecond},
+				start,
+				end,
+			),
+			"does not follow previous block slot",
+		)
+	}
+
 	require.ErrorContains(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{first, second},
-			immutableTip,
-			testGapHash32("ledger-hash"),
+			start,
+			ocommon.NewPoint(second.Slot, testGapHash32("ledger-hash")),
 		),
-		"does not match ledger state hash",
+		"does not match requested end hash",
 	)
+
+	require.ErrorContains(
+		t,
+		validateCompleteGapBlocks(
+			[]models.Block{first},
+			start,
+			end,
+		),
+		"does not match requested end slot",
+	)
+}
+
+func TestFetchGapBlocksFromPeersFallsThroughOnMismatchedRange(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	start := ocommon.NewPoint(10, testGapHash32("start"))
+	end := ocommon.NewPoint(12, testGapHash32("end"))
+	middleHash := testGapHash32("middle")
+	valid := []models.Block{
+		{
+			Slot:     11,
+			Hash:     middleHash,
+			PrevHash: start.Hash,
+		},
+		{
+			Slot:     end.Slot,
+			Hash:     end.Hash,
+			PrevHash: middleHash,
+		},
+	}
+	short := []models.Block{valid[0]}
+	var called []string
+
+	got, err := fetchGapBlocksFromPeers(
+		t.Context(),
+		logger,
+		1,
+		[]string{"first", "second"},
+		start,
+		end,
+		func(
+			_ context.Context,
+			_ *slog.Logger,
+			_ uint32,
+			peerAddr string,
+			_ ocommon.Point,
+			_ ocommon.Point,
+		) ([]models.Block, error) {
+			called = append(called, peerAddr)
+			if peerAddr == "first" {
+				return short, nil
+			}
+			return valid, nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"first", "second"}, called)
+	assert.Equal(t, valid, got)
 }
 
 func testGapConwayProtocolParameters() *conway.ConwayProtocolParameters {

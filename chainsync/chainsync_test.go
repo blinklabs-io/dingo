@@ -1474,6 +1474,78 @@ func (m *mockChainProvider) StabilityWindow() uint64 {
 	return m.stabilityWin
 }
 
+// TestLookupClientReturnsSnapshot guards against the race fixed in issue
+// 3267: a caller could take the pointer LookupClient returned and read its
+// fields later while the server goroutine mutated the same live
+// ChainsyncClientState (e.g. clearing NeedsInitialRollback), so the read and
+// the write were unsynchronized.
+//
+// It registers a client, takes a snapshot via LookupClient, then mutates the
+// real client state returned by AddClient (flipping NeedsInitialRollback and
+// overwriting a byte of the cursor hash). The snapshot must still show the
+// pre-mutation values, proving LookupClient copied the data — including a
+// deep copy of the Cursor.Hash byte slice — rather than handing back a
+// pointer an observer could see change underneath it.
+func TestLookupClientReturnsSnapshot(t *testing.T) {
+	provider := &mockChainProvider{}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	conn := newTestConnId(1)
+	point := ocommon.NewPoint(1, []byte{0x01})
+	clientState, err := s.AddClient(conn, point)
+	require.NoError(t, err)
+
+	// Snapshot must be taken before the mutation below to prove it isn't
+	// affected by changes made to the live state afterward.
+	snapshot, ok := s.LookupClient(conn)
+	require.True(t, ok)
+
+	// Mutate the live client state the same way the server does in
+	// production (clearing NeedsInitialRollback) plus a cursor byte, to
+	// confirm neither field aliases the snapshot.
+	clientState.NeedsInitialRollback = false
+	clientState.Cursor.Hash[0] = 0x02
+	require.True(t, snapshot.NeedsInitialRollback)
+	require.Equal(t, []byte{0x01}, snapshot.Cursor.Hash)
+}
+
+// TestLookupClientPerClientLockDoesNotBlockOtherClients guards against a
+// second issue found in review of the 3267 fix: an earlier version of the
+// rollback-state lock reused chainsync.State's map-wide mutex, so a slow
+// RollBackward send on one connection (chainsyncServerRequestNext holds the
+// lock across that send) would stall LookupClient and RemoveClient for every
+// other connection too.
+//
+// It locks one client's rollback state to simulate a send in flight, then
+// proves LookupClient and RemoveClient on a different client complete almost
+// immediately rather than waiting on that lock.
+func TestLookupClientPerClientLockDoesNotBlockOtherClients(t *testing.T) {
+	provider := &mockChainProvider{}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	slowConn := newTestConnId(1)
+	otherConn := newTestConnId(2)
+	slowClient, err := s.AddClient(slowConn, ocommon.NewPoint(1, []byte{0x01}))
+	require.NoError(t, err)
+	_, err = s.AddClient(otherConn, ocommon.NewPoint(2, []byte{0x02}))
+	require.NoError(t, err)
+
+	slowClient.LockRollbackState()
+	defer slowClient.UnlockRollbackState()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, ok := s.LookupClient(otherConn)
+		require.True(t, ok)
+		s.RemoveClient(otherConn)
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		200*time.Millisecond,
+		"LookupClient/RemoveClient for another connection must not wait on a different client's rollback lock",
+	)
+}
+
 // TestAddClient_NilChainProvider_ReturnsError verifies that AddClient returns
 // an error rather than panicking when no ChainProvider has been wired.
 func TestAddClient_NilChainProvider_ReturnsError(t *testing.T) {
@@ -1530,6 +1602,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	prev := []byte("prev-hash")
 	point := ocommon.NewPoint(200, hash)
 	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
+	arrivalTime := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	hdr := testBlockHeader{
 		hash:        lcommon.NewBlake2b256(hash),
 		prevHash:    lcommon.NewBlake2b256(prev),
@@ -1542,6 +1615,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 		BlockHeader:  hdr,
 		Point:        point,
 		Tip:          tip,
+		ArrivalTime:  arrivalTime,
 		BlockNumber:  5,
 		Type:         1,
 	})
@@ -1550,6 +1624,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, point, got.Point)
 	require.Equal(t, tip, got.Tip)
+	require.Equal(t, arrivalTime, got.ArrivalTime)
 	require.Equal(t, uint64(5), got.BlockNumber)
 	require.Equal(t, uint(1), got.Type)
 	require.Equal(t, hdr.PrevHash().Bytes(), gotPrev)

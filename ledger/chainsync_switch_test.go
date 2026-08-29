@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"sync"
 	"testing"
@@ -56,6 +57,13 @@ type mockHeader struct {
 	blockNumber uint64
 	slot        uint64
 }
+
+type sizedMockHeader struct {
+	mockHeader
+	cbor []byte
+}
+
+func (m sizedMockHeader) Cbor() []byte { return m.cbor }
 
 func (m mockHeader) Hash() lcommon.Blake2b256     { return m.hash }
 func (m mockHeader) PrevHash() lcommon.Blake2b256 { return m.prevHash }
@@ -474,7 +482,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 		},
 	))
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -525,7 +533,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
 	}, nil)
@@ -607,6 +615,97 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 	)
 }
 
+func TestChainSwitchNeedsFreshCursorUsesObservedTip(
+	t *testing.T,
+) {
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	require.Zero(t, testChain.HeaderCount())
+	localTip := testChain.Tip()
+
+	connId1 := testChainsyncConnId(6000, 3001)
+	connId2 := testChainsyncConnId(6000, 3002)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	needsFreshCursor := ls.chainSwitchNeedsFreshCursorLocked(
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: connId1,
+			NewConnectionId:      connId2,
+			NewTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					math.MaxUint64,
+					[]byte("advertised-outlier"),
+				),
+				BlockNumber: math.MaxUint64,
+			},
+			NewObservedTip:    localTip,
+			NewObservedTipSet: true,
+		},
+		connId2,
+	)
+	assert.False(
+		t,
+		needsFreshCursor,
+		"an untrusted advertisement must not force a resync when the delivered frontier is at the local tip",
+	)
+}
+
+func TestChainSwitchNeedsFreshCursorIgnoresFailedTargetFrontier(
+	t *testing.T,
+) {
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	require.Zero(t, testChain.HeaderCount())
+	localTip := testChain.Tip()
+
+	previousConnId := testChainsyncConnId(6000, 3001)
+	failedTargetConnId := testChainsyncConnId(6000, 3002)
+	fallbackConnId := testChainsyncConnId(6000, 3003)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				if sameConnectionId(connId, fallbackConnId) {
+					return localTip, true
+				}
+				return ochainsync.Tip{}, false
+			},
+		},
+	}
+
+	needsFreshCursor := ls.chainSwitchNeedsFreshCursorLocked(
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: previousConnId,
+			NewConnectionId:      failedTargetConnId,
+			NewObservedTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					localTip.Point.Slot+100,
+					[]byte("failed-target"),
+				),
+				BlockNumber: localTip.BlockNumber + 100,
+			},
+		},
+		fallbackConnId,
+	)
+	assert.False(
+		t,
+		needsFreshCursor,
+		"a failed target's observed frontier must not drive recovery for the fallback connection",
+	)
+}
+
 type chainSwitchFallbackFixture struct {
 	ls             *LedgerState
 	resyncCh       <-chan event.Event
@@ -643,6 +742,17 @@ func newChainSwitchFallbackFixture(
 			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &currentConn
+			},
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				if sameConnectionId(connId, connId3) {
+					return ochainsync.Tip{
+						Point:       ocommon.NewPoint(200, []byte("active-tip")),
+						BlockNumber: 10,
+					}, true
+				}
+				return ochainsync.Tip{}, false
 			},
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,
@@ -1325,7 +1435,7 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		},
 	}
 
-	err := ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -1785,7 +1895,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -1833,7 +1943,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
 	}, nil)
@@ -1889,11 +1999,69 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1, nil)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	assert.Equal(t, connId2, requestedConn)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
 	assert.Equal(t, 1, testChain.HeaderCount())
+}
+
+// TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection asserts a timeout
+// retry moves the blockfetch selection to the connection it retries on.
+// nextBlockfetchConnId prefers selectedBlockfetchConnId, and the
+// batch-completion continuation uses it to choose the next batch's connection,
+// so a selection left on the timed-out peer recovers one batch from the working
+// peer and sends the next straight back to the one that just timed out.
+func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	testChain := &chain.Chain{}
+	require.NoError(t, testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("hdr-retarget-1")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}))
+
+	var requestedConn ouroboros.ConnectionId
+	ls := &LedgerState{
+		chain:                  testChain,
+		activeBlockfetchConnId: connId1,
+		// Starts on the connection that is about to time out, so the
+		// assertion below cannot pass without the retarget.
+		selectedBlockfetchConnId: connId1,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &connId2
+			},
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ ocommon.Point,
+			) error {
+				requestedConn = connId
+				return nil
+			},
+		},
+	}
+
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
+
+	require.Equal(t, connId2, requestedConn)
+	assert.Equal(
+		t, connId2, ls.selectedBlockfetchConnId,
+		"the selection must follow the retry, so the next batch does not "+
+			"return to the timed-out connection",
+	)
 }
 
 func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
@@ -1913,7 +2081,7 @@ func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId, nil)
+	handleBlockfetchTimeoutForTest(ls, connId, nil)
 
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
 	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
@@ -1972,7 +2140,7 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1, nil)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	require.Equal(
 		t,
@@ -1982,4 +2150,49 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 	assert.Equal(t, 1, testChain.HeaderCount())
+}
+
+// TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue covers the
+// advertising-only peer this path exists to distrust.
+//
+// A zero delivered frontier is a real observation: the peer delivered nothing.
+// Inferring "field absent" from it fell back to the advertised NewTip, which
+// handed that peer's advertisement to ledger cursor recovery. The fallback now
+// keys on NewObservedTipSet, which every producer in chainselection sets, so
+// only a producer that never populated the field reaches the advertised tip.
+func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
+	advertised := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 9_000, Hash: []byte{0xaa}},
+		BlockNumber: 900,
+	}
+	delivered := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte{0xbb}},
+		BlockNumber: 10,
+	}
+
+	t.Run("delivered frontier is used when set", func(t *testing.T) {
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip:            advertised,
+			NewObservedTip:    delivered,
+			NewObservedTipSet: true,
+		})
+		assert.Equal(t, delivered, got)
+	})
+
+	t.Run("zero delivered frontier is not the advertised tip", func(t *testing.T) {
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip:            advertised,
+			NewObservedTipSet: true,
+		})
+		assert.Equal(t, ochainsync.Tip{}, got)
+		assert.NotEqual(t, advertised, got)
+	})
+
+	t.Run("unset falls back to the advertised tip", func(t *testing.T) {
+		// Older events and direct unit-test or integration constructors.
+		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+			NewTip: advertised,
+		})
+		assert.Equal(t, advertised, got)
+	})
 }

@@ -125,6 +125,53 @@ func TestPledgeLeverageEnvBinding(t *testing.T) {
 	}
 }
 
+func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
+	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(t, "0.0.0.0", cfg.BindAddr)
+	require.Equal(t, DefaultDebugBindAddr, cfg.DebugBindAddr)
+	require.Equal(t, "127.0.0.1:0", cfg.DebugListenAddress())
+	require.Equal(
+		t,
+		"127.0.0.1:6060",
+		(&Config{DebugPort: 6060}).DebugListenAddress(),
+	)
+}
+
+func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("debugBindAddr: 127.0.0.2\ndebugPort: 6060\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.2", cfg.DebugBindAddr)
+
+	t.Setenv("DINGO_DEBUG_BIND_ADDR", "127.0.0.3")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.3", cfg.DebugBindAddr)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--debug-bind-addr=0.0.0.0",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "0.0.0.0", cfg.DebugBindAddr)
+	require.Equal(t, "0.0.0.0:6060", cfg.DebugListenAddress())
+}
+
 func TestFullPotRewardsEnvBinding(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
@@ -166,6 +213,26 @@ func TestBlockPipelineEnabledEnvBinding(t *testing.T) {
 	}
 	if !cfg.BlockPipelineEnabled {
 		t.Fatal("expected env var to enable the block-decode pipeline")
+	}
+}
+
+func TestBlockPipelineValidateEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockPipelineValidateEnabled {
+		t.Fatal("expected env var to enable the block-pipeline validate stage")
 	}
 }
 
@@ -524,6 +591,39 @@ func TestApplyFlags_MidnightEnabledFlag(t *testing.T) {
 	})
 }
 
+func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "false")
+	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "false")
+	t.Setenv("DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE", "false")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(
+		"midnight:\n"+
+			"  serverEnabled: true\n"+
+			"  reflectionEnabled: true\n"+
+			"  allowInsecureRemote: true\n",
+	), 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.False(t, cfg.Midnight.ServerEnabled, "environment overrides YAML")
+	require.False(t, cfg.Midnight.ReflectionEnabled, "environment overrides YAML")
+	require.False(t, cfg.Midnight.AllowInsecureRemote, "environment overrides YAML")
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--midnight-server-enabled=true",
+		"--midnight-reflection-enabled=true",
+		"--midnight-allow-insecure-remote=true",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.True(t, cfg.Midnight.ServerEnabled, "CLI overrides environment")
+	require.True(t, cfg.Midnight.ReflectionEnabled, "CLI overrides environment")
+	require.True(t, cfg.Midnight.AllowInsecureRemote, "CLI overrides environment")
+}
+
 func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
 	resetGlobalConfig()
 
@@ -709,6 +809,31 @@ func loadConfigThroughPipeline(
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// TestPipeline_EmptyMidnightHostUsesLoopbackDefault pins the merged-config
+// defaulting contract: an explicitly empty higher-precedence environment value
+// must resolve to the same safe loopback host that the Midnight server uses.
+func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_HOST", "")
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"storageMode: \"api\"\n",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected empty Midnight host to use loopback default: %v", err)
+	}
+	wantHost := DefaultMidnightConfig().Host
+	if cfg.Midnight.Host != wantHost {
+		t.Errorf(
+			"Midnight.Host = %q, want %q",
+			cfg.Midnight.Host,
+			wantHost,
+		)
+	}
 }
 
 // TestPipeline_FlagOverridesInvalidYAMLRunMode is a precedence

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -81,6 +82,17 @@ type stateMetrics struct {
 	// wedged node is visible only as a repeating WARN. See issue #3165.
 	pipelineNoProgressRestarts prometheus.Gauge
 	pipelineStuck              prometheus.Gauge
+	// Set to 1 once the ledger pipeline has stopped retrying altogether.
+	// Unlike pipelineStuck this is terminal: the pipeline goroutine has
+	// returned and nothing will clear it short of a restart, so it is the
+	// signal to alert on for a node that has permanently stopped following
+	// the chain. See issue #3261.
+	pipelineHalted prometheus.Gauge
+	// Incremented when validation recovery declares a failure unrepairable
+	// because every rewind target it may legally reach lies inside the
+	// Mithril protected window. Each increment is one node that can no
+	// longer follow the chain without being re-bootstrapped.
+	mithrilTrustWindowUnrepairable prometheus.Counter
 	// Incremented for each epoch-boundary reward round that could not be
 	// applied because one of its inputs was absent. Every increment leaves
 	// reward balances -- and the leadership stake derived from them --
@@ -89,6 +101,36 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
+	// block-processing pipeline (issue #1894), refreshed after every batch
+	// decodeReadChainBatch submits to it. These are gauges rather than
+	// counters because the pipeline itself owns the cumulative totals
+	// (they can only be Set from a periodic snapshot, not incremented
+	// in-place from here); nil when BlockPipelineEnabled is off.
+	blockPipelineBlocksDecoded    prometheus.Gauge
+	blockPipelineBlocksValidated  prometheus.Gauge
+	blockPipelineDecodeErrors     prometheus.Gauge
+	blockPipelineValidationErrors prometheus.Gauge
+	blockPipelineQueueDepth       prometheus.Gauge
+	// blockPipelineExpectedEta0Errors/blockPipelineDeferredEpochCacheErrors/
+	// blockPipelineUnexpectedErrors count errors drained from
+	// blockPipeline.Errors() by drainBlockPipelineErrors (issue #1894
+	// deadlock fix): the eta0 counter tracks errBlockPipelineEta0Unavailable
+	// (no cached Praos nonce yet -- normal on every from-genesis sync, since
+	// it is how Byron-era slots always fail this lookup, but the same
+	// rollover-not-complete condition is not verified to be Byron-specific
+	// here); the deferred counter tracks errHeaderVerificationDeferred (the
+	// pipeline's epoch cache has not yet caught up with a block already
+	// committed to ls.chain -- a transient race, self-healing once the
+	// cache advances, per this section's own doc comment); the unexpected
+	// counter tracks everything else reaching errorsChan (decode errors,
+	// non-Byron validation failures, apply-stage invariant violations),
+	// which should stay at 0 in healthy operation. Unlike the *Errors gauges
+	// above (owned by the pipeline's own snapshot), these are counters
+	// incremented directly as each error is drained.
+	blockPipelineExpectedEta0Errors       prometheus.Counter
+	blockPipelineDeferredEpochCacheErrors prometheus.Counter
+	blockPipelineUnexpectedErrors         prometheus.Counter
 }
 
 // The accessors below tolerate an uninitialised stateMetrics. A LedgerState
@@ -117,6 +159,58 @@ func (m *stateMetrics) incSkippedStakeRewardRounds() {
 	m.skippedStakeRewardRounds.Inc()
 }
 
+// incBlockPipelineExpectedEta0Error records a block-processing pipeline
+// validate-stage error drained from errorsChan that was classified as the
+// expected Byron-era (no Praos epoch nonce) case. See
+// errBlockPipelineEta0Unavailable.
+func (m *stateMetrics) incBlockPipelineExpectedEta0Error() {
+	if m == nil || m.blockPipelineExpectedEta0Errors == nil {
+		return
+	}
+	m.blockPipelineExpectedEta0Errors.Inc()
+}
+
+// incBlockPipelineDeferredEpochCacheError records a block-processing
+// pipeline validate-stage error drained from errorsChan that was classified
+// as the pipeline's epoch cache not yet covering an already-committed
+// block's slot (errHeaderVerificationDeferred) -- a transient condition
+// that resolves once the epoch cache catches up, not a validation problem.
+func (m *stateMetrics) incBlockPipelineDeferredEpochCacheError() {
+	if m == nil || m.blockPipelineDeferredEpochCacheErrors == nil {
+		return
+	}
+	m.blockPipelineDeferredEpochCacheErrors.Inc()
+}
+
+// incBlockPipelineUnexpectedError records a block-processing pipeline error
+// drained from errorsChan that was not one of the expected/transient cases
+// above (e.g. a decode error, a non-Byron validation failure, or an
+// apply-stage invariant violation).
+func (m *stateMetrics) incBlockPipelineUnexpectedError() {
+	if m == nil || m.blockPipelineUnexpectedErrors == nil {
+		return
+	}
+	m.blockPipelineUnexpectedErrors.Inc()
+}
+
+// setPipelineHalted records that the ledger pipeline has stopped retrying.
+// Terminal by design: nothing clears it, because nothing restarts the pipeline.
+func (m *stateMetrics) setPipelineHalted() {
+	if m == nil || m.pipelineHalted == nil {
+		return
+	}
+	m.pipelineHalted.Set(1)
+}
+
+// incMithrilTrustWindowUnrepairable records a validation failure that no legal
+// rewind can repair because the trust anchor blocks every deeper target.
+func (m *stateMetrics) incMithrilTrustWindowUnrepairable() {
+	if m == nil || m.mithrilTrustWindowUnrepairable == nil {
+		return
+	}
+	m.mithrilTrustWindowUnrepairable.Inc()
+}
+
 func (m *stateMetrics) setPipelineNoProgress(restarts int, stuck bool) {
 	if m == nil {
 		return
@@ -130,6 +224,30 @@ func (m *stateMetrics) setPipelineNoProgress(restarts int, stuck bool) {
 			stuckValue = 1
 		}
 		m.pipelineStuck.Set(stuckValue)
+	}
+}
+
+// updateBlockPipelineStats refreshes the block-processing pipeline gauges
+// from a PipelineStats snapshot. Safe to call on an uninitialised
+// stateMetrics (tests that build a LedgerState without calling init).
+func (m *stateMetrics) updateBlockPipelineStats(stats pipeline.PipelineStats) {
+	if m == nil {
+		return
+	}
+	if m.blockPipelineBlocksDecoded != nil {
+		m.blockPipelineBlocksDecoded.Set(float64(stats.BlocksDecoded))
+	}
+	if m.blockPipelineBlocksValidated != nil {
+		m.blockPipelineBlocksValidated.Set(float64(stats.BlocksValidated))
+	}
+	if m.blockPipelineDecodeErrors != nil {
+		m.blockPipelineDecodeErrors.Set(float64(stats.DecodeErrors))
+	}
+	if m.blockPipelineValidationErrors != nil {
+		m.blockPipelineValidationErrors.Set(float64(stats.ValidationErrors))
+	}
+	if m.blockPipelineQueueDepth != nil {
+		m.blockPipelineQueueDepth.Set(float64(stats.CurrentQueueDepth))
 	}
 }
 
@@ -284,6 +402,67 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_pipeline_stuck",
 			Help: "1 while the ledger pipeline has restarted without tip progress often enough to be treated as stuck on a deterministic failure (operator intervention required), 0 otherwise",
+		},
+	)
+	m.pipelineHalted = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_pipeline_halted",
+			Help: "1 once the ledger pipeline has stopped retrying on an unrepairable validation failure; terminal, so the node is no longer following the chain and requires operator intervention",
+		},
+	)
+	m.mithrilTrustWindowUnrepairable = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_mithril_trust_window_unrepairable_total",
+			Help: "validation failures declared unrepairable because every legal rewind target lay inside the Mithril protected window; the state the failing block needs predates the anchor and cannot be re-derived without crossing it",
+		},
+	)
+	m.blockPipelineBlocksDecoded = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_blocks_decoded",
+			Help: "cumulative blocks successfully decoded by the block-processing pipeline (issue #1894); 0 unless blockPipelineEnabled is set",
+		},
+	)
+	m.blockPipelineBlocksValidated = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_blocks_validated",
+			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES validate stage; 0 unless blockPipelineValidateEnabled is set",
+		},
+	)
+	m.blockPipelineDecodeErrors = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_decode_errors",
+			Help: "cumulative block-processing pipeline decode failures",
+		},
+	)
+	m.blockPipelineValidationErrors = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_validation_errors",
+			Help: "cumulative block-processing pipeline VRF/KES validation failures, including expected Byron-era non-validation",
+		},
+	)
+	m.blockPipelineQueueDepth = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_pipeline_queue_depth",
+			Help: "current number of blocks buffered inside the block-processing pipeline's inter-stage channels",
+		},
+	)
+	m.blockPipelineExpectedEta0Errors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_expected_eta0_errors_total",
+			Help: "block-processing pipeline validate-stage errors drained " +
+				"from errorsChan because a cached epoch has no Praos nonce",
+		},
+	)
+	m.blockPipelineDeferredEpochCacheErrors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total",
+			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as a transient epoch-cache lag behind an already-committed block; expected to resolve once the epoch cache catches up",
+		},
+	)
+	m.blockPipelineUnexpectedErrors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_unexpected_errors_total",
+			Help: "block-processing pipeline errors drained from errorsChan that are not one of the expected/transient cases above; a nonzero value indicates a decode, validation, or apply-stage problem worth investigating",
 		},
 	)
 }

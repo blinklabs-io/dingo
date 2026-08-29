@@ -21,9 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
-	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -141,18 +139,37 @@ func serveAuxiliaryListener(
 	}
 }
 
+func newPprofDebugServer(cfg *config.Config) *http.Server {
+	if cfg.DebugPort == 0 {
+		return nil
+	}
+	debugMux := http.NewServeMux()
+	debugMux.HandleFunc("/debug/pprof/", pprof.Index)
+	debugMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return &http.Server{
+		Addr:              cfg.DebugListenAddress(),
+		Handler:           debugMux,
+		ReadHeaderTimeout: 60 * time.Second,
+	}
+}
+
+// logStartupConfig debug-logs the effective node configuration through
+// Config's redacted representation (Config.LogValue), so a debug log never
+// persists a Koios API key, an inline API auth token, or a storage provider
+// password or DSN credential.
+func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
+	logger.Debug("config", "component", "node", "config", cfg)
+}
+
 func Run(cfg *config.Config, logger *slog.Logger) error {
-	logger.Debug(fmt.Sprintf("config: %+v", cfg), "component", "node")
+	logStartupConfig(logger, cfg)
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
 		"component", "node",
 	)
-	// TODO: make this safer, check PID, create parent, etc. (#276)
-	if runtime.GOOS != "windows" {
-		if _, err := os.Stat(cfg.SocketPath); err == nil {
-			os.Remove(cfg.SocketPath)
-		}
-	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
 	network := cfg.Network
@@ -181,10 +198,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"component", "node",
 	)
 	// Apply cardano-node config.json P2P targets as fallback when the
-	// Dingo-native config (dingo.yaml / env) does not specify them.
-	// Priority: dingo.yaml/env > cardano config.json > peergov defaults.
+	// Dingo-native config (YAML / env / CLI) does not specify them.
+	// Priority: Dingo config > cardano config.json > peergov defaults.
 	if nodeCfg != nil {
 		rp, kp, ep, ap := nodeCfg.P2PTargets()
+		applyRootPeerTargetFallback(cfg, rp)
 		if cfg.TargetNumberOfKnownPeers == 0 && kp > 0 {
 			cfg.TargetNumberOfKnownPeers = kp
 		}
@@ -194,7 +212,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		if cfg.TargetNumberOfActivePeers == 0 && ap > 0 {
 			cfg.TargetNumberOfActivePeers = ap
 		}
-		_ = rp // TargetNumberOfRootPeers not yet wired to peergov
 	}
 	var cardanoNodePeerSharing *bool
 	if nodeCfg != nil {
@@ -310,7 +327,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
-		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
+		"midnight_grpc", storageMode.IsAPI() &&
+			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
 	d, err := dingo.New(
@@ -352,24 +370,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
-	var debugServer *http.Server
-	if cfg.DebugPort != 0 {
-		debugMux := http.NewServeMux()
-		debugMux.HandleFunc("/debug/pprof/", pprof.Index)
-		debugMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-		debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		debugAddr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.DebugPort)
+	debugServer := newPprofDebugServer(cfg)
+	if debugServer != nil {
 		logger.Info(
-			"serving pprof debug endpoints on "+debugAddr,
+			"serving pprof debug endpoints on "+debugServer.Addr,
 			"component", "node",
 		)
-		debugServer = &http.Server{
-			Addr:              debugAddr,
-			Handler:           debugMux,
-			ReadHeaderTimeout: 60 * time.Second,
-		}
 	}
 	// Wait for interrupt/termination signal
 	signalCtx, signalCtxStop := signal.NotifyContext(
@@ -459,6 +465,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	return err
 }
 
+func applyRootPeerTargetFallback(cfg *config.Config, target int) {
+	if cfg.TargetNumberOfRootPeers == 0 && target != 0 {
+		cfg.TargetNumberOfRootPeers = target
+	}
+}
+
 // buildDingoConfig translates the loaded internal/config.Config, plus the
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
@@ -518,6 +530,9 @@ func buildDingoConfig(
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
+		dingo.WithBarkOperatorCertificateFingerprints(
+			cfg.BarkOperatorCertificateFingerprints,
+		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
 			Frequency: cfg.HistoryExpiry.Frequency,
@@ -529,6 +544,7 @@ func buildDingoConfig(
 			APIKey:     cfg.KoiosParity.APIKey,
 			Strict:     cfg.KoiosParity.Strict,
 			GraceHours: cfg.KoiosParity.GraceHours,
+			Accounts:   &cfg.KoiosParity.Accounts,
 		}),
 		dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 		dingo.WithOffchainMetadataConfig(
@@ -545,8 +561,27 @@ func buildDingoConfig(
 					AllowPrivateAddresses,
 			},
 		),
+		dingo.WithTokenRegistryConfig(
+			dingo.TokenRegistryConfig{
+				Enabled:   cfg.TokenRegistry.Enabled,
+				SourceURL: cfg.TokenRegistry.SourceURL,
+				Interval:  cfg.TokenRegistry.Interval,
+				RequestTimeout: cfg.TokenRegistry.
+					RequestTimeout,
+				UserAgent: cfg.TokenRegistry.UserAgent,
+				MaxBytes:  cfg.TokenRegistry.MaxBytes,
+				MaxEntryBytes: cfg.TokenRegistry.
+					MaxEntryBytes,
+				StoreLogos: cfg.TokenRegistry.StoreLogos,
+				AllowPrivateAddresses: cfg.TokenRegistry.
+					AllowPrivateAddresses,
+			},
+		),
 		dingo.WithMidnightConfig(dingo.MidnightConfig{
 			Enabled:                     cfg.Midnight.Enabled,
+			ServerEnabled:               cfg.Midnight.ServerEnabled,
+			ReflectionEnabled:           cfg.Midnight.ReflectionEnabled,
+			AllowInsecureRemote:         cfg.Midnight.AllowInsecureRemote,
 			Port:                        cfg.Midnight.Port,
 			Host:                        cfg.Midnight.Host,
 			CNightPolicyID:              cfg.Midnight.CNightPolicyID,
@@ -581,6 +616,7 @@ func buildDingoConfig(
 			cfg.TargetNumberOfEstablishedPeers,
 			cfg.TargetNumberOfActivePeers,
 		),
+		dingo.WithRootPeerTarget(cfg.TargetNumberOfRootPeers),
 		dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
 		dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
 		dingo.WithGenesisCorroborationPeers(
@@ -661,6 +697,5 @@ func buildDingoConfig(
 		dingo.WithLeiosVoteSigningKeyFile(
 			cfg.LeiosVoteSigningKeyFile,
 		),
-		dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
 	)
 }

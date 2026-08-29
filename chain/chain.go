@@ -205,7 +205,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, true)
 	if err != nil {
 		return err
 	}
@@ -216,18 +216,24 @@ func (c *Chain) AddBlock(
 	return nil
 }
 
-// HandleBlockProposedEvent applies locally forged block proposals published on
-// the EventBus and acknowledges the result to the proposer when requested.
-func (c *Chain) HandleBlockProposedEvent(evt event.Event) {
-	proposal, ok := evt.Data.(BlockProposedEvent)
-	if !ok {
-		return
+// AddLocalBlock adds a locally forged block without comparing it to queued
+// peer headers. A successful local block invalidates those pending headers;
+// the actual chain-tip and block-number checks remain mandatory.
+func (c *Chain) AddLocalBlock(block ledger.Block) error {
+	evt, err := c.addBlockInternal(
+		block,
+		ocommon.Point{},
+		nil,
+		true,
+		false,
+	)
+	if err != nil {
+		return err
 	}
-	if proposal.Block == nil {
-		proposal.Respond(errors.New("proposed block is nil"))
-		return
+	if c.eventBus != nil && evt.Type != "" {
+		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
-	proposal.Respond(c.AddBlock(proposal.Block, nil))
+	return nil
 }
 
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
@@ -238,7 +244,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true)
+	evt, err := c.addBlockInternal(block, point, txn, true, true)
 	if err != nil {
 		return err
 	}
@@ -257,6 +263,7 @@ func (c *Chain) addBlockInternal(
 	point ocommon.Point,
 	txn *database.Txn,
 	notifyWaiters bool,
+	matchPendingHeader bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
@@ -270,7 +277,13 @@ func (c *Chain) addBlockInternal(
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
-	return c.addBlockLocked(block, point, txn, notifyWaiters)
+	return c.addBlockLocked(
+		block,
+		point,
+		txn,
+		notifyWaiters,
+		matchPendingHeader,
+	)
 }
 
 func (c *Chain) addBlockLocked(
@@ -278,6 +291,7 @@ func (c *Chain) addBlockLocked(
 	point ocommon.Point,
 	txn *database.Txn,
 	notifyWaiters bool,
+	matchPendingHeader bool,
 ) (event.Event, error) {
 	blockHashBytes := point.Hash
 	if len(blockHashBytes) == 0 {
@@ -287,7 +301,7 @@ func (c *Chain) addBlockLocked(
 	blockPrevHashBytes := []byte(nil)
 	blockNumber := block.BlockNumber()
 	// Check that the new block matches our first header, if any
-	if len(c.headers) > 0 {
+	if matchPendingHeader && len(c.headers) > 0 {
 		firstHeader := c.headers[0]
 		if !bytes.Equal(blockHashBytes, firstHeader.point.Hash) {
 			return event.Event{}, NewBlockNotMatchHeaderError(
@@ -344,8 +358,10 @@ func (c *Chain) addBlockLocked(
 		c.blocks = append(c.blocks, tmpPoint)
 	}
 	// Remove matching header entry, if any
-	if len(c.headers) > 0 {
+	if matchPendingHeader && len(c.headers) > 0 {
 		c.headers = slices.Delete(c.headers, 0, 1)
+	} else if !matchPendingHeader {
+		c.headers = c.headers[:0]
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -404,6 +420,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 					ocommon.Point{},
 					txn,
 					false,
+					true,
 				)
 				if err != nil {
 					return err
@@ -755,6 +772,33 @@ func (c *Chain) rollbackForkDepth(
 // underflow that caused the misclassification.
 //
 // Callers must hold c.mutex and c.manager.mutex.
+// checkEphemeralBufferSpan verifies that a fork's in-memory buffer holds an
+// entry for every block it claims above its fork point. rollbackLocked indexes
+// that buffer per rolled-back block, so a short buffer would otherwise surface
+// as an out-of-range offset part-way through the deletion loop, after blocks
+// had already been removed. Checking once up front keeps the rollback
+// all-or-nothing. blockByIndexLocked applies the same bounds per lookup.
+//
+// Reaching the error means this chain's tip index and buffer already disagree,
+// which no public call path produces; it is a corruption report, not a
+// rejection of the caller's rollback point.
+func (c *Chain) checkEphemeralBufferSpan() error {
+	if c.persistent || c.tipBlockIndex <= c.lastCommonBlockIndex {
+		return nil
+	}
+	want := c.tipBlockIndex - c.lastCommonBlockIndex
+	if want <= uint64(len(c.blocks)) { //nolint:gosec
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %d blocks above fork point %d, buffer holds %d",
+		ErrRollbackBeyondEphemeralChain,
+		want,
+		c.lastCommonBlockIndex,
+		len(c.blocks),
+	)
+}
+
 func (c *Chain) rollbackPointBlock(
 	point ocommon.Point,
 ) (models.Block, error) {
@@ -926,6 +970,11 @@ func (c *Chain) rollbackLocked(
 		)
 		return nil, ErrRollbackExceedsSecurityParam
 	}
+	// Validate the in-memory buffer before deleting anything, so a
+	// corrupt span fails the rollback whole rather than part-way through.
+	if err := c.checkEphemeralBufferSpan(); err != nil {
+		return nil, err
+	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
 	// Collect and delete rolled-back blocks in a single pass
@@ -956,9 +1005,13 @@ func (c *Chain) rollbackLocked(
 					rolledBackBlocks = append(rolledBackBlocks, block)
 				}
 			}
-			// Decrement our fork point block index if we rollback beyond it
-			if i < c.lastCommonBlockIndex {
-				c.lastCommonBlockIndex = i
+			// Blocks at or below the fork point belong to the
+			// common prefix held by the primary chain, not to this
+			// fork's in-memory buffer, so there is nothing to delete
+			// here. blockByIndexLocked draws the same boundary with
+			// <=; using < placed the fork point itself on the buffer
+			// side, where its index computes to -1.
+			if i <= c.lastCommonBlockIndex {
 				continue
 			}
 			// Remove from memory buffer
@@ -969,6 +1022,13 @@ func (c *Chain) rollbackLocked(
 				memBlockIndex+1,
 			)
 		}
+	}
+	// A rollback past the fork point shortens the prefix this chain
+	// shares with the primary: every block it still holds is now common.
+	// Re-anchor here, after the loop has finished reading the old value
+	// for buffer offsets, so lastCommonBlockIndex never exceeds the tip.
+	if !c.persistent && rollbackBlockIndex < c.lastCommonBlockIndex {
+		c.lastCommonBlockIndex = rollbackBlockIndex
 	}
 	// Clear out any headers
 	c.headers = slices.Delete(c.headers, 0, len(c.headers))
@@ -1101,6 +1161,36 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 		)
 	}
 	return points
+}
+
+// PointAtDepth returns the point depth blocks behind the current tip. A depth
+// of zero returns the tip. When depth reaches beyond the retained chain, the
+// immutable point is origin and found is false.
+//
+// Unlike RecentPoints, this performs one indexed lookup regardless of depth,
+// which is important for consensus reads at the security-parameter boundary.
+func (c *Chain) PointAtDepth(depth uint64) (point ocommon.Point, found bool, err error) {
+	if c == nil {
+		return ocommon.Point{}, false, errors.New("chain is nil")
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if c.tipBlockIndex < initialBlockIndex || depth >= c.tipBlockIndex {
+		return ocommon.Point{}, false, nil
+	}
+	if depth == 0 {
+		return ocommon.NewPoint(
+			c.currentTip.Point.Slot,
+			c.currentTip.Point.Hash,
+		), true, nil
+	}
+	unlocks := c.lockBlockIndexReadLocks()
+	defer unlocks()
+	block, err := c.blockByIndexLocked(c.tipBlockIndex - depth)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	return ocommon.NewPoint(block.Slot, block.Hash), true, nil
 }
 
 // IntersectPoints returns up to count points in descending order for

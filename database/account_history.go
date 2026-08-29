@@ -34,7 +34,7 @@ func (d *Database) GetAccountDelegationHistoryByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	rows, err := d.metadata.GetAccountDelegationHistoryByCredential(
+	rows, err := d.certificateStore().GetAccountDelegationHistoryByCredential(
 		credentialTag,
 		stakeKey,
 		limit,
@@ -62,7 +62,7 @@ func (d *Database) CountAccountDelegationHistoryByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAccountDelegationHistoryByCredential(
+	count, err := d.certificateStore().CountAccountDelegationHistoryByCredential(
 		credentialTag,
 		stakeKey,
 		txn.Metadata(),
@@ -90,7 +90,7 @@ func (d *Database) GetAccountRegistrationHistoryByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	rows, err := d.metadata.GetAccountRegistrationHistoryByCredential(
+	rows, err := d.certificateStore().GetAccountRegistrationHistoryByCredential(
 		credentialTag,
 		stakeKey,
 		limit,
@@ -118,7 +118,7 @@ func (d *Database) CountAccountRegistrationHistoryByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAccountRegistrationHistoryByCredential(
+	count, err := d.certificateStore().CountAccountRegistrationHistoryByCredential(
 		credentialTag,
 		stakeKey,
 		txn.Metadata(),
@@ -205,7 +205,7 @@ func (d *Database) GetAddressTransactionsByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	rows, err := d.metadata.GetAddressTransactionsByCredential(
+	rows, err := d.transactionStore().GetAddressTransactionsByCredential(
 		credentialTag,
 		stakeKey,
 		limit,
@@ -238,7 +238,7 @@ func (d *Database) CountAddressTransactionsByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAddressTransactionsByCredential(
+	count, err := d.transactionStore().CountAddressTransactionsByCredential(
 		credentialTag,
 		stakeKey,
 		from,

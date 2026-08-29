@@ -59,7 +59,7 @@ func (o *Ouroboros) keepaliveClientResponse(
 	ctx okeepalive.CallbackContext,
 	_ uint16,
 ) error {
-	if o.EventBus == nil {
+	if o.eventBus == nil {
 		return nil
 	}
 	evt := event.NewEvent(
@@ -68,6 +68,6 @@ func (o *Ouroboros) keepaliveClientResponse(
 			ConnectionId: ctx.ConnectionId,
 		},
 	)
-	o.EventBus.Publish(chainselection.PeerActivityEventType, evt)
+	o.eventBus.Publish(chainselection.PeerActivityEventType, evt)
 	return nil
 }

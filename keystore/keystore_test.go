@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
@@ -69,6 +70,8 @@ func setupTestKeys(t *testing.T) (string, string, string) {
 	require.NoError(t, os.WriteFile(vrfPath, []byte(testVRFSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(kesPath, []byte(testKESSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(opCertPath, []byte(testOpCertJSON), 0o600))
+	testutil.RestrictFileToCurrentUser(t, vrfPath)
+	testutil.RestrictFileToCurrentUser(t, kesPath)
 
 	return vrfPath, kesPath, opCertPath
 }

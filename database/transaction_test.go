@@ -321,7 +321,9 @@ func TestDeleteTxBlobsCountsFailedBatchCommit(t *testing.T) {
 	}
 
 	txHashes := [][]byte{{0x01}, {0x02}, {0x03}}
-	require.NoError(t, deleteTxBlobs(db, txHashes, nil))
+	err := deleteTxBlobs(db, txHashes, nil)
+	require.Error(t, err, "an uncommitted batch leaves unreachable objects")
+	require.ErrorIs(t, err, ErrBlobDeleteIncomplete)
 	require.Len(t, store.txns, 1)
 	require.Equal(t, 1, store.txns[0].commitCount)
 	require.Contains(t, logs.String(), "\"failed\":3")
@@ -350,7 +352,9 @@ func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
 		{TxId: []byte{0x02}, OutputIdx: 1},
 		{TxId: []byte{0x03}, OutputIdx: 2},
 	}
-	require.NoError(t, deleteUtxoBlobs(db, utxos, nil))
+	err := deleteUtxoBlobs(db, utxos, nil)
+	require.Error(t, err, "an uncommitted batch leaves unreachable objects")
+	require.ErrorIs(t, err, ErrBlobDeleteIncomplete)
 	require.Len(t, store.txns, 1)
 	require.Equal(t, 1, store.txns[0].commitCount)
 	require.Contains(t, logs.String(), "\"failed\":3")
@@ -779,15 +783,10 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 }
 
 // TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation covers
-// issue #3005: in the steady-state, at-tip, validated block-application path,
-// a consumed input whose produced utxo row is absent from the metadata store
-// (the producer transaction row may still be present) must NOT be recovered
-// from the append-only blob store and persisted, even when that recovery would
-// succeed. The blob retains blocks from abandoned forks,
-// so recovering the producer would import a UTxO the applied chain never
-// produced and bake an input-conservation violation into the persisted chain.
-// With StrictAppliedInputConservation the ingest errors instead, so the block's
-// transaction aborts and the node stalls for resync rather than wedging past K.
+// strict at-tip recovery after a consumed UTxO row was pruned. A canonical
+// producer may be reconstructed from the retained block/blob data (issue
+// #3170), while the primary-chain check still rejects an abandoned-fork
+// producer (issue #3005).
 //
 // The fixture stages the producers so that recovery from the blob WOULD
 // otherwise succeed (blob offsets present, metadata Transaction rows present,
@@ -866,30 +865,34 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{}))
 	})
 
-	t.Run("flag on refuses recovery past boundary", func(t *testing.T) {
-		db := newRecoverableDB(t)
-		// No mithril_ledger_slot recorded (0): every slot is past the boundary.
-		err := setConsumer(t, db, BatchedTxIngestOpts{
-			StrictAppliedInputConservation: true,
-		})
-		require.Error(t, err)
-		require.ErrorIs(t, err, ErrUtxoNotFound)
-		// The block's transaction must not have persisted the recovered row.
-		for _, input := range candidate.consumerTx.Consumed() {
-			utxo, err := db.Metadata().GetUtxoIncludingSpent(
-				input.Id().Bytes(),
-				input.Index(),
-				nil,
-			)
-			require.NoError(t, err)
-			require.Nil(
-				t,
-				utxo,
-				"input %s must not be recovered/persisted under the gate",
-				input.String(),
-			)
-		}
-	})
+	t.Run(
+		"flag on recovers canonical producer past boundary",
+		func(t *testing.T) {
+			db := newRecoverableDB(t)
+			// No mithril_ledger_slot recorded (0): every slot is past the boundary.
+			require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{
+				StrictAppliedInputConservation: true,
+			}))
+			// The block's transaction must persist the recovered row and mark it
+			// spent by the consumer, just as if rollback restoration had preserved
+			// the row in the first place.
+			for _, input := range candidate.consumerTx.Consumed() {
+				utxo, err := db.Metadata().GetUtxoIncludingSpent(
+					input.Id().Bytes(),
+					input.Index(),
+					nil,
+				)
+				require.NoError(t, err)
+				require.NotNil(
+					t,
+					utxo,
+					"input %s must be recovered/persisted when its producer is canonical",
+					input.String(),
+				)
+				require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
+			}
+		},
+	)
 
 	t.Run("flag on tolerated at or below boundary", func(t *testing.T) {
 		db := newRecoverableDB(t)

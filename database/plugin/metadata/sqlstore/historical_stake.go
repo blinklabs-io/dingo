@@ -45,11 +45,12 @@ type historicalWithdrawal struct {
 // credentials.  Filters are split into bounded batches so the generated
 // predicate stays below SQLite/PostgreSQL/MySQL parameter limits.
 func historicalRewards(
+	ctx context.Context,
 	db queryer,
 	slot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
-	return historicalRewardsAtBoundary(db, slot, 0, selected)
+	return historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
 }
 
 // historicalRewardsAtBoundary reconstructs the reward balance observed at an
@@ -57,6 +58,7 @@ func historicalRewards(
 // credits relative to SNAP and must be removed, while unmarked credits at the
 // boundary are already visible to the snapshot.
 func historicalRewardsAtBoundary(
+	ctx context.Context,
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
@@ -80,6 +82,7 @@ func historicalRewardsAtBoundary(
 			batchSelected[key] = struct{}{}
 		}
 		batch, err := historicalRewardsBatch(
+			ctx,
 			db,
 			slot,
 			boundarySlot,
@@ -97,6 +100,7 @@ func historicalRewardsAtBoundary(
 // persisted as decimal text and can exceed a signed SQL integer; keeping the
 // ordering logic here avoids lossy CAST/SUM arithmetic in SQLite.
 func historicalRewardsBatch(
+	ctx context.Context,
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
@@ -109,7 +113,7 @@ func historicalRewardsBatch(
 	base := make(map[historicalRewardKey]uint64)
 	predicate, predicateArgs := historicalRewardCredentialPredicate(selected)
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		"SELECT credential_tag, staking_key, reward FROM account WHERE "+predicate,
 		predicateArgs...)
 	if err != nil {
@@ -154,7 +158,7 @@ func historicalRewardsBatch(
 		withdrawalOp = ">="
 	}
 	withdrawalArgs := append([]any{withdrawalValue}, predicateArgs...)
-	rows, err = db.QueryContext(context.Background(), `
+	rows, err = db.QueryContext(ctx, `
 SELECT credential_tag, staking_key, id, added_slot, previous_reward
 FROM account_reward_delta
 WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
@@ -214,7 +218,7 @@ WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
 		creditArgs = []any{boundaryValue, boundaryValue}
 	}
 	creditArgs = append(creditArgs, predicateArgs...)
-	rows, err = db.QueryContext(context.Background(), `
+	rows, err = db.QueryContext(ctx, `
 SELECT credential_tag, staking_key, id, added_slot, amount
 FROM account_reward_delta
 WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
@@ -409,7 +413,7 @@ func (s *Store) getStakeByPoolsAtSlot(
 	if len(poolKeyHashes) == 0 {
 		return stakes, delegators, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -417,6 +421,7 @@ func (s *Store) getStakeByPoolsAtSlot(
 	for start := 0; start < len(poolKeyHashes); start += 400 {
 		end := min(start+400, len(poolKeyHashes))
 		query, args, err := s.historicalStakeCTE(
+			ctx,
 			db,
 			slot,
 			expiryEpoch,
@@ -430,7 +435,7 @@ func (s *Store) getStakeByPoolsAtSlot(
 		for _, hash := range poolKeyHashes[start:end] {
 			args = append(args, hash)
 		}
-		rows, err := db.QueryContext(context.Background(), query+`
+		rows, err := db.QueryContext(ctx, query+`
 SELECT pool_key_hash, credential_tag, staking_key, utxo_amount
 FROM active_delegator_stake`,
 			args...,
@@ -481,7 +486,7 @@ FROM active_delegator_stake`,
 			return nil, nil, err
 		}
 		rewardsByCredential, err := historicalRewardsAtBoundary(
-			db, slot, boundarySlot, selected,
+			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("calculate historical rewards: %w", err)
@@ -515,13 +520,14 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 	if len(ownerKeys) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	for start := 0; start < len(ownerKeys); start += 400 {
 		end := min(start+400, len(ownerKeys))
 		query, args, err := s.historicalStakeCTE(
+			ctx,
 			db,
 			slot,
 			expiryEpoch,
@@ -536,7 +542,7 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 		for _, key := range ownerKeys[start:end] {
 			args = append(args, key)
 		}
-		rows, err := db.QueryContext(context.Background(), query+`
+		rows, err := db.QueryContext(ctx, query+`
 SELECT pool_key_hash, staking_key, credential_tag, utxo_amount
 FROM active_delegator_stake`,
 			args...,
@@ -582,7 +588,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewards(db, slot, selected)
+		rewardsByCredential, err := historicalRewards(ctx, db, slot, selected)
 		if err != nil {
 			return nil, fmt.Errorf("calculate historical rewards: %w", err)
 		}
@@ -652,7 +658,7 @@ func (s *Store) getRewardStakeInputsForPools(
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -661,6 +667,7 @@ func (s *Store) getRewardStakeInputsForPools(
 	for start := 0; start < len(poolKeyHashes); start += 400 {
 		end := min(start+400, len(poolKeyHashes))
 		query, args, err := s.historicalStakeCTE(
+			ctx,
 			db,
 			slot,
 			expiryEpoch,
@@ -674,7 +681,7 @@ func (s *Store) getRewardStakeInputsForPools(
 		for _, hash := range poolKeyHashes[start:end] {
 			args = append(args, hash)
 		}
-		rows, err := db.QueryContext(context.Background(), query+`
+		rows, err := db.QueryContext(ctx, query+`
 SELECT pool_key_hash, credential_tag, staking_key, utxo_amount
 FROM active_delegator_stake
 ORDER BY pool_key_hash, credential_tag, staking_key`,
@@ -728,7 +735,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 			return nil, err
 		}
 		rewardsByCredential, err := historicalRewardsAtBoundary(
-			db, slot, boundarySlot, selected,
+			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("calculate historical rewards: %w", err)
@@ -759,6 +766,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 }
 
 func (s *Store) historicalStakeCTE(
+	ctx context.Context,
 	db queryer,
 	slot uint64,
 	expiryEpoch uint64,
@@ -775,6 +783,7 @@ func (s *Store) historicalStakeCTE(
 			)
 		}
 		expiration, expirationArgs, err := historicalExpirationSQL(
+			ctx,
 			db,
 			slot,
 			expiryEpoch,
@@ -965,13 +974,14 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 // it introduces no new divergence. See ARCHITECTURE.md's CIP-0163 section
 // (issue #2920) before adding any other deletion path for these tables.
 func historicalExpirationSQL(
+	ctx context.Context,
 	db queryer,
 	slot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) (string, []any, error) {
 	var value string
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 SELECT value FROM sync_state
 WHERE sync_key = 'delegator_inactivity_activated'
 LIMIT 1`).Scan(&value)

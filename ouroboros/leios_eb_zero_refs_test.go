@@ -23,6 +23,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type recordingLeiosPipelineHandler struct {
+	observed int
+}
+
+func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
+	uint64,
+	lcommon.Blake2b256,
+) {
+	h.observed++
+}
+
 // Investigation for dingo #2729.
 //
 // A from-genesis musashi Leios sync stalls in the epoch-15 endorser-block
@@ -155,7 +166,7 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 	// The peer serves an empty manifest instead of the real bytes.
 	emptyManifest := []byte{0xa0}
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
 	require.Error(t, err)
 	require.ErrorContains(
@@ -186,7 +197,11 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 	hash := lcommon.Blake2b256Hash(emptyManifest)
 	point := ocommon.NewPoint(15, hash.Bytes())
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	votes := &fakeLeiosVoteHandler{}
+	pipeline := &recordingLeiosPipelineHandler{}
+	o.leiosVotes = votes
+	o.leiosPipeline = pipeline
 	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
 	require.Error(t, err)
 	require.ErrorContains(
@@ -194,6 +209,10 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 		err,
 		"must contain at least one transaction reference",
 	)
+	_, cached := o.lookupLeiosEndorserBlock(point.Hash)
+	require.False(t, cached)
+	require.Empty(t, votes.ebs)
+	require.Zero(t, pipeline.observed)
 }
 
 // TestStoreLeiosEndorserBlockValidManifestStillStores confirms the reordered
@@ -202,7 +221,7 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 func TestStoreLeiosEndorserBlockValidManifestStillStores(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 15, 300)
 
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)

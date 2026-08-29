@@ -18,11 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
@@ -60,7 +62,6 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
@@ -72,37 +73,55 @@ type Node struct {
 	// no Stop of its own otherwise, so a live database restore/truncate,
 	// which constructs a fresh one on every cycle, would leak its EventBus
 	// subscription every time (node_lifecycle.go).
-	poolRelayProvider                *ledger.PoolRelayProvider
-	chainsyncState                   *chainsync.State
-	chainSelector                    *chainselection.ChainSelector
-	eventBus                         *event.EventBus
-	pluginHost                       *plugin.Host
-	destinationRegistry              *lifecycle.DestinationRegistry
-	mempool                          mempool.Service
-	chainManager                     *chain.ChainManager
-	db                               *database.Database
-	ledgerState                      *ledger.LedgerState
-	snapshotMgr                      *snapshot.Manager
-	dbLifecycleMgr                   *dblifecycle.Manager
-	leiosVoteManager                 *leios.VoteManager
-	leiosPipelineManager             *leios.PipelineManager
-	bark                             *bark.Bark
-	historyExpiry                    *historyexpiry.Pruner
-	koiosParityObserver              *koiosparity.Observer
-	midnightServer                   *midnightserver.Server
-	offchainMetadataFetcher          *offchainmetadata.Fetcher
-	midnightIndexer                  *midnightindexer.Indexer
-	ouroboros                        *ouroborosPkg.Ouroboros
-	blockForger                      *forging.BlockForger
-	leaderElection                   *leader.Election
-	rtsMetrics                       *rtsMetrics
-	shutdownFuncs                    []func(context.Context) error
-	deferredIndexMaintenanceDone     chan struct{}
-	config                           Config
-	ctx                              context.Context
-	cancel                           context.CancelFunc
-	shutdownOnce                     sync.Once
-	shutdownErr                      error
+	poolRelayProvider       *ledger.PoolRelayProvider
+	chainsyncState          *chainsync.State
+	chainSelector           *chainselection.ChainSelector
+	eventBus                *event.EventBus
+	pluginHost              *plugin.Host
+	destinationRegistry     *lifecycle.DestinationRegistry
+	mempool                 mempool.Service
+	chainManager            *chain.ChainManager
+	db                      *database.Database
+	ledgerState             *ledger.LedgerState
+	snapshotMgr             *snapshot.Manager
+	dbLifecycleMgr          *dblifecycle.Manager
+	leiosVoteManager        *leios.VoteManager
+	leiosPipelineManager    *leios.PipelineManager
+	bark                    *bark.Bark
+	historyExpiry           *historyexpiry.Pruner
+	koiosParityObserver     *koiosparity.Observer
+	midnightServer          *midnightserver.Server
+	offchainMetadataFetcher *offchainmetadata.Fetcher
+	tokenRegistrySync       *offchainmetadata.TokenRegistrySync
+	midnightIndexer         *midnightindexer.Indexer
+	// ouroborosRef holds the current Ouroboros. It is atomic because a live
+	// snapshot/restore replaces the instance while EventBus handlers and
+	// component callbacks -- which resolve it at call time, by design -- may
+	// be reading it from other goroutines. Read it through the ouroboros()
+	// accessor; the only writer is the replacement in
+	// reinitializeNetworkingCore and the initial construction in Run.
+	ouroborosRef atomic.Pointer[ouroborosPkg.Ouroboros]
+	// ouroborosConfig retains the settings half of the config Run built, so a
+	// live restore can reconstruct ouroboros against rebuilt dependencies
+	// without recomputing them and drifting from Run.
+	ouroborosConfig              ouroborosPkg.OuroborosConfig
+	blockForger                  *forging.BlockForger
+	leaderElection               *leader.Election
+	rtsMetrics                   *rtsMetrics
+	shutdownFuncs                []func(context.Context) error
+	deferredIndexMaintenanceDone chan struct{}
+	config                       Config
+	ctx                          context.Context
+	cancel                       context.CancelFunc
+	fatalErrMu                   sync.Mutex
+	fatalErr                     error
+	shutdownOnce                 sync.Once
+	shutdownErr                  error
+	// startupLifecycleMu keeps the startup rollback and normal shutdown from
+	// operating on the same partially initialized component concurrently. Run
+	// holds it until startup has either completed or unwound its LIFO cleanup;
+	// shutdown takes it before it begins its phase-ordered teardown.
+	startupLifecycleMu               sync.Mutex
 	chainsyncStallRecycler           *chainsyncrecycler.Recycler
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
@@ -115,10 +134,10 @@ type Node struct {
 	// tracked ID. Captured here (rather than discarded, as Run() otherwise
 	// would) purely so node_lifecycle.go can unsubscribe the stale handler
 	// before rebuilding its component; Run()'s own behavior is unchanged.
-	chainManagerBlockProposedSubId event.EventSubscriberId
-	chainsyncClientRemoveSubId     event.EventSubscriberId
-	connManagerRecycleSubId        event.EventSubscriberId
-	leiosVoteEmittedSubId          event.EventSubscriberId
+	chainsyncClientRemoveSubId event.EventSubscriberId
+	connManagerRecycleSubId    event.EventSubscriberId
+	leiosVoteEmittedSubId      event.EventSubscriberId
+	leiosVoteReceivedSubId     event.EventSubscriberId
 	// koiosParitySubId is tracked for the same reason: observer.
 	// HandleEpochTransitionEvent is bound to the *koiosparity.Observer
 	// instance startKoiosParityObserver creates, which a live database
@@ -399,8 +418,8 @@ func (n *Node) apiPluginSelection(
 // bark's own existing default behavior (all interfaces) is preserved for
 // deployments only using it for the read-only Archive service. Bind address
 // is a network control, independent of the mTLS client-certificate
-// authentication check Bark.Start enforces whenever lifecycleEnabled (see
-// BarkConfig.TlsClientCAFilePath) -- this default narrows exposure as
+// authentication and operator-fingerprint authorization checks Bark.Start
+// enforces whenever lifecycleEnabled -- this default narrows exposure as
 // defense in depth, it is not what makes those RPCs safe to reach.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
@@ -412,8 +431,41 @@ func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	return ""
 }
 
+// ouroboros returns the current Ouroboros instance. Callers resolve it through
+// here rather than caching it, so a live restore's replacement is picked up
+// automatically and the read is synchronized against the replacement.
+func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
+	return n.ouroborosRef.Load()
+}
+
+// Run wires *ledger.LedgerState in as the mempool's TxValidator, and the
+// mempool discovers the optional validation-session capability on it with a
+// runtime type assertion, silently falling back to unpinned per-transaction
+// validation when that fails. Guard the pairing here, in the package that
+// makes it, so drift cannot quietly unpin mempool revalidation from its
+// ledger snapshot.
+var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
-func (n *Node) Run(ctx context.Context) error {
+func (n *Node) Run(ctx context.Context) (runErr error) {
+	// A signal can cancel ctx while this function is still constructing
+	// components. Hold the lifecycle gate until either the startup cleanup has
+	// finished or every component has started, so the command layer's Stop
+	// cannot tear down a component while the rollback is doing the same.
+	n.startupLifecycleMu.Lock()
+	startupGateHeld := true
+	var started []func()
+	defer func() {
+		if !startupGateHeld {
+			return
+		}
+		r := recover()
+		n.cleanupFailedStartup(started)
+		if r != nil {
+			panic(r)
+		}
+	}()
+
 	// Configure tracing
 	n.warnIfTracingMisconfigured()
 	if n.config.tracing {
@@ -422,6 +474,9 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
+	defer func() {
+		runErr = n.resolveRunError(runErr)
+	}()
 
 	// Start the RTS metrics updater goroutine. It samples runtime.MemStats
 	// on a ticker and exits when n.ctx is cancelled by the existing
@@ -430,7 +485,6 @@ func (n *Node) Run(ctx context.Context) error {
 	go n.runRTSMetricsUpdater(n.ctx, rtsMetricsUpdateInterval)
 
 	// Track started components for cleanup on failure
-	var started []func()
 	stopPluginCapability := func(capability plugin.Capability) func() {
 		return func() {
 			if err := n.pluginHost.StopCapability(
@@ -447,29 +501,6 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		}
 	}
-	success := false
-	defer func() {
-		r := recover()
-		if r != nil {
-			if n.cancel != nil {
-				n.cancel()
-			}
-			// Cleanup on panic, then re-panic
-			for _, s := range slices.Backward(started) {
-				s()
-			}
-			panic(r)
-		} else if !success {
-			if n.cancel != nil {
-				n.cancel()
-			}
-			// Cleanup on failure (non-panic)
-			for _, s := range slices.Backward(started) {
-				s()
-			}
-		}
-	}()
-
 	// Register eventBus cleanup (created in New(), has background goroutines).
 	// Close (not Stop): startup-failure cleanup is terminal, and Stop restarts
 	// the async-worker pool, leaking those goroutines.
@@ -557,8 +588,7 @@ func (n *Node) Run(ctx context.Context) error {
 	n.db = db
 	started = append(started, func() { n.db.Close() })
 	if err != nil {
-		var dbErr database.CommitTimestampError
-		if !errors.As(err, &dbErr) {
+		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
 			return fmt.Errorf("failed to open database: %w", err)
 		}
 		n.config.logger.Warn(
@@ -606,14 +636,6 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
-	primaryChain := n.chainManager.PrimaryChain()
-	// Subscriber ID captured (rather than discarded) so a live database
-	// restore/truncate can unsubscribe this handler before rebuilding
-	// n.chainManager — see node_lifecycle.go.
-	n.chainManagerBlockProposedSubId = n.eventBus.SubscribeFunc(
-		chain.BlockProposedEventType,
-		primaryChain.HandleBlockProposedEvent,
-	)
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)
@@ -651,237 +673,18 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.isMusashiNetwork() {
 		keepAliveTimeout = okeepalive.ServerTimeout
 	}
-	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
-		Logger:                n.config.logger,
-		EventBus:              n.eventBus,
-		ConnManager:           n.connManager,
-		NetworkMagic:          n.config.networkMagic,
-		PeerSharing:           n.config.peerSharing,
-		IntersectTip:          n.config.intersectTip,
-		IntersectPoints:       n.config.intersectPoints,
-		PromRegistry:          n.retainedComponentPromRegistry(),
-		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
-		EnableLeios:           enableLeiosNetworking,
-		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
-		// extension ahead of the IOG Leios prototype. The prototype relays do
-		// not run a protocol-20 responder and reset the connection if we
-		// initiate it, so disable it on the Leios prototype network; there
-		// votes are diffused inline over leios-notify. Keep it available for
-		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
-		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
-		// Request endorser-block transaction bodies over leios-fetch, driven by
-		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
-		// that the EB's transactions are ready. Fetching before that offer
-		// (e.g. right after the manifest) makes the prototype relay reset the
-		// connection, so the fetch is gated on the txs offer, not the block
-		// offer. Best-effort: a fetch failure never tears down the shared
-		// connection.
-		EnableLeiosTxFetch:           enableLeiosNetworking,
-		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
-		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
-		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
-		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
-		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
-		// On the Musashi prototype network every mini-protocol shares one muxer
-		// to a single relay; block/EB traffic can delay the relay's keep-alive
-		// pong past the tight 10s gouroboros default, making dingo drop the
-		// only relay and pay a reconnect + fork rollback. Wait up to the
-		// keep-alive server timeout there so a slow-but-alive relay is not
-		// dropped. Unset on other networks (fast dead-peer eviction retained).
-		KeepAliveTimeout: keepAliveTimeout,
-	})
-	// Stop the asynchronous Leios endorser-block persistence writer during
-	// shutdown so it drains queued blob writes and its goroutine exits cleanly.
-	// No-op when no endorser block was ever fetched (writer never started), and
-	// idempotent, so registering it on both shutdown paths is safe.
-	//
-	// The `started` stack is only unwound on startup failure/panic; a graceful
-	// shutdown returns from Run via <-n.ctx.Done() without draining it. Register
-	// a defer as well so the writer is drained (before the process exits) on the
-	// normal shutdown path too. On the failure path the `started` entry keeps the
-	// LIFO ordering so the drain still runs before n.db.Close().
-	defer n.ouroboros.StopLeiosPersistWriter()
-	started = append(started, func() { n.ouroboros.StopLeiosPersistWriter() })
+	// n.ouroboros is constructed further down, once every dependency it
+	// requires exists. Nothing between here and there dereferences it: the
+	// callbacks handed to ledger, connmanager and peergov below are closures
+	// that resolve n.ouroboros when they fire, not method values bound now.
 	// Load state
-	state, err := ledger.NewLedgerState(
-		ledger.LedgerStateConfig{
-			ChainManager:       n.chainManager,
-			Database:           n.db,
-			EventBus:           n.eventBus,
-			Logger:             n.config.logger,
-			CardanoNodeConfig:  n.config.cardanoNodeConfig,
-			PromRegistry:       n.config.promRegistry,
-			ForgeBlocks:        n.config.isDevMode(),
-			ValidateHistorical: n.config.validateHistorical,
-			EnableDijkstra:     enableDijkstra,
-			StartInDijkstra:    n.config.startEra.IsDijkstra(),
-			// Parallel block-decode pipeline for the chainsync replay loop
-			// (issue #1894 phase 1). Not consensus-affecting; off by default.
-			BlockPipelineEnabled: n.config.blockPipelineEnabled,
-			// Supplies fetched Leios endorser-block transactions so the ledger
-			// can apply them when their referencing Dijkstra ranking block is
-			// processed (completing the UTxO set for endorser-resident outputs).
-			EndorserBlockProvider: n.ouroboros.EndorserBlockTxsByHash,
-			// Actively fetches a referenced endorser block by point and caches
-			// it. Used during historical catch-up: the prototype relay serves
-			// any endorser block by point on demand, so a from-scratch sync can
-			// backfill older ranking blocks' endorser-resident outputs and build
-			// a complete UTxO set instead of trusting the chain.
-			EndorserBlockFetcher: n.ouroboros.FetchEndorserBlockByPoint,
-			// Wait, at the tip, for a ranking block's referenced endorser block
-			// to arrive before applying it. Sourced from the pipeline timing
-			// (CIP-0164-tracking, override-able via WithLeiosPipelineTiming)
-			// rather than a hardcoded duration. We use CertifyByDeadlineSlots,
-			// not DiffuseWindowSlots: by the time a ranking block references an
-			// EB, that EB has already been certified, and measurement shows the
-			// prototype relay's tx-offer delay (~3s) plus the fetch (~3s, incl.
-			// the still-diffusing tail) exceeds the diffusion window — so the
-			// certify deadline is the bound that matches when the EB is actually
-			// available to fetch.
-			EndorserBlockWaitSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
-			// Two-path Leios ledger selection: the Musashi prototype
-			// (prototype-2026w29) applies only the certified parent EB, without
-			// validation or consumed-input recovery (Haskell-conformant), whereas
-			// dingo's forward path applies the current announcement normally
-			// (CIP-conformant).
-			LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
-			// dingo's leadership stake omits reward-account balances (staking
-			// rewards are not yet computed), which spuriously rejects the
-			// dominant pool's eligible blocks on Musashi's concentrated
-			// topology and wedges the chain. Trust rather than reject there
-			// until reward calculation lands; enforce on real networks where
-			// the omission is negligible. TPraos bootstrap pool-threshold
-			// checks are waived separately inside header validation after
-			// genesis overlay slots are handled.
-			SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
-			// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
-			// trusted by the prototype; skip dingo's per-tx validation to match it
-			// and keep block application at the production rate.
-			SkipDijkstraTxValidation: n.config.prototypeTrustBypassesEnabled(),
-			// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
-			// off by default (0), effective only in Dijkstra and later.
-			MinPoolMargin: n.config.minPoolMargin,
-			// CIP-50 pledge-leverage reward cap. Operator-set (not derived from
-			// the network) and off by default; enable only where every node
-			// also enables it.
-			PledgeLeverageEnabled: n.config.pledgeLeverageEnabled,
-			PledgeLeverage:        n.config.pledgeLeverage,
-			// CIP-0163 full-pot reward distribution. Operator-set (not derived
-			// from the network) and off by default; enable only where every node
-			// also enables it.
-			FullPotRewardsEnabled: n.config.fullPotRewardsEnabled,
-			// CIP-0163 reward-account inactivity expiry (operator-set)
-			DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
-			DelegatorInactivity:        n.config.delegatorInactivity,
-			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
-			PeersWithBlockFunc: func(
-				origin ouroboros.ConnectionId,
-				point ocommon.Point,
-			) []ouroboros.ConnectionId {
-				if n.chainsyncState == nil {
-					return nil
-				}
-				return n.chainsyncState.PeersWithBlock(origin, point)
-			},
-			RecordBlockfetchLatencyFunc: func(
-				connId ouroboros.ConnectionId,
-				latency time.Duration,
-			) {
-				if n.chainsyncState != nil {
-					n.chainsyncState.RecordBlockfetchLatency(
-						connId,
-						latency,
-					)
-				}
-			},
-			BlockfetchLatencyFunc: func(
-				connId ouroboros.ConnectionId,
-			) (time.Duration, bool) {
-				if n.chainsyncState == nil {
-					return 0, false
-				}
-				return n.chainsyncState.BlockfetchLatency(connId)
-			},
-			BlockfetchLatencyMedianFunc: func() (time.Duration, int) {
-				if n.chainsyncState == nil {
-					return 0, 0
-				}
-				return n.chainsyncState.BlockfetchLatencyMedian()
-			},
-			DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
-			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
-				// Return the current best peer for rollback filtering and
-				// blockfetch fallback. Headers can arrive from any eligible
-				// peer, but rollbacks and retry selection still need a
-				// current best connection.
-				if n.chainsyncState != nil {
-					return n.chainsyncState.GetClientConnId()
-				}
-				return nil
-			},
-			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
-				return n.connManager != nil &&
-					n.connManager.GetConnectionById(connId) != nil
-			},
-			ConnectionSwitchFunc: func() {
-				// Retain older seen-header history so a switched peer
-				// can replay only the post-tip segment from the local
-				// intersect point without re-delivering older headers.
-				if n.chainsyncState != nil && n.ledgerState != nil {
-					n.chainsyncState.ClearSeenHeadersFrom(
-						n.ledgerState.Tip().Point.Slot,
-					)
-				}
-			},
-			ClearSeenHeadersFromFunc: func(fromSlot uint64) {
-				if n.chainsyncState != nil {
-					n.chainsyncState.ClearSeenHeadersFrom(fromSlot)
-				}
-			},
-			PeerHeaderLookupFunc: func(
-				connId ouroboros.ConnectionId,
-				hash []byte,
-			) (ledger.ChainsyncEvent, []byte, bool) {
-				if n.chainsyncState == nil {
-					return ledger.ChainsyncEvent{}, nil, false
-				}
-				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(
-					connId,
-					hash,
-				)
-				if !ok {
-					return ledger.ChainsyncEvent{}, nil, false
-				}
-				return ledger.ChainsyncEvent{
-					ConnectionId: h.ConnectionId,
-					BlockHeader:  h.BlockHeader,
-					Point:        h.Point,
-					Tip:          h.Tip,
-					BlockNumber:  h.BlockNumber,
-					Type:         h.Type,
-					Rollback:     h.Rollback,
-				}, prevHash, true
-			},
-			GenesisSelectionStateFunc: func() (bool, uint64) {
-				if n.chainSelector == nil {
-					return false, 0
-				}
-				return n.chainSelector.GenesisSelectionState()
-			},
-			FatalErrorFunc: func(err error) {
-				n.config.logger.Error(
-					"fatal ledger error, initiating shutdown",
-					"error", err,
-				)
-				n.cancel()
-			},
-		},
-	)
+	state, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	if err != nil {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
 	n.ledgerState = state
-	n.ouroboros.LedgerState = n.ledgerState
+	// n.ouroboros is constructed once every dependency exists; see the
+	// NewOuroboros call below.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
 		return fmt.Errorf(
 			"failed to configure chain security parameter: %w",
@@ -1007,6 +810,20 @@ func (n *Node) Run(ctx context.Context) error {
 					endSlot,
 					fn,
 				)
+			},
+			// Read the applied ledger tip straight from metadata rather than
+			// from n.ledgerState.Tip(): LedgerState only loads its in-memory
+			// tip inside Start, which runs after this indexer has already
+			// backfilled, so Tip() would still be the zero value here. Blocks
+			// stored above this slot -- the whole post-snapshot suffix on a
+			// Mithril-bootstrapped node -- are replayed by LedgerState.Start
+			// and reach the indexer as live block events instead.
+			LedgerTipSlot: func() (uint64, error) {
+				tip, err := n.db.GetTip(nil)
+				if err != nil {
+					return 0, err
+				}
+				return tip.Point.Slot, nil
 			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
@@ -1189,7 +1006,6 @@ func (n *Node) Run(ctx context.Context) error {
 	)
 	// Set mempool adapter in ledger state for block forging.
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
-	n.ouroboros.Mempool = n.mempool
 	// Initialize chainsync state with multi-client configuration
 	chainsyncCfg := chainsync.DefaultConfig()
 	if n.config.chainsyncMaxClients > 0 {
@@ -1220,14 +1036,15 @@ func (n *Node) Run(ctx context.Context) error {
 		n.ledgerState,
 		chainsyncCfg,
 	)
-	n.ouroboros.ChainsyncState = n.chainsyncState
 	n.eventBus.SubscribeFunc(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
 	)
 	n.eventBus.SubscribeFunc(
 		peergov.PeerEligibilityChangedEventType,
-		n.ouroboros.HandlePeerEligibilityChangedEvent,
+		func(evt event.Event) {
+			n.ouroboros().HandlePeerEligibilityChangedEvent(evt)
+		},
 	)
 	// Subscriber ID captured for the same reason as chainManager's above —
 	// n.chainsyncState is rebuilt during a live database restore/truncate.
@@ -1290,18 +1107,26 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start chain selector: %w", err)
 	}
 	started = append(started, func() { n.chainSelector.Stop() })
-	// Configure connection manager
-	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
+	// Configure connection manager. The listener configs and outbound
+	// connection options come from ouroboros, which does not exist yet
+	// because it needs this ConnectionManager — so they are supplied as
+	// providers, resolved on first use at Start, by which point ouroboros is
+	// built.
 	n.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
-			Logger:              n.config.logger,
-			EventBus:            n.eventBus,
-			Listeners:           tmpListeners,
-			OutboundSourcePort:  n.config.outboundSourcePort,
-			OutboundConnOpts:    n.ouroboros.OutboundConnOpts(),
+			Logger:   n.config.logger,
+			EventBus: n.eventBus,
+			ListenersProvider: func() []connmanager.ListenerConfig {
+				return n.ouroboros().ConfigureListeners(n.config.listeners)
+			},
+			OutboundSourcePort: n.config.outboundSourcePort,
+			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
+				return n.ouroboros().OutboundConnOpts()
+			},
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
+			ConnClosedFunc:      n.handleConnManagerClosed,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -1325,42 +1150,118 @@ func (n *Node) Run(ctx context.Context) error {
 		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
 	}
 
-	n.peerGov = peergov.NewPeerGovernor(
-		peergov.PeerGovernorConfig{
-			Logger:                               n.config.logger,
-			EventBus:                             n.eventBus,
-			ConnManager:                          n.connManager,
-			DisableOutbound:                      n.config.isDevMode(),
-			PromRegistry:                         n.config.promRegistry,
-			PeerRequestFunc:                      n.ouroboros.RequestPeersFromPeer,
-			LedgerPeerProvider:                   ledgerPeerProvider,
-			UseLedgerAfterSlot:                   useLedgerAfterSlot,
-			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
-			TargetNumberOfKnownPeers:             n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers:       n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:            n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
-			InboundWarmTarget:                    n.config.inboundWarmTarget,
-			InboundHotQuota:                      n.config.inboundHotQuota,
-			InboundMinTenure:                     n.config.inboundMinTenure,
-			InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
-			InboundPruneAfter:                    n.config.inboundPruneAfter,
-			InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
-			InboundCooldown:                      n.config.inboundCooldown,
-			MinHotPeers:                          n.config.minHotPeers,
-			ReconcileInterval:                    n.config.reconcileInterval,
-			InactivityTimeout:                    n.config.inactivityTimeout,
-			SyncProgressProvider:                 n.ledgerState,
-			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	peerGovConfig := peergov.PeerGovernorConfig{
+		Logger:          n.config.logger,
+		EventBus:        n.eventBus,
+		ConnManager:     n.connManager,
+		DisableOutbound: n.config.isDevMode(),
+		PromRegistry:    n.config.promRegistry,
+		PeerRequestFunc: func(peer *peergov.Peer) []string {
+			return n.ouroboros().RequestPeersFromPeer(peer)
 		},
-	)
-	n.ouroboros.PeerGov = n.peerGov
+		LedgerPeerProvider:                   ledgerPeerProvider,
+		UseLedgerAfterSlot:                   useLedgerAfterSlot,
+		LedgerPeerTarget:                     n.config.ledgerPeerTarget,
+		ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
+		ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
+		ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
+		InboundWarmTarget:                    n.config.inboundWarmTarget,
+		InboundHotQuota:                      n.config.inboundHotQuota,
+		InboundMinTenure:                     n.config.inboundMinTenure,
+		InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
+		InboundPruneAfter:                    n.config.inboundPruneAfter,
+		InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
+		InboundCooldown:                      n.config.inboundCooldown,
+		MinHotPeers:                          n.config.minHotPeers,
+		ReconcileInterval:                    n.config.reconcileInterval,
+		InactivityTimeout:                    n.config.inactivityTimeout,
+		SyncProgressProvider:                 n.ledgerState,
+		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+	}
+	applyPeerTargets(n.config, &peerGovConfig)
+	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
+	// Construct ouroboros now that every dependency exists. It takes them all
+	// up front and validates them, so it can never be observed partially
+	// wired. This is deliberately the last construction before the peer
+	// governor and connection manager start below.
+	n.ouroborosConfig = ouroborosPkg.OuroborosConfig{
+		Logger:                  n.config.logger,
+		EventBus:                n.eventBus,
+		ConnManager:             n.connManager,
+		LedgerState:             n.ledgerState,
+		LeiosAnnouncementLedger: n.ledgerState,
+		Mempool:                 n.mempool,
+		ChainsyncState:          n.chainsyncState,
+		PeerGov:                 n.peerGov,
+		NetworkMagic:            n.config.networkMagic,
+		PeerSharing:             n.config.peerSharing,
+		IntersectTip:            n.config.intersectTip,
+		IntersectPoints:         n.config.intersectPoints,
+		PromRegistry:            n.retainedComponentPromRegistry(),
+		ChainsyncBlockTimeout:   n.config.chainsyncStallTimeout,
+		EnableLeios:             enableLeiosNetworking,
+		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
+		// extension ahead of the IOG Leios prototype. The prototype relays do
+		// not run a protocol-20 responder and reset the connection if we
+		// initiate it, so disable it on the Leios prototype network; there
+		// votes are diffused inline over leios-notify. Keep it available for
+		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
+		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
+		// Request endorser-block transaction bodies over leios-fetch, driven by
+		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
+		// that the EB's transactions are ready. Fetching before that offer
+		// (e.g. right after the manifest) makes the prototype relay reset the
+		// connection, so the fetch is gated on the txs offer, not the block
+		// offer. Best-effort: a fetch failure never tears down the shared
+		// connection.
+		EnableLeiosTxFetch:           enableLeiosNetworking,
+		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
+		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
+		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
+		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
+		// On the Musashi prototype network every mini-protocol shares one muxer
+		// to a single relay; block/EB traffic can delay the relay's keep-alive
+		// pong past the tight 10s gouroboros default, making dingo drop the
+		// only relay and pay a reconnect + fork rollback. Wait up to the
+		// keep-alive server timeout there so a slow-but-alive relay is not
+		// dropped. Unset on other networks (fast dead-peer eviction retained).
+		KeepAliveTimeout: keepAliveTimeout,
+	}
+	ouro, err := ouroborosPkg.NewOuroboros(n.ouroborosConfig)
+	if err != nil {
+		return fmt.Errorf("failed to construct ouroboros: %w", err)
+	}
+	// The Leios managers were started earlier in Run, before this instance
+	// existed, so their handlers are attached here rather than at their own
+	// construction. reinitializeNetworkingCore does the same after its
+	// rebuild.
+	if err := n.attachLeiosHandlers(ouro); err != nil {
+		return err
+	}
+	n.ouroborosRef.Store(ouro)
+	// The asynchronous Leios endorser-block persistence writer, the EventBus
+	// subscriptions ouroboros makes on its own behalf, and its Prometheus
+	// collectors are all released by Close. Registering it on both the
+	// unwind stack and a defer covers startup failure and graceful shutdown;
+	// Close is idempotent.
+	defer func() { _ = n.ouroboros().Close() }()
+	started = append(started, func() { _ = n.ouroboros().Close() })
+	// A closure, not a method value, even though n.ouroboros already exists
+	// here: a live restore replaces the instance, and a method value would
+	// pin this subscription to the replaced one forever, so outbound
+	// connections would be handled by a closed Ouroboros and the node would
+	// silently stop starting chainsync clients after any restore.
 	n.eventBus.SubscribeFunc(
 		peergov.OutboundConnectionEventType,
-		n.ouroboros.HandleOutboundConnEvent,
+		func(evt event.Event) { n.ouroboros().HandleOutboundConnEvent(evt) },
 	)
+	// Subscribe ouroboros to chainsync resync events from the ledger, so all
+	// stop/restart orchestration lives in the ouroboros/chainsync component.
+	// This is a method call rather than a handler registration, so unlike the
+	// subscriptions in subscribeConnectionEvents it has to run after the
+	// constructor above.
+	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 	if n.config.topologyConfig != nil {
 		topologyConfig := n.config.topologyConfig
 		usePeerSnapshot := genesisSelectionMode &&
@@ -1372,6 +1273,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.peerGov.LoadTopologyConfig(topologyConfig)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
+				n.ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added > 0 {
@@ -1397,7 +1299,23 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("peer governor start failed: %w", err)
 	}
-	started = append(started, func() { n.peerGov.Stop() })
+	// Bounded, not context.Background(): Stop waits for an in-flight
+	// GetPoolRelays call, so an unbounded wait here would let a later
+	// startup failure block Node.Run forever instead of returning its
+	// error.
+	started = append(started, func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			n.configuredShutdownTimeout(),
+		)
+		defer cancel()
+		if err := n.peerGov.Stop(stopCtx); err != nil {
+			n.config.logger.Warn(
+				"peer governor shutdown during startup rollback",
+				"error", err,
+			)
+		}
+	})
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
@@ -1460,21 +1378,22 @@ func (n *Node) Run(ctx context.Context) error {
 		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
-				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; its destructive RPCs also require a verified mTLS client certificate (--bark-client-ca-file-path) independent of bind address, but widen this bind only behind your own trusted network controls",
+				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; every DatabaseService RPC requires a verified mTLS client certificate (--bark-client-ca-file-path), and destructive RPCs require an allowlisted certificate fingerprint (--bark-operator-certificate-fingerprints), independent of bind address; widen this bind only behind your own trusted network controls",
 				"component",
 				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{
-			Logger:              n.config.logger,
-			DB:                  db,
-			TlsCertFilePath:     n.config.tlsCertFilePath,
-			TlsKeyFilePath:      n.config.tlsKeyFilePath,
-			TlsClientCAFilePath: n.config.barkClientCAFilePath,
-			Host:                barkHost,
-			Port:                n.config.barkPort,
-			CORSAllowedOrigins:  n.config.corsAllowedOrigins,
-			DestinationRegistry: n.destinationRegistry,
+			Logger:                          n.config.logger,
+			DB:                              db,
+			TlsCertFilePath:                 n.config.tlsCertFilePath,
+			TlsKeyFilePath:                  n.config.tlsKeyFilePath,
+			TlsClientCAFilePath:             n.config.barkClientCAFilePath,
+			OperatorCertificateFingerprints: n.config.barkOperatorCertificateFingerprints,
+			Host:                            barkHost,
+			Port:                            n.config.barkPort,
+			CORSAllowedOrigins:              n.config.corsAllowedOrigins,
+			DestinationRegistry:             n.destinationRegistry,
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and
@@ -1513,10 +1432,9 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Configure the Midnight gRPC server (only in API mode with a non-zero
-	// port). Port 0 disables the server while leaving the indexer eligible to
-	// run.
-	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
+	// Configure the Midnight gRPC server only after the operator explicitly
+	// enables it in API mode. The indexer has an independent opt-in.
+	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
@@ -1532,14 +1450,16 @@ func (n *Node) Run(ctx context.Context) error {
 					}
 					return block.Number, true, nil
 				},
-				Host:            n.config.midnight.Host,
-				Port:            n.config.midnight.Port,
-				TLSCertFilePath: n.config.tlsCertFilePath,
-				TLSKeyFilePath:  n.config.tlsKeyFilePath,
-				ShutdownTimeout: n.config.shutdownTimeout,
-				Database:        midnightserver.NewDatabase(n.db),
-				SlotTimer:       n.ledgerState,
-				PromRegistry:    n.config.promRegistry,
+				Host:                n.config.midnight.Host,
+				Port:                n.config.midnight.Port,
+				TLSCertFilePath:     n.config.tlsCertFilePath,
+				TLSKeyFilePath:      n.config.tlsKeyFilePath,
+				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
+				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:     n.config.shutdownTimeout,
+				Database:            midnightserver.NewDatabase(n.db),
+				SlotTimer:           n.ledgerState,
+				PromRegistry:        n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1675,6 +1595,25 @@ func (n *Node) Run(ctx context.Context) error {
 				)
 			}
 		})
+		if n.config.tokenRegistry.Enabled {
+			sync, err := n.newTokenRegistrySync()
+			if err != nil {
+				return fmt.Errorf("creating token registry sync: %w", err)
+			}
+			n.tokenRegistrySync = sync
+			if err := n.tokenRegistrySync.Start(n.ctx); err != nil { //nolint:contextcheck
+				return fmt.Errorf("starting token registry sync: %w", err)
+			}
+			started = append(started, func() { //nolint:contextcheck
+				if err := n.tokenRegistrySync.Stop(context.Background()); err != nil {
+					n.config.logger.Error(
+						"failed to stop token registry sync during cleanup",
+						"error",
+						err,
+					)
+				}
+			})
+		}
 		started = append(started, n.startDeferredIndexMaintenance())
 	}
 
@@ -1723,13 +1662,18 @@ func (n *Node) Run(ctx context.Context) error {
 				n.blockForger.Stop()
 			}
 			if n.leaderElection != nil {
-				_ = n.leaderElection.Stop()
+				logErrIfNotNil(
+					n.config.logger,
+					"failed to stop leader election during cleanup",
+					n.leaderElection.Stop(),
+				)
 			}
 		})
 	}
 
 	// All components started successfully
-	success = true
+	n.startupLifecycleMu.Unlock()
+	startupGateHeld = false
 
 	// Only now -- every component above has actually started against
 	// n.config.dataDir -- is a pre-restore backup left over from an
@@ -1738,9 +1682,77 @@ func (n *Node) Run(ctx context.Context) error {
 	// on why it must not be removed any earlier than this.
 	n.removeConfirmedRestoreBackup()
 
-	// Wait for shutdown signal
+	return n.waitForShutdown()
+}
+
+// cleanupFailedStartup completes a failed startup while Run owns the startup
+// lifecycle gate. The gate is released only after every started component has
+// stopped, so shutdown cannot overlap the LIFO rollback on a startup signal.
+func (n *Node) cleanupFailedStartup(started []func()) {
+	defer n.startupLifecycleMu.Unlock()
+	if n.cancel != nil {
+		n.cancel()
+	}
+	for _, stop := range slices.Backward(started) {
+		stop()
+	}
+}
+
+// cancelForFatal records the first component failure before cancelling the
+// node. Run returns that error after cancellation so supervisors and the CLI
+// can distinguish a fatal component stop from signal-driven shutdown.
+func (n *Node) cancelForFatal(err error) {
+	n.fatalErrMu.Lock()
+	if n.fatalErr == nil {
+		n.fatalErr = err
+	}
+	n.fatalErrMu.Unlock()
+	if n.cancel != nil {
+		n.cancel()
+	}
+}
+
+func (n *Node) waitForShutdown() error {
 	<-n.ctx.Done()
-	return nil
+	return n.resolveRunError(nil)
+}
+
+// resolveRunError preserves ordinary startup/runtime errors but replaces a
+// cancellation-shaped exit with the component fatal error that caused it.
+// The Run defer is necessary because an asynchronous component can fail after
+// it starts but before Run reaches waitForShutdown; a later startup step then
+// observes context.Canceled and would otherwise hide the original failure.
+func (n *Node) resolveRunError(runErr error) error {
+	n.fatalErrMu.Lock()
+	fatalErr := n.fatalErr
+	n.fatalErrMu.Unlock()
+	if fatalErr != nil && (runErr == nil || errors.Is(runErr, context.Canceled)) {
+		return fatalErr
+	}
+	return runErr
+}
+
+// applyPeerTargets maps Dingo's composed peer targets into the peer governor.
+// Keeping this mapping shared prevents live networking reinitialization from
+// drifting from initial node startup.
+func applyPeerTargets(cfg Config, peerGovConfig *peergov.PeerGovernorConfig) {
+	peerGovConfig.TargetNumberOfKnownPeers = cfg.targetNumberOfKnownPeers
+	peerGovConfig.TargetNumberOfEstablishedPeers = cfg.targetNumberOfEstablishedPeers
+	peerGovConfig.TargetNumberOfActivePeers = cfg.targetNumberOfActivePeers
+	peerGovConfig.TargetNumberOfRootPeers = cfg.targetNumberOfRootPeers
+}
+
+// midnightServerActive centralizes the startup and live-reinitialization gate.
+func midnightServerActive(storageMode StorageMode, cfg MidnightConfig) bool {
+	return storageMode.IsAPI() && cfg.ServerEnabled && cfg.Port > 0
+}
+
+// logErrIfNotNil logs err at Error level if non-nil, so a cleanup step run
+// from the startup failure/shutdown unwind stack doesn't fail silently.
+func logErrIfNotNil(logger *slog.Logger, msg string, err error) {
+	if err != nil {
+		logger.Error(msg, "error", err)
+	}
 }
 
 // taintValue encodes a taint bit for EnforceNodeSettings. A taint records
@@ -1751,6 +1763,39 @@ func taintValue(relaxed bool) string {
 		return nodesettings.LatchOn
 	}
 	return nodesettings.LatchOff
+}
+
+// handleConnManagerClosed releases the chainsync server-side (N2C) client
+// state -- including its live chain iterator -- and any pending Leios
+// endorser-closure serving wait, for a node-to-client connection that just
+// closed.
+//
+// NtC closes are deliberately excluded from the ConnectionClosedEventType
+// fan-out (see the connection manager's publish site) because every current
+// subscriber does node-to-node work and a local client reconnecting in a
+// tight loop would otherwise wedge the EventBus. This callback is the NtC
+// counterpart to HandleConnClosedEvent, which already performs the
+// equivalent RemoveClient cleanup for NtN closes via that event. Guarding on
+// isNtC here keeps the release exactly-once: an NtN close still cleans up
+// only through HandleConnClosedEvent.
+func (n *Node) handleConnManagerClosed(
+	connId ouroboros.ConnectionId,
+	isNtC bool,
+	_ error,
+) {
+	if !isNtC {
+		return
+	}
+	if n.chainsyncState != nil {
+		n.chainsyncState.RemoveClient(connId)
+	}
+	// Wake any NtC chainsync server callback parked waiting for this
+	// connection's certified endorser closure. connmanager drives this
+	// callback from its own per-connection goroutine, so it runs even while
+	// that server callback still owns gouroboros's receive loop.
+	if o := n.ouroboros(); o != nil {
+		o.ReleaseLeiosServeWaiters(connId)
+	}
 }
 
 // subscribeConnectionEvents wires the connection-manager side of the EventBus:
@@ -1789,18 +1834,15 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
-	n.ouroboros.ConnManager = n.connManager
-	// Subscribe ouroboros to chainsync resync events from the
-	// ledger. This replaces the previous ChainsyncResyncFunc
-	// closure so all stop/restart orchestration lives in the
-	// ouroboros/chainsync component. Registered after ConnManager
-	// is wired so the handler can look up connections.
-	n.ouroboros.SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 	// Subscribe to connection events BEFORE starting listeners so that
 	// inbound connections from peers that connect immediately are not lost.
+	//
+	// These are closures rather than method values because this runs before
+	// n.ouroboros is constructed; each resolves it when the event fires,
+	// which cannot happen until the listeners below are open.
 	n.eventBus.SubscribeFunc(
 		connmanager.ConnectionClosedEventType,
-		n.ouroboros.HandleConnClosedEvent,
+		func(evt event.Event) { n.ouroboros().HandleConnClosedEvent(evt) },
 	)
 	// Translate connmanager connection-closed events to ledger-owned events so
 	// ledger/ does not import connmanager/.
@@ -1825,7 +1867,7 @@ func (n *Node) subscribeConnectionEvents() {
 	)
 	n.eventBus.SubscribeFunc(
 		connmanager.InboundConnectionEventType,
-		n.ouroboros.HandleInboundConnEvent,
+		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
 }
 
@@ -2076,4 +2118,29 @@ func (n *Node) startDeferredIndexMaintenance() func() {
 			)
 		}
 	}
+}
+
+// newTokenRegistrySync builds the API-mode CIP-26 token registry sync from
+// node config. Both the startup path and the live storage-restart path use it
+// so the two cannot drift in how they map configuration onto the syncer.
+func (n *Node) newTokenRegistrySync() (
+	*offchainmetadata.TokenRegistrySync,
+	error,
+) {
+	return offchainmetadata.NewTokenRegistrySync(
+		offchainmetadata.TokenRegistryConfig{
+			Logger:                n.config.logger,
+			Store:                 n.db.Metadata(),
+			HTTPClient:            n.config.tokenRegistry.HTTPClient,
+			SourceURL:             n.config.tokenRegistry.SourceURL,
+			Network:               n.config.network,
+			UserAgent:             n.config.tokenRegistry.UserAgent,
+			Interval:              n.config.tokenRegistry.Interval,
+			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
+			MaxBytes:              n.config.tokenRegistry.MaxBytes,
+			MaxEntryBytes:         n.config.tokenRegistry.MaxEntryBytes,
+			StoreLogos:            n.config.tokenRegistry.StoreLogos,
+			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
+		},
+	)
 }
