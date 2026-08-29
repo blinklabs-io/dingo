@@ -1050,4 +1050,8 @@ For quick iteration without Docker, `devmode.sh` runs Dingo directly against a l
 DEBUG=true ./devmode.sh
 ```
 
-This stores state in `.devnet/` and uses genesis configs from `config/cardano/devnet/`. It runs a single Dingo node (no cardano-node counterpart), which is useful for testing startup, epoch transitions, and block production in isolation.
+This stores state in `.devnet/` and uses genesis configs from `config/cardano/devnet/`. It runs a single Dingo node (no cardano-node counterpart), which is useful for testing startup, block production, and transaction submission in isolation.
+
+The bundled devnet parameters track [Yaci DevKit](https://github.com/bloxbean/yaci-devkit)'s default local cluster, so a dApp developer moving between the two sees the same chain shape: 1-second slots with `activeSlotsCoeff=1.0`, so the single producer forges a block every slot, and a 600-slot (10-minute) epoch. `securityParam (k)=100` follows Yaci's derivation, which sizes k so the randomness stabilisation window is a fraction of the epoch rather than a multiple of it. Byron `k=60` puts the Byron epoch (10k slots) at the same 600 slots.
+
+These same files ship in the release image as `/opt/cardano/config/devnet` (from [docker-cardano-configs](https://github.com/blinklabs-io/docker-cardano-configs)) and are what downstream tooling copies to generate a single-node devnet.
