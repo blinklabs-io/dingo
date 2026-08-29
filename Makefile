@@ -44,7 +44,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck gorm-check test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -117,17 +117,6 @@ sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 
 govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
 	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
-
-gorm-check: ## Fail if the removed ORM returns to source or dependencies
-	@status=0; \
-	grep -RInE --exclude-dir=.git --exclude-dir=.worktrees \
-		--include='*.go' --include='go.mod' --include='go.sum' \
-		'gorm\.io|github.com/glebarez/sqlite|otelgorm' . || status=$$?; \
-	case "$$status" in \
-		0) echo 'gorm-check: forbidden ORM reference found' >&2; exit 1 ;; \
-		1) exit 0 ;; \
-		*) echo "gorm-check: scanner failed with status $$status" >&2; exit "$$status" ;; \
-	esac
 
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)

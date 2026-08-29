@@ -28,7 +28,7 @@ import (
 // RewardParitySource is the read-only view of Dingo's committed reward state
 // that the parity checker needs, independent of how that view is obtained.
 //
-// DingoDB (dingo_db.go) implements this by opening its own read-only GORM
+// DingoDB (dingo_db.go) implements this by opening its own read-only SQL
 // connection to a separate metadata.sqlite/postgres/mysql instance — the
 // shipped, standalone-CLI design (dingo #2684). DatabaseSource (this file)
 // implements it by reading directly from a live, in-process
