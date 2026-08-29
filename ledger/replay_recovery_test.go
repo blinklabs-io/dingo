@@ -1806,6 +1806,23 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	)
 }
 
+func TestReplayRecoveryHaltsOnWithdrawalStateDivergence(t *testing.T) {
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("withdrawal-block")),
+		TxHash:     testHashBytes("withdrawal-tx"),
+		Cause: shelley.IncorrectWithdrawalAmountError{
+			Balance: 399088479,
+		},
+	}
+
+	recovered, err := (&LedgerState{}).tryRecoverFromTxValidationError(
+		validationErr,
+	)
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
+	assert.False(t, recovered)
+	assert.ErrorContains(t, err, "reward withdrawal state diverged during replay")
+}
+
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)

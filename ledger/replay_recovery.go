@@ -212,6 +212,21 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if isDeterministicTxValidationError(validationErr.Cause) {
 		return ls.recoverFromDeterministicTxValidationError(validationErr)
 	}
+	// A withdrawal amount mismatch is a ledger-state divergence, not an
+	// unresolved producer that replaying another local UTxO history can repair.
+	// Retrying the same block through the producer-recovery path can repeatedly
+	// rewind a healthy primary chain while hiding the actual reward-state
+	// mismatch. Stop the pipeline and surface the original validation error so
+	// the operator can repair or replace the inconsistent state.
+	if _, ok := errors.AsType[shelley.IncorrectWithdrawalAmountError](
+		validationErr.Cause,
+	); ok {
+		return false, fmt.Errorf(
+			"reward withdrawal state diverged during replay: %w (%v)",
+			errHaltLedgerPipeline,
+			validationErr.Cause,
+		)
+	}
 	if ls.IsAtTip() {
 		return ls.recoverAtTipFromTxValidationError(validationErr)
 	}
