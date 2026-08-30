@@ -442,6 +442,11 @@ type GetPeerObservedTipFunc func(
 	ouroboros.ConnectionId,
 ) (ochainsync.Tip, bool)
 
+// GetPeerSyncTargetFunc returns a corroborated remote sync target.
+type GetPeerSyncTargetFunc func(
+	ouroboros.ConnectionId,
+) (ochainsync.Tip, bool)
+
 // ConnectionLiveFunc reports whether a connection is still registered with the
 // connection manager. This allows the ledger to drop late chainsync events that
 // arrive after teardown.
@@ -507,6 +512,7 @@ type LedgerStateConfig struct {
 	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
 	GetActiveConnectionFunc     GetActiveConnectionFunc
 	GetPeerObservedTipFunc      GetPeerObservedTipFunc
+	GetPeerSyncTargetFunc       GetPeerSyncTargetFunc
 	ConnectionLiveFunc          ConnectionLiveFunc
 	ConnectionSwitchFunc        ConnectionSwitchFunc
 	ClearSeenHeadersFromFunc    ClearSeenHeadersFromFunc
@@ -1056,7 +1062,8 @@ type LedgerState struct {
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
-	syncUpstreamTipSlot  atomic.Uint64 // upstream peer's tip slot
+	syncUpstreamTipSlot  atomic.Uint64 // latest admitted peer header slot
+	syncUpstreamState    atomic.Pointer[upstreamSyncState]
 	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
 
 	// Rate-limiting for non-active rollback drop messages
@@ -1090,6 +1097,13 @@ type LedgerState struct {
 	// Test hook called after Close releases the blockfetch continuation mutex
 	// and before it waits for continuation workers.
 	blockfetchContinuationSchedulingHook func()
+}
+
+// upstreamSyncState is one connection-generation snapshot. Consumers must not
+// combine an active flag from one peer with a target from another peer.
+type upstreamSyncState struct {
+	connectionKey string
+	targetSlot    uint64
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -2351,7 +2365,8 @@ func (ls *LedgerState) handleSlotTicks() {
 		// During catch up, don't emit slot-based epoch events. Block
 		// processing handles epoch transitions for historical data. We
 		// consider the node "near tip" when the ledger tip is inside the
-		// current era's stability window from the upstream peer's tip.
+		// current era's stability window from the admitted upstream-header
+		// frontier.
 		if !ls.isNearTip(tipSlot) {
 			if tick.IsEpochStart {
 				logger.Debug(
@@ -2586,11 +2601,12 @@ func (ls *LedgerState) protocolMajorForEvent(
 }
 
 // isNearTip returns true when the given slot is inside the current era's
-// stability window from the upstream peer's tip. This is used to decide
-// whether to emit slot-clock epoch events. During initial catch-up the node is
-// far behind the tip and these checks are skipped; once the node is close to
-// the tip they are always on. Returns false when no upstream tip is known yet
-// (no peer connected), since we can't determine proximity.
+// stability window from the admitted upstream-header frontier. This is used
+// to decide whether to emit slot-clock epoch events. During initial catch-up
+// the node is far behind the frontier and these checks are skipped; once the
+// node is close to the frontier they are always on. Returns false when no
+// upstream header is admitted yet (no peer connected), since we can't
+// determine proximity.
 func (ls *LedgerState) isNearTip(slot uint64) bool {
 	return ls.isNearTipWithStabilityWindow(slot, ls.calculateStabilityWindow())
 }
@@ -2598,7 +2614,7 @@ func (ls *LedgerState) isNearTip(slot uint64) bool {
 func (ls *LedgerState) isNearTipWithStabilityWindow(
 	slot, stabilityWindow uint64,
 ) bool {
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip := ls.UpstreamTipSlot()
 	if upstreamTip == 0 {
 		return false
 	}
@@ -2607,9 +2623,9 @@ func (ls *LedgerState) isNearTipWithStabilityWindow(
 
 // nearUpstreamTip reports whether slot is within stabilityWindow of a KNOWN
 // upstreamTip. Callers that must tell "upstream tip unknown" apart from
-// "known, and we are far behind it" read syncUpstreamTipSlot themselves and
-// call this directly; isNearTipWithStabilityWindow folds unknown into
-// not-near, which is the safe answer for its callers but not for all of them.
+// "known, and we are far behind it" read UpstreamTipSlot themselves and call
+// this directly; isNearTipWithStabilityWindow folds unknown into not-near,
+// which is the safe answer for its callers but not for all of them.
 func nearUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 	if slot >= upstreamTip {
 		return true
@@ -2668,13 +2684,20 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	ls.RUnlock()
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
 	// Read once and gate on a KNOWN upstream tip only. An unknown one is not
-	// evidence of catching up: no peer has ever connected, or the last active
-	// connection dropped and zeroed it (see handleEventChainsyncBlockfetch's
-	// active-connection handling in chainsync.go). Deferring on that would
+	// evidence of catching up: no peer has ever connected, or no active
+	// connection currently exposes the retained admitted-header frontier.
+	// Deferring on that would
 	// retain consumed rows forever on a node without peers, where cleanup
 	// previously ran off the local tip alone -- an unbounded utxo table in
 	// exactly the mode documented as minimal storage.
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip, upstreamActive := ls.UpstreamSyncStatus()
+	if upstreamActive && upstreamTip == 0 {
+		ls.config.Logger.Debug(
+			"deferring consumed UTxO cleanup until upstream target is known",
+			"component", "ledger",
+		)
+		return
+	}
 	if upstreamTip != 0 &&
 		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow) {
 		ls.config.Logger.Debug(
@@ -8356,10 +8379,100 @@ func (ls *LedgerState) PrimaryChainTipSlot() uint64 {
 	return ls.PrimaryChainTip().Point.Slot
 }
 
-// UpstreamTipSlot returns the latest known tip slot from upstream peers.
-// Returns 0 if no upstream tip is known yet.
+// UpstreamTipSlot returns the corroborated remote sync target while an upstream
+// connection is active. The admitted frontier is retained separately for
+// admission bookkeeping.
 func (ls *LedgerState) UpstreamTipSlot() uint64 {
-	return ls.syncUpstreamTipSlot.Load()
+	if ls.config.GetActiveConnectionFunc == nil {
+		return ls.syncUpstreamTipSlot.Load()
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+		return 0
+	}
+	state := ls.syncUpstreamState.Load()
+	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
+		return 0
+	}
+	return state.targetSlot
+}
+
+// UpstreamSyncStatus reports whether a live upstream is selected and its
+// corroborated target. An active upstream with target 0 is still syncing.
+func (ls *LedgerState) UpstreamSyncStatus() (uint64, bool) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		target := ls.UpstreamTipSlot()
+		return target, target != 0
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+		return 0, false
+	}
+	state := ls.syncUpstreamState.Load()
+	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
+		return 0, true
+	}
+	return state.targetSlot, true
+}
+
+func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
+	current := ls.syncUpstreamTipSlot.Load()
+	for slot > current {
+		if ls.syncUpstreamTipSlot.CompareAndSwap(current, slot) {
+			break
+		}
+		current = ls.syncUpstreamTipSlot.Load()
+	}
+}
+
+func (ls *LedgerState) publishActiveUpstream(connId ouroboros.ConnectionId) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		return
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !sameConnectionId(*activeConnId, connId) ||
+		!ls.isConnectionLive(connId) {
+		return
+	}
+	current := ls.syncUpstreamState.Load()
+	if current != nil && current.connectionKey == connIdKey(connId) {
+		return
+	}
+	ls.syncUpstreamState.Store(&upstreamSyncState{connectionKey: connIdKey(connId)})
+}
+
+func (ls *LedgerState) clearActiveUpstream() {
+	ls.syncUpstreamState.Store(nil)
+}
+
+// publishAdmittedUpstreamTarget is called only after a header has been
+// authenticated and admitted. Revalidation binds the target to the still-live
+// active connection rather than a prior switch generation.
+func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
+	connId := e.ConnectionId
+	if ls.config.GetActiveConnectionFunc == nil {
+		return
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !sameConnectionId(*activeConnId, connId) ||
+		!ls.isConnectionLive(connId) {
+		return
+	}
+	if !e.SyncTargetTrusted {
+		ls.publishActiveUpstream(connId)
+		return
+	}
+	// Recheck after consulting chain selection: a handoff may have happened
+	// while obtaining the target.
+	activeConnId = ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !sameConnectionId(*activeConnId, connId) ||
+		!ls.isConnectionLive(connId) {
+		return
+	}
+	ls.syncUpstreamState.Store(&upstreamSyncState{
+		connectionKey: connIdKey(connId),
+		targetSlot:    e.SyncTarget.Point.Slot,
+	})
 }
 
 // GetCurrentPParams returns the currentPParams value
