@@ -100,6 +100,45 @@ type blockingInitialLeiosKeyProvider struct {
 	mu              sync.Mutex
 }
 
+type blockingFirstLeiosKeyProvider struct {
+	keys        map[string]*lcommon.LeiosKey
+	err         error
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	calls       int
+}
+
+func newBlockingFirstLeiosKeyProvider() *blockingFirstLeiosKeyProvider {
+	return &blockingFirstLeiosKeyProvider{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (f *blockingFirstLeiosKeyProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	f.mu.Lock()
+	f.calls++
+	first := f.calls == 1
+	keys := maps.Clone(f.keys)
+	err := f.err
+	f.mu.Unlock()
+	if first {
+		f.enteredOnce.Do(func() { close(f.entered) })
+		<-f.release
+	}
+	return keys, err
+}
+
+func (f *blockingFirstLeiosKeyProvider) releaseFirstLookup() {
+	f.releaseOnce.Do(func() { close(f.release) })
+}
+
 func newBlockingInitialLeiosKeyProvider(
 	blockedSnapshot uint64,
 ) *blockingInitialLeiosKeyProvider {
@@ -2017,7 +2056,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 				"configuration after stale lookup release",
 			)
 			require.NoError(t, result.err)
-			assert.Equal(t, VotingConfigurationEnabled, result.status)
+			assert.Equal(t, VotingConfigurationSuperseded, result.status)
 			testutil.RequireNoReceive(
 				t,
 				emittedCh,
@@ -2028,38 +2067,184 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 	}
 }
 
-func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
+func TestVoteManagerConfigureVotingReportsSupersededDifferentPoolReplacement(
 	t *testing.T,
 ) {
 	testCases := []struct {
 		name           string
-		result         string
+		replacement    string
 		expectedStatus VotingConfigurationStatus
+		expectError    string
 	}{
 		{
+			name:           "success",
+			replacement:    "success",
+			expectedStatus: VotingConfigurationEnabled,
+		},
+		{
 			name:           "absence",
-			result:         "absence",
+			replacement:    "absence",
 			expectedStatus: VotingConfigurationAwaitingKey,
 		},
 		{
 			name:           "invalid proof",
-			result:         "invalid-proof",
-			expectedStatus: VotingConfigurationAwaitingKey,
-		},
-		{
-			name:           "provider error",
-			result:         "error",
+			replacement:    "invalid-proof",
 			expectedStatus: VotingConfigurationAwaitingKey,
 		},
 		{
 			name:           "mismatch",
-			result:         "mismatch",
-			expectedStatus: VotingConfigurationAwaitingKey,
+			replacement:    "mismatch",
+			expectedStatus: VotingConfigurationFailed,
+			expectError:    "does not match",
 		},
 		{
-			name:           "replay preparation failure",
-			result:         "replay-failure",
-			expectedStatus: VotingConfigurationRetryPending,
+			name:           "provider error",
+			replacement:    "provider-error",
+			expectedStatus: VotingConfigurationFailed,
+			expectError:    "store temporarily unavailable",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keyProvider := newBlockingFirstLeiosKeyProvider()
+			defer keyProvider.releaseFirstLookup()
+			fixture := newManagerFixture(
+				t,
+				func(_ *managerFixture, cfg *VoteManagerConfig) {
+					cfg.KeyProvider = keyProvider
+				},
+			)
+			originalMember := fixture.members[3]
+			originalKey := fixture.keys[originalMember.VoterId]
+			replacementMember := fixture.members[4]
+			replacementKey := fixture.keys[replacementMember.VoterId]
+			require.NotNil(t, originalKey)
+			require.NotNil(t, replacementKey)
+			var originalPool lcommon.PoolKeyHash
+			copy(originalPool[:], originalMember.PoolKeyHash)
+			var replacementPool lcommon.PoolKeyHash
+			copy(replacementPool[:], replacementMember.PoolKeyHash)
+			require.NotEqual(t, originalPool, replacementPool)
+
+			switch testCase.replacement {
+			case "success":
+				proof, err := SignVote(
+					replacementKey,
+					replacementKey.PublicKeyBytes(),
+				)
+				require.NoError(t, err)
+				keyProvider.keys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(replacementPool[:]): {
+						PublicKey:       replacementKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				}
+			case "invalid-proof":
+				keyProvider.keys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(replacementPool[:]): {
+						PublicKey: replacementKey.PublicKeyBytes(),
+						PossessionProof: make(
+							[]byte,
+							lcommon.LeiosBlsSignatureSize,
+						),
+					},
+				}
+			case "mismatch":
+				mismatchedKey := testSigningKey(t, 215)
+				proof, err := SignVote(
+					mismatchedKey,
+					mismatchedKey.PublicKeyBytes(),
+				)
+				require.NoError(t, err)
+				keyProvider.keys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(replacementPool[:]): {
+						PublicKey:       mismatchedKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				}
+			case "provider-error":
+				keyProvider.err = errors.New(
+					"store temporarily unavailable",
+				)
+			}
+
+			type configureResult struct {
+				status VotingConfigurationStatus
+				err    error
+			}
+			originalResultCh := make(chan configureResult, 1)
+			go func() {
+				status, err := fixture.mgr.ConfigureVoting(
+					originalPool,
+					originalKey,
+				)
+				originalResultCh <- configureResult{status: status, err: err}
+			}()
+			testutil.RequireReceive(
+				t,
+				keyProvider.entered,
+				2*time.Second,
+				"original voting key lookup",
+			)
+
+			replacementStatus, replacementErr := fixture.mgr.ConfigureVoting(
+				replacementPool,
+				replacementKey,
+			)
+			assert.Equal(t, testCase.expectedStatus, replacementStatus)
+			if testCase.expectError == "" {
+				require.NoError(t, replacementErr)
+			} else {
+				require.ErrorContains(
+					t,
+					replacementErr,
+					testCase.expectError,
+				)
+			}
+
+			keyProvider.releaseFirstLookup()
+			originalResult := testutil.RequireReceive(
+				t,
+				originalResultCh,
+				2*time.Second,
+				"superseded original voting configuration",
+			)
+			require.NoError(t, originalResult.err)
+			assert.Equal(
+				t,
+				VotingConfigurationSuperseded,
+				originalResult.status,
+			)
+		})
+	}
+}
+
+func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
+	t *testing.T,
+) {
+	testCases := []struct {
+		name   string
+		result string
+	}{
+		{
+			name:   "absence",
+			result: "absence",
+		},
+		{
+			name:   "invalid proof",
+			result: "invalid-proof",
+		},
+		{
+			name:   "provider error",
+			result: "error",
+		},
+		{
+			name:   "mismatch",
+			result: "mismatch",
+		},
+		{
+			name:   "replay preparation failure",
+			result: "replay-failure",
 		},
 	}
 	for _, testCase := range testCases {
@@ -2159,7 +2344,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 				"configuration after stale lookup release",
 			)
 			require.NoError(t, result.err)
-			assert.Equal(t, testCase.expectedStatus, result.status)
+			assert.Equal(t, VotingConfigurationSuperseded, result.status)
 			fixture.mgr.mu.Lock()
 			assert.Nil(t, fixture.mgr.votingKey)
 			assert.Same(t, key, fixture.mgr.deferredVotingKey)
@@ -2245,7 +2430,7 @@ func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
 		"configuration while newer retry remains in flight",
 	)
 	require.NoError(t, result.err)
-	assert.Equal(t, VotingConfigurationAwaitingKey, result.status)
+	assert.Equal(t, VotingConfigurationSuperseded, result.status)
 	fixture.mgr.mu.Lock()
 	assert.Nil(t, fixture.mgr.votingKey)
 	assert.Same(t, key, fixture.mgr.deferredVotingKey)

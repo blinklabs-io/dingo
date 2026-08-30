@@ -373,6 +373,14 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 			"pool_id",
 			poolID.String(),
 		)
+	case leios.VotingConfigurationSuperseded:
+		n.config.logger.Info(
+			"leios voting configuration was superseded by a newer configuration or retry",
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
+		)
 	case leios.VotingConfigurationFailed:
 		return errors.New(
 			"leios voting configuration failed without an error",

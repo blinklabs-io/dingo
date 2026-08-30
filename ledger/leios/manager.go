@@ -87,6 +87,9 @@ const (
 	// VotingConfigurationRetryPending means activation preparation failed but
 	// the configuration remains deferred for a later epoch-transition retry.
 	VotingConfigurationRetryPending
+	// VotingConfigurationSuperseded means a newer configuration or retry owns
+	// the voting state, so this request must not interpret that state as its own.
+	VotingConfigurationSuperseded
 )
 
 // StakeDistributionProvider supplies the active stake distribution for a
@@ -598,9 +601,10 @@ func (m *VoteManager) EnableVoting(
 // hard configuration error.
 //
 // The returned status distinguishes immediate activation, an on-chain key that
-// is not visible yet, and a retryable activation-preparation failure. Private
-// registry mode has no chain state to catch up and therefore keeps the strict
-// immediate EnableVoting behavior.
+// is not visible yet, a retryable activation-preparation failure, and a request
+// superseded by a newer configuration or retry. Private registry mode has no
+// chain state to catch up and therefore keeps the strict immediate EnableVoting
+// behavior.
 func (m *VoteManager) ConfigureVoting(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
@@ -639,7 +643,11 @@ func (m *VoteManager) ConfigureVoting(
 			key,
 			lookupGeneration,
 		) {
-			return m.currentVotingConfigurationStatus(), nil
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
 		}
 		return VotingConfigurationFailed, fmt.Errorf(
 			"resolve on-chain leios key for pool %s: %w",
@@ -653,7 +661,11 @@ func (m *VoteManager) ConfigureVoting(
 			key,
 			lookupGeneration,
 		) {
-			return m.currentVotingConfigurationStatus(), nil
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
 		}
 		return VotingConfigurationAwaitingKey, nil
 	}
@@ -663,7 +675,11 @@ func (m *VoteManager) ConfigureVoting(
 			key,
 			lookupGeneration,
 		) {
-			return m.currentVotingConfigurationStatus(), nil
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
 		}
 		return VotingConfigurationFailed, fmt.Errorf(
 			"configured leios voting key does not match the on-chain registered key for pool %s",
@@ -677,7 +693,11 @@ func (m *VoteManager) ConfigureVoting(
 		lookupGeneration,
 	)
 	if err != nil {
-		status := m.currentVotingConfigurationStatus()
+		status := m.currentVotingConfigurationStatus(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		)
 		m.logger.Error(
 			"cannot prepare leios voting activation; voting remains disabled",
 			"pool",
@@ -688,7 +708,11 @@ func (m *VoteManager) ConfigureVoting(
 		return status, nil
 	}
 	if !enabled {
-		return m.currentVotingConfigurationStatus(), nil
+		return m.currentVotingConfigurationStatus(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		), nil
 	}
 	return VotingConfigurationEnabled, nil
 }
@@ -723,18 +747,27 @@ func (m *VoteManager) isCurrentVotingLookup(
 		slices.Equal(m.deferredVotingPool, poolKeyHash)
 }
 
-func (m *VoteManager) currentVotingConfigurationStatus() VotingConfigurationStatus {
+func (m *VoteManager) currentVotingConfigurationStatus(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) VotingConfigurationStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.votingPool) > 0 && m.votingKey != nil {
+	if m.votingLookupGeneration != lookupGeneration {
+		return VotingConfigurationSuperseded
+	}
+	if m.votingKey == key && slices.Equal(m.votingPool, poolKeyHash) {
 		return VotingConfigurationEnabled
 	}
-	if len(m.deferredVotingPool) > 0 &&
-		m.deferredVotingKey != nil &&
-		m.deferredVotingAuthorized {
-		return VotingConfigurationRetryPending
+	if m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		if m.deferredVotingAuthorized {
+			return VotingConfigurationRetryPending
+		}
+		return VotingConfigurationAwaitingKey
 	}
-	return VotingConfigurationAwaitingKey
+	return VotingConfigurationSuperseded
 }
 
 // activateDeferredVoting promotes a matching deferred configuration and

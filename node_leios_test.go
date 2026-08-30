@@ -75,6 +75,41 @@ func (startupLeiosKeyProvider) GetLeiosKeys(
 	return map[string]*lcommon.LeiosKey{}, nil
 }
 
+type startupBlockingFirstLeiosKeyProvider struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	calls       int
+}
+
+func newStartupBlockingFirstLeiosKeyProvider() *startupBlockingFirstLeiosKeyProvider {
+	return &startupBlockingFirstLeiosKeyProvider{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (p *startupBlockingFirstLeiosKeyProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	p.mu.Unlock()
+	if first {
+		p.enteredOnce.Do(func() { close(p.entered) })
+		<-p.release
+	}
+	return map[string]*lcommon.LeiosKey{}, nil
+}
+
+func (p *startupBlockingFirstLeiosKeyProvider) releaseFirstLookup() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
 type startupLeiosReplayProvider struct {
 	mu        sync.Mutex
 	recovered bool
@@ -263,6 +298,91 @@ func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
 		t,
 		logs.String(),
 		"leios voting activation preparation failed",
+	)
+}
+
+func TestEnableLeiosVotingReportsSupersededConfiguration(t *testing.T) {
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
+	creds := forging.NewPoolCredentials()
+	require.NoError(
+		t,
+		creds.LoadFromFiles(vrfPath, kesPath, opcertPath),
+	)
+
+	voteKeyPath := filepath.Join(t.TempDir(), "leios-vote.skey")
+	require.NoError(
+		t,
+		os.WriteFile(
+			voteKeyPath,
+			[]byte(
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			),
+			0o600,
+		),
+	)
+	key, err := leios.LoadVoteSigningKeyFile(voteKeyPath)
+	require.NoError(t, err)
+
+	provider := newStartupBlockingFirstLeiosKeyProvider()
+	defer provider.releaseFirstLookup()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+		Logger:         logger,
+		EventBus:       event.NewEventBus(nil, logger),
+		StakeProvider:  startupLeiosStakeProvider{},
+		EpochProvider:  startupLeiosEpochProvider{},
+		ParamsProvider: startupLeiosParamsProvider{},
+		KeyProvider:    provider,
+	})
+	require.NoError(t, err)
+
+	n := &Node{
+		config: Config{
+			logger:                  logger,
+			blockProducer:           true,
+			leiosVoteSigningKeyFile: voteKeyPath,
+		},
+		leiosVoteManager: voteManager,
+	}
+	startupResultCh := make(chan error, 1)
+	go func() {
+		startupResultCh <- n.enableLeiosVoting(creds)
+	}()
+	testutil.RequireReceive(
+		t,
+		provider.entered,
+		2*time.Second,
+		"startup voting key lookup",
+	)
+
+	poolID := creds.GetPoolID()
+	var replacementPool lcommon.PoolKeyHash
+	replacementPool[0] = 0xff
+	require.NotEqual(t, poolID[:], replacementPool[:])
+	replacementStatus, err := voteManager.ConfigureVoting(replacementPool, key)
+	require.NoError(t, err)
+	require.Equal(t, leios.VotingConfigurationAwaitingKey, replacementStatus)
+
+	provider.releaseFirstLookup()
+	require.NoError(
+		t,
+		testutil.RequireReceive(
+			t,
+			startupResultCh,
+			2*time.Second,
+			"superseded startup voting configuration",
+		),
+	)
+	assert.Contains(
+		t,
+		logs.String(),
+		"leios voting configuration was superseded by a newer configuration or retry",
+	)
+	assert.NotContains(
+		t,
+		logs.String(),
+		"deferred until the configured key is available",
 	)
 }
 
