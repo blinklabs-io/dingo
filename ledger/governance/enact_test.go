@@ -203,6 +203,77 @@ func TestSetProtocolVersion_ConwayParams(t *testing.T) {
 	assert.Equal(t, uint(9), pparams.ProtocolVersion.Major)
 }
 
+func TestEnactProposal_DijkstraHardForkPreservesPParams(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+	action := &lcommon.HardForkInitiationGovAction{
+		Type: uint(lcommon.GovActionTypeHardForkInitiation),
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: gdijkstra.MinProtocolVersionDijkstra + 1,
+			Minor: 2,
+		},
+	}
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+
+	refScriptMultiplier := newRat(3, 2)
+	committeeCoverage := newRat(2, 3)
+	quorumThreshold := newRat(3, 5)
+	pparams := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MinFeeA: 44,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: gdijkstra.MinProtocolVersionDijkstra,
+				Minor: 1,
+			},
+			CostModels:              map[uint][]int64{3: {1, 2, 3}},
+			GovActionValidityPeriod: 7,
+		},
+		MaxRefScriptSizePerBlock: 99_000,
+		MaxRefScriptSizePerTx:    9_000,
+		RefScriptCostStride:      128,
+		RefScriptCostMultiplier:  &refScriptMultiplier,
+		CommitteeStakeCoverage:   &committeeCoverage,
+		QuorumStakeThreshold:     &quorumThreshold,
+	}
+	original := *pparams
+	proposal := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 0xD4),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
+		GovActionCbor: encoded,
+		AddedSlot:     500,
+		ExpiresEpoch:  100,
+		AnchorURL:     "https://example.invalid/dijkstra-hard-fork",
+		AnchorHash:    testBytes(32, 0xD5),
+		ReturnAddress: testBytes(29, 0xD6),
+	}
+
+	result, err := EnactProposal(&EnactmentContext{
+		DB:      db,
+		Slot:    2_000,
+		Epoch:   42,
+		PParams: pparams,
+	}, proposal)
+	require.NoError(t, err)
+	require.True(t, result.PParamsChanged)
+	updated, ok := result.UpdatedPParams.(*gdijkstra.DijkstraProtocolParameters)
+	require.True(t, ok, "hard-fork enactment must retain the Dijkstra type")
+	require.Equal(t, action.ProtocolVersion.Major, updated.ProtocolVersion.Major)
+	require.Equal(t, action.ProtocolVersion.Minor, updated.ProtocolVersion.Minor)
+
+	gotNonVersion := *updated
+	gotNonVersion.ProtocolVersion = original.ProtocolVersion
+	require.Equal(
+		t,
+		original,
+		gotNonVersion,
+		"hard-fork enactment must preserve every non-version field",
+	)
+	require.Equal(t, original.ProtocolVersion, pparams.ProtocolVersion)
+	require.NotNil(t, proposal.EnactedEpoch)
+	assert.Equal(t, uint64(42), *proposal.EnactedEpoch)
+}
+
 func TestStakeEpochFor(t *testing.T) {
 	tests := []struct {
 		newEpoch uint64

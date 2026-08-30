@@ -565,6 +565,11 @@ func setProtocolVersion(
 		updated.ProtocolVersion.Major = major
 		updated.ProtocolVersion.Minor = minor
 		return &updated, nil
+	case *gdijkstra.DijkstraProtocolParameters:
+		updated := *p
+		updated.ProtocolVersion.Major = major
+		updated.ProtocolVersion.Minor = minor
+		return &updated, nil
 	}
 	return nil, fmt.Errorf(
 		"protocol version update unsupported for pparams type %T",

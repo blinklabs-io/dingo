@@ -89,8 +89,11 @@ func ProcessEpoch(
 	}
 	out := &EpochOutput{UpdatedPParams: in.PParams}
 
-	conwayPParams, ok := in.PParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	if err != nil {
+		return nil, err
+	}
+	if conwayPParams == nil {
 		// Pre-Conway: nothing to do, governance state machine is
 		// not yet active.
 		return out, nil
@@ -380,9 +383,17 @@ func ProcessEpoch(
 	// HardForkInitiation), refresh the Conway pparams view so major
 	// version and threshold reads reflect the updated values.
 	if out.PParamsChanged {
-		if p, ok := out.UpdatedPParams.(*conway.ConwayProtocolParameters); ok {
-			conwayPParams = p
+		updatedConwayPParams, err := conwayGovernanceProtocolParameters(out.UpdatedPParams)
+		if err != nil {
+			return nil, fmt.Errorf("resolve updated governance pparams: %w", err)
 		}
+		if updatedConwayPParams == nil {
+			return nil, fmt.Errorf(
+				"governance pparams update returned pre-Conway type %T",
+				out.UpdatedPParams,
+			)
+		}
+		conwayPParams = updatedConwayPParams
 	}
 
 	majorVersion := conwayPParams.ProtocolVersion.Major

@@ -98,8 +98,11 @@ func EvaluateRatifiableHardForkInitiation(
 	if in.DB == nil {
 		return nil, errors.New("nil database")
 	}
-	conwayPParams, ok := in.PParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	if err != nil {
+		return nil, err
+	}
+	if conwayPParams == nil {
 		// Pre-Conway: no governance state machine exists, so no
 		// HardForkInitiation can be in flight.
 		return nil, nil

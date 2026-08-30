@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -392,6 +393,94 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 	require.NoError(t, err)
 	assert.Nil(t, proposal.RatifiedEpoch)
 	assert.Nil(t, proposal.RatifiedSlot)
+}
+
+func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
+	tests := []struct {
+		name    string
+		pparams func() lcommon.ProtocolParameters
+	}{
+		{
+			name: "Conway",
+			pparams: func() lcommon.ProtocolParameters {
+				return &conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: 10,
+					},
+				}
+			},
+		},
+		{
+			name: "Dijkstra",
+			pparams: func() lcommon.ProtocolParameters {
+				return &gdijkstra.DijkstraProtocolParameters{
+					ConwayProtocolParameters: conway.ConwayProtocolParameters{
+						ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+							Major: gdijkstra.MinProtocolVersionDijkstra,
+						},
+					},
+					MaxRefScriptSizePerBlock: 1_000,
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, _ := newTallyTestDB(t)
+			actionCbor, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+				Type: uint(lcommon.GovActionTypeNoConfidence),
+			})
+			require.NoError(t, err)
+
+			txHash := testBytes(32, 0xA1)
+			require.NoError(t, db.SetGovernanceProposal(
+				&models.GovernanceProposal{
+					TxHash:        txHash,
+					ActionIndex:   0,
+					ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
+					ProposedEpoch: 4,
+					ExpiresEpoch:  10,
+					AnchorURL:     "https://example.invalid/no-confidence",
+					AnchorHash:    testBytes(32, 0xA2),
+					ReturnAddress: testBytes(29, 0xA3),
+					GovActionCbor: actionCbor,
+					AddedSlot:     400,
+				},
+				nil,
+			))
+
+			txn := db.MetadataTxn(true)
+			defer txn.Release()
+			out, err := ProcessEpoch(&EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    4,
+				NewEpoch:     5,
+				BoundarySlot: 500,
+				PParams:      test.pparams(),
+				UpdateFn: func(
+					pparams lcommon.ProtocolParameters,
+					_ any,
+				) (lcommon.ProtocolParameters, error) {
+					return pparams, nil
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+
+			require.Equal(
+				t,
+				1,
+				out.RatifiedCount,
+				"ProcessEpoch must run the governance ratification path",
+			)
+			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, proposal.RatifiedEpoch)
+			assert.Equal(t, uint64(5), *proposal.RatifiedEpoch)
+		})
+	}
 }
 
 func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
