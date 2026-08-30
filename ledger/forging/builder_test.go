@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"testing"
+	"time"
 
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -106,6 +107,10 @@ func setupTestCredentials(t *testing.T) *PoolCredentials {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 	creds := NewPoolCredentials()
 	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, creds.ValidateKESPeriod(
+		synthGenesis(100, 62, time.Second, time.Unix(0, 0)),
+		0,
+	))
 	return creds
 }
 

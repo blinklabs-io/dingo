@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"sync"
 
@@ -33,7 +34,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/vrf"
 )
 
-var ErrVRFKeyHashMismatch = errors.New("VRF key hash mismatch")
+var (
+	ErrVRFKeyHashMismatch = errors.New("VRF key hash mismatch")
+	errOpCertExpired      = errors.New("operational certificate expired")
+)
 
 const maxSecretKeyFileSize = 1 << 20
 
@@ -54,6 +58,10 @@ type PoolCredentials struct {
 
 	// Operational certificate linking KES to pool cold key
 	opCert *OpCert
+	// Protocol lifetime loaded from the Shelley genesis that validated the
+	// operational certificate. This is distinct from the KES key's 2^depth
+	// cryptographic capacity.
+	maxKESEvolutions uint64
 
 	mu sync.RWMutex
 }
@@ -121,6 +129,7 @@ func (pc *PoolCredentials) LoadFromFiles(
 ) error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	pc.maxKESEvolutions = 0
 
 	// Load VRF signing key
 	vrfKey, err := loadSecretKeyFromFile(vrfSKeyPath)
@@ -420,27 +429,85 @@ func (pc *PoolCredentials) ValidateOpCert() error {
 	return nil
 }
 
-// OpCertExpiryPeriod returns the KES period at which the OpCert expires.
-// For depth 6, max periods = 2^6 = 64, so expiry = startPeriod + 64.
+func validateMaxKESEvolutions(maxEvolutions uint64) error {
+	if maxEvolutions == 0 {
+		return errors.New("max KES evolutions must be positive")
+	}
+	capacity := kes.MaxPeriod(kes.CardanoKesDepth)
+	if maxEvolutions > capacity {
+		return fmt.Errorf(
+			"max KES evolutions %d exceeds KES key capacity %d",
+			maxEvolutions,
+			capacity,
+		)
+	}
+	return nil
+}
+
+func opCertExpiryPeriod(
+	startPeriod uint64,
+	maxEvolutions uint64,
+) (uint64, error) {
+	if err := validateMaxKESEvolutions(maxEvolutions); err != nil {
+		return 0, err
+	}
+	if startPeriod > math.MaxUint64-maxEvolutions {
+		return 0, fmt.Errorf(
+			"opcert expiry overflows uint64: start period %d, max evolutions %d",
+			startPeriod,
+			maxEvolutions,
+		)
+	}
+	return startPeriod + maxEvolutions, nil
+}
+
+func (pc *PoolCredentials) opCertExpiryPeriodUnsafe() (uint64, error) {
+	if pc.opCert == nil {
+		return 0, errors.New("operational certificate not loaded")
+	}
+	return opCertExpiryPeriod(
+		pc.opCert.KESPeriod,
+		pc.maxKESEvolutions,
+	)
+}
+
+func (pc *PoolCredentials) validatedKESProtocolLifetime() (
+	uint64,
+	uint64,
+	error,
+) {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	expiryPeriod, err := pc.opCertExpiryPeriodUnsafe()
+	if err != nil {
+		return 0, 0, err
+	}
+	return pc.maxKESEvolutions, expiryPeriod, nil
+}
+
+// OpCertExpiryPeriod returns the protocol KES period at which the OpCert
+// expires. ValidateKESPeriod must first load MaxKESEvolutions from Shelley
+// genesis. It returns zero when no validated protocol lifetime is available.
 func (pc *PoolCredentials) OpCertExpiryPeriod() uint64 {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
-
-	if pc.opCert == nil {
+	expiryPeriod, err := pc.opCertExpiryPeriodUnsafe()
+	if err != nil {
 		return 0
 	}
-	return pc.opCert.KESPeriod + kes.MaxPeriod(kes.CardanoKesDepth)
+	return expiryPeriod
 }
 
-// PeriodsRemaining returns how many KES periods remain before expiry.
+// PeriodsRemaining returns how many protocol KES periods remain before
+// expiry. It returns zero before the OpCert start, at or after expiry, or when
+// no validated protocol lifetime is available.
 func (pc *PoolCredentials) PeriodsRemaining(currentPeriod uint64) uint64 {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
-
-	if pc.opCert == nil {
+	expiryPeriod, err := pc.opCertExpiryPeriodUnsafe()
+	if err != nil || currentPeriod < pc.opCert.KESPeriod {
 		return 0
 	}
-	expiryPeriod := pc.opCert.KESPeriod + kes.MaxPeriod(kes.CardanoKesDepth)
 	if currentPeriod >= expiryPeriod {
 		return 0
 	}
@@ -455,13 +522,17 @@ func (pc *PoolCredentials) PeriodsRemaining(currentPeriod uint64) uint64 {
 //
 // The protocol-level expiry uses MaxKESEvolutions from genesis rather
 // than the raw 2^depth ceiling, so this matches the chain's view of when
-// an opcert stops being valid.
+// an opcert stops being valid. A successful result retains that protocol
+// lifetime for runtime forging checks and operational metrics.
 func (pc *PoolCredentials) ValidateKESPeriod(
 	genesis *shelley.ShelleyGenesis,
 	currentSlot uint64,
 ) error {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	// Any failed validation leaves the credentials unusable for production
+	// forging rather than retaining a policy from an earlier genesis.
+	pc.maxKESEvolutions = 0
 
 	if pc.opCert == nil {
 		return errors.New("operational certificate not loaded")
@@ -473,22 +544,38 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 	if err != nil {
 		return err
 	}
+	if genesis.MaxKESEvolutions <= 0 {
+		return fmt.Errorf(
+			"genesis maxKESEvolutions must be positive, got %d",
+			genesis.MaxKESEvolutions,
+		)
+	}
+	// #nosec G115 -- guarded positive above; int fits within uint64.
+	maxEvolutions := uint64(genesis.MaxKESEvolutions)
+	expiryPeriod, err := opCertExpiryPeriod(
+		pc.opCert.KESPeriod,
+		maxEvolutions,
+	)
+	if err != nil {
+		return err
+	}
 	if pc.opCert.KESPeriod > current {
 		return fmt.Errorf(
 			"opcert KES period %d is in the future (current %d)",
 			pc.opCert.KESPeriod, current,
 		)
 	}
-	maxEvolutions := uint64(genesis.MaxKESEvolutions) // #nosec G115
-	if maxEvolutions > 0 &&
-		current >= pc.opCert.KESPeriod+maxEvolutions {
+	if current >= expiryPeriod {
 		return fmt.Errorf(
-			"opcert KES period %d has expired (current %d, max evolutions %d); rotate the operational certificate",
+			"%w: opcert KES period %d expired at period %d (current %d, max evolutions %d); rotate the operational certificate",
+			errOpCertExpired,
 			pc.opCert.KESPeriod,
+			expiryPeriod,
 			current,
 			maxEvolutions,
 		)
 	}
+	pc.maxKESEvolutions = maxEvolutions
 	return nil
 }
 

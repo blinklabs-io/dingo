@@ -77,6 +77,10 @@ type BlockForger struct {
 	blockForged      BlockForgedObserver
 	slotClock        SlotClockProvider
 	slotDuration     time.Duration
+	// KES protocol limits are captured from the Shelley genesis validation
+	// performed on creds. They are distinct from the KES key depth capacity.
+	maxKESEvolutions uint64
+	opCertExpiryKES  uint64
 
 	// Slot battle detection
 	slotTracker *SlotTracker
@@ -256,7 +260,8 @@ type ForgerConfig struct {
 	Logger       *slog.Logger
 	SlotDuration time.Duration
 
-	// Production mode configuration
+	// Production mode configuration. Credentials must have passed
+	// ValidateKESPeriod so the forger can enforce the genesis KES lifetime.
 	Credentials      *PoolCredentials
 	LeaderChecker    LeaderChecker
 	BlockBuilder     BlockBuilder
@@ -357,6 +362,16 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		if cfg.SlotClock == nil {
 			return nil, errors.New("production mode requires slot clock")
 		}
+		maxEvolutions, expiryPeriod, err :=
+			cfg.Credentials.validatedKESProtocolLifetime()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"production mode requires a validated KES protocol lifetime: %w",
+				err,
+			)
+		}
+		f.maxKESEvolutions = maxEvolutions
+		f.opCertExpiryKES = expiryPeriod
 		if cfg.LeiosProduceChecker != nil && cfg.LeiosTxValidator == nil {
 			return nil, errors.New(
 				"production Leios forging requires transaction validator",
@@ -395,7 +410,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 				float64(opCert.KESPeriod),
 			)
 			f.metrics.opCertExpiryKES.Set(
-				float64(f.creds.OpCertExpiryPeriod()),
+				float64(f.opCertExpiryKES),
 			)
 		}
 	}
@@ -660,6 +675,30 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
 
+	// Compute and enforce the protocol KES lifetime before any Leios or
+	// ranking-block construction. The expiry was checked for overflow when
+	// the production forger was created, so this comparison cannot wrap.
+	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
+	if slotsPerKESPeriod == 0 {
+		return errors.New("slots per KES period is zero")
+	}
+	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
+	if err != nil {
+		return err
+	}
+	f.updateKESMetrics(kesPeriod)
+	if kesPeriod >= f.opCertExpiryKES {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: operational certificate expired; rotate the operational certificate",
+			"slot", currentSlot,
+			"current_kes_period", kesPeriod,
+			"opcert_expiry_period", f.opCertExpiryKES,
+			"max_kes_evolutions", f.maxKESEvolutions,
+		)
+		return nil
+	}
+
 	leiosBlockData, embeddedEb := f.leiosBlockDataForSlot(currentSlot)
 	if f.leiosChecker != nil {
 		var excludedTxHashes map[string]struct{}
@@ -707,24 +746,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	f.logger.Info("producing block", "slot", currentSlot)
 
-	// Calculate KES period for this slot
-	// KES period = slot / slots_per_kes_period
-	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
-	if slotsPerKESPeriod == 0 {
-		return errors.New("slots per KES period is zero")
-	}
-	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
-	if err != nil {
-		return err
-	}
-
 	// Ensure KES key is at correct period
 	if err := f.creds.UpdateKESPeriod(kesPeriod); err != nil {
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
-
-	// Update KES metrics after successful evolution
-	f.updateKESMetrics(kesPeriod)
 
 	// Build the block
 	block, blockCbor, err := f.buildBlock(
@@ -985,8 +1010,8 @@ func (f *BlockForger) reportForgeCallbackPanic(phase string, r any) {
 	)
 }
 
-// updateKESMetrics updates KES gauges after a successful KES
-// period update. Safe to call when metrics are nil.
+// updateKESMetrics updates KES protocol-lifetime gauges for the current slot.
+// Safe to call when metrics are nil.
 func (f *BlockForger) updateKESMetrics(
 	currentPeriod uint64,
 ) {
@@ -1003,7 +1028,7 @@ func (f *BlockForger) updateKESMetrics(
 			float64(opCert.KESPeriod),
 		)
 		f.metrics.opCertExpiryKES.Set(
-			float64(f.creds.OpCertExpiryPeriod()),
+			float64(f.opCertExpiryKES),
 		)
 	}
 }

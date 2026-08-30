@@ -105,6 +105,98 @@ func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(t *testing.T
 	assert.Zero(t, broadcaster.calls)
 }
 
+func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
+	creds := setupTestCredentials(t)
+	genesis := synthGenesis(1, 2, time.Second, time.Unix(0, 0))
+	require.NoError(t, creds.ValidateKESPeriod(genesis, 0))
+
+	block := newForgerTestBlock(1, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	clock := &forgerTestSlotClock{
+		currentSlot:       1,
+		chainTipSlot:      0,
+		slotsPerKESPeriod: 1,
+	}
+	var logs bytes.Buffer
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock:        clock,
+		PromRegistry:     prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	// The final period in [start, start+maxEvolutions) remains valid.
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(t, 1, builder.calls)
+	require.Equal(t, 1, broadcaster.calls)
+	lastValidCurrent := testutil.ToFloat64(forger.metrics.currentKESPeriod)
+	lastValidRemaining := testutil.ToFloat64(
+		forger.metrics.remainingKESPeriods,
+	)
+	lastValidExpiry := testutil.ToFloat64(forger.metrics.opCertExpiryKES)
+
+	// The same loaded producer reaches the first expired period while running.
+	clock.currentSlot = 2
+	clock.chainTipSlot = 1
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(t, 1, builder.calls, "expired period must not build a block")
+	require.Equal(
+		t,
+		1,
+		broadcaster.calls,
+		"expired period must not broadcast a block",
+	)
+	require.Contains(t, logs.String(), "operational certificate expired")
+	require.Equal(t, float64(1), lastValidCurrent)
+	require.Equal(t, float64(1), lastValidRemaining)
+	require.Equal(t, float64(2), lastValidExpiry)
+
+	require.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(forger.metrics.currentKESPeriod),
+	)
+	require.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.remainingKESPeriods),
+	)
+	require.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(forger.metrics.opCertExpiryKES),
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
+}
+
+func TestNewBlockForgerRejectsUnvalidatedKESLifetime(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	creds := NewPoolCredentials()
+	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	_, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			slotsPerKESPeriod: 1,
+		},
+	})
+	require.ErrorContains(t, err, "validated KES protocol lifetime")
+}
+
 type forgerTestBuilder struct {
 	block      ledger.Block
 	cbor       []byte

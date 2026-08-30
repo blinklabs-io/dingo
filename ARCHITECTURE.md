@@ -3854,18 +3854,20 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
 `BlockForger` runs a slot-based loop that:
 1. Waits for the next slot boundary using the wall-clock slot timer
 2. Checks leader eligibility via the `Election`
-3. Reads the parent ranking block's `LeiosAnnouncement`, selects only the matching eligible Leios endorser-block certificate, and independently produces and broadcasts a new endorser block for the current slot when eligible
-4. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
-5. Optionally self-validates the forged block before adoption (see below)
-6. Submits the forged block directly to the primary chain for synchronous local
+3. Computes the current KES period and declines forging at the operational
+   certificate's protocol expiry
+4. Reads the parent ranking block's `LeiosAnnouncement`, selects only the matching eligible Leios endorser-block certificate, and independently produces and broadcasts a new endorser block for the current slot when eligible
+5. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
+6. Optionally self-validates the forged block before adoption (see below)
+7. Submits the forged block directly to the primary chain for synchronous local
    admission, before running observability callbacks. Local admission validates
    the actual chain tip and contiguous block number, but does not compare the
    block with peer-delivered pending headers. Successful adoption clears those
    now-conflicting headers; a genuinely stale parent is still rejected without
    changing the queued headers.
-7. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
+8. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
-Step 4's transaction selection runs inside `LedgerState.WithTxValidationSession`
+Step 5's transaction selection runs inside `LedgerState.WithTxValidationSession`
 (the same mechanism the mempool backend rebuilds use above): one pinned ledger
 generation, one validation reference slot, and one repeatable-read transaction
 cover every mempool transaction considered for the candidate block, not a
@@ -3878,19 +3880,28 @@ it, by slot, hash, and block number, against the parent point the candidate
 already committed to (`nextBlockNumber`/`prevHash`) before selection started;
 a mismatch — a peer block landing mid-selection — rejects the candidate
 before VRF/KES signing (`selected parent changed during block assembly`)
-rather than relying solely on step 6's `Chain.AddLocalBlock` check, which
+rather than relying solely on step 7's `Chain.AddLocalBlock` check, which
 still runs as the final backstop against any race not closed here.
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
+Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
+the loaded credentials. `NewBlockForger` rejects credentials without that
+validated protocol lifetime and precomputes the expiry with overflow checks.
+At each leader slot, the runtime gate admits the half-open interval
+`[opcertStart, opcertStart + MaxKESEvolutions)` and logs/counts a
+could-not-forge disposition at or after the exclusive end before either Leios
+or ranking-block construction. The expiry and remaining-period gauges use that
+same protocol lifetime; the KES key's `2^depth` cryptographic capacity remains
+a separate upper bound rather than an operational lifetime.
 
-Steps 2, 5, and 6 each call into a pluggable interface (`LeaderChecker`, `BlockValidator`, `BlockBroadcaster`) that the node wires up at composition time, so a panic inside one of those implementations is contained rather than propagating out of `checkAndForgeProduction` — which would otherwise crash the forger's producer-loop goroutine, and with it the process, since nothing else recovers a goroutine panic in Go. Each callback is invoked through a `*Safe` wrapper (`checkLeaderSafe`, `validateForgedBlockSafe`, `addBlockSafe`) that recovers and converts a panic into the same outcome as that phase's ordinary failure path — "not leader" for selection, a validation failure for validation, an `AddBlock` error for publication — so worker accounting (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and shutdown behavior are unaffected, and the next forge cycle proceeds normally. Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and logged with a stack trace. The `blockForged` observer callback (step 6) already recovered its own panics separately, since observability hooks are expected to be best-effort.
+Steps 2, 6, and 7 each call into a pluggable interface (`LeaderChecker`, `BlockValidator`, `BlockBroadcaster`) that the node wires up at composition time, so a panic inside one of those implementations is contained rather than propagating out of `checkAndForgeProduction` — which would otherwise crash the forger's producer-loop goroutine, and with it the process, since nothing else recovers a goroutine panic in Go. Each callback is invoked through a `*Safe` wrapper (`checkLeaderSafe`, `validateForgedBlockSafe`, `addBlockSafe`) that recovers and converts a panic into the same outcome as that phase's ordinary failure path — "not leader" for selection, a validation failure for validation, an `AddBlock` error for publication — so worker accounting (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and shutdown behavior are unaffected, and the next forge cycle proceeds normally. Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and logged with a stack trace. The `blockForged` observer callback (step 7) already recovered its own panics separately, since observability hooks are expected to be best-effort.
 
 When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype's 12-field Dijkstra header body for every forged Dijkstra ranking block: the standard Praos/Babbage fields plus `leios_certified` and `leios_announcement`. A locally forged endorser block is announced in the same-slot ranking block's `leios_announcement` as `[eb_hash, eb_size]`; `eb_size` is rejected before header construction if it exceeds the CDDL `uint .size 4` bound. If the pipeline has a certified, non-equivocated EB inside its inclusion window whose hash matches the parent ranking block's `LeiosAnnouncement`, the forger also populates the prototype `DijkstraLeiosCertificate` body field and sets `leios_certified=true`. Prototype-2026w29 permits that CertRB to carry the new same-slot announcement as well as the certificate for its parent's EB. Before constructing the new EB, the forger reads the certified EB's manifest and filters those transaction hashes from its mempool view, matching the prototype's post-certificate rebase without mutating the live mempool before block adoption; if the certified closure is unavailable, it safely forges the certificate-only RB. The certified EB is marked embedded only after the CertRB is adopted locally.
 
 #### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
-When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between step 3 and step 5. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
+When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between steps 5 and 7. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -3900,6 +3911,12 @@ VRF and KES secret-key loads check permissions on the open file handle and
 reject group/other access on Unix or insecure DACL grants on Windows before
 reading the key. Operational certificates contain public data and remain
 exempt from the secret-key permission check.
+
+`PoolCredentials.ValidateKESPeriod` validates and retains the Shelley genesis
+protocol lifetime only on success. Reloading credentials or any failed
+validation clears it, so production construction fails closed instead of
+falling back to the KES depth capacity. `OpCertExpiryPeriod` and
+`PeriodsRemaining` report zero until that policy has been validated.
 
 ### Leios Voting (`ledger/leios/`)
 

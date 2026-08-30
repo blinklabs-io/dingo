@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -415,20 +416,23 @@ func TestOpCertValidation(t *testing.T) {
 	// Validate OpCert - should pass since keys match and signature is valid
 	err = pc.ValidateOpCert()
 	require.NoError(t, err)
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(100, 62, time.Second, time.Unix(0, 0)),
+		0,
+	))
 
 	// Check expiry period
 	expiryPeriod := pc.OpCertExpiryPeriod()
-	// For depth 6, max periods = 64, starting at period 0
-	assert.Equal(t, uint64(64), expiryPeriod)
+	assert.Equal(t, uint64(62), expiryPeriod)
 
 	// Check periods remaining
 	remaining := pc.PeriodsRemaining(0)
-	assert.Equal(t, uint64(64), remaining)
+	assert.Equal(t, uint64(62), remaining)
 
 	remaining = pc.PeriodsRemaining(32)
-	assert.Equal(t, uint64(32), remaining)
+	assert.Equal(t, uint64(30), remaining)
 
-	remaining = pc.PeriodsRemaining(64)
+	remaining = pc.PeriodsRemaining(62)
 	assert.Equal(t, uint64(0), remaining)
 
 	remaining = pc.PeriodsRemaining(100)
@@ -791,6 +795,44 @@ func TestValidateKESPeriod_NilGenesis(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nil genesis")
 	}
+}
+
+func TestValidateKESPeriod_InvalidMaxKESEvolutions(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		max  int
+		want string
+	}{
+		{name: "zero", max: 0, want: "must be positive"},
+		{name: "negative", max: -1, want: "must be positive"},
+		{
+			name: "exceeds key capacity",
+			max:  int(kes.MaxPeriod(kes.CardanoKesDepth)) + 1,
+			want: "exceeds KES key capacity",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			g := synthGenesis(100, test.max, time.Second, time.Unix(0, 0))
+			pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
+
+			err := pc.ValidateKESPeriod(g, 0)
+			require.ErrorContains(t, err, test.want)
+			require.Zero(t, pc.OpCertExpiryPeriod())
+			require.Zero(t, pc.PeriodsRemaining(0))
+		})
+	}
+}
+
+func TestValidateKESPeriod_ExpiryOverflowFailsClosed(t *testing.T) {
+	g := synthGenesis(1, 3, time.Second, time.Unix(0, 0))
+	pc := &PoolCredentials{
+		opCert: &OpCert{KESPeriod: math.MaxUint64 - 1},
+	}
+
+	err := pc.ValidateKESPeriod(g, math.MaxUint64)
+	require.ErrorContains(t, err, "expiry overflows uint64")
+	require.Zero(t, pc.OpCertExpiryPeriod())
+	require.Zero(t, pc.PeriodsRemaining(math.MaxUint64))
 }
 
 // fakeLedgerView is a test stub for the LedgerView interface.
