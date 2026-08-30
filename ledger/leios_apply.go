@@ -97,6 +97,26 @@ func (ls *LedgerState) applyEndorserBlock(
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
 ) (int, uint64, error) {
+	return ls.applyEndorserBlockTrackingTransactions(
+		txn,
+		rbPoint,
+		rbBlockNumber,
+		ebSlot,
+		ebHashBytes,
+		rawTxs,
+		nil,
+	)
+}
+
+func (ls *LedgerState) applyEndorserBlockTrackingTransactions(
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	ebSlot uint64,
+	ebHashBytes []byte,
+	rawTxs []cbor.RawMessage,
+	certifiedTxIDs map[lcommon.Blake2b256]struct{},
+) (int, uint64, error) {
 	if len(rawTxs) == 0 {
 		return 0, 0, nil
 	}
@@ -247,6 +267,11 @@ func (ls *LedgerState) applyEndorserBlock(
 					"apply endorser block transactions: %w",
 					err,
 				),
+			}
+		}
+		if certifiedTxIDs != nil {
+			for _, transaction := range txs {
+				certifiedTxIDs[transaction.Hash()] = struct{}{}
 			}
 		}
 		return len(delta.Transactions), delta.donation, nil

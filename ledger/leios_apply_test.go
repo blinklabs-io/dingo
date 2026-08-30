@@ -20,10 +20,14 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -329,6 +333,417 @@ func leiosApplyTestTxWithOutput(
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
 	return cbor.RawMessage(txCbor), tx
+}
+
+func leiosApplyTestTxSpending(
+	t *testing.T,
+	seed byte,
+	input lcommon.TransactionInput,
+) (cbor.RawMessage, lcommon.Transaction) {
+	t.Helper()
+	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
+	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: cbor.Tag{
+			Number: cbor.CborTagSet,
+			Content: []any{
+				[]any{input.Id().Bytes(), uint64(input.Index())},
+			},
+		},
+		1: []any{
+			map[uint]any{
+				0: addr,
+				1: uint64(700_000),
+			},
+		},
+		2: uint64(200_000),
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(bodyCbor),
+		map[uint]any{},
+		true,
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(
+		gledger.TxTypeDijkstra,
+		txCbor,
+	)
+	require.NoError(t, err)
+	return cbor.RawMessage(txCbor), tx
+}
+
+func leiosApplyTestTxWithDistinctWitness(
+	t *testing.T,
+	tx lcommon.Transaction,
+) lcommon.Transaction {
+	t.Helper()
+	var txFields []cbor.RawMessage
+	_, err := cbor.Decode(tx.Cbor(), &txFields)
+	require.NoError(t, err)
+	require.Len(t, txFields, 4)
+	variantCbor, err := cbor.Encode([]any{
+		txFields[0],
+		map[uint]any{0: []any{}},
+		txFields[2],
+		txFields[3],
+	})
+	require.NoError(t, err)
+	variant, err := gledger.NewTransactionFromCbor(
+		gledger.TxTypeDijkstra,
+		variantCbor,
+	)
+	require.NoError(t, err)
+	require.Equal(t, tx.Hash(), variant.Hash())
+	originalDijkstra, ok := tx.(*dijkstra.DijkstraTransaction)
+	require.True(t, ok)
+	variantDijkstra, ok := variant.(*dijkstra.DijkstraTransaction)
+	require.True(t, ok)
+	require.NotEqual(
+		t,
+		originalDijkstra.LeiosHash(),
+		variantDijkstra.LeiosHash(),
+		"the fixture must distinguish Cardano transaction identity from the full Leios envelope hash",
+	)
+	return variant
+}
+
+func leiosApplyTestBlock(
+	t *testing.T,
+	blockNumber uint64,
+	slot uint64,
+	prevHash lcommon.Blake2b256,
+	certified bool,
+	announcement []byte,
+	txs ...lcommon.Transaction,
+) (*dijkstra.DijkstraBlock, []byte) {
+	t.Helper()
+	dijkstraTxs := make([]dijkstra.DijkstraTransaction, len(txs))
+	for i, tx := range txs {
+		dijkstraTx, ok := tx.(*dijkstra.DijkstraTransaction)
+		require.True(t, ok)
+		dijkstraTxs[i] = *dijkstraTx
+	}
+	body := dijkstra.DijkstraBlockBody{Transactions: dijkstraTxs}
+	bodyCbor, err := body.MarshalCBOR()
+	require.NoError(t, err)
+	headerBody := babbage.BabbageBlockHeaderBody{
+		BlockNumber:   blockNumber,
+		Slot:          slot,
+		PrevHash:      prevHash,
+		BlockBodySize: uint64(len(bodyCbor)),
+		BlockBodyHash: body.Hash(),
+	}
+	headerBodyCbor, err := cbor.Encode(&headerBody)
+	require.NoError(t, err)
+	var headerBodyFields []cbor.RawMessage
+	_, err = cbor.Decode(headerBodyCbor, &headerBodyFields)
+	require.NoError(t, err)
+	headerBodyFields = append(
+		headerBodyFields,
+		leiosTestRaw(t, certified),
+		leiosTestRaw(t, nil),
+	)
+	if announcement != nil {
+		headerBodyFields[len(headerBodyFields)-1] = leiosTestRaw(
+			t,
+			[]any{announcement, uint64(4096)},
+		)
+	}
+	extendedHeaderBodyCbor, err := cbor.Encode(headerBodyFields)
+	require.NoError(t, err)
+	headerCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(extendedHeaderBodyCbor),
+		[]byte{},
+	})
+	require.NoError(t, err)
+	var header dijkstra.DijkstraBlockHeader
+	_, err = cbor.Decode(headerCbor, &header)
+	require.NoError(t, err)
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &header,
+		BlockBody:   body,
+	}
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	return block, blockCbor
+}
+
+func leiosApplyTestProcessBlock(
+	t *testing.T,
+	ls *LedgerState,
+	db *database.Database,
+	block *dijkstra.DijkstraBlock,
+	blockCbor []byte,
+) error {
+	t.Helper()
+	point := ocommon.Point{
+		Slot: block.SlotNumber(),
+		Hash: block.Hash().Bytes(),
+	}
+	var blockHash [lcommon.Blake2b256Size]byte
+	copy(blockHash[:], point.Hash)
+	offsets := &database.BlockIngestionResult{
+		TxOffsets:   make(map[[lcommon.Blake2b256Size]byte]database.CborOffset),
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	for _, tx := range block.Transactions() {
+		var txFields []cbor.RawMessage
+		_, err := cbor.Decode(tx.Cbor(), &txFields)
+		require.NoError(t, err)
+		require.NotEmpty(t, txFields)
+		bodyOffset := bytes.Index(blockCbor, txFields[0])
+		require.NotEqual(t, -1, bodyOffset)
+		var txHash [lcommon.Blake2b256Size]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		offsets.TxOffsets[txHash] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: uint32(bodyOffset),       // #nosec G115 -- tiny test block
+			ByteLength: uint32(len(txFields[0])), // #nosec G115 -- tiny test tx
+		}
+		for _, utxo := range tx.Produced() {
+			outputCbor := utxo.Output.Cbor()
+			require.NotEmpty(t, outputCbor)
+			outputOffset := bytes.Index(blockCbor, outputCbor)
+			require.NotEqual(t, -1, outputOffset)
+			offsets.UtxoOffsets[database.UtxoRef{
+				TxId:      txHash,
+				OutputIdx: utxo.Id.Index(),
+			}] = database.CborOffset{
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteOffset: uint32(outputOffset),    // #nosec G115 -- tiny test block
+				ByteLength: uint32(len(outputCbor)), // #nosec G115 -- tiny test tx
+			}
+		}
+	}
+	return db.Transaction(true).Do(func(txn *database.Txn) error {
+		deltaBatch := NewLedgerDeltaBatch()
+		defer deltaBatch.Release()
+		delta, err := ls.ledgerProcessBlock(
+			txn,
+			point,
+			block,
+			false,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			offsets,
+			eras.DijkstraEraDesc,
+			nil,
+			nil,
+		)
+		if err != nil {
+			return err
+		}
+		if delta != nil {
+			deltaBatch.addDelta(delta)
+		}
+		return deltaBatch.apply(ls, txn)
+	})
+}
+
+func leiosApplyTestSeedProducers(
+	t *testing.T,
+	ls *LedgerState,
+	db *database.Database,
+) (lcommon.Transaction, lcommon.Transaction) {
+	t.Helper()
+	rawFirst, first := leiosApplyTestTxWithOutput(t, 0xb1)
+	rawSecond, second := leiosApplyTestTxWithOutput(t, 0xb2)
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0xb3),
+			1,
+			19_000,
+			leiosApplyTestEbHash(0xb4),
+			[]cbor.RawMessage{rawFirst, rawSecond},
+		)
+		return err
+	}))
+	return first, second
+}
+
+func leiosApplyTestTransactionEvents(
+	t *testing.T,
+	ls *LedgerState,
+) <-chan event.Event {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	subID, events := bus.SubscribeWithBuffer(TransactionEventType, 8)
+	require.NotEqual(t, event.EventSubscriberId(0), subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+	ls.config.EventBus = bus
+	return events
+}
+
+func requireLeiosApplyTestTransactionEvent(
+	t *testing.T,
+	events <-chan event.Event,
+) TransactionEvent {
+	t.Helper()
+	evt := testutil.RequireReceive(
+		t,
+		events,
+		2*time.Second,
+		"Leios transaction apply event",
+	)
+	txEvt, ok := evt.Data.(TransactionEvent)
+	require.True(t, ok, "unexpected event payload %T", evt.Data)
+	return txEvt
+}
+
+// The Musashi prototype can carry the same transaction in both the certified
+// endorser block and its certifying ranking block. Exercise ledgerProcessBlock's
+// real ordering: the certified closure is applied immediately, then the ranking
+// delta is applied. The shared transaction must have ledger effects exactly
+// once, while a distinct ranking transaction keeps its original block index and
+// still applies. The CIP path remains announcement-driven and deliberately does
+// not receive this Musashi-only overlap handling.
+func TestLedgerProcessBlockLeiosTransactionSequencing(t *testing.T) {
+	t.Run("Musashi certified overlap applies exactly once", func(t *testing.T) {
+		ls, db, rawDB := newLeiosApplyTestLedger(t)
+		firstProducer, secondProducer := leiosApplyTestSeedProducers(t, ls, db)
+		overlapRaw, endorserOverlapTx := leiosApplyTestTxSpending(
+			t,
+			0xc1,
+			firstProducer.Produced()[0].Id,
+		)
+		overlapTx := leiosApplyTestTxWithDistinctWitness(t, endorserOverlapTx)
+		_, distinctTx := leiosApplyTestTxSpending(
+			t,
+			0xc2,
+			secondProducer.Produced()[0].Id,
+		)
+		events := leiosApplyTestTransactionEvents(t, ls)
+		ebHash := leiosApplyTestEbHash(0xc3)
+		parent, parentCbor := leiosApplyTestBlock(
+			t,
+			2,
+			19_999,
+			lcommon.Blake2b256{},
+			false,
+			ebHash,
+		)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     parent.SlotNumber(),
+			Hash:     parent.Hash().Bytes(),
+			Number:   parent.BlockNumber(),
+			Type:     uint(parent.Type()),
+			PrevHash: parent.PrevHash().Bytes(),
+			Cbor:     parentCbor,
+		}, nil))
+		ranking, rankingCbor := leiosApplyTestBlock(
+			t,
+			3,
+			20_000,
+			parent.Hash(),
+			true,
+			nil,
+			overlapTx,
+			distinctTx,
+		)
+		providerCalls := 0
+		ls.config.EndorserBlockProvider = func(
+			hash []byte,
+		) (uint64, []cbor.RawMessage, bool) {
+			providerCalls++
+			if !bytes.Equal(hash, ebHash) {
+				return 0, nil, false
+			}
+			return 19_999, []cbor.RawMessage{overlapRaw}, true
+		}
+
+		require.NoError(
+			t,
+			leiosApplyTestProcessBlock(t, ls, db, ranking, rankingCbor),
+			"a transaction shared by the certified endorser block and ranking block must not be applied twice",
+		)
+		require.Equal(t, 1, providerCalls)
+		var overlapIndex uint32
+		require.NoError(t, rawDB.QueryRow(
+			`SELECT block_index FROM "transaction" WHERE hash = ?`,
+			overlapTx.Hash().Bytes(),
+		).Scan(&overlapIndex))
+		require.Equal(t, uint32(0), overlapIndex)
+		var distinctIndex uint32
+		require.NoError(t, rawDB.QueryRow(
+			`SELECT block_index FROM "transaction" WHERE hash = ?`,
+			distinctTx.Hash().Bytes(),
+		).Scan(&distinctIndex))
+		require.Equal(t, uint32(1), distinctIndex)
+		requireLeiosApplyTestTxCount(t, rawDB, 4)
+		firstEvent := requireLeiosApplyTestTransactionEvent(t, events)
+		require.Equal(t, overlapTx.Hash(), firstEvent.Transaction.Hash())
+		secondEvent := requireLeiosApplyTestTransactionEvent(t, events)
+		require.Equal(
+			t,
+			distinctTx.Hash(),
+			secondEvent.Transaction.Hash(),
+			"the overlapping ranking transaction must not be applied a second time",
+		)
+		testutil.RequireNoReceive(
+			t,
+			events,
+			100*time.Millisecond,
+			"only the overlapping EB transaction and distinct ranking transaction should apply",
+		)
+	})
+
+	t.Run("CIP announcement overlap remains unchanged", func(t *testing.T) {
+		ls, db, _ := newLeiosApplyTestLedger(t)
+		ls.config.LeiosApplyEndorserBlockTxs = true
+		producer, _ := leiosApplyTestSeedProducers(t, ls, db)
+		overlapRaw, endorserOverlapTx := leiosApplyTestTxSpending(
+			t,
+			0xd1,
+			producer.Produced()[0].Id,
+		)
+		overlapTx := leiosApplyTestTxWithDistinctWitness(t, endorserOverlapTx)
+		events := leiosApplyTestTransactionEvents(t, ls)
+		ebHash := leiosApplyTestEbHash(0xd2)
+		ranking, rankingCbor := leiosApplyTestBlock(
+			t,
+			2,
+			20_100,
+			lcommon.Blake2b256{},
+			false,
+			ebHash,
+			overlapTx,
+		)
+		providerCalls := 0
+		ls.config.EndorserBlockProvider = func(
+			hash []byte,
+		) (uint64, []cbor.RawMessage, bool) {
+			providerCalls++
+			if !bytes.Equal(hash, ebHash) {
+				return 0, nil, false
+			}
+			return 20_099, []cbor.RawMessage{overlapRaw}, true
+		}
+
+		require.NoError(
+			t,
+			leiosApplyTestProcessBlock(t, ls, db, ranking, rankingCbor),
+		)
+		require.Equal(t, 1, providerCalls)
+		firstEvent := requireLeiosApplyTestTransactionEvent(t, events)
+		secondEvent := requireLeiosApplyTestTransactionEvent(t, events)
+		require.Equal(t, overlapTx.Hash(), firstEvent.Transaction.Hash())
+		require.Equal(t, overlapTx.Hash(), secondEvent.Transaction.Hash())
+		testutil.RequireNoReceive(
+			t,
+			events,
+			100*time.Millisecond,
+			"the CIP control should keep its existing two-stage application",
+		)
+	})
 }
 
 // The Haskell-conformant path applies endorser-block transactions with their

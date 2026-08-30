@@ -6039,7 +6039,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// resolution, availability, decode, and apply failures abort the block.
 	// Storage-phase failures always abort the DB transaction so a partial
 	// endorser-block application cannot be committed.
+	var certifiedEndorserTxIDs map[lcommon.Blake2b256]struct{}
 	if currentEra.Id == dijkstra.EraIdDijkstra {
+		if !ls.config.LeiosApplyEndorserBlockTxs {
+			certifiedEndorserTxIDs = make(map[lcommon.Blake2b256]struct{})
+		}
 		if ls.config.EndorserBlockProvider == nil {
 			if certifier, ok := block.Header().(leiosEndorserBlockCertifier); ok {
 				if certified, present := certifier.LeiosCertified(); present &&
@@ -6074,15 +6078,31 @@ func (ls *LedgerState) ledgerProcessBlock(
 				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
 					ebHash.Bytes(),
 				); ok {
-					var donation uint64
-					applied, donation, err := ls.applyEndorserBlock(
-						txn,
-						point,
-						block.BlockNumber(),
-						ebSlot,
-						ebHash.Bytes(),
-						ebTxs,
+					var (
+						applied  int
+						donation uint64
+						err      error
 					)
+					if certifiedEndorserTxIDs == nil {
+						applied, donation, err = ls.applyEndorserBlock(
+							txn,
+							point,
+							block.BlockNumber(),
+							ebSlot,
+							ebHash.Bytes(),
+							ebTxs,
+						)
+					} else {
+						applied, donation, err = ls.applyEndorserBlockTrackingTransactions(
+							txn,
+							point,
+							block.BlockNumber(),
+							ebSlot,
+							ebHash.Bytes(),
+							ebTxs,
+							certifiedEndorserTxIDs,
+						)
+					}
 					var storageErr *leiosEndorserBlockStorageError
 					switch {
 					case errors.As(err, &storageErr):
@@ -6169,6 +6189,16 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
+		// The Musashi CertRB body can repeat a transaction from the certified
+		// parent endorser block that was applied immediately above. Cardano's
+		// transaction identity is the transaction-body hash returned by Hash;
+		// the Leios full-envelope hash also includes witnesses and is not the
+		// identity used by UTxOs or transaction metadata. Skip only transactions
+		// present in that successfully processed certified closure. The CIP path
+		// leaves certifiedEndorserTxIDs nil and retains its existing behavior.
+		if _, alreadyApplied := certifiedEndorserTxIDs[tx.Hash()]; alreadyApplied {
+			continue
+		}
 		if delta == nil {
 			delta = NewLedgerDelta(
 				point,
