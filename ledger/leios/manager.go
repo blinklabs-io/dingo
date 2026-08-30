@@ -347,6 +347,10 @@ type VoteManager struct {
 	// key provider returns a PoP-verified matching public key.
 	deferredVotingPool []byte
 	deferredVotingKey  *VoteSigningKey
+	// votingLookupGeneration orders provider lookups for the deferred
+	// configuration. Every initial lookup or retry receives a generation when
+	// it starts; only the newest generation may change voting state.
+	votingLookupGeneration uint64
 }
 
 type managerSubscription struct {
@@ -602,6 +606,8 @@ func (m *VoteManager) ConfigureVoting(
 	m.votingKey = nil
 	m.deferredVotingPool = slices.Clone(poolKeyHash[:])
 	m.deferredVotingKey = key
+	m.votingLookupGeneration++
+	lookupGeneration := m.votingLookupGeneration
 	m.mu.Unlock()
 
 	currentEpoch := m.epochProvider.CurrentEpoch()
@@ -612,23 +618,14 @@ func (m *VoteManager) ConfigureVoting(
 	m.localEmissionMu.Lock()
 	defer m.localEmissionMu.Unlock()
 
-	// A newer epoch retry may have completed while the initial provider
-	// lookup was blocked. Apply this result only while the same configuration
-	// is still deferred; otherwise report the state established by that retry.
-	m.mu.Lock()
-	enabled := m.votingKey == key &&
-		slices.Equal(m.votingPool, poolKeyHash[:])
-	deferred := m.deferredVotingKey == key &&
-		slices.Equal(m.deferredVotingPool, poolKeyHash[:])
-	m.mu.Unlock()
-	if enabled {
-		return VotingConfigurationEnabled, nil
-	}
-	if !deferred {
-		return VotingConfigurationRetryPending, nil
-	}
 	if err != nil {
-		m.clearDeferredVoting(poolKeyHash[:], key)
+		if !m.clearDeferredVoting(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(poolKeyHash[:], key), nil
+		}
 		return VotingConfigurationFailed, fmt.Errorf(
 			"resolve on-chain leios key for pool %s: %w",
 			poolKeyHash.String(),
@@ -636,19 +633,33 @@ func (m *VoteManager) ConfigureVoting(
 		)
 	}
 	if !ok {
+		if !m.isCurrentVotingLookup(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(poolKeyHash[:], key), nil
+		}
 		return VotingConfigurationAwaitingKey, nil
 	}
 	if !registered.Equal(key.PublicKey()) {
-		m.clearDeferredVoting(poolKeyHash[:], key)
+		if !m.clearDeferredVoting(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(poolKeyHash[:], key), nil
+		}
 		return VotingConfigurationFailed, fmt.Errorf(
 			"configured leios voting key does not match the on-chain registered key for pool %s",
 			poolKeyHash.String(),
 		)
 	}
-	enabled, err = m.activateDeferredVotingLocked(
+	enabled, err := m.activateDeferredVotingLocked(
 		poolKeyHash[:],
 		key,
 		currentEpoch,
+		lookupGeneration,
 	)
 	if err != nil {
 		m.logger.Error(
@@ -669,14 +680,42 @@ func (m *VoteManager) ConfigureVoting(
 func (m *VoteManager) clearDeferredVoting(
 	poolKeyHash []byte,
 	key *VoteSigningKey,
-) {
+	lookupGeneration uint64,
+) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.deferredVotingKey == key &&
+	if m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
 		slices.Equal(m.deferredVotingPool, poolKeyHash) {
 		m.deferredVotingPool = nil
 		m.deferredVotingKey = nil
+		return true
 	}
+	return false
+}
+
+func (m *VoteManager) isCurrentVotingLookup(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash)
+}
+
+func (m *VoteManager) currentVotingConfigurationStatus(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+) VotingConfigurationStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.votingKey == key && slices.Equal(m.votingPool, poolKeyHash) {
+		return VotingConfigurationEnabled
+	}
+	return VotingConfigurationRetryPending
 }
 
 // activateDeferredVoting promotes a matching deferred configuration and
@@ -688,10 +727,16 @@ func (m *VoteManager) activateDeferredVoting(
 	poolKeyHash []byte,
 	key *VoteSigningKey,
 	currentEpoch uint64,
+	lookupGeneration uint64,
 ) (bool, error) {
 	m.localEmissionMu.Lock()
 	defer m.localEmissionMu.Unlock()
-	return m.activateDeferredVotingLocked(poolKeyHash, key, currentEpoch)
+	return m.activateDeferredVotingLocked(
+		poolKeyHash,
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
 }
 
 // activateDeferredVotingLocked requires localEmissionMu to be held.
@@ -699,12 +744,14 @@ func (m *VoteManager) activateDeferredVotingLocked(
 	poolKeyHash []byte,
 	key *VoteSigningKey,
 	currentEpoch uint64,
+	lookupGeneration uint64,
 ) (bool, error) {
 	replayPrepared := false
 	var ready []readyAnnouncement
 	for {
 		m.mu.Lock()
-		if m.deferredVotingKey != key ||
+		if m.votingLookupGeneration != lookupGeneration ||
+			m.deferredVotingKey != key ||
 			!slices.Equal(m.deferredVotingPool, poolKeyHash) {
 			enabled := m.votingKey == key &&
 				slices.Equal(m.votingPool, poolKeyHash)
@@ -744,7 +791,8 @@ func (m *VoteManager) activateDeferredVotingLocked(
 	}
 
 	m.mu.Lock()
-	if m.deferredVotingKey == key &&
+	if m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
 		slices.Equal(m.deferredVotingPool, poolKeyHash) {
 		m.deferredVotingPool = nil
 		m.deferredVotingKey = nil
@@ -786,15 +834,25 @@ func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
 	m.mu.Lock()
 	pool := slices.Clone(m.deferredVotingPool)
 	key := m.deferredVotingKey
-	m.mu.Unlock()
 	if len(pool) == 0 || key == nil {
+		m.mu.Unlock()
 		return
 	}
+	m.votingLookupGeneration++
+	lookupGeneration := m.votingLookupGeneration
+	if m.votingKey == key && slices.Equal(m.votingPool, pool) {
+		m.votingPool = nil
+		m.votingKey = nil
+	}
+	m.mu.Unlock()
 
 	registered, ok, err := m.resolveOnChainKeyForPoolAtEpoch(
 		pool,
 		currentEpoch,
 	)
+	if !m.isCurrentVotingLookup(pool, key, lookupGeneration) {
+		return
+	}
 	if err != nil {
 		m.logger.Error(
 			"cannot resolve deferred leios voting key; voting remains disabled",
@@ -820,7 +878,12 @@ func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
 		return
 	}
 
-	enabled, err := m.activateDeferredVoting(pool, key, currentEpoch)
+	enabled, err := m.activateDeferredVoting(
+		pool,
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
 	if err != nil {
 		m.logger.Error(
 			"cannot replay deferred leios voting announcements; voting remains disabled",

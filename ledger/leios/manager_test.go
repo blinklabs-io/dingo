@@ -85,10 +85,19 @@ type blockingInitialLeiosKeyProvider struct {
 	blockedKeys     map[string]*lcommon.LeiosKey
 	blockedErr      error
 	currentKeys     map[string]*lcommon.LeiosKey
+	currentErr      error
+	currentFailCall int
+	currentCalls    int
+	blockCurrent    bool
 	entered         chan struct{}
 	release         chan struct{}
+	currentEntered  chan struct{}
+	currentRelease  chan struct{}
 	enteredOnce     sync.Once
 	releaseOnce     sync.Once
+	currentOnce     sync.Once
+	currentRelOnce  sync.Once
+	mu              sync.Mutex
 }
 
 func newBlockingInitialLeiosKeyProvider(
@@ -98,6 +107,8 @@ func newBlockingInitialLeiosKeyProvider(
 		blockedSnapshot: blockedSnapshot,
 		entered:         make(chan struct{}),
 		release:         make(chan struct{}),
+		currentEntered:  make(chan struct{}),
+		currentRelease:  make(chan struct{}),
 	}
 }
 
@@ -110,11 +121,25 @@ func (f *blockingInitialLeiosKeyProvider) GetLeiosKeys(
 		<-f.release
 		return maps.Clone(f.blockedKeys), f.blockedErr
 	}
-	return maps.Clone(f.currentKeys), nil
+	if f.blockCurrent {
+		f.currentOnce.Do(func() { close(f.currentEntered) })
+		<-f.currentRelease
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.currentCalls++
+	if f.currentFailCall == f.currentCalls {
+		return nil, errors.New("current snapshot temporarily unavailable")
+	}
+	return maps.Clone(f.currentKeys), f.currentErr
 }
 
 func (f *blockingInitialLeiosKeyProvider) releaseInitialLookup() {
 	f.releaseOnce.Do(func() { close(f.release) })
+}
+
+func (f *blockingInitialLeiosKeyProvider) releaseCurrentLookup() {
+	f.currentRelOnce.Do(func() { close(f.currentRelease) })
 }
 
 func (f *fakeLeiosKeyProvider) GetLeiosKeys(
@@ -1878,6 +1903,216 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 			)
 		})
 	}
+}
+
+func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
+	t *testing.T,
+) {
+	testCases := []struct {
+		name   string
+		result string
+	}{
+		{name: "absence", result: "absence"},
+		{name: "invalid proof", result: "invalid-proof"},
+		{name: "provider error", result: "error"},
+		{name: "mismatch", result: "mismatch"},
+		{name: "replay preparation failure", result: "replay-failure"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keyProvider := newBlockingInitialLeiosKeyProvider(
+				CommitteeSnapshotEpoch(5),
+			)
+			defer keyProvider.releaseInitialLookup()
+			var member CommitteeMember
+			var key *VoteSigningKey
+			fixture := newManagerFixture(
+				t,
+				func(f *managerFixture, cfg *VoteManagerConfig) {
+					member = f.members[3]
+					key = f.keys[member.VoterId]
+					cfg.KeyProvider = keyProvider
+				},
+			)
+			require.NotNil(t, key)
+			var poolKeyHash lcommon.PoolKeyHash
+			copy(poolKeyHash[:], member.PoolKeyHash)
+			poolHash := hex.EncodeToString(member.PoolKeyHash)
+			validProof, err := SignVote(key, key.PublicKeyBytes())
+			require.NoError(t, err)
+			validKeys := map[string]*lcommon.LeiosKey{
+				poolHash: {
+					PublicKey:       key.PublicKeyBytes(),
+					PossessionProof: validProof,
+				},
+			}
+			keyProvider.blockedErr = errors.New("stale initial lookup failure")
+			switch testCase.result {
+			case "invalid-proof":
+				keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
+					poolHash: {
+						PublicKey: key.PublicKeyBytes(),
+						PossessionProof: make(
+							[]byte,
+							lcommon.LeiosBlsSignatureSize,
+						),
+					},
+				}
+			case "error":
+				keyProvider.currentErr = errors.New(
+					"newer snapshot temporarily unavailable",
+				)
+			case "mismatch":
+				otherKey := testSigningKey(t, 213)
+				otherProof, signErr := SignVote(
+					otherKey,
+					otherKey.PublicKeyBytes(),
+				)
+				require.NoError(t, signErr)
+				keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
+					poolHash: {
+						PublicKey:       otherKey.PublicKeyBytes(),
+						PossessionProof: otherProof,
+					},
+				}
+			case "replay-failure":
+				keyProvider.currentKeys = validKeys
+				keyProvider.currentFailCall = 2
+				ebHash := lcommon.NewBlake2b256([]byte("overlap-deferred-eb"))
+				rbHash := lcommon.NewBlake2b256([]byte("overlap-deferred-rb"))
+				fixture.mgr.HandleEndorserBlock(601, ebHash)
+				fixture.mgr.ObserveAnnouncement(601, rbHash, ebHash)
+			}
+
+			type configureResult struct {
+				status VotingConfigurationStatus
+				err    error
+			}
+			configuredCh := make(chan configureResult, 1)
+			go func() {
+				status, configureErr := fixture.mgr.ConfigureVoting(
+					poolKeyHash,
+					key,
+				)
+				configuredCh <- configureResult{
+					status: status,
+					err:    configureErr,
+				}
+			}()
+			testutil.RequireReceive(
+				t,
+				keyProvider.entered,
+				2*time.Second,
+				"initial epoch key lookup",
+			)
+
+			fixture.mgr.retryDeferredVoting(6)
+			keyProvider.releaseInitialLookup()
+			result := testutil.RequireReceive(
+				t,
+				configuredCh,
+				2*time.Second,
+				"configuration after stale lookup release",
+			)
+			require.NoError(t, result.err)
+			assert.Equal(t, VotingConfigurationRetryPending, result.status)
+			fixture.mgr.mu.Lock()
+			assert.Nil(t, fixture.mgr.votingKey)
+			assert.Same(t, key, fixture.mgr.deferredVotingKey)
+			fixture.mgr.mu.Unlock()
+
+			keyProvider.mu.Lock()
+			keyProvider.currentErr = nil
+			keyProvider.currentFailCall = 0
+			keyProvider.currentKeys = validKeys
+			keyProvider.mu.Unlock()
+			fixture.mgr.retryDeferredVoting(7)
+			fixture.mgr.mu.Lock()
+			assert.Same(t, key, fixture.mgr.votingKey)
+			assert.Nil(t, fixture.mgr.deferredVotingKey)
+			fixture.mgr.mu.Unlock()
+		})
+	}
+}
+
+func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
+	t *testing.T,
+) {
+	keyProvider := newBlockingInitialLeiosKeyProvider(
+		CommitteeSnapshotEpoch(5),
+	)
+	keyProvider.blockCurrent = true
+	defer keyProvider.releaseInitialLookup()
+	defer keyProvider.releaseCurrentLookup()
+	var member CommitteeMember
+	var key *VoteSigningKey
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			key = f.keys[member.VoterId]
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	require.NotNil(t, key)
+	proof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.blockedKeys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	type configureResult struct {
+		status VotingConfigurationStatus
+		err    error
+	}
+	configuredCh := make(chan configureResult, 1)
+	go func() {
+		status, configureErr := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+		configuredCh <- configureResult{status: status, err: configureErr}
+	}()
+	testutil.RequireReceive(
+		t,
+		keyProvider.entered,
+		2*time.Second,
+		"initial epoch key lookup",
+	)
+	retryDone := make(chan struct{})
+	go func() {
+		fixture.mgr.retryDeferredVoting(6)
+		close(retryDone)
+	}()
+	testutil.RequireReceive(
+		t,
+		keyProvider.currentEntered,
+		2*time.Second,
+		"newer retry key lookup",
+	)
+
+	keyProvider.releaseInitialLookup()
+	result := testutil.RequireReceive(
+		t,
+		configuredCh,
+		2*time.Second,
+		"configuration while newer retry remains in flight",
+	)
+	require.NoError(t, result.err)
+	assert.Equal(t, VotingConfigurationRetryPending, result.status)
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+
+	keyProvider.releaseCurrentLookup()
+	testutil.RequireReceive(t, retryDone, 2*time.Second, "newer deferred retry")
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
 }
 
 func TestVoteManagerConfigureVotingReportsReplayPreparationFailure(
