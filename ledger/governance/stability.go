@@ -132,6 +132,7 @@ func EvaluateRatifiableHardForkInitiation(
 		Txn:                   in.Txn,
 		StakeEpoch:            stakeEpochFor(in.CurrentEpoch),
 		CurrentEpoch:          in.CurrentEpoch,
+		MajorVersion:          conwayPParams.ProtocolVersion.Major,
 		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
