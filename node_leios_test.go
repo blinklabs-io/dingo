@@ -175,7 +175,9 @@ func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
 		t,
 		os.WriteFile(
 			voteKeyPath,
-			[]byte("0000000000000000000000000000000000000000000000000000000000000001"),
+			[]byte(
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			),
 			0o600,
 		),
 	)

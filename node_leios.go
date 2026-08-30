@@ -353,8 +353,10 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if !enabled {
 		n.config.logger.Info(
 			"leios voting deferred until the configured key is available in the on-chain snapshot",
-			"component", "node",
-			"pool_id", poolID.String(),
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
 		)
 		return nil
 	}

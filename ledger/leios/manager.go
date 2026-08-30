@@ -535,7 +535,8 @@ func (m *VoteManager) EnableVoting(
 	if m.keyProvider != nil {
 		m.logger.Debug(
 			"leios voting key matches the on-chain registration, skipping static registry",
-			"pool", poolKeyHash.String(),
+			"pool",
+			poolKeyHash.String(),
 		)
 	} else if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
 		return fmt.Errorf("register local leios voting key: %w", err)
@@ -664,14 +665,16 @@ func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
 	if !ok {
 		m.logger.Debug(
 			"deferred leios voting key is not available in the on-chain snapshot; voting remains disabled",
-			"pool", hex.EncodeToString(pool),
+			"pool",
+			hex.EncodeToString(pool),
 		)
 		return
 	}
 	if !registered.Equal(key.PublicKey()) {
 		m.logger.Error(
 			"configured leios voting key does not match the on-chain registered key; voting remains disabled",
-			"pool", hex.EncodeToString(pool),
+			"pool",
+			hex.EncodeToString(pool),
 		)
 		return
 	}
@@ -683,6 +686,43 @@ func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
 		"leios voting enabled after resolving the on-chain registration",
 		"pool", hex.EncodeToString(pool),
 	)
+	m.replayEligibleAnnouncements(currentEpoch)
+}
+
+func (m *VoteManager) replayEligibleAnnouncements(currentEpoch uint64) {
+	type readyAnnouncement struct {
+		rbHash lcommon.Blake2b256
+		record announcementRecord
+	}
+
+	m.mu.Lock()
+	ready := make([]readyAnnouncement, 0, len(m.announcements))
+	for rbHash, record := range m.announcements {
+		if record.epoch != currentEpoch {
+			continue
+		}
+		if _, acquired := m.acquiredEbs[record.ebHash]; !acquired {
+			continue
+		}
+		if _, voted := m.votedAnnouncements[rbHash]; voted {
+			continue
+		}
+		ready = append(ready, readyAnnouncement{
+			rbHash: rbHash,
+			record: record,
+		})
+	}
+	m.mu.Unlock()
+
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].record.slot != ready[j].record.slot {
+			return ready[i].record.slot < ready[j].record.slot
+		}
+		return slices.Compare(ready[i].rbHash[:], ready[j].rbHash[:]) < 0
+	})
+	for _, item := range ready {
+		m.emitPrototypeVote(item.rbHash, item.record)
+	}
 }
 
 // ValidateVotingKey verifies that an operator-supplied voting key matches a
@@ -1866,8 +1906,10 @@ func (m *VoteManager) emitPrototypeVote(
 	if !resolvedOK || !resolved.Equal(votingKey.PublicKey()) {
 		m.logger.Error(
 			"configured leios voting key no longer matches the resolved public key for this pool, not voting",
-			"slot", record.slot,
-			"voter_id", voterId,
+			"slot",
+			record.slot,
+			"voter_id",
+			voterId,
 		)
 		return
 	}
