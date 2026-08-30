@@ -282,7 +282,8 @@ func (d *Database) SetTransactionWithOpts(
 	}
 	if err := d.transactionStore().SetTransaction(
 		tx, point, idx, certDeposits,
-		opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+		opts.SkipWithdrawalWitnessWrite,
+		txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata for tx %s (block idx %d, slot %d): %w",

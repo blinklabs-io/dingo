@@ -73,12 +73,53 @@ func (s *Store) SetTransactionBatched(
 	)
 }
 
+// SetTransactionBatchedHistorical is the historical-replay variant. It keeps
+// the public MetadataStore contract stable while allowing API backfill to
+// preserve snapshot-boundary reward balances instead of applying live-slot
+// withdrawal sufficiency checks.
+func (s *Store) SetTransactionBatchedHistorical(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+		return fmt.Errorf(
+			"SetTransactionBatchedHistorical: wrong accumulator type %T",
+			accumulator,
+		)
+	}
+	return s.setTransaction(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, historicalBackfill, txn,
+	)
+}
+
 func (s *Store) SetTransaction(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
 	index uint32,
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
+	txn types.Txn,
+) error {
+	return s.setTransaction(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, false, txn,
+	)
+}
+
+func (s *Store) setTransaction(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
 	txn types.Txn,
 ) error {
 	if transaction == nil {
@@ -162,6 +203,7 @@ RETURNING id`,
 					point.Slot,
 					hash,
 					skipWithdrawalWitness,
+					historicalBackfill,
 				); err != nil {
 					return err
 				}
@@ -754,6 +796,7 @@ func (s *Store) applyTransactionWithdrawals(
 	slot uint64,
 	txHash []byte,
 	skipWithdrawalWitness bool,
+	historicalBackfill bool,
 ) error {
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
@@ -826,23 +869,29 @@ SELECT EXISTS (
 		if err != nil {
 			return err
 		}
-		if amount.Uint64() > previous {
+		if !historicalBackfill && amount.Uint64() > previous {
 			return fmt.Errorf(
-				"reward withdrawal amount %s exceeds account balance %d",
+				"reward withdrawal amount %s exceeds account balance %d: %w",
 				amount.String(),
 				previous,
+				models.ErrRewardWithdrawalExceedsBalance,
 			)
 		}
 		if amount.Sign() == 0 {
 			continue
 		}
-		rewardAfter := previous - amount.Uint64()
-		if _, err := db.ExecContext(ctx, `
+		// Historical API backfill replays withdrawals before the imported
+		// snapshot balance's intervening credits are available. Record the
+		// withdrawal history, but leave that trusted boundary balance untouched.
+		if !historicalBackfill {
+			rewardAfter := previous - amount.Uint64()
+			if _, err := db.ExecContext(ctx, `
 UPDATE account SET reward = ? WHERE id = ?`,
-			strconv.FormatUint(rewardAfter, 10),
-			accountID,
-		); err != nil {
-			return err
+				strconv.FormatUint(rewardAfter, 10),
+				accountID,
+			); err != nil {
+				return err
+			}
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO account_reward_delta (
