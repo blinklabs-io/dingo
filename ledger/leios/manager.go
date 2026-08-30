@@ -233,6 +233,12 @@ type readyAnnouncement struct {
 	record announcementRecord
 }
 
+type votingConfigurationSnapshot struct {
+	generation uint64
+	pool       []byte
+	key        *VoteSigningKey
+}
+
 type pendingPrototypeVote struct {
 	connKey string
 	vote    lcommon.LeiosPrototypeVote
@@ -300,6 +306,9 @@ type VoteManager struct {
 	metrics         *voteManagerMetrics
 	// now is the clock used for vote TTL expiry; tests may override it.
 	now func() time.Time
+	// signVote is the local vote signer; tests may override it to synchronize
+	// configuration changes with an in-flight signature.
+	signVote func(*VoteSigningKey, []byte) ([]byte, error)
 	// voteTTL, maxVotes, and maxRecords bound the vote stores; tests
 	// may lower them.
 	voteTTL    time.Duration
@@ -347,6 +356,10 @@ type VoteManager struct {
 	// key provider returns a PoP-verified matching public key.
 	deferredVotingPool []byte
 	deferredVotingKey  *VoteSigningKey
+	// deferredVotingAuthorized records that the current deferred generation's
+	// key matched its on-chain registration. Only replay preparation, not
+	// authorization, remains pending while this is true.
+	deferredVotingAuthorized bool
 	// votingLookupGeneration orders provider lookups for the deferred
 	// configuration. Every initial lookup or retry receives a generation when
 	// it starts; only the newest generation may change voting state.
@@ -399,6 +412,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		voteWindowSlots:    voteWindowSlots,
 		registry:           registry,
 		now:                time.Now,
+		signVote:           SignVote,
 		voteTTL:            voteStoreTTL,
 		maxVotes:           voteStoreMaxEntries,
 		maxRecords:         voteRecordMaxEntries,
@@ -606,6 +620,7 @@ func (m *VoteManager) ConfigureVoting(
 	m.votingKey = nil
 	m.deferredVotingPool = slices.Clone(poolKeyHash[:])
 	m.deferredVotingKey = key
+	m.deferredVotingAuthorized = false
 	m.votingLookupGeneration++
 	lookupGeneration := m.votingLookupGeneration
 	m.mu.Unlock()
@@ -624,7 +639,7 @@ func (m *VoteManager) ConfigureVoting(
 			key,
 			lookupGeneration,
 		) {
-			return m.currentVotingConfigurationStatus(poolKeyHash[:], key), nil
+			return m.currentVotingConfigurationStatus(), nil
 		}
 		return VotingConfigurationFailed, fmt.Errorf(
 			"resolve on-chain leios key for pool %s: %w",
@@ -638,7 +653,7 @@ func (m *VoteManager) ConfigureVoting(
 			key,
 			lookupGeneration,
 		) {
-			return m.currentVotingConfigurationStatus(poolKeyHash[:], key), nil
+			return m.currentVotingConfigurationStatus(), nil
 		}
 		return VotingConfigurationAwaitingKey, nil
 	}
@@ -648,7 +663,7 @@ func (m *VoteManager) ConfigureVoting(
 			key,
 			lookupGeneration,
 		) {
-			return m.currentVotingConfigurationStatus(poolKeyHash[:], key), nil
+			return m.currentVotingConfigurationStatus(), nil
 		}
 		return VotingConfigurationFailed, fmt.Errorf(
 			"configured leios voting key does not match the on-chain registered key for pool %s",
@@ -662,6 +677,7 @@ func (m *VoteManager) ConfigureVoting(
 		lookupGeneration,
 	)
 	if err != nil {
+		status := m.currentVotingConfigurationStatus()
 		m.logger.Error(
 			"cannot prepare leios voting activation; voting remains disabled",
 			"pool",
@@ -669,10 +685,10 @@ func (m *VoteManager) ConfigureVoting(
 			"error",
 			err,
 		)
-		return VotingConfigurationRetryPending, nil
+		return status, nil
 	}
 	if !enabled {
-		return VotingConfigurationRetryPending, nil
+		return m.currentVotingConfigurationStatus(), nil
 	}
 	return VotingConfigurationEnabled, nil
 }
@@ -689,6 +705,7 @@ func (m *VoteManager) clearDeferredVoting(
 		slices.Equal(m.deferredVotingPool, poolKeyHash) {
 		m.deferredVotingPool = nil
 		m.deferredVotingKey = nil
+		m.deferredVotingAuthorized = false
 		return true
 	}
 	return false
@@ -706,16 +723,18 @@ func (m *VoteManager) isCurrentVotingLookup(
 		slices.Equal(m.deferredVotingPool, poolKeyHash)
 }
 
-func (m *VoteManager) currentVotingConfigurationStatus(
-	poolKeyHash []byte,
-	key *VoteSigningKey,
-) VotingConfigurationStatus {
+func (m *VoteManager) currentVotingConfigurationStatus() VotingConfigurationStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.votingKey == key && slices.Equal(m.votingPool, poolKeyHash) {
+	if len(m.votingPool) > 0 && m.votingKey != nil {
 		return VotingConfigurationEnabled
 	}
-	return VotingConfigurationRetryPending
+	if len(m.deferredVotingPool) > 0 &&
+		m.deferredVotingKey != nil &&
+		m.deferredVotingAuthorized {
+		return VotingConfigurationRetryPending
+	}
+	return VotingConfigurationAwaitingKey
 }
 
 // activateDeferredVoting promotes a matching deferred configuration and
@@ -758,6 +777,7 @@ func (m *VoteManager) activateDeferredVotingLocked(
 			m.mu.Unlock()
 			return enabled, nil
 		}
+		m.deferredVotingAuthorized = true
 		ready = m.readyAnnouncementsForEpochLocked(currentEpoch)
 		if len(ready) == 0 || replayPrepared {
 			m.votingPool = slices.Clone(poolKeyHash)
@@ -796,6 +816,7 @@ func (m *VoteManager) activateDeferredVotingLocked(
 		slices.Equal(m.deferredVotingPool, poolKeyHash) {
 		m.deferredVotingPool = nil
 		m.deferredVotingKey = nil
+		m.deferredVotingAuthorized = false
 	}
 	enabled := m.votingKey == key &&
 		slices.Equal(m.votingPool, poolKeyHash)
@@ -840,6 +861,7 @@ func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
 	}
 	m.votingLookupGeneration++
 	lookupGeneration := m.votingLookupGeneration
+	m.deferredVotingAuthorized = false
 	if m.votingKey == key && slices.Equal(m.votingPool, pool) {
 		m.votingPool = nil
 		m.votingKey = nil
@@ -1297,6 +1319,7 @@ func (m *VoteManager) HandleVote(
 		verified,
 		entry.tau,
 		lcommon.Blake2b256{},
+		nil,
 	)
 	return nil
 }
@@ -1396,6 +1419,7 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		verified,
 		entry.tau,
 		vote.AnnouncingRbHash,
+		nil,
 	)
 	// Re-diffuse a newly accepted peer vote the same way a locally emitted
 	// one is diffused. insertVote's dedup/equivocation gate above means this
@@ -1603,6 +1627,7 @@ func (m *VoteManager) insertVote(
 	verified bool,
 	tau *big.Rat,
 	announcingRbHash lcommon.Blake2b256,
+	expectedVoting *votingConfigurationSnapshot,
 ) bool {
 	raw, err := vote.MarshalCBOR()
 	if err != nil {
@@ -1616,6 +1641,13 @@ func (m *VoteManager) insertVote(
 	now := m.now()
 
 	m.mu.Lock()
+	if expectedVoting != nil &&
+		(m.votingLookupGeneration != expectedVoting.generation ||
+			m.votingKey != expectedVoting.key ||
+			!slices.Equal(m.votingPool, expectedVoting.pool)) {
+		m.mu.Unlock()
+		return false
+	}
 	if announcingRbHash != (lcommon.Blake2b256{}) {
 		current, ok := m.announcements[announcingRbHash]
 		if !ok || current.slot != vote.SlotNo || current.epoch != epoch ||
@@ -2043,8 +2075,9 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	record announcementRecord,
 ) {
 	m.mu.Lock()
-	votingPool := m.votingPool
+	votingPool := slices.Clone(m.votingPool)
 	votingKey := m.votingKey
+	votingGeneration := m.votingLookupGeneration
 	_, alreadyVoted := m.votedAnnouncements[rbHash]
 	m.mu.Unlock()
 	if len(votingPool) == 0 || votingKey == nil || alreadyVoted {
@@ -2101,7 +2134,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		return
 	}
 	msg := PrototypeVoteMessageBytes(rbHash)
-	sig, err := SignVote(votingKey, msg)
+	sig, err := m.signVote(votingKey, msg)
 	if err != nil {
 		m.logger.Error(
 			"failed to sign leios vote",
@@ -2117,21 +2150,26 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		VoterId:           voterId,
 		VoteSignature:     sig,
 	}
-	if m.metrics != nil {
-		m.metrics.votesReceivedTotal.Inc()
-	}
-	m.logger.Info(
-		"emitting leios vote",
-		"slot", record.slot,
-		"voter_id", voterId,
-		"announcing_rb_hash", rbHash.String(),
-		"endorser_block_hash", record.ebHash.String(),
-	)
 	m.prototypeEmissionMu.Lock()
 	inserted := m.insertVote(
 		"", vote, record.epoch, committee, member, true, entry.tau, rbHash,
+		&votingConfigurationSnapshot{
+			generation: votingGeneration,
+			pool:       votingPool,
+			key:        votingKey,
+		},
 	)
 	if inserted {
+		if m.metrics != nil {
+			m.metrics.votesReceivedTotal.Inc()
+		}
+		m.logger.Info(
+			"emitting leios vote",
+			"slot", record.slot,
+			"voter_id", voterId,
+			"announcing_rb_hash", rbHash.String(),
+			"endorser_block_hash", record.ebHash.String(),
+		)
 		m.eventBus.Publish(VoteEmittedEventType, event.NewEvent(
 			VoteEmittedEventType,
 			VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{

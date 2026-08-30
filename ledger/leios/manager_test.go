@@ -900,6 +900,129 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	assert.Equal(t, uint64(3), result.votes[0].VoterId)
 }
 
+func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
+	t *testing.T,
+) {
+	keyProvider := &fakeLeiosKeyProvider{}
+	var member CommitteeMember
+	var key *VoteSigningKey
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			key = f.keys[member.VoterId]
+			proof, err := SignVote(key, key.PublicKeyBytes())
+			require.NoError(t, err)
+			keyProvider.keys = map[string]*lcommon.LeiosKey{
+				hex.EncodeToString(member.PoolKeyHash): {
+					PublicKey:       key.PublicKeyBytes(),
+					PossessionProof: proof,
+				},
+			}
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationEnabled, status)
+
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	signingEntered := make(chan struct{})
+	releaseSigningCh := make(chan struct{})
+	var signingEnteredOnce sync.Once
+	var releaseSigningOnce sync.Once
+	releaseSigning := func() {
+		releaseSigningOnce.Do(func() { close(releaseSigningCh) })
+	}
+	defer releaseSigning()
+	fixture.mgr.signVote = func(
+		signingKey *VoteSigningKey,
+		msg []byte,
+	) ([]byte, error) {
+		signingEnteredOnce.Do(func() { close(signingEntered) })
+		<-releaseSigningCh
+		return SignVote(signingKey, msg)
+	}
+
+	fixture.mgr.mu.Lock()
+	initialGeneration := fixture.mgr.votingLookupGeneration
+	fixture.mgr.mu.Unlock()
+	ebHash := lcommon.NewBlake2b256([]byte("reconfigured-signing-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("reconfigured-signing-rb"))
+	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	observeDone := make(chan struct{})
+	go func() {
+		fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
+		close(observeDone)
+	}()
+	testutil.RequireReceive(
+		t,
+		signingEntered,
+		2*time.Second,
+		"local vote signing",
+	)
+
+	replacementKey := testSigningKey(t, 214)
+	var replacementPool lcommon.PoolKeyHash
+	replacementPool[0] = 0xfe
+	type configureResult struct {
+		status VotingConfigurationStatus
+		err    error
+	}
+	configuredCh := make(chan configureResult, 1)
+	go func() {
+		configuredStatus, configureErr := fixture.mgr.ConfigureVoting(
+			replacementPool,
+			replacementKey,
+		)
+		configuredCh <- configureResult{
+			status: configuredStatus,
+			err:    configureErr,
+		}
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.votingLookupGeneration > initialGeneration &&
+			fixture.mgr.votingKey == nil &&
+			fixture.mgr.deferredVotingKey == replacementKey &&
+			slices.Equal(fixture.mgr.deferredVotingPool, replacementPool[:])
+	}, 2*time.Second, "replacement voting configuration installed")
+
+	releaseSigning()
+	testutil.RequireReceive(
+		t,
+		observeDone,
+		2*time.Second,
+		"vote emission return",
+	)
+	result := testutil.RequireReceive(
+		t,
+		configuredCh,
+		2*time.Second,
+		"replacement voting configuration",
+	)
+	require.NoError(t, result.err)
+	require.Equal(t, VotingConfigurationAwaitingKey, result.status)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"stale signed vote must not be published",
+	)
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 501, VoterId: member.VoterId,
+	}}))
+	fixture.mgr.mu.Lock()
+	_, voted := fixture.mgr.votedAnnouncements[rbHash]
+	fixture.mgr.mu.Unlock()
+	assert.False(t, voted, "stale signed vote must not mutate vote state")
+}
+
 func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -1909,14 +2032,35 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 	t *testing.T,
 ) {
 	testCases := []struct {
-		name   string
-		result string
+		name           string
+		result         string
+		expectedStatus VotingConfigurationStatus
 	}{
-		{name: "absence", result: "absence"},
-		{name: "invalid proof", result: "invalid-proof"},
-		{name: "provider error", result: "error"},
-		{name: "mismatch", result: "mismatch"},
-		{name: "replay preparation failure", result: "replay-failure"},
+		{
+			name:           "absence",
+			result:         "absence",
+			expectedStatus: VotingConfigurationAwaitingKey,
+		},
+		{
+			name:           "invalid proof",
+			result:         "invalid-proof",
+			expectedStatus: VotingConfigurationAwaitingKey,
+		},
+		{
+			name:           "provider error",
+			result:         "error",
+			expectedStatus: VotingConfigurationAwaitingKey,
+		},
+		{
+			name:           "mismatch",
+			result:         "mismatch",
+			expectedStatus: VotingConfigurationAwaitingKey,
+		},
+		{
+			name:           "replay preparation failure",
+			result:         "replay-failure",
+			expectedStatus: VotingConfigurationRetryPending,
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -2015,7 +2159,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 				"configuration after stale lookup release",
 			)
 			require.NoError(t, result.err)
-			assert.Equal(t, VotingConfigurationRetryPending, result.status)
+			assert.Equal(t, testCase.expectedStatus, result.status)
 			fixture.mgr.mu.Lock()
 			assert.Nil(t, fixture.mgr.votingKey)
 			assert.Same(t, key, fixture.mgr.deferredVotingKey)
@@ -2101,7 +2245,7 @@ func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
 		"configuration while newer retry remains in flight",
 	)
 	require.NoError(t, result.err)
-	assert.Equal(t, VotingConfigurationRetryPending, result.status)
+	assert.Equal(t, VotingConfigurationAwaitingKey, result.status)
 	fixture.mgr.mu.Lock()
 	assert.Nil(t, fixture.mgr.votingKey)
 	assert.Same(t, key, fixture.mgr.deferredVotingKey)
