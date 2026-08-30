@@ -287,6 +287,131 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 		})
 	}
 }
+
+// TestLedgerProcessBlockHistoricalValidationRunsPhase2 verifies the
+// configuration decision at the real block-application boundary.  A
+// historical-validation replay must pass a LedgerView with phase-two
+// validation enabled; the trusted-replay control retains the skip shortcut.
+func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name              string
+		validationEnabled bool
+		wantValidationErr bool
+	}{
+		{
+			name:              "historical validation evaluates phase two",
+			validationEnabled: true,
+			wantValidationErr: true,
+		},
+		{
+			name:              "trusted replay keeps phase two skipped",
+			validationEnabled: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			tx := omockledger.NewTransactionBuilder()
+			tx.WithId(bytes.Repeat([]byte{0x52}, 32))
+			tx.WithType(gdijkstra.TxTypeDijkstra)
+			tx.WithValid(true)
+			var txHash [32]byte
+			copy(txHash[:], tx.Hash().Bytes())
+			offsets := &database.BlockIngestionResult{
+				TxOffsets: map[[32]byte]database.CborOffset{
+					txHash: {BlockSlot: 10, ByteLength: 1},
+				},
+			}
+
+			phase2Called := false
+			testEra := eras.DijkstraEraDesc
+			testEra.ValidateTxFunc = func(
+				_ lcommon.Transaction,
+				_ uint64,
+				state lcommon.LedgerState,
+				_ lcommon.ProtocolParameters,
+			) error {
+				phase2Called = true
+				skipper, ok := state.(interface {
+					SkipPhase2Validation() bool
+				})
+				if ok && skipper.SkipPhase2Validation() {
+					return nil
+				}
+				return conway.PlutusScriptFailedError{
+					Err: errors.New("phase-two validation mismatch"),
+				}
+			}
+			pparams := &gdijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: gdijkstra.MinProtocolVersionDijkstra,
+					},
+					MaxBlockBodySize:   100_000,
+					MaxBlockHeaderSize: 100_000,
+				},
+			}
+			nodeConfig := newTestShelleyGenesisCfg(t)
+			nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+			ls := &LedgerState{
+				db:         db,
+				activeEras: []eras.EraDesc{testEra},
+				config: LedgerStateConfig{
+					CardanoNodeConfig: nodeConfig,
+					Logger:            testLogger(),
+				},
+				currentEra: testEra,
+			}
+			block := &validityOutcomeTestBlock{
+				header: &gdijkstra.DijkstraBlockHeader{
+					BabbageBlockHeader: babbage.BabbageBlockHeader{
+						Body: babbage.BabbageBlockHeaderBody{
+							BlockNumber: 1,
+							Slot:        10,
+							ProtoVersion: babbage.BabbageProtoVersion{
+								Major: gdijkstra.MinProtocolVersionDijkstra,
+							},
+						},
+					},
+				},
+				txs: []lcommon.Transaction{tx},
+				era: gdijkstra.EraDijkstra,
+			}
+			skipPhase2 := shouldSkipConfiguredPhase2Validation(
+				tt.validationEnabled,
+				true,
+				true,
+			)
+			processErr := db.Transaction(true).Do(func(txn *database.Txn) error {
+				_, err := ls.ledgerProcessBlock(
+					txn,
+					ocommon.NewPoint(10, block.Hash().Bytes()),
+					block,
+					true,
+					false,
+					skipPhase2,
+					nil,
+					envelopeParent{origin: true},
+					offsets,
+					testEra,
+					pparams,
+					nil,
+				)
+				return err
+			})
+			require.True(t, phase2Called)
+			if tt.wantValidationErr {
+				var plutusErr conway.PlutusScriptFailedError
+				require.ErrorAs(t, processErr, &plutusErr)
+			} else {
+				require.NoError(t, processErr)
+			}
+		})
+	}
+}
+
 func (b *validityOutcomeTestBlock) Cbor() []byte { return []byte{0x82, 0x80, 0x80} }
 func (b *validityOutcomeTestBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
 	return nil, nil
