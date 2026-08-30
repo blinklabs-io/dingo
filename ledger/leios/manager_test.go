@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -1543,6 +1544,208 @@ func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
 	var missingPool lcommon.PoolKeyHash
 	missingPool[0] = 0xff
 	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
+}
+
+func TestVoteManagerConfigureVotingDefersUntilOnChainKeyResolves(
+	t *testing.T,
+) {
+	keyProvider := &fakeLeiosKeyProvider{}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	member := fixture.members[3]
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	assert.False(t, enabled)
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Equal(t, member.PoolKeyHash, fixture.mgr.deferredVotingPool)
+	fixture.mgr.mu.Unlock()
+	deferredEB := lcommon.NewBlake2b256([]byte("deferred-eb"))
+	deferredRB := lcommon.NewBlake2b256([]byte("deferred-rb"))
+	fixture.mgr.HandleEndorserBlock(577, deferredEB)
+	fixture.mgr.ObserveAnnouncement(577, deferredRB, deferredEB)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"a deferred signing key must not emit a vote",
+	)
+
+	proof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	keyProvider.mu.Unlock()
+
+	fixture.eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: 6},
+		),
+	)
+	require.Eventually(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.votingKey == key &&
+			slices.Equal(fixture.mgr.votingPool, member.PoolKeyHash) &&
+			fixture.mgr.deferredVotingKey == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	keyProvider.mu.Lock()
+	assert.Equal(t, CommitteeSnapshotEpoch(6), keyProvider.snapshotEpoch)
+	keyProvider.mu.Unlock()
+
+	enabledEB := lcommon.NewBlake2b256([]byte("enabled-eb"))
+	enabledRB := lcommon.NewBlake2b256([]byte("enabled-rb"))
+	fixture.mgr.HandleEndorserBlock(578, enabledEB)
+	fixture.mgr.ObserveAnnouncement(578, enabledRB, enabledEB)
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"vote emission after on-chain key resolution",
+	)
+	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, enabledRB, emitted.Vote.AnnouncingRbHash)
+	assert.Equal(t, member.VoterId, emitted.Vote.VoterId)
+}
+
+func TestVoteManagerDeferredVotingRejectsInvalidAuthorization(
+	t *testing.T,
+) {
+	keyProvider := &fakeLeiosKeyProvider{}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	member := fixture.members[3]
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.False(t, enabled)
+
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: make([]byte, lcommon.LeiosBlsSignatureSize),
+		},
+	}
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(6)
+
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+
+	validProof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: validProof,
+		},
+	}
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(7)
+
+	fixture.mgr.mu.Lock()
+	assert.Same(t, key, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerConfigureVotingRejectsResolvedMismatch(t *testing.T) {
+	onChainKey := testSigningKey(t, 210)
+	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	require.NoError(t, err)
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       onChainKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+
+	enabled, err := fixture.mgr.ConfigureVoting(
+		poolKeyHash,
+		key,
+	)
+	require.Error(t, err)
+	assert.False(t, enabled)
+	assert.Contains(t, err.Error(), "does not match")
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerConfigureVotingPropagatesKeyProviderFailure(
+	t *testing.T,
+) {
+	member := CommitteeMember{}
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				err: errors.New("store temporarily unavailable"),
+			}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+
+	enabled, err := fixture.mgr.ConfigureVoting(
+		poolKeyHash,
+		key,
+	)
+	require.Error(t, err)
+	assert.False(t, enabled)
+	assert.Contains(t, err.Error(), "store temporarily unavailable")
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
 }
 
 // TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches proves

@@ -315,6 +315,13 @@ type VoteManager struct {
 
 	votingPool []byte // local pool key hash; nil disables voting
 	votingKey  *VoteSigningKey
+	// deferredVotingPool/deferredVotingKey retain an operator-configured
+	// signing key while the authoritative historical on-chain key snapshot is
+	// not available locally yet. They never participate in vote emission;
+	// retryDeferredVoting promotes them to votingPool/votingKey only after the
+	// key provider returns a PoP-verified matching public key.
+	deferredVotingPool []byte
+	deferredVotingKey  *VoteSigningKey
 }
 
 type managerSubscription struct {
@@ -536,6 +543,146 @@ func (m *VoteManager) EnableVoting(
 	m.votingPool = slices.Clone(poolKeyHash[:])
 	m.votingKey = key
 	return nil
+}
+
+// ConfigureVoting configures local vote emission for a pool. Production
+// composition calls this during startup, when a node may still be behind the
+// snapshot containing its pool's on-chain Leios key registration. In that
+// case the signing key is retained only as deferred configuration and voting
+// remains disabled until an epoch transition makes a matching, PoP-verified
+// key resolvable. A key that is already resolvable but mismatches remains a
+// hard configuration error.
+//
+// The returned bool reports whether voting was enabled immediately. Private
+// registry mode has no chain state to catch up and therefore keeps the strict
+// immediate EnableVoting behavior.
+func (m *VoteManager) ConfigureVoting(
+	poolKeyHash lcommon.PoolKeyHash,
+	key *VoteSigningKey,
+) (bool, error) {
+	if key == nil {
+		return false, errors.New("nil leios vote signing key")
+	}
+	if m.keyProvider == nil {
+		if err := m.EnableVoting(poolKeyHash, key); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	m.mu.Lock()
+	m.votingPool = nil
+	m.votingKey = nil
+	m.deferredVotingPool = slices.Clone(poolKeyHash[:])
+	m.deferredVotingKey = key
+	m.mu.Unlock()
+
+	registered, ok, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	if err != nil {
+		m.clearDeferredVoting(poolKeyHash[:], key)
+		return false, fmt.Errorf(
+			"resolve on-chain leios key for pool %s: %w",
+			poolKeyHash.String(),
+			err,
+		)
+	}
+	if !ok {
+		return false, nil
+	}
+	if !registered.Equal(key.PublicKey()) {
+		m.clearDeferredVoting(poolKeyHash[:], key)
+		return false, fmt.Errorf(
+			"configured leios voting key does not match the on-chain registered key for pool %s",
+			poolKeyHash.String(),
+		)
+	}
+	if m.promoteDeferredVoting(poolKeyHash[:], key) {
+		return true, nil
+	}
+	m.mu.Lock()
+	enabled := m.votingKey == key &&
+		slices.Equal(m.votingPool, poolKeyHash[:])
+	m.mu.Unlock()
+	return enabled, nil
+}
+
+func (m *VoteManager) clearDeferredVoting(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		m.deferredVotingPool = nil
+		m.deferredVotingKey = nil
+	}
+}
+
+func (m *VoteManager) promoteDeferredVoting(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.deferredVotingKey != key ||
+		!slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		return false
+	}
+	m.votingPool = slices.Clone(poolKeyHash)
+	m.votingKey = key
+	m.deferredVotingPool = nil
+	m.deferredVotingKey = nil
+	return true
+}
+
+// retryDeferredVoting rechecks deferred startup configuration after an epoch
+// transition. Historical Leios keys are frozen into epoch snapshots, so these
+// boundaries are the only chain updates that can make an unavailable key
+// resolvable. Provider failures, invalid proofs, and mismatches leave voting
+// disabled and retain the configuration for a later snapshot.
+func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
+	m.mu.Lock()
+	pool := slices.Clone(m.deferredVotingPool)
+	key := m.deferredVotingKey
+	m.mu.Unlock()
+	if len(pool) == 0 || key == nil {
+		return
+	}
+
+	registered, ok, err := m.resolveOnChainKeyForPoolAtEpoch(
+		pool,
+		currentEpoch,
+	)
+	if err != nil {
+		m.logger.Error(
+			"cannot resolve deferred leios voting key; voting remains disabled",
+			"pool", hex.EncodeToString(pool),
+			"error", err,
+		)
+		return
+	}
+	if !ok {
+		m.logger.Debug(
+			"deferred leios voting key is not available in the on-chain snapshot; voting remains disabled",
+			"pool", hex.EncodeToString(pool),
+		)
+		return
+	}
+	if !registered.Equal(key.PublicKey()) {
+		m.logger.Error(
+			"configured leios voting key does not match the on-chain registered key; voting remains disabled",
+			"pool", hex.EncodeToString(pool),
+		)
+		return
+	}
+
+	if !m.promoteDeferredVoting(pool, key) {
+		return
+	}
+	m.logger.Info(
+		"leios voting enabled after resolving the on-chain registration",
+		"pool", hex.EncodeToString(pool),
+	)
 }
 
 // ValidateVotingKey verifies that an operator-supplied voting key matches a
@@ -766,8 +913,18 @@ func (m *VoteManager) resolveOnChainKeys(
 func (m *VoteManager) resolveOnChainKeyForPool(
 	poolKeyHash []byte,
 ) (*bls12381.G2Affine, bool, error) {
+	return m.resolveOnChainKeyForPoolAtEpoch(
+		poolKeyHash,
+		m.epochProvider.CurrentEpoch(),
+	)
+}
+
+func (m *VoteManager) resolveOnChainKeyForPoolAtEpoch(
+	poolKeyHash []byte,
+	currentEpoch uint64,
+) (*bls12381.G2Affine, bool, error) {
 	poolHashHex := hex.EncodeToString(poolKeyHash)
-	snapshotEpoch := CommitteeSnapshotEpoch(m.epochProvider.CurrentEpoch())
+	snapshotEpoch := CommitteeSnapshotEpoch(currentEpoch)
 	keys, err := m.resolveOnChainKeys(snapshotEpoch, []string{poolHashHex})
 	if err != nil {
 		return nil, false, err
@@ -1782,6 +1939,7 @@ func (m *VoteManager) eventLoop(
 			}
 			if data, ok := evt.Data.(event.EpochTransitionEvent); ok {
 				m.handleEpochTransition(data)
+				m.retryDeferredVoting(data.NewEpoch)
 			}
 		case evt, ok := <-chainCh:
 			if !ok {

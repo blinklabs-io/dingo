@@ -16,11 +16,16 @@ package dingo
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -28,6 +33,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type startupLeiosStakeProvider struct{}
+
+func (startupLeiosStakeProvider) GetStakeDistribution(
+	uint64,
+) (map[string]uint64, uint64, error) {
+	return map[string]uint64{}, 0, nil
+}
+
+type startupLeiosEpochProvider struct{}
+
+func (startupLeiosEpochProvider) CurrentEpoch() uint64 {
+	return 5
+}
+
+func (startupLeiosEpochProvider) EpochForSlot(uint64) (uint64, error) {
+	return 5, nil
+}
+
+type startupLeiosParamsProvider struct{}
+
+func (startupLeiosParamsProvider) LeiosCommitteeParameters() (
+	*big.Rat,
+	*big.Rat,
+	error,
+) {
+	return big.NewRat(99, 100), big.NewRat(3, 4), nil
+}
+
+type startupLeiosKeyProvider struct{}
+
+func (startupLeiosKeyProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	return map[string]*lcommon.LeiosKey{}, nil
+}
 
 // TestLeiosCommitteeParamsFromPParamsDefaultsWhenBothUnset covers the issue
 // #2836 root cause: musashi ships a refScript-only dijkstra genesis, so
@@ -118,6 +160,52 @@ func TestLeiosCommitteeParamsFromPParamsRejectsDefaultInvariantViolation(
 	}
 	_, _, err := leiosCommitteeParamsFromPParams(pp)
 	require.Error(t, err)
+}
+
+func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
+	creds := forging.NewPoolCredentials()
+	require.NoError(
+		t,
+		creds.LoadFromFiles(vrfPath, kesPath, opcertPath),
+	)
+
+	voteKeyPath := filepath.Join(t.TempDir(), "leios-vote.skey")
+	require.NoError(
+		t,
+		os.WriteFile(
+			voteKeyPath,
+			[]byte("0000000000000000000000000000000000000000000000000000000000000001"),
+			0o600,
+		),
+	)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	eventBus := event.NewEventBus(nil, logger)
+	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+		Logger:         logger,
+		EventBus:       eventBus,
+		StakeProvider:  startupLeiosStakeProvider{},
+		EpochProvider:  startupLeiosEpochProvider{},
+		ParamsProvider: startupLeiosParamsProvider{},
+		KeyProvider:    startupLeiosKeyProvider{},
+	})
+	require.NoError(t, err)
+
+	n := &Node{
+		config: Config{
+			logger:                  logger,
+			blockProducer:           true,
+			leiosVoteSigningKeyFile: voteKeyPath,
+		},
+		leiosVoteManager: voteManager,
+	}
+
+	require.NoError(
+		t,
+		n.enableLeiosVoting(creds),
+		"startup must continue while the on-chain registration is behind the local tip",
+	)
 }
 
 // TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles guards a

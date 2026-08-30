@@ -346,13 +346,17 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if err != nil {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
-	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-		// ValidateVotingKey reports whether the PoP-verified on-chain key is
-		// missing or mismatched. Production has no static-key fallback.
+	enabled, err := n.leiosVoteManager.ConfigureVoting(poolKeyHash, key)
+	if err != nil {
 		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
-	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
-		return fmt.Errorf("enable leios voting: %w", err)
+	if !enabled {
+		n.config.logger.Info(
+			"leios voting deferred until the configured key is available in the on-chain snapshot",
+			"component", "node",
+			"pool_id", poolID.String(),
+		)
+		return nil
 	}
 	n.config.logger.Info(
 		"leios voting enabled",
