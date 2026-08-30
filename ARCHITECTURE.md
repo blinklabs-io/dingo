@@ -7994,7 +7994,36 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    "CIP-0163 activation" above.
 7. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
    proposal-deposit returns, which observe the post-POOLREAP treasury. The
-   proposal-independent voting denominators — DRep voting power
+   ENACT pass first checks the locally deterministic failure surfaces used by
+   Dingo's RATIFY path: action decoding, proposal-deposit and withdrawal reward
+   addresses, protocol-parameter and hard-fork updates on cloned parameters,
+   positive committee quorum, withdrawal sum overflow, and the running treasury
+   budget. A legacy/already-ratified proposal that positively fails this
+   preflight has its ratification marker cleared and journaled at the boundary,
+   so it remains pending without blocking later proposals or epoch advance.
+   Once preflight succeeds, any error from the actual `EnactProposal` call is a
+   storage or other operational failure and aborts the whole boundary
+   transaction; it is never converted into proposal-local non-enactability.
+   Proposals already durably marked enacted at this exact boundary are replayed
+   fail-closed instead: skipping one after the stake-reward pot reset would keep
+   its enacted marker while losing its effects.
+
+   The subsequent RATIFY pass carries the post-ENACT treasury as a running
+   budget. Each accepted treasury withdrawal consumes that budget; an
+   over-budget withdrawal or a withdrawal whose `uint64` amount sum overflows
+   remains pending, and evaluation continues with later proposals. This is the
+   treasury-capacity portion of Conway RATIFY's running enactment state, not a
+   claim that this preflight implements every formal ENACT predicate. In
+   particular it does not add committee-term validation; committee membership
+   and term state remain part of the actual enactment path. A parameter update
+   is tested against a clone during preflight and that result is discarded;
+   only a successful actual enactment advances `UpdatedPParams`. RATIFY does
+   not thread a prospective parameter-update result into the parameter view of
+   later candidates in the same pass. This is another reason the behavior
+   described here is specifically the running-treasury subset, not the full
+   formal ENACT-state transition.
+
+   The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
    stake snapshot (`LoadSPOVotingState`), and committee state
    (`LoadCommitteeVotingState`) — are computed once per epoch tick and reused

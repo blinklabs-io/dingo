@@ -171,6 +171,61 @@ func TestRunnerFreshDatabaseAndIdempotentRerun(t *testing.T) {
 	require.True(t, completed.Valid)
 }
 
+func TestRatificationHistoryMigrationBackfillsExistingMarker(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	runner := &Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: registry[:5],
+		Locker:   NewProcessLocker(),
+	}
+	require.NoError(t, runner.Run(context.Background()))
+	_, err = db.Exec(`
+INSERT INTO governance_proposal (
+    tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
+    ratified_epoch, ratified_slot, anchor_url, anchor_hash, deposit,
+    return_address, added_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[]byte("pre-history-proposal"),
+		0,
+		6,
+		1,
+		100,
+		5,
+		550,
+		"https://example.invalid/governance",
+		[]byte("pre-history-anchor"),
+		0,
+		[]byte("pre-history-return-address"),
+		500,
+	)
+	require.NoError(t, err)
+
+	runner.Registry = registry
+	require.NoError(t, runner.Run(context.Background()))
+	var transitionSlot, ratifiedEpoch, ratifiedSlot uint64
+	require.NoError(t, db.QueryRow(`
+SELECT transition_slot, ratified_epoch, ratified_slot
+FROM governance_proposal_ratification_history`).Scan(
+		&transitionSlot,
+		&ratifiedEpoch,
+		&ratifiedSlot,
+	))
+	require.Equal(t, uint64(550), transitionSlot)
+	require.Equal(t, uint64(5), ratifiedEpoch)
+	require.Equal(t, uint64(550), ratifiedSlot)
+	_, err = db.Exec(registry[5].SQL["sqlite"].Expand[3])
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM governance_proposal_ratification_history",
+	).Scan(&count))
+	require.Equal(t, 1, count, "migration backfill must be re-runnable")
+}
+
 func TestRunnerResumesBackfillCursor(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
