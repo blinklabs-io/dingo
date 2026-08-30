@@ -242,9 +242,12 @@ type SlotClockProvider interface {
 	ChainTipSlot() uint64
 	// NextSlotTime returns the wall-clock time when the next slot begins.
 	NextSlotTime() (time.Time, error)
-	// UpstreamTipSlot returns the latest known tip slot from upstream peers.
-	// Returns 0 if no upstream tip is known.
+	// UpstreamTipSlot returns the latest admitted header slot from upstream
+	// peers. Returns 0 if no corroborated target is available.
 	UpstreamTipSlot() uint64
+	// UpstreamSyncStatus reports whether a live upstream is selected and its
+	// corroborated target.
+	UpstreamSyncStatus() (targetSlot uint64, active bool)
 }
 
 // ForgerConfig holds configuration for the block forger.
@@ -610,19 +613,23 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	// Skip if the chain is still syncing from a peer.
-	// Compare against the upstream peer tip rather than the wall
-	// clock. Forging while syncing creates blocks that conflict
+	// Compare against the admitted upstream header frontier rather than the
+	// wall clock. Forging while syncing creates blocks that conflict
 	// with the peer's chain, causing persistent header mismatches
 	// and resync loops.
 	// See forgeSyncToleranceSlots for the tolerance rationale.
-	upstreamTip := f.slotClock.UpstreamTipSlot()
-	if upstreamTip > 0 &&
-		upstreamTip > tipSlot &&
-		upstreamTip-tipSlot > f.forgeSyncToleranceSlots {
+	upstreamTip, upstreamActive := f.slotClock.UpstreamSyncStatus()
+	if upstreamActive && (upstreamTip == 0 ||
+		(upstreamTip > tipSlot &&
+			upstreamTip-tipSlot > f.forgeSyncToleranceSlots)) {
 		if f.metrics != nil {
+			gap := uint64(0)
+			if upstreamTip > tipSlot {
+				gap = upstreamTip - tipSlot
+			}
 			f.metrics.forgeSyncSkip.Inc()
 			f.metrics.tipGapSlots.Set(
-				float64(upstreamTip - tipSlot),
+				float64(gap),
 			)
 		}
 		f.logger.Debug(

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1100,6 +1101,96 @@ func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
 		ls.isNearTipWithStabilityWindow(990, 10),
 		"explicit window must accept an equal upstream gap",
 	)
+}
+
+func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing.T) {
+	activeConnID := testChainsyncConnId(6000, 3091)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConnID
+			},
+			GetPeerSyncTargetFunc: func(
+				ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return ochainsync.Tip{
+					Point:       ocommon.NewPoint(1000, []byte("network-head")),
+					BlockNumber: 1000,
+				}, true
+			},
+			CardanoNodeConfig: newNonceReadyTestConfig(t),
+		},
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(5, nil)},
+	}
+	ls.syncUpstreamTipSlot.Store(5)
+	ls.publishActiveUpstream(activeConnID)
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      activeConnID,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(1000, nil)},
+		SyncTargetTrusted: true,
+	})
+
+	assert.Equal(t, uint64(5), ls.syncUpstreamTipSlot.Load(),
+		"the admitted frontier remains available for bookkeeping")
+	assert.Equal(t, uint64(1000), ls.UpstreamTipSlot(),
+		"sync consumers must use the corroborated remote target")
+	assert.InDelta(t, 0.005, ls.SyncProgress(), 0.000001)
+	assert.False(t, ls.isNearTip(5),
+		"a restarted node with only a few admitted headers remains in catch-up")
+}
+
+func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(t *testing.T) {
+	connA := testChainsyncConnId(6000, 3092)
+	connB := testChainsyncConnId(6000, 3093)
+	activeConn := connA
+	targets := map[string]uint64{
+		connIdKey(connA): 100,
+		connIdKey(connB): 200,
+	}
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId { return &activeConn },
+			GetPeerSyncTargetFunc: func(connId ouroboros.ConnectionId) (ochainsync.Tip, bool) {
+				return ochainsync.Tip{Point: ocommon.NewPoint(targets[connIdKey(connId)], nil)}, true
+			},
+		},
+	}
+
+	ls.publishActiveUpstream(connA)
+	assert.Zero(t, ls.UpstreamTipSlot(), "active selection alone must not trust a target")
+	// Model the independent queues: a rejected peer-tip observation R is
+	// delivered before ledger later admits header V. R must not be recovered
+	// from mutable selector state when V is published.
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId: connA,
+		SyncTarget:   ochainsync.Tip{Point: ocommon.NewPoint(999, nil)},
+	})
+	assert.Zero(t, ls.UpstreamTipSlot())
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      connA,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(100, nil)},
+		SyncTargetTrusted: true,
+	})
+	assert.Equal(t, uint64(100), ls.UpstreamTipSlot())
+
+	// A→B changes the authoritative active connection before the ledger has
+	// processed the switch. The A snapshot must not be visible as B's target.
+	activeConn = connB
+	target, active := ls.UpstreamSyncStatus()
+	assert.True(t, active)
+	assert.Zero(t, target)
+	ls.publishActiveUpstream(connB)
+	assert.Zero(t, ls.UpstreamTipSlot())
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      connB,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(200, nil)},
+		SyncTargetTrusted: true,
+	})
+	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
+
+	// A deferred or rejected header never reaches the trusted publication path.
+	ls.recordAdmittedHeaderFrontier(ChainsyncEvent{ConnectionId: connB}, false)
+	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
 }
 
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
