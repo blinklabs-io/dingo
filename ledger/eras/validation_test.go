@@ -16,7 +16,6 @@ package eras
 
 import (
 	"encoding/hex"
-	"fmt"
 	"iter"
 	"math"
 	"math/big"
@@ -29,6 +28,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/data"
@@ -308,13 +308,6 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 }
 
 func TestAlonzoValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	requireRuleIndexResolvesToFunc(
-		t,
-		alonzo.UtxoValidationRules,
-		alonzoUtxoValidatePlutusScriptsRuleIndex,
-		alonzo.UtxoValidatePlutusScripts,
-		"alonzo.UtxoValidatePlutusScripts",
-	)
 	require.Len(t, alonzoUtxoValidationRules, len(alonzo.UtxoValidationRules)-1)
 	requireIndexedRulesExcludeFunc(
 		t,
@@ -325,13 +318,6 @@ func TestAlonzoValidationRulesUseLocalPlutusExecution(t *testing.T) {
 }
 
 func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	requireRuleIndexResolvesToFunc(
-		t,
-		babbage.UtxoValidationRules,
-		babbageUtxoValidatePlutusScriptsRuleIndex,
-		babbage.UtxoValidatePlutusScripts,
-		"babbage.UtxoValidatePlutusScripts",
-	)
 	require.Len(
 		t,
 		babbageUtxoValidationRules,
@@ -511,27 +497,6 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 }
 
 func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	requireRuleIndexResolvesToFunc(
-		t,
-		conway.UtxoValidationRules,
-		conwayUtxoValidateConwayFeaturesRuleIndex,
-		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
-		"conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
-	)
-	requireRuleIndexResolvesToFunc(
-		t,
-		conway.UtxoValidationRules,
-		conwayUtxoValidateFeeTooSmallRuleIndex,
-		conway.UtxoValidateFeeTooSmallUtxo,
-		"conway.UtxoValidateFeeTooSmallUtxo",
-	)
-	requireRuleIndexResolvesToFunc(
-		t,
-		conway.UtxoValidationRules,
-		conwayUtxoValidatePlutusScriptsRuleIndex,
-		conway.UtxoValidatePlutusScripts,
-		"conway.UtxoValidatePlutusScripts",
-	)
 	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
 	requireIndexedRulesExcludeFunc(
 		t,
@@ -560,27 +525,6 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 }
 
 func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
-	requireRuleIndexResolvesToFunc(
-		t,
-		conway.UtxoValidationRules,
-		conwayUtxoValidateFeeTooSmallRuleIndex,
-		conway.UtxoValidateFeeTooSmallUtxo,
-		"conway.UtxoValidateFeeTooSmallUtxo",
-	)
-	requireRuleIndexResolvesToFunc(
-		t,
-		conway.UtxoValidationRules,
-		conwayUtxoValidateExUnitsTooBigRuleIndex,
-		conway.UtxoValidateExUnitsTooBigUtxo,
-		"conway.UtxoValidateExUnitsTooBigUtxo",
-	)
-	requireRuleIndexResolvesToFunc(
-		t,
-		conway.UtxoValidationRules,
-		conwayUtxoValidatePlutusScriptsRuleIndex,
-		conway.UtxoValidatePlutusScripts,
-		"conway.UtxoValidatePlutusScripts",
-	)
 	require.Len(
 		t,
 		conwayPhase1UtxoValidationRules,
@@ -603,6 +547,26 @@ func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
 		conwayPhase1UtxoValidationRules,
 		conway.UtxoValidatePlutusScripts,
 		"Conway phase-1 replay must not execute Plutus scripts",
+	)
+}
+
+func TestDijkstraPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
+	require.Len(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		len(gdijkstra.UtxoValidationRules)-1,
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		gdijkstra.UtxoValidateExUnitsTooBigUtxo,
+		"Dijkstra phase-1 replay must still enforce ExUnits limits",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		gdijkstra.UtxoValidatePlutusScripts,
+		"Dijkstra phase-1 replay must not execute Plutus scripts",
 	)
 }
 
@@ -1067,56 +1031,91 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 	)
 }
 
-func TestBuildIndexedUtxoValidationRulesPanicsForStaleSkipIndex(t *testing.T) {
-	// The message is derived from the constant rather than spelled out, so an
-	// upstream reordering that shifts the index does not also require editing
-	// this expectation.
-	staleIndex := alonzoUtxoValidatePlutusScriptsRuleIndex - 1
-	require.PanicsWithValue(
-		t,
-		fmt.Sprintf(
-			"test.UtxoValidatePlutusScripts hardcoded rule index %d no longer resolves to the expected function",
-			staleIndex,
-		),
-		func() {
-			buildIndexedUtxoValidationRules(
-				alonzo.UtxoValidationRules,
-				staleIndex,
+func TestBuildIndexedUtxoValidationRulesFollowsFunctionIdentity(t *testing.T) {
+	tests := []struct {
+		name  string
+		rules []lcommon.UtxoValidationRuleFunc
+	}{
+		{
+			name: "inserted rules",
+			rules: []lcommon.UtxoValidationRuleFunc{
+				shelley.UtxoValidateMetadata,
+				shelley.UtxoValidateBadInputsUtxo,
+				shelley.UtxoValidateFeeTooSmallUtxo,
 				alonzo.UtxoValidatePlutusScripts,
-				"test.UtxoValidatePlutusScripts",
-			)
+				shelley.UtxoValidateMaxTxSizeUtxo,
+			},
 		},
-	)
+		{
+			name: "reordered rules",
+			rules: []lcommon.UtxoValidationRuleFunc{
+				shelley.UtxoValidateMaxTxSizeUtxo,
+				alonzo.UtxoValidatePlutusScripts,
+				shelley.UtxoValidateMetadata,
+				shelley.UtxoValidateFeeTooSmallUtxo,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildIndexedUtxoValidationRules(
+				tc.rules,
+				utxoValidationRuleReplacement{
+					validationFunc: shelley.UtxoValidateFeeTooSmallUtxo,
+					name:           "test fee rule",
+				},
+				utxoValidationRuleReplacement{
+					validationFunc:  alonzo.UtxoValidatePlutusScripts,
+					replacementFunc: validateConwayFeaturesWithNeededPlutusV1V2,
+					name:            "test Plutus rule",
+				},
+			)
+
+			var expected []indexedUtxoValidationRule
+			feeName := utxoValidationRuleName(
+				shelley.UtxoValidateFeeTooSmallUtxo,
+			)
+			plutusName := utxoValidationRuleName(
+				alonzo.UtxoValidatePlutusScripts,
+			)
+			for idx, rule := range tc.rules {
+				switch utxoValidationRuleName(rule) {
+				case feeName:
+					continue
+				case plutusName:
+					rule = validateConwayFeaturesWithNeededPlutusV1V2
+				}
+				expected = append(expected, indexedUtxoValidationRule{
+					index:          idx,
+					validationFunc: rule,
+				})
+			}
+			require.Len(t, got, len(expected))
+			for idx := range expected {
+				require.Equal(t, expected[idx].index, got[idx].index)
+				require.Equal(
+					t,
+					utxoValidationRuleName(expected[idx].validationFunc),
+					utxoValidationRuleName(got[idx].validationFunc),
+				)
+			}
+		})
+	}
 }
 
-func requireRuleIndexResolvesToFunc(
-	t *testing.T,
-	rules []lcommon.UtxoValidationRuleFunc,
-	index int,
-	want lcommon.UtxoValidationRuleFunc,
-	name string,
-) {
-	t.Helper()
-	require.GreaterOrEqual(
+func TestBuildIndexedUtxoValidationRulesPanicsWhenRuleIsMissing(t *testing.T) {
+	require.PanicsWithValue(
 		t,
-		index,
-		0,
-		"%s rule index must be non-negative",
-		name,
-	)
-	require.Less(
-		t,
-		index,
-		len(rules),
-		"%s rule index must be within upstream rules",
-		name,
-	)
-	require.Equal(
-		t,
-		utxoValidationRuleName(want),
-		utxoValidationRuleName(rules[index]),
-		"%s hardcoded rule index no longer resolves to the expected function",
-		name,
+		"test Plutus rule was not found in upstream rules",
+		func() {
+			buildIndexedUtxoValidationRules(
+				shelley.UtxoValidationRules,
+				utxoValidationRuleReplacement{
+					validationFunc: alonzo.UtxoValidatePlutusScripts,
+					name:           "test Plutus rule",
+				},
+			)
+		},
 	)
 }
 
@@ -1404,20 +1403,6 @@ func TestPreAlonzoRebuiltWireSize(t *testing.T) {
 }
 
 func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
-	requireRuleIndexResolvesToFunc(
-		t,
-		shelley.UtxoValidationRules,
-		shelleyUtxoValidateFeeTooSmallRuleIndex,
-		shelley.UtxoValidateFeeTooSmallUtxo,
-		"shelley.UtxoValidateFeeTooSmallUtxo",
-	)
-	requireRuleIndexResolvesToFunc(
-		t,
-		shelley.UtxoValidationRules,
-		shelleyUtxoValidateMaxTxSizeRuleIndex,
-		shelley.UtxoValidateMaxTxSizeUtxo,
-		"shelley.UtxoValidateMaxTxSizeUtxo",
-	)
 	require.Len(
 		t,
 		shelleyUtxoValidationRules,
@@ -1436,20 +1421,6 @@ func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
 		"Shelley validation must size the max-size check with TxSizeForFee",
 	)
 
-	requireRuleIndexResolvesToFunc(
-		t,
-		allegra.UtxoValidationRules,
-		allegraUtxoValidateFeeTooSmallRuleIndex,
-		allegra.UtxoValidateFeeTooSmallUtxo,
-		"allegra.UtxoValidateFeeTooSmallUtxo",
-	)
-	requireRuleIndexResolvesToFunc(
-		t,
-		allegra.UtxoValidationRules,
-		allegraUtxoValidateMaxTxSizeRuleIndex,
-		allegra.UtxoValidateMaxTxSizeUtxo,
-		"allegra.UtxoValidateMaxTxSizeUtxo",
-	)
 	require.Len(
 		t,
 		allegraUtxoValidationRules,

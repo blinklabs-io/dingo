@@ -261,36 +261,23 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			index: conwayUtxoValidateConwayFeaturesRuleIndex,
+	return buildIndexedUtxoValidationRules(
+		conway.UtxoValidationRules,
+		utxoValidationRuleReplacement{
 			validationFunc: conway.
 				UtxoValidateConwayFeaturesWithPlutusV1V2,
-			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
+			replacementFunc: validateConwayFeaturesWithNeededPlutusV1V2,
+			name:            "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
 		},
-		{
-			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
+		utxoValidationRuleReplacement{
 			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
 			name:           "conway.UtxoValidateFeeTooSmallUtxo",
 		},
-		{
-			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
+		utxoValidationRuleReplacement{
 			validationFunc: conway.UtxoValidatePlutusScripts,
 			name:           "conway.UtxoValidatePlutusScripts",
 		},
-	}
-	ret := buildIndexedUtxoValidationRulesWithSkips(
-		conway.UtxoValidationRules,
-		skips,
 	)
-	ret = append(ret, indexedUtxoValidationRule{
-		index:          conwayUtxoValidateConwayFeaturesRuleIndex,
-		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
-	})
-	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
-		return a.index - b.index
-	})
-	return ret
 }
 
 // validateConwayFeaturesWithNeededPlutusV1V2 rejects Conway-only transaction
@@ -317,8 +304,7 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 		return nil
 	}
 
-	if treasury := tx.CurrentTreasuryValue(); treasury != nil &&
-		treasury.Sign() > 0 {
+	if conwayCurrentTreasuryValuePresent(tx) {
 		return conway.CurrentTreasuryValueWithPlutusV1V2Error{
 			PlutusVersion: plutusVersion,
 		}
@@ -367,6 +353,51 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	}
 
 	return nil
+}
+
+// conwayCurrentTreasuryValuePresent preserves the distinction between an
+// absent key 21 and an explicitly encoded zero across supported gouroboros
+// versions. Maintained gouroboros exposes that distinction through a nil value
+// and CurrentTreasuryValuePresent. The pinned version returns a non-nil zero
+// for both cases, so decoded or constructed concrete transactions fall back to
+// checking the transaction-body map.
+func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	treasury := tx.CurrentTreasuryValue()
+	if treasury == nil {
+		return false
+	}
+	if treasury.Sign() != 0 {
+		return true
+	}
+	conwayTx, ok := tx.(*conway.ConwayTransaction)
+	if !ok || conwayTx == nil {
+		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
+		// implementations that do not need the pinned-version compatibility
+		// path.
+		return true
+	}
+	if presence, ok := any(&conwayTx.Body).(interface {
+		CurrentTreasuryValuePresent() bool
+	}); ok {
+		return presence.CurrentTreasuryValuePresent()
+	}
+	bodyCbor := conwayTx.Body.Cbor()
+	if len(bodyCbor) == 0 {
+		var err error
+		bodyCbor, err = cbor.Encode(&conwayTx.Body)
+		if err != nil {
+			return true
+		}
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(bodyCbor, &fields); err != nil {
+		return true
+	}
+	_, ok = fields[21]
+	return ok
 }
 
 func neededPlutusV1V2Version(view script.TxScriptView) string {

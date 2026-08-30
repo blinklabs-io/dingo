@@ -99,33 +99,13 @@ type indexedUtxoValidationRule struct {
 	validationFunc lcommon.UtxoValidationRuleFunc
 }
 
-type utxoValidationRuleSkip struct {
-	index          int
-	validationFunc lcommon.UtxoValidationRuleFunc
-	name           string
+type utxoValidationRuleReplacement struct {
+	validationFunc  lcommon.UtxoValidationRuleFunc
+	replacementFunc lcommon.UtxoValidationRuleFunc
+	name            string
 }
 
-const (
-	noUtxoValidationRuleIndex = -1
-
-	// Positions in gouroboros v0.201.1
-	// UtxoValidationRules. Function
-	// values are not directly comparable in Go, so setup guards compare
-	// their runtime function names before filtering by index.
-	shelleyUtxoValidateFeeTooSmallRuleIndex    = 6
-	shelleyUtxoValidateMaxTxSizeRuleIndex      = 13
-	allegraUtxoValidateFeeTooSmallRuleIndex    = 6
-	allegraUtxoValidateMaxTxSizeRuleIndex      = 13
-	alonzoUtxoValidatePlutusScriptsRuleIndex   = 27
-	babbageUtxoValidatePlutusScriptsRuleIndex  = 31
-	conwayUtxoValidateConwayFeaturesRuleIndex  = 19
-	conwayUtxoValidateFeeTooSmallRuleIndex     = 24
-	conwayUtxoValidateExUnitsTooBigRuleIndex   = 39
-	conwayUtxoValidatePlutusScriptsRuleIndex   = 43
-	dijkstraUtxoValidatePlutusScriptsRuleIndex = 43
-
-	conwayRefScriptCostStride = 25_600
-)
+const conwayRefScriptCostStride = 25_600
 
 func shouldSkipPhase2Validation(
 	ls lcommon.LedgerState,
@@ -185,95 +165,63 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 	return false
 }
 
+// buildIndexedUtxoValidationRules finds each target by function identity and
+// preserves the target's current upstream position. A nil replacement removes
+// the target; a non-nil replacement substitutes it in place.
 func buildIndexedUtxoValidationRules(
 	rules []lcommon.UtxoValidationRuleFunc,
-	skipIndex int,
-	skipValidationFunc lcommon.UtxoValidationRuleFunc,
-	skipRuleName string,
+	replacements ...utxoValidationRuleReplacement,
 ) []indexedUtxoValidationRule {
-	if skipIndex != noUtxoValidationRuleIndex {
-		return buildIndexedUtxoValidationRulesWithSkips(
-			rules,
-			[]utxoValidationRuleSkip{
-				{
-					index:          skipIndex,
-					validationFunc: skipValidationFunc,
-					name:           skipRuleName,
-				},
-			},
-		)
-	}
-	return buildIndexedUtxoValidationRulesWithSkips(rules, nil)
-}
-
-func buildIndexedUtxoValidationRulesWithSkips(
-	rules []lcommon.UtxoValidationRuleFunc,
-	skips []utxoValidationRuleSkip,
-) []indexedUtxoValidationRule {
-	skipIndexes := map[int]struct{}{}
-	for _, skip := range skips {
-		if skip.index == noUtxoValidationRuleIndex {
-			continue
+	replacementByName := make(
+		map[string]utxoValidationRuleReplacement,
+		len(replacements),
+	)
+	replacementNames := make([]string, 0, len(replacements))
+	for _, replacement := range replacements {
+		name := replacement.name
+		if name == "" {
+			name = "UTxO validation rule"
 		}
-		validateUtxoValidationSkipIndex(
-			rules,
-			skip.index,
-			skip.validationFunc,
-			skip.name,
-		)
-		skipIndexes[skip.index] = struct{}{}
+		replacement.name = name
+		targetName := utxoValidationRuleName(replacement.validationFunc)
+		if targetName == "" {
+			panic(name + " expected validation function is nil")
+		}
+		if _, ok := replacementByName[targetName]; ok {
+			panic(name + " is configured more than once")
+		}
+		replacementByName[targetName] = replacement
+		replacementNames = append(replacementNames, targetName)
 	}
+
+	matched := make(map[string]bool, len(replacements))
 	ret := make([]indexedUtxoValidationRule, 0, len(rules))
 	for idx, validationFunc := range rules {
-		if _, ok := skipIndexes[idx]; ok {
-			continue
+		ruleName := utxoValidationRuleName(validationFunc)
+		if replacement, ok := replacementByName[ruleName]; ok {
+			if matched[ruleName] {
+				panic(replacement.name + " appears more than once in upstream rules")
+			}
+			matched[ruleName] = true
+			validationFunc = replacement.replacementFunc
+			if validationFunc == nil {
+				continue
+			}
 		}
 		ret = append(ret, indexedUtxoValidationRule{
 			index:          idx,
 			validationFunc: validationFunc,
 		})
 	}
+	for _, targetName := range replacementNames {
+		if !matched[targetName] {
+			panic(
+				replacementByName[targetName].name +
+					" was not found in upstream rules",
+			)
+		}
+	}
 	return ret
-}
-
-func validateUtxoValidationSkipIndex(
-	rules []lcommon.UtxoValidationRuleFunc,
-	skipIndex int,
-	skipValidationFunc lcommon.UtxoValidationRuleFunc,
-	skipRuleName string,
-) {
-	if skipRuleName == "" {
-		skipRuleName = "UTxO validation skip rule"
-	}
-	if skipIndex < 0 {
-		panic(fmt.Sprintf(
-			"%s has invalid negative hardcoded rule index %d",
-			skipRuleName,
-			skipIndex,
-		))
-	}
-	if skipIndex >= len(rules) {
-		panic(fmt.Sprintf(
-			"%s hardcoded rule index %d is outside upstream rules length %d",
-			skipRuleName,
-			skipIndex,
-			len(rules),
-		))
-	}
-	if skipValidationFunc == nil {
-		panic(skipRuleName + " expected validation function is nil")
-	}
-	if utxoValidationRuleName(
-		rules[skipIndex],
-	) != utxoValidationRuleName(
-		skipValidationFunc,
-	) {
-		panic(fmt.Sprintf(
-			"%s hardcoded rule index %d no longer resolves to the expected function",
-			skipRuleName,
-			skipIndex,
-		))
-	}
 }
 
 func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
@@ -426,7 +374,7 @@ func preAlonzoRebuiltWireSize(tx lcommon.Transaction) (uint64, bool) {
 
 // validatePreAlonzoTx runs a pre-Alonzo era's UTxO validation rules and then
 // applies Dingo's size and fee checks in place of the upstream fee and
-// max-size rules that buildIndexedUtxoValidationRulesWithSkips removed.
+// max-size rules that buildIndexedUtxoValidationRules removed.
 //
 // Both replacements derive their size from TxSizeForFee. Keeping both checks
 // on TxSizeForFee makes the local validation path explicit and consistent with

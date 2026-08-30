@@ -160,19 +160,15 @@ var allegraUtxoValidationRules = buildAllegraValidationRules()
 // fee and max-size checks keep Allegra validation on the shared TxSizeForFee
 // path, including for transactions rebuilt from block components.
 func buildAllegraValidationRules() []indexedUtxoValidationRule {
-	return buildIndexedUtxoValidationRulesWithSkips(
+	return buildIndexedUtxoValidationRules(
 		allegra.UtxoValidationRules,
-		[]utxoValidationRuleSkip{
-			{
-				index:          allegraUtxoValidateFeeTooSmallRuleIndex,
-				validationFunc: allegra.UtxoValidateFeeTooSmallUtxo,
-				name:           "allegra.UtxoValidateFeeTooSmallUtxo",
-			},
-			{
-				index:          allegraUtxoValidateMaxTxSizeRuleIndex,
-				validationFunc: allegra.UtxoValidateMaxTxSizeUtxo,
-				name:           "allegra.UtxoValidateMaxTxSizeUtxo",
-			},
+		utxoValidationRuleReplacement{
+			validationFunc: allegra.UtxoValidateFeeTooSmallUtxo,
+			name:           "allegra.UtxoValidateFeeTooSmallUtxo",
+		},
+		utxoValidationRuleReplacement{
+			validationFunc: allegra.UtxoValidateMaxTxSizeUtxo,
+			name:           "allegra.UtxoValidateMaxTxSizeUtxo",
 		},
 	)
 }
