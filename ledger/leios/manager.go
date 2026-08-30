@@ -211,6 +211,11 @@ type announcementRecord struct {
 	seenAt time.Time
 }
 
+type readyAnnouncement struct {
+	rbHash lcommon.Blake2b256
+	record announcementRecord
+}
+
 type pendingPrototypeVote struct {
 	connKey string
 	vote    lcommon.LeiosPrototypeVote
@@ -285,6 +290,9 @@ type VoteManager struct {
 	maxRecords int
 
 	mu sync.Mutex
+	// localEmissionMu keeps activation replay ahead of ordinary local emission
+	// without blocking rollback while a signature is being prepared.
+	localEmissionMu sync.Mutex
 	// prototypeEmissionMu linearizes local vote commit/publication with
 	// rollback pruning. This avoids holding mu while publishing an EventBus
 	// event, whose subscribers are outside the manager's lock hierarchy.
@@ -577,7 +585,11 @@ func (m *VoteManager) ConfigureVoting(
 	m.deferredVotingKey = key
 	m.mu.Unlock()
 
-	registered, ok, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	currentEpoch := m.epochProvider.CurrentEpoch()
+	registered, ok, err := m.resolveOnChainKeyForPoolAtEpoch(
+		poolKeyHash[:],
+		currentEpoch,
+	)
 	if err != nil {
 		m.clearDeferredVoting(poolKeyHash[:], key)
 		return false, fmt.Errorf(
@@ -596,13 +608,19 @@ func (m *VoteManager) ConfigureVoting(
 			poolKeyHash.String(),
 		)
 	}
-	if m.promoteDeferredVoting(poolKeyHash[:], key) {
-		return true, nil
+	enabled, err := m.activateDeferredVoting(
+		poolKeyHash[:],
+		key,
+		currentEpoch,
+	)
+	if err != nil {
+		m.clearDeferredVoting(poolKeyHash[:], key)
+		return false, fmt.Errorf(
+			"activate leios voting for pool %s: %w",
+			poolKeyHash.String(),
+			err,
+		)
 	}
-	m.mu.Lock()
-	enabled := m.votingKey == key &&
-		slices.Equal(m.votingPool, poolKeyHash[:])
-	m.mu.Unlock()
 	return enabled, nil
 }
 
@@ -619,21 +637,94 @@ func (m *VoteManager) clearDeferredVoting(
 	}
 }
 
-func (m *VoteManager) promoteDeferredVoting(
+// activateDeferredVoting promotes a matching deferred configuration and
+// replays every ready current-epoch announcement before releasing ordinary
+// local emission. Any provider failure needed to prepare that replay leaves
+// voting disabled and the deferred configuration intact so a later epoch
+// transition can retry the complete activation.
+func (m *VoteManager) activateDeferredVoting(
 	poolKeyHash []byte,
 	key *VoteSigningKey,
-) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.deferredVotingKey != key ||
-		!slices.Equal(m.deferredVotingPool, poolKeyHash) {
-		return false
+	currentEpoch uint64,
+) (bool, error) {
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+
+	replayPrepared := false
+	var ready []readyAnnouncement
+	for {
+		m.mu.Lock()
+		if m.deferredVotingKey != key ||
+			!slices.Equal(m.deferredVotingPool, poolKeyHash) {
+			enabled := m.votingKey == key &&
+				slices.Equal(m.votingPool, poolKeyHash)
+			m.mu.Unlock()
+			return enabled, nil
+		}
+		ready = m.readyAnnouncementsForEpochLocked(currentEpoch)
+		if len(ready) == 0 || replayPrepared {
+			m.votingPool = slices.Clone(poolKeyHash)
+			m.votingKey = key
+			m.mu.Unlock()
+			break
+		}
+		m.mu.Unlock()
+
+		// Resolve and cache every provider-backed input emission will need
+		// before exposing the voting key. Failures are deliberately not
+		// cached by committeeAndParamsForEpoch, so the complete activation
+		// remains retryable.
+		if _, err := m.committeeAndParamsForEpoch(currentEpoch); err != nil {
+			return false, fmt.Errorf(
+				"prepare current-epoch announcement replay: %w",
+				err,
+			)
+		}
+		replayPrepared = true
 	}
-	m.votingPool = slices.Clone(poolKeyHash)
-	m.votingKey = key
-	m.deferredVotingPool = nil
-	m.deferredVotingKey = nil
-	return true
+
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].record.slot != ready[j].record.slot {
+			return ready[i].record.slot < ready[j].record.slot
+		}
+		return slices.Compare(ready[i].rbHash[:], ready[j].rbHash[:]) < 0
+	})
+	for _, item := range ready {
+		m.emitPrototypeVoteLocked(item.rbHash, item.record)
+	}
+
+	m.mu.Lock()
+	if m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		m.deferredVotingPool = nil
+		m.deferredVotingKey = nil
+	}
+	enabled := m.votingKey == key &&
+		slices.Equal(m.votingPool, poolKeyHash)
+	m.mu.Unlock()
+	return enabled, nil
+}
+
+func (m *VoteManager) readyAnnouncementsForEpochLocked(
+	currentEpoch uint64,
+) []readyAnnouncement {
+	ready := make([]readyAnnouncement, 0, len(m.announcements))
+	for rbHash, record := range m.announcements {
+		if record.epoch != currentEpoch {
+			continue
+		}
+		if _, acquired := m.acquiredEbs[record.ebHash]; !acquired {
+			continue
+		}
+		if _, voted := m.votedAnnouncements[rbHash]; voted {
+			continue
+		}
+		ready = append(ready, readyAnnouncement{
+			rbHash: rbHash,
+			record: record,
+		})
+	}
+	return ready
 }
 
 // retryDeferredVoting rechecks deferred startup configuration after an epoch
@@ -679,50 +770,24 @@ func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
 		return
 	}
 
-	if !m.promoteDeferredVoting(pool, key) {
+	enabled, err := m.activateDeferredVoting(pool, key, currentEpoch)
+	if err != nil {
+		m.logger.Error(
+			"cannot replay deferred leios voting announcements; voting remains disabled",
+			"pool",
+			hex.EncodeToString(pool),
+			"error",
+			err,
+		)
+		return
+	}
+	if !enabled {
 		return
 	}
 	m.logger.Info(
 		"leios voting enabled after resolving the on-chain registration",
 		"pool", hex.EncodeToString(pool),
 	)
-	m.replayEligibleAnnouncements(currentEpoch)
-}
-
-func (m *VoteManager) replayEligibleAnnouncements(currentEpoch uint64) {
-	type readyAnnouncement struct {
-		rbHash lcommon.Blake2b256
-		record announcementRecord
-	}
-
-	m.mu.Lock()
-	ready := make([]readyAnnouncement, 0, len(m.announcements))
-	for rbHash, record := range m.announcements {
-		if record.epoch != currentEpoch {
-			continue
-		}
-		if _, acquired := m.acquiredEbs[record.ebHash]; !acquired {
-			continue
-		}
-		if _, voted := m.votedAnnouncements[rbHash]; voted {
-			continue
-		}
-		ready = append(ready, readyAnnouncement{
-			rbHash: rbHash,
-			record: record,
-		})
-	}
-	m.mu.Unlock()
-
-	sort.Slice(ready, func(i, j int) bool {
-		if ready[i].record.slot != ready[j].record.slot {
-			return ready[i].record.slot < ready[j].record.slot
-		}
-		return slices.Compare(ready[i].rbHash[:], ready[j].rbHash[:]) < 0
-	})
-	for _, item := range ready {
-		m.emitPrototypeVote(item.rbHash, item.record)
-	}
 }
 
 // ValidateVotingKey verifies that an operator-supplied voting key matches a
@@ -1852,6 +1917,15 @@ func (m *VoteManager) HandleEndorserBlock(
 }
 
 func (m *VoteManager) emitPrototypeVote(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+) {
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+	m.emitPrototypeVoteLocked(rbHash, record)
+}
+
+func (m *VoteManager) emitPrototypeVoteLocked(
 	rbHash lcommon.Blake2b256,
 	record announcementRecord,
 ) {
