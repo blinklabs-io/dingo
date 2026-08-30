@@ -72,6 +72,23 @@ const (
 // manager is not running.
 var ErrVoteManagerStopped = errors.New("leios vote manager stopped")
 
+// VotingConfigurationStatus reports the outcome of configuring local Leios
+// vote emission.
+type VotingConfigurationStatus uint8
+
+const (
+	// VotingConfigurationFailed accompanies a non-nil configuration error.
+	VotingConfigurationFailed VotingConfigurationStatus = iota
+	// VotingConfigurationEnabled means local vote emission is active.
+	VotingConfigurationEnabled
+	// VotingConfigurationAwaitingKey means the configured pool has no usable
+	// on-chain voting key in the current snapshot yet.
+	VotingConfigurationAwaitingKey
+	// VotingConfigurationRetryPending means activation preparation failed but
+	// the configuration remains deferred for a later epoch-transition retry.
+	VotingConfigurationRetryPending
+)
+
 // StakeDistributionProvider supplies the active stake distribution for a
 // snapshot epoch: lowercase-hex pool key hash -> stake plus the total
 // active stake used as the quorum denominator.
@@ -562,21 +579,23 @@ func (m *VoteManager) EnableVoting(
 // key resolvable. A key that is already resolvable but mismatches remains a
 // hard configuration error.
 //
-// The returned bool reports whether voting was enabled immediately. Private
+// The returned status distinguishes immediate activation, an on-chain key that
+// is not visible yet, and a retryable activation-preparation failure. Private
 // registry mode has no chain state to catch up and therefore keeps the strict
 // immediate EnableVoting behavior.
 func (m *VoteManager) ConfigureVoting(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
-) (bool, error) {
+) (VotingConfigurationStatus, error) {
 	if key == nil {
-		return false, errors.New("nil leios vote signing key")
+		return VotingConfigurationFailed,
+			errors.New("nil leios vote signing key")
 	}
 	if m.keyProvider == nil {
 		if err := m.EnableVoting(poolKeyHash, key); err != nil {
-			return false, err
+			return VotingConfigurationFailed, err
 		}
-		return true, nil
+		return VotingConfigurationEnabled, nil
 	}
 	m.mu.Lock()
 	m.votingPool = nil
@@ -592,18 +611,18 @@ func (m *VoteManager) ConfigureVoting(
 	)
 	if err != nil {
 		m.clearDeferredVoting(poolKeyHash[:], key)
-		return false, fmt.Errorf(
+		return VotingConfigurationFailed, fmt.Errorf(
 			"resolve on-chain leios key for pool %s: %w",
 			poolKeyHash.String(),
 			err,
 		)
 	}
 	if !ok {
-		return false, nil
+		return VotingConfigurationAwaitingKey, nil
 	}
 	if !registered.Equal(key.PublicKey()) {
 		m.clearDeferredVoting(poolKeyHash[:], key)
-		return false, fmt.Errorf(
+		return VotingConfigurationFailed, fmt.Errorf(
 			"configured leios voting key does not match the on-chain registered key for pool %s",
 			poolKeyHash.String(),
 		)
@@ -621,9 +640,12 @@ func (m *VoteManager) ConfigureVoting(
 			"error",
 			err,
 		)
-		return false, nil
+		return VotingConfigurationRetryPending, nil
 	}
-	return enabled, nil
+	if !enabled {
+		return VotingConfigurationRetryPending, nil
+	}
+	return VotingConfigurationEnabled, nil
 }
 
 func (m *VoteManager) clearDeferredVoting(

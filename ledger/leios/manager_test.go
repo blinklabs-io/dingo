@@ -1579,9 +1579,9 @@ func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
 
-	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
 	require.NoError(t, err)
-	assert.False(t, enabled)
+	assert.Equal(t, VotingConfigurationAwaitingKey, status)
 	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 	fixture.mgr.mu.Lock()
@@ -1708,9 +1708,9 @@ func TestVoteManagerConfigureVotingReplaysPreloadedAnnouncements(
 	fixture.mgr.HandleEndorserBlock(501, ebHash)
 	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
 
-	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
 	require.NoError(t, err)
-	require.True(t, enabled)
+	require.Equal(t, VotingConfigurationEnabled, status)
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
@@ -1729,6 +1729,57 @@ func TestVoteManagerConfigureVotingReplaysPreloadedAnnouncements(
 	)
 }
 
+func TestVoteManagerConfigureVotingReportsReplayPreparationFailure(
+	t *testing.T,
+) {
+	keyProvider := &fakeLeiosKeyProvider{failOnCall: 2}
+	var member CommitteeMember
+	var key *VoteSigningKey
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			key = f.keys[member.VoterId]
+			proof, err := SignVote(key, key.PublicKeyBytes())
+			require.NoError(t, err)
+			keyProvider.keys = map[string]*lcommon.LeiosKey{
+				hex.EncodeToString(member.PoolKeyHash): {
+					PublicKey:       key.PublicKeyBytes(),
+					PossessionProof: proof,
+				},
+			}
+			keyProvider.failErr = errors.New(
+				"committee keys temporarily unavailable",
+			)
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	ebHash := lcommon.NewBlake2b256([]byte("failed-preparation-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("failed-preparation-rb"))
+	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
+
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	assert.Equal(t, VotingConfigurationRetryPending, status)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"failed replay preparation must leave voting disabled",
+	)
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
 func TestVoteManagerDeferredVotingRetriesFailedReplayLookup(
 	t *testing.T,
 ) {
@@ -1745,9 +1796,9 @@ func TestVoteManagerDeferredVotingRetriesFailedReplayLookup(
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
 
-	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
 	require.NoError(t, err)
-	require.False(t, enabled)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
 	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 	ebHash := lcommon.NewBlake2b256([]byte("replay-provider-eb"))
@@ -1832,9 +1883,9 @@ func TestVoteManagerDeferredVotingRejectsInvalidAuthorization(
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
 
-	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
 	require.NoError(t, err)
-	require.False(t, enabled)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
 
 	keyProvider.mu.Lock()
 	keyProvider.keys = map[string]*lcommon.LeiosKey{
@@ -1884,9 +1935,9 @@ func TestVoteManagerDeferredVotingRetryRetainsMismatchedKeyUntilRecovery(
 	require.NotNil(t, key)
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
 	require.NoError(t, err)
-	require.False(t, enabled)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
 
 	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
@@ -1975,9 +2026,9 @@ func TestVoteManagerDeferredVotingRetryRetainsProviderFailureUntilRecovery(
 	require.NotNil(t, key)
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	enabled, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
 	require.NoError(t, err)
-	require.False(t, enabled)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
 
 	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
@@ -2064,12 +2115,12 @@ func TestVoteManagerConfigureVotingRejectsResolvedMismatch(t *testing.T) {
 	key := fixture.keys[member.VoterId]
 	require.NotNil(t, key)
 
-	enabled, err := fixture.mgr.ConfigureVoting(
+	status, err := fixture.mgr.ConfigureVoting(
 		poolKeyHash,
 		key,
 	)
 	require.Error(t, err)
-	assert.False(t, enabled)
+	assert.Equal(t, VotingConfigurationFailed, status)
 	assert.Contains(t, err.Error(), "does not match")
 	fixture.mgr.mu.Lock()
 	assert.Nil(t, fixture.mgr.votingKey)
@@ -2095,12 +2146,12 @@ func TestVoteManagerConfigureVotingPropagatesKeyProviderFailure(
 	key := fixture.keys[member.VoterId]
 	require.NotNil(t, key)
 
-	enabled, err := fixture.mgr.ConfigureVoting(
+	status, err := fixture.mgr.ConfigureVoting(
 		poolKeyHash,
 		key,
 	)
 	require.Error(t, err)
-	assert.False(t, enabled)
+	assert.Equal(t, VotingConfigurationFailed, status)
 	assert.Contains(t, err.Error(), "store temporarily unavailable")
 	fixture.mgr.mu.Lock()
 	assert.Nil(t, fixture.mgr.votingKey)

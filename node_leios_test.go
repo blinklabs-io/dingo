@@ -15,10 +15,10 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
-	"io"
 	"log/slog"
 	"math/big"
 	"os"
@@ -227,7 +227,8 @@ func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
 		),
 	)
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	eventBus := event.NewEventBus(nil, logger)
 	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
 		Logger:         logger,
@@ -252,6 +253,16 @@ func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
 		t,
 		n.enableLeiosVoting(creds),
 		"startup must continue while the on-chain registration is behind the local tip",
+	)
+	assert.Contains(
+		t,
+		logs.String(),
+		"leios voting deferred until the configured key is available in the on-chain snapshot",
+	)
+	assert.NotContains(
+		t,
+		logs.String(),
+		"leios voting activation preparation failed",
 	)
 }
 
@@ -287,7 +298,8 @@ func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
 			PossessionProof: proof,
 		},
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	eventBus := event.NewEventBus(nil, logger)
 	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
 		Logger:         logger,
@@ -320,6 +332,16 @@ func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
 		t,
 		n.enableLeiosVoting(creds),
 		"transient replay preparation must not abort node startup",
+	)
+	assert.Contains(
+		t,
+		logs.String(),
+		"leios voting activation preparation failed",
+	)
+	assert.NotContains(
+		t,
+		logs.String(),
+		"deferred until the configured key is available",
 	)
 	testutil.RequireNoReceive(
 		t,
