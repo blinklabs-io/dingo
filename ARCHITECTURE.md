@@ -2561,6 +2561,14 @@ The `LedgerView` interface provides query access to ledger state:
   capability used by transaction validation to enforce exact withdrawals
   before Dijkstra and Dijkstra's script-sensitive partial-withdrawal rule,
   while always rejecting amounts above the balance before storage ingestion.
+- `TreasuryValue` reads the latest slot-keyed `NetworkState` through the same
+  metadata transaction held by the validation view. A boundary block therefore
+  observes reward, MIR, pool-retirement, governance-withdrawal, and donation
+  changes committed by its epoch rollover, while a mempool or forging session
+  keeps one repeatable-read value for the whole candidate. Genesis and Mithril
+  bootstrap seed the same history; restart preserves it, and rollback deletion
+  reveals the prior surviving row. A missing row or storage failure is returned
+  as an error rather than treating an unknown treasury as zero.
 
 ### Local State Query
 

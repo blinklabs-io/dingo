@@ -63,6 +63,7 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 		uint64(14_999_999_100_000_000),
 		uint64(state.Reserves),
 	)
+	requireTreasuryValue(t, ls, nil, 0)
 }
 
 func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
