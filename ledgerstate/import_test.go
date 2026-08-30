@@ -1103,6 +1103,9 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	})
 
 	stakeKey := bytes.Repeat([]byte{0xA4}, 28)
+	keyDeposit := uint64(2_000_000)
+	scriptDeposit := uint64(3_000_000)
+	zeroDeposit := uint64(0)
 	cfg := ImportConfig{
 		Database: db,
 		Logger: slog.New(
@@ -1119,15 +1122,34 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 					Type: CredentialTypeKey,
 					Hash: stakeKey,
 				},
-				Reward: 1,
-				Active: true,
+				Reward:  1,
+				Deposit: &keyDeposit,
+				Active:  true,
 			},
 			{
 				StakingKey: Credential{
 					Type: CredentialTypeScript,
 					Hash: stakeKey,
 				},
-				Reward: 2,
+				Reward:  2,
+				Deposit: &scriptDeposit,
+				Active:  true,
+			},
+			{
+				StakingKey: Credential{
+					Type: CredentialTypeKey,
+					Hash: bytes.Repeat([]byte{0xA5}, 28),
+				},
+				Reward:  3,
+				Deposit: &zeroDeposit,
+				Active:  true,
+			},
+			{
+				StakingKey: Credential{
+					Type: CredentialTypeKey,
+					Hash: bytes.Repeat([]byte{0xA6}, 28),
+				},
+				Reward: 4,
 				Active: true,
 			},
 		},
@@ -1143,6 +1165,47 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), scriptAcct.CredentialTag)
 	require.Equal(t, types.Uint64(2), scriptAcct.Reward)
+
+	for _, tc := range []struct {
+		name    string
+		tag     uint8
+		deposit uint64
+	}{
+		{name: "key", tag: 0, deposit: 2_000_000},
+		{name: "script", tag: 1, deposit: 3_000_000},
+	} {
+		t.Run(tc.name+" registration deposit", func(t *testing.T) {
+			registration, err := db.GetAccountImportRegistrationByCredential(
+				tc.tag,
+				stakeKey,
+				nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, registration)
+			require.Equal(t, uint64(123), registration.AddedSlot)
+			require.NotNil(t, registration.Deposit)
+			require.Equal(t, tc.deposit, *registration.Deposit)
+		})
+	}
+
+	zeroRegistration, err := db.GetAccountImportRegistrationByCredential(
+		0,
+		bytes.Repeat([]byte{0xA5}, 28),
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, zeroRegistration)
+	require.NotNil(t, zeroRegistration.Deposit)
+	require.Zero(t, *zeroRegistration.Deposit)
+
+	unknownRegistration, err := db.GetAccountImportRegistrationByCredential(
+		0,
+		bytes.Repeat([]byte{0xA6}, 28),
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, unknownRegistration)
+	require.Nil(t, unknownRegistration.Deposit)
 }
 
 // TestImportPoolsPreservesRewardAccountCredentialTag verifies snapshot

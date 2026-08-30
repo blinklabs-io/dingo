@@ -106,6 +106,10 @@ type Account struct {
 	CreatedSlot   uint64
 	CertificateID uint
 	Reward        types.Uint64
+	// ImportDeposit is the stake-key deposit carried by a ledger-state
+	// snapshot. It is only used when ImportAccount records the rollback
+	// baseline; nil means the import source could not establish the deposit.
+	ImportDeposit *types.Uint64
 	// DrepType is the DRep delegation type code, an internal enum
 	// matching the Cardano ledger CBOR sum-type tag:
 	//   0 = key credential, 1 = script credential,

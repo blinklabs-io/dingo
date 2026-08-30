@@ -54,6 +54,15 @@ type AccountRegistrationHistoryRow struct {
 	BlockHash []byte
 }
 
+// AccountImportRegistration is the virtual registration state established by
+// a snapshot import or Shelley genesis delegation. No registration certificate
+// exists in local history, so AddedSlot is the baseline boundary and Deposit
+// may be nil for a legacy baseline whose import discarded the historical value.
+type AccountImportRegistration struct {
+	AddedSlot uint64
+	Deposit   *uint64
+}
+
 // AccountWithdrawalHistoryRow holds withdrawal history
 // query results for a stake account.
 type AccountWithdrawalHistoryRow struct {

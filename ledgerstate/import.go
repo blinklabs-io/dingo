@@ -213,7 +213,7 @@ type ParsedAccount struct {
 	PoolKeyHash []byte     // 28-byte pool key hash (delegation target)
 	DRepCred    Credential // DRep credential (vote delegation)
 	Reward      uint64     // reward balance in lovelace
-	Deposit     uint64     // deposit in lovelace
+	Deposit     *uint64    // deposit in lovelace; nil when absent from the source
 	Active      bool
 }
 
@@ -1068,6 +1068,10 @@ func importAccounts(
 			AddedSlot:     slot,
 			Reward:        types.Uint64(acct.Reward),
 			Active:        acct.Active,
+		}
+		if acct.Deposit != nil {
+			deposit := types.Uint64(*acct.Deposit)
+			model.ImportDeposit = &deposit
 		}
 
 		if err := store.ImportAccount(

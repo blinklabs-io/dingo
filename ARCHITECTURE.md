@@ -2553,6 +2553,13 @@ The `LedgerView` interface provides query access to ledger state:
   capability used by transaction validation to enforce exact withdrawals
   before Dijkstra and Dijkstra's script-sensitive partial-withdrawal rule,
   while always rejecting amounts above the balance before storage ingestion.
+- `StakeCredentialDeposit` returns the deposit currently locked by an active
+  key- or script-hash stake credential. Certificate-created accounts use the
+  latest registration history entry, while Mithril-imported and Shelley-genesis
+  accounts fall back to the deposit captured in their rollback baseline because
+  no registration certificate exists in local history. Unknown legacy baseline
+  deposits remain nil; the current protocol parameter is never substituted for
+  an unavailable historical value.
 
 ### Local State Query
 

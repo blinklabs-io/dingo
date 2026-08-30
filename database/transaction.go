@@ -1124,6 +1124,7 @@ func (d *Database) SetGenesisTransaction(
 func (d *Database) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
+	keyDeposit uint64,
 	blockHash []byte,
 	txn *Txn,
 ) error {
@@ -1131,6 +1132,7 @@ func (d *Database) SetGenesisStaking(
 		if err := d.metadata.SetGenesisStaking(
 			pools,
 			stakeDelegations,
+			keyDeposit,
 			blockHash,
 			nil,
 		); err != nil {
@@ -1141,6 +1143,7 @@ func (d *Database) SetGenesisStaking(
 	if err := d.metadata.SetGenesisStaking(
 		pools,
 		stakeDelegations,
+		keyDeposit,
 		blockHash,
 		txn.Metadata(),
 	); err != nil {

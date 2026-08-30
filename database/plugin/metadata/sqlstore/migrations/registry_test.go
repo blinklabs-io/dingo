@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 5)
+	require.Len(t, registry, 6)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -70,6 +70,11 @@ func TestSQLiteRegistry(t *testing.T) {
 		"ALTER TABLE `pool_stake_snapshot` ADD COLUMN `leios_key_public` blob",
 		"ALTER TABLE `pool_stake_snapshot` ADD COLUMN `leios_key_possession_proof` blob",
 	}, registry[4].SQL["sqlite"].Expand)
+	require.Equal(t, 6, registry[5].Version)
+	require.Equal(t, "account-import-deposit", registry[5].Name)
+	require.Equal(t, []string{
+		"ALTER TABLE `account_import_baseline` ADD COLUMN `deposit_amount` text",
+	}, registry[5].SQL["sqlite"].Expand)
 }
 
 // TestMySQLRegistryPrefixesAccountBaselinePrimaryKey guards the v4 migration's
@@ -133,7 +138,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 5)
+	require.Len(t, registry, 6)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

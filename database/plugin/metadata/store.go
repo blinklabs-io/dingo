@@ -1274,6 +1274,13 @@ type MetadataStore interface {
 	// ImportAccount upserts an account (insert or update delegation
 	// fields on conflict).
 	ImportAccount(*models.Account, types.Txn) error
+	// GetAccountImportRegistrationByCredential returns the virtual
+	// registration captured by an imported account baseline.
+	GetAccountImportRegistrationByCredential(
+		uint8,
+		[]byte,
+		types.Txn,
+	) (*models.AccountImportRegistration, error)
 
 	// ImportPool upserts a pool and creates a registration record.
 	ImportPool(
@@ -2081,6 +2088,7 @@ type MetadataStore interface {
 	SetGenesisStaking(
 		pools map[string]lcommon.PoolRegistrationCertificate,
 		stakeDelegations map[string]string,
+		keyDeposit uint64,
 		blockHash []byte,
 		txn types.Txn,
 	) error

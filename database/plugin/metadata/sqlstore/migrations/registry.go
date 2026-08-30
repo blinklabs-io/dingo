@@ -34,6 +34,7 @@ const (
 	tokenRegistrySchemaRelease    = "token-registry-metadata"
 	accountBaselineSchemaRelease  = "account-import-baseline"
 	leiosSnapshotKeySchemaRelease = "leios-snapshot-keys"
+	accountDepositSchemaRelease   = "account-import-deposit"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -47,6 +48,7 @@ var schemaVersions = []struct {
 	{Version: 3, Name: tokenRegistrySchemaRelease, Dir: "v3"},
 	{Version: 4, Name: accountBaselineSchemaRelease, Dir: "v4"},
 	{Version: 5, Name: leiosSnapshotKeySchemaRelease, Dir: "v5"},
+	{Version: 6, Name: accountDepositSchemaRelease, Dir: "v6"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

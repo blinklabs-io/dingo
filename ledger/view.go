@@ -250,6 +250,21 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	if err != nil {
 		return nil, err
 	}
+	importRegistration, err := lv.ls.db.GetAccountImportRegistrationByCredential(
+		credentialTag,
+		cred.Credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// The import baseline represents state after the snapshot point. Treat it
+	// as the latest registration when no certificate history is newer, without
+	// exposing a fabricated transaction through the public history API.
+	if importRegistration != nil &&
+		(len(history) == 0 || importRegistration.AddedSlot >= history[0].AddedSlot) {
+		return importRegistration.Deposit, nil
+	}
 	if len(history) == 0 || history[0].Action != "registered" {
 		return nil, nil
 	}
