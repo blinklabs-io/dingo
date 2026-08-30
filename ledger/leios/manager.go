@@ -614,12 +614,14 @@ func (m *VoteManager) ConfigureVoting(
 		currentEpoch,
 	)
 	if err != nil {
-		m.clearDeferredVoting(poolKeyHash[:], key)
-		return false, fmt.Errorf(
-			"activate leios voting for pool %s: %w",
+		m.logger.Error(
+			"cannot prepare leios voting activation; voting remains disabled",
+			"pool",
 			poolKeyHash.String(),
+			"error",
 			err,
 		)
+		return false, nil
 	}
 	return enabled, nil
 }

@@ -16,15 +16,19 @@ package dingo
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -69,6 +73,47 @@ func (startupLeiosKeyProvider) GetLeiosKeys(
 	[]string,
 ) (map[string]*lcommon.LeiosKey, error) {
 	return map[string]*lcommon.LeiosKey{}, nil
+}
+
+type startupLeiosReplayProvider struct {
+	mu        sync.Mutex
+	recovered bool
+	keyCalls  int
+	poolHash  string
+	key       *lcommon.LeiosKey
+}
+
+func (p *startupLeiosReplayProvider) GetStakeDistribution(
+	uint64,
+) (map[string]uint64, uint64, error) {
+	return map[string]uint64{p.poolHash: 100}, 100, nil
+}
+
+func (p *startupLeiosReplayProvider) LeiosCommitteeParameters() (
+	*big.Rat,
+	*big.Rat,
+	error,
+) {
+	return big.NewRat(1, 1), big.NewRat(3, 4), nil
+}
+
+func (p *startupLeiosReplayProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.keyCalls++
+	if !p.recovered && p.keyCalls > 1 {
+		return nil, errors.New("committee keys temporarily unavailable")
+	}
+	return map[string]*lcommon.LeiosKey{p.poolHash: p.key}, nil
+}
+
+func (p *startupLeiosReplayProvider) recover() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.recovered = true
 }
 
 // TestLeiosCommitteeParamsFromPParamsDefaultsWhenBothUnset covers the issue
@@ -207,6 +252,104 @@ func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
 		t,
 		n.enableLeiosVoting(creds),
 		"startup must continue while the on-chain registration is behind the local tip",
+	)
+}
+
+func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
+	creds := forging.NewPoolCredentials()
+	require.NoError(
+		t,
+		creds.LoadFromFiles(vrfPath, kesPath, opcertPath),
+	)
+
+	voteKeyPath := filepath.Join(t.TempDir(), "leios-vote.skey")
+	require.NoError(
+		t,
+		os.WriteFile(
+			voteKeyPath,
+			[]byte(
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			),
+			0o600,
+		),
+	)
+	key, err := leios.LoadVoteSigningKeyFile(voteKeyPath)
+	require.NoError(t, err)
+	proof, err := leios.SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+
+	poolID := creds.GetPoolID()
+	provider := &startupLeiosReplayProvider{
+		poolHash: hex.EncodeToString(poolID[:]),
+		key: &lcommon.LeiosKey{
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	eventBus := event.NewEventBus(nil, logger)
+	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+		Logger:         logger,
+		EventBus:       eventBus,
+		StakeProvider:  provider,
+		EpochProvider:  startupLeiosEpochProvider{},
+		ParamsProvider: provider,
+		KeyProvider:    provider,
+	})
+	require.NoError(t, err)
+	require.NoError(t, voteManager.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, voteManager.Stop()) })
+
+	subID, emittedCh := eventBus.Subscribe(leios.VoteEmittedEventType)
+	defer eventBus.Unsubscribe(leios.VoteEmittedEventType, subID)
+	ebHash := lcommon.NewBlake2b256([]byte("startup-replay-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("startup-replay-rb"))
+	voteManager.HandleEndorserBlock(501, ebHash)
+	voteManager.ObserveAnnouncement(501, rbHash, ebHash)
+
+	n := &Node{
+		config: Config{
+			logger:                  logger,
+			blockProducer:           true,
+			leiosVoteSigningKeyFile: voteKeyPath,
+		},
+		leiosVoteManager: voteManager,
+	}
+	require.NoError(
+		t,
+		n.enableLeiosVoting(creds),
+		"transient replay preparation must not abort node startup",
+	)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"voting must remain disabled after replay preparation fails",
+	)
+
+	provider.recover()
+	eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: 5},
+		),
+	)
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"announcement replay after startup provider recovery",
+	)
+	emitted, ok := emittedEvent.Data.(leios.VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"recovered announcement must be replayed exactly once",
 	)
 }
 
