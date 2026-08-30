@@ -1806,6 +1806,31 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	)
 }
 
+func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	ls.config.EventBus = bus
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reward-withdrawal-mismatch-tx"),
+			Cause: fmt.Errorf(
+				"amount 78446537 exceeds account balance 78446536: %w",
+				models.ErrRewardWithdrawalExceedsBalance,
+			),
+		}
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
+	require.False(t, recovered)
+}
+
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)

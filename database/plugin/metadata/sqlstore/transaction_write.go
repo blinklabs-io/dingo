@@ -871,9 +871,10 @@ SELECT EXISTS (
 		}
 		if !historicalBackfill && amount.Uint64() > previous {
 			return fmt.Errorf(
-				"reward withdrawal amount %s exceeds account balance %d",
+				"reward withdrawal amount %s exceeds account balance %d: %w",
 				amount.String(),
 				previous,
+				models.ErrRewardWithdrawalExceedsBalance,
 			)
 		}
 		if amount.Sign() == 0 {
