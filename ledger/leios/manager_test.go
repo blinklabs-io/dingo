@@ -80,6 +80,43 @@ type fakeLeiosKeyProvider struct {
 	snapshotEpoch uint64
 }
 
+type blockingInitialLeiosKeyProvider struct {
+	blockedSnapshot uint64
+	blockedKeys     map[string]*lcommon.LeiosKey
+	blockedErr      error
+	currentKeys     map[string]*lcommon.LeiosKey
+	entered         chan struct{}
+	release         chan struct{}
+	enteredOnce     sync.Once
+	releaseOnce     sync.Once
+}
+
+func newBlockingInitialLeiosKeyProvider(
+	blockedSnapshot uint64,
+) *blockingInitialLeiosKeyProvider {
+	return &blockingInitialLeiosKeyProvider{
+		blockedSnapshot: blockedSnapshot,
+		entered:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+}
+
+func (f *blockingInitialLeiosKeyProvider) GetLeiosKeys(
+	snapshotEpoch uint64,
+	_ []string,
+) (map[string]*lcommon.LeiosKey, error) {
+	if snapshotEpoch == f.blockedSnapshot {
+		f.enteredOnce.Do(func() { close(f.entered) })
+		<-f.release
+		return maps.Clone(f.blockedKeys), f.blockedErr
+	}
+	return maps.Clone(f.currentKeys), nil
+}
+
+func (f *blockingInitialLeiosKeyProvider) releaseInitialLookup() {
+	f.releaseOnce.Do(func() { close(f.release) })
+}
+
 func (f *fakeLeiosKeyProvider) GetLeiosKeys(
 	snapshotEpoch uint64,
 	_ []string,
@@ -1727,6 +1764,120 @@ func TestVoteManagerConfigureVotingReplaysPreloadedAnnouncements(
 		100*time.Millisecond,
 		"preloaded announcement must be replayed exactly once",
 	)
+}
+
+func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
+	t *testing.T,
+) {
+	testCases := []struct {
+		name        string
+		staleResult string
+	}{
+		{name: "absence", staleResult: "absence"},
+		{name: "mismatch", staleResult: "mismatch"},
+		{name: "provider error", staleResult: "error"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keyProvider := newBlockingInitialLeiosKeyProvider(
+				CommitteeSnapshotEpoch(5),
+			)
+			defer keyProvider.releaseInitialLookup()
+			var member CommitteeMember
+			var key *VoteSigningKey
+			fixture := newManagerFixture(
+				t,
+				func(f *managerFixture, cfg *VoteManagerConfig) {
+					member = f.members[3]
+					key = f.keys[member.VoterId]
+					proof, err := SignVote(key, key.PublicKeyBytes())
+					require.NoError(t, err)
+					keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
+						hex.EncodeToString(member.PoolKeyHash): {
+							PublicKey:       key.PublicKeyBytes(),
+							PossessionProof: proof,
+						},
+					}
+					cfg.KeyProvider = keyProvider
+				},
+			)
+			require.NotNil(t, key)
+			var poolKeyHash lcommon.PoolKeyHash
+			copy(poolKeyHash[:], member.PoolKeyHash)
+
+			switch testCase.staleResult {
+			case "mismatch":
+				staleKey := testSigningKey(t, 212)
+				proof, err := SignVote(
+					staleKey,
+					staleKey.PublicKeyBytes(),
+				)
+				require.NoError(t, err)
+				keyProvider.blockedKeys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       staleKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				}
+			case "error":
+				keyProvider.blockedErr = errors.New(
+					"stale snapshot temporarily unavailable",
+				)
+			}
+
+			subID, emittedCh := fixture.eventBus.Subscribe(
+				VoteEmittedEventType,
+			)
+			defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+			ebHash := lcommon.NewBlake2b256([]byte("overlap-eb"))
+			rbHash := lcommon.NewBlake2b256([]byte("overlap-rb"))
+			fixture.mgr.HandleEndorserBlock(601, ebHash)
+			fixture.mgr.ObserveAnnouncement(601, rbHash, ebHash)
+
+			type configureResult struct {
+				status VotingConfigurationStatus
+				err    error
+			}
+			configuredCh := make(chan configureResult, 1)
+			go func() {
+				status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+				configuredCh <- configureResult{status: status, err: err}
+			}()
+			testutil.RequireReceive(
+				t,
+				keyProvider.entered,
+				2*time.Second,
+				"initial epoch key lookup",
+			)
+
+			fixture.mgr.retryDeferredVoting(6)
+			emittedEvent := testutil.RequireReceive(
+				t,
+				emittedCh,
+				2*time.Second,
+				"newer epoch voting activation",
+			)
+			emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+			require.True(t, ok)
+			assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash)
+
+			keyProvider.releaseInitialLookup()
+			result := testutil.RequireReceive(
+				t,
+				configuredCh,
+				2*time.Second,
+				"configuration after stale lookup release",
+			)
+			require.NoError(t, result.err)
+			assert.Equal(t, VotingConfigurationEnabled, result.status)
+			testutil.RequireNoReceive(
+				t,
+				emittedCh,
+				100*time.Millisecond,
+				"stale lookup release must not emit a duplicate vote",
+			)
+		})
+	}
 }
 
 func TestVoteManagerConfigureVotingReportsReplayPreparationFailure(

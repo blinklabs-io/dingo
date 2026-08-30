@@ -609,6 +609,24 @@ func (m *VoteManager) ConfigureVoting(
 		poolKeyHash[:],
 		currentEpoch,
 	)
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+
+	// A newer epoch retry may have completed while the initial provider
+	// lookup was blocked. Apply this result only while the same configuration
+	// is still deferred; otherwise report the state established by that retry.
+	m.mu.Lock()
+	enabled := m.votingKey == key &&
+		slices.Equal(m.votingPool, poolKeyHash[:])
+	deferred := m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash[:])
+	m.mu.Unlock()
+	if enabled {
+		return VotingConfigurationEnabled, nil
+	}
+	if !deferred {
+		return VotingConfigurationRetryPending, nil
+	}
 	if err != nil {
 		m.clearDeferredVoting(poolKeyHash[:], key)
 		return VotingConfigurationFailed, fmt.Errorf(
@@ -627,7 +645,7 @@ func (m *VoteManager) ConfigureVoting(
 			poolKeyHash.String(),
 		)
 	}
-	enabled, err := m.activateDeferredVoting(
+	enabled, err = m.activateDeferredVotingLocked(
 		poolKeyHash[:],
 		key,
 		currentEpoch,
@@ -673,7 +691,15 @@ func (m *VoteManager) activateDeferredVoting(
 ) (bool, error) {
 	m.localEmissionMu.Lock()
 	defer m.localEmissionMu.Unlock()
+	return m.activateDeferredVotingLocked(poolKeyHash, key, currentEpoch)
+}
 
+// activateDeferredVotingLocked requires localEmissionMu to be held.
+func (m *VoteManager) activateDeferredVotingLocked(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	currentEpoch uint64,
+) (bool, error) {
 	replayPrepared := false
 	var ready []readyAnnouncement
 	for {
