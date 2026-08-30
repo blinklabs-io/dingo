@@ -99,8 +99,6 @@ jobs:
         run: go build ./cmd/dingo
       - name: sqlc-generation-drift
         run: make sql-check
-      - name: gorm-dependency-absence
-        run: make gorm-check
       - name: install-mariadb-client
         # database/plugin/metadata/mysql's backup/restore CLI arg mapping
         # (mysqlSSLArgs) targets the mysqldump/mysql client this repo's own

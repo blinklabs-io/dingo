@@ -454,6 +454,41 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	// Keep the test at header admission; no blockfetch worker is needed.
+	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+
+	forkHash := testHashBytes("fork-frontier-header")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	advertisedSlot := ^uint64(0)
+	require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advertisedSlot,
+				testHashBytes("unbound-fork-tip"),
+			),
+			BlockNumber: advertisedSlot,
+		},
+	}))
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, header.slot, fixture.ls.chain.HeaderTip().Point.Slot)
+	assert.Equal(t, header.slot, fixture.ls.syncUpstreamTipSlot.Load())
+}
+
 func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
