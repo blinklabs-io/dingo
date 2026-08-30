@@ -113,8 +113,12 @@ func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 	assert.True(t, noConfidenceDecision.DRepApproved)
 
 	updateCommitteeDecision := ShouldRatify(RatifyInputs{
-		Tally:           updateCommitteeTally,
-		PParams:         pparams,
+		Tally:   updateCommitteeTally,
+		PParams: pparams,
+		GovAction: &lcommon.UpdateCommitteeGovAction{
+			Type:       uint(lcommon.GovActionTypeUpdateCommittee),
+			CredEpochs: map[*lcommon.Credential]uint{},
+		},
 		ActiveDRepCount: 0,
 		MajorVersion:    10,
 	})

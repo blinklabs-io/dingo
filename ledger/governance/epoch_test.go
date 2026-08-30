@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -710,6 +711,155 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 	assert.True(t, committeeNoConfidenceState(&models.GovernanceProposal{
 		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
 	}))
+}
+
+func TestProcessEpochCommitteeTermLimit(t *testing.T) {
+	const currentEpoch = uint64(10)
+	uintPtr := func(value uint) *uint { return &value }
+	tests := []struct {
+		name         string
+		termLimit    uint64
+		memberExpiry *uint
+		actionType   lcommon.GovActionType
+		wantRatified bool
+	}{
+		{
+			name:         "within limit",
+			termLimit:    5,
+			memberExpiry: uintPtr(14),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "exact boundary",
+			termLimit:    5,
+			memberExpiry: uintPtr(15),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "over limit remains pending",
+			termLimit:    5,
+			memberExpiry: uintPtr(16),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: false,
+		},
+		{
+			name:         "overflowing bound",
+			termLimit:    math.MaxUint64,
+			memberExpiry: uintPtr(20),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "empty members",
+			termLimit:    0,
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "non committee action",
+			termLimit:    0,
+			actionType:   lcommon.GovActionTypeNoConfidence,
+			wantRatified: true,
+		},
+	}
+
+	for testIndex, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, _ := newTallyTestDB(t)
+			var action lcommon.GovAction
+			switch test.actionType {
+			case lcommon.GovActionTypeUpdateCommittee:
+				members := make(map[*lcommon.Credential]uint)
+				if test.memberExpiry != nil {
+					credential := &lcommon.Credential{
+						CredType: lcommon.CredentialTypeAddrKeyHash,
+					}
+					copy(credential.Credential[:], testBytes(28, byte(testIndex+1)))
+					members[credential] = *test.memberExpiry
+				}
+				action = &lcommon.UpdateCommitteeGovAction{
+					Type:       uint(test.actionType),
+					CredEpochs: members,
+					Quorum:     newRat(2, 3),
+				}
+			case lcommon.GovActionTypeNoConfidence:
+				action = &lcommon.NoConfidenceGovAction{
+					Type: uint(test.actionType),
+				}
+			default:
+				t.Fatalf("unsupported action type %d", test.actionType)
+			}
+			actionCBOR, err := cbor.Encode(action)
+			require.NoError(t, err)
+
+			txHash := testBytes(32, byte(0x80+testIndex))
+			require.NoError(t, db.SetGovernanceProposal(
+				&models.GovernanceProposal{
+					TxHash:        txHash,
+					ActionIndex:   0,
+					ActionType:    uint8(test.actionType),
+					ProposedEpoch: currentEpoch - 1,
+					ExpiresEpoch:  currentEpoch + 10,
+					AnchorURL:     "https://example.invalid/committee-term",
+					AnchorHash:    testBytes(32, byte(0x90+testIndex)),
+					ReturnAddress: testBytes(29, byte(0xa0+testIndex)),
+					GovActionCbor: actionCBOR,
+					AddedSlot:     100,
+				},
+				nil,
+			))
+
+			pparams := conwayPParamsFixture(10)
+			pparams.CommitteeTermLimit = test.termLimit
+			pparams.DRepVotingThresholds.CommitteeNormal = newRat(0, 1)
+			pparams.PoolVotingThresholds.CommitteeNormal = newRat(0, 1)
+			pparams.DRepVotingThresholds.MotionNoConfidence = newRat(0, 1)
+			pparams.PoolVotingThresholds.MotionNoConfidence = newRat(0, 1)
+
+			txn := db.MetadataTxn(true)
+			defer txn.Release()
+			out, err := ProcessEpoch(&EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    currentEpoch - 1,
+				NewEpoch:     currentEpoch,
+				BoundarySlot: 500,
+				PParams:      pparams,
+				UpdateFn: func(
+					pparams lcommon.ProtocolParameters,
+					_ any,
+				) (lcommon.ProtocolParameters, error) {
+					return pparams, nil
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+
+			if test.wantRatified {
+				assert.Equal(t, 1, out.RatifiedCount)
+			} else {
+				assert.Equal(t, 0, out.RatifiedCount)
+			}
+			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			if test.wantRatified {
+				require.NotNil(t, proposal.RatifiedEpoch)
+				assert.Equal(t, currentEpoch, *proposal.RatifiedEpoch)
+			} else {
+				assert.Nil(t, proposal.RatifiedEpoch)
+				assert.Nil(t, proposal.RatifiedSlot)
+				assert.Nil(t, proposal.EnactedEpoch)
+				assert.Nil(t, proposal.ExpiredEpoch)
+				assert.Nil(t, proposal.DeletedSlot)
+				active, err := db.GetActiveGovernanceProposals(currentEpoch, nil)
+				require.NoError(t, err)
+				require.Len(t, active, 1)
+				assert.Equal(t, txHash, active[0].TxHash)
+			}
+		})
+	}
 }
 
 // buildInfoProposal is a test helper that creates a GovernanceProposal with
