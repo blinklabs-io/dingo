@@ -300,7 +300,7 @@ func TestEnactProposalHardForkReturnsMutationIsolatedPParams(t *testing.T) {
 	tests := []struct {
 		name    string
 		pparams func() lcommon.ProtocolParameters
-		mutate  func(lcommon.ProtocolParameters)
+		mutate  func(*testing.T, lcommon.ProtocolParameters)
 		extra   func(lcommon.ProtocolParameters) []string
 	}{
 		{
@@ -308,8 +308,9 @@ func TestEnactProposalHardForkReturnsMutationIsolatedPParams(t *testing.T) {
 			pparams: func() lcommon.ProtocolParameters {
 				return mutableConwayPParamsFixture()
 			},
-			mutate: func(pparams lcommon.ProtocolParameters) {
+			mutate: func(t *testing.T, pparams lcommon.ProtocolParameters) {
 				mutateConwayPParams(
+					t,
 					pparams.(*conway.ConwayProtocolParameters),
 				)
 			},
@@ -327,9 +328,9 @@ func TestEnactProposalHardForkReturnsMutationIsolatedPParams(t *testing.T) {
 					QuorumStakeThreshold:     testRatPtr(3, 5),
 				}
 			},
-			mutate: func(pparams lcommon.ProtocolParameters) {
+			mutate: func(t *testing.T, pparams lcommon.ProtocolParameters) {
 				p := pparams.(*gdijkstra.DijkstraProtocolParameters)
-				mutateConwayPParams(&p.ConwayProtocolParameters)
+				mutateConwayPParams(t, &p.ConwayProtocolParameters)
 				for i, rat := range []*cbor.Rat{
 					p.RefScriptCostMultiplier,
 					p.CommitteeStakeCoverage,
@@ -380,7 +381,7 @@ func TestEnactProposalHardForkReturnsMutationIsolatedPParams(t *testing.T) {
 				ReturnAddress: testBytes(29, 0xE4),
 			})
 			require.NoError(t, err)
-			test.mutate(result.UpdatedPParams)
+			test.mutate(t, result.UpdatedPParams)
 
 			after, err := cbor.Encode(pparams)
 			require.NoError(t, err)
@@ -437,8 +438,19 @@ func mutableConwayPParamsFixture() *conway.ConwayProtocolParameters {
 	}
 }
 
-func mutateConwayPParams(pparams *conway.ConwayProtocolParameters) {
-	pparams.CostModels[3][0] = 999
+func mutateConwayPParams(
+	t *testing.T,
+	pparams *conway.ConwayProtocolParameters,
+) {
+	t.Helper()
+	costModel, ok := pparams.CostModels[3]
+	if !ok {
+		t.Fatal("expected cost model 3")
+	}
+	if len(costModel) == 0 {
+		t.Fatal("expected cost model 3 to contain parameters")
+	}
+	costModel[0] = 999
 	pparams.CostModels[4] = []int64{4, 5, 6}
 	for i, rat := range []*cbor.Rat{
 		pparams.A0,

@@ -5267,7 +5267,7 @@ func cloneProtocolParametersForEra(
 	if era.Id == eras.ConwayEraDesc.Id {
 		if _, ok := pparams.(*conway.ConwayProtocolParameters); !ok {
 			return nil, fmt.Errorf(
-				"Conway era has protocol parameters type %T",
+				"conway era has protocol parameters type %T",
 				pparams,
 			)
 		}
@@ -5283,7 +5283,7 @@ func cloneProtocolParametersForEra(
 	if era.Id == eras.DijkstraEraDesc.Id {
 		if _, ok := pparams.(*dijkstra.DijkstraProtocolParameters); !ok {
 			return nil, fmt.Errorf(
-				"Dijkstra era has protocol parameters type %T",
+				"dijkstra era has protocol parameters type %T",
 				pparams,
 			)
 		}

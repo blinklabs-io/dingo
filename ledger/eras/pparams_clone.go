@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -33,12 +34,12 @@ func CloneGovernanceProtocolParameters(
 	switch p := pparams.(type) {
 	case *conway.ConwayProtocolParameters:
 		if p == nil {
-			return nil, fmt.Errorf("nil Conway protocol parameters")
+			return nil, errors.New("nil Conway protocol parameters")
 		}
 		return cloneConwayProtocolParameters(p), nil
 	case *gdijkstra.DijkstraProtocolParameters:
 		if p == nil {
-			return nil, fmt.Errorf("nil Dijkstra protocol parameters")
+			return nil, errors.New("nil Dijkstra protocol parameters")
 		}
 		ret := *p
 		ret.ConwayProtocolParameters = *cloneConwayProtocolParameters(

@@ -803,11 +803,12 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 }
 
 func TestProposalRepairRejectsUnknownGovernanceEra(t *testing.T) {
+	db, _ := newTallyTestDB(t)
 	cache := &proposalRepairCache{}
 	_, err := cache.govActionValidityPeriod(
 		models.Epoch{EpochId: 100, EraId: 999},
 		testHash32("future-era-proposal"),
-		nil,
+		db,
 		nil,
 	)
 	require.ErrorContains(t, err, "unexpected governance era 999")
