@@ -2584,6 +2584,14 @@ and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
 
+Caller-controlled filters for query paths that perform database work per item
+are bounded by `ledger.MaxLocalStateQueryItems` (currently 1000). This applies
+to `GetStakeSnapshots`, `GetDRepState`, `GetStakeDelegDeposits`, and
+`GetFilteredVoteDelegatees`. The bound is checked before database or consensus
+state access; oversized requests return a `ledger.LocalStateQueryLimitError`
+that matches `ledger.ErrLocalStateQueryLimitExceeded`. Empty/all forms and the
+existing result ordering and partial-result behavior remain unchanged.
+
 `GetChainDepState` and `GetPoolDistr2` back `cardano-cli query
 leadership-schedule`, which reads the epoch nonce from the first and the stake
 distribution from the second.

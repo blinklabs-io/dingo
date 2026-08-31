@@ -34,6 +34,52 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
+// MaxLocalStateQueryItems bounds caller-controlled collections on query paths
+// that perform database work for each requested item. The limit is checked
+// before any database read so an over-limit request cannot return a partial
+// response or monopolize the LocalStateQuery connection.
+const MaxLocalStateQueryItems = 1000
+
+// ErrLocalStateQueryLimitExceeded identifies a LocalStateQuery request whose
+// caller-controlled item count exceeds MaxLocalStateQueryItems.
+var ErrLocalStateQueryLimitExceeded = errors.New(
+	"local state query item limit exceeded",
+)
+
+// LocalStateQueryLimitError describes an over-limit LocalStateQuery request.
+// Callers can use errors.Is(err, ErrLocalStateQueryLimitExceeded) for the
+// stable error category and errors.As for the query name and counts.
+type LocalStateQueryLimitError struct {
+	Query string
+	Items int
+	Limit int
+}
+
+func (e *LocalStateQueryLimitError) Error() string {
+	return fmt.Sprintf(
+		"%s: %s: got %d items, limit %d",
+		ErrLocalStateQueryLimitExceeded,
+		e.Query,
+		e.Items,
+		e.Limit,
+	)
+}
+
+func (e *LocalStateQueryLimitError) Unwrap() error {
+	return ErrLocalStateQueryLimitExceeded
+}
+
+func checkLocalStateQueryItemLimit(query string, items int) error {
+	if items <= MaxLocalStateQueryItems {
+		return nil
+	}
+	return &LocalStateQueryLimitError{
+		Query: query,
+		Items: items,
+		Limit: MaxLocalStateQueryItems,
+	}
+}
+
 func (ls *LedgerState) Query(query any) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
@@ -528,6 +574,16 @@ func (ls *LedgerState) queryShelleyCbor(
 func (ls *LedgerState) queryShelleyStakeSnapshots(
 	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
 ) (any, error) {
+	pools, all := q.PoolFilter()
+	if !all {
+		if err := checkLocalStateQueryItemLimit(
+			"GetStakeSnapshots",
+			len(pools),
+		); err != nil {
+			return nil, err
+		}
+	}
+
 	consensus := ls.loadConsensusSnapshot()
 	epoch := consensus.currentEpoch.EpochId
 	setEpoch, hasSet := priorEpoch(epoch, 1)
@@ -549,8 +605,6 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
-
-	pools, all := q.PoolFilter()
 
 	var poolSnapshots map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot
 	if all {
@@ -809,6 +863,12 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 func (ls *LedgerState) queryShelleyDRepState(
 	creds []lcommon.Credential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetDRepState",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	result := make(olocalstatequery.DRepStateResult)
 	var dreps []*models.Drep
 	if len(creds) == 0 {
@@ -1075,6 +1135,12 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 	creds []olocalstatequery.StakeCredential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetStakeDelegDeposits",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	ret := make(olocalstatequery.StakeDelegDepositsResult)
 	for _, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
@@ -1106,6 +1172,12 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	creds []lcommon.Credential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetFilteredVoteDelegatees",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
 	for _, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
