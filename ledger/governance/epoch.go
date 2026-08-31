@@ -386,6 +386,9 @@ func ProcessEpoch(
 	}
 
 	majorVersion := conwayPParams.ProtocolVersion.Major
+	// RATIFY uses the post-ENACT protocol version for both threshold
+	// selection and action-specific SPO non-voter semantics.
+	tallyCtx.MajorVersion = majorVersion
 	// Computed after ENACT and reused across the RATIFY loop. The
 	// RATIFY loop marks proposals but does not enact committee state.
 	ccQuorum, err := conwayRatifyQuorum(

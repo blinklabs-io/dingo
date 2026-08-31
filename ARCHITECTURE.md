@@ -8059,6 +8059,11 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    used by standalone/test callers. The mid-epoch HardForkInitiation stability
    check snapshots and threads this gate through `StabilityCheckInputs` as well,
    keeping its advertised transition tally aligned with boundary ratification.
+   `TallyContext.MajorVersion` is assigned from the post-ENACT protocol
+   parameters in both paths. SPO tallying first honors an explicit vote, then
+   treats every silent pool as implicit No for HardForkInitiation; during
+   Conway bootstrap, silent pools on other actions are Abstain. Only
+   post-bootstrap non-voters reach the reward-account default-vote rules.
 8. Treasury donations (`applyEpochDonations`), added after withdrawals.
 9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
