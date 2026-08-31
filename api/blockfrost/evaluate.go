@@ -218,6 +218,24 @@ func (b *Blockfrost) evaluateTransaction(
 			)
 			return
 		}
+		// A transaction that decoded but could not be evaluated is a
+		// different failure, and reporting it as malformed CBOR sends
+		// callers looking in the wrong place. Log the cause: it is the
+		// only record of why evaluation failed, and the response body
+		// deliberately does not leak ledger internals.
+		if errors.Is(err, ErrTransactionEvaluation) {
+			b.logger.Error(
+				"failed to evaluate transaction",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Transaction could not be evaluated.",
+			)
+			return
+		}
 		b.logger.Error("failed to evaluate transaction", "error", err)
 		writeError(
 			w,

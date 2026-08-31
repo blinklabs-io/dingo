@@ -1244,6 +1244,29 @@ func (b *Blockfrost) handleTransactionSubmit(
 
 	hash, err := b.node.TransactionSubmit(txCbor)
 	if err != nil {
+		if errors.Is(err, ErrTransactionRejected) {
+			// The transaction decoded; the mempool declined it. Reporting
+			// that as malformed CBOR sends callers looking at their
+			// serialization instead of at the rejection, so name the
+			// reason. Blockfrost likewise passes the node's rejection
+			// through, and an off-chain SDK surfaces this message verbatim
+			// to whoever ran the transaction.
+			b.logger.Error(
+				"transaction rejected by the mempool",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Transaction rejected: "+
+					strings.TrimPrefix(
+						err.Error(),
+						ErrTransactionRejected.Error()+": ",
+					),
+			)
+			return
+		}
 		if errors.Is(err, ErrInvalidTransaction) {
 			writeError(
 				w,

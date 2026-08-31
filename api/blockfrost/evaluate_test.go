@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -321,4 +322,94 @@ func TestDecodeTransactionPayload(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// TestHandleTransactionSubmitRejectedIsNotReportedAsMalformed covers a
+// transaction the mempool declines. Both that and a genuinely undecodable body
+// used to be wrapped in ErrInvalidTransaction, so a well-formed transaction
+// rejected for, say, a script data hash mismatch came back as
+// "Invalid transaction CBOR." with nothing logged. That sends the caller to
+// inspect their serialization instead of the rejection, which is the one thing
+// the response could have told them.
+func TestHandleTransactionSubmitRejectedIsNotReportedAsMalformed(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: fmt.Errorf(
+			"%w: validate transaction: script data hash mismatch",
+			ErrTransactionRejected,
+		),
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.NotEqual(
+		t,
+		"Invalid transaction CBOR.",
+		resp.Message,
+		"a rejected transaction is not malformed CBOR",
+	)
+	assert.Equal(
+		t,
+		"Transaction rejected: validate transaction: script data hash mismatch",
+		resp.Message,
+		"the rejection reason is what the caller needs",
+	)
+}
+
+// TestHandleTransactionSubmitStillReportsMalformedCbor pins the other side of
+// that split: a body that genuinely cannot be decoded keeps its message.
+func TestHandleTransactionSubmitStillReportsMalformedCbor(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: fmt.Errorf(
+			"%w: determine transaction type",
+			ErrInvalidTransaction,
+		),
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Invalid transaction CBOR.", resp.Message)
+}
+
+// TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed is the same
+// split on the evaluation endpoints: a transaction that decoded but could not
+// be evaluated is not malformed CBOR.
+func TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed(t *testing.T) {
+	node := evaluateTestNode()
+	node.transactionEvaluationErr = fmt.Errorf(
+		"%w: resolve inputs",
+		ErrTransactionEvaluation,
+	)
+	b := newTestBlockfrost(node)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/utils/txs/evaluate",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionEvaluate(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Transaction could not be evaluated.", resp.Message)
 }

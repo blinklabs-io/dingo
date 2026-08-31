@@ -54,19 +54,30 @@ import (
 )
 
 var (
-	ErrInvalidAddress      = errors.New("invalid address")
-	ErrAddressNotFound     = errors.New("address not found")
-	ErrInvalidBlockID      = errors.New("invalid block id")
-	ErrBlockNotFound       = errors.New("block not found")
-	ErrEpochNotFound       = errors.New("epoch not found")
-	ErrAssetNotFound       = errors.New("asset not found")
-	ErrDRepNotFound        = errors.New("drep not found")
-	ErrInvalidTransaction  = errors.New("invalid transaction")
-	ErrInvalidPoolID       = errors.New("invalid pool id")
-	ErrMempoolUnavailable  = errors.New("mempool unavailable")
-	ErrMempoolFull         = errors.New("mempool full")
-	ErrTransactionNotFound = errors.New("transaction not found")
-	ErrInvalidStakeAddress = errors.New("invalid stake address")
+	ErrInvalidAddress     = errors.New("invalid address")
+	ErrAddressNotFound    = errors.New("address not found")
+	ErrInvalidBlockID     = errors.New("invalid block id")
+	ErrBlockNotFound      = errors.New("block not found")
+	ErrEpochNotFound      = errors.New("epoch not found")
+	ErrAssetNotFound      = errors.New("asset not found")
+	ErrDRepNotFound       = errors.New("drep not found")
+	ErrInvalidTransaction = errors.New("invalid transaction")
+	// ErrTransactionRejected reports a well-formed transaction the mempool
+	// declined, e.g. failing script validation or an unresolvable input. It
+	// is distinct from ErrInvalidTransaction so submission does not report a
+	// decodable transaction as malformed CBOR.
+	ErrTransactionRejected = errors.New("transaction rejected")
+	// ErrTransactionEvaluation reports a transaction that decoded cleanly but
+	// could not be evaluated, e.g. an input the ledger cannot resolve or a
+	// script that fails. It is deliberately distinct from
+	// ErrInvalidTransaction so the evaluation endpoints do not report a
+	// well-formed transaction as malformed CBOR.
+	ErrTransactionEvaluation = errors.New("transaction evaluation failed")
+	ErrInvalidPoolID         = errors.New("invalid pool id")
+	ErrMempoolUnavailable    = errors.New("mempool unavailable")
+	ErrMempoolFull           = errors.New("mempool full")
+	ErrTransactionNotFound   = errors.New("transaction not found")
+	ErrInvalidStakeAddress   = errors.New("invalid stake address")
 	// ErrProtocolParamsUnavailable reports that no protocol parameters exist
 	// for the requested point. Byron carries no protocol-parameter CBOR, so a
 	// genuine Byron prefix reaches this during a from-genesis sync; it is an
@@ -3782,9 +3793,9 @@ func (a *NodeAdapter) TransactionSubmit(
 			)
 		}
 		return "", fmt.Errorf(
-			"submit transaction to mempool: %w: %w",
+			"%w: %w",
+			ErrTransactionRejected,
 			err,
-			ErrInvalidTransaction,
 		)
 	}
 	return tx.Hash().String(), nil
@@ -3814,8 +3825,8 @@ func (a *NodeAdapter) TransactionEvaluate(
 	_, _, redeemerExUnits, err := a.ledgerState.EvaluateTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"%w: evaluate transaction: %w",
-			ErrInvalidTransaction,
+			"%w: %w",
+			ErrTransactionEvaluation,
 			err,
 		)
 	}
@@ -3825,7 +3836,7 @@ func (a *NodeAdapter) TransactionEvaluate(
 		if purpose == "" {
 			return nil, fmt.Errorf(
 				"%w: unsupported redeemer tag %d",
-				ErrInvalidTransaction,
+				ErrTransactionEvaluation,
 				key.Tag,
 			)
 		}
