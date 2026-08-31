@@ -575,7 +575,7 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 
 	txn := db.MetadataTxn(true)
 	defer txn.Release()
-	_, err = ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(&EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -589,12 +589,26 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 			return pparams, nil
 		},
 	})
-	require.Error(t, err)
-	assert.Contains(
-		t,
-		err.Error(),
-		"exceeds tracked treasury withdrawal capacity 100",
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	assert.Equal(t, 1, out.EnactedCount)
+	constitution, err := db.GetGovernanceProposal(testBytes(32, 8), 0, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, constitution.EnactedEpoch)
+	withdrawal, err := db.GetGovernanceProposal(testBytes(32, 10), 0, nil)
+	require.NoError(t, err)
+	assert.Nil(t, withdrawal.EnactedEpoch)
+	assert.Nil(t, withdrawal.RatifiedEpoch)
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(150), uint64(state.Treasury))
+	account, err := store.GetAccountByCredential(
+		0, withdrawStakeCred, false, nil,
 	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Zero(t, uint64(account.Reward))
 }
 
 func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(

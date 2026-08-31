@@ -234,6 +234,16 @@ type GovernanceStore interface {
 		types.Txn,
 	) error
 
+	// ClearGovernanceProposalRatification moves a proposal back to the active,
+	// pending state at transitionSlot after a deterministic enactment
+	// precondition failure.
+	ClearGovernanceProposalRatification(
+		txHash []byte,
+		actionIndex uint32,
+		transitionSlot uint64,
+		txn types.Txn,
+	) error
+
 	// GetChildGovernanceProposals returns all active proposals whose parent
 	// is the given proposal (matched by txHash + actionIndex). Only returns
 	// proposals not yet enacted, expired, or soft-deleted. Used during
