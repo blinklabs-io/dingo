@@ -1370,7 +1370,10 @@ func (m *DingoStateManager) proposalToModel(
 	}
 
 	if info.RatifiedEpoch != nil {
-		proposal.RatifiedEpoch = info.RatifiedEpoch
+		ratifiedEpoch := *info.RatifiedEpoch
+		ratifiedSlot := ratifiedEpoch * conformanceSlotsPerEpoch
+		proposal.RatifiedEpoch = &ratifiedEpoch
+		proposal.RatifiedSlot = &ratifiedSlot
 	}
 
 	return proposal

@@ -74,6 +74,30 @@ func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
 	require.Equal(t, boundarySlot, *stored.RatifiedSlot)
 }
 
+func TestProposalToModelStoresRatificationPair(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	ratifiedEpoch := uint64(4)
+	model := m.proposalToModel(
+		hex.EncodeToString(testHash32(0xb1))+"#0",
+		conformance.GovActionInfo{
+			ActionType:     common.GovActionTypeInfo,
+			ExpiresAfter:   10,
+			RatifiedEpoch:  &ratifiedEpoch,
+			SubmittedEpoch: 1,
+		},
+	)
+	require.NotNil(t, model.RatifiedEpoch)
+	require.NotNil(t, model.RatifiedSlot)
+	require.Equal(
+		t,
+		ratifiedEpoch*conformanceSlotsPerEpoch,
+		*model.RatifiedSlot,
+	)
+}
+
 // testHash28 builds a deterministic, distinguishable-by-seed 28-byte hash
 // value (the size of a Blake2b224 credential/pool/DRep hash) for tests that
 // need a well-formed but otherwise arbitrary identity.
