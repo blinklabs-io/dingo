@@ -3155,9 +3155,20 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 	)
 }
 
-// rollbackChainAndState rewinds the primary chain and then synchronizes the
-// metadata-backed ledger state to the same point.
-func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
+// rollbackChainAndStateDeferred is rollbackChainAndState that queues the
+// chain.update events produced by the primary-chain rewind onto pubs instead
+// of letting the chain publish them inline. This method is reached from
+// chainsync event handling (handleEventChainsyncRollback, tryResolveFork)
+// while chainsyncMutex is held; an inline, back-pressured chain.update publish
+// under that mutex is the drain deadlock (see pendingPublishes). Queueing on
+// the caller's pendingPublishes publishes after the mutex is released and,
+// because the caller threads one queue through the whole handler, keeps this
+// rollback's chain.update ahead of the block-add chain.update events that
+// follow it. A nil pubs publishes immediately (unlocked / test path).
+func (ls *LedgerState) rollbackChainAndStateDeferred(
+	point ocommon.Point,
+	pubs *pendingPublishes,
+) error {
 	ls.RLock()
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
@@ -3212,16 +3223,29 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	// A database commit becomes visible before its AfterCommit callbacks run.
 	// Exclude that window so blocksAboveSlot can never publish an Undo for the
 	// new state before the matching Apply reaches the ordered lane.
+	var rollbackEvents []event.Event
 	err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 			return err
 		}
-		return ls.chain.Rollback(point)
+		evts, rbErr := ls.chain.RollbackDeferred(point)
+		if rbErr != nil {
+			return rbErr
+		}
+		rollbackEvents = evts
+		return nil
 	}()
 	if err != nil {
 		return err
+	}
+	// Publish the rollback's chain.update after chainsyncMutex is released.
+	// Under the mutex an inline back-pressured publish deadlocks the drain;
+	// queueing on pubs (nil publishes immediately on the unlocked path) moves
+	// it past the unlock while preserving rollback-before-add ordering.
+	for _, evt := range rollbackEvents {
+		pubs.add(ls.config.EventBus, evt.Type, evt)
 	}
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)

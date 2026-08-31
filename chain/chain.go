@@ -205,11 +205,17 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, true)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true)
 	if err != nil {
 		return err
 	}
-	// Publish event immediately for standalone (non-batched) calls
+	// Publish event immediately for standalone (non-batched) callers.
+	// forgeBlock reaches this on the scheduler goroutine, not under a ledger
+	// mutex, so a backpressured Publish here cannot stall the chainsync
+	// drain. The mutex-holding blockfetch drain uses AddBlockWithPointDeferred
+	// instead, which returns the event for the ledger to publish after it
+	// releases chainsyncBlockfetchMutex. See ledger.pendingPublishes and the
+	// blinklabs-io/dingo drain deadlock.
 	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
@@ -224,7 +230,6 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 		block,
 		ocommon.Point{},
 		nil,
-		true,
 		false,
 	)
 	if err != nil {
@@ -244,7 +249,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true, true)
+	evt, err := c.addBlockInternal(block, point, txn, true)
 	if err != nil {
 		return err
 	}
@@ -252,6 +257,25 @@ func (c *Chain) AddBlockWithPoint(
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
 	return nil
+}
+
+// AddBlockWithPointDeferred adds a block exactly like AddBlockWithPoint but
+// returns the resulting chain.update event instead of publishing it, leaving
+// publication to the caller. The ledger's chainsync/blockfetch drain calls
+// this while holding chainsyncBlockfetchMutex and queues the event on its
+// pendingPublishes, so the (potentially backpressured) delivery runs only
+// after the mutex is released. Publishing inline under that mutex is what
+// deadlocked the node: a terminal chain.update subscriber that stopped
+// draining parked the publish with the mutex held, handleEventChainsync then
+// blocked on the same mutex, and the ledger.chainsync buffer filled
+// (blinklabs-io/dingo preview freeze). A returned event with an empty Type
+// means there is nothing to publish.
+func (c *Chain) AddBlockWithPointDeferred(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+) (event.Event, error) {
+	return c.addBlockInternal(block, point, txn, true)
 }
 
 // addBlockInternal performs all block-adding logic but returns the event
@@ -262,7 +286,6 @@ func (c *Chain) addBlockInternal(
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
-	notifyWaiters bool,
 	matchPendingHeader bool,
 ) (event.Event, error) {
 	if c == nil {
@@ -281,7 +304,7 @@ func (c *Chain) addBlockInternal(
 		block,
 		point,
 		txn,
-		notifyWaiters,
+		true,
 		matchPendingHeader,
 	)
 }
@@ -435,7 +458,9 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 			return err
 		}
 		c.notifyWaitingIterators()
-		// Transaction committed successfully; publish all events
+		// Transaction committed successfully; publish all events. This
+		// bulk-import path (internal/node/load) does not run under a ledger
+		// mutex, so an inline Publish here cannot stall the chainsync drain.
 		if c.eventBus != nil {
 			for _, evt := range pendingEvents {
 				c.eventBus.Publish(ChainUpdateEventType, evt)
@@ -666,7 +691,8 @@ func (c *Chain) addRawBlocks(
 			return fmt.Errorf("add raw block batch: %w", err)
 		}
 		c.notifyWaitingIterators()
-		// Publish events (only when eventBus is set).
+		// Publish events (only when eventBus is set). Not reached under a
+		// ledger mutex, so an inline Publish is safe here.
 		if c.eventBus != nil {
 			for _, evt := range pendingEvents {
 				c.eventBus.Publish(
@@ -697,13 +723,36 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 		return err
 	}
 	// Publish events after locks are released to prevent deadlocks
-	// when subscribers call back into chain/manager state.
+	// when subscribers call back into chain/manager state. The
+	// mutex-holding ledger rollback path uses RollbackDeferred instead,
+	// which returns these events for the ledger to publish after it
+	// releases chainsyncMutex.
 	if c.eventBus != nil {
 		for _, evt := range pendingEvents {
 			c.eventBus.Publish(evt.Type, evt)
 		}
 	}
 	return nil
+}
+
+// RollbackDeferred rewinds the chain exactly like Rollback but returns the
+// resulting chain.update events instead of publishing them, leaving
+// publication to the caller. The ledger's rollbackChainAndState calls this
+// while holding chainsyncMutex and queues the events on its pendingPublishes,
+// so delivery (which can backpressure on a full subscriber buffer) runs only
+// after the mutex is released. Publishing inline under chainsyncMutex risks
+// the same drain deadlock described on AddBlockWithPointDeferred. The events
+// are returned in rollback order; a caller that queues them on one
+// pendingPublishes keeps this rollback's chain.update ahead of the block-add
+// chain.update events that follow it, which is the ordering rollbacks depend
+// on.
+func (c *Chain) RollbackDeferred(
+	point ocommon.Point,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	return c.rollbackLocked(point)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to

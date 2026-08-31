@@ -528,7 +528,7 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 			)
 		}
 	} else if e.Block != nil {
-		if err := ls.handleEventBlockfetchBlock(e); err != nil {
+		if err := ls.handleEventBlockfetchBlockDeferred(e, &pending); err != nil {
 			if strings.Contains(
 				err.Error(),
 				"block header crypto verification failed",
@@ -1998,7 +1998,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			),
 		)
 	}
-	if err := ls.rollbackChainAndState(e.Point); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(e.Point, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -3472,7 +3472,7 @@ func (ls *LedgerState) tryResolveFork(
 		"connection_id", e.ConnectionId.String(),
 	)
 
-	if err := ls.rollbackChainAndState(rollbackPoint); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(rollbackPoint, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// The ancestor resolved but the chain no longer holds it at that
 			// index, so rolling back would splice a continuation onto a parent
@@ -3618,8 +3618,15 @@ func (ls *LedgerState) tryResolveFork(
 	return true, nil
 }
 
-//nolint:unparam
-func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
+// handleEventBlockfetchBlockDeferred is handleEventBlockfetchBlock that threads
+// the caller's pendingPublishes queue into flushPendingBlockfetchBlocksDeferred,
+// so chain.update events emitted while chainsyncBlockfetchMutex is held are
+// published only after it is released. A nil pubs preserves the standalone
+// immediate-publish behaviour for test callers.
+func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
+	e BlockfetchEvent,
+	pubs *pendingPublishes,
+) error {
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to
@@ -3669,7 +3676,7 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 		)
 		if !headerAlreadyVerified &&
 			!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
-			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+			if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 				return err
 			}
 			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
@@ -3717,7 +3724,7 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// range is fetchable after all and its failure record is stale.
 	ls.noteBlockfetchRangeProgress(e.Point)
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
-		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 			return err
 		}
 	}
@@ -3768,7 +3775,7 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 			ls.chainsyncBlockfetchReadyChan = nil
 		}
 		ls.chainsyncBlockfetchReadyMutex.Unlock()
-		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
 			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 			return fmt.Errorf(
@@ -4317,7 +4324,19 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
-func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
+// flushPendingBlockfetchBlocksDeferred is flushPendingBlockfetchBlocks that
+// queues each committed block's chain.update onto pubs instead of letting the
+// chain publish it inline. The blockfetch drain runs under
+// chainsyncBlockfetchMutex; an inline, back-pressured chain.update publish
+// there can park the drain with the mutex held, which then blocks
+// handleEventChainsync on the same mutex and fills the ledger.chainsync buffer
+// -- the preview drain deadlock. Queueing on the caller's pendingPublishes
+// moves publication to after the mutex is released. A nil pubs publishes
+// immediately (the unlocked / test path), per pendingPublishes' nil-receiver
+// contract.
+func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
+	pubs *pendingPublishes,
+) error {
 	if len(ls.pendingBlockfetchEvents) == 0 {
 		return nil
 	}
@@ -4328,12 +4347,18 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
 	// lookups hit uncommitted state.
 	for _, pendingEvent := range pending {
-		addBlockErr := ls.chain.AddBlockWithPoint(
+		evt, addBlockErr := ls.chain.AddBlockWithPointDeferred(
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
 		)
 		if addBlockErr == nil {
+			// Defer this block's chain.update past chainsyncBlockfetchMutex
+			// rather than publishing inline. See
+			// flushPendingBlockfetchBlocksDeferred and pendingPublishes.
+			if evt.Type != "" {
+				pubs.add(ls.config.EventBus, evt.Type, evt)
+			}
 			// Audit only after the body has extended the queued chain. A body
 			// from an abandoned fetch may still be delivered after a fork
 			// restart; auditing it here would poison producedTxs with stale
@@ -6353,7 +6378,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
 	receivedBlockCount := ls.batchBlocksReceived
-	if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+	if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
