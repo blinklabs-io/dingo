@@ -21,7 +21,7 @@ require (
 	github.com/blinklabs-io/bursa v0.16.1-0.20260817233527-1eb8b64db609
 	github.com/blinklabs-io/gouroboros v0.202.2
 	github.com/blinklabs-io/ouroboros-mock v0.18.0
-	github.com/blinklabs-io/plutigo v0.4.0
+	github.com/blinklabs-io/plutigo v0.5.0
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.21.0
