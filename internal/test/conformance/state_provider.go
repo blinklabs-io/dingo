@@ -477,6 +477,9 @@ func (p *DingoStateProvider) realCommitteeMember(
 		return nil, fmt.Errorf("lookup committee resignation: %w", err)
 	}
 	result.Resigned = resigned
+	if resigned {
+		result.HotKey = nil
+	}
 
 	return result, nil
 }
@@ -526,6 +529,9 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 			return nil, fmt.Errorf("lookup committee resignation: %w", err)
 		}
 		member.Resigned = resigned
+		if resigned {
+			member.HotKey = nil
+		}
 		members = append(members, member)
 	}
 

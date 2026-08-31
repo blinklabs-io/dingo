@@ -213,6 +213,73 @@ func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
 	)
 }
 
+// TestCommitteeMemberResignationClearsHotKey proves an authorization that is
+// superseded by a later resignation is not exposed as active by either
+// committee-member provider method. A still-later authorization restores the
+// hot key and clears the resigned state.
+func TestCommitteeMemberResignationClearsHotKey(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	coldKey := testHash28(0x52)
+	hotKey := testHash28(0x53)
+	require.NoError(t, m.LoadInitialState(
+		&conformance.ParsedInitialState{
+			CommitteeMembers: map[common.Blake2b224]uint64{coldKey: 999},
+		},
+		&conway.ConwayProtocolParameters{},
+	))
+
+	applyCert := func(slot uint64, seed string, cert common.Certificate) {
+		tx, err := syntheticTransaction(seed, []common.Certificate{cert})
+		require.NoError(t, err)
+		require.NoError(t, m.ApplyTransaction(tx, slot))
+	}
+	authorization := func() *common.AuthCommitteeHotCertificate {
+		return &common.AuthCommitteeHotCertificate{
+			CertType: uint(common.CertificateTypeAuthCommitteeHot),
+			ColdCredential: common.Credential{
+				CredType:   common.CredentialTypeAddrKeyHash,
+				Credential: coldKey,
+			},
+			HotCredential: common.Credential{
+				CredType:   common.CredentialTypeAddrKeyHash,
+				Credential: hotKey,
+			},
+		}
+	}
+
+	applyCert(1, "committee-authorize", authorization())
+	applyCert(2, "committee-resign", &common.ResignCommitteeColdCertificate{
+		CertType: uint(common.CertificateTypeResignCommitteeCold),
+		ColdCredential: common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: coldKey,
+		},
+	})
+
+	provider := NewDingoStateProvider(m)
+	assertState := func(wantResigned bool, wantHotKey *common.Blake2b224) {
+		member, err := provider.CommitteeMember(coldKey)
+		require.NoError(t, err)
+		require.NotNil(t, member)
+		require.Equal(t, wantResigned, member.Resigned)
+		require.Equal(t, wantHotKey, member.HotKey)
+
+		members, err := provider.CommitteeMembers()
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+		require.Equal(t, wantResigned, members[0].Resigned)
+		require.Equal(t, wantHotKey, members[0].HotKey)
+	}
+
+	assertState(true, nil)
+
+	applyCert(3, "committee-reauthorize", authorization())
+	assertState(false, &hotKey)
+}
+
 // TestPoolCurrentStatePendingRetirement proves PoolCurrentState's pending
 // retirement epoch tracks the pool's latest retirement certificate by
 // insertion order (AddedSlot), not the maximum epoch value across every
