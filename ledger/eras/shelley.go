@@ -184,18 +184,16 @@ var shelleyUtxoValidationRules = buildShelleyValidationRules()
 
 // buildShelleyValidationRules drops the upstream fee and max-size rules so
 // ValidateTxShelley can apply the Dingo checks that size a transaction with
-// TxSizeForFee. Rules are identified by function so upstream insertions and
+// TxSizeForFee. Rules are identified by descriptor ID so upstream insertions and
 // reordering do not change which checks Dingo replaces.
 func buildShelleyValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
-		shelley.UtxoValidationRules,
+		shelley.UtxoValidationRuleDescriptors(),
 		utxoValidationRuleReplacement{
-			validationFunc: shelley.UtxoValidateFeeTooSmallUtxo,
-			name:           "shelley.UtxoValidateFeeTooSmallUtxo",
+			id: lcommon.UtxoValidationRuleFeeTooSmall,
 		},
 		utxoValidationRuleReplacement{
-			validationFunc: shelley.UtxoValidateMaxTxSizeUtxo,
-			name:           "shelley.UtxoValidateMaxTxSizeUtxo",
+			id: lcommon.UtxoValidationRuleMaxTxSize,
 		},
 	)
 }

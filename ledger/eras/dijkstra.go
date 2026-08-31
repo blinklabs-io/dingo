@@ -285,10 +285,9 @@ func ValidateTxDijkstra(
 }
 
 var dijkstraPhase1UtxoValidationRules = buildIndexedUtxoValidationRules(
-	gdijkstra.UtxoValidationRules,
+	gdijkstra.UtxoValidationRuleDescriptors(),
 	utxoValidationRuleReplacement{
-		validationFunc: gdijkstra.UtxoValidatePlutusScripts,
-		name:           "dijkstra.UtxoValidatePlutusScripts",
+		id: lcommon.UtxoValidationRulePlutusScripts,
 	},
 )
 

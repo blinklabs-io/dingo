@@ -19,8 +19,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"reflect"
-	"runtime"
 
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -96,13 +94,18 @@ func checkPoolMarginFloor(
 
 type indexedUtxoValidationRule struct {
 	index          int
+	id             lcommon.UtxoValidationRuleId
 	validationFunc lcommon.UtxoValidationRuleFunc
 }
 
 type utxoValidationRuleReplacement struct {
-	validationFunc  lcommon.UtxoValidationRuleFunc
+	id              lcommon.UtxoValidationRuleId
 	replacementFunc lcommon.UtxoValidationRuleFunc
-	name            string
+}
+
+type utxoValidationRuleDescriptor interface {
+	lcommon.UtxoValidationRuleDescriptor |
+		*lcommon.UtxoValidationRuleDescriptor
 }
 
 const conwayRefScriptCostStride = 25_600
@@ -165,44 +168,65 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 	return false
 }
 
-// buildIndexedUtxoValidationRules finds each target by function identity and
-// preserves the target's current upstream position. A nil replacement removes
-// the target; a non-nil replacement substitutes it in place.
-func buildIndexedUtxoValidationRules(
-	rules []lcommon.UtxoValidationRuleFunc,
+// buildIndexedUtxoValidationRules finds each target by its stable descriptor
+// ID and preserves the target's original upstream position. A nil replacement
+// removes the target; a non-nil replacement substitutes it in place.
+func buildIndexedUtxoValidationRules[D utxoValidationRuleDescriptor](
+	descriptors []D,
 	replacements ...utxoValidationRuleReplacement,
 ) []indexedUtxoValidationRule {
-	replacementByName := make(
-		map[string]utxoValidationRuleReplacement,
-		len(replacements),
+	normalized := make(
+		[]lcommon.UtxoValidationRuleDescriptor,
+		len(descriptors),
 	)
-	replacementNames := make([]string, 0, len(replacements))
-	for _, replacement := range replacements {
-		name := replacement.name
-		if name == "" {
-			name = "UTxO validation rule"
+	for idx, descriptor := range descriptors {
+		switch tmpDescriptor := any(descriptor).(type) {
+		case lcommon.UtxoValidationRuleDescriptor:
+			normalized[idx] = tmpDescriptor
+		case *lcommon.UtxoValidationRuleDescriptor:
+			if tmpDescriptor == nil {
+				panic(fmt.Errorf(
+					"UTxO validation rule descriptor at index %d is nil",
+					idx,
+				))
+			}
+			normalized[idx] = *tmpDescriptor
 		}
-		replacement.name = name
-		targetName := utxoValidationRuleName(replacement.validationFunc)
-		if targetName == "" {
-			panic(name + " expected validation function is nil")
-		}
-		if _, ok := replacementByName[targetName]; ok {
-			panic(name + " is configured more than once")
-		}
-		replacementByName[targetName] = replacement
-		replacementNames = append(replacementNames, targetName)
+	}
+	rules, err := lcommon.UtxoValidationRulesFromDescriptors(normalized)
+	if err != nil {
+		panic(err)
 	}
 
-	matched := make(map[string]bool, len(replacements))
+	replacementById := make(
+		map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement,
+		len(replacements),
+	)
+	replacementIds := make(
+		[]lcommon.UtxoValidationRuleId,
+		0,
+		len(replacements),
+	)
+	for _, replacement := range replacements {
+		if replacement.id == "" {
+			panic("UTxO validation rule replacement has an empty ID")
+		}
+		if _, ok := replacementById[replacement.id]; ok {
+			panic(fmt.Sprintf(
+				"UTxO validation rule replacement ID %q is configured more than once",
+				replacement.id,
+			))
+		}
+		replacementById[replacement.id] = replacement
+		replacementIds = append(replacementIds, replacement.id)
+	}
+
+	matched := make(map[lcommon.UtxoValidationRuleId]bool, len(replacements))
 	ret := make([]indexedUtxoValidationRule, 0, len(rules))
 	for idx, validationFunc := range rules {
-		ruleName := utxoValidationRuleName(validationFunc)
-		if replacement, ok := replacementByName[ruleName]; ok {
-			if matched[ruleName] {
-				panic(replacement.name + " appears more than once in upstream rules")
-			}
-			matched[ruleName] = true
+		descriptor := normalized[idx]
+		if replacement, ok := replacementById[descriptor.Id]; ok {
+			matched[descriptor.Id] = true
 			validationFunc = replacement.replacementFunc
 			if validationFunc == nil {
 				continue
@@ -210,29 +234,19 @@ func buildIndexedUtxoValidationRules(
 		}
 		ret = append(ret, indexedUtxoValidationRule{
 			index:          idx,
+			id:             descriptor.Id,
 			validationFunc: validationFunc,
 		})
 	}
-	for _, targetName := range replacementNames {
-		if !matched[targetName] {
-			panic(
-				replacementByName[targetName].name +
-					" was not found in upstream rules",
-			)
+	for _, replacementId := range replacementIds {
+		if !matched[replacementId] {
+			panic(fmt.Sprintf(
+				"UTxO validation rule replacement ID %q was not found in upstream descriptors",
+				replacementId,
+			))
 		}
 	}
 	return ret
-}
-
-func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
-	if fn == nil {
-		return ""
-	}
-	pc := reflect.ValueOf(fn).Pointer()
-	if runtimeFn := runtime.FuncForPC(pc); runtimeFn != nil {
-		return runtimeFn.Name()
-	}
-	return fmt.Sprintf("%x", pc)
 }
 
 // SafeAddExUnits adds two ExUnits values with

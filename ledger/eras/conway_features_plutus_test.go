@@ -212,11 +212,9 @@ func decodeConwayFeaturesTx(
 
 func conwayFeaturesRule(t *testing.T) lcommon.UtxoValidationRuleFunc {
 	t.Helper()
-	wantName := utxoValidationRuleName(
-		validateConwayFeaturesWithNeededPlutusV1V2,
-	)
 	for _, rule := range conwayUtxoValidationRules {
-		if utxoValidationRuleName(rule.validationFunc) == wantName {
+		if rule.id == lcommon.
+			UtxoValidationRuleConwayFeaturesWithPlutusV1V2 {
 			return rule.validationFunc
 		}
 	}
