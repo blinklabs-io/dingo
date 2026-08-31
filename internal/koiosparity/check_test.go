@@ -1149,3 +1149,300 @@ func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
 			"divergence and must stay flagged", koiosEpoch,
 	)
 }
+
+// TestCheckDepartedPoolDoesNotErrorEpoch is the end-to-end counterpart of
+// compare_test.go's TestComparePoolEpochDepartedPoolIsInformational: it proves
+// checkEpoch resolves the K+1 snapshot's readiness for itself, which the
+// ComparePoolEpoch unit tests cannot.
+//
+// The fixture mirrors preview epoch 14. The pool is in epoch K's stake basis
+// (a K-1 reward_pool_input row) and absent from the K+1 snapshot, which is
+// itself committed — a ready epoch_summary row at K+1. That combination means
+// the pool left the pool set, so the epoch must still report PASS rather than
+// halting a strict-mode node (dingo #3485).
+func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// The pool is absent from the K+1 pool set: it left, so its epoch-K block
+	// count has no row to live on and the gap is informational.
+	dingoDir, cachePath, _ := seedDepartureFixture(
+		t, network, koiosEpoch, false,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"a departed pool must not put epoch %d into ERROR", koiosEpoch,
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "reward_pool_input_params", mismatches[0].Field)
+	require.Equal(
+		t,
+		CategoryPoolDeparted,
+		mismatches[0].Category,
+		"the uncomparable block count is recorded, not silently skipped",
+	)
+}
+
+// seedDepartureFixture builds the epoch-K comparison fixture used by the
+// departure tests. paramEpochPoolInSet controls whether the pool still appears
+// in the K+1 mark pool_stake_snapshot, which is what separates a pool that
+// left the pool set from one whose reward inputs are missing.
+func seedDepartureFixture(
+	t *testing.T,
+	network string,
+	koiosEpoch uint64,
+	paramEpochPoolInSet bool,
+) (dingoDir, cachePath string, poolBech32 string) {
+	t.Helper()
+	return seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, paramEpochPoolInSet, 0,
+	)
+}
+
+// seedDepartureFixtureWithCount is seedDepartureFixture with control over the
+// K+1 epoch_summary's declared TotalPoolCount. declaredPools of 0 means "match
+// the mark rows actually written", i.e. a complete set; a larger value
+// simulates a set that was only partially read.
+func seedDepartureFixtureWithCount(
+	t *testing.T,
+	network string,
+	koiosEpoch uint64,
+	paramEpochPoolInSet bool,
+	declaredPools uint64,
+) (dingoDir, cachePath string, poolBech32 string) {
+	t.Helper()
+	stakeEpoch := koiosEpoch - 1
+	paramEpoch := koiosEpoch + 1
+
+	poolHash := testPoolKeyHash(t, 0x09)
+	poolBech32, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolHash))
+	require.NoError(t, err)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	// One mark row is always written for another pool; the subject pool adds
+	// a second when it is still in the set. The summary declares that same
+	// count unless the caller is simulating a partial read.
+	markRows := uint64(1)
+	if paramEpochPoolInSet {
+		markRows = 2
+	}
+	if declaredPools == 0 {
+		declaredPools = markRows
+	}
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            paramEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		TotalPoolCount:   declaredPools,
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(5_000_000),
+		DelegatorCount: 7,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             stakeEpoch,
+		PoolKeyHash:       poolHash,
+		MemberRewardTotal: types.Uint64(123_456),
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	// Another pool always sits in the K+1 set, so membership is established
+	// either way and the two cases differ only in this pool's presence.
+	require.NoError(t, gdb.Create(&models.PoolStakeSnapshot{
+		Epoch:        paramEpoch,
+		SnapshotType: "mark",
+		PoolKeyHash:  testPoolKeyHash(t, 0x0a),
+		TotalStake:   types.Uint64(1_000),
+	}).Error)
+	if paramEpochPoolInSet {
+		require.NoError(t, gdb.Create(&models.PoolStakeSnapshot{
+			Epoch:        paramEpoch,
+			SnapshotType: "mark",
+			PoolKeyHash:  poolHash,
+			TotalStake:   types.Uint64(5_000_000),
+		}).Error)
+	}
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath = filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		[]KoiosPoolEpoch{{
+			Network:       network,
+			Epoch:         koiosEpoch,
+			PoolBech32:    poolBech32,
+			ActiveStake:   "5000000",
+			BlockCnt:      15,
+			Delegators:    7,
+			Margin:        "0.1",
+			FixedCost:     "340000000",
+			MemberRewards: "123456",
+			FetchedAt:     fetchedAt,
+		}},
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			Treasury:  "1000",
+			Reserves:  "2000",
+			Fees:      "300",
+			FetchedAt: fetchedAt,
+		},
+	))
+	require.NoError(t, cache.Close())
+	return dingoDir, cachePath, poolBech32
+}
+
+// TestCheckDegradedActivePoolStillErrors is the reviewer's degraded-active-pool
+// case. buildRewardStateInputs (ledger/snapshot/rotation.go) drops a pool with
+// stale registration data from reward_pool_input so one bad pool cannot wedge
+// the whole boundary capture, and says so explicitly: degraded pools are
+// excluded "and only from it — PoolStakeSnapshot and EpochSummary still
+// reflect the true observed stake".
+//
+// Such a pool is still in the K+1 pool set, so its missing reward-input row is
+// genuine missing input, not departure. Classifying it as pool_departed would
+// turn a real ERROR into a PASS, which is why departure is decided from
+// per-pool pool_stake_snapshot membership rather than from
+// epoch_summary.SnapshotReady (dingo #3485).
+func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixture(t, network, koiosEpoch, true)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a pool still in the K+1 pool set with no reward-input row is "+
+			"missing input, not a departure",
+	)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckMissingRewardBundleStillErrors is the reviewer's no-bundle case.
+// saveSnapshotInTxn persists the mark pool_stake_snapshot and epoch summary on
+// every transition "regardless of reward-input availability", so a ready
+// epoch_summary at K+1 is compatible with the entire reward-input bundle
+// having been skipped. Every pool then looks absent from reward_pool_input at
+// once, and none of them departed.
+//
+// The pool set at K+1 still lists them, so each stays an ERROR.
+func TestCheckMissingRewardBundleStillErrors(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// paramEpochPoolInSet: the whole bundle is missing, so no pool has a K+1
+	// reward_pool_input row while all of them remain in the pool set.
+	dingoDir, cachePath, _ := seedDepartureFixture(t, network, koiosEpoch, true)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a skipped reward-input bundle must not read as every pool departing",
+	)
+}
+
+// TestCheckIncompleteParamEpochPoolSetStillErrors is the completeness case: a
+// non-empty pool-set read does not prove the set was fully recorded or fully
+// read.
+//
+// The K+1 epoch summary here declares two pools while only one mark row is
+// present. The absent pool would look departed against that partial set, which
+// would pass the epoch and hide a dingo_db_missing. Membership is only trusted
+// when the number of readable mark rows equals the count the summary declares,
+// both being written from the same StakeDistribution (dingo #3485).
+func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// The pool is absent from the mark rows — which alone would read as
+	// departure — but the summary declares a pool that was never recorded, so
+	// the set is incomplete and absence proves nothing.
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"an incomplete K+1 pool set must not let absence read as departure",
+	)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
