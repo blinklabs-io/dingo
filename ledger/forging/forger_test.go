@@ -423,7 +423,17 @@ func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
 	return p.rbHash, p.hash, p.ok, p.err
 }
 
-func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
+// TestCheckAndForgeProductionSkipsObserverWhenNotAdopted holds the
+// contract that the blockForged observer publishes only after durable
+// acceptance. The production observer republishes the block on the event
+// bus and enqueues the Leios announcement that diffuses it to peers, so
+// running it for a block AddBlock rejected would advertise a block this
+// node never adopted.
+//
+// The forgeForged counter still increments before adoption, which is what
+// PR #2323 required: build-versus-adopt remains observable through
+// forgeForged and forgeCouldNot without publishing an unadopted block.
+func TestCheckAndForgeProductionSkipsObserverWhenNotAdopted(
 	t *testing.T,
 ) {
 	creds := setupTestCredentials(t)
@@ -436,6 +446,65 @@ func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
 	innerBroadcaster := &forgerTestBroadcaster{
 		err: errors.New("not adopted"),
 	}
+	var callOrder []string
+	broadcaster := &trackingBroadcaster{
+		inner: innerBroadcaster,
+		onAdd: func() { callOrder = append(callOrder, "adopt") },
+	}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		BlockForged: func(
+			ledger.Block,
+			[]byte,
+			time.Duration,
+		) {
+			callOrder = append(callOrder, "observe")
+		},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	err = forger.checkAndForgeProduction(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to add block")
+
+	assert.Equal(t, []string{"adopt"}, callOrder)
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, innerBroadcaster.calls)
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
+	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
+}
+
+// TestCheckAndForgeProductionObservesForgedBlockAfterAdoption is the
+// positive half of the contract: the observer runs, with the built block
+// and CBOR, once AddBlock has accepted the block.
+func TestCheckAndForgeProductionObservesForgedBlockAfterAdoption(
+	t *testing.T,
+) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	blockCbor := []byte{0x83, 0xaa, 0xbb}
+	builder := &forgerTestBuilder{
+		block: block,
+		cbor:  blockCbor,
+	}
+	innerBroadcaster := &forgerTestBroadcaster{}
 	var callOrder []string
 	broadcaster := &trackingBroadcaster{
 		inner: innerBroadcaster,
@@ -473,9 +542,7 @@ func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
 	})
 	require.NoError(t, err)
 
-	err = forger.checkAndForgeProduction(context.Background())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "failed to add block")
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
 	require.Same(t, block, observedBlock)
 	assert.Equal(t, blockCbor, observedCbor)
@@ -484,7 +551,7 @@ func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
 	assert.Equal(t, 1, builder.calls)
 	assert.Equal(t, 1, innerBroadcaster.calls)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
-	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }
 
 func TestCheckAndForgeProductionRecoversBlockForgedObserverPanic(
@@ -584,7 +651,9 @@ func TestCheckAndForgeProductionRecoversBlockValidatorPanic(t *testing.T) {
 	broadcaster := &forgerTestBroadcaster{}
 	validator := &forgerTestValidator{panic: true}
 
-	forger := newForgerWithValidator(t, block, nil, broadcaster, validator)
+	forger, clock := newForgerWithValidator(
+		t, block, nil, broadcaster, validator,
+	)
 
 	// A panic from the validator must not escape checkAndForgeProduction; it
 	// is treated as a validation failure so the block is dropped rather than
@@ -607,8 +676,10 @@ func TestCheckAndForgeProductionRecoversBlockValidatorPanic(t *testing.T) {
 		),
 	)
 
-	// The following forge cycle proceeds normally.
+	// The following forge cycle proceeds normally. It runs at the next
+	// slot because the fence refuses a slot already signed for.
 	validator.panic = false
+	clock.currentSlot = 11
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	assert.Equal(t, 2, validator.calls)
 	assert.Equal(t, 1, broadcaster.calls)
@@ -620,6 +691,11 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 	block := newForgerTestBlock(10, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{panic: true}
+	clock := &forgerTestSlotClock{
+		currentSlot:       10,
+		chainTipSlot:      9,
+		slotsPerKESPeriod: 100,
+	}
 
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
@@ -628,12 +704,8 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 		LeaderChecker:    forgerTestLeader{},
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
+		SlotClock:        clock,
+		PromRegistry:     prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 
@@ -654,8 +726,10 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 		),
 	)
 
-	// The following forge cycle proceeds normally.
+	// The following forge cycle proceeds normally. It runs at the next
+	// slot because the fence refuses a slot already signed for.
 	broadcaster.panic = false
+	clock.currentSlot = 11
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	assert.Equal(t, 2, broadcaster.calls)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))

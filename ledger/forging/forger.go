@@ -81,6 +81,14 @@ type BlockForger struct {
 	// Slot battle detection
 	slotTracker *SlotTracker
 
+	// Duplicate-slot fence. fenceStore is nil when no metadata store is
+	// wired (dev mode, embedders); lastForgedSlot is then in-memory
+	// only. Both are touched exclusively from the single forge loop
+	// goroutine after construction.
+	fenceStore     ForgeFenceStore
+	lastForgedSlot uint64
+	fenceLoaded    bool
+
 	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
 	leiosChecker   LeiosProduceChecker
 	leiosEBCaster  EndorserBlockBroadcaster
@@ -104,6 +112,25 @@ type BlockForger struct {
 	running bool
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+}
+
+// ForgeFenceStore persists the highest slot this node has committed to
+// forging. It is the durable half of the duplicate-slot fence: the
+// in-memory chain tip is lost on restart, and a tip that has rolled back
+// no longer proves which slots were already used.
+//
+// The fence is written before the block header for a slot is signed, so a
+// crash anywhere between signing and adoption still leaves the slot
+// recorded. Refusing a slot the node did not actually use costs one
+// block; signing a second, different block for a slot whose first block
+// may already have reached peers is equivocation.
+type ForgeFenceStore interface {
+	// LoadLastForgedSlot returns the highest recorded slot and whether
+	// any fence has been recorded yet.
+	LoadLastForgedSlot() (uint64, bool, error)
+	// StoreLastForgedSlot durably records slot as used. It must not
+	// return until the record survives a crash.
+	StoreLastForgedSlot(slot uint64) error
 }
 
 // LeaderChecker determines if the pool should produce a block for a given slot.
@@ -265,6 +292,12 @@ type ForgerConfig struct {
 	BlockForged      BlockForgedObserver
 	SlotClock        SlotClockProvider
 
+	// ForgeFence persists the last-forged-slot fence so a restart cannot
+	// sign a second block for a slot this node already used. Nil
+	// disables the durable fence, which leaves only the in-memory chain
+	// tip guarding against duplicate slots.
+	ForgeFence ForgeFenceStore
+
 	// LeiosProduceChecker enables EB forging when non-nil. Requires
 	// LeiosEBBroadcaster and LeiosMempool to also be set.
 	LeiosProduceChecker LeiosProduceChecker
@@ -329,6 +362,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosCerts:       cfg.LeiosCertificateProvider,
 		leiosParent:      cfg.LeiosParentAnnouncementProvider,
 		blockValidator:   cfg.BlockValidator,
+		fenceStore:       cfg.ForgeFence,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -377,6 +411,29 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		cfg.LeiosParentAnnouncementProvider == nil {
 		return nil, errors.New(
 			"leios certificate provider requires LeiosParentAnnouncementProvider",
+		)
+	}
+
+	// Load the persisted fence before the forger can be started. A store
+	// that cannot be read offers no duplicate-slot protection, so fail
+	// wiring rather than start a producer without it.
+	if f.fenceStore != nil {
+		slot, ok, err := f.fenceStore.LoadLastForgedSlot()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load forge fence: %w", err)
+		}
+		f.lastForgedSlot = slot
+		f.fenceLoaded = ok
+		if ok {
+			cfg.Logger.Info(
+				"loaded last-forged-slot fence",
+				"last_forged_slot", slot,
+			)
+		}
+	} else if cfg.Mode == ModeProduction {
+		cfg.Logger.Warn(
+			"no forge fence store configured; duplicate-slot " +
+				"protection will not survive a restart",
 		)
 	}
 
@@ -660,6 +717,19 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
 
+	// Commit to this slot before any signing happens for it, including
+	// the Leios endorser block below. The tip check above only rejects
+	// slots the local chain already covers; it cannot see a slot whose
+	// block was signed and diffused but never adopted, nor one that
+	// survived only in a tip that has since rolled back.
+	proceed, err := f.reserveForgeSlot(currentSlot)
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		return nil
+	}
+
 	leiosBlockData, embeddedEb := f.leiosBlockDataForSlot(currentSlot)
 	if f.leiosChecker != nil {
 		var excludedTxHashes map[string]struct{}
@@ -793,7 +863,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// Attempt local adoption immediately after building and validation. Keep
 	// observability callbacks out of this critical path: subscribers may be
 	// slow, while the block's parent must still be the active chain tip.
-	addErr := f.addBlockSafe(block, blockCbor)
+	if addErr := f.addBlockSafe(block, blockCbor); addErr != nil {
+		f.incCouldNotForge()
+		return fmt.Errorf("failed to add block: %w", addErr)
+	}
+
+	// Publish only after durable acceptance. The observer republishes the
+	// block on the event bus and enqueues its Leios announcement for
+	// diffusion, so running it for a rejected block would advertise a
+	// block this node never adopted. Build-versus-adopt stays observable
+	// through forgeForged above and forgeCouldNot on the failure path.
 	if f.blockForged != nil {
 		func() {
 			defer func() {
@@ -807,10 +886,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			}()
 			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
 		}()
-	}
-	if addErr != nil {
-		f.incCouldNotForge()
-		return fmt.Errorf("failed to add block: %w", addErr)
 	}
 
 	// AddBlock accepted the block, so its transactions are confirmed. Remove
@@ -913,6 +988,42 @@ func (f *BlockForger) buildBlock(
 
 // incCouldNotForge increments Forge_could_not_forge. Safe to call
 // when metrics are nil.
+// reserveForgeSlot enforces the duplicate-slot fence for slot and, when
+// the slot is usable, records it durably before the caller signs
+// anything for it.
+//
+// It reports whether forging may proceed. A slot at or below the fence is
+// refused (false, nil): the node has already committed to that slot, and
+// a second block for it would equivocate against a first that may already
+// have reached peers. A fence that cannot be persisted fails the forge
+// (false, err) rather than signing unprotected.
+func (f *BlockForger) reserveForgeSlot(slot uint64) (bool, error) {
+	if f.fenceLoaded && slot <= f.lastForgedSlot {
+		if f.metrics != nil {
+			f.metrics.forgeFenceBlocked.Inc()
+		}
+		f.logger.Warn(
+			"forge skip: slot at or below last-forged-slot fence",
+			"current_slot", slot,
+			"last_forged_slot", f.lastForgedSlot,
+		)
+		return false, nil
+	}
+	if f.fenceStore != nil {
+		if err := f.fenceStore.StoreLastForgedSlot(slot); err != nil {
+			f.incCouldNotForge()
+			return false, fmt.Errorf(
+				"failed to persist forge fence for slot %d: %w",
+				slot,
+				err,
+			)
+		}
+	}
+	f.lastForgedSlot = slot
+	f.fenceLoaded = true
+	return true, nil
+}
+
 func (f *BlockForger) incCouldNotForge() {
 	if f.metrics != nil {
 		f.metrics.forgeCouldNot.Inc()
