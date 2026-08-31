@@ -238,6 +238,16 @@ func mustAddConsumer(
 	return consumer
 }
 
+func retainedConsumerCacheBytes(consumer *MempoolConsumer) int64 {
+	consumer.cacheMutex.Lock()
+	defer consumer.cacheMutex.Unlock()
+	var ret int64
+	for _, tx := range consumer.cache {
+		ret += int64(len(tx.Cbor))
+	}
+	return ret
+}
+
 // newTestMempoolWithValidator creates a mempool with a specific validator
 func newTestMempoolWithValidator(
 	t *testing.T,
@@ -1261,6 +1271,75 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 	assert.Equal(t, txs[2].Hash, third.Hash)
 	assert.NotNil(t, consumer.GetTxFromCache(txs[2].Hash))
 	assert.Len(t, consumer.cache, 2)
+}
+
+func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   10,
+		ConsumerCacheSize: 10,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
+
+	txs := []*MempoolTransaction{
+		{Hash: "small", Cbor: make([]byte, 4)},
+		{Hash: "large", Cbor: make([]byte, 7)},
+	}
+	m.transactions = append(m.transactions, txs...)
+	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
+
+	first := consumer.NextTx(false)
+	require.NotNil(t, first)
+	require.Equal(t, "small", first.Hash)
+	assert.Nil(t, consumer.NextTx(false), "11 retained bytes exceed the limit")
+	assert.Equal(t, int64(4), retainedConsumerCacheBytes(consumer))
+	assert.Equal(t, 1, consumer.nextTxIdx, "unadvertised tx stays at the cursor")
+	assert.NotNil(t, consumer.GetTxFromCache("small"))
+
+	consumer.RemoveTxFromCache("small")
+	next := consumer.NextTx(false)
+	require.NotNil(t, next)
+	assert.Equal(t, "large", next.Hash)
+	assert.Equal(t, int64(7), retainedConsumerCacheBytes(consumer))
+	assert.NotNil(t, consumer.GetTxFromCache("large"))
+}
+
+func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   10,
+		ConsumerCacheSize: 10,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
+
+	tx := &MempoolTransaction{Hash: "shared", Cbor: make([]byte, 6)}
+	m.transactions = append(m.transactions, tx)
+	firstID := newTestConnectionId(1)
+	secondID := newTestConnectionId(2)
+	first := mustAddConsumer(t, m, firstID)
+	second := mustAddConsumer(t, m, secondID)
+
+	require.NotNil(t, first.NextTx(false))
+	assert.Nil(t, second.NextTx(false), "two retained copies exceed aggregate limit")
+	assert.Equal(t, 0, second.nextTxIdx, "aggregate backpressure preserves cursor")
+	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
+	assert.NotNil(t, first.GetTxFromCache(tx.Hash), "advertised body is retransmittable")
+
+	first.RemoveTxFromCache(tx.Hash)
+	require.NotNil(t, second.NextTx(false))
+	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
+	assert.NotNil(t, second.GetTxFromCache(tx.Hash))
+
+	m.RemoveConsumer(secondID)
+	assert.Equal(t, int64(0), retainedConsumerCacheBytes(second), "consumer removal releases bytes")
 }
 
 func TestMempoolConsumer_ClearCache(t *testing.T) {

@@ -178,11 +178,14 @@ type Mempool struct {
 	// actually timed out rather than whichever caller happens to check it.
 	stopTimeoutErr atomic.Pointer[error]
 
-	workerWG        sync.WaitGroup
-	consumersMutex  sync.Mutex
-	overlay         *utxoOverlay
-	dag             *transactionDAG
-	headroomChanged chan struct{}
+	workerWG          sync.WaitGroup
+	consumersMutex    sync.Mutex
+	relayCacheMutex   sync.Mutex
+	relayCacheBytes   int64
+	relayCacheChanged chan struct{}
+	overlay           *utxoOverlay
+	dag               *transactionDAG
+	headroomChanged   chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -588,6 +591,7 @@ func newMempool(
 		implementation:         implementation,
 		config:                 config,
 		done:                   make(chan struct{}),
+		relayCacheChanged:      make(chan struct{}),
 		transactionTTL:         transactionTTL,
 		cleanupInterval:        cleanupInterval,
 		evictionWatermark:      evictionWatermark,
@@ -721,7 +725,38 @@ func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	consumer := m.consumers[connId]
 	delete(m.consumers, connId)
 	m.consumersMutex.Unlock()
-	consumer.cancel()
+	if consumer != nil {
+		consumer.ClearCache()
+		consumer.cancel()
+	}
+}
+
+// reserveRelayCacheBytes charges retained transaction bytes across every
+// consumer. A consumer also applies this same limit independently, so neither
+// one connection nor all connections together can retain more transaction
+// body data than the configured mempool capacity.
+func (m *Mempool) reserveRelayCacheBytes(size int64) (bool, <-chan struct{}) {
+	m.relayCacheMutex.Lock()
+	defer m.relayCacheMutex.Unlock()
+	if size > m.config.MempoolCapacity-m.relayCacheBytes {
+		return false, m.relayCacheChanged
+	}
+	m.relayCacheBytes += size
+	return true, nil
+}
+
+func (m *Mempool) releaseRelayCacheBytes(size int64) {
+	if size <= 0 {
+		return
+	}
+	m.relayCacheMutex.Lock()
+	m.relayCacheBytes -= size
+	if m.relayCacheBytes < 0 {
+		m.relayCacheBytes = 0
+	}
+	close(m.relayCacheChanged)
+	m.relayCacheChanged = make(chan struct{})
+	m.relayCacheMutex.Unlock()
 }
 
 func (m *Mempool) Stop(ctx context.Context) error {
