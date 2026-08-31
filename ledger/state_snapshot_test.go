@@ -374,6 +374,34 @@ func TestLoadPParamsRehydratesPersistedDijkstraProtocolParameters(
 	t *testing.T,
 ) {
 	cfg := dijkstraRetentionNodeConfig(t)
+	ls := dijkstraRetentionRestartLedgerState(t, cfg)
+	require.NoError(t, ls.loadPParams())
+	retained, ok := ls.currentPParams.(*gdijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+	assertDijkstraRetentionPParams(t, retained)
+}
+
+func TestLoadPParamsRejectsInvalidRehydratedDijkstraCommitteeParameters(
+	t *testing.T,
+) {
+	cfg := dijkstraRetentionNodeConfigWithCommitteeParameters(t, 0.5, 0.6)
+	ls := dijkstraRetentionRestartLedgerState(t, cfg)
+
+	err := ls.loadPParams()
+	require.ErrorContains(t, err, "validate persisted Dijkstra pparams")
+	require.ErrorContains(
+		t,
+		err,
+		"quorum stake threshold must be less than committee stake coverage",
+	)
+	require.Nil(t, ls.currentPParams)
+}
+
+func dijkstraRetentionRestartLedgerState(
+	t *testing.T,
+	cfg *cardano.CardanoNodeConfig,
+) *LedgerState {
+	t.Helper()
 	dataDir := t.TempDir()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -417,8 +445,10 @@ func TestLoadPParamsRehydratesPersistedDijkstraProtocolParameters(
 		Logger:  logger,
 	})
 	require.NoError(t, err)
-	defer dbtest.CloseDatabase(reopened)
-	ls := &LedgerState{
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(reopened))
+	})
+	return &LedgerState{
 		db:           reopened,
 		currentEra:   eras.DijkstraEraDesc,
 		activeEras:   eras.ErasWithDijkstra,
@@ -429,13 +459,18 @@ func TestLoadPParamsRehydratesPersistedDijkstraProtocolParameters(
 			Logger:            logger,
 		},
 	}
-	require.NoError(t, ls.loadPParams())
-	retained, ok := ls.currentPParams.(*gdijkstra.DijkstraProtocolParameters)
-	require.True(t, ok)
-	assertDijkstraRetentionPParams(t, retained)
 }
 
 func dijkstraRetentionNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	return dijkstraRetentionNodeConfigWithCommitteeParameters(t, 0.8, 0.6)
+}
+
+func dijkstraRetentionNodeConfigWithCommitteeParameters(
+	t *testing.T,
+	committeeStakeCoverage float64,
+	quorumStakeThreshold float64,
+) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
@@ -465,14 +500,18 @@ func dijkstraRetentionNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
 		},
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)))
-	require.NoError(t, cfg.LoadDijkstraGenesisFromReader(strings.NewReader(`{
+	dijkstraGenesis := fmt.Sprintf(`{
 		"maxRefScriptSizePerBlock": 100,
 		"maxRefScriptSizePerTx": 50,
 		"refScriptCostStride": 16,
 		"refScriptCostMultiplier": 1.25,
-		"committeeStakeCoverage": 0.5,
-		"quorumStakeThreshold": 0.6
-	}`)))
+		"committeeStakeCoverage": %v,
+		"quorumStakeThreshold": %v
+	}`, committeeStakeCoverage, quorumStakeThreshold)
+	require.NoError(
+		t,
+		cfg.LoadDijkstraGenesisFromReader(strings.NewReader(dijkstraGenesis)),
+	)
 	return cfg
 }
 
@@ -490,7 +529,7 @@ func dijkstraRetentionPParams() *gdijkstra.DijkstraProtocolParameters {
 			Rat: big.NewRat(7, 4),
 		},
 		CommitteeStakeCoverage: &cbor.Rat{
-			Rat: big.NewRat(1, 2),
+			Rat: big.NewRat(4, 5),
 		},
 		QuorumStakeThreshold: &cbor.Rat{
 			Rat: big.NewRat(3, 5),
@@ -510,7 +549,7 @@ func assertDijkstraRetentionPParams(
 	require.NotNil(t, pparams.CommitteeStakeCoverage)
 	require.NotNil(t, pparams.QuorumStakeThreshold)
 	require.Zero(t, pparams.RefScriptCostMultiplier.Cmp(big.NewRat(7, 4)))
-	require.Zero(t, pparams.CommitteeStakeCoverage.Cmp(big.NewRat(1, 2)))
+	require.Zero(t, pparams.CommitteeStakeCoverage.Cmp(big.NewRat(4, 5)))
 	require.Zero(t, pparams.QuorumStakeThreshold.Cmp(big.NewRat(3, 5)))
 }
 

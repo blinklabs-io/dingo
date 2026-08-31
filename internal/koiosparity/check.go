@@ -340,6 +340,20 @@ func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 // at this offset: a mark snapshot records the pool parameters as of its own
 // boundary, so Margin/FixedCost belong with the stake epoch (dingo #3484).
 // See koiosStakeEpoch's doc comment and ARCHITECTURE.md.
+// poolDepartedAtParamEpoch reports whether keyHex is provably absent from the
+// K+1 pool set. It is false whenever membership could not be established, so
+// an unresolved read never downgrades a missing reward-input row from ERROR.
+func poolDepartedAtParamEpoch(
+	paramEpochPools map[string]struct{},
+	keyHex string,
+) bool {
+	if len(paramEpochPools) == 0 {
+		return false
+	}
+	_, present := paramEpochPools[keyHex]
+	return !present
+}
+
 func koiosParamEpoch(koiosEpoch uint64) uint64 {
 	return koiosEpoch + 1
 }
@@ -494,6 +508,73 @@ func checkEpoch(
 	} else {
 		dingoPoolErr = epochErr
 	}
+
+	// Pool-set membership at K+1, used to tell a pool that left the pool set
+	// from one whose reward inputs are missing or incomplete.
+	//
+	// epoch_summary.SnapshotReady cannot answer this. It is epoch-level, and
+	// ledger/snapshot/rotation.go writes the epoch summary and the mark
+	// pool_stake_snapshot on every transition "regardless of reward-input
+	// availability" — so a ready summary is compatible with the entire
+	// reward-input bundle having been skipped. buildRewardStateInputs also
+	// deliberately omits a degraded active pool from reward_pool_input while
+	// keeping it in PoolStakeSnapshot. Both cases are genuine missing input,
+	// not departure, and both would pass under an epoch-level flag.
+	//
+	// pool_stake_snapshot is written in both of those cases, so per-pool
+	// absence from it is the evidence that the pool really did leave the set.
+	// Resolved once here so every pool in this epoch is judged against the
+	// same read. A lookup error or an empty set leaves membership unproven,
+	// which keeps the stricter dingo_db_missing classification (dingo #3485).
+	// Absence is only departure proof when the set it is measured against is
+	// known complete. A non-empty read is not enough on its own: if the K+1
+	// summary declares two pools and only one mark row comes back, the
+	// missing one would look departed and hide a dingo_db_missing. The
+	// epoch summary's TotalPoolCount is written from the same
+	// StakeDistribution as those rows (rotation.go), so equality between the
+	// two is what establishes completeness. Anything short of that -- a read
+	// error, an empty set, no ready summary, a zero count, or a count that
+	// disagrees -- leaves membership unproven and keeps the stricter
+	// dingo_db_missing classification (dingo #3485).
+	var paramEpochPools map[string]struct{}
+	members, membersErr := dingo.GetPoolStakeSnapshotMembers(ctx, paramEpoch)
+	switch {
+	case membersErr != nil:
+		logger.Debug(
+			"koiosparity: could not resolve param-epoch pool-set membership",
+			"network", network,
+			"epoch", epoch,
+			"param_epoch", paramEpoch,
+			"error", membersErr,
+		)
+	case len(members) == 0:
+		// Cannot distinguish "captured, no pools" from "not captured".
+	default:
+		paramSummary, sErr := dingo.GetEpochData(ctx, paramEpoch)
+		switch {
+		case sErr != nil:
+			logger.Debug(
+				"koiosparity: could not resolve param-epoch pool count",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"error", sErr,
+			)
+		case paramSummary == nil || paramSummary.TotalPoolCount == 0:
+			// No ready summary, or no declared count to verify against.
+		case uint64(len(members)) != paramSummary.TotalPoolCount:
+			logger.Debug(
+				"koiosparity: param-epoch pool set is incomplete",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"members", len(members),
+				"declared", paramSummary.TotalPoolCount,
+			)
+		default:
+			paramEpochPools = members
+		}
+	}
 	if dingoPoolErr != nil {
 		// Record the DB failure and skip all per-pool comparisons.
 		// Continuing with dingoPoolMap == nil would make every Koios pool appear
@@ -550,6 +631,7 @@ func checkEpoch(
 				now,
 				graceHours,
 				epochEndTime,
+				poolDepartedAtParamEpoch(paramEpochPools, keyHex),
 			)
 			allMismatches = append(allMismatches, poolMismatches...)
 

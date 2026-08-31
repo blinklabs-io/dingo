@@ -19,6 +19,7 @@ package devnet
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -40,8 +41,9 @@ const stopGracePeriod = 2 * time.Second
 // exercise peer interruption and relay restart against the real
 // topology.
 type NodeControl struct {
-	composeFile string
-	logf        func(format string, args ...any)
+	composeFile    string
+	composeProject string
+	logf           func(format string, args ...any)
 }
 
 // NewNodeControl returns a controller for the running DevNet. It fails
@@ -58,6 +60,17 @@ func NewNodeControl(
 	if composeFile == "" {
 		composeFile = defaultComposeFile
 	}
+	composeProject := os.Getenv("DEVNET_COMPOSE_PROJECT")
+	if composeProject == "" {
+		composeProject = os.Getenv("COMPOSE_PROJECT_NAME")
+	}
+	if composeProject == "" {
+		return nil, errors.New(
+			"devnet: compose project unset; run the scenario via" +
+				" internal/test/devnet/run-tests.sh, or set" +
+				" DEVNET_COMPOSE_PROJECT",
+		)
+	}
 	//nolint:gosec // compose path comes from the harness environment
 	if _, err := os.Stat(composeFile); err != nil {
 		return nil, fmt.Errorf(
@@ -70,41 +83,50 @@ func NewNodeControl(
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := runCompose(
-		ctx, composeFile, "version",
+		ctx, composeFile, composeProject, "version",
 	); err != nil {
 		return nil, fmt.Errorf("devnet: docker compose unusable: %w", err)
 	}
-	return &NodeControl{composeFile: composeFile, logf: logf}, nil
+	return &NodeControl{
+		composeFile: composeFile, composeProject: composeProject, logf: logf,
+	}, nil
 }
 
 // Stop halts one node, leaving its volumes intact so a later Start
 // resumes the same node rather than bootstrapping a fresh one.
 //
-// This drives `docker` directly rather than `docker compose`, because
+// This resolves the service through this run's Compose project, then drives
+// `docker` directly rather than `docker compose`, because
 // compose resolves depends_on: `docker compose start dingo-3` also starts
 // the configurator it depends on, which regenerates genesis into the
 // shared config volumes. The restarted node then refuses to start at all,
 // with a genesis-hash mismatch against the database it already has —
-// a network-wide reset dressed up as a single-node restart. Every DevNet
-// service pins container_name to its service name, so addressing the
-// container by name is exact and touches nothing else.
-func (n *NodeControl) Stop(ctx context.Context, container string) error {
-	n.logf("nodectl: stopping %s", container)
+// a network-wide reset dressed up as a single-node restart.
+func (n *NodeControl) Stop(ctx context.Context, service string) error {
+	container, err := n.containerID(ctx, service)
+	if err != nil {
+		return err
+	}
+	n.logf("nodectl: stopping %s (%s)", service, container)
 	if _, err := runDocker(
 		ctx,
 		"stop", "-t", strconv.Itoa(int(stopGracePeriod.Seconds())), container,
 	); err != nil {
-		return fmt.Errorf("stop %s: %w", container, err)
+		return fmt.Errorf("stop %s: %w", service, err)
 	}
 	return nil
 }
 
 // Start brings a stopped node back up. See Stop for why this bypasses
 // compose.
-func (n *NodeControl) Start(ctx context.Context, container string) error {
-	n.logf("nodectl: starting %s", container)
+func (n *NodeControl) Start(ctx context.Context, service string) error {
+	container, err := n.containerID(ctx, service)
+	if err != nil {
+		return err
+	}
+	n.logf("nodectl: starting %s (%s)", service, container)
 	if _, err := runDocker(ctx, "start", container); err != nil {
-		return fmt.Errorf("start %s: %w", container, err)
+		return fmt.Errorf("start %s: %w", service, err)
 	}
 	return nil
 }
@@ -112,7 +134,9 @@ func (n *NodeControl) Start(ctx context.Context, container string) error {
 // ContainerStatus returns `docker compose ps` output for the active
 // profile.
 func (n *NodeControl) ContainerStatus(ctx context.Context) (string, error) {
-	out, err := runCompose(ctx, n.composeFile, "ps", "--all")
+	out, err := runCompose(
+		ctx, n.composeFile, n.composeProject, "ps", "--all",
+	)
 	return out, err
 }
 
@@ -129,7 +153,25 @@ func (n *NodeControl) Logs(
 		args = append(args, "--tail", strconv.Itoa(tailLines))
 	}
 	args = append(args, service)
-	return runCompose(ctx, n.composeFile, args...)
+	return runCompose(ctx, n.composeFile, n.composeProject, args...)
+}
+
+func (n *NodeControl) containerID(
+	ctx context.Context,
+	service string,
+) (string, error) {
+	out, err := runCompose(
+		ctx, n.composeFile, n.composeProject,
+		"ps", "--all", "--quiet", service,
+	)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s container: %w", service, err)
+	}
+	container := string(bytes.TrimSpace([]byte(out)))
+	if container == "" {
+		return "", fmt.Errorf("resolve %s container: no container found", service)
+	}
+	return container, nil
 }
 
 // CaptureFailureArtifacts writes the evidence a failed scenario needs to
@@ -173,10 +215,15 @@ func (n *NodeControl) CaptureFailureArtifacts(
 func runCompose(
 	ctx context.Context,
 	composeFile string,
+	composeProject string,
 	args ...string,
 ) (string, error) {
 	return runDocker(
-		ctx, append([]string{"compose", "-f", composeFile}, args...)...,
+		ctx,
+		append(
+			[]string{"compose", "-f", composeFile, "-p", composeProject},
+			args...,
+		)...,
 	)
 }
 

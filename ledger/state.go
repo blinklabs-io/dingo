@@ -7045,22 +7045,23 @@ func (ls *LedgerState) loadPersistedProtocolParameters(
 			pparams,
 		)
 	}
-	if ls.config.CardanoNodeConfig == nil {
-		return dijkstraPParams, nil
+	if ls.config.CardanoNodeConfig != nil {
+		genesis := ls.config.CardanoNodeConfig.DijkstraGenesis()
+		if genesis != nil {
+			if dijkstraPParams.CommitteeStakeCoverage == nil {
+				dijkstraPParams.CommitteeStakeCoverage = cloneGenesisRat(
+					genesis.CommitteeStakeCoverage,
+				)
+			}
+			if dijkstraPParams.QuorumStakeThreshold == nil {
+				dijkstraPParams.QuorumStakeThreshold = cloneGenesisRat(
+					genesis.QuorumStakeThreshold,
+				)
+			}
+		}
 	}
-	genesis := ls.config.CardanoNodeConfig.DijkstraGenesis()
-	if genesis == nil {
-		return dijkstraPParams, nil
-	}
-	if dijkstraPParams.CommitteeStakeCoverage == nil {
-		dijkstraPParams.CommitteeStakeCoverage = cloneGenesisRat(
-			genesis.CommitteeStakeCoverage,
-		)
-	}
-	if dijkstraPParams.QuorumStakeThreshold == nil {
-		dijkstraPParams.QuorumStakeThreshold = cloneGenesisRat(
-			genesis.QuorumStakeThreshold,
-		)
+	if err := dijkstraPParams.ValidateLeiosCommitteeParameters(); err != nil {
+		return nil, fmt.Errorf("validate persisted Dijkstra pparams: %w", err)
 	}
 	return dijkstraPParams, nil
 }

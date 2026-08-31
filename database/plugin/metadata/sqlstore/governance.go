@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -183,9 +184,26 @@ func (s *Store) SetGovernanceProposal(
 	if proposal == nil {
 		return errors.New("set governance proposal: nil proposal")
 	}
+	if (proposal.RatifiedEpoch == nil) != (proposal.RatifiedSlot == nil) {
+		return errors.New(
+			"set governance proposal: ratified epoch and slot must both be set or both be nil",
+		)
+	}
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			var previousEpoch, previousSlot sql.NullInt64
+			previousErr := db.QueryRowContext(ctx, `
+SELECT ratified_epoch, ratified_slot
+FROM governance_proposal
+WHERE tx_hash = ? AND action_index = ?`,
+				proposal.TxHash,
+				proposal.ActionIndex,
+			).Scan(&previousEpoch, &previousSlot)
+			if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
+				return previousErr
+			}
+
 			var id uint
 			err := db.QueryRowContext(ctx, `
 INSERT INTO governance_proposal (
@@ -249,9 +267,91 @@ RETURNING id`,
 				proposal.AddedSlot,
 				proposal.DeletedSlot,
 			).Scan(&id)
-			if err == nil {
-				proposal.ID = id
+			if err != nil {
+				return err
 			}
+			proposal.ID = id
+
+			if proposal.RatifiedEpoch == nil {
+				return nil
+			}
+			if previousErr == nil && previousEpoch.Valid && previousSlot.Valid &&
+				previousEpoch.Int64 >= 0 && previousSlot.Int64 >= 0 &&
+				uint64(previousEpoch.Int64) == *proposal.RatifiedEpoch &&
+				uint64(previousSlot.Int64) == *proposal.RatifiedSlot {
+				return nil
+			}
+			_, err = db.ExecContext(ctx, `
+INSERT INTO governance_proposal_ratification_history (
+    proposal_id, transition_slot, ratified_epoch, ratified_slot
+) VALUES (?, ?, ?, ?)`,
+				id,
+				*proposal.RatifiedSlot,
+				*proposal.RatifiedEpoch,
+				*proposal.RatifiedSlot,
+			)
+			return err
+		},
+	)
+}
+
+func (s *Store) ClearGovernanceProposalRatification(
+	txHash []byte,
+	actionIndex uint32,
+	transitionSlot uint64,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			var (
+				id            uint
+				ratifiedEpoch sql.NullInt64
+				ratifiedSlot  sql.NullInt64
+			)
+			if err := db.QueryRowContext(ctx, `
+SELECT id, ratified_epoch, ratified_slot
+FROM governance_proposal
+WHERE tx_hash = ? AND action_index = ?`,
+				txHash,
+				actionIndex,
+			).Scan(&id, &ratifiedEpoch, &ratifiedSlot); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return errors.New(
+						"clear proposal ratification: expected 1 row, found 0",
+					)
+				}
+				return err
+			}
+			if !ratifiedEpoch.Valid && !ratifiedSlot.Valid {
+				return nil
+			}
+			if ratifiedEpoch.Valid != ratifiedSlot.Valid {
+				return errors.New(
+					"clear proposal ratification: inconsistent ratification marker",
+				)
+			}
+			result, err := db.ExecContext(ctx, `
+UPDATE governance_proposal
+SET ratified_epoch = NULL, ratified_slot = NULL
+WHERE id = ?`, id)
+			if err != nil {
+				return err
+			}
+			rows, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if rows != 1 {
+				return fmt.Errorf(
+					"clear proposal ratification: expected 1 row, updated %d",
+					rows,
+				)
+			}
+			_, err = db.ExecContext(ctx, `
+INSERT INTO governance_proposal_ratification_history (
+    proposal_id, transition_slot, ratified_epoch, ratified_slot
+) VALUES (?, ?, NULL, NULL)`, id, transitionSlot)
 			return err
 		},
 	)
@@ -339,25 +439,58 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			queries := []string{
-				"DELETE FROM governance_proposal WHERE added_slot > ?",
-				`UPDATE governance_proposal SET deleted_slot = NULL
+			queries := []struct {
+				query string
+				args  []any
+			}{
+				{
+					query: "DELETE FROM governance_proposal WHERE added_slot > ?",
+					args:  []any{slot},
+				},
+				{
+					query: `UPDATE governance_proposal SET deleted_slot = NULL
 				 WHERE deleted_slot > ?`,
-				`UPDATE governance_proposal
-				 SET ratified_epoch = NULL, ratified_slot = NULL
-				 WHERE ratified_slot > ?`,
-				`UPDATE governance_proposal
+					args: []any{slot},
+				},
+				{
+					query: `DELETE FROM governance_proposal_ratification_history
+				 WHERE transition_slot > ?`,
+					args: []any{slot},
+				},
+				{
+					query: `UPDATE governance_proposal
+				 SET ratified_epoch = (
+				     SELECT history.ratified_epoch
+				     FROM governance_proposal_ratification_history AS history
+				     WHERE history.proposal_id = governance_proposal.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 ), ratified_slot = (
+				     SELECT history.ratified_slot
+				     FROM governance_proposal_ratification_history AS history
+				     WHERE history.proposal_id = governance_proposal.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 )`,
+				},
+				{
+					query: `UPDATE governance_proposal
 				 SET enacted_epoch = NULL, enacted_slot = NULL
 				 WHERE enacted_slot > ?`,
-				`UPDATE governance_proposal
+					args: []any{slot},
+				},
+				{
+					query: `UPDATE governance_proposal
 				 SET expired_epoch = NULL, expired_slot = NULL
 				 WHERE expired_slot > ?`,
+					args: []any{slot},
+				},
 			}
 			for _, query := range queries {
 				if _, err := db.ExecContext(
 					ctx,
-					query,
-					slot,
+					query.query,
+					query.args...,
 				); err != nil {
 					return err
 				}
