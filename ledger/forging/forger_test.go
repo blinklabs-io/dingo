@@ -329,6 +329,68 @@ func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 	)
 }
 
+func TestCheckAndForgeProductionCountsKESUpdateFailure(t *testing.T) {
+	creds := setupTestCredentials(t)
+	require.NoError(t, creds.UpdateKESPeriod(1))
+
+	builder := &forgerTestBuilder{block: newForgerTestBlock(1, 2)}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       1,
+			chainTipSlot:      0,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	err = forger.checkAndForgeProduction(context.Background())
+	require.ErrorContains(t, err, "failed to update KES period")
+	require.Zero(t, builder.calls)
+	require.Zero(t, broadcaster.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
+}
+
+func TestSignBlockHeaderEnforcesProtocolKESLifetime(t *testing.T) {
+	creds := setupTestCredentials(t)
+	creds.mu.Lock()
+	creds.generation++
+	creds.opCertStartKES = 0
+	creds.maxKESEvolutions = 2
+	creds.opCertExpiryKES = 2
+	creds.opCertValidated = true
+	creds.mu.Unlock()
+	require.NoError(t, creds.UpdateKESPeriod(2))
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			slotsPerKESPeriod: 1,
+		},
+	})
+	require.NoError(t, err)
+
+	signature, err := forger.SignBlockHeader(2, []byte("expired header"))
+	require.ErrorIs(t, err, errOpCertExpired)
+	require.Nil(t, signature)
+}
+
 func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
 	t *testing.T,
 ) {

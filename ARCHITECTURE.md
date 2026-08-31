@@ -3955,12 +3955,17 @@ atomically publishes the opcert
 `{start, MaxKESEvolutions, expiry}` policy only on success; failed validation
 retains the loaded material but clears the policy. Both paths therefore fail
 closed instead of falling back to an older policy or the KES depth capacity.
+Revalidating an unchanged, already-valid operational certificate preserves its
+published protocol lifetime; a failed revalidation still clears that lifetime.
 `OpCertExpiryPeriod` and `PeriodsRemaining` report zero until the current
 generation has both a validated certificate and policy. The exported
 `DefaultBlockBuilder.BuildBlock` and `BuildBlockWithLeios` entrypoints enforce
 that same half-open interval inside the generation-backed builder path before
 they inspect the chain tip, mempool, VRF key, or Leios inputs, so direct callers
-cannot bypass the forger's outer gate.
+cannot bypass the forger's outer gate. `BlockForger.SignBlockHeader` also
+requires the same validated interval; `PoolCredentials.KESSign` remains the
+lower-level cryptographic primitive used by credential tooling and tests that
+may not have Shelley genesis context.
 
 ### Leios Voting (`ledger/leios/`)
 

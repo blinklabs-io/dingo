@@ -818,6 +818,11 @@ func (pc *PoolCredentials) ValidateOpCert() error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.generation++
+	previousStart := pc.opCertStartKES
+	previousMaxEvolutions := pc.maxKESEvolutions
+	previousExpiry := pc.opCertExpiryKES
+	hadValidatedLifetime := pc.opCertValidated &&
+		previousMaxEvolutions > 0 && previousExpiry > previousStart
 	pc.opCertValidated = false
 	pc.maxKESEvolutions = 0
 	pc.opCertExpiryKES = 0
@@ -826,6 +831,10 @@ func (pc *PoolCredentials) ValidateOpCert() error {
 		return err
 	}
 	pc.opCertValidated = true
+	if hadValidatedLifetime && pc.opCert.KESPeriod == previousStart {
+		pc.maxKESEvolutions = previousMaxEvolutions
+		pc.opCertExpiryKES = previousExpiry
+	}
 	return nil
 }
 

@@ -928,6 +928,34 @@ func TestValidateKESPeriod_HappyPath(t *testing.T) {
 	}
 }
 
+func TestValidateOpCertPreservesValidatedKESLifetime(t *testing.T) {
+	pc := setupTestCredentials(t)
+	wantExpiry := pc.OpCertExpiryPeriod()
+	require.NotZero(t, wantExpiry)
+
+	require.NoError(t, pc.ValidateOpCert())
+	require.Equal(t, wantExpiry, pc.OpCertExpiryPeriod())
+
+	generation := pc.acquireCredentialGeneration()
+	start, maxEvolutions, expiry, err := generation.validatedKESProtocolLifetime()
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), start)
+	require.Equal(t, uint64(62), maxEvolutions)
+	require.Equal(t, wantExpiry, expiry)
+	generation.release()
+
+	pc.mu.Lock()
+	pc.opCert.Signature[0] ^= 0xff
+	pc.mu.Unlock()
+	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.Zero(t, pc.OpCertExpiryPeriod())
+
+	invalidGeneration := pc.acquireCredentialGeneration()
+	defer invalidGeneration.release()
+	_, _, _, err = invalidGeneration.validatedKESProtocolLifetime()
+	require.ErrorContains(t, err, "not validated")
+}
+
 func TestValidateKESPeriod_AtStart(t *testing.T) {
 	// Edge case: opcert KESPeriod equals current period (just rotated
 	// into use). Should pass.

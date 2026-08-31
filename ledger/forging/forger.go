@@ -824,6 +824,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	// Ensure KES key is at correct period
 	if err := generation.updateKESPeriod(kesPeriod); err != nil {
+		f.incCouldNotForge()
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
@@ -1201,7 +1202,18 @@ func (f *BlockForger) SignBlockHeader(
 		return nil, errors.New("credentials not loaded")
 	}
 
-	return f.creds.KESSign(kesPeriod, headerBytes)
+	generation := f.creds.acquireCredentialGeneration()
+	defer generation.release()
+	if err := generation.validateKESPeriod(kesPeriod); err != nil {
+		return nil, fmt.Errorf(
+			"cannot sign block header outside operational certificate lifetime: %w",
+			err,
+		)
+	}
+	if err := generation.updateKESPeriod(kesPeriod); err != nil {
+		return nil, fmt.Errorf("failed to update KES period: %w", err)
+	}
+	return generation.kesSign(kesPeriod, headerBytes)
 }
 
 // SlotTracker returns the forger's slot tracker, which can be used
