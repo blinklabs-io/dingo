@@ -3886,14 +3886,32 @@ still runs as the final backstop against any race not closed here.
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
 Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
-the loaded credentials. `NewBlockForger` rejects credentials without that
-validated protocol lifetime and precomputes the expiry with overflow checks.
-At each leader slot, the runtime gate admits the half-open interval
-`[opcertStart, opcertStart + MaxKESEvolutions)` and logs/counts a
-could-not-forge disposition at or after the exclusive end before either Leios
-or ranking-block construction. The expiry and remaining-period gauges use that
-same protocol lifetime; the KES key's `2^depth` cryptographic capacity remains
-a separate upper bound rather than an operational lifetime.
+the loaded credentials together with the opcert start and overflow-checked
+exclusive expiry. `NewBlockForger` rejects credentials without that validated
+protocol lifetime. At each leader slot, the runtime gate admits exactly the
+half-open interval `[opcertStart, opcertStart + MaxKESEvolutions)`: periods
+before the start and at or after the exclusive end both log/count a
+could-not-forge disposition before either Leios or ranking-block construction.
+The start, expiry, current-period, and remaining-period gauges use that same
+protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
+separate upper bound rather than an operational lifetime.
+
+Each production forge attempt holds a read lease on one complete credential
+generation from the runtime gate through KES evolution, VRF/KES signing, local
+block construction. `DefaultBlockBuilder` receives that same package-private
+generation rather than re-reading `PoolCredentials`. The lease ends once the
+block is signed, before pluggable validation, adoption, and observability
+callbacks, because those phases no longer consume credentials and may safely
+initiate a reload themselves.
+Credential reload and KES-policy revalidation take the exclusive side of the
+generation lock, which is separate from the ordinary credential accessor
+lock. They therefore wait for an in-flight attempt without preventing a
+pluggable builder from using read-only credential accessors. Reload and
+revalidation cannot replace the key, opcert, start, maximum, or expiry
+independently. A completed reload or
+revalidation is therefore a linearization boundary: the old generation may
+finish before it, while the next attempt sees the new generation in its gate,
+signing inputs, logs, and gauges together.
 
 Steps 2, 6, and 7 each call into a pluggable interface (`LeaderChecker`, `BlockValidator`, `BlockBroadcaster`) that the node wires up at composition time, so a panic inside one of those implementations is contained rather than propagating out of `checkAndForgeProduction` — which would otherwise crash the forger's producer-loop goroutine, and with it the process, since nothing else recovers a goroutine panic in Go. Each callback is invoked through a `*Safe` wrapper (`checkLeaderSafe`, `validateForgedBlockSafe`, `addBlockSafe`) that recovers and converts a panic into the same outcome as that phase's ordinary failure path — "not leader" for selection, a validation failure for validation, an `AddBlock` error for publication — so worker accounting (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and shutdown behavior are unaffected, and the next forge cycle proceeds normally. Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and logged with a stack trace. The `blockForged` observer callback (step 7) already recovered its own panics separately, since observability hooks are expected to be best-effort.
 
@@ -3912,11 +3930,15 @@ reject group/other access on Unix or insecure DACL grants on Windows before
 reading the key. Operational certificates contain public data and remain
 exempt from the secret-key permission check.
 
-`PoolCredentials.ValidateKESPeriod` validates and retains the Shelley genesis
-protocol lifetime only on success. Reloading credentials or any failed
-validation clears it, so production construction fails closed instead of
-falling back to the KES depth capacity. `OpCertExpiryPeriod` and
-`PeriodsRemaining` report zero until that policy has been validated.
+`PoolCredentials.LoadFromFiles` parses replacement files before taking the
+exclusive generation lock, then atomically installs all key material and the
+opcert as a new, unvalidated generation. A failed reload clears the active
+credentials. `ValidateKESPeriod` atomically publishes the opcert
+`{start, MaxKESEvolutions, expiry}` policy only on success; failed validation
+retains the loaded material but clears the policy. Both paths therefore fail
+closed instead of falling back to an older policy or the KES depth capacity.
+`OpCertExpiryPeriod` and `PeriodsRemaining` report zero until the current
+generation has a validated policy.
 
 ### Leios Voting (`ledger/leios/`)
 

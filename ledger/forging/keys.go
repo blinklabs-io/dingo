@@ -62,8 +62,39 @@ type PoolCredentials struct {
 	// operational certificate. This is distinct from the KES key's 2^depth
 	// cryptographic capacity.
 	maxKESEvolutions uint64
+	opCertStartKES   uint64
+	opCertExpiryKES  uint64
+	generation       uint64
 
-	mu sync.RWMutex
+	// generationMu prevents credential or policy replacement while a forge
+	// attempt is using one generation. Keep it separate from mu so code called
+	// during that attempt can still use the public read-only accessors without
+	// recursively acquiring an RWMutex that has a writer queued behind it.
+	generationMu sync.RWMutex
+	mu           sync.RWMutex
+	kesMu        sync.RWMutex
+}
+
+// credentialGeneration pins one complete credential and protocol-policy
+// generation while a production forge attempt is in flight. The owner read
+// lock remains held until release, so reload and revalidation cannot replace
+// any key, opcert, or lifetime field partway through the attempt.
+type credentialGeneration struct {
+	owner            *PoolCredentials
+	id               uint64
+	loaded           bool
+	maxKESEvolutions uint64
+	opCertStartKES   uint64
+	opCertExpiryKES  uint64
+}
+
+type loadedPoolCredentials struct {
+	poolID  lcommon.PoolId
+	vrfSKey []byte
+	vrfVKey []byte
+	kesSKey *kes.SecretKey
+	kesVKey []byte
+	opCert  *OpCert
 }
 
 // OpCert represents an operational certificate that binds a KES key to a pool.
@@ -120,57 +151,51 @@ func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
 	return key, nil
 }
 
-// LoadFromFiles loads all pool credentials from the specified file paths.
-// Uses Bursa to parse cardano-cli format key files.
-func (pc *PoolCredentials) LoadFromFiles(
+func loadPoolCredentialsFromFiles(
 	vrfSKeyPath string,
 	kesSKeyPath string,
 	opCertPath string,
-) error {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-	pc.maxKESEvolutions = 0
-
+) (*loadedPoolCredentials, error) {
 	// Load VRF signing key
 	vrfKey, err := loadSecretKeyFromFile(vrfSKeyPath)
 	if err != nil {
-		return fmt.Errorf("failed to load VRF signing key: %w", err)
+		return nil, fmt.Errorf("failed to load VRF signing key: %w", err)
 	}
 	if len(vrfKey.SKey) != vrf.SeedSize {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"invalid VRF key size: expected %d, got %d",
 			vrf.SeedSize,
 			len(vrfKey.SKey),
 		)
 	}
-	pc.vrfSKey = vrfKey.SKey
-	pc.vrfVKey = vrfKey.VKey
 
 	// Load KES signing key
 	kesKey, err := loadSecretKeyFromFile(kesSKeyPath)
 	if err != nil {
-		return fmt.Errorf("failed to load KES signing key: %w", err)
+		return nil, fmt.Errorf("failed to load KES signing key: %w", err)
 	}
 	if len(kesKey.SKey) != kes.CardanoKesSecretKeySize {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"invalid KES key size: expected %d, got %d",
 			kes.CardanoKesSecretKeySize,
 			len(kesKey.SKey),
 		)
 	}
-	pc.kesSKey = &kes.SecretKey{
+	kesSKey := &kes.SecretKey{
 		Depth:  kes.CardanoKesDepth,
 		Period: 0, // Will be updated during block production
 		Data:   kesKey.SKey,
 	}
-	pc.kesVKey = kesKey.VKey
 
 	// Load operational certificate
 	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
 	if err != nil {
-		return fmt.Errorf("failed to load operational certificate: %w", err)
+		return nil, fmt.Errorf(
+			"failed to load operational certificate: %w",
+			err,
+		)
 	}
-	pc.opCert = &OpCert{
+	opCert := &OpCert{
 		KESVKey:     opCertKey.VKey,
 		IssueNumber: opCertKey.OpCertIssueNumber,
 		KESPeriod:   opCertKey.OpCertKesPeriod,
@@ -179,15 +204,70 @@ func (pc *PoolCredentials) LoadFromFiles(
 	}
 
 	// Derive pool ID from cold verification key (Blake2b-224 hash)
-	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash(pc.opCert.ColdVKey))
+	poolID := lcommon.PoolId(lcommon.Blake2b224Hash(opCert.ColdVKey))
 
 	// Validate that OpCert KES vkey matches the loaded KES key
-	if !bytes.Equal(pc.kesVKey, pc.opCert.KESVKey) {
-		return errors.New(
+	if !bytes.Equal(kesKey.VKey, opCert.KESVKey) {
+		return nil, errors.New(
 			"KES verification key mismatch: loaded key does not match OpCert KES vkey",
 		)
 	}
 
+	return &loadedPoolCredentials{
+		poolID:  poolID,
+		vrfSKey: vrfKey.SKey,
+		vrfVKey: vrfKey.VKey,
+		kesSKey: kesSKey,
+		kesVKey: kesKey.VKey,
+		opCert:  opCert,
+	}, nil
+}
+
+func (pc *PoolCredentials) clearUnsafe() {
+	pc.poolID = lcommon.PoolId{}
+	pc.vrfSKey = nil
+	pc.vrfVKey = nil
+	pc.kesSKey = nil
+	pc.kesVKey = nil
+	pc.opCert = nil
+	pc.maxKESEvolutions = 0
+	pc.opCertStartKES = 0
+	pc.opCertExpiryKES = 0
+}
+
+// LoadFromFiles loads all pool credentials from the specified file paths.
+// Uses Bursa to parse cardano-cli format key files. The full loaded material
+// replaces the prior generation atomically. A failed reload invalidates the
+// prior generation so an active forger cannot continue with stale policy.
+func (pc *PoolCredentials) LoadFromFiles(
+	vrfSKeyPath string,
+	kesSKeyPath string,
+	opCertPath string,
+) error {
+	loaded, err := loadPoolCredentialsFromFiles(
+		vrfSKeyPath,
+		kesSKeyPath,
+		opCertPath,
+	)
+
+	pc.generationMu.Lock()
+	defer pc.generationMu.Unlock()
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.generation++
+	if err != nil {
+		pc.clearUnsafe()
+		return err
+	}
+	pc.poolID = loaded.poolID
+	pc.vrfSKey = loaded.vrfSKey
+	pc.vrfVKey = loaded.vrfVKey
+	pc.kesSKey = loaded.kesSKey
+	pc.kesVKey = loaded.kesVKey
+	pc.opCert = loaded.opCert
+	pc.maxKESEvolutions = 0
+	pc.opCertStartKES = loaded.opCert.KESPeriod
+	pc.opCertExpiryKES = 0
 	return nil
 }
 
@@ -212,8 +292,14 @@ func (pc *PoolCredentials) relativeKESPeriodUnsafe(
 // so we translate chain KES periods by subtracting the opcert start period
 // when an opcert is loaded.
 func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.updateKESPeriodUnsafe(period)
+}
+
+func (pc *PoolCredentials) updateKESPeriodUnsafe(period uint64) error {
+	pc.kesMu.Lock()
+	defer pc.kesMu.Unlock()
 
 	if pc.kesSKey == nil {
 		return errors.New("KES key not loaded")
@@ -261,7 +347,12 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 func (pc *PoolCredentials) VRFProve(alpha []byte) ([]byte, []byte, error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
+	return pc.vrfProveUnsafe(alpha)
+}
 
+func (pc *PoolCredentials) vrfProveUnsafe(
+	alpha []byte,
+) ([]byte, []byte, error) {
 	if pc.vrfSKey == nil {
 		return nil, nil, errors.New("VRF key not loaded")
 	}
@@ -285,6 +376,15 @@ func (pc *PoolCredentials) KESSign(
 ) ([]byte, error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
+	return pc.kesSignUnsafe(period, message)
+}
+
+func (pc *PoolCredentials) kesSignUnsafe(
+	period uint64,
+	message []byte,
+) ([]byte, error) {
+	pc.kesMu.RLock()
+	defer pc.kesMu.RUnlock()
 
 	if pc.kesSKey == nil {
 		return nil, errors.New("KES key not loaded")
@@ -353,7 +453,10 @@ func (pc *PoolCredentials) GetPoolID() lcommon.PoolId {
 func (pc *PoolCredentials) GetOpCert() *OpCert {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
+	return pc.getOpCertUnsafe()
+}
 
+func (pc *PoolCredentials) getOpCertUnsafe() *OpCert {
 	if pc.opCert == nil {
 		return nil
 	}
@@ -373,6 +476,8 @@ func (pc *PoolCredentials) GetOpCert() *OpCert {
 func (pc *PoolCredentials) GetKESPeriod() uint64 {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
+	pc.kesMu.RLock()
+	defer pc.kesMu.RUnlock()
 	if pc.kesSKey == nil {
 		return 0
 	}
@@ -383,7 +488,89 @@ func (pc *PoolCredentials) GetKESPeriod() uint64 {
 func (pc *PoolCredentials) IsLoaded() bool {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
+	pc.kesMu.RLock()
+	defer pc.kesMu.RUnlock()
+	return pc.isLoadedUnsafe()
+}
+
+func (pc *PoolCredentials) isLoadedUnsafe() bool {
 	return pc.vrfSKey != nil && pc.kesSKey != nil && pc.opCert != nil
+}
+
+func (pc *PoolCredentials) acquireCredentialGeneration() *credentialGeneration {
+	pc.generationMu.RLock()
+	pc.mu.RLock()
+	pc.kesMu.RLock()
+	generation := &credentialGeneration{
+		owner:            pc,
+		id:               pc.generation,
+		loaded:           pc.isLoadedUnsafe(),
+		maxKESEvolutions: pc.maxKESEvolutions,
+		opCertStartKES:   pc.opCertStartKES,
+		opCertExpiryKES:  pc.opCertExpiryKES,
+	}
+	pc.kesMu.RUnlock()
+	pc.mu.RUnlock()
+	return generation
+}
+
+func (g *credentialGeneration) release() {
+	g.owner.generationMu.RUnlock()
+}
+
+func (g *credentialGeneration) validatedKESProtocolLifetime() (
+	uint64,
+	uint64,
+	uint64,
+	error,
+) {
+	if !g.loaded {
+		return 0, 0, 0, errors.New("credentials not loaded")
+	}
+	if g.maxKESEvolutions == 0 || g.opCertExpiryKES == 0 {
+		return 0, 0, 0, errors.New("KES protocol lifetime is not validated")
+	}
+	return g.opCertStartKES,
+		g.maxKESEvolutions,
+		g.opCertExpiryKES,
+		nil
+}
+
+func (g *credentialGeneration) periodsRemaining(currentPeriod uint64) uint64 {
+	if currentPeriod < g.opCertStartKES ||
+		currentPeriod >= g.opCertExpiryKES ||
+		g.maxKESEvolutions == 0 {
+		return 0
+	}
+	return g.opCertExpiryKES - currentPeriod
+}
+
+func (g *credentialGeneration) updateKESPeriod(period uint64) error {
+	return g.owner.updateKESPeriodUnsafe(period)
+}
+
+func (g *credentialGeneration) vrfVKey() []byte {
+	if g.owner.vrfVKey == nil {
+		return nil
+	}
+	return append([]byte(nil), g.owner.vrfVKey...)
+}
+
+func (g *credentialGeneration) vrfProve(
+	alpha []byte,
+) ([]byte, []byte, error) {
+	return g.owner.vrfProveUnsafe(alpha)
+}
+
+func (g *credentialGeneration) opCert() *OpCert {
+	return g.owner.getOpCertUnsafe()
+}
+
+func (g *credentialGeneration) kesSign(
+	period uint64,
+	message []byte,
+) ([]byte, error) {
+	return g.owner.kesSignUnsafe(period, message)
 }
 
 // ValidateOpCert validates that the operational certificate matches the KES key
@@ -465,24 +652,10 @@ func (pc *PoolCredentials) opCertExpiryPeriodUnsafe() (uint64, error) {
 	if pc.opCert == nil {
 		return 0, errors.New("operational certificate not loaded")
 	}
-	return opCertExpiryPeriod(
-		pc.opCert.KESPeriod,
-		pc.maxKESEvolutions,
-	)
-}
-
-func (pc *PoolCredentials) validatedKESProtocolLifetime() (
-	uint64,
-	uint64,
-	error,
-) {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	expiryPeriod, err := pc.opCertExpiryPeriodUnsafe()
-	if err != nil {
-		return 0, 0, err
+	if pc.maxKESEvolutions == 0 || pc.opCertExpiryKES == 0 {
+		return 0, errors.New("KES protocol lifetime is not validated")
 	}
-	return pc.maxKESEvolutions, expiryPeriod, nil
+	return pc.opCertExpiryKES, nil
 }
 
 // OpCertExpiryPeriod returns the protocol KES period at which the OpCert
@@ -505,7 +678,7 @@ func (pc *PoolCredentials) PeriodsRemaining(currentPeriod uint64) uint64 {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 	expiryPeriod, err := pc.opCertExpiryPeriodUnsafe()
-	if err != nil || currentPeriod < pc.opCert.KESPeriod {
+	if err != nil || currentPeriod < pc.opCertStartKES {
 		return 0
 	}
 	if currentPeriod >= expiryPeriod {
@@ -528,15 +701,21 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 	genesis *shelley.ShelleyGenesis,
 	currentSlot uint64,
 ) error {
+	pc.generationMu.Lock()
+	defer pc.generationMu.Unlock()
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	pc.generation++
 	// Any failed validation leaves the credentials unusable for production
 	// forging rather than retaining a policy from an earlier genesis.
 	pc.maxKESEvolutions = 0
+	pc.opCertExpiryKES = 0
 
 	if pc.opCert == nil {
+		pc.opCertStartKES = 0
 		return errors.New("operational certificate not loaded")
 	}
+	pc.opCertStartKES = pc.opCert.KESPeriod
 	if genesis == nil {
 		return errors.New("shelley genesis is required")
 	}
@@ -576,6 +755,7 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 		)
 	}
 	pc.maxKESEvolutions = maxEvolutions
+	pc.opCertExpiryKES = expiryPeriod
 	return nil
 }
 
