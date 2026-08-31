@@ -407,7 +407,9 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 // used by the manager's cloud-destination test doubles. Specialized doubles
 // embed it and override only the operation whose failure they inject.
 type directoryBackedCloudDestination struct {
-	dir string
+	dir      string
+	uploaded chan<- string
+	deleted  chan<- string
 }
 
 func (d *directoryBackedCloudDestination) UploadDir(
@@ -433,6 +435,9 @@ func (d *directoryBackedCloudDestination) UploadDir(
 			return err
 		}
 	}
+	if d.uploaded != nil {
+		d.uploaded <- d.dir
+	}
 	return nil
 }
 
@@ -444,7 +449,13 @@ func (d *directoryBackedCloudDestination) DownloadDir(
 }
 
 func (d *directoryBackedCloudDestination) Delete(context.Context) error {
-	return os.RemoveAll(d.dir)
+	if err := os.RemoveAll(d.dir); err != nil {
+		return err
+	}
+	if d.deleted != nil {
+		d.deleted <- d.dir
+	}
+	return nil
 }
 
 var (
@@ -491,12 +502,23 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
-	setManagerFakeCloudBackingDir(t, cloudBackingDir)
-	const cloudDest = "managerfaketest://bucket/prefix"
-	// managerFakeCloudDestination resolves a URI's path directly onto the
-	// backing dir (see its registration func above), and cloudDest's own
-	// path component is "/prefix" -- so every snapshot this uploads lands
-	// under cloudBackingDir/prefix/<snapshotID>, not cloudBackingDir/<snapshotID>.
+	uploaded := make(chan string, 3)
+	deleted := make(chan string, 1)
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register(
+		"managerprunetest",
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			return &directoryBackedCloudDestination{
+				dir: filepath.Join(
+					cloudBackingDir,
+					strings.TrimPrefix(uri.Path, "/"),
+				),
+				uploaded: uploaded,
+				deleted:  deleted,
+			}, nil
+		},
+	)
+	const cloudDest = "managerprunetest://bucket/prefix"
 	cloudPrefixDir := filepath.Join(cloudBackingDir, "prefix")
 
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
@@ -505,32 +527,41 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
-	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", registry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
 	for epoch := uint64(1); epoch <= 3; epoch++ {
 		publishEpochTransition(eb, epoch)
-		require.Eventually(t, func() bool {
-			_, err := os.Stat(filepath.Join(
-				cloudPrefixDir,
-				"epoch-"+strconv.FormatUint(epoch, 10),
-				"manifest.json",
-			))
-			return err == nil
-		}, 5*time.Second, 10*time.Millisecond)
+		epochDir := filepath.Join(
+			cloudPrefixDir,
+			"epoch-"+strconv.FormatUint(epoch, 10),
+		)
+		require.Equal(t, epochDir, testutil.RequireReceive(
+			t,
+			uploaded,
+			30*time.Second,
+			"automatic snapshot cloud upload did not complete",
+		))
+		require.FileExists(t, filepath.Join(epochDir, "manifest.json"))
 	}
 
 	// epoch-1 is beyond retention (2): both its local directory and its
 	// cloud mirror must be gone.
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
-		return os.IsNotExist(err)
-	}, 5*time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(cloudPrefixDir, "epoch-1"))
-		return os.IsNotExist(err)
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, filepath.Join(cloudPrefixDir, "epoch-1"),
+		testutil.RequireReceive(
+			t,
+			deleted,
+			30*time.Second,
+			"automatic snapshot cloud prune did not complete",
+		),
+	)
+	// Delete reports the cloud operation itself. Stop is the manager's
+	// documented drain barrier and proves the same handler has completed
+	// the following local prune before inspecting either retained set.
+	require.NoError(t, m.Stop())
+	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-1"))
+	require.NoDirExists(t, filepath.Join(cloudPrefixDir, "epoch-1"))
 	require.DirExists(t, filepath.Join(cloudPrefixDir, "epoch-2"))
 	require.DirExists(t, filepath.Join(cloudPrefixDir, "epoch-3"))
 }
