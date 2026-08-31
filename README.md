@@ -608,6 +608,10 @@ metadata backfill with these timings:
 | Post-backfill index finalization | ~16m 30s |
 | Total through bootstrap completion | ~20h 53m 19s |
 
+The finalization phase is approximate; the total is the end-to-end
+measurement and should not be reconstructed by summing the rounded phase
+durations.
+
 The API-mode measurement was taken on 2026-08-30/31 against approximately
 4.6M Preview blocks. The backfill processed 6.86M transactions at roughly
 64 blocks per second.
