@@ -6,7 +6,7 @@
 # uses it in place of the image's own go1.26.3. Advance this tag when
 # blinklabs-io/docker-go publishes a newer one; never lower the go.mod floor to
 # match it.
-FROM ghcr.io/blinklabs-io/go:1.26.3-1 AS build
+FROM ghcr.io/blinklabs-io/go:1.26.7-1 AS build
 
 ARG VERSION
 ARG COMMIT_HASH
