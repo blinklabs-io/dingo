@@ -3888,21 +3888,33 @@ KES periods are computed from the era-aware absolute slot (`currentSlot / slotsP
 Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
 the loaded credentials together with the opcert start and overflow-checked
 exclusive expiry. `NewBlockForger` rejects credentials without that validated
-protocol lifetime. At each leader slot, the runtime gate admits exactly the
+protocol lifetime. Before leader selection at each candidate slot, the runtime
+gate admits exactly the
 half-open interval `[opcertStart, opcertStart + MaxKESEvolutions)`: periods
 before the start and at or after the exclusive end both log/count a
-could-not-forge disposition before either Leios or ranking-block construction.
+could-not-forge disposition before Praos, Leios, or ranking-block work.
 The start, expiry, current-period, and remaining-period gauges use that same
 protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
 separate upper bound rather than an operational lifetime.
 
-Each production forge attempt holds a read lease on one complete credential
-generation from the runtime gate through KES evolution, VRF/KES signing, local
-block construction. `DefaultBlockBuilder` receives that same package-private
-generation rather than re-reading `PoolCredentials`. The lease ends once the
-block is signed, before pluggable validation, adoption, and observability
-callbacks, because those phases no longer consume credentials and may safely
-initiate a reload themselves.
+Each production forge attempt identifies one complete credential generation at
+the runtime gate. It releases that generation before the pluggable
+`LeaderChecker` callback so a callback that synchronously initiates a reload
+cannot deadlock on the generation lock, then reacquires the generation and
+requires the generation number to be unchanged. A concurrent reload therefore
+abandons the slot rather than mixing election from one generation with
+construction or signing from another. Once revalidated after selection, the
+attempt holds the generation read lease through KES evolution, VRF/KES signing,
+and local block construction. `DefaultBlockBuilder` receives that same
+package-private generation rather than re-reading `PoolCredentials`. The lease
+ends once the block is signed, before pluggable validation, adoption, and
+observability callbacks, because those phases no longer consume credentials
+and may safely initiate a reload themselves. The pool ID and VRF verification
+key are permanently pinned by the first successful load on a
+`PoolCredentials`; later reloads may rotate KES/opcert material for that
+identity but an attempted pool or VRF identity replacement clears the active
+generation and is rejected. This keeps the long-lived leader schedule's
+identity coherent without rebuilding it during a forge attempt.
 Credential reload and KES-policy revalidation take the exclusive side of the
 generation lock, which is separate from the ordinary credential accessor
 lock. They therefore wait for an in-flight attempt without preventing a
@@ -3933,12 +3945,21 @@ exempt from the secret-key permission check.
 `PoolCredentials.LoadFromFiles` parses replacement files before taking the
 exclusive generation lock, then atomically installs all key material and the
 opcert as a new, unvalidated generation. A failed reload clears the active
-credentials. `ValidateKESPeriod` atomically publishes the opcert
+credentials while retaining the first successful load's pool/VRF identity pin,
+so a later retry cannot silently switch the identity used by leader election.
+Operational-certificate signature and KES-key validation is generation state:
+every load clears it, `ValidateOpCert` publishes it only for the current
+generation, and `ValidateKESPeriod` repeats the cryptographic check before it
+atomically publishes the opcert
 `{start, MaxKESEvolutions, expiry}` policy only on success; failed validation
 retains the loaded material but clears the policy. Both paths therefore fail
 closed instead of falling back to an older policy or the KES depth capacity.
 `OpCertExpiryPeriod` and `PeriodsRemaining` report zero until the current
-generation has a validated policy.
+generation has both a validated certificate and policy. The exported
+`DefaultBlockBuilder.BuildBlock` and `BuildBlockWithLeios` entrypoints enforce
+that same half-open interval inside the generation-backed builder path before
+they inspect the chain tip, mempool, VRF key, or Leios inputs, so direct callers
+cannot bypass the forger's outer gate.
 
 ### Leios Voting (`ledger/leios/`)
 

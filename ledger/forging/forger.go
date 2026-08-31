@@ -660,28 +660,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	// Check if we're the leader for this slot
-	isLeader := f.checkLeaderSafe(currentSlot)
-	if !isLeader {
-		f.logger.Debug(
-			"forge check: not leader for slot",
-			"current_slot", currentSlot,
-			"tip_slot", tipSlot,
-		)
-		if f.metrics != nil {
-			f.metrics.forgeNotLeader.Inc()
-		}
-		return nil
-	}
-
-	// We are the slot leader
-	if f.metrics != nil {
-		f.metrics.forgeNodeIsLeader.Inc()
-	}
-
-	// Compute and enforce the protocol KES lifetime before any Leios or
-	// ranking-block construction. The expiry was checked for overflow when
-	// the production forger was created, so this comparison cannot wrap.
+	// Compute and enforce the protocol KES lifetime before Praos leader
+	// selection, Leios work, or ranking-block construction. The expiry was
+	// checked for overflow when the production forger was created, so these
+	// comparisons cannot wrap.
 	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
 	if slotsPerKESPeriod == 0 {
 		return errors.New("slots per KES period is zero")
@@ -733,6 +715,59 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"max_kes_evolutions", maxEvolutions,
 		)
 		return nil
+	}
+
+	// Do not hold the generation lease across the pluggable leader callback:
+	// it may synchronously trigger a credential reload. Remember the generation
+	// selected by the policy gate and require that exact generation again after
+	// the callback. Pool and VRF identity changes are rejected by LoadFromFiles,
+	// so the election's startup identity remains valid; a same-identity KES or
+	// opcert reload changes the generation and safely abandons this attempt.
+	attemptGeneration := generation.id
+	generation.release()
+	generationReleased = true
+
+	// Check if we're the leader for this slot only after the KES gate.
+	isLeader := f.checkLeaderSafe(currentSlot)
+	if !isLeader {
+		f.logger.Debug(
+			"forge check: not leader for slot",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+		)
+		if f.metrics != nil {
+			f.metrics.forgeNotLeader.Inc()
+		}
+		return nil
+	}
+
+	generation = f.creds.acquireCredentialGeneration()
+	generationReleased = false
+	if generation.id != attemptGeneration {
+		f.incCouldNotForge()
+		f.logger.Warn(
+			"forge skip: credentials changed during leader selection",
+			"slot", currentSlot,
+			"selected_generation", attemptGeneration,
+			"current_generation", generation.id,
+		)
+		return nil
+	}
+	if err := generation.validateKESPeriod(kesPeriod); err != nil {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: credential generation became invalid during leader selection",
+			"slot", currentSlot,
+			"credential_generation", generation.id,
+			"error", err,
+		)
+		return nil
+	}
+
+	// We are the slot leader with the same credential generation that passed
+	// the pre-selection gate.
+	if f.metrics != nil {
+		f.metrics.forgeNodeIsLeader.Inc()
 	}
 
 	leiosBlockData, embeddedEb := f.leiosBlockDataForSlot(currentSlot)

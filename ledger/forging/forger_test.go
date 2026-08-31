@@ -48,6 +48,60 @@ func (forgerTestLeader) NextLeaderSlot(
 	return fromSlot, true
 }
 
+type forgerBlockingLeader struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (l *forgerBlockingLeader) ShouldProduceBlock(uint64) bool {
+	l.mu.Lock()
+	l.calls++
+	l.mu.Unlock()
+	l.enteredOnce.Do(func() { close(l.entered) })
+	<-l.release
+	return true
+}
+
+func (l *forgerBlockingLeader) NextLeaderSlot(
+	fromSlot uint64,
+) (uint64, bool) {
+	return fromSlot, true
+}
+
+func (l *forgerBlockingLeader) callCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
+type forgerCountingLeader struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (l *forgerCountingLeader) ShouldProduceBlock(uint64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls++
+	return true
+}
+
+func (l *forgerCountingLeader) NextLeaderSlot(
+	fromSlot uint64,
+) (uint64, bool) {
+	return fromSlot, true
+}
+
+func (l *forgerCountingLeader) callCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
 type forgerTestSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
@@ -121,12 +175,13 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 		chainTipSlot:      0,
 		slotsPerKESPeriod: 1,
 	}
+	leader := &forgerCountingLeader{}
 	var logs bytes.Buffer
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
 		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
 		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
+		LeaderChecker:    leader,
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock:        clock,
@@ -136,6 +191,7 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 
 	// The final period in [start, start+maxEvolutions) remains valid.
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(t, 1, leader.callCount())
 	require.Equal(t, 1, builder.calls)
 	require.Equal(t, 1, broadcaster.calls)
 	lastValidCurrent := testutil.ToFloat64(forger.metrics.currentKESPeriod)
@@ -148,6 +204,12 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 	clock.currentSlot = 2
 	clock.chainTipSlot = 1
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(
+		t,
+		1,
+		leader.callCount(),
+		"expired period must not run leader selection",
+	)
 	require.Equal(t, 1, builder.calls, "expired period must not build a block")
 	require.Equal(
 		t,
@@ -184,22 +246,28 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 
 func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 	creds := setupTestCredentials(t)
+	creds.generationMu.Lock()
+	creds.mu.Lock()
+	creds.generation++
 	creds.opCert.KESPeriod = 5
-	require.NoError(t, creds.ValidateKESPeriod(
-		synthGenesis(1, 2, time.Second, time.Unix(0, 0)),
-		5,
-	))
+	creds.opCertStartKES = 5
+	creds.maxKESEvolutions = 2
+	creds.opCertExpiryKES = 7
+	creds.opCertValidated = true
+	creds.mu.Unlock()
+	creds.generationMu.Unlock()
 
 	block := newForgerTestBlock(4, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{}
 	leiosChecker := &forgerTestLeiosChecker{reason: "not eligible"}
+	leader := &forgerCountingLeader{}
 	var logs bytes.Buffer
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
 		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
 		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
+		LeaderChecker:    leader,
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
@@ -219,6 +287,11 @@ func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 		t,
 		forger.checkAndForgeProduction(context.Background()),
 		"pre-start policy gate must decline before KES evolution",
+	)
+	require.Zero(
+		t,
+		leader.callCount(),
+		"pre-start period must not run leader selection",
 	)
 	require.Zero(t, leiosChecker.calls, "pre-start period must not run Leios")
 	require.Zero(t, builder.calls, "pre-start period must not build a block")
@@ -257,6 +330,74 @@ func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeCouldNot),
 	)
+}
+
+func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
+	t *testing.T,
+) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	creds := NewPoolCredentials()
+	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, creds.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+
+	leader := &forgerBlockingLeader{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	builder := &forgerTestBuilder{
+		block: newForgerTestBlock(1, 2),
+	}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       1,
+			chainTipSlot:      0,
+			slotsPerKESPeriod: 1,
+		},
+	})
+	require.NoError(t, err)
+
+	forgeDone := make(chan error, 1)
+	go func() {
+		forgeDone <- forger.checkAndForgeProduction(context.Background())
+	}()
+	dingotestutil.RequireReceive(t, leader.entered, time.Second, "leader entered")
+
+	alternateVRFPath := createAlternateTestVRFKey(t)
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- creds.LoadFromFiles(
+			alternateVRFPath,
+			kesPath,
+			opCertPath,
+		)
+	}()
+	reloadErr := dingotestutil.RequireReceive(
+		t,
+		reloadDone,
+		time.Second,
+		"identity-changing reload completion",
+	)
+	require.ErrorContains(t, reloadErr, "cannot change pool or VRF identity")
+	close(leader.release)
+	require.NoError(t, dingotestutil.RequireReceive(
+		t,
+		forgeDone,
+		time.Second,
+		"forge completion",
+	))
+	require.Equal(t, 1, leader.callCount())
+	require.Zero(t, builder.calls)
+	require.Zero(t, broadcaster.calls)
 }
 
 type forgerCredentialGenerationBuilder struct {
@@ -559,6 +700,38 @@ func TestNewBlockForgerRejectsUnvalidatedKESLifetime(t *testing.T) {
 		},
 	})
 	require.ErrorContains(t, err, "validated KES protocol lifetime")
+}
+
+func TestNewBlockForgerRejectsInvalidOpCertGeneration(t *testing.T) {
+	vrfPath, kesPath, _ := createTestKeys(t)
+	corrupted := strings.Replace(testOpCertJSON, "89fc9e9f", "88fc9e9f", 1)
+	require.NotEqual(t, testOpCertJSON, corrupted)
+	creds := NewPoolCredentials()
+	require.NoError(t, creds.LoadFromFiles(
+		vrfPath,
+		kesPath,
+		writeTestOpCert(t, corrupted),
+	))
+	require.ErrorContains(
+		t,
+		creds.ValidateKESPeriod(
+			synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+			0,
+		),
+		"signature verification failed",
+	)
+
+	_, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			slotsPerKESPeriod: 1,
+		},
+	})
+	require.ErrorContains(t, err, "operational certificate is not validated")
 }
 
 type forgerTestBuilder struct {

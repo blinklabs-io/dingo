@@ -64,7 +64,11 @@ type PoolCredentials struct {
 	maxKESEvolutions uint64
 	opCertStartKES   uint64
 	opCertExpiryKES  uint64
+	opCertValidated  bool
 	generation       uint64
+	identitySet      bool
+	identityPoolID   lcommon.PoolId
+	identityVRFVKey  []byte
 
 	// generationMu prevents credential or policy replacement while a forge
 	// attempt is using one generation. Keep it separate from mu so code called
@@ -86,6 +90,7 @@ type credentialGeneration struct {
 	maxKESEvolutions uint64
 	opCertStartKES   uint64
 	opCertExpiryKES  uint64
+	opCertValidated  bool
 }
 
 type loadedPoolCredentials struct {
@@ -233,6 +238,7 @@ func (pc *PoolCredentials) clearUnsafe() {
 	pc.maxKESEvolutions = 0
 	pc.opCertStartKES = 0
 	pc.opCertExpiryKES = 0
+	pc.opCertValidated = false
 }
 
 // LoadFromFiles loads all pool credentials from the specified file paths.
@@ -259,6 +265,19 @@ func (pc *PoolCredentials) LoadFromFiles(
 		pc.clearUnsafe()
 		return err
 	}
+	if pc.identitySet &&
+		(pc.identityPoolID != loaded.poolID ||
+			!bytes.Equal(pc.identityVRFVKey, loaded.vrfVKey)) {
+		pc.clearUnsafe()
+		return errors.New(
+			"runtime credential reload cannot change pool or VRF identity",
+		)
+	}
+	if !pc.identitySet {
+		pc.identitySet = true
+		pc.identityPoolID = loaded.poolID
+		pc.identityVRFVKey = append([]byte(nil), loaded.vrfVKey...)
+	}
 	pc.poolID = loaded.poolID
 	pc.vrfSKey = loaded.vrfSKey
 	pc.vrfVKey = loaded.vrfVKey
@@ -268,6 +287,7 @@ func (pc *PoolCredentials) LoadFromFiles(
 	pc.maxKESEvolutions = 0
 	pc.opCertStartKES = loaded.opCert.KESPeriod
 	pc.opCertExpiryKES = 0
+	pc.opCertValidated = false
 	return nil
 }
 
@@ -508,6 +528,7 @@ func (pc *PoolCredentials) acquireCredentialGeneration() *credentialGeneration {
 		maxKESEvolutions: pc.maxKESEvolutions,
 		opCertStartKES:   pc.opCertStartKES,
 		opCertExpiryKES:  pc.opCertExpiryKES,
+		opCertValidated:  pc.opCertValidated,
 	}
 	pc.kesMu.RUnlock()
 	pc.mu.RUnlock()
@@ -527,6 +548,11 @@ func (g *credentialGeneration) validatedKESProtocolLifetime() (
 	if !g.loaded {
 		return 0, 0, 0, errors.New("credentials not loaded")
 	}
+	if !g.opCertValidated {
+		return 0, 0, 0, errors.New(
+			"operational certificate is not validated",
+		)
+	}
 	if g.maxKESEvolutions == 0 || g.opCertExpiryKES == 0 {
 		return 0, 0, 0, errors.New("KES protocol lifetime is not validated")
 	}
@@ -534,6 +560,30 @@ func (g *credentialGeneration) validatedKESProtocolLifetime() (
 		g.maxKESEvolutions,
 		g.opCertExpiryKES,
 		nil
+}
+
+func (g *credentialGeneration) validateKESPeriod(period uint64) error {
+	start, maxEvolutions, expiry, err := g.validatedKESProtocolLifetime()
+	if err != nil {
+		return err
+	}
+	if period < start {
+		return fmt.Errorf(
+			"operational certificate is not valid before KES period %d (current %d)",
+			start,
+			period,
+		)
+	}
+	if period >= expiry {
+		return fmt.Errorf(
+			"%w: operational certificate expired at KES period %d (current %d, max evolutions %d)",
+			errOpCertExpired,
+			expiry,
+			period,
+			maxEvolutions,
+		)
+	}
+	return nil
 }
 
 func (g *credentialGeneration) periodsRemaining(currentPeriod uint64) uint64 {
@@ -576,9 +626,23 @@ func (g *credentialGeneration) kesSign(
 // ValidateOpCert validates that the operational certificate matches the KES key
 // and that the cold key signature over the certificate body is valid.
 func (pc *PoolCredentials) ValidateOpCert() error {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
+	pc.generationMu.Lock()
+	defer pc.generationMu.Unlock()
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.generation++
+	pc.opCertValidated = false
+	pc.maxKESEvolutions = 0
+	pc.opCertExpiryKES = 0
 
+	if err := pc.validateOpCertUnsafe(); err != nil {
+		return err
+	}
+	pc.opCertValidated = true
+	return nil
+}
+
+func (pc *PoolCredentials) validateOpCertUnsafe() error {
 	if pc.opCert == nil {
 		return errors.New("operational certificate not loaded")
 	}
@@ -652,7 +716,9 @@ func (pc *PoolCredentials) opCertExpiryPeriodUnsafe() (uint64, error) {
 	if pc.opCert == nil {
 		return 0, errors.New("operational certificate not loaded")
 	}
-	if pc.maxKESEvolutions == 0 || pc.opCertExpiryKES == 0 {
+	if !pc.opCertValidated ||
+		pc.maxKESEvolutions == 0 ||
+		pc.opCertExpiryKES == 0 {
 		return 0, errors.New("KES protocol lifetime is not validated")
 	}
 	return pc.opCertExpiryKES, nil
@@ -706,16 +772,28 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.generation++
+	previousOpCertValidation := pc.opCertValidated
 	// Any failed validation leaves the credentials unusable for production
 	// forging rather than retaining a policy from an earlier genesis.
 	pc.maxKESEvolutions = 0
 	pc.opCertExpiryKES = 0
+	pc.opCertValidated = false
 
 	if pc.opCert == nil {
 		pc.opCertStartKES = 0
 		return errors.New("operational certificate not loaded")
 	}
 	pc.opCertStartKES = pc.opCert.KESPeriod
+	if pc.isLoadedUnsafe() {
+		if err := pc.validateOpCertUnsafe(); err != nil {
+			return fmt.Errorf("validate operational certificate: %w", err)
+		}
+		pc.opCertValidated = true
+	} else {
+		// Preserve an explicit ValidateOpCert result for focused callers that
+		// validate certificate metadata without loading signing material.
+		pc.opCertValidated = previousOpCertValidation
+	}
 	if genesis == nil {
 		return errors.New("shelley genesis is required")
 	}

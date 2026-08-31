@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -78,6 +80,31 @@ func createTestKeys(t *testing.T) (string, string, string) {
 	return vrfPath, kesPath, opCertPath
 }
 
+func createAlternateTestVRFKey(t *testing.T) string {
+	t.Helper()
+	seed := make([]byte, vrf.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	_, secretKey, err := vrf.KeyGen(seed)
+	require.NoError(t, err)
+	keyFile, err := bursa.GetVRFSKey(secretKey)
+	require.NoError(t, err)
+	data, err := json.Marshal(keyFile)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "alternate-vrf.skey")
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
+	return path
+}
+
+func writeTestOpCert(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "opcert.cert")
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+	return path
+}
+
 func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 	loadedVRF, err := loadSecretKeyFromFile(vrfPath)
@@ -119,6 +146,89 @@ func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 
 	// Verify IsLoaded
 	assert.True(t, pc.IsLoaded())
+}
+
+func TestPoolCredentialsRejectsRuntimeVRFIdentityChange(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+
+	err := pc.LoadFromFiles(
+		createAlternateTestVRFKey(t),
+		kesPath,
+		opCertPath,
+	)
+	require.ErrorContains(t, err, "cannot change pool or VRF identity")
+	require.False(t, pc.IsLoaded())
+	require.Zero(t, pc.OpCertExpiryPeriod())
+	require.ErrorContains(
+		t,
+		pc.LoadFromFiles(
+			createAlternateTestVRFKey(t),
+			kesPath,
+			opCertPath,
+		),
+		"cannot change pool or VRF identity",
+	)
+}
+
+func TestPoolCredentialsInvalidOpCertCannotPublishKESPolicy(t *testing.T) {
+	vrfPath, kesPath, _ := createTestKeys(t)
+	corrupted := strings.Replace(testOpCertJSON, "89fc9e9f", "88fc9e9f", 1)
+	require.NotEqual(t, testOpCertJSON, corrupted)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(
+		vrfPath,
+		kesPath,
+		writeTestOpCert(t, corrupted),
+	))
+
+	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateKESPeriod(
+			synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+			0,
+		),
+		"signature verification failed",
+	)
+	generation := pc.acquireCredentialGeneration()
+	defer generation.release()
+	require.ErrorContains(
+		t,
+		generation.validateKESPeriod(0),
+		"operational certificate is not validated",
+	)
+}
+
+func TestPoolCredentialsMismatchedKESReloadFailsClosed(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+
+	mismatched := strings.Replace(
+		testOpCertJSON,
+		"4cd49bb0",
+		"5cd49bb0",
+		1,
+	)
+	require.NotEqual(t, testOpCertJSON, mismatched)
+	err := pc.LoadFromFiles(
+		vrfPath,
+		kesPath,
+		writeTestOpCert(t, mismatched),
+	)
+	require.ErrorContains(t, err, "KES verification key mismatch")
+	require.False(t, pc.IsLoaded())
+	require.Zero(t, pc.OpCertExpiryPeriod())
 }
 
 func TestPoolCredentialsRejectsPermissiveSecretKeyModes(t *testing.T) {

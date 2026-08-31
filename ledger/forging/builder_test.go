@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -38,9 +39,11 @@ import (
 // mockMempool implements MempoolProvider for testing.
 type mockMempool struct {
 	transactions []MempoolTransaction
+	calls        int
 }
 
 func (m *mockMempool) Transactions() []MempoolTransaction {
+	m.calls++
 	return m.transactions
 }
 
@@ -187,6 +190,138 @@ func TestNewDefaultBlockBuilder(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NotNil(t, builder)
+}
+
+func TestExportedBuildersEnforceProtocolKESLifetime(t *testing.T) {
+	tests := []struct {
+		name        string
+		start       uint64
+		max         uint64
+		period      uint64
+		wantErr     string
+		wantMempool int
+	}{
+		{
+			name:    "pre-start",
+			start:   1,
+			max:     2,
+			period:  0,
+			wantErr: "not valid before",
+		},
+		{
+			name:        "start",
+			start:       0,
+			max:         2,
+			period:      0,
+			wantMempool: 1,
+		},
+		{
+			name:        "last-valid",
+			start:       0,
+			max:         2,
+			period:      1,
+			wantMempool: 1,
+		},
+		{
+			name:    "expiry",
+			start:   0,
+			max:     2,
+			period:  2,
+			wantErr: "operational certificate expired",
+		},
+	}
+	builders := []struct {
+		name string
+		call func(*DefaultBlockBuilder, uint64) (ledger.Block, []byte, error)
+	}{
+		{
+			name: "BuildBlock",
+			call: func(
+				builder *DefaultBlockBuilder,
+				period uint64,
+			) (ledger.Block, []byte, error) {
+				return builder.BuildBlock(1001, period)
+			},
+		},
+		{
+			name: "BuildBlockWithLeios",
+			call: func(
+				builder *DefaultBlockBuilder,
+				period uint64,
+			) (ledger.Block, []byte, error) {
+				return builder.BuildBlockWithLeios(
+					1001,
+					period,
+					LeiosBlockData{},
+				)
+			},
+		},
+	}
+
+	for _, entrypoint := range builders {
+		for _, test := range tests {
+			t.Run(entrypoint.name+"/"+test.name, func(t *testing.T) {
+				creds := setupTestCredentials(t)
+				creds.generationMu.Lock()
+				creds.mu.Lock()
+				creds.generation++
+				creds.opCertStartKES = test.start
+				creds.maxKESEvolutions = test.max
+				creds.opCertExpiryKES = test.start + test.max
+				creds.opCertValidated = true
+				creds.mu.Unlock()
+				creds.generationMu.Unlock()
+
+				mempool := &mockMempool{
+					transactions: []MempoolTransaction{},
+				}
+				builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+					Mempool: mempool,
+					PParamsProvider: &mockPParamsProvider{
+						pparams: &dijkstra.DijkstraProtocolParameters{
+							ConwayProtocolParameters: conway.ConwayProtocolParameters{
+								MaxTxSize:        16384,
+								MaxBlockBodySize: 90112,
+								ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+									Major: 10,
+								},
+							},
+						},
+					},
+					ChainTip: &mockChainTip{
+						tip: ochainsync.Tip{
+							Point: ocommon.Point{
+								Slot: 1000,
+								Hash: make([]byte, 32),
+							},
+							BlockNumber: 100,
+						},
+					},
+					EpochNonce: &mockEpochNonceProvider{
+						epoch: 1,
+						nonce: make([]byte, 32),
+					},
+					Credentials: creds,
+				})
+				require.NoError(t, err)
+				if test.wantErr == "" && test.period > 0 {
+					require.NoError(t, creds.UpdateKESPeriod(test.period))
+				}
+
+				block, blockCbor, err := entrypoint.call(builder, test.period)
+				if test.wantErr != "" {
+					require.ErrorContains(t, err, test.wantErr)
+					require.Nil(t, block)
+					require.Nil(t, blockCbor)
+				} else {
+					require.NoError(t, err)
+					require.NotNil(t, block)
+					require.NotEmpty(t, blockCbor)
+				}
+				require.Equal(t, test.wantMempool, mempool.calls)
+			})
+		}
+	}
 }
 
 func TestBuildBlockEmptyMempool(t *testing.T) {
@@ -450,7 +585,7 @@ func TestBuildBlockMissingVRFKey(t *testing.T) {
 	// Build should fail with missing VRF key
 	_, _, err := builder.BuildBlock(1001, 0)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF verification key not loaded")
+	assert.Contains(t, err.Error(), "credentials not loaded")
 }
 
 func TestBuildBlockInvalidColdVKeySize(t *testing.T) {
@@ -505,7 +640,7 @@ func TestBuildBlockInvalidColdVKeySize(t *testing.T) {
 	// Build should fail with invalid cold vkey size
 	_, _, err := builder.BuildBlock(1001, 0)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid cold verification key size")
+	assert.Contains(t, err.Error(), "credentials not loaded")
 }
 
 func TestBuildBlockInvalidVRFVKeySize(t *testing.T) {
@@ -560,7 +695,7 @@ func TestBuildBlockInvalidVRFVKeySize(t *testing.T) {
 	// Build should fail with invalid VRF vkey size
 	_, _, err := builder.BuildBlock(1001, 0)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid VRF verification key size")
+	assert.Contains(t, err.Error(), "credentials not loaded")
 }
 
 func TestBuildBlockTxExceedsMaxSize(t *testing.T) {

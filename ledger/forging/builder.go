@@ -246,6 +246,16 @@ func (b *DefaultBlockBuilder) buildBlock(
 	leios LeiosBlockData,
 	credentials *credentialGeneration,
 ) (ledger.Block, []byte, error) {
+	// Keep the protocol lifetime guard inside the generation-backed path so
+	// both exported builder entrypoints and BlockForger fail before reading the
+	// mempool, chain state, VRF key, or Leios inputs.
+	if err := credentials.validateKESPeriod(kesPeriod); err != nil {
+		return nil, nil, fmt.Errorf(
+			"cannot build block outside operational certificate lifetime: %w",
+			err,
+		)
+	}
+
 	// Get current chain tip
 	currentTip := b.chainTip.Tip()
 
