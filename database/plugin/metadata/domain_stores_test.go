@@ -161,6 +161,7 @@ var transactionStoreMethods = []string{
 	"NewBatchAccumulator",
 	"FlushBatch",
 	"SetTransactionBatched",
+	"SetTransactionLeiosClosure",
 	"SetTransaction",
 	"SetGapBlockTransaction",
 	"RecomputeGapCollateralFee",
