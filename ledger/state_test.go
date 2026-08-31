@@ -74,6 +74,7 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	err := ls.ledgerProcessBlocksFromSource(
 		context.Background(),
 		readChainResultCh,
+		true,
 	)
 	require.NoError(t, err)
 }
@@ -94,7 +95,7 @@ func TestLedgerProcessBlocksFromSourceReturnsReadChainError(t *testing.T) {
 	}
 	close(readChainResultCh)
 
-	err := ls.ledgerProcessBlocksFromSource(t.Context(), readChainResultCh)
+	err := ls.ledgerProcessBlocksFromSource(t.Context(), readChainResultCh, true)
 	require.ErrorContains(t, err, "read-chain decode or validation")
 	select {
 	case <-resultDone:
@@ -4484,6 +4485,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			eras.BabbageEraDesc,
 			nil,
 			nil,
+			true,
 		)
 		return err
 	}))
@@ -4542,6 +4544,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			eras.DijkstraEraDesc,
 			nil,
 			nil,
+			true,
 		)
 		return err
 	})
@@ -4626,6 +4629,7 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			eras.DijkstraEraDesc,
 			pparams,
 			nil,
+			true,
 		)
 		return err
 	})

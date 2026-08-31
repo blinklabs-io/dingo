@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
@@ -497,6 +498,15 @@ func validateTxPlutusConwayWithContext(
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
 	)
+	// Followed-chain apply path only (blinklabs-io/dingo#3627): trust the
+	// producer's declared-budget verdict. False for mempool/forging/queries.
+	trustProducerBudget := shouldTrustProducerPlutusBudget(ls)
+	// #3627 cumulative cap: even when the producer's per-redeemer declared
+	// budget is trusted, the transaction-wide protocol maximum (MaxTxExUnits)
+	// is NEVER relaxed. Accumulate the actually-metered ex-units across ALL
+	// redeemers and reject the tx if the running total exceeds MaxTxExUnits,
+	// so multiple individually-in-bounds scripts cannot sum past the cap.
+	var totalUsed lcommon.ExUnits
 	for redeemerKey, redeemerValue := range plutusCtx.redeemers.Iter() {
 		purpose, ok := buildConwayScriptPurpose(
 			redeemerKey,
@@ -575,26 +585,93 @@ func validateTxPlutusConwayWithContext(
 			Data:    redeemerValue.Data.Data,
 			ExUnits: redeemerValue.ExUnits,
 		}
-		_, execErr, err := evaluateConwayPlutusScript(
+		// #3627: on the followed-chain apply path defer to the producer's
+		// declared-budget verdict. Run phase-2 in exact (non-restrictive) mode
+		// with the protocol per-tx max as the machine limit (exactly as
+		// EvaluateTxConway does) so a script that evaluates successfully but
+		// whose locally metered ex-units marginally exceed the declared budget
+		// is accepted instead of deterministically re-rejecting a block the
+		// honest network already accepted. Mempool and forging leave
+		// trustProducerBudget false, keep restrictive mode, and still reject
+		// over-budget transactions.
+		evalBudget := redeemerValue.ExUnits
+		restrictive := true
+		if trustProducerBudget {
+			evalBudget = pp.MaxTxExUnits
+			restrictive = false
+		}
+		usedBudget, execErr, err := evaluateConwayPlutusScript(
 			plutusScript,
 			purpose,
 			redeemer,
 			datum,
-			redeemerValue.ExUnits,
+			evalBudget,
 			pp,
 			txInfos,
-			true,
+			restrictive,
 		)
 		if err != nil {
 			return err
 		}
 		if execErr != nil {
+			// A genuine script failure (evaluation error, false/invalid result,
+			// type or builtin error) still rejects in BOTH modes: exact mode
+			// only drops the used>declared post-check, never the script's own
+			// evaluation error.
 			return conway.PlutusScriptFailedError{
 				ScriptHash: scriptHash,
 				Tag:        redeemerKey.Tag,
 				Index:      redeemerKey.Index,
 				Err:        execErr,
 			}
+		}
+		// #3627 cumulative cap: accumulate the metered ex-units and reject the
+		// whole transaction if the running total exceeds the protocol per-tx
+		// maximum, even on the trust path. The producer's per-redeemer declared
+		// budget may be trusted, but the transaction-wide MaxTxExUnits ceiling
+		// is never relaxed, so multiple scripts that are each individually in
+		// bounds cannot collectively exceed the cap. On the strict path this is
+		// redundant with the phase-1 ExUnitsTooBig rule (used <= declared, and
+		// sum of declared <= max) but harmless.
+		newSteps, okSteps := lcommon.AddInt64Checked(totalUsed.Steps, usedBudget.Steps)
+		newMemory, okMemory := lcommon.AddInt64Checked(totalUsed.Memory, usedBudget.Memory)
+		if !okSteps || !okMemory {
+			// Arithmetic overflow: the running total is already larger than any
+			// representable MaxTxExUnits, so the tx unquestionably exceeds it.
+			return alonzo.ExUnitsTooBigUtxoError{
+				TotalExUnits: lcommon.ExUnits{
+					Steps:  totalUsed.Steps,
+					Memory: totalUsed.Memory,
+				},
+				MaxTxExUnits: pp.MaxTxExUnits,
+			}
+		}
+		totalUsed.Steps = newSteps
+		totalUsed.Memory = newMemory
+		if totalUsed.Steps > pp.MaxTxExUnits.Steps ||
+			totalUsed.Memory > pp.MaxTxExUnits.Memory {
+			return alonzo.ExUnitsTooBigUtxoError{
+				TotalExUnits: lcommon.ExUnits{
+					Steps:  totalUsed.Steps,
+					Memory: totalUsed.Memory,
+				},
+				MaxTxExUnits: pp.MaxTxExUnits,
+			}
+		}
+		// When the producer was trusted, log observably iff the script actually
+		// cost more than it declared (i.e. restrictive mode would have rejected
+		// it here). No log means the trust never had to fire.
+		if !restrictive &&
+			(usedBudget.Steps > redeemerValue.ExUnits.Steps ||
+				usedBudget.Memory > redeemerValue.ExUnits.Memory) {
+			reportProducerPlutusBudgetOverage(
+				ls,
+				scriptHash,
+				redeemerKey.Tag,
+				redeemerKey.Index,
+				usedBudget,
+				redeemerValue.ExUnits,
+			)
 		}
 	}
 	return nil

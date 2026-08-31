@@ -40,6 +40,31 @@ type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
 }
 
+// PlutusBudgetOverageTruster is satisfied by the dingo ledger view to signal
+// that phase-2 Plutus evaluation should defer to the block producer on the
+// declared-budget post-check (blinklabs-io/dingo#3627). It is set ONLY on the
+// followed-chain block-apply path; mempool admission and forging leave it unset
+// so they stay strict. Exported so *ledger.LedgerView can assert conformance at
+// compile time — signature drift here would silently re-enable strict rejection
+// on the apply path and re-wedge the follower.
+type PlutusBudgetOverageTruster interface {
+	TrustProducerPlutusBudget() bool
+}
+
+// PlutusBudgetOverageReporter is an optional capability the ledger view exposes
+// to log, observably, each time the apply path actually tolerated an
+// over-declared-budget script. Era validation discovers it with a runtime type
+// assertion, so it is safe for a ledger state not to implement it.
+type PlutusBudgetOverageReporter interface {
+	ReportProducerPlutusBudgetOverage(
+		scriptHash lcommon.ScriptHash,
+		tag lcommon.RedeemerTag,
+		index uint32,
+		used lcommon.ExUnits,
+		declared lcommon.ExUnits,
+	)
+}
+
 // MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
 // CIP-23 minimum pool margin to era validation, mirroring phase2ValidationSkipper.
 // Exported so implementers (e.g. *ledger.LedgerView) can assert conformance at
@@ -132,6 +157,35 @@ func shouldSkipPhase2Validation(
 ) bool {
 	skipper, ok := ls.(phase2ValidationSkipper)
 	return ok && skipper.SkipPhase2Validation()
+}
+
+// shouldTrustProducerPlutusBudget reports whether the followed-chain apply path
+// wants an over-declared-budget (used > declared ex-units) but otherwise
+// successful Plutus script accepted rather than rejected. Only the apply-path
+// ledger view returns true; every strict path (mempool, forging, queries)
+// returns false. See PlutusBudgetOverageTruster and blinklabs-io/dingo#3627.
+func shouldTrustProducerPlutusBudget(
+	ls lcommon.LedgerState,
+) bool {
+	truster, ok := ls.(PlutusBudgetOverageTruster)
+	return ok && truster.TrustProducerPlutusBudget()
+}
+
+// reportProducerPlutusBudgetOverage forwards an observable overage-tolerated
+// event to the ledger view if it implements PlutusBudgetOverageReporter.
+func reportProducerPlutusBudgetOverage(
+	ls lcommon.LedgerState,
+	scriptHash lcommon.ScriptHash,
+	tag lcommon.RedeemerTag,
+	index uint32,
+	used lcommon.ExUnits,
+	declared lcommon.ExUnits,
+) {
+	if reporter, ok := ls.(PlutusBudgetOverageReporter); ok {
+		reporter.ReportProducerPlutusBudgetOverage(
+			scriptHash, tag, index, used, declared,
+		)
+	}
 }
 
 // validatePlutusOutcome requires the locally evaluated phase-2 result to

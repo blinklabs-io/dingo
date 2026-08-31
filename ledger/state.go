@@ -4751,7 +4751,18 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			return ls.runLedgerReadChainAttempt(
 				attemptCtx,
 				ls.ledgerReadChain,
-				ls.ledgerProcessBlocksFromSource,
+				func(
+					srcCtx context.Context,
+					readChainResultCh <-chan readChainResult,
+				) error {
+					// Live followed chain: trust the producer's Plutus
+					// declared-budget verdict (#3627).
+					return ls.ledgerProcessBlocksFromSource(
+						srcCtx,
+						readChainResultCh,
+						true,
+					)
+				},
 			)
 		},
 	)
@@ -4957,12 +4968,16 @@ func (ls *LedgerState) ProcessTrustedBlockBatches(
 			}
 		}
 	}()
-	return ls.ledgerProcessBlocksFromSource(ctx, readChainResultCh)
+	// Historical immutable-load replay: re-derive every phase-2 verdict
+	// strictly (#3627). The producer-budget trust is a live-follower-only
+	// tolerance and must never relax a block during replay.
+	return ls.ledgerProcessBlocksFromSource(ctx, readChainResultCh, false)
 }
 
 func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	ctx context.Context,
 	readChainResultCh <-chan readChainResult,
+	trustProducerPlutusBudget bool,
 ) error {
 	// Enable bulk-load optimizations when syncing from behind
 	var bulkOptimizer metadata.BulkLoadOptimizer
@@ -5759,6 +5774,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							snapshotEra,
 							snapshotPParams,
 							snapshotPrevEraPParams,
+							// #3627: trust the producer's Plutus declared-budget
+							// verdict only on the live followed chain, never during
+							// historical immutable-load replay.
+							trustProducerPlutusBudget,
 						)
 						if err != nil {
 							deltaBatch.Release()
@@ -6061,6 +6080,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	currentEra eras.EraDesc,
 	pparams lcommon.ProtocolParameters,
 	prevEraPParams lcommon.ProtocolParameters,
+	trustProducerPlutusBudget bool,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
@@ -6349,6 +6369,16 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ls:                   ls,
 					intraBlockUtxos:      intraBlockUtxos,
 					skipPhase2Validation: skipPhase2Validation,
+					// Live followed-chain apply path only: defer to the producer
+					// on the Plutus declared-budget check so a sub-percent local
+					// ex-unit over-count does not deterministically re-reject a
+					// block the honest network accepted and wedge this follower
+					// (blinklabs-io/dingo#3627). This trust is threaded in by the
+					// caller: it is true ONLY for the live pipeline and false for
+					// historical immutable-load replay (ProcessTrustedBlockBatches),
+					// which must re-derive verdicts strictly. Mempool admission and
+					// forging build their LedgerView without this and stay strict.
+					trustProducerPlutusBudget: trustProducerPlutusBudget,
 				}
 				err := validationEra.ValidateTxFunc(
 					tx,

@@ -2194,6 +2194,7 @@ func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
 	err := fixture.ls.ledgerProcessBlocksFromSource(
 		context.Background(),
 		readChainResultCh,
+		true,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 }

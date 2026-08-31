@@ -410,6 +410,7 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 	require.NoError(t, ls.ledgerProcessBlocksFromSource(
 		context.Background(),
 		results,
+		true,
 	))
 	// Historical validation is enabled above, so the normal processing path
 	// calls validateInboundBlockEnvelope before applying this block. That call
@@ -444,6 +445,7 @@ func TestByronShelleyBoundarySeedsEpochNonceOnProductionPath(t *testing.T) {
 	require.NoError(t, ls.ledgerProcessBlocksFromSource(
 		context.Background(),
 		results,
+		true,
 	))
 	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
 

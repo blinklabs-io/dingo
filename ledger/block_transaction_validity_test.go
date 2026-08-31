@@ -239,24 +239,24 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).
-				Do(func(txn *database.Txn) error {
-					_, err := ls.ledgerProcessBlock(
-						txn,
-						ocommon.NewPoint(10, block.Hash().Bytes()),
-						block,
-						true,
-						false,
-						false,
-						nil,
-						envelopeParent{origin: true},
-						offsets,
-						testEra,
-						pparams,
-						nil,
-					)
-					return err
-				})
+			processErr := db.Transaction(true).Do(func(txn *database.Txn) error {
+				_, err := ls.ledgerProcessBlock(
+					txn,
+					ocommon.NewPoint(10, block.Hash().Bytes()),
+					block,
+					true,
+					false,
+					false,
+					nil,
+					envelopeParent{origin: true},
+					offsets,
+					testEra,
+					pparams,
+					nil,
+					true,
+				)
+				return err
+			})
 			require.True(t, phase1Reached)
 			require.True(t, phase2Reached)
 
@@ -398,24 +398,24 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 				true,
 				true,
 			)
-			processErr := db.Transaction(true).
-				Do(func(txn *database.Txn) error {
-					_, err := ls.ledgerProcessBlock(
-						txn,
-						ocommon.NewPoint(10, block.Hash().Bytes()),
-						block,
-						true,
-						false,
-						skipPhase2,
-						nil,
-						envelopeParent{origin: true},
-						offsets,
-						testEra,
-						pparams,
-						nil,
-					)
-					return err
-				})
+			processErr := db.Transaction(true).Do(func(txn *database.Txn) error {
+				_, err := ls.ledgerProcessBlock(
+					txn,
+					ocommon.NewPoint(10, block.Hash().Bytes()),
+					block,
+					true,
+					false,
+					skipPhase2,
+					nil,
+					envelopeParent{origin: true},
+					offsets,
+					testEra,
+					pparams,
+					nil,
+					true,
+				)
+				return err
+			})
 			require.True(t, phase2Called)
 			if tt.wantValidationErr {
 				var plutusErr conway.PlutusScriptFailedError
@@ -503,6 +503,7 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 					testEra,
 					nil,
 					nil,
+					true,
 				)
 				return err
 			})

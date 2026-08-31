@@ -227,7 +227,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 	}
 	close(results)
 
-	err = ls.ledgerProcessBlocksFromSource(t.Context(), results)
+	err = ls.ledgerProcessBlocksFromSource(t.Context(), results, true)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 	require.Equal(t, ledgerTipBlock.Slot, cm.PrimaryChain().Tip().Point.Slot)
 	select {
