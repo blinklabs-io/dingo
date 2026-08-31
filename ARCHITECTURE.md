@@ -1420,6 +1420,18 @@ triggers are single-flight; once the node is near the upstream tip, each run
 deletes at most one bounded batch of eligible rows using the era's stability
 window. Later runs continue the cleanup, keeping SQLite occupancy bounded.
 
+`LedgerState.Close` stops that timer and waits for a run already in flight,
+under a dedicated mutex rather than the `LedgerState` `RWMutex` (an in-flight
+run still takes `RLock` to read the tip, so draining under the ledger lock
+would deadlock). Both are required: the timer callback re-arms itself, so a
+`Close` that only stopped it would let an in-flight run install a fresh timer
+behind `Close`'s back, and `time.Timer.Stop` never waits for an `AfterFunc`
+callback that has already fired. Both triggers also refuse to start once
+`Close` has set the closed flag, which is what constrains the epoch
+transition's own `go ls.cleanupConsumedUtxos()` — stopping the timer does not
+reach that goroutine. `LedgerState` does not own the database, and its owner
+closes it as soon as `Close` returns.
+
 ### Midnight gRPC Server
 
 In `storageMode: api` with `midnight.serverEnabled: true` and a non-zero
