@@ -598,6 +598,20 @@ runs on 2026-08-26 and 2026-08-28, from bootstrap start through completion:
 Mainnet's total includes its index rebuild; subsequent restarts reused the
 completed database rather than repeating the bootstrap.
 
+A profiled Preview `api`-mode run completed snapshot bootstrap and historical
+metadata backfill with these timings:
+
+| Phase | Duration |
+|-------|----------|
+| Mithril snapshot bootstrap | 39m 13s |
+| Historical metadata backfill | 19h 57m 46s |
+| Post-backfill index finalization | ~16m 30s |
+| Total through bootstrap completion | ~20h 53m 19s |
+
+The API-mode measurement was taken on 2026-08-30/31 against approximately
+4.6M Preview blocks. The backfill processed 6.86M transactions at roughly
+64 blocks per second.
+
 ### Disk Space Requirements
 
 Bootstrapping requires temporary disk space for both the downloaded snapshot and the Dingo database:
