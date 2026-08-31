@@ -355,11 +355,16 @@ To drive it by hand against a network you brought up yourself:
 
 ```bash
 ./start.sh --accelerated
-DEVNET_ACCELERATED=1 \
-  DEVNET_TESTNET_YAML=$PWD/testnet-dingo-accelerated.yaml \
-  DEVNET_COMPOSE_FILE=$PWD/docker-compose.yml \
-  go test -tags devnet -run TestAcceleratedScenarioTimeline -timeout 8m \
-  ./internal/test/devnet/scenarios/
+```
+
+`start.sh --accelerated` prints the exact `go test` command to run next,
+including the `DEVNET_COMPOSE_PROJECT` and `DEVNET_*_ADDR` values for
+whichever project/ports this run actually landed on — `devnet_ports` may
+have derived non-default host ports, so copy that printed command rather
+than retyping one with the default `localhost:3010`-style addresses, which
+would connect to the wrong ports. Then:
+
+```bash
 ./stop.sh --accelerated
 ```
 
@@ -530,9 +535,13 @@ this feature:
 
 ## Port and address overrides
 
-If the defaults clash with something already on the host, override the port
-mappings via environment or a local `.env` file next to `docker-compose.yml`
-(the checked-in `.env` sets `COMPOSE_PROFILES=dingo` as the default).
+`start.sh`/`run-tests.sh` derive a worktree-specific block for all 11
+variables below by default (see `devnet_ports` in [Cleanup](#cleanup)), so
+the defaults in this table only apply to a bare `docker compose up` or a
+single-worktree run with `DEVNET_*_PORT` set explicitly. Set any one of them
+to opt out of auto-derivation entirely and take full manual control (via
+environment or a local `.env` file next to `docker-compose.yml`; the
+checked-in `.env` sets `COMPOSE_PROFILES=dingo` as the default).
 
 Dingo mode:
 
@@ -578,6 +587,7 @@ harness and the compose port mappings always agree.
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |
+| `compose-project.sh`         | Derives a stable, worktree-specific Compose project name, a collision-checked bridge subnet and host port block, and a rendered topology directory; wraps `docker compose up` with a retry on subnet collision |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full bring-up → test → tear-down cycle used by CI; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
@@ -598,15 +608,62 @@ harness and the compose port mappings always agree.
 
 ## Cleanup
 
-`stop.sh` and the `run-tests.sh` trap both run `docker compose down -v`
-scoped to the active `COMPOSE_PROFILES`, which removes that mode's config
-and data volumes. Genesis is regenerated on every start, so this is the
-desired default — there's no state worth preserving between runs. If a
-previous run left orphaned containers or volumes around:
+`start.sh`, `stop.sh`, and `run-tests.sh` derive `COMPOSE_PROJECT_NAME` from
+the worktree's absolute path. Compose therefore gives each worktree distinct
+containers, networks, volumes, and project state. Set `COMPOSE_PROJECT_NAME`
+explicitly to run more than one DevNet in the same worktree. `NodeControl`
+receives that project as `DEVNET_COMPOSE_PROJECT`, resolves service containers
+inside it, and still uses direct `docker stop`/`docker start` for disruption
+phases.
+
+A distinct network *name* isn't enough on its own: the compose network's
+subnet is a separate axis, and Docker refuses to create two networks with an
+overlapping subnet even under different project names ("Pool overlaps with
+other one on this address space"). The same three scripts also derive
+`DEVNET_NET_BASE`, a `172.24-172.31.x` /24, and use it for the compose
+network's subnet and each service's static IP — the topology still needs
+static IPs because the peer lists in `topology/*.json` are static,
+checked-in files. `devnet_render_topology` rewrites a worktree-local copy of
+those files with the run's `DEVNET_NET_BASE` into `DEVNET_TOPOLOGY_DIR`,
+which `docker-compose.yml` mounts instead of the checked-in `./topology`
+(its fallback default, so a bare `docker compose up` without going through
+these scripts still works — for a single run at a time).
+
+A worktree-path hash only picks a *starting* subnet: two worktrees can hash
+to the same one, and this range isn't reserved for DevNet, so an unrelated
+Docker network could already sit on part of it. `devnet_net_base` actually
+checks every subnet `docker network ls`/`inspect` currently reports and
+walks forward from the hash to a genuinely free `/24` (falling back to the
+hash alone if Docker isn't reachable). A residual race remains between that
+check and the network actually being created — `devnet_compose_up` (used by
+`start.sh`/`run-tests.sh` in place of a bare `docker compose up -d`) covers
+it: on a "Pool overlaps" failure it recomputes `DEVNET_NET_BASE` (which now
+sees the winner's network and skips it), re-renders topology, and retries,
+up to 3 attempts. Set `DEVNET_NET_BASE` explicitly for the same reason
+you'd set `COMPOSE_PROJECT_NAME`.
+
+Published host ports are a fourth axis Compose does not scope by project at
+all: two worktrees' default ports (3010/3013-3015, 3020-3023, and
+conformance's 3010-3012) collide outright with "port is already allocated".
+`devnet_ports` derives a worktree-specific block of 11 ports (one hash-based
+starting point, actually checked against what's listening on
+`127.0.0.1` and shifted forward a whole block at a time until every port in
+it is free) and exports it as the `DEVNET_*_PORT` / `DEVNET_*_NTC_PORT`
+variables `docker-compose.yml` already reads. It's skipped entirely if the
+caller has already set any of those variables, so a manual port override
+stays in full manual control.
+
+`stop.sh` and the `run-tests.sh` trap run `docker compose down -v` only for
+that project, removing its config and data volumes without touching another
+worktree's run, and remove that project's rendered topology directory.
+Genesis is regenerated on every start, so this is the desired default —
+there's no state worth preserving between runs. If a previous run left
+orphaned containers or volumes around, use the same project name:
 
 ```bash
-docker compose -f docker-compose.yml down -v --remove-orphans
+COMPOSE_PROJECT_NAME=<project> docker compose -f docker-compose.yml down -v --remove-orphans
 docker volume ls | grep devnet                       # inspect leftovers
+docker network ls | grep dingo-devnet                # inspect leftover networks
 ```
 
 ## Troubleshooting
@@ -642,7 +699,8 @@ docker volume ls | grep devnet                       # inspect leftovers
   `epochLength: 500`, `slotLength: 1s`.
 - The accelerated scenario fails at `NewNodeControl`. It needs to reach
   Docker Compose to stop and start nodes. Run it through `run-tests.sh`,
-  which exports `DEVNET_COMPOSE_FILE`, or set that variable yourself. It
+  which exports `DEVNET_COMPOSE_FILE` and `DEVNET_COMPOSE_PROJECT`, or set
+  both variables yourself. It
   fails rather than skipping the disruption phases on purpose — a pass
   that quietly omitted them would not be release evidence.
 - `TestCIP50PledgeLeverageRewardEffect` skips. It requires
