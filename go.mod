@@ -25,7 +25,7 @@ require (
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.21.0
-	github.com/dgraph-io/badger/v4 v4.9.4
+	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/fxamacker/cbor/v2 v2.9.3
 	github.com/getsops/sops/v3 v3.13.3
 	github.com/glebarez/go-sqlite v1.23.0
