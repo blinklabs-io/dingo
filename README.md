@@ -1002,7 +1002,11 @@ container generates fresh pool keys and genesis files for either profile.
 
 ### Running the Automated Tests
 
-The test suite builds the Dingo Docker image, starts all containers, waits for health checks, and runs Go integration tests tagged with `//go:build devnet`:
+The test suite builds the Dingo Docker image, starts all containers, waits for
+health checks, and runs Linux-only Go integration tests tagged with
+`//go:build linux && devnet`. Conformance-only scenarios additionally require
+`devnet_conformance`, while Dingo-only scenarios require
+`!devnet_conformance`:
 
 ```bash
 cd internal/test/devnet/

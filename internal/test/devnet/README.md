@@ -21,16 +21,19 @@ Two networks are available, selected by a Docker Compose profile:
 The Go test harness lives alongside this directory: `internal/test/devnet/`
 (helpers and config loader at the top level, runnable scenarios under
 `internal/test/devnet/scenarios/`). The layout mirrors
-`internal/test/antithesis/`. Everything that talks to a running network is
-gated by the `devnet` build tag, and conformance-only tests additionally
-require `devnet_conformance` (see Test scenarios below).
+`internal/test/antithesis/`. Every Go file in the tree has a `linux` build
+constraint because the harness requires a native Linux Docker engine, Bash,
+Linux container networking, and Unix ownership semantics. Code that talks to
+a running network additionally requires the `devnet` build tag, and
+conformance-only tests also require `devnet_conformance` (see Test scenarios
+below).
 
 The pure logic the harness is built on — the network-spec loader and its
-validation, the observed-chain state machine, and the scenario plan — is
-deliberately **not** tagged, so its unit tests run in the ordinary
+validation, the observed-chain state machine, and the scenario plan — carries
+only the `linux` constraint, so its unit tests run in the ordinary Linux
 `go test ./...` with no Docker involved. That is what keeps an invalid
-accelerated spec or a broken rollback rule from only surfacing as a
-mysterious DevNet stall.
+accelerated spec or a broken rollback rule from only surfacing as a mysterious
+DevNet stall.
 
 ## Topology — dingo mode (default)
 
@@ -120,9 +123,9 @@ it, and both are derived from `k` and `f` rather than configured directly:
 `DevNetConfig.Validate()` enforces `4k/f < epochLength` and
 `3k/f < epochLength`, and `TestCheckedInSpecsAreValid` in
 `internal/test/devnet/config_test.go` runs it against every checked-in
-spec. That test carries **no build tag**, so an edit that shrinks an epoch
-without shrinking `k` fails in the ordinary `go test ./...` run instead of
-turning into a DevNet stall nobody can explain.
+spec. That test carries only the `linux` constraint, so an edit that shrinks an
+epoch without shrinking `k` fails in the ordinary Linux `go test ./...` run
+instead of turning into a DevNet stall nobody can explain.
 
 The canonical specs are deliberately *not* accelerated: they are what soak
 and canary runs use, and `TestCanonicalSpecsKeepCanonicalTiming` fails if
@@ -250,7 +253,7 @@ node's NtC endpoint.
 
 ## Running the integration tests
 
-`run-tests.sh` is the entry point used both locally and in CI:
+`run-tests.sh` is the entry point for a complete native-Linux DevNet run:
 
 ```bash
 ./run-tests.sh                              # dingo mode (default): bring up, run devnet tests, tear down
@@ -505,8 +508,8 @@ runs).
 All scenarios live in `internal/test/devnet/scenarios/` and use the harness
 in `internal/test/devnet/`.
 
-Generic scenarios (`//go:build devnet`) run in both dingo and conformance
-mode:
+Generic scenarios (`//go:build linux && devnet`) run in both dingo and
+conformance mode:
 
 | Test | What it verifies |
 |------|-------------------|
@@ -518,16 +521,17 @@ mode:
 | `TestEpochBoundaryConsensus` | All nodes remain in consensus across at least one epoch boundary (exercises candidate-nonce freeze, lab nonce roll, and new-epoch VRF verification) |
 | `TestAcceleratedScenarioTimeline` | The accelerated scenario timeline: readiness, block and transaction propagation, chain agreement, an epoch transition, a peer interruption with recovery, and a relay restart — all on one shared clock, driven by streamed ChainSync events. Skipped unless `DEVNET_ACCELERATED=1`; see Accelerated scenario timeline above. |
 
-Reference-conformance scenario (`//go:build devnet && devnet_conformance`),
-runs only with `--conformance`:
+Reference-conformance scenario
+(`//go:build linux && devnet && devnet_conformance`) runs only with
+`--conformance`:
 
 | Test | What it verifies |
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
 
-Dingo-only feature scenario (`//go:build devnet && !devnet_conformance`),
-runs only in the default dingo mode — no `cardano-node` reference exists for
-this feature:
+Dingo-only feature scenario
+(`//go:build linux && devnet && !devnet_conformance`) runs only in the default
+dingo mode — no `cardano-node` reference exists for this feature:
 
 | Test | What it verifies |
 |------|-------------------|
@@ -589,22 +593,22 @@ harness and the compose port mappings always agree.
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |
 | `compose-project.sh`         | Derives a stable, worktree-specific Compose project name, a collision-checked bridge subnet and host port block, and a rendered topology directory; wraps `docker compose up` with a retry on subnet collision |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
-| `run-tests.sh`               | Full bring-up → test → tear-down cycle used by CI; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
+| `run-tests.sh`               | Full native-Linux bring-up → test → tear-down runner; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
-| `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (build tag `devnet`) |
-| `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (**no build tag** — its tests run in the ordinary `go test ./...`) |
-| `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (**no build tag**) |
-| `timeline.go`                | `ScenarioPlan`: derives the accelerated scenario's phases, deadlines, outage length, and hard timeout from the network spec (**no build tag**) |
-| `observer.go`                | Persistent per-node ChainSync sessions feeding `chainstate.go`, with automatic reconnect across container restarts (build tag `devnet`) |
-| `nodectl.go`                 | Stops/starts compose services for the disruption phases and supplies the Docker side of failure capture (build tag `devnet`) |
-| `artifacts.go`               | What a failed scenario preserves and where: capture planning and artifact writing (**no build tag** — its tests run in the ordinary `go test ./...`) |
-| `endpoints.go`               | The `NodeEndpoint` description shared by the harness, observers, and failure capture (**no build tag**) |
-| `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |
-| `endpoints_conformance.go`   | Conformance-mode node endpoints (`//go:build devnet && devnet_conformance`) |
-| `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (build tag `devnet`) |
-| `credentials.go`             | Loads genesis stake credentials for the CIP-50 scenario (build tag `devnet`) |
-| `harness_test.go`, `credentials_test.go` | Tests for the harness/credential helpers themselves (build tag `devnet`) |
-| `scenarios/`                 | Devnet test scenarios (one or more `Test*` per file, gated per the Test scenarios table above) |
+| `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (`linux && devnet`) |
+| `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (`linux`; its tests run in the ordinary Linux `go test ./...`) |
+| `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (`linux`) |
+| `timeline.go`                | `ScenarioPlan`: derives the accelerated scenario's phases, deadlines, outage length, and hard timeout from the network spec (`linux`) |
+| `observer.go`                | Persistent per-node ChainSync sessions feeding `chainstate.go`, with automatic reconnect across container restarts (`linux && devnet`) |
+| `nodectl.go`                 | Stops/starts compose services for the disruption phases and supplies the Docker side of failure capture (`linux && devnet`) |
+| `artifacts.go`               | What a failed scenario preserves and where: capture planning and artifact writing (`linux`; its tests run in the ordinary Linux `go test ./...`) |
+| `endpoints.go`               | The `NodeEndpoint` description shared by the harness, observers, and failure capture (`linux`) |
+| `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`linux && devnet && !devnet_conformance`) |
+| `endpoints_conformance.go`   | Conformance-mode node endpoints (`linux && devnet && devnet_conformance`) |
+| `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (`linux && devnet`) |
+| `credentials.go`             | Loads genesis stake credentials for the CIP-50 scenario (`linux && devnet`) |
+| `harness_test.go`, `credentials_test.go` | Tests for the harness/credential helpers themselves (`linux && devnet`) |
+| `scenarios/`                 | DevNet test scenarios (`linux` plus the scenario-specific constraints in the Test scenarios table above) |
 
 ## Cleanup
 

@@ -6656,6 +6656,17 @@ The package has no build tag, so `go test ./...` runs it on every platform in
 CI as well. Adding a documented value that a file in the tree already owns
 belongs in a rule here, not in a second hard-coded copy.
 
+### DevNet Platform Boundary
+
+`internal/test/devnet/` is a Linux-only integration harness. It requires a
+native Linux Docker engine, Bash, Linux container networking, and Unix
+ownership semantics; emulated or remote Docker clients on macOS and Windows do
+not provide an equivalent test environment. Every Go file in that tree carries
+a `linux` build constraint, so ordinary `go build ./...` and `go test ./...`
+retain their full commands while excluding the harness on unsupported hosts.
+`TestDevnetFilesStayLinuxOnly` enforces the constraint for newly added files.
+Native Linux is the authoritative platform for DevNet validation.
+
 ## Design Patterns
 
 ### Dependency Injection
