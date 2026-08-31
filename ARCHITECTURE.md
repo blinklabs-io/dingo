@@ -7346,8 +7346,36 @@ full per-epoch and per-pool reward history stays queryable and a missing
 summary row keeps its diagnostic meaning of a boundary that was never
 captured. Because a retained snapshot can outlive its per-credential rows,
 `applyStakeRewards` skips an epoch whose snapshot claims delegators over an
-empty `RewardStakeInput` set rather than failing the rollover. See the
-retention section in `DATABASE.md` for the per-table detail.
+empty `RewardStakeInput` set rather than failing the rollover.
+
+`PoolStakeSnapshot` retention has one extra lower-watermark rule (issue #3727):
+it is the leader-eligibility basis a queued/deferred header validates against.
+`cleanupOldSnapshots` prunes `PoolStakeSnapshot` through a retention guard
+(`Manager.SetPoolSnapshotRetentionGuard`, wired to
+`LedgerState.PrunePoolSnapshotsWithRetentionFloor`) that, under one dedicated
+lock held across the whole decision and the pool-snapshot delete+commit: (1)
+evicts deferred headers the apply cursor has already passed — abandoned, since a
+canonical one is consumed at apply — so they stop pinning their snapshots and
+their persisted markers are deleted; (2) lowers the delete boundary to the floor
+(oldest `StakeSnapshotEpoch(epochOf(slot))` over the survivors) when it is below
+`current-3`, or to 0 while any deferred slot is not yet epoch-mappable; and (3)
+clamps that boundary up to a hard depth cap (`current - 24`) so a stuck header
+can never pin snapshots without bound. Holding the lock across floor read and
+delete+commit means admission cannot interleave between them (the race
+CodeRabbit flagged; `markDeferredHeaderValidation` takes the same lock and does
+no I/O, so no deadlock). The pin moves only `PoolStakeSnapshot` — the reward
+window stays at `current-3` — never prunes more than the default, releases as
+headers resolve or are evicted, and is rebuilt from the persisted markers at
+startup (`repopulateDeferredHeaderValidation`) so it survives a restart. The pin
+is what makes a deferred header *resolve*: its snapshot is retained until the
+cursor reaches it. The classification in `verifyBlockHeaderState` is
+consensus-narrow: a leader-stake snapshot reported unavailable is deferred ONLY
+while the apply cursor is still behind the header's slot (not yet produced =
+recoverable); once the cursor has caught up a still-empty distribution is a
+genuine, permanent gap and stays a hard rejection, exactly as before, and a
+producer absent from a populated snapshot always hard-rejects. See the retention
+section in `DATABASE.md` for the per-table
+detail.
 
 A skipped reward round is never made up later, and that has consequences
 well beyond the reward figures. Applying the round at the boundary into N

@@ -381,8 +381,8 @@ func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
 }
 
 func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
-	ls.Lock()
-	defer ls.Unlock()
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
 	if ls.deferredHeaderValidation == nil {
 		ls.deferredHeaderValidation = make(map[string]struct{})
 	}
@@ -390,22 +390,129 @@ func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
 }
 
 func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
-	ls.Lock()
-	defer ls.Unlock()
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
 	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
 }
 
 func (ls *LedgerState) consumeDeferredHeaderValidation(
 	point ocommon.Point,
 ) bool {
-	ls.Lock()
-	defer ls.Unlock()
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
 	key := headerValidationPointKey(point)
 	if _, ok := ls.deferredHeaderValidation[key]; !ok {
 		return false
 	}
 	delete(ls.deferredHeaderValidation, key)
 	return true
+}
+
+// evictStaleDeferredHeadersLocked drops deferred-header entries the apply
+// cursor has already passed (issue #3727, finding 5). A canonical deferred
+// header is consumed by consumeDeferredHeaderValidation when its block is
+// applied, so an entry still present at a slot <= the applied tip is on an
+// abandoned fork (or a rollback left it behind) and can never resolve; keeping
+// it would pin its epoch's pool_stake_snapshot rows forever. Entries with an
+// unparseable key are dropped too (they can never be validated). Returns the
+// evicted map keys so the caller can delete their persisted markers. The
+// caller must hold deferredHeaderValidationMu.
+func (ls *LedgerState) evictStaleDeferredHeadersLocked() []string {
+	if len(ls.deferredHeaderValidation) == 0 {
+		return nil
+	}
+	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	var evicted []string
+	for key := range ls.deferredHeaderValidation {
+		slot, err := slotFromHeaderValidationKey(key)
+		// STRICTLY below the tip: a block whose slot the cursor has fully
+		// passed was applied (and its marker consumed) if canonical, so one
+		// still present is abandoned. Excluding slot == tip avoids racing the
+		// in-progress apply/consume of the block that just became the tip --
+		// its consume clears the marker itself, and it is evicted on a later
+		// pass only if it turns out to be abandoned.
+		if err != nil || slot < tipSlot {
+			evicted = append(evicted, key)
+			delete(ls.deferredHeaderValidation, key)
+		}
+	}
+	return evicted
+}
+
+// deletePersistedDeferredMarkers removes the sync_state markers for a set of
+// deferred-header map keys. Best effort and lock-free: it is called after the
+// in-memory eviction has already released the retention pin, so a failure only
+// leaves a dead marker row to be re-cleaned on a later pass.
+func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
+	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
+		return
+	}
+	for _, k := range mapKeys {
+		syncKey := deferredHeaderValidationSyncStatePrefix + k
+		if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+			ls.config.Logger.Warn(
+				"failed to delete stale deferred-header marker",
+				"key", syncKey,
+				"error", err,
+				"component", "ledger",
+			)
+		}
+	}
+}
+
+// repopulateDeferredHeaderValidation rebuilds the in-memory deferred-header set
+// from the persisted markers at startup (issue #3727, finding 3), so the
+// snapshot retention floor (PrunePoolSnapshotsWithRetentionFloor) covers
+// headers still awaiting apply from before the restart -- otherwise the first
+// post-restart epoch cleanup could prune a pool-stake snapshot such a header
+// needs. Abandoned markers loaded here are harmless: the retention guard evicts
+// any whose slot the apply cursor has already passed on its next run. Best
+// effort: a load error only forgoes the pin, leaving apply-time re-validation
+// (which reads the per-point marker directly) unaffected.
+func (ls *LedgerState) repopulateDeferredHeaderValidation() {
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return
+	}
+	keys, err := ls.db.ListSyncStateKeysByPrefix(
+		deferredHeaderValidationSyncStatePrefix,
+		nil,
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to repopulate deferred-header set from persisted markers; "+
+				"snapshot retention pin will not cover pre-restart deferred headers until re-seen",
+			"error", err,
+			"component", "ledger",
+		)
+		return
+	}
+	if len(keys) == 0 {
+		return
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	if ls.deferredHeaderValidation == nil {
+		ls.deferredHeaderValidation = make(map[string]struct{}, len(keys))
+	}
+	restored := 0
+	for _, syncKey := range keys {
+		mapKey := strings.TrimPrefix(
+			syncKey,
+			deferredHeaderValidationSyncStatePrefix,
+		)
+		if mapKey == "" || mapKey == syncKey {
+			continue
+		}
+		ls.deferredHeaderValidation[mapKey] = struct{}{}
+		restored++
+	}
+	ls.deferredHeaderValidationMu.Unlock()
+	if restored > 0 {
+		ls.config.Logger.Info(
+			"repopulated deferred-header set from persisted markers",
+			"count", restored,
+			"component", "ledger",
+		)
+	}
 }
 
 func (ls *LedgerState) persistDeferredHeaderValidation(

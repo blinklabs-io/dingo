@@ -776,6 +776,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Prune pool snapshots through the deferred-header retention guard, so a
+	// snapshot a queued/deferred header still needs for leader validation is
+	// never pruned out from under it and misread as pool absence, and the
+	// floor selection is atomic with deferred-header admission (issue #3727).
+	// Set before Start; the pin is released automatically as headers resolve.
+	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
+		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
+	)
 	// Reinstall both epoch-boundary hooks, in the same order and with the
 	// same bodies as Run() (node.go): the stake hook first, so the
 	// authoritative SNAP-point stake read (after MIR, before POOLREAP/

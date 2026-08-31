@@ -941,7 +941,9 @@ Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
 epochs the Shelley rotation and delayed reward model need: current, current-1,
 current-2 for Go, and current-3 so reward calculation can be replayed after a
 rollback across the boundary where those rewards were applied. Retention is not
-configurable, and it only ever deletes rows below that window.
+operator-configurable, and it only ever deletes rows below that window (but see
+the deferred-header retention pin below, which can hold `pool_stake_snapshot`
+rows longer).
 
 Pruned at `epoch < current-3`:
 
@@ -960,6 +962,54 @@ two per-credential tables scale with delegator count — about 5k rows per epoch
 preview and 1.3M on mainnet — which is why they alone stay windowed. No
 before-epoch delete method exists for any retained table on
 `metadata.MetadataStore`.
+
+**Deferred-header retention pin (issue #3727).** `pool_stake_snapshot` has one
+extra retention rule the two windowed reward tables do not: it is the
+leader-eligibility basis a *queued/deferred header* validates against. If the
+mark snapshot such a header needs (`StakeSnapshotEpoch(epoch) = epoch-1`) were
+pruned out from under it, `leaderEligibilityStake` (`ledger/verify_header.go`)
+would read the missing rows back as a zero-stake answer. `cleanupOldSnapshots`
+therefore prunes `pool_stake_snapshot` *through a retention guard*
+(`Manager.SetPoolSnapshotRetentionGuard`, wired at node start to
+`LedgerState.PrunePoolSnapshotsWithRetentionFloor`). Under one dedicated lock,
+held across the whole decision and the pool-snapshot delete+commit, the guard:
+
+1. **Evicts abandoned headers.** A deferred header the apply cursor has already
+   passed is abandoned — a canonical one is consumed at apply — so it is dropped
+   from the set (and its persisted marker deleted) instead of pinning its
+   snapshot forever. This is what bounds retention in practice.
+2. **Computes the floor** as the minimum of `StakeSnapshotEpoch(epochOf(slot))`
+   over the surviving deferred headers and lowers the pool-snapshot delete
+   boundary to it when it is below `current-3` (reward-table retention is
+   untouched at `current-3`). While ANY surviving deferred slot is not yet
+   mappable to an epoch, the floor is **0** (retain everything) so the snapshot
+   the header will need once the epoch cache advances is not pruned meanwhile.
+3. **Clamps to a depth cap.** The boundary is clamped up to
+   `current - poolSnapshotRetentionMaxDepth` (24), a hard backstop so even a
+   stuck header can never pin more than a bounded number of epochs of pool
+   snapshots (~1.3M rows/epoch on mainnet). It never rises above the default
+   window.
+
+Because the guard holds the lock across both the floor read and the
+delete+commit, a header admitted concurrently cannot slip in between them and
+lose its snapshot (admission — `markDeferredHeaderValidation` — takes the same
+lock and does no I/O, so it cannot deadlock). The pin is a *lower-watermark
+only*: it never prunes more than the default window, releases as headers
+resolve (the set shrinks) or are evicted, and with no guard set is
+byte-identical to the original behavior. Across a restart the in-memory set is
+rebuilt from the persisted markers (`repopulateDeferredHeaderValidation`, via
+`ListSyncStateKeysByPrefix`) before the first cleanup, so the pin covers
+headers still awaiting apply from before the restart.
+
+The pin is what makes a deferred header *resolve* (its snapshot is retained
+until the cursor reaches it). The classification in `verifyBlockHeaderState` is
+deliberately narrow and consensus-safe: a leader-stake snapshot reported
+unavailable is deferred ONLY while the apply cursor is still behind the header's
+slot (the snapshot is not yet produced — recoverable). Once the cursor has
+caught up, a still-empty distribution is a genuine, permanent gap for that epoch
+and stays a hard rejection, exactly as before — deferring it forever would adopt
+a block whose leader eligibility is never checked. A producer absent from a
+*populated* snapshot is authoritative ineligibility and always hard-rejects.
 
 Together the retained tables are the full per-epoch reward record a historical
 closed-epoch comparison needs: the pots the epoch was paid from, both sets of

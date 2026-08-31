@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
@@ -221,6 +222,48 @@ func (s *Store) DeleteSyncState(key string, txn types.Txn) error {
 		return fmt.Errorf("delete sync state: %w", err)
 	}
 	return nil
+}
+
+// ListSyncStateKeysByPrefix returns every sync_state key that has the given
+// byte prefix, sorted ascending. It enumerates the (small) sync_state keyspace
+// and filters the exact prefix in Go with strings.HasPrefix, so the match is
+// byte-exact and identical on every backend. A SQL range scan or LIKE would be
+// wrong here: on MySQL/Postgres the >=/< and LIKE operators honor the column's
+// COLLATION, not byte order, so a case- or locale-insensitive collation could
+// include keys that lack the byte prefix (or exclude keys that have it), and a
+// synthesized range upper bound over a non-ASCII prefix can be invalid UTF-8.
+// The deferred-header retention markers this enumerates (issue #3727) must be
+// matched exactly or a restart could miss a marker and fail to pin a snapshot.
+func (s *Store) ListSyncStateKeysByPrefix(
+	prefix string,
+	txn types.Txn,
+) ([]string, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf("list sync state keys: %w", err)
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind("SELECT sync_key FROM sync_state ORDER BY sync_key"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list sync state keys: %w", err)
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("list sync state keys: %w", err)
+		}
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list sync state keys: %w", err)
+	}
+	return keys, nil
 }
 
 func (s *Store) ClearSyncState(txn types.Txn) error {
