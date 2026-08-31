@@ -153,6 +153,10 @@ func (loaded *loadedPoolCredentials) zeroize() {
 		loaded.kesSKey.Zeroize()
 		loaded.kesSKey = nil
 	}
+	loaded.vrfVKey = nil
+	loaded.kesVKey = nil
+	loaded.opCert = nil
+	loaded.poolID = lcommon.PoolId{}
 }
 
 // OpCert represents an operational certificate that binds a KES key to a pool.
@@ -213,12 +217,20 @@ func loadPoolCredentialsFromFiles(
 	vrfSKeyPath string,
 	kesSKeyPath string,
 	opCertPath string,
-) (*loadedPoolCredentials, error) {
+) (_ *loadedPoolCredentials, retErr error) {
+	loaded := &loadedPoolCredentials{}
+	defer func() {
+		if retErr != nil {
+			loaded.zeroize()
+		}
+	}()
+
 	// Load VRF signing key
 	vrfKey, err := loadSecretKeyFromFile(vrfSKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load VRF signing key: %w", err)
 	}
+	loaded.vrfSKey = vrfKey.SKey
 	if len(vrfKey.SKey) != vrf.SeedSize {
 		return nil, fmt.Errorf(
 			"invalid VRF key size: expected %d, got %d",
@@ -226,11 +238,33 @@ func loadPoolCredentialsFromFiles(
 			len(vrfKey.SKey),
 		)
 	}
+	derivedVRFVKey, derivedSeed, err := vrf.KeyGen(vrfKey.SKey)
+	if len(derivedSeed) > 0 {
+		wipeCredentialBytes(derivedSeed)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive VRF verification key: %w", err)
+	}
+	if len(vrfKey.VKey) > 0 &&
+		(len(vrfKey.VKey) != vrf.PublicKeySize ||
+			!bytes.Equal(vrfKey.VKey, derivedVRFVKey)) {
+		return nil, errors.New(
+			"VRF verification key mismatch: supplied key does not match signing seed",
+		)
+	}
+	// Use only the identity derived from the signing seed. Bursa's parsed
+	// verification key is an untrusted suffix in 64-byte cardano-cli files.
+	loaded.vrfVKey = derivedVRFVKey
 
 	// Load KES signing key
 	kesKey, err := loadSecretKeyFromFile(kesSKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load KES signing key: %w", err)
+	}
+	loaded.kesSKey = &kes.SecretKey{
+		Depth:  kes.CardanoKesDepth,
+		Period: 0, // Will be updated during block production
+		Data:   kesKey.SKey,
 	}
 	if len(kesKey.SKey) != kes.CardanoKesSecretKeySize {
 		return nil, fmt.Errorf(
@@ -239,11 +273,7 @@ func loadPoolCredentialsFromFiles(
 			len(kesKey.SKey),
 		)
 	}
-	kesSKey := &kes.SecretKey{
-		Depth:  kes.CardanoKesDepth,
-		Period: 0, // Will be updated during block production
-		Data:   kesKey.SKey,
-	}
+	loaded.kesVKey = kesKey.VKey
 
 	// Load operational certificate
 	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
@@ -253,7 +283,7 @@ func loadPoolCredentialsFromFiles(
 			err,
 		)
 	}
-	opCert := &OpCert{
+	loaded.opCert = &OpCert{
 		KESVKey:     opCertKey.VKey,
 		IssueNumber: opCertKey.OpCertIssueNumber,
 		KESPeriod:   opCertKey.OpCertKesPeriod,
@@ -262,23 +292,18 @@ func loadPoolCredentialsFromFiles(
 	}
 
 	// Derive pool ID from cold verification key (Blake2b-224 hash)
-	poolID := lcommon.PoolId(lcommon.Blake2b224Hash(opCert.ColdVKey))
+	loaded.poolID = lcommon.PoolId(
+		lcommon.Blake2b224Hash(loaded.opCert.ColdVKey),
+	)
 
 	// Validate that OpCert KES vkey matches the loaded KES key
-	if !bytes.Equal(kesKey.VKey, opCert.KESVKey) {
+	if !bytes.Equal(loaded.kesVKey, loaded.opCert.KESVKey) {
 		return nil, errors.New(
 			"KES verification key mismatch: loaded key does not match OpCert KES vkey",
 		)
 	}
 
-	return &loadedPoolCredentials{
-		poolID:  poolID,
-		vrfSKey: vrfKey.SKey,
-		vrfVKey: vrfKey.VKey,
-		kesSKey: kesSKey,
-		kesVKey: kesKey.VKey,
-		opCert:  opCert,
-	}, nil
+	return loaded, nil
 }
 
 func (pc *PoolCredentials) clearUnsafe() {

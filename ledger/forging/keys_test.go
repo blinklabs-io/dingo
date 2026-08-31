@@ -98,6 +98,59 @@ func createAlternateTestVRFKey(t *testing.T) string {
 	return path
 }
 
+func createMismatchedTestVRFEnvelope(
+	t *testing.T,
+	validVRFPath string,
+) string {
+	t.Helper()
+	validKey, err := loadSecretKeyFromFile(validVRFPath)
+	require.NoError(t, err)
+	defer wipeCredentialBytes(validKey.SKey)
+
+	alternateSeed := make([]byte, vrf.SeedSize)
+	for i := range alternateSeed {
+		alternateSeed[i] = byte(i + 1)
+	}
+	derivedVKey, derivedSeed, err := vrf.KeyGen(alternateSeed)
+	require.NoError(t, err)
+	wipeCredentialBytes(derivedSeed)
+	require.NotEqual(t, validKey.VKey, derivedVKey)
+
+	// Cardano CLI's 64-byte envelope is seed || public key. Keep the
+	// original public-key suffix while replacing only its seed.
+	envelope := append(append([]byte(nil), alternateSeed...), validKey.VKey...)
+	keyFile, err := bursa.GetVRFSKey(envelope)
+	require.NoError(t, err)
+	data, err := json.Marshal(keyFile)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "mismatched-vrf.skey")
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
+	return path
+}
+
+func requireVRFKeyPairCoherent(
+	t *testing.T,
+	credentials *PoolCredentials,
+) {
+	t.Helper()
+	seed := credentials.GetVRFSKey()
+	require.Len(t, seed, vrf.SeedSize)
+	defer wipeCredentialBytes(seed)
+
+	derivedVKey, derivedSeed, err := vrf.KeyGen(seed)
+	require.NoError(t, err)
+	wipeCredentialBytes(derivedSeed)
+	require.Equal(t, derivedVKey, credentials.GetVRFVKey())
+
+	alpha := []byte("credential identity coherence")
+	proof, output, err := credentials.VRFProve(alpha)
+	require.NoError(t, err)
+	verified, err := vrf.Verify(derivedVKey, proof, output, alpha)
+	require.NoError(t, err)
+	require.True(t, verified)
+}
+
 func writeTestOpCert(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "opcert.cert")
@@ -146,6 +199,55 @@ func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 
 	// Verify IsLoaded
 	assert.True(t, pc.IsLoaded())
+	requireVRFKeyPairCoherent(t, pc)
+}
+
+func TestPoolCredentialsRejectsMismatchedVRFEnvelopeAtStartup(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+
+	err := pc.LoadFromFiles(
+		createMismatchedTestVRFEnvelope(t, vrfPath),
+		kesPath,
+		opCertPath,
+	)
+	require.ErrorContains(t, err, "VRF verification key mismatch")
+	require.False(t, pc.IsLoaded())
+	require.Empty(t, pc.GetVRFSKey())
+	require.Empty(t, pc.GetVRFVKey())
+	require.False(t, pc.identitySet)
+}
+
+func TestPoolCredentialsRejectsMismatchedVRFEnvelopeOnReload(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+	requireVRFKeyPairCoherent(t, pc)
+	pinnedVKey := append([]byte(nil), pc.identityVRFVKey...)
+
+	err := pc.LoadFromFiles(
+		createMismatchedTestVRFEnvelope(t, vrfPath),
+		kesPath,
+		opCertPath,
+	)
+	require.ErrorContains(t, err, "VRF verification key mismatch")
+	require.False(t, pc.IsLoaded())
+	require.Zero(t, pc.OpCertExpiryPeriod())
+	require.True(t, pc.identitySet)
+	require.Equal(t, pinnedVKey, pc.identityVRFVKey)
+
+	// A failed replacement must not poison the pinned identity. Reloading the
+	// original generation restores coherent leader-election and proof keys.
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+	requireVRFKeyPairCoherent(t, pc)
 }
 
 func TestPoolCredentialsRejectsRuntimeVRFIdentityChange(t *testing.T) {
