@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -616,6 +617,120 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 		ls.chain.Tip().Point.Slot,
 		"chain must be untouched by a rejected rollback",
 	)
+}
+
+// TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock covers issue
+// #3516's review: reconciliationUndoBlocks used to build its list from the
+// ledgerTip snapshotted at the very top of reconcilePrimaryChainTipWithLedgerTip,
+// with no lock held between that snapshot and the later,
+// transactionEventMutex-guarded resolution. A concurrent
+// submitBlockApplyDBTxn commit landing in that window advances the ledger's
+// applied tip and writes a new block_nonce row that the stale snapshot's
+// upper bound would never see -- yet the primary chain extends together
+// with that same apply, so the rewind still removes the new block, with no
+// undo ever published for it. beforeReconciliationUndoSnapshot forces
+// exactly that interleaving deterministically.
+func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as in the sibling tests: the
+	// ledger tip is no longer on it, but the fixture's ancestor still
+	// is, so reconciliation rewinds to it.
+	forkHash := testHashBytes("reconcile-undo-race-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Force a concurrent block-apply commit into the window between the
+	// reconciler's ledgerTip snapshot and its later undo-block
+	// resolution: extend the primary chain past forkHash and advance
+	// the ledger's own applied tip to it, exactly what
+	// submitBlockApplyDBTxn's commit would do had it genuinely raced
+	// this call.
+	raceHash := testHashBytes("reconcile-undo-race-applied")
+	raceTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			fixture.currentTip.Point.Slot+10,
+			raceHash,
+		),
+		BlockNumber: fixture.currentTip.BlockNumber + 2,
+	}
+	raceNonce := []byte("nonce-race-applied")
+	ls.beforeReconciliationUndoSnapshot = func() {
+		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+			{
+				Slot:        raceTip.Point.Slot,
+				Hash:        raceTip.Point.Hash,
+				BlockNumber: raceTip.BlockNumber,
+				Type:        1,
+				PrevHash:    forkHash,
+				Cbor:        []byte{0x80},
+			},
+		}))
+		require.NoError(t, ls.db.SetBlockNonce(
+			raceTip.Point.Hash,
+			raceTip.Point.Slot,
+			raceNonce,
+			false,
+			nil,
+		))
+		ls.Lock()
+		ls.currentTip = raceTip
+		ls.currentTipBlockNonce = append([]byte(nil), raceNonce...)
+		ls.Unlock()
+	}
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	// Both the originally-applied block and the one applied during the
+	// race must have been considered for undo: each is unresolvable
+	// through blocksAboveSlot's old (blob-scan) path but resolvable as
+	// a decode failure here, so seeing both decode errors is proof both
+	// were included, in newest-first order.
+	first := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"undo-event decode error for the race-applied block",
+	)
+	firstEvt, ok := first.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", first.Data)
+	require.Equal(t, raceTip.Point.Slot, firstEvt.Point.Slot)
+	require.Equal(t, raceTip.Point.Hash, firstEvt.Point.Hash)
+
+	second := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"undo-event decode error for the originally-applied block",
+	)
+	secondEvt, ok := second.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", second.Data)
+	require.Equal(t, fixture.currentTip.Point.Slot, secondEvt.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, secondEvt.Point.Hash)
+
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"expected exactly two undo decode errors",
+	)
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
 }
 
 // TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating

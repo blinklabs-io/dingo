@@ -8444,10 +8444,11 @@ holds that read lock while this runs.
 
 Unlike `rollbackChainAndState`, it does not pair a dry-run
 `ValidateRollback` with a separately-locked `RewindPrimaryChainToPoint`
-call: it resolves what to undo first (`reconciliationUndoBlocks`, below),
-then calls `RewindPrimaryChainToPoint` directly with no earlier check, and
-only calls `emitRollbackTransactionEvents` after that single call returns
-success. A validate-then-separately-truncate pairing leaves a real gap
+call: it resolves what to undo (`reconciliationUndoBlocks`, below) only
+after taking `transactionEventMutex`, then calls `RewindPrimaryChainToPoint`
+directly with no earlier check, and only calls
+`emitRollbackTransactionEvents` after that single call returns success. A
+validate-then-separately-truncate pairing leaves a real gap
 open in between the two locked calls: `AddBlock`/`AddBlockWithPoint`
 (blockfetch delivering a new block) takes only the chain's own
 `c.mutex`/`c.manager.mutex`, independent of `transactionEventMutex`, so the
@@ -8490,6 +8491,25 @@ rows for the applied points in that range and resolves each one via
 block-cache before the database — so an abandoned block chain selection
 already removed from the active index still resolves as long as the cache
 still holds it.
+
+The upper bound of that range must itself be read fresh, under
+`transactionEventMutex`, not taken from the `ledgerTip` snapshotted at the
+top of this function with no lock held: `submitBlockApplyDBTxn`'s
+forward-apply commit also takes `transactionEventMutex` around updating
+`ls.currentTip` and its own `block_nonce` write, so a commit landing in the
+otherwise-unguarded window between that early snapshot and this
+resolution advances the ledger's applied tip and writes a row the stale
+snapshot's upper bound would never query for — yet the primary chain
+extends together with that same apply, so the rewind still removes the
+newly-applied block, with no undo ever published for it (issue #3516
+review). Re-reading `ls.currentTip.Point.Slot` after `transactionEventMutex`
+is already held closes this the same way the chain-growth fix above does:
+nothing that also needs that mutex can advance the applied tip again until
+this section releases it, so the fresh read stays valid through the
+`RewindPrimaryChainToPoint` call that follows. `beforeReconciliationUndoSnapshot`
+(`ledger/state.go`) is a test-only hook, run right after the top-of-function
+snapshot, that lets a test force this interleaving deterministically rather
+than relying on goroutine scheduling.
 
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts

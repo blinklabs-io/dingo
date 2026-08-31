@@ -1036,6 +1036,13 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// beforeReconciliationUndoSnapshot is a test-only sequencing hook, nil
+	// in production. It runs in reconcilePrimaryChainTipWithLedgerTip right
+	// after the ledgerTip snapshot at the top of that function, so a test
+	// can deterministically force a concurrent block-apply commit into the
+	// window between that snapshot and the later, transactionEventMutex-
+	// held undo-block resolution, without relying on scheduler timing.
+	beforeReconciliationUndoSnapshot func()
 
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
@@ -7594,6 +7601,9 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
+	if ls.beforeReconciliationUndoSnapshot != nil {
+		ls.beforeReconciliationUndoSnapshot()
+	}
 	chainTip := ls.chain.Tip()
 	if chainTip.Point.Slot == ledgerTip.Point.Slot &&
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
@@ -7688,13 +7698,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		"ancestor_hash",
 		hex.EncodeToString(ancestor.Hash),
 	)
-	// Resolve the ledger's own applied blocks between the ancestor and its
-	// old tip before taking any lock below: reconciliationUndoBlocks reads
-	// through ChainManager.BlockByPoint, which takes the chain's own
-	// c.mutex/c.manager.mutex, so it must not run from inside a section
-	// that also holds those (see the same constraint noted on
-	// emitRollbackTransactionEvents below).
-	undoBlocks := ls.reconciliationUndoBlocks(ancestor, ledgerTip.Point.Slot)
 	// Rewind the primary chain to the common ancestor through the same
 	// gather-exclude, then drain sequencing rollbackChainAndState uses
 	// for a peer-driven rollback, so no in-flight gathered-but-not-yet-
@@ -7720,6 +7723,32 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	if err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		// Resolve the ledger's own applied blocks between the ancestor
+		// and the CURRENT applied tip only now, holding
+		// transactionEventMutex: submitBlockApplyDBTxn's forward-apply
+		// commit also takes this mutex around updating ls.currentTip
+		// and its own AfterCommit publish, so holding it here guarantees
+		// no commit in flight when this section started can land, and
+		// none can start, until this section releases it. Building this
+		// list from the ledgerTip snapshotted at the top of this
+		// function -- taken with no lock held between there and here --
+		// would miss any block a concurrent apply committed in that
+		// window: the rewind below would still remove it (the primary
+		// chain extends together with the ledger's applied tip), but
+		// with no matching entry in an undoBlocks list sized to the
+		// stale tip, so it would silently get no undo (issue #3516
+		// review). ChainManager.BlockByPoint (called via
+		// reconciliationUndoBlocks) takes only cm.mutex, unrelated to
+		// and released well before the chain-locked rewind call below,
+		// so calling it here is not the reentrancy
+		// emitRollbackTransactionEvents must still avoid (see below).
+		ls.RLock()
+		currentLedgerTipSlot := ls.currentTip.Point.Slot
+		ls.RUnlock()
+		undoBlocks := ls.reconciliationUndoBlocks(
+			ancestor,
+			currentLedgerTipSlot,
+		)
 		// RewindPrimaryChainToPoint's own K-check and truncation run
 		// under one continuous hold of the chain's own locks (see
 		// Chain.rollbackLocked), so calling it directly here -- with no
