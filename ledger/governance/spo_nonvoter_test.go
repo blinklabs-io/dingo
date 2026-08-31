@@ -272,8 +272,17 @@ func seedSPONonVoterProposal(
 	actionType lcommon.GovActionType,
 ) *models.GovernanceProposal {
 	t.Helper()
+	returnAddress, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		testBytes(28, 0xF8),
+	)
+	require.NoError(t, err)
+	returnAddressBytes, err := returnAddress.Bytes()
+	require.NoError(t, err)
+
 	var actionCBOR []byte
-	var err error
 	switch actionType {
 	case lcommon.GovActionTypeHardForkInitiation:
 		action := &lcommon.HardForkInitiationGovAction{
@@ -301,7 +310,7 @@ func seedSPONonVoterProposal(
 		ProposedEpoch: stabilityTestEpoch - 1,
 		ExpiresEpoch:  stabilityTestEpoch + 10,
 		Deposit:       1_000,
-		ReturnAddress: testBytes(29, 0xF8),
+		ReturnAddress: returnAddressBytes,
 		AnchorURL:     "https://example.invalid/spo-nonvoter",
 		AnchorHash:    testBytes(32, 0xF9),
 		GovActionCbor: actionCBOR,

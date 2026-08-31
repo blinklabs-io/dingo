@@ -616,6 +616,31 @@ func (s *Store) UpdateDRepActivity(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) error {
+	// Existence is checked explicitly rather than inferred from the UPDATE's
+	// own affected-rows count: go-sql-driver/mysql reports the number of
+	// rows a plain UPDATE actually *changed*, not the number the WHERE
+	// clause *matched*, unless the connection sets the MySQL-specific
+	// CLIENT_FOUND_ROWS capability flag (which sqlite3/lib/pq don't need --
+	// both always report rows matched). A DRep voting again in the same
+	// epoch with the same resulting activity/expiry epoch is exactly the
+	// shape that trips this: the WHERE clause matches a real row, but
+	// nothing actually changes value, so MySQL's default semantics report
+	// affected == 0 -- indistinguishable, without this check, from the row
+	// genuinely not existing. This pre-check makes the not-found decision
+	// dialect-neutral instead of setting a connection-wide MySQL flag,
+	// which would also change affected-rows semantics for every other
+	// caller sharing that connection (several elsewhere in this package
+	// rely on the *current* semantics -- see EnsureOffchainMetadataPointers
+	// in offchain_metadata.go, which would silently over-count duplicates
+	// as newly created rows under CLIENT_FOUND_ROWS).
+	existing, err := s.GetDrepByCredential(credentialTag, credential, true, txn)
+	if err != nil {
+		return fmt.Errorf("check drep exists before activity update: %w", err)
+	}
+	if existing == nil {
+		return models.ErrDrepActivityNotUpdated
+	}
+
 	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
@@ -629,7 +654,7 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
-	affected, err := q.UpdateDRepActivity(
+	if _, err := q.UpdateDRepActivity(
 		ctx,
 		sqlitequery.UpdateDRepActivityParams{
 			LastActivityEpoch: validInt64(activity),
@@ -637,12 +662,8 @@ func (s *Store) UpdateDRepActivity(
 			CredentialTag:     int64(credentialTag),
 			Credential:        credential,
 		},
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("update drep activity: %w", err)
-	}
-	if affected == 0 {
-		return models.ErrDrepActivityNotUpdated
 	}
 	return nil
 }

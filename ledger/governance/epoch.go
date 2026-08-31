@@ -560,39 +560,34 @@ func ProcessEpoch(
 		if err != nil {
 			return nil, fmt.Errorf("tally: %w", err)
 		}
-		// For ParameterChange, decode the action so thresholds can
-		// take the touched parameter groups into account (especially
-		// so SPOs only gate security-group changes, and DReps select
-		// the most restrictive touched group).
+		// Decode the action once for every action-specific ratification
+		// predicate. ParameterChange uses the touched parameter groups for
+		// threshold selection, while UpdateCommittee checks proposed member
+		// expiries against the current epoch and committee term limit.
+		action, decodeErr := decodeGovAction(
+			proposal.GovActionCbor, proposal.ActionType,
+		)
+		if decodeErr != nil {
+			if in.Logger != nil {
+				in.Logger.Error(
+					"skipping proposal: failed to decode governance action",
+					"tx_hash",
+					shortHash(proposal.TxHash),
+					"action_index",
+					proposal.ActionIndex,
+					"action_type",
+					proposal.ActionType,
+					"error",
+					decodeErr,
+					"component",
+					"governance",
+				)
+			}
+			continue
+		}
 		var paramUpdate *conway.ConwayProtocolParameterUpdate
 		if lcommon.GovActionType(proposal.ActionType) ==
 			lcommon.GovActionTypeParameterChange {
-			action, decodeErr := decodeGovAction(
-				proposal.GovActionCbor, proposal.ActionType,
-			)
-			if decodeErr != nil {
-				// A decode failure means we cannot tell which
-				// parameter groups are touched; silently falling
-				// through with paramUpdate==nil would let SPO
-				// checks return nil and allow security-group
-				// changes to ratify without SPO approval. Skip
-				// this proposal and surface the error so it is
-				// investigated.
-				if in.Logger != nil {
-					in.Logger.Error(
-						"skipping proposal: failed to decode parameter change action",
-						"tx_hash",
-						shortHash(proposal.TxHash),
-						"action_index",
-						proposal.ActionIndex,
-						"error",
-						decodeErr,
-						"component",
-						"governance",
-					)
-				}
-				continue
-			}
 			a, ok := action.(*conway.ConwayParameterChangeGovAction)
 			if !ok {
 				if in.Logger != nil {
@@ -615,7 +610,9 @@ func ProcessEpoch(
 		decision := ShouldRatify(RatifyInputs{
 			Tally:                 tally,
 			PParams:               conwayPParams,
+			GovAction:             action,
 			ParamUpdate:           paramUpdate,
+			CurrentEpoch:          in.NewEpoch,
 			ActiveDRepCount:       activeDRepCount,
 			ActiveCCCount:         activeCCCount,
 			CCQuorum:              ccQuorum,
