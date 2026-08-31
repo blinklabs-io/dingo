@@ -977,7 +977,7 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 	}
 
 	// Phase 2: ratify proposals that meet threshold requirements.
-	if err := m.ratifyProposals(txn, newEpoch); err != nil {
+	if err := m.ratifyProposals(txn, newEpoch, boundarySlot); err != nil {
 		return fmt.Errorf("ratify proposals: %w", err)
 	}
 
@@ -1005,6 +1005,7 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 func (m *DingoStateManager) ratifyProposals(
 	txn *database.Txn,
 	currentEpoch uint64,
+	boundarySlot uint64,
 ) error {
 	for id, proposal := range m.govState.Proposals {
 		if proposal.RatifiedEpoch != nil {
@@ -1018,7 +1019,9 @@ func (m *DingoStateManager) ratifyProposals(
 			epoch := currentEpoch
 			proposal.RatifiedEpoch = &epoch
 			m.govState.Proposals[id] = proposal
-			if err := m.persistRatification(txn, id, currentEpoch); err != nil {
+			if err := m.persistRatification(
+				txn, id, currentEpoch, boundarySlot,
+			); err != nil {
 				return err
 			}
 			continue
@@ -1064,28 +1067,34 @@ func (m *DingoStateManager) ratifyProposals(
 		epoch := currentEpoch
 		proposal.RatifiedEpoch = &epoch
 		m.govState.Proposals[id] = proposal
-		if err := m.persistRatification(txn, id, currentEpoch); err != nil {
+		if err := m.persistRatification(
+			txn, id, currentEpoch, boundarySlot,
+		); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// persistRatification sets the real governance_proposal row's
-// ratified_epoch. A proposal id with no matching real row (a synthetic
+// persistRatification sets the real governance_proposal row's ratification
+// epoch and boundary slot as one rollback-safe state transition. A proposal
+// id with no matching real row (a synthetic
 // initial-state seed with no originating transaction) is left as an
 // in-memory-only decision -- there is nothing to persist for it.
 func (m *DingoStateManager) persistRatification(
 	txn *database.Txn,
 	id string,
 	epoch uint64,
+	boundarySlot uint64,
 ) error {
 	proposal, err := m.lookupGovernanceProposal(txn, id)
 	if proposal == nil || err != nil {
 		return err
 	}
 	ratifiedEpoch := epoch
+	ratifiedSlot := boundarySlot
 	proposal.RatifiedEpoch = &ratifiedEpoch
+	proposal.RatifiedSlot = &ratifiedSlot
 	return m.db.SetGovernanceProposal(proposal, txn)
 }
 

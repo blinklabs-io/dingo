@@ -17,6 +17,7 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -30,6 +31,48 @@ import (
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	txHash := testHash32(0xa1)
+	proposal := &models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(common.GovActionTypeInfo),
+		ProposedEpoch: 1,
+		ExpiresEpoch:  10,
+		AnchorURL:     "https://example.invalid/ratification-pair",
+		AnchorHash:    testHash32(0xa2),
+		ReturnAddress: bytes.Repeat([]byte{0xa3}, 29),
+		GovActionCbor: []byte{0x80},
+		AddedSlot:     1,
+	}
+	require.NoError(t, m.db.SetGovernanceProposal(proposal, nil))
+
+	const (
+		ratifiedEpoch = uint64(4)
+		boundarySlot  = uint64(400)
+	)
+	txn := m.db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, m.persistRatification(
+		txn,
+		hex.EncodeToString(txHash)+"#0",
+		ratifiedEpoch,
+		boundarySlot,
+	))
+	require.NoError(t, txn.Commit())
+
+	stored, err := m.db.GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, stored.RatifiedEpoch)
+	require.NotNil(t, stored.RatifiedSlot)
+	require.Equal(t, ratifiedEpoch, *stored.RatifiedEpoch)
+	require.Equal(t, boundarySlot, *stored.RatifiedSlot)
+}
 
 // testHash28 builds a deterministic, distinguishable-by-seed 28-byte hash
 // value (the size of a Blake2b224 credential/pool/DRep hash) for tests that
