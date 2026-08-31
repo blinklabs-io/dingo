@@ -187,7 +187,6 @@ func EvaluateRatifiableHardForkInitiation(
 		decision := ShouldRatify(RatifyInputs{
 			Tally:                 tally,
 			PParams:               conwayPParams,
-			ParamUpdate:           nil, // not used for HardForkInitiation
 			ActiveDRepCount:       activeDRepCount,
 			ActiveCCCount:         committeeState.ActiveMemberCount,
 			CCQuorum:              ccQuorum,

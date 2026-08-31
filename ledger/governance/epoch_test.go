@@ -15,10 +15,12 @@
 package governance
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -479,6 +481,161 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, proposal.RatifiedEpoch)
 			assert.Equal(t, uint64(5), *proposal.RatifiedEpoch)
+		})
+	}
+}
+
+func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
+	t *testing.T,
+) {
+	maxBlock := uint32(2_000)
+	maxTx := uint32(1_000)
+	stride := uint32(128)
+	multiplier := &cbor.Rat{Rat: new(big.Rat).SetFrac64(7, 4)}
+	tests := []struct {
+		name   string
+		update gdijkstra.DijkstraProtocolParameterUpdate
+		assert func(*testing.T, *gdijkstra.DijkstraProtocolParameters)
+	}{
+		{
+			name: "key-34-max-ref-script-size-per-block",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerBlock: &maxBlock,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, maxBlock, p.MaxRefScriptSizePerBlock)
+			},
+		},
+		{
+			name: "key-35-max-ref-script-size-per-tx",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerTx: &maxTx,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, maxTx, p.MaxRefScriptSizePerTx)
+			},
+		},
+		{
+			name: "key-36-ref-script-cost-stride",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostStride: &stride,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, stride, p.RefScriptCostStride)
+			},
+		},
+		{
+			name: "key-37-ref-script-cost-multiplier",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostMultiplier: multiplier,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Zero(t, p.RefScriptCostMultiplier.Cmp(multiplier.Rat))
+			},
+		},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, store := newTallyTestDB(t)
+			actionCbor, err := cbor.Encode(
+				&gdijkstra.DijkstraParameterChangeGovAction{
+					Type:        uint(lcommon.GovActionTypeParameterChange),
+					ParamUpdate: test.update,
+				},
+			)
+			require.NoError(t, err)
+
+			txHash := testBytes(32, byte(0xB0+index))
+			require.NoError(t, db.SetGovernanceProposal(
+				&models.GovernanceProposal{
+					TxHash:        txHash,
+					ActionIndex:   0,
+					ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+					ProposedEpoch: stabilityTestEpoch - 1,
+					ExpiresEpoch:  stabilityTestEpoch + 10,
+					AnchorURL:     "https://example.invalid/dijkstra-param",
+					AnchorHash:    testBytes(32, byte(0xC0+index)),
+					ReturnAddress: testBytes(29, byte(0xD0+index)),
+					GovActionCbor: actionCbor,
+					AddedSlot:     400,
+				},
+				nil,
+			))
+			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			drepCred := seedDRepWithStake(t, db, 100)
+			seedDRepYesVote(t, db, proposal.ID, drepCred)
+			seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
+
+			pparams := &gdijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: gdijkstra.MinProtocolVersionDijkstra,
+					},
+					MinCommitteeSize: 1,
+					PoolVotingThresholds: conway.PoolVotingThresholds{
+						PpSecurityGroup: newRat(1, 1),
+					},
+					DRepVotingThresholds: conway.DRepVotingThresholds{
+						PpNetworkGroup: newRat(1, 1),
+						PpGovGroup:     newRat(1, 1),
+					},
+				},
+				MaxRefScriptSizePerBlock: 1_000,
+				MaxRefScriptSizePerTx:    500,
+				RefScriptCostStride:      64,
+				RefScriptCostMultiplier:  testRatPtr(3, 2),
+				CommitteeStakeCoverage:   testRatPtr(2, 3),
+				QuorumStakeThreshold:     testRatPtr(3, 5),
+			}
+
+			runEpoch := func(
+				prevEpoch uint64,
+				newEpoch uint64,
+				activePParams lcommon.ProtocolParameters,
+			) *EpochOutput {
+				t.Helper()
+				txn := db.MetadataTxn(true)
+				defer txn.Release()
+				out, processErr := ProcessEpoch(&EpochInput{
+					DB:           db,
+					Txn:          txn,
+					PrevEpoch:    prevEpoch,
+					NewEpoch:     newEpoch,
+					BoundarySlot: newEpoch * 100,
+					PParams:      activePParams,
+					UpdateFn:     eras.PParamsUpdateDijkstra,
+				})
+				require.NoError(t, processErr)
+				require.NoError(t, txn.Commit())
+				return out
+			}
+
+			ratification := runEpoch(
+				stabilityTestEpoch-1,
+				stabilityTestEpoch,
+				pparams,
+			)
+			require.Equal(t, 1, ratification.RatifiedCount)
+			stored, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, stored.RatifiedEpoch)
+			require.Equal(t, stabilityTestEpoch, *stored.RatifiedEpoch)
+
+			enactment := runEpoch(
+				stabilityTestEpoch,
+				stabilityTestEpoch+1,
+				ratification.UpdatedPParams,
+			)
+			require.Equal(t, 1, enactment.EnactedCount)
+			updated, ok := enactment.UpdatedPParams.(*gdijkstra.DijkstraProtocolParameters)
+			require.True(t, ok)
+			test.assert(t, updated)
+			stored, err = db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, stored.EnactedEpoch)
+			require.Equal(t, stabilityTestEpoch+1, *stored.EnactedEpoch)
 		})
 	}
 }

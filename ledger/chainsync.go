@@ -44,6 +44,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -5262,6 +5263,38 @@ func cloneProtocolParametersForEra(
 	// carried through a Byron rollover or treated as a Byron-owned snapshot.
 	if era.Id == eras.ByronEraDesc.Id {
 		return nil, nil
+	}
+	if era.Id == eras.ConwayEraDesc.Id {
+		if _, ok := pparams.(*conway.ConwayProtocolParameters); !ok {
+			return nil, fmt.Errorf(
+				"Conway era has protocol parameters type %T",
+				pparams,
+			)
+		}
+		ret, err := eras.CloneGovernanceProtocolParameters(pparams)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"clone governance protocol parameters: %w",
+				err,
+			)
+		}
+		return ret, nil
+	}
+	if era.Id == eras.DijkstraEraDesc.Id {
+		if _, ok := pparams.(*dijkstra.DijkstraProtocolParameters); !ok {
+			return nil, fmt.Errorf(
+				"Dijkstra era has protocol parameters type %T",
+				pparams,
+			)
+		}
+		ret, err := eras.CloneGovernanceProtocolParameters(pparams)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"clone governance protocol parameters: %w",
+				err,
+			)
+		}
+		return ret, nil
 	}
 	if era.DecodePParamsFunc == nil {
 		return nil, fmt.Errorf(

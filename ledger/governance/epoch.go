@@ -490,11 +490,13 @@ func ProcessEpoch(
 		// take the touched parameter groups into account (especially
 		// so SPOs only gate security-group changes, and DReps select
 		// the most restrictive touched group).
-		var paramUpdate *conway.ConwayProtocolParameterUpdate
+		var parameterChange lcommon.ParameterChangeGovAction
 		if lcommon.GovActionType(proposal.ActionType) ==
 			lcommon.GovActionTypeParameterChange {
-			action, decodeErr := decodeGovAction(
-				proposal.GovActionCbor, proposal.ActionType,
+			action, decodeErr := decodeGovActionForPParams(
+				proposal.GovActionCbor,
+				proposal.ActionType,
+				out.UpdatedPParams,
 			)
 			if decodeErr != nil {
 				// A decode failure means we cannot tell which
@@ -519,7 +521,7 @@ func ProcessEpoch(
 				}
 				continue
 			}
-			a, ok := action.(*conway.ConwayParameterChangeGovAction)
+			a, ok := action.(lcommon.ParameterChangeGovAction)
 			if !ok {
 				if in.Logger != nil {
 					in.Logger.Error(
@@ -536,12 +538,12 @@ func ProcessEpoch(
 				}
 				continue
 			}
-			paramUpdate = &a.ParamUpdate
+			parameterChange = a
 		}
 		decision := ShouldRatify(RatifyInputs{
 			Tally:                 tally,
 			PParams:               conwayPParams,
-			ParamUpdate:           paramUpdate,
+			ParameterChange:       parameterChange,
 			ActiveDRepCount:       activeDRepCount,
 			ActiveCCCount:         activeCCCount,
 			CCQuorum:              ccQuorum,

@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,6 +31,18 @@ import (
 // newRat is a test helper that builds a cbor.Rat from num/denom.
 func newRat(num, denom int64) cbor.Rat {
 	return cbor.Rat{Rat: big.NewRat(num, denom)}
+}
+
+func conwayParameterChange(
+	update *conway.ConwayProtocolParameterUpdate,
+) lcommon.ParameterChangeGovAction {
+	if update == nil {
+		return nil
+	}
+	return &conway.ConwayParameterChangeGovAction{
+		Type:        uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: *update,
+	}
 }
 
 // conwayPParamsFixture returns a ConwayProtocolParameters with the
@@ -91,6 +104,82 @@ func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
 	}
 	d := ShouldRatify(ratifyInputs(tally, pparams, 5, 1, big.NewRat(2, 3), 9, false))
 	assert.False(t, d.Ratified)
+}
+
+func TestShouldRatify_DijkstraOnlyParametersUseNetworkAndSecurityGroups(
+	t *testing.T,
+) {
+	maxBlock := uint32(2_000)
+	maxTx := uint32(1_000)
+	stride := uint32(128)
+	multiplier := &cbor.Rat{Rat: big.NewRat(7, 4)}
+	actions := []struct {
+		name   string
+		update gdijkstra.DijkstraProtocolParameterUpdate
+	}{
+		{
+			name: "key-34",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerBlock: &maxBlock,
+			},
+		},
+		{
+			name: "key-35",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerTx: &maxTx,
+			},
+		},
+		{
+			name: "key-36",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostStride: &stride,
+			},
+		},
+		{
+			name: "key-37",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostMultiplier: multiplier,
+			},
+		},
+	}
+	pparams := conwayPParamsFixture(gdijkstra.MinProtocolVersionDijkstra)
+	pparams.MinCommitteeSize = 1
+	pparams.DRepVotingThresholds.PpNetworkGroup = newRat(3, 4)
+	pparams.DRepVotingThresholds.PpGovGroup = newRat(1, 1)
+	pparams.PoolVotingThresholds.PpSecurityGroup = newRat(3, 4)
+
+	for _, test := range actions {
+		t.Run(test.name, func(t *testing.T) {
+			action := &gdijkstra.DijkstraParameterChangeGovAction{
+				Type:        uint(lcommon.GovActionTypeParameterChange),
+				ParamUpdate: test.update,
+			}
+			require.Equal(
+				t,
+				drepParameterGroupNetwork,
+				parameterChangeDRepGroups(action),
+			)
+			require.NotEmpty(t, action.SecurityGroupFields())
+			decision := ShouldRatify(RatifyInputs{
+				Tally: &ProposalTally{
+					ActionType:     uint8(lcommon.GovActionTypeParameterChange),
+					DRepYesStake:   75,
+					DRepTotalStake: 100,
+					SPOYesStake:    75,
+					SPOTotalStake:  100,
+					CCYesCount:     1,
+					CCTotalCount:   1,
+				},
+				PParams:         pparams,
+				ParameterChange: action,
+				ActiveDRepCount: 1,
+				ActiveCCCount:   1,
+				CCQuorum:        big.NewRat(1, 1),
+				MajorVersion:    gdijkstra.MinProtocolVersionDijkstra,
+			})
+			require.True(t, decision.Ratified)
+		})
+	}
 }
 
 func TestShouldRatify_BootstrapMissingCommitteeDoesNotRatify(t *testing.T) {
@@ -199,7 +288,7 @@ func TestShouldRatify_BootstrapPerBodyRequirements(t *testing.T) {
 			d := ShouldRatify(RatifyInputs{
 				Tally:           tt.tally,
 				PParams:         pparams,
-				ParamUpdate:     tt.param,
+				ParameterChange: conwayParameterChange(tt.param),
 				ActiveCCCount:   tt.activeCC,
 				CCQuorum:        quorum,
 				MajorVersion:    9,
@@ -386,12 +475,12 @@ func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
 					want = false
 				}
 				d := ShouldRatify(RatifyInputs{
-					Tally:         makeTally(tc.action, votes),
-					PParams:       pparams,
-					ParamUpdate:   tc.param,
-					ActiveCCCount: 3,
-					CCQuorum:      big.NewRat(2, 3),
-					MajorVersion:  major,
+					Tally:           makeTally(tc.action, votes),
+					PParams:         pparams,
+					ParameterChange: conwayParameterChange(tc.param),
+					ActiveCCCount:   3,
+					CCQuorum:        big.NewRat(2, 3),
+					MajorVersion:    major,
 				})
 				assert.Equal(t, want, d.Ratified)
 			})
@@ -671,7 +760,10 @@ func TestGetDRepThreshold_ParameterGroupSelection(t *testing.T) {
 		GovActionDeposit: &deposit,
 	}
 	got := getDRepThreshold(
-		lcommon.GovActionTypeParameterChange, pparams, update, false,
+		lcommon.GovActionTypeParameterChange,
+		pparams,
+		conwayParameterChange(update),
+		false,
 	)
 	// Gov group (75/100) > economic (67/100), so we expect 75/100.
 	assert.Equal(t, big.NewRat(75, 100), got)
@@ -723,7 +815,10 @@ func TestGetSPOThreshold_ParameterChangeSecurityGroup(t *testing.T) {
 	a0 := newRat(1, 100)
 	nonSecurity := &conway.ConwayProtocolParameterUpdate{A0: &a0}
 	assert.Nil(t, getSPOThreshold(
-		lcommon.GovActionTypeParameterChange, pparams, nonSecurity, false,
+		lcommon.GovActionTypeParameterChange,
+		pparams,
+		conwayParameterChange(nonSecurity),
+		false,
 	))
 	// An update that touches a security-group parameter (MaxTxSize)
 	// must return the security-group threshold.
@@ -732,25 +827,28 @@ func TestGetSPOThreshold_ParameterChangeSecurityGroup(t *testing.T) {
 		MaxTxSize: &maxTxSize,
 	}
 	got := getSPOThreshold(
-		lcommon.GovActionTypeParameterChange, pparams, securityUpdate, false,
+		lcommon.GovActionTypeParameterChange,
+		pparams,
+		conwayParameterChange(securityUpdate),
+		false,
 	)
 	assert.Equal(t, big.NewRat(51, 100), got)
 	adaPerUtxoByte := uint64(4310)
 	assert.Equal(t, big.NewRat(51, 100), getSPOThreshold(
 		lcommon.GovActionTypeParameterChange,
 		pparams,
-		&conway.ConwayProtocolParameterUpdate{
+		conwayParameterChange(&conway.ConwayProtocolParameterUpdate{
 			AdaPerUtxoByte: &adaPerUtxoByte,
-		},
+		}),
 		false,
 	))
 	govActionDeposit := uint64(1000000000)
 	assert.Equal(t, big.NewRat(51, 100), getSPOThreshold(
 		lcommon.GovActionTypeParameterChange,
 		pparams,
-		&conway.ConwayProtocolParameterUpdate{
+		conwayParameterChange(&conway.ConwayProtocolParameterUpdate{
 			GovActionDeposit: &govActionDeposit,
-		},
+		}),
 		false,
 	))
 	// No update at all means the caller cannot prove security-group

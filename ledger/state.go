@@ -6959,10 +6959,9 @@ func (ls *LedgerState) computePParams(
 	var pparams lcommon.ProtocolParameters
 	if era.DecodePParamsFunc != nil {
 		var err error
-		pparams, err = ls.db.GetPParams(
+		pparams, err = ls.loadPersistedProtocolParameters(
 			epoch.EpochId,
-			era.Id,
-			era.DecodePParamsFunc,
+			era,
 			nil,
 		)
 		if err != nil {
@@ -6997,10 +6996,9 @@ func (ls *LedgerState) computePParams(
 			prevEra, _ := ls.eraById(ep.EraId)
 			if prevEra != nil &&
 				prevEra.DecodePParamsFunc != nil {
-				prevPP, prevErr := ls.db.GetPParams(
+				prevPP, prevErr := ls.loadPersistedProtocolParameters(
 					ep.EpochId,
-					ep.EraId,
-					prevEra.DecodePParamsFunc,
+					*prevEra,
 					nil,
 				)
 				if prevErr != nil {
@@ -7018,6 +7016,60 @@ func (ls *LedgerState) computePParams(
 		}
 	}
 	return pparams, prevEraPParams, nil
+}
+
+// loadPersistedProtocolParameters decodes the era-owned CBOR row and restores
+// Dijkstra's genesis-only stake thresholds, which are intentionally absent
+// from the on-chain protocol-parameter CBOR representation.
+func (ls *LedgerState) loadPersistedProtocolParameters(
+	epoch uint64,
+	era eras.EraDesc,
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
+	if era.DecodePParamsFunc == nil {
+		return nil, nil
+	}
+	pparams, err := ls.db.GetPParams(
+		epoch,
+		era.Id,
+		era.DecodePParamsFunc,
+		txn,
+	)
+	if err != nil || pparams == nil || era.Id != eras.DijkstraEraDesc.Id {
+		return pparams, err
+	}
+	dijkstraPParams, ok := pparams.(*dijkstra.DijkstraProtocolParameters)
+	if !ok || dijkstraPParams == nil {
+		return nil, fmt.Errorf(
+			"persisted Dijkstra pparams decoded as %T",
+			pparams,
+		)
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return dijkstraPParams, nil
+	}
+	genesis := ls.config.CardanoNodeConfig.DijkstraGenesis()
+	if genesis == nil {
+		return dijkstraPParams, nil
+	}
+	if dijkstraPParams.CommitteeStakeCoverage == nil {
+		dijkstraPParams.CommitteeStakeCoverage = cloneGenesisRat(
+			genesis.CommitteeStakeCoverage,
+		)
+	}
+	if dijkstraPParams.QuorumStakeThreshold == nil {
+		dijkstraPParams.QuorumStakeThreshold = cloneGenesisRat(
+			genesis.QuorumStakeThreshold,
+		)
+	}
+	return dijkstraPParams, nil
+}
+
+func cloneGenesisRat(value *lcommon.GenesisRat) *cbor.Rat {
+	if value == nil || value.Rat == nil {
+		return nil
+	}
+	return &cbor.Rat{Rat: new(big.Rat).Set(value.Rat)}
 }
 
 // computeGenesisProtocolParameters bootstraps protocol parameters
