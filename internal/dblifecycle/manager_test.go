@@ -409,11 +409,10 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 type directoryBackedCloudDestination struct {
 	dir      string
 	uploaded chan<- string
-	deleted  chan<- string
 }
 
 func (d *directoryBackedCloudDestination) UploadDir(
-	_ context.Context,
+	ctx context.Context,
 	localDir string,
 ) error {
 	if err := os.MkdirAll(d.dir, 0o755); err != nil {
@@ -436,7 +435,11 @@ func (d *directoryBackedCloudDestination) UploadDir(
 		}
 	}
 	if d.uploaded != nil {
-		d.uploaded <- d.dir
+		select {
+		case d.uploaded <- d.dir:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return nil
 }
@@ -449,13 +452,7 @@ func (d *directoryBackedCloudDestination) DownloadDir(
 }
 
 func (d *directoryBackedCloudDestination) Delete(context.Context) error {
-	if err := os.RemoveAll(d.dir); err != nil {
-		return err
-	}
-	if d.deleted != nil {
-		d.deleted <- d.dir
-	}
-	return nil
+	return os.RemoveAll(d.dir)
 }
 
 var (
@@ -502,8 +499,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
-	uploaded := make(chan string, 3)
-	deleted := make(chan string, 1)
+	uploaded := make(chan string)
 	registry := lifecycle.NewDestinationRegistry()
 	registry.Register(
 		"managerprunetest",
@@ -511,15 +507,25 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 			return &directoryBackedCloudDestination{
 				dir: filepath.Join(
 					cloudBackingDir,
-					strings.TrimPrefix(uri.Path, "/"),
+					filepath.FromSlash(strings.TrimPrefix(uri.Path, "/")),
 				),
 				uploaded: uploaded,
-				deleted:  deleted,
 			}, nil
 		},
 	)
 	const cloudDest = "managerprunetest://bucket/prefix"
 	cloudPrefixDir := filepath.Join(cloudBackingDir, "prefix")
+	// Start launches a retry scan in the background. Give that scan an
+	// existing, nonnumeric epoch directory to upload before publishing any
+	// real epoch: receiving this upload proves the scan reached the probe,
+	// and retryMu orders the first epoch handler after the scan finishes.
+	// The nonnumeric suffix keeps the probe out of retention accounting.
+	const startupProbeName = "epoch-startup-probe"
+	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
+	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
+	))
 
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled:          true,
@@ -530,6 +536,14 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	}, testManagerBlobPlugin, "sqlite", registry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
+	require.Equal(t, filepath.Join(cloudPrefixDir, startupProbeName),
+		testutil.RequireReceive(
+			t,
+			uploaded,
+			30*time.Second,
+			"startup cloud-mirror retry scan did not reach its probe",
+		),
+	)
 
 	for epoch := uint64(1); epoch <= 3; epoch++ {
 		publishEpochTransition(eb, epoch)
@@ -547,18 +561,17 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	}
 
 	// epoch-1 is beyond retention (2): both its local directory and its
-	// cloud mirror must be gone.
-	require.Equal(t, filepath.Join(cloudPrefixDir, "epoch-1"),
-		testutil.RequireReceive(
-			t,
-			deleted,
-			30*time.Second,
-			"automatic snapshot cloud prune did not complete",
-		),
-	)
-	// Delete reports the cloud operation itself. Stop is the manager's
-	// documented drain barrier and proves the same handler has completed
-	// the following local prune before inspecting either retained set.
+	// cloud mirror must be gone. Local removal is the observable completion
+	// point shared by both the fixed implementation and the old local-only
+	// pruning behavior, so the remote assertion below fails on the actual
+	// deletion defect rather than waiting for a notification the old code
+	// could never send.
+	testutil.WaitForCondition(t, func() bool {
+		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
+		return os.IsNotExist(err)
+	}, 30*time.Second, "automatic snapshot local prune did not complete")
+	// Stop is the manager's drain barrier and proves the same handler has
+	// fully completed before inspecting either retained set.
 	require.NoError(t, m.Stop())
 	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-1"))
 	require.NoDirExists(t, filepath.Join(cloudPrefixDir, "epoch-1"))
