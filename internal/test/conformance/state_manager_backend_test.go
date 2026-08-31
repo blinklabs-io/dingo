@@ -280,6 +280,35 @@ func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
 	)
 }
 
+func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	coldKey := testHash28(0x51)
+	m.govState.Proposals["pending-committee-update"] = &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType: common.GovActionTypeUpdateCommittee,
+			ProposedMembers: map[common.Blake2b224]uint64{
+				coldKey: 999,
+			},
+		},
+	}
+
+	provider := NewDingoStateProvider(m)
+	member, err := provider.CommitteeMember(coldKey)
+	require.NoError(t, err)
+	require.NotNil(t, member)
+	require.Equal(t, coldKey, member.ColdKey)
+	require.Equal(t, uint64(999), member.ExpiryEpoch)
+	require.Nil(t, member.HotKey)
+	require.False(t, member.Resigned)
+
+	members, err := provider.CommitteeMembers()
+	require.NoError(t, err)
+	require.Empty(t, members, "pending members are not seated members")
+}
+
 // TestCommitteeMemberResignationClearsHotKey proves an authorization that is
 // superseded by a later resignation is not exposed as active by either
 // committee-member provider method. A still-later authorization restores the

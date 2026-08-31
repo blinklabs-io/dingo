@@ -551,8 +551,10 @@ func extractRawCostModels(
 	}
 }
 
-// CommitteeMember returns a seated committee member by cold key.
-// Returns nil if the cold key is not in the current committee.
+// CommitteeMember returns a seated or pending proposed committee member by
+// cold key. Seated state takes precedence so its authorization and resignation
+// status remain authoritative. Returns nil if the cold key is neither seated
+// nor proposed by an active UpdateCommittee action.
 func (lv *LedgerView) CommitteeMember(
 	coldKey lcommon.Blake2b224,
 ) (*lcommon.CommitteeMember, error) {
@@ -568,7 +570,7 @@ func (lv *LedgerView) CommitteeMember(
 		}
 	}
 	if found == nil {
-		return nil, nil
+		return lv.proposedCommitteeMember(coldKey)
 	}
 
 	hotByCold, err := lv.committeeHotCredentialsByCold()
@@ -593,6 +595,54 @@ func (lv *LedgerView) CommitteeMember(
 	}
 	member.Resigned = resigned
 	return member, nil
+}
+
+func (lv *LedgerView) proposedCommitteeMember(
+	coldKey lcommon.Blake2b224,
+) (*lcommon.CommitteeMember, error) {
+	state := lv.ls.loadConsensusSnapshot()
+	proposals, err := lv.ls.db.GetActiveGovernanceProposals(
+		state.currentEpoch.EpochId,
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get active governance proposals: %w", err)
+	}
+	for _, proposal := range proposals {
+		if proposal == nil ||
+			lcommon.GovActionType(proposal.ActionType) !=
+				lcommon.GovActionTypeUpdateCommittee {
+			continue
+		}
+		action, err := governance.DecodeGovActionForPParams(
+			proposal.GovActionCbor,
+			proposal.ActionType,
+			state.currentPParams,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode pending committee proposal: %w",
+				err,
+			)
+		}
+		update, ok := action.(*lcommon.UpdateCommitteeGovAction)
+		if !ok {
+			return nil, fmt.Errorf(
+				"decode pending committee proposal: unexpected action type %T",
+				action,
+			)
+		}
+		for credential, expiry := range update.CredEpochs {
+			if credential == nil || credential.Credential != coldKey {
+				continue
+			}
+			return &lcommon.CommitteeMember{
+				ColdKey:     coldKey,
+				ExpiryEpoch: uint64(expiry),
+			}, nil
+		}
+	}
+	return nil, nil
 }
 
 // CommitteeMembers returns all seated committee members.

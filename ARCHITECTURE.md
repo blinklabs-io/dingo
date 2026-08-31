@@ -2555,6 +2555,13 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
+- `CommitteeMember` resolves both the seated constitutional committee and
+  members proposed by active, pending `UpdateCommittee` actions for committee
+  certificate validation. Seated state takes precedence so its hot-key and
+  resignation status remain authoritative; proposed-only members have no hot
+  key and are not resigned. Unknown credentials return nil, while storage and
+  proposal-decoding failures are propagated. `CommitteeMembers` continues to
+  list only the seated committee.
 - `RewardAccountBalance` lookup for a full, tag-aware stake credential. It
   returns the active account's current reward balance, including zero, or nil
   for an absent or inactive account. This implements the ledger-state
