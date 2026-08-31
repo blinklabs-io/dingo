@@ -717,16 +717,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	// Do not hold the generation lease across the pluggable leader callback:
-	// it may synchronously trigger a credential reload. Remember the generation
-	// selected by the policy gate and require that exact generation again after
-	// the callback. Pool and VRF identity changes are rejected by LoadFromFiles,
-	// so the election's startup identity remains valid; a same-identity KES or
-	// opcert reload changes the generation and safely abandons this attempt.
-	attemptGeneration := generation.id
-	generation.release()
-	generationReleased = true
-
 	// Check if we're the leader for this slot only after the KES gate.
 	isLeader := f.checkLeaderSafe(currentSlot)
 	if !isLeader {
@@ -741,15 +731,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	generation = f.creds.acquireCredentialGeneration()
-	generationReleased = false
-	if generation.id != attemptGeneration {
+	// The credential snapshot owns its secret material, so the callback above
+	// never holds a writer-blocking lease. A reload still invalidates this
+	// attempt before any Leios or block-construction work begins.
+	if err := generation.ensureCurrent(); err != nil {
 		f.incCouldNotForge()
 		f.logger.Warn(
 			"forge skip: credentials changed during leader selection",
 			"slot", currentSlot,
-			"selected_generation", attemptGeneration,
-			"current_generation", generation.id,
+			"selected_generation", generation.id,
+			"error", err,
 		)
 		return nil
 	}
@@ -814,6 +805,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			}
 		}
 	}
+	// Leios providers, mempool access, transaction validation, and broadcaster
+	// callbacks are all pluggable. They run without credential locks; if one
+	// reloads or revalidates credentials, abandon the ranking-block attempt
+	// before evolving or consuming the selected snapshot.
+	if err := generation.ensureCurrent(); err != nil {
+		f.incCouldNotForge()
+		f.logger.Warn(
+			"forge skip: credentials changed during Leios processing",
+			"slot", currentSlot,
+			"selected_generation", generation.id,
+			"error", err,
+		)
+		return nil
+	}
 
 	f.logger.Info("producing block", "slot", currentSlot)
 
@@ -833,9 +838,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
 	}
-	// Key material is no longer needed after the block is signed. End the
-	// generation lease before invoking pluggable validation, adoption, or
-	// observer callbacks so those callbacks can safely trigger a reload.
+	// Key material is no longer needed after the block is signed. Zeroize the
+	// independently owned snapshot before invoking pluggable validation,
+	// adoption, or observer callbacks.
 	generation.release()
 	generationReleased = true
 
@@ -1002,24 +1007,43 @@ func (f *BlockForger) buildBlock(
 	leiosData LeiosBlockData,
 	generation *credentialGeneration,
 ) (ledger.Block, []byte, error) {
+	var (
+		block     ledger.Block
+		blockCbor []byte
+		err       error
+	)
 	if generationBuilder, ok := f.blockBuilder.(credentialGenerationBlockBuilder); ok {
-		return generationBuilder.buildBlockWithCredentialGeneration(
+		block, blockCbor, err = generationBuilder.buildBlockWithCredentialGeneration(
 			slot,
 			kesPeriod,
 			leiosData,
 			generation,
 		)
-	}
-	if leiosData.empty() {
-		return f.blockBuilder.BuildBlock(slot, kesPeriod)
-	}
-	leiosBuilder, ok := f.blockBuilder.(LeiosBlockBuilder)
-	if !ok {
-		return nil, nil, errors.New(
-			"leios block data requires a LeiosBlockBuilder",
+	} else if leiosData.empty() {
+		block, blockCbor, err = f.blockBuilder.BuildBlock(slot, kesPeriod)
+	} else {
+		leiosBuilder, ok := f.blockBuilder.(LeiosBlockBuilder)
+		if !ok {
+			return nil, nil, errors.New(
+				"leios block data requires a LeiosBlockBuilder",
+			)
+		}
+		block, blockCbor, err = leiosBuilder.BuildBlockWithLeios(
+			slot,
+			kesPeriod,
+			leiosData,
 		)
 	}
-	return leiosBuilder.BuildBlockWithLeios(slot, kesPeriod, leiosData)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Custom builders cannot consume the package-private immutable snapshot.
+	// Reject their output (and any default-builder output racing a callback
+	// reload) if the selected owner generation changed while the callback ran.
+	if err := generation.ensureCurrent(); err != nil {
+		return nil, nil, err
+	}
+	return block, blockCbor, nil
 }
 
 // incCouldNotForge increments Forge_could_not_forge. Safe to call

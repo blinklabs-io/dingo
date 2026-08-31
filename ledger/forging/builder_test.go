@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -68,6 +69,21 @@ type mockChainTip struct {
 }
 
 func (m *mockChainTip) Tip() ochainsync.Tip {
+	return m.tip
+}
+
+type reentrantChainTip struct {
+	tip         ochainsync.Tip
+	callback    func() error
+	callbackErr error
+	called      bool
+}
+
+func (m *reentrantChainTip) Tip() ochainsync.Tip {
+	if !m.called {
+		m.called = true
+		m.callbackErr = m.callback()
+	}
 	return m.tip
 }
 
@@ -262,7 +278,6 @@ func TestExportedBuildersEnforceProtocolKESLifetime(t *testing.T) {
 		for _, test := range tests {
 			t.Run(entrypoint.name+"/"+test.name, func(t *testing.T) {
 				creds := setupTestCredentials(t)
-				creds.generationMu.Lock()
 				creds.mu.Lock()
 				creds.generation++
 				creds.opCertStartKES = test.start
@@ -270,7 +285,6 @@ func TestExportedBuildersEnforceProtocolKESLifetime(t *testing.T) {
 				creds.opCertExpiryKES = test.start + test.max
 				creds.opCertValidated = true
 				creds.mu.Unlock()
-				creds.generationMu.Unlock()
 
 				mempool := &mockMempool{
 					transactions: []MempoolTransaction{},
@@ -322,6 +336,76 @@ func TestExportedBuildersEnforceProtocolKESLifetime(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestDefaultBuilderRejectsReentrantProviderReload(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	creds := NewPoolCredentials()
+	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	genesis := synthGenesis(100, 62, time.Second, time.Unix(0, 0))
+	require.NoError(t, creds.ValidateKESPeriod(genesis, 0))
+
+	chainTip := &reentrantChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+		callback: func() error {
+			if err := creds.LoadFromFiles(
+				vrfPath,
+				kesPath,
+				opCertPath,
+			); err != nil {
+				return err
+			}
+			return creds.ValidateKESPeriod(genesis, 0)
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool: &mockMempool{transactions: []MempoolTransaction{}},
+		PParamsProvider: &mockPParamsProvider{
+			pparams: &dijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: conway.ConwayProtocolParameters{
+					MaxTxSize:        16384,
+					MaxBlockBodySize: 90112,
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: 10,
+					},
+				},
+			},
+		},
+		ChainTip: chainTip,
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	type buildResult struct {
+		block ledger.Block
+		cbor  []byte
+		err   error
+	}
+	resultCh := make(chan buildResult, 1)
+	go func() {
+		block, blockCbor, err := builder.BuildBlock(1001, 0)
+		resultCh <- buildResult{block: block, cbor: blockCbor, err: err}
+	}()
+	result := dingotestutil.RequireReceive(
+		t,
+		resultCh,
+		time.Second,
+		"reentrant default-builder provider reload completion",
+	)
+	require.ErrorContains(t, result.err, "credential generation changed")
+	require.Nil(t, result.block)
+	require.Nil(t, result.cbor)
+	require.NoError(t, chainTip.callbackErr)
 }
 
 func TestBuildBlockEmptyMempool(t *testing.T) {

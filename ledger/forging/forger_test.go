@@ -26,7 +26,6 @@ import (
 	"time"
 
 	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -246,7 +245,6 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 
 func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 	creds := setupTestCredentials(t)
-	creds.generationMu.Lock()
 	creds.mu.Lock()
 	creds.generation++
 	creds.opCert.KESPeriod = 5
@@ -255,7 +253,6 @@ func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 	creds.opCertExpiryKES = 7
 	creds.opCertValidated = true
 	creds.mu.Unlock()
-	creds.generationMu.Unlock()
 
 	block := newForgerTestBlock(4, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
@@ -400,84 +397,29 @@ func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
 	require.Zero(t, broadcaster.calls)
 }
 
-type forgerCredentialGenerationBuilder struct {
-	creds       *PoolCredentials
+type forgerReentrantBuilder struct {
+	callback    func() error
+	callbackErr error
 	block       ledger.Block
 	cbor        []byte
-	entered     chan struct{}
-	read        chan struct{}
-	readDone    chan struct{}
-	release     chan struct{}
-	enteredOnce sync.Once
-	readOnce    sync.Once
-
-	mu             sync.Mutex
-	calls          int
-	signed         bool
-	opCertStart    uint64
-	opCertExpiry   uint64
-	signingPeriod  uint64
-	signingErrText string
+	calls       int
 }
 
-func (b *forgerCredentialGenerationBuilder) BuildBlock(
+func (b *forgerReentrantBuilder) BuildBlock(
 	_ uint64,
-	kesPeriod uint64,
+	_ uint64,
 ) (ledger.Block, []byte, error) {
-	b.enteredOnce.Do(func() { close(b.entered) })
-	<-b.read
-
-	opCert := b.creds.GetOpCert()
-	message := []byte("credential generation race")
-	signature, err := b.creds.KESSign(kesPeriod, message)
-
-	b.mu.Lock()
 	b.calls++
-	b.signingPeriod = kesPeriod
-	b.opCertExpiry = b.creds.OpCertExpiryPeriod()
-	if opCert != nil {
-		b.opCertStart = opCert.KESPeriod
-		if err == nil {
-			b.signed = kes.VerifySignedKES(
-				b.creds.GetKESVKey(),
-				kesPeriod-opCert.KESPeriod,
-				message,
-				signature,
-			)
-		}
+	if b.callback != nil {
+		b.callbackErr = b.callback()
 	}
-	if err != nil {
-		b.signingErrText = err.Error()
-	}
-	b.mu.Unlock()
-
-	b.readOnce.Do(func() { close(b.readDone) })
-	<-b.release
-	if err != nil {
-		return nil, nil, err
+	if b.callbackErr != nil {
+		return nil, nil, b.callbackErr
 	}
 	return b.block, b.cbor, nil
 }
 
-func (b *forgerCredentialGenerationBuilder) snapshot() (
-	calls int,
-	signed bool,
-	start uint64,
-	expiry uint64,
-	period uint64,
-	signingErr string,
-) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.calls,
-		b.signed,
-		b.opCertStart,
-		b.opCertExpiry,
-		b.signingPeriod,
-		b.signingErrText
-}
-
-func TestCheckAndForgeProductionSerializesCredentialReload(t *testing.T) {
+func TestCheckAndForgeProductionRejectsReentrantBuilderReload(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 	creds := NewPoolCredentials()
 	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
@@ -487,14 +429,22 @@ func TestCheckAndForgeProductionSerializesCredentialReload(t *testing.T) {
 	))
 
 	block := newForgerTestBlock(1, 2)
-	builder := &forgerCredentialGenerationBuilder{
-		creds:    creds,
-		block:    block,
-		cbor:     block.cbor,
-		entered:  make(chan struct{}),
-		read:     make(chan struct{}),
-		readDone: make(chan struct{}),
-		release:  make(chan struct{}),
+	builder := &forgerReentrantBuilder{
+		block: block,
+		cbor:  block.cbor,
+		callback: func() error {
+			if err := creds.LoadFromFiles(
+				vrfPath,
+				kesPath,
+				opCertPath,
+			); err != nil {
+				return err
+			}
+			return creds.ValidateKESPeriod(
+				synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+				0,
+			)
+		},
 	}
 	broadcaster := &forgerTestBroadcaster{}
 	clock := &forgerTestSlotClock{
@@ -518,112 +468,68 @@ func TestCheckAndForgeProductionSerializesCredentialReload(t *testing.T) {
 	go func() {
 		forgeDone <- forger.checkAndForgeProduction(context.Background())
 	}()
-	dingotestutil.RequireReceive(
+	forgeErr := dingotestutil.RequireReceive(
 		t,
-		builder.entered,
+		forgeDone,
 		time.Second,
-		"builder entered",
+		"reentrant builder reload completion",
 	)
+	require.ErrorContains(t, forgeErr, "credential generation changed")
+	require.NoError(t, builder.callbackErr)
+	require.Equal(t, 1, builder.calls)
+	require.Zero(t, broadcaster.calls, "stale builder output must not be adopted")
+}
 
-	reloadStarted := make(chan struct{})
-	reloadDone := make(chan error, 1)
-	go func() {
-		close(reloadStarted)
-		if err := creds.LoadFromFiles(vrfPath, kesPath, opCertPath); err != nil {
-			reloadDone <- err
-			return
-		}
-		reloadDone <- creds.ValidateKESPeriod(
-			synthGenesis(1, 1, time.Second, time.Unix(0, 0)),
-			0,
-		)
-	}()
-	dingotestutil.RequireReceive(
-		t,
-		reloadStarted,
-		time.Second,
-		"reload started",
-	)
+func TestCheckAndForgeProductionRejectsReentrantLeiosRevalidation(
+	t *testing.T,
+) {
+	creds := setupTestCredentials(t)
+	genesis := synthGenesis(1, 3, time.Second, time.Unix(0, 0))
+	require.NoError(t, creds.ValidateKESPeriod(genesis, 0))
 
-	var releaseOnce sync.Once
-	releaseBuilder := func() {
-		releaseOnce.Do(func() { close(builder.release) })
+	builder := &forgerTestBuilder{
+		block: newForgerTestBlock(1, 2),
 	}
-	defer releaseBuilder()
-	dingotestutil.RequireNoReceive(
+	broadcaster := &forgerTestBroadcaster{}
+	leiosChecker := &forgerTestLeiosChecker{
+		reason: "revalidated",
+		callback: func() error {
+			return creds.ValidateKESPeriod(genesis, 0)
+		},
+	}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       1,
+			chainTipSlot:      0,
+			slotsPerKESPeriod: 1,
+		},
+		LeiosProduceChecker: leiosChecker,
+		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
+		LeiosMempool:        forgerTestMempoolProvider{},
+		LeiosTxValidator:    &mockTxValidator{},
+	})
+	require.NoError(t, err)
+
+	forgeDone := make(chan error, 1)
+	go func() {
+		forgeDone <- forger.checkAndForgeProduction(context.Background())
+	}()
+	require.NoError(t, dingotestutil.RequireReceive(
 		t,
-		reloadDone,
-		100*time.Millisecond,
-		"credential reload must wait for the active forge generation",
-	)
-	close(builder.read)
-	dingotestutil.RequireReceive(
-		t,
-		builder.readDone,
+		forgeDone,
 		time.Second,
-		"builder credential reads must not deadlock behind queued reload",
-	)
-	dingotestutil.RequireNoReceive(
-		t,
-		reloadDone,
-		100*time.Millisecond,
-		"credential reload must wait through generation-backed signing",
-	)
-	releaseBuilder()
-	require.NoError(
-		t,
-		dingotestutil.RequireReceive(
-			t,
-			forgeDone,
-			time.Second,
-			"forge completion",
-		),
-	)
-	require.NoError(
-		t,
-		dingotestutil.RequireReceive(
-			t,
-			reloadDone,
-			time.Second,
-			"reload completion",
-		),
-	)
-
-	calls, signed, start, expiry, period, signingErr := builder.snapshot()
-	require.Equal(t, 1, calls)
-	require.True(t, signed)
-	require.Empty(t, signingErr)
-	require.Equal(t, uint64(0), start)
-	require.Equal(t, uint64(3), expiry)
-	require.Equal(t, uint64(1), period)
-	require.Equal(t, 1, broadcaster.calls)
-
-	// The successful shorter-lifetime reload is visible as one complete
-	// generation on the next cycle: gate and telemetry switch together.
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	calls, _, _, _, _, _ = builder.snapshot()
-	require.Equal(t, 1, calls, "reloaded expired generation must not build")
-	require.Equal(t, 1, broadcaster.calls)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.currentKESPeriod),
-	)
-	require.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(forger.metrics.remainingKESPeriods),
-	)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.opCertExpiryKES),
-	)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
+		"reentrant Leios revalidation completion",
+	))
+	require.NoError(t, leiosChecker.callbackErr)
+	require.Equal(t, 1, leiosChecker.calls)
+	require.Zero(t, builder.calls, "stale Leios attempt must not build")
+	require.Zero(t, broadcaster.calls, "stale Leios attempt must not be adopted")
 }
 
 func TestCheckAndForgeProductionFailsClosedAfterKESRevalidation(t *testing.T) {
@@ -842,10 +748,12 @@ func (b *forgerTestBlock) Cbor() []byte     { return b.cbor }
 func (b *forgerTestBlock) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 type forgerTestLeiosChecker struct {
-	calls   int
-	allowed bool
-	reason  string
-	err     error
+	calls       int
+	allowed     bool
+	reason      string
+	err         error
+	callback    func() error
+	callbackErr error
 }
 
 type forgerTestConfirmedTxRemover struct {
@@ -980,6 +888,12 @@ func (c *forgerTestLeiosChecker) MayProduceEndorserBlock(
 	uint64,
 ) (bool, string, error) {
 	c.calls++
+	if c.callback != nil {
+		c.callbackErr = c.callback()
+		if c.callbackErr != nil {
+			return false, "", c.callbackErr
+		}
+	}
 	return c.allowed, c.reason, c.err
 }
 

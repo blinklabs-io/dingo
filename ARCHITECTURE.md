@@ -3897,33 +3897,31 @@ The start, expiry, current-period, and remaining-period gauges use that same
 protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
 separate upper bound rather than an operational lifetime.
 
-Each production forge attempt identifies one complete credential generation at
-the runtime gate. It releases that generation before the pluggable
-`LeaderChecker` callback so a callback that synchronously initiates a reload
-cannot deadlock on the generation lock, then reacquires the generation and
-requires the generation number to be unchanged. A concurrent reload therefore
-abandons the slot rather than mixing election from one generation with
-construction or signing from another. Once revalidated after selection, the
-attempt holds the generation read lease through KES evolution, VRF/KES signing,
-and local block construction. `DefaultBlockBuilder` receives that same
-package-private generation rather than re-reading `PoolCredentials`. The lease
-ends once the block is signed, before pluggable validation, adoption, and
-observability callbacks, because those phases no longer consume credentials
-and may safely initiate a reload themselves. The pool ID and VRF verification
-key are permanently pinned by the first successful load on a
-`PoolCredentials`; later reloads may rotate KES/opcert material for that
-identity but an attempted pool or VRF identity replacement clears the active
-generation and is rejected. This keeps the long-lived leader schedule's
-identity coherent without rebuilding it during a forge attempt.
-Credential reload and KES-policy revalidation take the exclusive side of the
-generation lock, which is separate from the ordinary credential accessor
-lock. They therefore wait for an in-flight attempt without preventing a
-pluggable builder from using read-only credential accessors. Reload and
-revalidation cannot replace the key, opcert, start, maximum, or expiry
-independently. A completed reload or
-revalidation is therefore a linearization boundary: the old generation may
-finish before it, while the next attempt sees the new generation in its gate,
-signing inputs, logs, and gauges together.
+Each production forge attempt takes an independently owned snapshot of one
+complete credential generation at the runtime gate. The snapshot deep-copies
+the VRF secret, KES secret, verification keys, opcert, and validated lifetime;
+it never aliases mutable key material in `PoolCredentials`. No credential lock
+is therefore held across the pluggable leader, Leios, mempool, ledger,
+block-builder, validation, adoption, or observer callbacks. A callback may
+synchronously reload or revalidate credentials without waiting on its own call
+stack. The snapshot's secret copies are best-effort zeroized when the attempt
+finishes.
+
+Generation checks after leader and Leios callbacks and after block construction
+reject callback output when the owner generation changed. This is required for
+custom builders, which cannot consume the package-private snapshot. The
+`DefaultBlockBuilder` receives the exact snapshot and performs the same check
+before returning, so provider-triggered reloads cannot publish a block assembled
+from shared mutable credentials. KES evolution advances the still-current owner
+and its private snapshot before provider callbacks; VRF proof, opcert fields,
+and KES signature are then derived only from that snapshot. A concurrent reload
+that linearizes after a generation check may coexist with the old snapshot, but
+cannot mutate it or mix its cryptographic inputs. The pool ID and VRF
+verification key remain permanently pinned by the first successful load;
+later reloads may rotate KES/opcert material for that identity, while an
+attempted pool or VRF identity replacement clears the active generation and is
+rejected. This keeps the long-lived leader schedule coherent without rebuilding
+it during a forge attempt.
 
 Steps 2, 6, and 7 each call into a pluggable interface (`LeaderChecker`, `BlockValidator`, `BlockBroadcaster`) that the node wires up at composition time, so a panic inside one of those implementations is contained rather than propagating out of `checkAndForgeProduction` — which would otherwise crash the forger's producer-loop goroutine, and with it the process, since nothing else recovers a goroutine panic in Go. Each callback is invoked through a `*Safe` wrapper (`checkLeaderSafe`, `validateForgedBlockSafe`, `addBlockSafe`) that recovers and converts a panic into the same outcome as that phase's ordinary failure path — "not leader" for selection, a validation failure for validation, an `AddBlock` error for publication — so worker accounting (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and shutdown behavior are unaffected, and the next forge cycle proceeds normally. Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and logged with a stack trace. The `blockForged` observer callback (step 7) already recovered its own panics separately, since observability hooks are expected to be best-effort.
 
@@ -3943,10 +3941,11 @@ reading the key. Operational certificates contain public data and remain
 exempt from the secret-key permission check.
 
 `PoolCredentials.LoadFromFiles` parses replacement files before taking the
-exclusive generation lock, then atomically installs all key material and the
-opcert as a new, unvalidated generation. A failed reload clears the active
-credentials while retaining the first successful load's pool/VRF identity pin,
-so a later retry cannot silently switch the identity used by leader election.
+credential write lock, then atomically installs all key material and the opcert
+as a new, unvalidated generation. Replaced VRF and KES secret material is
+best-effort zeroized. A failed reload clears the active credentials while
+retaining the first successful load's pool/VRF identity pin, so a later retry
+cannot silently switch the identity used by leader election.
 Operational-certificate signature and KES-key validation is generation state:
 every load clears it, `ValidateOpCert` publishes it only for the current
 generation, and `ValidateKESPeriod` repeats the cryptographic check before it

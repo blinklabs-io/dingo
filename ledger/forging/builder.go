@@ -255,6 +255,13 @@ func (b *DefaultBlockBuilder) buildBlock(
 			err,
 		)
 	}
+	// Evolve both the selected snapshot and the still-current owner before any
+	// provider callback. The snapshot remains independently usable while a
+	// callback reloads credentials; a changed owner generation is rejected
+	// before the resulting block can escape this method.
+	if err := credentials.updateKESPeriod(kesPeriod); err != nil {
+		return nil, nil, fmt.Errorf("failed to update KES period: %w", err)
+	}
 
 	// Get current chain tip
 	currentTip := b.chainTip.Tip()
@@ -1030,6 +1037,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 		"total_memory", totalExUnits.Memory,
 		"total_steps", totalExUnits.Steps,
 	)
+	if err := credentials.ensureCurrent(); err != nil {
+		return nil, nil, fmt.Errorf(
+			"credentials changed during block assembly: %w",
+			err,
+		)
+	}
 
 	return ledgerBlock, blockCbor, nil
 }
