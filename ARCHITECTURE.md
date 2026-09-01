@@ -2330,7 +2330,11 @@ delegation view, validates the signing delegate, and charges the resolved
 genesis issuer against the rolling `k`-signature PBFT window. Each main block's
 delegation payload is signature-checked and scheduled for activation after
 `2k` slots; activation replaces the issuer's delegate, while self-delegation
-revokes the prior delegate. The in-memory delegation and issuer-window states
+revokes the prior delegate. The payload is passed to the delegation state as
+the CBOR it arrived in rather than as decoded certificates, because a
+certificate's signature covers the wire encoding of its epoch field and
+re-encoding a decoded value cannot reproduce a non-canonical encoding the
+issuer signed. The in-memory delegation and issuer-window states
 are updated only after the block transaction commits. On startup or after a
 rollback, the delegation view is reconstructed from the canonical Byron chain
 through the applied tip, while the issuer window retains only its last `k`
