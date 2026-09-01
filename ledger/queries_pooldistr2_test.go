@@ -721,3 +721,71 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 		"fractions taken over the summary's total must still sum to one, "+
 			"got %s", sum)
 }
+
+// poolDistr2CborQuery wraps the leaf query in GetCBOR (Shelley sub-query 9,
+// ShelleyCborQuery), the shape cardano-cli uses for several queries (e.g.
+// `query stake-snapshot`) to get a query's result back as CBOR-in-CBOR
+// (tag 24) rather than as a directly-typed reply.
+func poolDistr2CborQuery() *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCborQuery{
+				Query: &olocalstatequery.ShelleyPoolDistr2Query{
+					Type: olocalstatequery.QueryTypeShelleyPoolDistr2,
+				},
+			},
+		},
+	}
+}
+
+// TestQueryShelleyPoolDistr2_ViaGetCBOR covers GetPoolDistr2 wrapped in the
+// GetCBOR combinator (queryShelleyCbor), a path distinct from the direct
+// query the rest of this file exercises.
+//
+// queryShelleyPoolDistr2's fix -- returning the result's two fields
+// destructured into a []any instead of the whole PoolDistr2Result struct --
+// changed the shape queryShelleyCbor sees from its wrapped inner query: one
+// element (the struct) before the fix, two (the fields) after. Before
+// queryShelleyCbor was updated to match, that regressed a case that used to
+// work by accident: the CBOR round trip below is what would have caught it.
+func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
+	db := newTestDB(t)
+
+	vrfA := make([]byte, 32)
+	for i := range vrfA {
+		vrfA[i] = 0xAA
+	}
+	poolA := make([]byte, 28)
+	for i := range poolA {
+		poolA[i] = 0x11
+	}
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	result, err := ls.Query(poolDistr2CborQuery())
+	require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr2 must not error")
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected the []any result wrapper")
+	require.Len(t, arr, 1)
+	tag, ok := arr[0].(cbor.Tag)
+	require.True(t, ok, "expected a tag-24 CBOR.Tag, got %T", arr[0])
+	assert.EqualValues(t, cbor.CborTagCbor, tag.Number)
+
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok, "tag content must be raw CBOR bytes, got %T", tag.Content)
+
+	// The tag-24 content must decode via the same real client-side type a
+	// direct (non-GetCBOR) GetPoolDistr2 reply does: proof that GetCBOR
+	// carries the identical value, just CBOR-in-CBOR encoded.
+	var distr olocalstatequery.PoolDistr2Result
+	_, err = cbor.Decode(content, &distr)
+	require.NoError(t, err, "tag-24 content must decode as a PoolDistr2Result")
+
+	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
+	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
+	assert.Equal(t, uint64(3_000_000), entryA.TotalPoolStake)
+	assert.Equal(t, uint64(3_000_000), distr.TotalActiveStake)
+}

@@ -499,22 +499,31 @@ func (ls *LedgerState) queryShelleyCbor(
 	if err != nil {
 		return nil, err
 	}
-	// Inner handlers return the result in the single-element MsgResult wire
-	// form ([]any{value}); GetCBOR serialises just the wrapped value. This
-	// assumes every wrappable query's []any has exactly one element, which no
-	// longer holds for a multi-field StructAsArray result whose handler
-	// destructures its fields into the slice (e.g. queryShelleyPoolDistr2's
-	// []any{result.Pools, result.TotalActiveStake}); no query of that shape is
-	// currently sent through GetCBOR in practice, and this combinator path has
-	// no test coverage of its own, so this is a known gap rather than a fix.
+	// Inner handlers return the result in the MsgResult wire form: a
+	// single-element []any{value} for a query whose direct reply is one
+	// value (e.g. GetStakeSnapshots' []any{result}), or a multi-element
+	// []any{field1, field2, ...} for one whose handler destructures a
+	// multi-field StructAsArray result's fields directly into the slice
+	// (e.g. queryShelleyPoolDistr2's []any{result.Pools,
+	// result.TotalActiveStake}). Either way, GetCBOR's tag-24 content must
+	// be the same bytes a direct (non-wrapped) reply to that inner query
+	// would carry as its value -- which is cbor.Encode(values[0]) for the
+	// single-element case (unwrapping the outer slice) and
+	// cbor.Encode(values) for the multi-element case (the slice's own
+	// array encoding already matches a StructAsArray struct with those
+	// same field values, byte for byte).
 	values, ok := inner.([]any)
-	if !ok || len(values) != 1 {
+	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(
 			"unexpected inner query result shape for GetCBOR: %T",
 			inner,
 		)
 	}
-	encoded, err := cbor.Encode(values[0])
+	var content any = values
+	if len(values) == 1 {
+		content = values[0]
+	}
+	encoded, err := cbor.Encode(content)
 	if err != nil {
 		return nil, err
 	}
