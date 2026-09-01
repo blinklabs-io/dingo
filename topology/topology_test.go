@@ -381,17 +381,17 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			wantErr: "localRoots[0].accessPoints[0].port must be in range 1-65535",
 		},
 		{
-			name: "local root warm valency exceeds valency",
+			name: "local root valency exceeds warm valency when set",
 			json: `{
   "localRoots": [
     {
       "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
-      "valency": 1,
-      "warmValency": 2
+			"valency": 2,
+			"warmValency": 1
     }
   ]
 }`,
-			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
+			wantErr: "localRoots[0].valency must be <= localRoots[0].warmValency when warmValency is set",
 		},
 		{
 			name: "local root valency exceeds access points",
@@ -430,17 +430,17 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			wantErr: "publicRoots[0].accessPoints[0].port must be in range 1-65535",
 		},
 		{
-			name: "public root warm valency exceeds valency",
+			name: "public root valency exceeds warm valency when set",
 			json: `{
   "publicRoots": [
     {
       "accessPoints": [{"address": "public.example.com", "port": 3001}],
-      "valency": 1,
-      "warmValency": 2
+			"valency": 2,
+			"warmValency": 1
     }
   ]
 }`,
-			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
+			wantErr: "publicRoots[0].valency must be <= publicRoots[0].warmValency when warmValency is set",
 		},
 		{
 			name: "public root valency exceeds access points",
@@ -521,7 +521,7 @@ func TestNewPeerSnapshotConfigFromReader_ValidationErrors(t *testing.T) {
     }
   ]
 }`,
-			wantErr: "ledgerPools[0].relays[0].port must be in range 1-65535",
+			wantErr: "ledgerPools[0].relays[0].port must be in range 0-65535",
 		},
 	}
 
@@ -534,4 +534,42 @@ func TestNewPeerSnapshotConfigFromReader_ValidationErrors(t *testing.T) {
 			require.Contains(t, err.Error(), test.wantErr)
 		})
 	}
+}
+
+func TestNewTopologyConfigFromReader_AllowsEmptyAccessPointsWithValency(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [],
+			"valency": 1
+		}
+	],
+	"publicRoots": [
+		{
+			"accessPoints": [],
+			"valency": 1
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
+}
+
+func TestNewPeerSnapshotConfigFromReader_AllowsMissingRelayPort(t *testing.T) {
+	jsonData := `{
+	"NetworkMagic": 1,
+	"NodeToClientVersion": 23,
+	"Point": {"blockPointHash": "abc", "blockPointSlot": 1},
+	"ledgerPools": [
+		{
+			"relays": [
+				{"address": "relay.example.com"}
+			]
+		}
+	]
+}`
+
+	_, err := topology.NewPeerSnapshotConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
 }

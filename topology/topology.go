@@ -114,8 +114,11 @@ func NewTopologyConfigFromFS(
 
 // maxTopologySize is the maximum allowed size for a topology config file
 // (10 MB). This prevents unbounded memory allocation from untrusted readers.
-const maxTopologySize = 10 * 1024 * 1024
-const maxAccessPointPort = 65535
+const (
+	maxTopologySize     = 10 * 1024 * 1024
+	maxPeerSnapshotSize = 10 * 1024 * 1024
+	maxAccessPointPort  = 65535
+)
 
 func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	t := &TopologyConfig{}
@@ -137,10 +140,6 @@ func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	}
 	return t, nil
 }
-
-// maxPeerSnapshotSize is the maximum allowed size for peer-snapshot.json
-// (10 MB). This matches topology config's defensive read limit.
-const maxPeerSnapshotSize = 10 * 1024 * 1024
 
 func NewPeerSnapshotConfigFromReader(
 	r io.Reader,
@@ -165,12 +164,22 @@ func NewPeerSnapshotConfigFromReader(
 	return s, nil
 }
 
-func validateAccessPoint(ap TopologyConfigP2PAccessPoint, field string) error {
+func validateAccessPoint(
+	ap TopologyConfigP2PAccessPoint,
+	field string,
+	requirePort bool,
+) error {
 	if strings.TrimSpace(ap.Address) == "" {
 		return fmt.Errorf("%s.address must not be empty", field)
 	}
-	if ap.Port == 0 || ap.Port > maxAccessPointPort {
-		return fmt.Errorf("%s.port must be in range 1-65535", field)
+	if requirePort {
+		if ap.Port == 0 || ap.Port > maxAccessPointPort {
+			return fmt.Errorf("%s.port must be in range 1-65535", field)
+		}
+		return nil
+	}
+	if ap.Port > maxAccessPointPort {
+		return fmt.Errorf("%s.port must be in range 0-65535", field)
 	}
 	return nil
 }
@@ -181,14 +190,14 @@ func validateRootValencies(
 	valency uint,
 	accessPointCount int,
 ) error {
-	if warmValency > valency {
+	if warmValency > 0 && valency > warmValency {
 		return fmt.Errorf(
-			"%s.warmValency must be <= %s.valency",
+			"%s.valency must be <= %s.warmValency when warmValency is set",
 			fieldPrefix,
 			fieldPrefix,
 		)
 	}
-	if valency > uint(accessPointCount) {
+	if accessPointCount > 0 && valency > uint(accessPointCount) {
 		return fmt.Errorf(
 			"%s.valency must be <= len(%s.accessPoints)",
 			fieldPrefix,
@@ -205,6 +214,7 @@ func (t *TopologyConfig) validate() error {
 			if err := validateAccessPoint(
 				ap,
 				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+				true,
 			); err != nil {
 				return err
 			}
@@ -225,6 +235,7 @@ func (t *TopologyConfig) validate() error {
 			if err := validateAccessPoint(
 				ap,
 				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+				true,
 			); err != nil {
 				return err
 			}
@@ -243,6 +254,7 @@ func (t *TopologyConfig) validate() error {
 		if err := validateAccessPoint(
 			bootstrapPeer,
 			fmt.Sprintf("bootstrapPeers[%d]", idx),
+			true,
 		); err != nil {
 			return err
 		}
@@ -257,6 +269,7 @@ func (s *PeerSnapshotConfig) validate() error {
 			if err := validateAccessPoint(
 				relay,
 				fmt.Sprintf("bigLedgerPools[%d].relays[%d]", poolIdx, relayIdx),
+				false,
 			); err != nil {
 				return err
 			}
@@ -267,6 +280,7 @@ func (s *PeerSnapshotConfig) validate() error {
 			if err := validateAccessPoint(
 				relay,
 				fmt.Sprintf("ledgerPools[%d].relays[%d]", poolIdx, relayIdx),
+				false,
 			); err != nil {
 				return err
 			}
