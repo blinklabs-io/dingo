@@ -1347,6 +1347,74 @@ func TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor(t *testing.T) {
 	assert.Equal(t, 2, blocking.nextTxIdx)
 }
 
+// TestMempoolConsumer_DefaultCacheBudgetHasFloor verifies that the
+// per-consumer byte budget derived from MempoolCapacity (ConsumerCacheBytes
+// left at zero) cannot truncate below minConsumerCacheBytes. Without the
+// floor, a realistic-but-small MempoolCapacity yields a derived budget
+// smaller than an ordinary transaction body, and NextTx would then skip it
+// forever.
+func TestMempoolConsumer_DefaultCacheBudgetHasFloor(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1000,
+		ConsumerCacheSize: 10,
+		// ConsumerCacheBytes intentionally left at zero: the naive derivation
+		// (MempoolCapacity/4 = 250) is smaller than the 300-byte body below.
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
+
+	tx := &MempoolTransaction{Hash: "typical", Cbor: make([]byte, 300)}
+	m.transactions = append(m.transactions, tx)
+	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
+
+	require.Greater(
+		t, consumer.cacheLimitBytes, int64(300),
+		"unfloored derivation (capacity/4=250) would permanently skip this body",
+	)
+
+	skippedBefore := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
+	got := consumer.NextTx(false)
+	require.NotNil(t, got, "a realistic-size body must not be skipped forever")
+	assert.Equal(t, "typical", got.Hash)
+	skippedAfter := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
+	assert.Equal(
+		t, skippedBefore, skippedAfter,
+		"a relayed body must not also be counted as skipped",
+	)
+}
+
+// TestMempoolConsumer_OversizedSkipIsObservable verifies that a permanently
+// skipped oversized body increments the consumerCacheBytesSkipped counter,
+// so this failure mode is visible instead of looking like a healthy idle
+// relay.
+func TestMempoolConsumer_OversizedSkipIsObservable(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           event.NewEventBus(nil, nil),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          newMockValidator(),
+		MempoolCapacity:    10,
+		ConsumerCacheSize:  10,
+		ConsumerCacheBytes: 4,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
+
+	m.transactions = append(m.transactions,
+		&MempoolTransaction{Hash: "oversized", Cbor: make([]byte, 5)},
+	)
+	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
+
+	skippedBefore := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
+	assert.Nil(t, consumer.NextTx(false))
+	skippedAfter := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
+	assert.Equal(t, skippedBefore+1, skippedAfter)
+}
+
 // TestMempoolConsumer_CachesShareAggregateByteLimit verifies that retained
 // copies across consumers share one aggregate budget and that releasing one
 // consumer's copy allows another consumer to advertise the transaction.

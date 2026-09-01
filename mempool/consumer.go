@@ -54,6 +54,22 @@ func newConsumer(
 	if cacheLimitBytes <= 0 {
 		cacheLimitBytes = mempool.config.MempoolCapacity /
 			defaultConsumerCacheShare
+		// A budget this small would permanently exclude ordinary transaction
+		// bodies from relay with no other visible symptom, so the derived
+		// default (unlike an operator's explicit ConsumerCacheBytes) is
+		// floored to a size that comfortably holds one.
+		if cacheLimitBytes < minConsumerCacheBytes {
+			mempool.logger.Warn(
+				"derived default consumer relay cache byte budget is below "+
+					"the floor; raising it to avoid silently excluding "+
+					"ordinary transaction bodies from relay",
+				"component", "mempool",
+				"mempool_capacity", mempool.config.MempoolCapacity,
+				"derived_bytes", cacheLimitBytes,
+				"floor_bytes", int64(minConsumerCacheBytes),
+			)
+			cacheLimitBytes = minConsumerCacheBytes
+		}
 	}
 	return &MempoolConsumer{
 		mempool:         mempool,
@@ -99,9 +115,22 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 				// become cacheable. Skip it so it cannot permanently pin the
 				// cursor and prevent later transactions from being relayed.
 				if int64(len(poolTx.Cbor)) > m.cacheLimitBytes {
+					hash := poolTx.Hash
+					size := len(poolTx.Cbor)
+					limit := m.cacheLimitBytes
 					m.nextTxIdx++
 					m.nextTxIdxMu.Unlock()
 					m.mempool.RUnlock()
+					m.mempool.metrics.consumerCacheBytesSkipped.Inc()
+					m.mempool.logger.Warn(
+						"skipping transaction that exceeds this consumer's "+
+							"relay cache byte budget; it will never be "+
+							"relayed to this consumer",
+						"component", "mempool",
+						"tx_hash", hash,
+						"tx_size_bytes", size,
+						"cache_limit_bytes", limit,
+					)
 					continue
 				}
 				cached, aggregateChanged := m.cacheTransaction(poolTx)

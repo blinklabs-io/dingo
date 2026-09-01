@@ -48,6 +48,15 @@ const (
 	DefaultRevalidationDeltaCap = 64
 	DefaultConsumerCacheSize    = 1024
 	defaultConsumerCacheShare   = 4
+	// minConsumerCacheBytes floors the per-consumer relay cache budget derived
+	// from MempoolCapacity when ConsumerCacheBytes is left at zero. NextTx
+	// permanently skips any body whose size exceeds this budget, so an
+	// unfloored default derived from a small MempoolCapacity silently and
+	// permanently excludes ordinary transactions from relay to that consumer.
+	// 16 KiB comfortably holds a typical single transaction body without
+	// coupling the mempool package to a ledger protocol parameter. An
+	// operator's explicit ConsumerCacheBytes is left as configured.
+	minConsumerCacheBytes = 16 * 1024
 	// defaultRevalidationJournalCap bounds the mutation journal a revalidation
 	// pass may accumulate. A mempoolMutation is 40 bytes, so the backing slice
 	// tops out near 42 MiB, and each entry additionally pins the transaction it
@@ -149,6 +158,11 @@ type Mempool struct {
 		txsEvicted      prometheus.Counter
 		txsExpired      prometheus.Counter
 		implementation  prometheus.Gauge
+		// consumerCacheBytesSkipped counts transaction bodies permanently
+		// skipped by a consumer's relay cursor for exceeding its per-consumer
+		// byte budget. A nonzero rate means relay to that consumer has gone
+		// silent for those transactions with no other visible symptom.
+		consumerCacheBytesSkipped prometheus.Counter
 	}
 	validator              TxValidator
 	implementation         Implementation
@@ -654,6 +668,12 @@ func newMempool(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_txsExpiredNum_int",
 			Help: "total transactions expired from mempool by TTL",
+		},
+	)
+	m.metrics.consumerCacheBytesSkipped = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_consumerCacheBytesSkippedNum_int",
+			Help: "total tx bodies skipped for exceeding a consumer's byte budget",
 		},
 	)
 	m.metrics.implementation = promautoFactory.NewGauge(
