@@ -17,6 +17,7 @@ package forging
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -218,4 +219,40 @@ func TestSyncStateForgeFenceStoreRealDatabase(t *testing.T) {
 	slot, _, err = reopened.LoadLastForgedSlot()
 	require.NoError(t, err)
 	assert.Equal(t, uint64(98765), slot)
+}
+
+// TestSyncStateForgeFenceStoreRejectsMissingSlot fails closed on a record
+// that decodes but carries no slot. Treating the absent field's zero value
+// as a real fence would install an inert zero-slot fence that permits
+// every positive slot, which is the opposite of what the record is for.
+func TestSyncStateForgeFenceStoreRejectsMissingSlot(t *testing.T) {
+	poolID := storeTestPoolID("pool")
+	backing := newMockSyncStateStore()
+	backing.values[syncStateForgeFenceKey(poolID)] = fmt.Sprintf(
+		`{"format_version":%d,"pool_id":%q}`,
+		forgeFenceFormatVersion,
+		hex.EncodeToString(poolID[:]),
+	)
+	store := NewSyncStateForgeFenceStore(backing, poolID)
+
+	_, _, err := store.LoadLastForgedSlot()
+	require.ErrorContains(t, err, "missing last_forged_slot")
+}
+
+// TestSyncStateForgeFenceStoreAcceptsExplicitZeroSlot keeps the presence
+// check from rejecting a genuine slot-0 fence.
+func TestSyncStateForgeFenceStoreAcceptsExplicitZeroSlot(t *testing.T) {
+	poolID := storeTestPoolID("pool")
+	backing := newMockSyncStateStore()
+	backing.values[syncStateForgeFenceKey(poolID)] = fmt.Sprintf(
+		`{"format_version":%d,"pool_id":%q,"last_forged_slot":0}`,
+		forgeFenceFormatVersion,
+		hex.EncodeToString(poolID[:]),
+	)
+	store := NewSyncStateForgeFenceStore(backing, poolID)
+
+	slot, ok, err := store.LoadLastForgedSlot()
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, uint64(0), slot)
 }

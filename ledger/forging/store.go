@@ -37,10 +37,14 @@ type syncStateStore interface {
 	SetSyncState(key, value string, txn types.Txn) error
 }
 
+// syncStateForgeFenceRecord is the persisted fence. LastForgedSlot is a
+// pointer so an absent field is distinguishable from an explicit zero: a
+// record missing it would otherwise decode to a zero fence, which permits
+// every positive slot and silently disables the protection.
 type syncStateForgeFenceRecord struct {
-	FormatVersion  int    `json:"format_version"`
-	PoolID         string `json:"pool_id"`
-	LastForgedSlot uint64 `json:"last_forged_slot"`
+	FormatVersion  int     `json:"format_version"`
+	PoolID         string  `json:"pool_id"`
+	LastForgedSlot *uint64 `json:"last_forged_slot"`
 }
 
 // syncStateForgeFenceStore persists the last-forged-slot fence in
@@ -108,7 +112,13 @@ func (s *syncStateForgeFenceStore) LoadLastForgedSlot() (
 			expectedPoolID,
 		)
 	}
-	return record.LastForgedSlot, true, nil
+	if record.LastForgedSlot == nil {
+		return 0, false, fmt.Errorf(
+			"forge fence %q missing last_forged_slot",
+			s.key,
+		)
+	}
+	return *record.LastForgedSlot, true, nil
 }
 
 // StoreLastForgedSlot records slot as used. The fence only ever moves
@@ -124,7 +134,7 @@ func (s *syncStateForgeFenceStore) StoreLastForgedSlot(slot uint64) error {
 	payload, err := json.Marshal(syncStateForgeFenceRecord{
 		FormatVersion:  forgeFenceFormatVersion,
 		PoolID:         hex.EncodeToString(s.poolID[:]),
-		LastForgedSlot: slot,
+		LastForgedSlot: &slot,
 	})
 	if err != nil {
 		return fmt.Errorf("encode forge fence for slot %d: %w", slot, err)
