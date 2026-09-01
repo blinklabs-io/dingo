@@ -4236,9 +4236,14 @@ func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
 		for _, round := range []int{0, 1, 17, 1_000, 100_000} {
 			for _, pending := range []int{1, 2, 63, 64, 65, 1 << 20} {
 				got := catchupBudget(round, pending, deltaCap)
-				assert.Greater(t, got, round,
+				assert.Greater(
+					t,
+					got,
+					round,
 					"deltaCap=%d round=%d pending=%d: a pending backlog must leave headroom",
-					deltaCap, round, pending,
+					deltaCap,
+					round,
+					pending,
 				)
 			}
 		}

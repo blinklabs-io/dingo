@@ -216,17 +216,44 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 	}
 	require.Empty(
 		t,
-		ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false),
+		ComparePoolEpoch(
+			"preview",
+			5,
+			koios,
+			dingo,
+			now,
+			0,
+			time.Time{},
+			false,
+		),
 	)
 
 	dingo.FixedCost = "340000001"
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false)
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "fixed_cost", ms[0].Field)
 
 	dingo.FixedCost = "340000000"
 	dingo.Margin = "1/5"
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "margin", ms[0].Field)
 }
@@ -262,14 +289,32 @@ func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
 
 	dingo := *baseline
 	dingo.FixedCost = ""
-	ms := ComparePoolEpoch("preview", 5, koios, &dingo, now, 0, time.Time{}, false)
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		&dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "fixed_cost", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 
 	dingo = *baseline
 	dingo.Margin = ""
-	ms = ComparePoolEpoch("preview", 5, koios, &dingo, now, 0, time.Time{}, false)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		&dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "margin", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
@@ -304,7 +349,16 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 	}
 
 	// Historical (outside grace, or no grace configured): dingo_db_missing.
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false)
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_params", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -312,7 +366,16 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 
 	// Recent (epoch closed within the grace window): reference_lag, not PASS.
 	recentClose := now.Add(-time.Hour)
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose, false)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		24,
+		recentClose,
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_params", ms[0].Field)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
@@ -347,7 +410,16 @@ func TestComparePoolEpochStakeNotPresent(t *testing.T) {
 
 	// Historical (outside grace, or no grace configured): dingo_db_missing,
 	// never a value_mismatch against the zero-value stub.
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false)
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_stake", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -359,7 +431,16 @@ func TestComparePoolEpochStakeNotPresent(t *testing.T) {
 	// Recent (epoch closed within the grace window): reference_lag, not PASS
 	// and not a value_mismatch.
 	recentClose := now.Add(-time.Hour)
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose, false)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		24,
+		recentClose,
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_stake", ms[0].Field)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
@@ -390,7 +471,16 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	}
 	require.Empty(
 		t,
-		ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false),
+		ComparePoolEpoch(
+			"preview",
+			5,
+			koios,
+			dingo,
+			now,
+			0,
+			time.Time{},
+			false,
+		),
 	)
 
 	// Reward calculation not yet finished for this pool/epoch: Dingo has no
@@ -399,7 +489,16 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	// (reference_lag) vs historical (dingo_db_missing) split this guards.
 	dingo.MemberRewardPresent = false
 	dingo.MemberRewardTotal = ""
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false)
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(
 		t,
 		ms,
@@ -412,7 +511,16 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	dingo.MemberRewardPresent = true
 
 	dingo.MemberRewardTotal = "1"
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
@@ -444,7 +552,16 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 
 	// Historical: outside the grace window (or no grace configured) — a
 	// genuine gap in Dingo's own computation.
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, false)
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -453,7 +570,16 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 	// Recent: epoch closed within the grace window — may simply not be
 	// computed yet, but still not a pass.
 	recentClose := now.Add(-time.Hour)
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose, false)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		24,
+		recentClose,
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
@@ -679,7 +805,16 @@ func TestComparePoolEpochDepartedPoolIsInformational(t *testing.T) {
 
 	// The K+1 snapshot is committed, so the absent row means the pool left
 	// the set rather than the snapshot being unwritten.
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}, true)
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		true,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_params", ms[0].Field)
 	require.Equal(t, CategoryPoolDeparted, ms[0].Category)

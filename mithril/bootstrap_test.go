@@ -191,7 +191,11 @@ func TestBootstrap(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc", result.Snapshot.Digest)
+	require.Equal(
+		t,
+		"a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc",
+		result.Snapshot.Digest,
+	)
 	require.NotEmpty(t, result.ImmutableDir)
 	require.NotEmpty(t, result.ArchivePath)
 	assert.Greater(
@@ -1443,9 +1447,12 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 	} {
 		t.Run(digest, func(t *testing.T) {
 			snapshots := []SnapshotListItem{{SnapshotBase: SnapshotBase{
-				Digest:               digest,
-				Network:              "preprod",
-				Beacon:               Beacon{Epoch: 270, ImmutableFileNumber: 5320},
+				Digest:  digest,
+				Network: "preprod",
+				Beacon: Beacon{
+					Epoch:               270,
+					ImmutableFileNumber: 5320,
+				},
 				Size:                 int64(len(archiveData)),
 				CompressionAlgorithm: "zstandard",
 			}}}

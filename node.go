@@ -1733,7 +1733,8 @@ func (n *Node) resolveRunError(runErr error) error {
 	n.fatalErrMu.Lock()
 	fatalErr := n.fatalErr
 	n.fatalErrMu.Unlock()
-	if fatalErr != nil && (runErr == nil || errors.Is(runErr, context.Canceled)) {
+	if fatalErr != nil &&
+		(runErr == nil || errors.Is(runErr, context.Canceled)) {
 		return fatalErr
 	}
 	return runErr

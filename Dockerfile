@@ -22,6 +22,7 @@ COPY . .
 RUN make build
 
 FROM build AS antithesis-build
+RUN apk add --no-cache bash
 RUN go get github.com/antithesishq/antithesis-sdk-go@latest
 RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-instrumentor@latest
 RUN make mod-tidy

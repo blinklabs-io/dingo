@@ -510,10 +510,14 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if ls.config.Logger != nil {
 			ls.config.Logger.Error(
 				"replay recovery found a repeated reward withdrawal mismatch; halting instead of retrying indefinitely",
-				"component", "ledger",
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"error", validationErr.Cause,
-				"hint", "local reward-account state disagrees with the chain; repair or resync the node before restarting",
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"error",
+				validationErr.Cause,
+				"hint",
+				"local reward-account state disagrees with the chain; repair or resync the node before restarting",
 			)
 		}
 		return false, fmt.Errorf(
@@ -526,10 +530,14 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"deterministic transaction validation rejected a block at or behind the ledger tip; no rewind target precedes it",
-				"component", "ledger",
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"ledger_tip_slot", rewindPoint.Slot,
-				"error", validationErr.Cause,
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"ledger_tip_slot",
+				rewindPoint.Slot,
+				"error",
+				validationErr.Cause,
 			)
 		}
 		return false, nil
@@ -546,10 +554,14 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"chain selection moved the primary chain off the deterministic transaction recovery point; the rejected block is already gone",
-				"component", "ledger",
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"rewind_target_slot", rewindPoint.Slot,
-				"error", err,
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"rewind_target_slot",
+				rewindPoint.Slot,
+				"error",
+				err,
 			)
 		}
 		return true, nil
@@ -558,12 +570,18 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 	if ls.config.Logger != nil {
 		ls.config.Logger.Warn(
 			"deterministic transaction validation rejected a block on the primary chain; rewinding so chain selection can offer another candidate",
-			"component", "ledger",
-			"tx_hash", hex.EncodeToString(validationErr.TxHash),
-			"failing_block_slot", validationErr.BlockPoint.Slot,
-			"rewind_target_slot", rewindPoint.Slot,
-			"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
-			"error", validationErr.Cause,
+			"component",
+			"ledger",
+			"tx_hash",
+			hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot",
+			validationErr.BlockPoint.Slot,
+			"rewind_target_slot",
+			rewindPoint.Slot,
+			"rewind_target_hash",
+			hex.EncodeToString(rewindPoint.Hash),
+			"error",
+			validationErr.Cause,
 		)
 	}
 	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
@@ -585,11 +603,16 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"deterministic transaction validation rejected the same block again at the same applied tip; rejecting the branch without rotating peers",
-				"component", "ledger",
-				"tx_hash", hex.EncodeToString(validationErr.TxHash),
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"ledger_tip_slot", rewindPoint.Slot,
-				"hint", "peers are serving a transaction this node rejects; the pipeline keeps rejecting it and reports no tip progress",
+				"component",
+				"ledger",
+				"tx_hash",
+				hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"ledger_tip_slot",
+				rewindPoint.Slot,
+				"hint",
+				"peers are serving a transaction this node rejects; the pipeline keeps rejecting it and reports no tip progress",
 			)
 		}
 		return true, nil

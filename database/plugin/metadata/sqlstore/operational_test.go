@@ -137,7 +137,11 @@ func TestGetEpochRejectsNegativeStoredEraID(t *testing.T) {
 	store := newManagementTestStore(t)
 	_, err := store.writeDB.Exec(
 		"INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (?, ?, ?, ?, ?)",
-		1, 0, -1, 1, 432000,
+		1,
+		0,
+		-1,
+		1,
+		432000,
 	)
 	require.NoError(t, err)
 
@@ -153,7 +157,11 @@ func TestGetEpochRejectsNegativeStoredSlotLength(t *testing.T) {
 	store := newManagementTestStore(t)
 	_, err := store.writeDB.Exec(
 		"INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (?, ?, ?, ?, ?)",
-		2, 0, 1, -1, 432000,
+		2,
+		0,
+		1,
+		-1,
+		432000,
 	)
 	require.NoError(t, err)
 
@@ -169,7 +177,11 @@ func TestGetEpochRejectsNegativeStoredLengthInSlots(t *testing.T) {
 	store := newManagementTestStore(t)
 	_, err := store.writeDB.Exec(
 		"INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (?, ?, ?, ?, ?)",
-		3, 0, 1, 1, -1,
+		3,
+		0,
+		1,
+		1,
+		-1,
 	)
 	require.NoError(t, err)
 

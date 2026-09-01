@@ -159,7 +159,11 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 	}
 	assert.Zero(t, decodedHeaders)
 	assert.Equal(t, retainedBytes, history.retainedBytes)
-	assert.LessOrEqual(t, history.retainedBytes, maxPeerHeaderHistoryBytesPerConn)
+	assert.LessOrEqual(
+		t,
+		history.retainedBytes,
+		maxPeerHeaderHistoryBytesPerConn,
+	)
 }
 
 func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {

@@ -577,7 +577,9 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 // name would name a different file for a network like "../../etc" — one outside
 // the download directory, and Cleanup calls os.RemoveAll on whatever it is
 // given. So the reported path has to stay inside, whatever the aggregator says.
-func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T) {
+func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(
+	t *testing.T,
+) {
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "nope", http.StatusInternalServerError)
@@ -589,8 +591,10 @@ func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T)
 	_, archPath, err := downloadAncillary(
 		t.Context(),
 		BootstrapConfig{
-			AllowInsecureHTTP:           true,
-			Logger:                      slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AllowInsecureHTTP: true,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			DownloadMaxTransientRetries: -1,
 		},
 		&SnapshotListItem{
@@ -892,7 +896,9 @@ func TestBootstrappedImmutableRefusesAFileSubstitutedAfterVerification(
 // parsed are then not the bytes the ancillary key signed. So the manifest
 // travels with the handle and the selected files are re-checked from the
 // descriptors the import reads through.
-func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(t *testing.T) {
+func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
+	t *testing.T,
+) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// A one-element CBOR array: parses far enough to fail distinctively, so a
 	// tree that is read reports "parsing ledger state" rather than anything

@@ -649,6 +649,33 @@ graph TB
 
 The block production pipeline from leader election through broadcast.
 
+Two invariants keep the forger from advertising or repeating a block it has
+not durably adopted:
+
+- **Publish after acceptance.** `BlockForgedEvent` and the Leios
+  announcement enqueued alongside it (`node_forging.go`) run only after
+  `AddBlock` accepts the block. A rejected block is never advertised, so
+  peers cannot fetch a block this node does not have. Build-versus-adopt
+  stays observable through the `Forge_forged_int` and
+  `Forge_could_not_forge_int` counters.
+- **Duplicate-slot fence.** The chain-tip check (`currentSlot <= tipSlot`)
+  cannot see a slot whose block was signed and diffused but never adopted,
+  and it forgets slots entirely when the tip rolls back or the process
+  restarts. `ForgeFenceStore` (`ledger/forging/store.go`, persisted in
+  `sync_state` under `forge_fence:<poolid>`) records the highest slot the
+  node committed to *before* the header for that slot is signed, and the
+  forger refuses any slot at or below it. Refusing a slot the node did not
+  actually use costs one block; signing a second, different block for a
+  slot whose first block may already have reached peers is equivocation.
+  A fence that cannot be read fails forger construction, and one that
+  cannot be written fails the forge, rather than signing unprotected.
+  The `dingo_metrics_forgeFenceBlocked_int` counter is zero in normal
+  operation: any increment points at a slot-clock regression or a
+  rolled-back database. The fence lives in `sync_state`, so a Mithril
+  import that ends in a full `ClearSyncState` drops it; a producer
+  bootstrapped from a snapshot has only the chain-tip check until it
+  next forges (issue #3736).
+
 ```mermaid
 sequenceDiagram
     participant SC as SlotClock
@@ -658,6 +685,7 @@ sequenceDiagram
     participant MP as Mempool
     participant LS as LedgerState
     participant PC as PrimaryChain
+    participant DB as ForgeFenceStore
     participant EB as EventBus
 
     Note over SC,EB: Epoch Preparation
@@ -675,6 +703,7 @@ sequenceDiagram
     else is leader
         LE-->>BF: true (vrfProof, vrfOutput)
         BF->>BF: check sync tolerance (tip not stale)
+        BF->>DB: reserveForgeSlot: reject slot <= fence, else persist it
         BF->>BB: BuildBlock(slot, kesPeriod)
         BB->>MP: drain eligible transactions
         BB->>LS: validate each tx against current state
@@ -683,7 +712,7 @@ sequenceDiagram
         BB-->>BF: block + CBOR
         BF->>PC: AddLocalBlock(forgedBlock) via BlockBroadcaster
         PC->>EB: publish ChainUpdateEvent, before AddLocalBlock returns
-        BF->>EB: publish BlockForgedEvent
+        BF->>EB: publish BlockForgedEvent, only after AddLocalBlock succeeds
         BF->>MP: remove confirmed transactions (RemoveTxsByHash)
     end
 
@@ -778,6 +807,7 @@ dingo/
 │   │   ├── builder.go   # DefaultBlockBuilder, block assembly
 │   │   ├── keys.go      # PoolCredentials (VRF/KES/OpCert)
 │   │   ├── slot_tracker.go # Slot battle detection
+│   │   ├── store.go     # Persisted last-forged-slot fence
 │   │   ├── events.go    # Forging events
 │   │   └── metrics.go   # Forging metrics
 │   ├── leader/          # Leader election
@@ -1215,7 +1245,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.pool_restored` | LedgerState | Pool state restored after rollback |
 | `epoch.transition` | LedgerState | Epoch boundary crossed |
 | `hardfork.transition` | LedgerState | Hard fork transition |
-| `block.forged` | BlockForger | Block successfully forged |
+| `block.forged` | BlockForger | Block forged and adopted onto the chain |
 | `forging.slot_battle` | SlotTracker | Competing blocks at same slot |
 | `leios.eb_quorum` | Leios VoteManager | Endorser block reached stake quorum; certificate built (consumed by the Leios PipelineManager for inclusion eligibility) |
 | `leios.vote_emitted` | Leios VoteManager | Locally signed prototype vote ready for node wiring to enqueue on each peer's LeiosNotify stream |
@@ -1419,6 +1449,18 @@ state persistence during historical catch-up. The timer and epoch-boundary
 triggers are single-flight; once the node is near the upstream tip, each run
 deletes at most one bounded batch of eligible rows using the era's stability
 window. Later runs continue the cleanup, keeping SQLite occupancy bounded.
+
+`LedgerState.Close` stops that timer and waits for a run already in flight,
+under a dedicated mutex rather than the `LedgerState` `RWMutex` (an in-flight
+run still takes `RLock` to read the tip, so draining under the ledger lock
+would deadlock). Both are required: the timer callback re-arms itself, so a
+`Close` that only stopped it would let an in-flight run install a fresh timer
+behind `Close`'s back, and `time.Timer.Stop` never waits for an `AfterFunc`
+callback that has already fired. Both triggers also refuse to start once
+`Close` has set the closed flag, which is what constrains the epoch
+transition's own `go ls.cleanupConsumedUtxos()` — stopping the timer does not
+reach that goroutine. `LedgerState` does not own the database, and its owner
+closes it as soon as `Close` returns.
 
 ### Midnight gRPC Server
 
@@ -2330,7 +2372,11 @@ delegation view, validates the signing delegate, and charges the resolved
 genesis issuer against the rolling `k`-signature PBFT window. Each main block's
 delegation payload is signature-checked and scheduled for activation after
 `2k` slots; activation replaces the issuer's delegate, while self-delegation
-revokes the prior delegate. The in-memory delegation and issuer-window states
+revokes the prior delegate. The payload is passed to the delegation state as
+the CBOR it arrived in rather than as decoded certificates, because a
+certificate's signature covers the wire encoding of its epoch field and
+re-encoding a decoded value cannot reproduce a non-canonical encoding the
+issuer signed. The in-memory delegation and issuer-window states
 are updated only after the block transaction commits. On startup or after a
 rollback, the delegation view is reconstructed from the canonical Byron chain
 through the applied tip, while the issuer window retains only its last `k`
@@ -3861,19 +3907,21 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
 
 `BlockForger` runs a slot-based loop that:
 1. Waits for the next slot boundary using the wall-clock slot timer
-2. Checks leader eligibility via the `Election`
-3. Reads the parent ranking block's `LeiosAnnouncement`, selects only the matching eligible Leios endorser-block certificate, and independently produces and broadcasts a new endorser block for the current slot when eligible
-4. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
-5. Optionally self-validates the forged block before adoption (see below)
-6. Submits the forged block directly to the primary chain for synchronous local
+2. Computes the current KES period and declines forging at the operational
+   certificate's protocol expiry
+3. Checks leader eligibility via the `Election`
+4. Reads the parent ranking block's `LeiosAnnouncement`, selects only the matching eligible Leios endorser-block certificate, and independently produces and broadcasts a new endorser block for the current slot when eligible
+5. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
+6. Optionally self-validates the forged block before adoption (see below)
+7. Submits the forged block directly to the primary chain for synchronous local
    admission, before running observability callbacks. Local admission validates
    the actual chain tip and contiguous block number, but does not compare the
    block with peer-delivered pending headers. Successful adoption clears those
    now-conflicting headers; a genuinely stale parent is still rejected without
    changing the queued headers.
-7. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
+8. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
-Step 4's transaction selection runs inside `LedgerState.WithTxValidationSession`
+Step 5's transaction selection runs inside `LedgerState.WithTxValidationSession`
 (the same mechanism the mempool backend rebuilds use above): one pinned ledger
 generation, one validation reference slot, and one repeatable-read transaction
 cover every mempool transaction considered for the candidate block, not a
@@ -3886,19 +3934,58 @@ it, by slot, hash, and block number, against the parent point the candidate
 already committed to (`nextBlockNumber`/`prevHash`) before selection started;
 a mismatch — a peer block landing mid-selection — rejects the candidate
 before VRF/KES signing (`selected parent changed during block assembly`)
-rather than relying solely on step 6's `Chain.AddLocalBlock` check, which
+rather than relying solely on step 7's `Chain.AddLocalBlock` check, which
 still runs as the final backstop against any race not closed here.
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
+Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
+the loaded credentials together with the opcert start and overflow-checked
+exclusive expiry. `NewBlockForger` rejects credentials without that validated
+protocol lifetime. Before leader selection at each candidate slot, the runtime
+gate admits exactly the
+half-open interval `[opcertStart, opcertStart + MaxKESEvolutions)`: periods
+before the start and at or after the exclusive end both log/count a
+could-not-forge disposition before Praos, Leios, or ranking-block work.
+The start, expiry, current-period, and remaining-period gauges use that same
+protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
+separate upper bound rather than an operational lifetime.
 
-Steps 2, 5, and 6 each call into a pluggable interface (`LeaderChecker`, `BlockValidator`, `BlockBroadcaster`) that the node wires up at composition time, so a panic inside one of those implementations is contained rather than propagating out of `checkAndForgeProduction` — which would otherwise crash the forger's producer-loop goroutine, and with it the process, since nothing else recovers a goroutine panic in Go. Each callback is invoked through a `*Safe` wrapper (`checkLeaderSafe`, `validateForgedBlockSafe`, `addBlockSafe`) that recovers and converts a panic into the same outcome as that phase's ordinary failure path — "not leader" for selection, a validation failure for validation, an `AddBlock` error for publication — so worker accounting (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and shutdown behavior are unaffected, and the next forge cycle proceeds normally. Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and logged with a stack trace. The `blockForged` observer callback (step 6) already recovered its own panics separately, since observability hooks are expected to be best-effort.
+Each production forge attempt takes an independently owned snapshot of one
+complete credential generation at the runtime gate. The snapshot deep-copies
+the VRF secret, KES secret, verification keys, opcert, and validated lifetime;
+it never aliases mutable key material in `PoolCredentials`. No credential lock
+is therefore held across the pluggable leader, Leios, mempool, ledger,
+block-builder, validation, adoption, or observer callbacks. A callback may
+synchronously reload or revalidate credentials without waiting on its own call
+stack. The snapshot's secret copies are best-effort zeroized when the attempt
+finishes.
+
+Generation checks after leader and Leios callbacks and after block construction
+reject callback output when the owner generation changed. This is required for
+custom builders, which cannot consume the package-private snapshot. The
+`DefaultBlockBuilder` receives the exact snapshot and performs the same check
+before returning, so provider-triggered reloads cannot publish a block assembled
+from shared mutable credentials. KES evolution advances the still-current owner
+and its private snapshot before provider callbacks; VRF proof, opcert fields,
+and KES signature are then derived only from that snapshot. A concurrent reload
+that linearizes after a generation check may coexist with the old snapshot, but
+cannot mutate it or mix its cryptographic inputs. The pool ID and VRF
+verification key derived from the loaded VRF seed remain permanently pinned by
+the first successful load. A 64-byte VRF key envelope's supplied public-key
+suffix must match that derivation, and only the derived identity is installed;
+later reloads may rotate KES/opcert material for that identity, while an
+attempted pool or VRF identity replacement clears the active generation and is
+rejected. This keeps the long-lived leader schedule coherent without rebuilding
+it during a forge attempt.
+
+Steps 3, 6, and 7 each call into a pluggable interface (`LeaderChecker`, `BlockValidator`, `BlockBroadcaster`) that the node wires up at composition time, so a panic inside one of those implementations is contained rather than propagating out of `checkAndForgeProduction` — which would otherwise crash the forger's producer-loop goroutine, and with it the process, since nothing else recovers a goroutine panic in Go. Each callback is invoked through a `*Safe` wrapper (`checkLeaderSafe`, `validateForgedBlockSafe`, `addBlockSafe`) that recovers and converts a panic into the same outcome as that phase's ordinary failure path — "not leader" for selection, a validation failure for validation, an `AddBlock` error for publication — so worker accounting (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and shutdown behavior are unaffected, and the next forge cycle proceeds normally. Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and logged with a stack trace. The `blockForged` observer callback (step 7) already recovered its own panics separately, since observability hooks are expected to be best-effort.
 
 When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype's 12-field Dijkstra header body for every forged Dijkstra ranking block: the standard Praos/Babbage fields plus `leios_certified` and `leios_announcement`. A locally forged endorser block is announced in the same-slot ranking block's `leios_announcement` as `[eb_hash, eb_size]`; `eb_size` is rejected before header construction if it exceeds the CDDL `uint .size 4` bound. If the pipeline has a certified, non-equivocated EB inside its inclusion window whose hash matches the parent ranking block's `LeiosAnnouncement`, the forger also populates the prototype `DijkstraLeiosCertificate` body field and sets `leios_certified=true`. Prototype-2026w29 permits that CertRB to carry the new same-slot announcement as well as the certificate for its parent's EB. Before constructing the new EB, the forger reads the certified EB's manifest and filters those transaction hashes from its mempool view, matching the prototype's post-certificate rebase without mutating the live mempool before block adoption; if the certified closure is unavailable, it safely forges the certificate-only RB. The certified EB is marked embedded only after the CertRB is adopted locally.
 
 #### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
-When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between step 3 and step 5. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
+When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between steps 5 and 7. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -3908,6 +3995,31 @@ VRF and KES secret-key loads check permissions on the open file handle and
 reject group/other access on Unix or insecure DACL grants on Windows before
 reading the key. Operational certificates contain public data and remain
 exempt from the secret-key permission check.
+
+`PoolCredentials.LoadFromFiles` parses replacement files before taking the
+credential write lock, then atomically installs all key material and the opcert
+as a new, unvalidated generation. Replaced VRF and KES secret material is
+best-effort zeroized. A failed reload clears the active credentials while
+retaining the first successful load's pool/VRF identity pin, so a later retry
+cannot silently switch the identity used by leader election.
+Operational-certificate signature and KES-key validation is generation state:
+every load clears it, `ValidateOpCert` publishes it only for the current
+generation, and `ValidateKESPeriod` repeats the cryptographic check before it
+atomically publishes the opcert
+`{start, MaxKESEvolutions, expiry}` policy only on success; failed validation
+retains the loaded material but clears the policy. Both paths therefore fail
+closed instead of falling back to an older policy or the KES depth capacity.
+Revalidating an unchanged, already-valid operational certificate preserves its
+published protocol lifetime; a failed revalidation still clears that lifetime.
+`OpCertExpiryPeriod` and `PeriodsRemaining` report zero until the current
+generation has both a validated certificate and policy. The exported
+`DefaultBlockBuilder.BuildBlock` and `BuildBlockWithLeios` entrypoints enforce
+that same half-open interval inside the generation-backed builder path before
+they inspect the chain tip, mempool, VRF key, or Leios inputs, so direct callers
+cannot bypass the forger's outer gate. `BlockForger.SignBlockHeader` also
+requires the same validated interval; `PoolCredentials.KESSign` remains the
+lower-level cryptographic primitive used by credential tooling and tests that
+may not have Shelley genesis context.
 
 ### Leios Voting (`ledger/leios/`)
 
@@ -6664,6 +6776,17 @@ The package has no build tag, so `go test ./...` runs it on every platform in
 CI as well. Adding a documented value that a file in the tree already owns
 belongs in a rule here, not in a second hard-coded copy.
 
+### DevNet Platform Boundary
+
+`internal/test/devnet/` is a Linux-only integration harness. It requires a
+native Linux Docker engine, Bash, Linux container networking, and Unix
+ownership semantics; emulated or remote Docker clients on macOS and Windows do
+not provide an equivalent test environment. Every Go file in that tree carries
+a `linux` build constraint, so ordinary `go build ./...` and `go test ./...`
+retain their full commands while excluding the harness on unsupported hosts.
+`TestDevnetFilesStayLinuxOnly` enforces the constraint for newly added files.
+Native Linux is the authoritative platform for DevNet validation.
+
 ## Design Patterns
 
 ### Dependency Injection
@@ -7994,8 +8117,8 @@ merge; unit and conformance tests do not exercise full multi-node timing.
 
 ### Epoch Boundary State Transitions
 
-`processEpochRollover` (ledger) applies the Conway EPOCH rule's state changes in
-a fixed order, mirroring `cardano-ledger`'s sequencing:
+`processEpochRollover` (ledger) applies the Conway-or-later EPOCH rule's state
+changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
 
 1. Delayed stake reward application (`applyStakeRewards`): apply the reward
    update derived from the mark snapshot three epochs back — credit spendable
@@ -8015,7 +8138,15 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    Shelley's `NEWEPOCH` embeds MIR between `applyRUpd` and `EPOCH`, so it runs
    before both the stake snapshot and POOLREAP: its credits are part of the mark
    snapshot and its pot movements are visible to POOLREAP, governance and the
-   ADA-pot capture.
+   ADA-pot capture. The boundary's certificates are aggregated and checked
+   against pot capacity before any of them is applied, mirroring
+   `mirTransition`: credits are restricted to registered, active reward
+   accounts, pot-to-pot transfers are folded into the available balances, and
+   the boundary is applied only when `totR <= availableReserves && totT <=
+   availableTreasury`. When either pot falls short the whole boundary is a
+   no-op — no credit, debit or transfer is written — and the rollover still
+   succeeds; the certificates are scoped to the ended epoch's slot range, so a
+   discarded MIR is not retried at the next boundary.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two
@@ -8043,7 +8174,43 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    "CIP-0163 activation" above.
 7. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
    proposal-deposit returns, which observe the post-POOLREAP treasury. The
-   proposal-independent voting denominators — DRep voting power
+   ENACT pass first checks the locally deterministic failure surfaces used by
+   Dingo's RATIFY path: action decoding, proposal-deposit and withdrawal reward
+   addresses, protocol-parameter and hard-fork updates on cloned parameters,
+   positive committee quorum, withdrawal sum overflow, and the running treasury
+   budget. A legacy/already-ratified proposal that positively fails this
+   preflight has its ratification marker cleared and journaled at the boundary,
+   so it remains pending without blocking later proposals or epoch advance.
+   Once preflight succeeds, any error from the actual `EnactProposal` call is a
+   storage or other operational failure and aborts the whole boundary
+   transaction; it is never converted into proposal-local non-enactability.
+   Proposals already durably marked enacted at this exact boundary are replayed
+   fail-closed instead: skipping one after the stake-reward pot reset would keep
+   its enacted marker while losing its effects.
+
+   The governance adapter resolves both Conway and Dijkstra protocol-parameter
+   types. Action decoding follows the active parameter type, so a Dijkstra
+   parameter-change payload is decoded as a Dijkstra action and update rather
+   than the narrower Conway shape. Deterministic preflight clones protocol
+   parameters through `eras.CloneGovernanceProtocolParameters`, preserving
+   Dijkstra's extension fields; unsupported future parameter types fail closed.
+
+   The subsequent RATIFY pass carries the post-ENACT treasury as a running
+   budget. Each accepted treasury withdrawal consumes that budget; an
+   over-budget withdrawal or a withdrawal whose `uint64` amount sum overflows
+   remains pending, and evaluation continues with later proposals. This is the
+   treasury-capacity portion of Conway RATIFY's running enactment state, not a
+   claim that this preflight implements every formal ENACT predicate. In
+   particular it does not add committee-term validation; committee membership
+   and term state remain part of the actual enactment path. A parameter update
+   is tested against a clone during preflight and that result is discarded;
+   only a successful actual enactment advances `UpdatedPParams`. RATIFY does
+   not thread a prospective parameter-update result into the parameter view of
+   later candidates in the same pass. This is another reason the behavior
+   described here is specifically the running-treasury subset, not the full
+   formal ENACT-state transition.
+
+   The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
    stake snapshot (`LoadSPOVotingState`), and committee state
    (`LoadCommitteeVotingState`) — are computed once per epoch tick and reused
@@ -8067,6 +8234,11 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    used by standalone/test callers. The mid-epoch HardForkInitiation stability
    check snapshots and threads this gate through `StabilityCheckInputs` as well,
    keeping its advertised transition tally aligned with boundary ratification.
+   `TallyContext.MajorVersion` is assigned from the post-ENACT protocol
+   parameters in both paths. SPO tallying first honors an explicit vote, then
+   treats every silent pool as implicit No for HardForkInitiation; during
+   Conway bootstrap, silent pools on other actions are Abstain. Only
+   post-bootstrap non-voters reach the reward-account default-vote rules.
 8. Treasury donations (`applyEpochDonations`), added after withdrawals.
 9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation

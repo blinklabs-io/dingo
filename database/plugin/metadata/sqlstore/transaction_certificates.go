@@ -147,7 +147,11 @@ UPDATE certs SET certificate_id = ? WHERE id = ?`,
 	return ret, nil
 }
 
-func deleteSpecializedCertificates(ctx context.Context, db queryer, transactionID int64) error {
+func deleteSpecializedCertificates(
+	ctx context.Context,
+	db queryer,
+	transactionID int64,
+) error {
 	if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner
 WHERE pool_registration_id IN (

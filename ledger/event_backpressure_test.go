@@ -28,7 +28,9 @@ import (
 // production LedgerState subscription policy, not only EventBus in isolation.
 // A blockfetch event cannot be silently omitted: the subscription remains
 // attached until the handler drains or its lifecycle closes it.
-func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(t *testing.T) {
+func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
+	t *testing.T,
+) {
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Stop()
 
@@ -64,7 +66,10 @@ func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(t *testing.T) 
 	go func() {
 		defer close(published)
 		for i := 1; i < total; i++ {
-			bus.Publish(BlockfetchEventType, event.NewEvent(BlockfetchEventType, i))
+			bus.Publish(
+				BlockfetchEventType,
+				event.NewEvent(BlockfetchEventType, i),
+			)
 		}
 	}()
 

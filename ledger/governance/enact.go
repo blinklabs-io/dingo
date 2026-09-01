@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -239,12 +240,9 @@ func applyTreasuryWithdrawal(
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	var total uint64
-	for _, amount := range a.Withdrawals {
-		if total > ^uint64(0)-amount {
-			return errors.New("treasury withdrawal amount overflow")
-		}
-		total += amount
+	total, err := treasuryWithdrawalTotal(a)
+	if err != nil {
+		return err
 	}
 	if !ctx.TreasuryWithdrawalRemainingSet {
 		ctx.TreasuryWithdrawalRemaining = treasury
@@ -304,6 +302,25 @@ func applyTreasuryWithdrawal(
 		ctx.Slot,
 		metaTxn,
 	)
+}
+
+// treasuryWithdrawalTotal returns the amount an ENACT transition would remove
+// from its running treasury budget. Dingo stores lovelace in uint64, so an
+// action whose mathematical sum is outside that range is not enactable.
+func treasuryWithdrawalTotal(
+	a *lcommon.TreasuryWithdrawalGovAction,
+) (uint64, error) {
+	if a == nil {
+		return 0, errors.New("nil treasury withdrawal action")
+	}
+	var total uint64
+	for _, amount := range a.Withdrawals {
+		if total > ^uint64(0)-amount {
+			return 0, errors.New("treasury withdrawal amount overflow")
+		}
+		total += amount
+	}
+	return total, nil
 }
 
 // CreditRegisteredRewardAccountAfterSnapshot credits a reward account for an
@@ -552,22 +569,28 @@ func decodeGovAction(
 	return nil, fmt.Errorf("unknown action type: %d", actionType)
 }
 
-// setProtocolVersion rebuilds the pparams with a new protocol version
-// using the era's update function. We construct a minimal update that
-// only touches the protocol version.
+// setProtocolVersion deep-clones the pparams before changing only the
+// protocol version, preserving immutable epoch snapshots held by readers.
 func setProtocolVersion(
 	current lcommon.ProtocolParameters,
 	major, minor uint,
 ) (lcommon.ProtocolParameters, error) {
-	switch p := current.(type) {
+	cloned, err := eras.CloneGovernanceProtocolParameters(current)
+	if err != nil {
+		return nil, err
+	}
+	switch p := cloned.(type) {
 	case *conway.ConwayProtocolParameters:
-		updated := *p
-		updated.ProtocolVersion.Major = major
-		updated.ProtocolVersion.Minor = minor
-		return &updated, nil
+		p.ProtocolVersion.Major = major
+		p.ProtocolVersion.Minor = minor
+		return p, nil
+	case *gdijkstra.DijkstraProtocolParameters:
+		p.ProtocolVersion.Major = major
+		p.ProtocolVersion.Minor = minor
+		return p, nil
 	}
 	return nil, fmt.Errorf(
 		"protocol version update unsupported for pparams type %T",
-		current,
+		cloned,
 	)
 }
