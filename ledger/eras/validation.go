@@ -371,7 +371,10 @@ func resolveUtxoValidationSkipIndex(
 		found = index
 	}
 	if found == noUtxoValidationRuleIndex {
-		panic(fmt.Sprintf("%s expected function is absent from upstream validation rules", skipRuleName))
+		panic(
+			skipRuleName +
+				" expected function is absent from upstream validation rules",
+		)
 	}
 	return found
 }
