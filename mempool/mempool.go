@@ -883,6 +883,10 @@ type ProviderConfig struct {
 	EvictionWatermark    float64 `yaml:"evictionWatermark"`
 	RejectionWatermark   float64 `yaml:"rejectionWatermark"`
 	RevalidationDeltaCap int     `yaml:"revalidationDeltaCap"`
+	// ConsumerCacheBytes bounds retained transaction body bytes per relay
+	// consumer. Zero uses one quarter of Capacity; see
+	// MempoolConfig.ConsumerCacheBytes.
+	ConsumerCacheBytes int64 `yaml:"consumerCacheBytes"`
 }
 
 // ProviderDependencies are runtime dependencies assembled after ledger and
@@ -940,6 +944,7 @@ func registerProvider(
 				EvictionWatermark:    cfg.EvictionWatermark,
 				RejectionWatermark:   cfg.RejectionWatermark,
 				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
+				ConsumerCacheBytes:   cfg.ConsumerCacheBytes,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
 			}
 			var (
