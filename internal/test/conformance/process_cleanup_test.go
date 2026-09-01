@@ -46,16 +46,17 @@ func registerProcessCleanup(fn func() error) {
 	processCleanups = append(processCleanups, fn)
 }
 
-// TestMain runs every registered process teardown after the tests finish, then
-// removes the shared vector extraction (see corpusTestdataRoot).
+// runProcessCleanups runs every registered process teardown in registration
+// order and reports whether any of them failed.
 //
-// Every step always runs: a failure is recorded and reflected in the exit code
-// rather than returning early, so one failed drop or removal never leaves a
-// sibling resource uncleaned as a side effect -- for example the blob directory
-// paired with a schema that failed to drop.
-func TestMain(m *testing.M) {
-	code := m.Run()
-
+// Every step always runs: a failure is logged and recorded rather than
+// returning early, so one failed drop or removal never leaves a sibling
+// resource uncleaned as a side effect -- for example the blob directory paired
+// with a schema that failed to drop. TestMain is the only caller that runs it
+// against the real chain; TestProcessCleanupChainRunsEveryStepAfterAFailure
+// calls this same function against a substituted chain so the guarantee is
+// tested where it is implemented rather than in a copy of the loop.
+func runProcessCleanups() bool {
 	cleanupFailed := false
 	for _, cleanup := range processCleanups {
 		if err := cleanup(); err != nil {
@@ -63,6 +64,17 @@ func TestMain(m *testing.M) {
 			cleanupFailed = true
 		}
 	}
+	return cleanupFailed
+}
+
+// TestMain runs every registered process teardown after the tests finish, then
+// removes the shared vector extraction (see corpusTestdataRoot). The vector
+// extraction removal runs even when a registered cleanup failed, and any
+// failure is reflected in the exit code.
+func TestMain(m *testing.M) {
+	code := m.Run()
+
+	cleanupFailed := runProcessCleanups()
 	if err := cleanupCorpusTestdata(); err != nil {
 		log.Printf("conformance: remove shared vector extraction: %v", err)
 		cleanupFailed = true
@@ -105,6 +117,10 @@ func TestProcessCleanupExitCodeFailsOnCleanupFailure(t *testing.T) {
 // reaches the exit code. The ordering guarantee is the point: the Postgres and
 // MySQL teardowns each drop a remote resource and then remove the local blob
 // directory paired with it.
+//
+// It calls runProcessCleanups, the function TestMain calls, against a
+// substituted chain, so a future early return on the first cleanup error fails
+// this test.
 func TestProcessCleanupChainRunsEveryStepAfterAFailure(t *testing.T) {
 	before := processCleanups
 	t.Cleanup(func() { processCleanups = before })
@@ -120,12 +136,7 @@ func TestProcessCleanupChainRunsEveryStepAfterAFailure(t *testing.T) {
 		return nil
 	})
 
-	cleanupFailed := false
-	for _, cleanup := range processCleanups {
-		if err := cleanup(); err != nil {
-			cleanupFailed = true
-		}
-	}
+	cleanupFailed := runProcessCleanups()
 
 	require.Equal(t, []string{"first", "second"}, ran)
 	require.True(t, cleanupFailed)
