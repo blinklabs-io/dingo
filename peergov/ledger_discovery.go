@@ -282,10 +282,6 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		return false
 	}
 
-	// Track this address as ledger-discovered so peers from other
-	// sources at the same address count toward the ledger target.
-	p.ledgerKnownAddrs[normalized] = struct{}{}
-
 	// Check for existing peer using cached NormalizedAddress
 	exists := false
 	for _, peer := range p.peers {
@@ -313,6 +309,11 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		p.mu.Unlock()
 		return false
 	}
+
+	// Record only admitted ledger addresses. Keeping duplicate or
+	// capacity-rejected candidates would make them count toward the ledger
+	// target even though the governor does not retain them as peers.
+	p.ledgerKnownAddrs[normalized] = struct{}{}
 
 	// Add as new peer
 	newPeer := &Peer{
