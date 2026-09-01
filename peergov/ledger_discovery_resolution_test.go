@@ -83,8 +83,8 @@ func TestAddLedgerPeer_KnownPeerSkipsDNSResolution(t *testing.T) {
 	pg.mu.Lock()
 	_, known := pg.ledgerKnownAddrs["44.0.0.7:3001"]
 	pg.mu.Unlock()
-	assert.True(t, known,
-		"skipping resolution must still record the peer as ledger-known")
+	assert.False(t, known,
+		"a rejected duplicate must not be retained as ledger-known")
 }
 
 // Peer.Address is stored verbatim, so a topology or gossip peer can hold the
