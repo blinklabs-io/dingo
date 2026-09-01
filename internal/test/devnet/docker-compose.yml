@@ -29,6 +29,12 @@
 #   - dingo-producer:   Dingo node forging with pool 1 keys
 #   - cardano-producer: Official cardano-node forging with pool 2 keys
 #   - cardano-relay:    Relay connecting both producers (no block production)
+#   NtN host ports: 3010 (dingo-producer), 3011 (cardano-producer),
+#   3012 (cardano-relay).
+#   NtC host ports: 3030 (dingo-producer), 3031 (cardano-producer, bridged
+#   from its unix socket by socat via SOCAT_PORT). cardano-relay has no NtC
+#   host port; only the two producers' ledger states are compared
+#   (blinklabs-io/dingo#1900).
 #
 # Usage:
 #   docker compose up -d       # Start all services in the selected profile
@@ -39,9 +45,11 @@
 #   DEVNET_CONFORMANCE_SPEC - conformance profile spec (default: ./testnet.yaml)
 #
 # Host port overrides (set in environment or .env file, conformance profile):
-#   DEVNET_DINGO_PORT     - Dingo producer host port    (default: 3010)
-#   DEVNET_CARDANO_PORT   - Cardano producer host port  (default: 3011)
-#   DEVNET_RELAY_PORT     - Cardano relay host port     (default: 3012)
+#   DEVNET_DINGO_PORT       - Dingo producer host port (NtN)   (default: 3010)
+#   DEVNET_CARDANO_PORT     - Cardano producer host port (NtN) (default: 3011)
+#   DEVNET_RELAY_PORT       - Cardano relay host port (NtN)    (default: 3012)
+#   DEVNET_DINGO_NTC_PORT   - Dingo producer host port (NtC)   (default: 3030)
+#   DEVNET_CARDANO_NTC_PORT - Cardano producer host port (NtC) (default: 3031)
 #
 # Each profile's configurator service runs first (via depends_on) to generate
 # unique key sets and genesis files for each pool from its testnet*.yaml.
@@ -297,6 +305,7 @@ services:
       - dingo-producer-ipc:/ipc
     ports:
       - "${DEVNET_DINGO_PORT:-3010}:3001"
+      - "${DEVNET_DINGO_NTC_PORT:-3030}:3002"
     networks:
       devnet:
         ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.10
@@ -316,6 +325,15 @@ services:
     environment:
       CARDANO_BLOCK_PRODUCER: "true"
       RESTORE_SNAPSHOT: "false"
+      # Bridge node-to-client (LocalStateQuery) to TCP so the host test
+      # harness can query cardano-producer's ledger state and compare it
+      # against dingo-producer's (cross-node ledger-state conformance,
+      # blinklabs-io/dingo#1900). cardano-node has no built-in TCP NtC
+      # support; the run-node entrypoint spawns "socat TCP-LISTEN:<port>
+      # ... UNIX-CLIENT:<socket-path>" in the background when SOCAT_PORT is
+      # set. Mirrors the private port dingo binds its own NtC TCP listener
+      # on via DINGO_PRIVATE_BIND_ADDR.
+      SOCAT_PORT: "3002"
     command:
       - "run"
       - "--config"
@@ -341,6 +359,7 @@ services:
       - cardano-producer-ipc:/ipc
     ports:
       - "${DEVNET_CARDANO_PORT:-3011}:3001"
+      - "${DEVNET_CARDANO_NTC_PORT:-3031}:3002"
     networks:
       devnet:
         ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.11
