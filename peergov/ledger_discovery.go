@@ -360,7 +360,7 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// Check for existing peer using cached NormalizedAddress. The address
 	// comparison is normalized on both sides, as in AddPeer, so a peer
 	// holding the same hostname under different casing is not duplicated.
-	exists := false
+	var existingPeer *Peer
 	for _, peer := range p.peers {
 		if peer == nil {
 			continue
@@ -368,11 +368,15 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		if peer.NormalizedAddress == normalized ||
 			peer.NormalizedAddress == hostnameNormalized ||
 			p.normalizeAddress(peer.Address) == hostnameNormalized {
-			exists = true
+			existingPeer = peer
 			break
 		}
 	}
-	if exists {
+	if existingPeer != nil {
+		// The candidate is a valid ledger relay backed by a peer we already
+		// retain from another source. Record that retained peer's address so
+		// it counts toward the ledger target without adding a duplicate.
+		p.ledgerKnownAddrs[existingPeer.NormalizedAddress] = struct{}{}
 		p.mu.Unlock()
 		return false
 	}
@@ -463,6 +467,10 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
 			p.normalizeAddress(peer.Address) != hostnameNormalized {
 			continue
 		}
+		// This is a valid ledger relay already retained from another source,
+		// not an unusable rejected candidate. Associate the retained peer with
+		// ledger discovery so it contributes to LedgerPeerTarget.
+		p.ledgerKnownAddrs[peer.NormalizedAddress] = struct{}{}
 		return true
 	}
 	return false

@@ -205,11 +205,13 @@ func TestAddLedgerPeer_RejectedAtCap(t *testing.T) {
 	assert.False(t, retained, "rejected ledger peer must not be retained")
 }
 
-// TestAddLedgerPeer_DuplicateNotRetained verifies that rejecting a duplicate
-// ledger peer does not leave its address in the ledger-discovery state.
-func TestAddLedgerPeer_DuplicateNotRetained(t *testing.T) {
+// TestAddLedgerPeer_ExistingPeerCountsTowardLedgerTarget verifies that a
+// ledger relay already retained from another source satisfies the target
+// without adding a duplicate peer.
+func TestAddLedgerPeer_ExistingPeerCountsTowardLedgerTarget(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerTarget: 1,
 	})
 	const address = "44.99.99.99:3000"
 	require.NoError(t, pg.AddPeer(address, PeerSourceP2PGossip))
@@ -217,5 +219,7 @@ func TestAddLedgerPeer_DuplicateNotRetained(t *testing.T) {
 	added := pg.addLedgerPeer(address)
 	assert.False(t, added, "duplicate ledger peer should be rejected")
 	_, retained := pg.ledgerKnownAddrs[address]
-	assert.False(t, retained, "duplicate ledger address must not be retained")
+	assert.True(t, retained, "retained peer should be marked ledger-known")
+	assert.Zero(t, pg.ledgerPeerDeficit(),
+		"retained ledger relay should satisfy the ledger target")
 }
