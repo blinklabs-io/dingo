@@ -219,13 +219,12 @@ RETURNING id`,
 				if err != nil {
 					return err
 				}
-				if err := s.refreshRewardLiveStakeRefs(
-					ctx,
-					db,
-					certificateRefs,
-					point.Slot,
-				); err != nil {
-					return err
+				if !historicalBackfill {
+					if err := s.refreshRewardLiveStakeRefs(
+						ctx, db, certificateRefs, point.Slot,
+					); err != nil {
+						return err
+					}
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
@@ -354,6 +353,9 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 					input.Id().Bytes(),
 					input.Index(),
 				)
+			}
+			if historicalBackfill {
+				return nil
 			}
 			stakeRefs, err := queryUtxoStakeRefs(ctx, db, refs, false)
 			if err != nil {
@@ -910,13 +912,14 @@ ON CONFLICT (
 		); err != nil {
 			return err
 		}
-		if err := s.refreshRewardLiveStakeAggregate(
-			ctx,
-			db,
-			models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
-			slot,
-		); err != nil {
-			return err
+		if !historicalBackfill {
+			if err := s.refreshRewardLiveStakeAggregate(
+				ctx, db,
+				models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
+				slot,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

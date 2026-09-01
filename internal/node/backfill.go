@@ -1077,6 +1077,24 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return fmt.Errorf("flushing final backfill batch: %w", err)
 	}
+	// Do not start the potentially expensive aggregate rebuild after a caller
+	// has canceled the backfill. Re-check after it returns as well so callers
+	// observe cancellation before the completion checkpoint is persisted.
+	if err := ctx.Err(); err != nil {
+		saveCommittedCheckpoint()
+		return err
+	}
+	// Historical replay intentionally leaves the imported snapshot reward
+	// balances untouched and skips per-transaction live-stake refreshes. The
+	// derived aggregate is rebuilt once from canonical account and live-UTxO
+	// metadata after all historical rows are present, avoiding millions of
+	// repeated indexed UTxO sums during API backfill.
+	if err := b.db.RebuildRewardLiveStake(tipSlot, nil); err != nil {
+		return fmt.Errorf("rebuilding reward live stake after backfill: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.maybeLogProgress(
 		cp, processedBlocks, processedTxs,
 		tipSlot, startSlot, startTime, &lastLogTime,
