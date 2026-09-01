@@ -234,6 +234,17 @@ jobs:
   # on one platform cannot cancel the other's run, and so each renders a stable
   # check name distinct from publish.yml's go-test (windows-latest) /
   # go-test (macos-latest).
+  # Deliberately advisory: this job is not a required branch-protection
+  # context, and must not become one while the Windows suite behaves as it
+  # does. It is the slowest and least predictable of the three platforms --
+  # 17m44s in run 33519632627 against 42m+ in run 33529462211 for the same
+  # command, and it has a history of wedging rather than failing. Tracked
+  # separately in #3746. Blocking merges on it would
+  # stall the queue on runner variance rather than on a defect.
+  #
+  # Advisory means "not required", not continue-on-error. A red X here is a
+  # real result to read, and suppressing the exit status would hide exactly
+  # the Windows-only breakage this job exists to surface.
   go-test-windows:
     name: go-test (Windows)
     strategy:
@@ -241,7 +252,8 @@ jobs:
         go-version: [1.26.x]
     runs-on: windows-latest
     # See go-test-linux-race: backstop only, per-package -timeout is the
-    # diagnostic. The suite ran 17m44s here in run 33519632627.
+    # diagnostic. Bounds a wedged run at 90 minutes instead of GitHub's
+    # 360-minute default.
     timeout-minutes: 90
     env:
       CGO_ENABLED: 0
