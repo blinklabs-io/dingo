@@ -420,6 +420,13 @@ func (p *DingoStateProvider) CommitteeMember(
 	if err != nil {
 		return nil, err
 	}
+	if keyMember != nil && !keyMember.Resigned &&
+		(scriptMember == nil || scriptMember.Resigned) {
+		return keyMember, nil
+	}
+	if scriptMember != nil && !scriptMember.Resigned && keyMember == nil {
+		return scriptMember, nil
+	}
 	if keyMember != nil && scriptMember != nil {
 		return nil, nil
 	}
@@ -437,9 +444,13 @@ func (p *DingoStateProvider) CommitteeCredentialMember(
 	coldCredential common.Credential,
 ) (*common.CommitteeMember, error) {
 	member, err := p.realCommitteeMember(coldCredential)
-	if err != nil || member != nil {
+	if err != nil {
 		return member, err
 	}
+	if member != nil && !member.Resigned {
+		return member, nil
+	}
+	resignedMember := member
 	proposals, err := withBadConnRetry(
 		func() ([]*models.GovernanceProposal, error) {
 			return p.manager.db.GetActiveGovernanceProposals(
@@ -451,44 +462,30 @@ func (p *DingoStateProvider) CommitteeCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("lookup pending committee proposals: %w", err)
 	}
-	for _, proposal := range proposals {
-		if proposal == nil || common.GovActionType(proposal.ActionType) !=
-			common.GovActionTypeUpdateCommittee {
-			continue
-		}
-		action, err := dingogov.DecodeGovActionForPParams(
-			proposal.GovActionCbor,
-			proposal.ActionType,
-			p.manager.protocolParams,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("decode pending committee proposal: %w", err)
-		}
-		update, ok := action.(*common.UpdateCommitteeGovAction)
-		if !ok {
-			return nil, fmt.Errorf("unexpected committee action %T", action)
-		}
-		for proposedCredential, expiry := range update.CredEpochs {
-			if proposedCredential == nil ||
-				proposedCredential.CredType != coldCredential.CredType ||
-				proposedCredential.Credential != coldCredential.Credential {
-				continue
-			}
-			member := &common.CommitteeMember{
-				ColdKey:     coldCredential.Credential,
-				ExpiryEpoch: uint64(expiry),
-			}
-			if err := p.populateCommitteeMemberStatus(
-				coldCredential,
-				proposal.AddedSlot,
-				member,
-			); err != nil {
-				return nil, err
-			}
-			return member, nil
-		}
+	root, err := p.manager.db.GetLastEnactedGovernanceProposal(
+		[]uint8{uint8(common.GovActionTypeUpdateCommittee)}, nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee proposal root: %w", err)
 	}
-	return nil, nil
+	member, termStart, err := dingogov.ResolveCommitteeProposal(
+		proposals, root, coldCredential, p.manager.protocolParams,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if member != nil {
+		if err := p.populateCommitteeMemberStatus(coldCredential, termStart, member); err != nil {
+			return nil, err
+		}
+		// Pending terms have no certificate history of their own yet. A
+		// resignation from the replaced term must not leak into the successor.
+		member.Resigned = false
+	}
+	if member == nil {
+		return resignedMember, nil
+	}
+	return member, nil
 }
 
 // realCommitteeMember reads an enacted committee member's full state
@@ -497,6 +494,10 @@ func (p *DingoStateProvider) CommitteeCredentialMember(
 func (p *DingoStateProvider) realCommitteeMember(
 	coldCredential common.Credential,
 ) (*common.CommitteeMember, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
 	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
 		return p.manager.db.GetCommitteeMembers(nil)
 	})
@@ -505,14 +506,22 @@ func (p *DingoStateProvider) realCommitteeMember(
 	}
 	var expiryEpoch uint64
 	var termStartSlot uint64
+	var addedSlot uint64
+	var memberID uint
 	found := false
 	for _, member := range members {
-		if member.ColdCredentialTag == uint8(coldCredential.CredType) &&
+		if member.ColdCredentialTag == coldTag &&
 			common.NewBlake2b224(member.ColdCredHash) == coldCredential.Credential {
+			if found && (member.TermStartSlot < termStartSlot ||
+				(member.TermStartSlot == termStartSlot && member.AddedSlot < addedSlot) ||
+				(member.TermStartSlot == termStartSlot && member.AddedSlot == addedSlot && member.ID < memberID)) {
+				continue
+			}
 			expiryEpoch = member.ExpiresEpoch
 			termStartSlot = member.TermStartSlot
+			addedSlot = member.AddedSlot
+			memberID = member.ID
 			found = true
-			break
 		}
 	}
 	if !found {
@@ -538,9 +547,13 @@ func (p *DingoStateProvider) populateCommitteeMemberStatus(
 	termStartSlot uint64,
 	result *common.CommitteeMember,
 ) error {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return fmt.Errorf("invalid committee cold credential: %w", err)
+	}
 	auth, err := withBadConnRetry(func() (*models.AuthCommitteeHot, error) {
 		return p.manager.db.GetCommitteeMember(
-			uint8(coldCredential.CredType),
+			coldTag,
 			coldCredential.Credential[:],
 			termStartSlot,
 			nil,
@@ -556,7 +569,7 @@ func (p *DingoStateProvider) populateCommitteeMemberStatus(
 
 	resigned, err := withBadConnRetry(func() (bool, error) {
 		return p.manager.db.IsCommitteeMemberResigned(
-			uint8(coldCredential.CredType),
+			coldTag,
 			coldCredential.Credential[:],
 			termStartSlot,
 			nil,
@@ -628,7 +641,11 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		return nil, fmt.Errorf("lookup active committee hot credentials: %w", err)
 	}
 	for _, authorization := range authorizations {
-		if authorization.HotCredentialTag != uint8(hotCredential.CredType) ||
+		hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
+		if err != nil {
+			return nil, fmt.Errorf("invalid committee hot credential: %w", err)
+		}
+		if authorization.HotCredentialTag != hotTag ||
 			common.NewBlake2b224(authorization.HotCredential) !=
 				hotCredential.Credential {
 			continue

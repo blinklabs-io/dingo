@@ -62,11 +62,13 @@ func parseCertState3(
 	result := &ParsedCertState{}
 	var warnings []error
 
-	dreps, err := parseVState(certState[0])
+	dreps, hotKeys, resignations, err := parseVState(certState[0])
 	if err != nil {
 		return nil, fmt.Errorf("parsing VState: %w", err)
 	}
 	result.DReps = dreps
+	result.CommitteeHotKeys = hotKeys
+	result.CommitteeResignations = resignations
 
 	pools, err := parsePState(certState[1])
 	if err != nil {
@@ -1500,17 +1502,85 @@ func parsePoolMetadata(
 
 // parseVState decodes the voting/DRep state.
 // VState = [dreps, ccHotKeys, numDormantEpochs, ...]
-func parseVState(data []byte) ([]ParsedDRep, error) {
+func parseVState(data []byte) (
+	[]ParsedDRep, []ParsedCommitteeHotKey, []Credential, error,
+) {
 	vs, err := decodeRawElements(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding VState: %w", err)
+		return nil, nil, nil, fmt.Errorf("decoding VState: %w", err)
 	}
 	if len(vs) < 1 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 
-	// Parse DRep registrations (index 0)
-	return parseDRepMap(vs[0])
+	// Parse DRep registrations (index 0). Conway's VState stores committee
+	// hot-key authorizations and resignations alongside the DRep map; retain
+	// the credential tags so imported state cannot alias key and script hashes.
+	dreps, warning := parseDRepMap(vs[0])
+	hotKeys, resignations := parseCommitteeVState(vs[1:])
+	return dreps, hotKeys, resignations, warning
+}
+
+func parseCommitteeVState(
+	fields [][]byte,
+) ([]ParsedCommitteeHotKey, []Credential) {
+	var hotKeys []ParsedCommitteeHotKey
+	var resignations []Credential
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders
+	// wrap these two fields in one committee-state array, so accept both.
+	committeeFields := fields
+	if len(fields) == 1 {
+		if nested, err := decodeRawElements(fields[0]); err == nil && len(nested) >= 2 {
+			committeeFields = nested
+		}
+	}
+	entries, err := decodeMapEntries(committeeFields[0])
+	if err == nil {
+		for _, entry := range entries {
+			cold, coldErr := parseCredential(entry.KeyRaw)
+			hot, hotErr := parseCommitteeHotCredential(entry.ValueRaw)
+			if coldErr != nil || hotErr != nil {
+				continue
+			}
+			hotKeys = append(hotKeys, ParsedCommitteeHotKey{Cold: cold, Hot: hot})
+		}
+	}
+	if len(committeeFields) < 2 {
+		return hotKeys, nil
+	}
+	resignationEntries, resignationErr := decodeMapEntries(committeeFields[1])
+	if resignationErr == nil {
+		for _, entry := range resignationEntries {
+			cold, coldErr := parseCredential(entry.KeyRaw)
+			if coldErr == nil {
+				resignations = append(resignations, cold)
+			}
+		}
+		return hotKeys, resignations
+	}
+	if values, arrayErr := decodeRawArray(committeeFields[1]); arrayErr == nil {
+		for _, value := range values {
+			cold, coldErr := parseCredential(value)
+			if coldErr == nil {
+				resignations = append(resignations, cold)
+			}
+		}
+	}
+	return hotKeys, resignations
+}
+
+func parseCommitteeHotCredential(data []byte) (Credential, error) {
+	if credential, err := parseCredential(data); err == nil {
+		return credential, nil
+	}
+	wrapped, err := decodeRawArray(data)
+	if err != nil || len(wrapped) != 1 {
+		return Credential{}, errors.New("decoding committee hot credential")
+	}
+	return parseCredential(wrapped[0])
 }
 
 // parseDRepMap decodes a DRep credential -> DRepState map.

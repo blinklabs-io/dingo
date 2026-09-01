@@ -15,11 +15,13 @@
 package migrations
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -114,16 +116,69 @@ func registryForDialect(dialect string) ([]Migration, error) {
 				wholeSchema,
 			)
 		}
-		ret = append(ret, Migration{
+		migration := Migration{
 			Version:          version.Version,
 			Name:             version.Name,
 			BackfillRevision: "none",
 			SQL: map[string]SQL{
 				dialect: sqlForDialect,
 			},
-		})
+		}
+		if version.Version == 8 {
+			migration.BackfillRevision = "1"
+			migration.Backfill = committeeTermStartBackfill
+		}
+		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+// committeeTermStartBackfill is deliberately data-driven rather than a
+// migration SQL statement. The expand phase can therefore be retried after a
+// process dies immediately after adding the column; rows are selected by ID
+// and each committed batch advances the durable migration cursor.
+func committeeTermStartBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf("parse committee backfill cursor: %w", err)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx,
+		"SELECT id FROM committee_member WHERE id > ? AND NOT term_start_slot_set ORDER BY id LIMIT ?",
+		lastID, batch.Limit,
+	)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return BatchResult{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(ids) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, id := range ids {
+		if _, err := batch.Tx.ExecContext(ctx,
+			"UPDATE committee_member SET term_start_slot_set = TRUE WHERE id = ?", id,
+		); err != nil {
+			return BatchResult{}, err
+		}
+	}
+	return BatchResult{Cursor: strconv.FormatInt(ids[len(ids)-1], 10), Rows: int64(len(ids))}, nil
 }
 
 var (

@@ -609,10 +609,48 @@ func execDDL(
 				isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
 				continue
 			}
+			if dialect == "sqlite" &&
+				isSQLiteDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+				continue
+			}
 			return fmt.Errorf("statement %d: %w", index+1, err)
 		}
 	}
 	return nil
+}
+
+func isSQLiteDDLAlreadyAppliedOnConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	statement string,
+	err error,
+) bool {
+	if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return false
+	}
+	fields := strings.Fields(strings.TrimSuffix(statement, ";"))
+	if len(fields) < 6 ||
+		!strings.EqualFold(fields[0], "ALTER") ||
+		!strings.EqualFold(fields[1], "TABLE") ||
+		!strings.EqualFold(fields[3], "ADD") ||
+		!strings.EqualFold(fields[4], "COLUMN") {
+		return false
+	}
+	table := strings.Trim(fields[2], "`")
+	column := strings.Trim(fields[5], "`")
+	if table == "" || column == "" {
+		return false
+	}
+	var found int
+	if queryErr := conn.QueryRowContext(
+		ctx,
+		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	).Scan(&found); queryErr != nil {
+		return false
+	}
+	return found == 1
 }
 
 func boundedCursor(cursor string) string {

@@ -100,7 +100,7 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 4:
+advertising readiness. The current registry has migrations 1 through 8:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`, and
 `account-import-baseline`. `DATABASE.md` is the source of truth for their
 schema changes and upgrade behavior. It then checks the read pool. File-backed

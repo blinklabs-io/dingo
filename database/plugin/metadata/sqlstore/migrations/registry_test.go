@@ -90,11 +90,8 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, "committee-credential-tags", registry[6].Name)
 	require.Equal(t, 8, registry[7].Version)
 	require.Equal(t, "committee-term-start-presence", registry[7].Name)
-	require.Contains(
-		t,
-		registry[7].SQL["sqlite"].Expand,
-		"UPDATE `committee_member` SET `term_start_slot_set` = true",
-	)
+	require.Len(t, registry[7].SQL["sqlite"].Expand, 1)
+	require.NotNil(t, registry[7].Backfill)
 }
 
 func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
@@ -118,8 +115,12 @@ func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
 
 	postgresPresence := strings.Join(postgres[7].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresPresence, `"term_start_slot_set" boolean`)
+	require.Len(t, postgres[7].SQL["postgres"].Expand, 1)
+	require.NotNil(t, postgres[7].Backfill)
 	mysqlPresence := strings.Join(mysql[7].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlPresence, "`term_start_slot_set` boolean")
+	require.Len(t, mysql[7].SQL["mysql"].Expand, 1)
+	require.NotNil(t, mysql[7].Backfill)
 }
 
 // TestMySQLRegistryPrefixesAccountBaselinePrimaryKey guards the v4 migration's

@@ -467,9 +467,13 @@ func applyUpdateCommittee(
 ) error {
 	removeCredentials := make([]models.CommitteeCredential, 0, len(a.Credentials))
 	for _, c := range a.Credentials {
+		credentialTag, err := models.CredentialTagFromUint(c.CredType)
+		if err != nil {
+			return fmt.Errorf("remove member credential: %w", err)
+		}
 		hash := c.Credential
 		removeCredentials = append(removeCredentials, models.CommitteeCredential{
-			CredentialTag: uint8(c.CredType),
+			CredentialTag: credentialTag,
 			Credential:    hash[:],
 		})
 	}
@@ -492,8 +496,12 @@ func applyUpdateCommittee(
 			continue
 		}
 		hash := cred.Credential
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return fmt.Errorf("add member credential: %w", err)
+		}
 		members = append(members, &models.CommitteeMember{
-			ColdCredentialTag: uint8(cred.CredType),
+			ColdCredentialTag: credentialTag,
 			ColdCredHash:      hash[:],
 			ExpiresEpoch:      uint64(expiry),
 			TermStartSlot:     termStartSlot,

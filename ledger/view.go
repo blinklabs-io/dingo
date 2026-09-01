@@ -599,6 +599,13 @@ func (lv *LedgerView) CommitteeMember(
 	if err != nil {
 		return nil, err
 	}
+	if keyMember != nil && !keyMember.Resigned &&
+		(scriptMember == nil || scriptMember.Resigned) {
+		return keyMember, nil
+	}
+	if scriptMember != nil && !scriptMember.Resigned && keyMember == nil {
+		return scriptMember, nil
+	}
 	if keyMember != nil && scriptMember != nil {
 		return nil, nil
 	}
@@ -613,16 +620,23 @@ func (lv *LedgerView) CommitteeMember(
 func (lv *LedgerView) CommitteeCredentialMember(
 	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
 	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get committee members: %w", err)
 	}
 	var found *models.CommitteeMember
 	for _, member := range dbMembers {
-		if member.ColdCredentialTag == uint8(coldCredential.CredType) &&
+		if member.ColdCredentialTag == coldTag &&
 			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
-			found = member
-			break
+			if found == nil || member.TermStartSlot > found.TermStartSlot ||
+				(member.TermStartSlot == found.TermStartSlot && member.AddedSlot > found.AddedSlot) ||
+				(member.TermStartSlot == found.TermStartSlot && member.AddedSlot == found.AddedSlot && member.ID > found.ID) {
+				found = member
+			}
 		}
 	}
 	if found == nil {
@@ -639,6 +653,19 @@ func (lv *LedgerView) CommitteeCredentialMember(
 	); err != nil {
 		return nil, err
 	}
+	// A re-election may replace a resigned term before enactment. The old
+	// historical row remains authoritative for its term, but must not mask the
+	// pending successor when validation asks for this cold credential.
+	if member.Resigned {
+		proposed, err := lv.proposedCommitteeMember(coldCredential)
+		if err != nil {
+			return nil, err
+		}
+		if proposed != nil {
+			return proposed, nil
+		}
+		return member, nil
+	}
 	return member, nil
 }
 
@@ -647,8 +674,12 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 	termStartSlot uint64,
 	member *lcommon.CommitteeMember,
 ) error {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return fmt.Errorf("invalid committee cold credential: %w", err)
+	}
 	resigned, err := lv.ls.db.IsCommitteeMemberResigned(
-		uint8(coldCredential.CredType),
+		coldTag,
 		coldCredential.Credential[:],
 		termStartSlot,
 		lv.txn,
@@ -664,7 +695,7 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 		return nil
 	}
 	authorization, err := lv.ls.db.GetCommitteeMember(
-		uint8(coldCredential.CredType),
+		coldTag,
 		coldCredential.Credential[:],
 		termStartSlot,
 		lv.txn,
@@ -690,51 +721,27 @@ func (lv *LedgerView) proposedCommitteeMember(
 	if err != nil {
 		return nil, fmt.Errorf("get active governance proposals: %w", err)
 	}
-	for _, proposal := range proposals {
-		if proposal == nil ||
-			lcommon.GovActionType(proposal.ActionType) !=
-				lcommon.GovActionTypeUpdateCommittee {
-			continue
-		}
-		action, err := governance.DecodeGovActionForPParams(
-			proposal.GovActionCbor,
-			proposal.ActionType,
-			pparams,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode pending committee proposal: %w",
-				err,
-			)
-		}
-		update, ok := action.(*lcommon.UpdateCommitteeGovAction)
-		if !ok {
-			return nil, fmt.Errorf(
-				"decode pending committee proposal: unexpected action type %T",
-				action,
-			)
-		}
-		for credential, expiry := range update.CredEpochs {
-			if credential == nil ||
-				credential.CredType != coldCredential.CredType ||
-				credential.Credential != coldCredential.Credential {
-				continue
-			}
-			member := &lcommon.CommitteeMember{
-				ColdKey:     coldCredential.Credential,
-				ExpiryEpoch: uint64(expiry),
-			}
-			if err := lv.populateCommitteeMemberStatus(
-				coldCredential,
-				proposal.AddedSlot,
-				member,
-			); err != nil {
-				return nil, err
-			}
-			return member, nil
-		}
+	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+		[]uint8{uint8(lcommon.GovActionTypeUpdateCommittee)}, lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get committee proposal root: %w", err)
 	}
-	return nil, nil
+	member, termStart, err := governance.ResolveCommitteeProposal(
+		proposals, root, coldCredential, pparams,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if member != nil {
+		if err := lv.populateCommitteeMemberStatus(coldCredential, termStart, member); err != nil {
+			return nil, err
+		}
+		// Pending terms have no certificate history of their own yet. A
+		// resignation from the replaced term must not leak into the successor.
+		member.Resigned = false
+	}
+	return member, nil
 }
 
 func (lv *LedgerView) committeeSnapshot() (
@@ -759,7 +766,11 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
 	}
 	for _, authorization := range authorizations {
-		if authorization.HotCredentialTag != uint8(hotCredential.CredType) ||
+		hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
+		if err != nil {
+			return nil, fmt.Errorf("invalid committee hot credential: %w", err)
+		}
+		if authorization.HotCredentialTag != hotTag ||
 			!bytes.Equal(authorization.HotCredential, hotCredential.Credential[:]) {
 			continue
 		}

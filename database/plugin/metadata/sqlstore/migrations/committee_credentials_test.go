@@ -17,6 +17,7 @@ package migrations_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -140,4 +141,55 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 		err,
 		"the migrated uniqueness constraint must preserve the credential tag",
 	)
+}
+
+func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	db, err := sql.Open("sqlite", "file:"+databasePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+
+	run := func(versions []migrations.Migration) error {
+		runner := migrations.Runner{
+			DB:       db,
+			Dialect:  "sqlite",
+			Registry: versions,
+			Locker: migrations.NewFileLocker(
+				databasePath + ".migrate.lock",
+			),
+		}
+		return runner.Run(context.Background())
+	}
+
+	require.NoError(t, run(registry[:7]))
+	for slot := int64(1); slot <= 3; slot++ {
+		_, err = db.Exec(
+			"INSERT INTO committee_member (cold_cred_hash, expires_epoch, added_slot) VALUES (?, ?, ?)",
+			[]byte{byte(slot)}, 41, slot,
+		)
+		require.NoError(t, err)
+	}
+
+	interrupted := registry[7]
+	interrupted.BatchSize = 1
+	originalBackfill := interrupted.Backfill
+	backfillCalls := 0
+	interrupted.Backfill = func(ctx context.Context, batch migrations.Batch) (migrations.BatchResult, error) {
+		backfillCalls++
+		if backfillCalls == 2 {
+			return migrations.BatchResult{}, errors.New("intentional interruption")
+		}
+		return originalBackfill(ctx, batch)
+	}
+	interruptedRegistry := append(append([]migrations.Migration{}, registry[:7]...), interrupted)
+	require.Error(t, run(interruptedRegistry))
+	require.NoError(t, run(registry))
+
+	var incomplete int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM committee_member WHERE NOT term_start_slot_set",
+	).Scan(&incomplete))
+	require.Zero(t, incomplete)
 }

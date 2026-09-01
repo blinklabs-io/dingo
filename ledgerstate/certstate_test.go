@@ -429,6 +429,40 @@ func encodeCredentialMapEntry(t *testing.T, key any, value any) []byte {
 	return data
 }
 
+func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
+	keyHash := bytes.Repeat([]byte{0x11}, 28)
+	scriptHash := bytes.Repeat([]byte{0x22}, 28)
+	hotHash := bytes.Repeat([]byte{0x33}, 28)
+	keyCredential, err := cbor.Encode([]any{uint64(0), keyHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptCredential, err := cbor.Encode([]any{uint64(1), scriptHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotCredential, err := cbor.Encode([]any{uint64(1), hotHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotMap := append([]byte{0xa1}, keyCredential...)
+	hotMap = append(hotMap, hotCredential...)
+	resignMap := append([]byte{0xa1}, scriptCredential...)
+	resignMap = append(resignMap, 0xf5)
+	hotKeys, resignations := parseCommitteeVState(
+		[][]byte{hotMap, resignMap},
+	)
+	if len(hotKeys) != 1 || len(resignations) != 1 {
+		t.Fatalf("unexpected committee state: %d authorizations, %d resignations", len(hotKeys), len(resignations))
+	}
+	if hotKeys[0].Cold.Type != CredentialTypeKey || hotKeys[0].Hot.Type != CredentialTypeScript {
+		t.Fatalf("credential tags were not preserved: %#v", hotKeys[0])
+	}
+	if resignations[0].Type != CredentialTypeScript {
+		t.Fatalf("resignation credential tag was not preserved: %#v", resignations[0])
+	}
+}
+
 func toFixed28(src []byte) [28]byte {
 	var dst [28]byte
 	copy(dst[:], src)
