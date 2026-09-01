@@ -142,14 +142,11 @@ jobs:
   # #3228) went unverified on real Windows CI before now. This job runs it on
   # every PR instead.
   #
-  # It stays scoped to ./mithril/... rather than ./..., deliberately: the
-  # release job's full-suite run currently fails on windows-latest for
-  # unrelated reasons (internal/test/devnet asserts a Unix-only UID:GID
-  # mapping; tracked separately), and running the same full suite here would
-  # block every PR on that pre-existing, unrelated breakage rather than on
-  # anything this job is meant to check. Widening this job's scope is
-  # follow-up work gated on auditing and fixing the rest of the suite for
-  # Windows, not something to do incidentally here.
+  # It stays scoped to ./mithril/... rather than ./..., deliberately. The
+  # Linux build constraint on internal/test/devnet keeps that native-Docker
+  # harness out of every macOS and Windows `go test ./...` invocation. This PR
+  # job stays scoped to Mithril so it remains fast and directly attributable to
+  # the Windows extraction behavior it guards.
   go-test-windows:
     name: go-test (Windows)
     strategy:
