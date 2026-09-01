@@ -1273,6 +1273,9 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 	assert.Len(t, consumer.cache, 2)
 }
 
+// TestMempoolConsumer_CacheIsBoundedByRetainedBytes verifies that temporary
+// per-consumer byte pressure preserves the cursor until retained bytes are
+// released, while keeping every advertised body available for retransmission.
 func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1309,6 +1312,9 @@ func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	assert.NotNil(t, consumer.GetTxFromCache("large"))
 }
 
+// TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor verifies that a
+// body which can never fit the consumer budget is skipped instead of wedging
+// blocking or non-blocking consumers behind it.
 func TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1341,6 +1347,9 @@ func TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor(t *testing.T) {
 	assert.Equal(t, 2, blocking.nextTxIdx)
 }
 
+// TestMempoolConsumer_CachesShareAggregateByteLimit verifies that retained
+// copies across consumers share one aggregate budget and that releasing one
+// consumer's copy allows another consumer to advertise the transaction.
 func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1376,6 +1385,8 @@ func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 	assert.Equal(t, int64(0), retainedConsumerCacheBytes(second), "consumer removal releases bytes")
 }
 
+// TestMempoolConsumer_RemovalRejectsLaterCacheWrites verifies that cancellation
+// prevents a removed consumer from reserving bytes or repopulating its cache.
 func TestMempoolConsumer_RemovalRejectsLaterCacheWrites(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -4196,6 +4207,9 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnConsumerRemoval(t *testing.T) {
 	))
 }
 
+// TestMempoolConsumer_RemovalCannotRepopulateFullCache verifies that a NextTx
+// blocked on a full cache cannot race the final removal clear, insert another
+// body, and leak its aggregate byte reservation.
 func TestMempoolConsumer_RemovalCannotRepopulateFullCache(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
