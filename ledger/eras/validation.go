@@ -114,33 +114,12 @@ type indexedUtxoValidationRule struct {
 }
 
 type utxoValidationRuleSkip struct {
-	index          int
 	validationFunc lcommon.UtxoValidationRuleFunc
 	name           string
 }
 
 const (
 	noUtxoValidationRuleIndex = -1
-
-	// Positions in gouroboros v0.201.1
-	// UtxoValidationRules. Function
-	// values are not directly comparable in Go, so setup guards compare
-	// their runtime function names before filtering by index.
-	shelleyUtxoValidateFeeTooSmallRuleIndex     = 6
-	shelleyUtxoValidateMaxTxSizeRuleIndex       = 13
-	allegraUtxoValidateFeeTooSmallRuleIndex     = 6
-	allegraUtxoValidateMaxTxSizeRuleIndex       = 13
-	alonzoUtxoValidatePlutusScriptsRuleIndex    = 27
-	babbageUtxoValidatePlutusScriptsRuleIndex   = 31
-	conwayUtxoValidateConwayFeaturesRuleIndex   = 19
-	conwayUtxoValidateFeeTooSmallRuleIndex      = 24
-	conwayUtxoValidateExUnitsTooBigRuleIndex    = 39
-	conwayUtxoValidatePlutusScriptsRuleIndex    = 43
-	conwayUtxoValidateCommitteeCertsRuleIndex   = 47
-	conwayUtxoValidateUnknownVotersRuleIndex    = 48
-	dijkstraUtxoValidatePlutusScriptsRuleIndex  = 43
-	dijkstraUtxoValidateCommitteeCertsRuleIndex = 47
-	dijkstraUtxoValidateUnknownVotersRuleIndex  = 48
 
 	conwayRefScriptCostStride = 25_600
 )
@@ -329,23 +308,13 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 
 func buildIndexedUtxoValidationRules(
 	rules []lcommon.UtxoValidationRuleFunc,
-	skipIndex int,
 	skipValidationFunc lcommon.UtxoValidationRuleFunc,
 	skipRuleName string,
 ) []indexedUtxoValidationRule {
-	if skipIndex != noUtxoValidationRuleIndex {
-		return buildIndexedUtxoValidationRulesWithSkips(
-			rules,
-			[]utxoValidationRuleSkip{
-				{
-					index:          skipIndex,
-					validationFunc: skipValidationFunc,
-					name:           skipRuleName,
-				},
-			},
-		)
-	}
-	return buildIndexedUtxoValidationRulesWithSkips(rules, nil)
+	return buildIndexedUtxoValidationRulesWithSkips(rules, []utxoValidationRuleSkip{{
+		validationFunc: skipValidationFunc,
+		name:           skipRuleName,
+	}})
 }
 
 func buildIndexedUtxoValidationRulesWithSkips(
@@ -354,12 +323,8 @@ func buildIndexedUtxoValidationRulesWithSkips(
 ) []indexedUtxoValidationRule {
 	skipIndexes := map[int]struct{}{}
 	for _, skip := range skips {
-		if skip.index == noUtxoValidationRuleIndex {
-			continue
-		}
 		resolvedIndex := resolveUtxoValidationSkipIndex(
 			rules,
-			skip.index,
 			skip.validationFunc,
 			skip.name,
 		)
@@ -380,31 +345,16 @@ func buildIndexedUtxoValidationRulesWithSkips(
 
 func resolveUtxoValidationSkipIndex(
 	rules []lcommon.UtxoValidationRuleFunc,
-	skipIndex int,
 	skipValidationFunc lcommon.UtxoValidationRuleFunc,
 	skipRuleName string,
 ) int {
 	if skipRuleName == "" {
 		skipRuleName = "UTxO validation skip rule"
 	}
-	if skipIndex < 0 {
-		panic(fmt.Sprintf(
-			"%s has invalid negative hardcoded rule index %d",
-			skipRuleName,
-			skipIndex,
-		))
-	}
-	if skipIndex >= len(rules) {
-		skipIndex = noUtxoValidationRuleIndex
-	}
 	if skipValidationFunc == nil {
 		panic(skipRuleName + " expected validation function is nil")
 	}
 	targetName := utxoValidationRuleName(skipValidationFunc)
-	if skipIndex != noUtxoValidationRuleIndex &&
-		utxoValidationRuleName(rules[skipIndex]) == targetName {
-		return skipIndex
-	}
 	found := noUtxoValidationRuleIndex
 	for index, rule := range rules {
 		if utxoValidationRuleName(rule) != targetName {
@@ -421,11 +371,7 @@ func resolveUtxoValidationSkipIndex(
 		found = index
 	}
 	if found == noUtxoValidationRuleIndex {
-		panic(fmt.Sprintf(
-			"%s expected function is absent from upstream validation rules (preferred index %d)",
-			skipRuleName,
-			skipIndex,
-		))
+		panic(fmt.Sprintf("%s expected function is absent from upstream validation rules", skipRuleName))
 	}
 	return found
 }

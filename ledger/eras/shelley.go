@@ -193,12 +193,10 @@ func buildShelleyValidationRules() []indexedUtxoValidationRule {
 		shelley.UtxoValidationRules,
 		[]utxoValidationRuleSkip{
 			{
-				index:          shelleyUtxoValidateFeeTooSmallRuleIndex,
 				validationFunc: shelley.UtxoValidateFeeTooSmallUtxo,
 				name:           "shelley.UtxoValidateFeeTooSmallUtxo",
 			},
 			{
-				index:          shelleyUtxoValidateMaxTxSizeRuleIndex,
 				validationFunc: shelley.UtxoValidateMaxTxSizeUtxo,
 				name:           "shelley.UtxoValidateMaxTxSizeUtxo",
 			},

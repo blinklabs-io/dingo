@@ -263,38 +263,31 @@ func conwayValidationRules(
 func buildConwayValidationRules() []indexedUtxoValidationRule {
 	skips := []utxoValidationRuleSkip{
 		{
-			index: conwayUtxoValidateConwayFeaturesRuleIndex,
 			validationFunc: conway.
 				UtxoValidateConwayFeaturesWithPlutusV1V2,
 			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
 		},
 		{
-			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
 			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
 			name:           "conway.UtxoValidateFeeTooSmallUtxo",
 		},
 		{
-			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
 			validationFunc: conway.UtxoValidatePlutusScripts,
 			name:           "conway.UtxoValidatePlutusScripts",
 		},
 		{
-			index:          conwayUtxoValidateCommitteeCertsRuleIndex,
 			validationFunc: conway.UtxoValidateCommitteeCertificates,
 			name:           "conway.UtxoValidateCommitteeCertificates",
 		},
 		{
-			index:          conwayUtxoValidateUnknownVotersRuleIndex,
 			validationFunc: conway.UtxoValidateUnknownVoters,
 			name:           "conway.UtxoValidateUnknownVoters",
 		},
 	}
+	indexes := make([]int, len(skips))
 	for i := range skips {
-		skips[i].index = resolveUtxoValidationSkipIndex(
-			conway.UtxoValidationRules,
-			skips[i].index,
-			skips[i].validationFunc,
-			skips[i].name,
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			conway.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
 		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
@@ -302,16 +295,16 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		skips,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
-		index:          skips[0].index,
+		index:          indexes[0],
 		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
 	})
 	ret = append(ret,
 		indexedUtxoValidationRule{
-			index:          skips[3].index,
+			index:          indexes[3],
 			validationFunc: validateCommitteeCertificates,
 		},
 		indexedUtxoValidationRule{
-			index:          skips[4].index,
+			index:          indexes[4],
 			validationFunc: validateUnknownVoters,
 		},
 	)

@@ -585,26 +585,33 @@ func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 func (lv *LedgerView) CommitteeMember(
 	coldKey lcommon.Blake2b224,
 ) (*lcommon.CommitteeMember, error) {
-	keyMember, err := lv.CommitteeCredentialMember(lcommon.Credential{
+	keyCredential := lcommon.Credential{
 		CredType:   lcommon.CredentialTypeAddrKeyHash,
 		Credential: coldKey,
-	})
+	}
+	keyMember, err := lv.legacyCommitteeCredentialMember(keyCredential)
 	if err != nil {
 		return nil, err
 	}
-	scriptMember, err := lv.CommitteeCredentialMember(lcommon.Credential{
+	if keyMember == nil {
+		keyMember, err = lv.proposedCommitteeMember(keyCredential)
+		if err != nil {
+			return nil, err
+		}
+	}
+	scriptCredential := lcommon.Credential{
 		CredType:   lcommon.CredentialTypeScriptHash,
 		Credential: coldKey,
-	})
+	}
+	scriptMember, err := lv.legacyCommitteeCredentialMember(scriptCredential)
 	if err != nil {
 		return nil, err
 	}
-	if keyMember != nil && !keyMember.Resigned &&
-		(scriptMember == nil || scriptMember.Resigned) {
-		return keyMember, nil
-	}
-	if scriptMember != nil && !scriptMember.Resigned && keyMember == nil {
-		return scriptMember, nil
+	if scriptMember == nil {
+		scriptMember, err = lv.proposedCommitteeMember(scriptCredential)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if keyMember != nil && scriptMember != nil {
 		return nil, nil
@@ -613,6 +620,39 @@ func (lv *LedgerView) CommitteeMember(
 		return keyMember, nil
 	}
 	return scriptMember, nil
+}
+
+// legacyCommitteeCredentialMember returns the first seated term for a tagged
+// credential. The hash-only CommitteeMember API must preserve this behavior;
+// successor resolution belongs only to CommitteeCredentialMember.
+func (lv *LedgerView) legacyCommitteeCredentialMember(
+	coldCredential lcommon.Credential,
+) (*lcommon.CommitteeMember, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get committee members: %w", err)
+	}
+	for _, found := range dbMembers {
+		if found.ColdCredentialTag != coldTag ||
+			!bytes.Equal(found.ColdCredHash, coldCredential.Credential[:]) {
+			continue
+		}
+		member := &lcommon.CommitteeMember{
+			ColdKey:     coldCredential.Credential,
+			ExpiryEpoch: found.ExpiresEpoch,
+		}
+		if err := lv.populateCommitteeMemberStatus(
+			coldCredential, found.TermStartSlot, member,
+		); err != nil {
+			return nil, err
+		}
+		return member, nil
+	}
+	return nil, nil
 }
 
 // CommitteeCredentialMember resolves a seated or pending proposed committee
@@ -737,9 +777,6 @@ func (lv *LedgerView) proposedCommitteeMember(
 		if err := lv.populateCommitteeMemberStatus(coldCredential, termStart, member); err != nil {
 			return nil, err
 		}
-		// Pending terms have no certificate history of their own yet. A
-		// resignation from the replaced term must not leak into the successor.
-		member.Resigned = false
 	}
 	return member, nil
 }

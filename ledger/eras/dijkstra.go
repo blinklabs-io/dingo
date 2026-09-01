@@ -290,28 +290,23 @@ var dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules()
 func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 	skips := []utxoValidationRuleSkip{
 		{
-			index:          dijkstraUtxoValidatePlutusScriptsRuleIndex,
 			validationFunc: gdijkstra.UtxoValidatePlutusScripts,
 			name:           "dijkstra.UtxoValidatePlutusScripts",
 		},
 		{
-			index: dijkstraUtxoValidateCommitteeCertsRuleIndex,
 			validationFunc: conway.
 				UtxoValidateCommitteeCertificates,
 			name: "conway.UtxoValidateCommitteeCertificates",
 		},
 		{
-			index:          dijkstraUtxoValidateUnknownVotersRuleIndex,
 			validationFunc: conway.UtxoValidateUnknownVoters,
 			name:           "conway.UtxoValidateUnknownVoters",
 		},
 	}
+	indexes := make([]int, len(skips))
 	for i := range skips {
-		skips[i].index = resolveUtxoValidationSkipIndex(
-			gdijkstra.UtxoValidationRules,
-			skips[i].index,
-			skips[i].validationFunc,
-			skips[i].name,
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			gdijkstra.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
 		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
@@ -320,11 +315,11 @@ func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 	)
 	ret = append(ret,
 		indexedUtxoValidationRule{
-			index:          skips[1].index,
+			index:          indexes[1],
 			validationFunc: validateCommitteeCertificates,
 		},
 		indexedUtxoValidationRule{
-			index:          skips[2].index,
+			index:          indexes[2],
 			validationFunc: validateUnknownVoters,
 		},
 	)
