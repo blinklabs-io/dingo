@@ -515,8 +515,8 @@ jobs:
   # workflow green even if the tap PR cannot be opened. A broken tap must never
   # hold back a shipped release.
   #
-  # Requires a repository secret HOMEBREW_TAP_GITHUB_TOKEN: a token (PAT or GitHub
-  # App installation token) with `contents: write` and `pull-requests: write` on
+  # Authenticates to the tap with the org-level ORG_PROJECT_PAT secret, a token
+  # with `contents: write` and `pull-requests: write` on
   # blinklabs-io/homebrew-cardano. The default GITHUB_TOKEN only scopes to this
   # repository and cannot push a branch or open a PR on the tap. When the secret
   # is absent (e.g. forks), the job no-ops instead of failing.
@@ -529,7 +529,7 @@ jobs:
       contents: read
     env:
       TAP_REPO: blinklabs-io/homebrew-cardano
-      HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+      HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
     steps:
       - name: Check tap token
         id: gate
@@ -601,6 +601,14 @@ jobs:
           git switch -C "$branch"
           git add Formula/dingo.rb
           git commit -m "dingo ${RELEASE_TAG}"
+          # A retried tag run may find the tap branch already on the remote. The
+          # tap was checked out on its default branch, so there is no
+          # origin/$branch tracking ref for --force-with-lease to compare
+          # against and the push would be rejected as stale. Fetch the existing
+          # branch first so the lease has a real base to check.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+          fi
           git push --force-with-lease origin "$branch"
           # Reuse an existing open PR for this tag if a prior run created one.
           if [ -z "$(gh pr list --repo "$TAP_REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
