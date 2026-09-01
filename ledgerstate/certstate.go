@@ -1548,23 +1548,24 @@ func parseVState(data []byte) (
 	return dreps, hotKeys, resignations, warning
 }
 
-// looksLikeCommitteeCredentialMap reports whether every entry maps a credential
-// to a credential, which is the committee hot-key shape. DState maps a
-// credential to an account state, so this separates the two regardless of size.
+// looksLikeCommitteeCredentialMap reports whether a map's entries pair a
+// credential key with a credential value, which is the committee hot-key shape.
+// DState pairs a credential with an account state, so this separates the two
+// regardless of which is larger.
+//
+// The map is homogeneous, so the first entry settles it. Reading only that
+// entry keeps this off the allocation path for a mainnet-scale DState, which
+// this classifier is run against before the DState scans.
 func looksLikeCommitteeCredentialMap(data []byte) bool {
-	entries, err := decodeMapEntries(data)
-	if err != nil || len(entries) == 0 {
+	entry, ok := firstMapEntry(data)
+	if !ok {
 		return false
 	}
-	for _, entry := range entries {
-		if _, err := parseCredential(entry.KeyRaw); err != nil {
-			return false
-		}
-		if _, err := parseCommitteeHotCredential(entry.ValueRaw); err != nil {
-			return false
-		}
+	if _, err := parseCredential(entry.KeyRaw); err != nil {
+		return false
 	}
-	return true
+	_, err := parseCommitteeHotCredential(entry.ValueRaw)
+	return err == nil
 }
 
 // isCborArray reports whether data begins a definite or indefinite CBOR array.
