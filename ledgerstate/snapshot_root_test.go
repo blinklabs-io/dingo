@@ -162,7 +162,10 @@ func TestOpenSnapshotAtOrBeforeSurvivesFileSwap(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		if string(byName) != "ours" {
-			t.Fatalf("open-file sharing must preserve the selected name: got %q", byName)
+			t.Fatalf(
+				"open-file sharing must preserve the selected name: got %q",
+				byName,
+			)
 		}
 	} else if string(byName) != "theirs" {
 		t.Fatal("the substitution must be observable through the name")

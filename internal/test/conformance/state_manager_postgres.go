@@ -17,7 +17,9 @@
 package conformance
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -149,10 +151,105 @@ func newDingoPostgresStateManagerAtSchema(
 	if err != nil {
 		return nil, err
 	}
-	m.wipeMetadata = func() error {
-		return truncatePostgresConformanceSchema(dsn, schema)
+	resetter, err := newPostgresResetter(dsn, schema)
+	if err != nil {
+		return nil, errors.Join(err, m.Close())
 	}
+	m.wipeMetadata = func() error {
+		return resetter.reset(context.Background())
+	}
+	m.closeExtra = resetter.Close
 	return m, nil
+}
+
+// newPostgresResetter opens the one admin connection this manager's Reset
+// reuses for its whole lifetime, replacing a per-vector sql.Open/Close. See
+// reset_cost.go for why the per-vector connection, table-list query, and
+// unconditional truncate were each worth removing.
+func newPostgresResetter(dsn, schema string) (*backendResetter, error) {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres admin connection: %w", err)
+	}
+	return &backendResetter{
+		db: db,
+		listTables: func(
+			ctx context.Context,
+			db *sql.DB,
+		) ([]string, error) {
+			return listPostgresConformanceTables(ctx, db, schema)
+		},
+		qualify: func(table string) string {
+			return pgQuoteQualified(schema, table)
+		},
+		truncate: func(
+			ctx context.Context,
+			db *sql.DB,
+			qualified []string,
+		) error {
+			// PostgreSQL takes every table in one statement, so this is a
+			// single implicit-commit DDL round trip regardless of how many
+			// tables the vector dirtied.
+			if _, err := db.ExecContext(
+				ctx,
+				"TRUNCATE TABLE "+strings.Join(qualified, ", ")+" CASCADE",
+			); err != nil {
+				return fmt.Errorf(
+					"truncate postgres schema %q: %w",
+					schema,
+					err,
+				)
+			}
+			return nil
+		},
+	}, nil
+}
+
+// listPostgresConformanceTables returns schema's base tables, excluding
+// schema_migrations.
+//
+// schema_migrations is the migration runner's own bookkeeping table
+// (database/plugin/metadata/sqlstore/migrations/runner.go), not conformance
+// data. Truncating it would desync tracked migration state from the physical
+// schema without reverting any DDL: a later construction against this
+// already-migrated schema would see an empty schema_migrations, decide every
+// migration still needed to run, and fail with a duplicate column/table error
+// partway through re-applying already-applied DDL.
+func listPostgresConformanceTables(
+	ctx context.Context,
+	db *sql.DB,
+	schema string,
+) ([]string, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT table_name FROM information_schema.tables
+WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name <> 'schema_migrations'`,
+		schema,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"list postgres schema %q tables: %w",
+			schema,
+			err,
+		)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan postgres table name: %w", err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"list postgres schema %q tables: %w",
+			schema,
+			err,
+		)
+	}
+	return tables, nil
 }
 
 // ensurePostgresConformanceSchema creates schema (if it doesn't already
@@ -182,94 +279,15 @@ func ensurePostgresConformanceSchema(dsn, schema string) error {
 	return nil
 }
 
-// truncatePostgresConformanceSchema empties every base table in schema, in
-// place, over an ordinary connection to dsn (not the live store's own
-// connection pool -- Reset calls this without going through
-// DingoStateManager.db at all, so it works whether or not the store
-// considers itself mid-transaction). Used as DingoStateManager's
-// wipeMetadata hook (see Reset in state_manager.go).
-//
-// This truncates rather than drops-and-recreates: unlike
-// metadata.Resettable.Reset (database/plugin/metadata/postgres's own Reset
-// callback, which drops tables outright, requiring a fresh migration run
-// before the store is usable again), TRUNCATE keeps every table (and
-// index/constraint) in place, so the already-open store's connection pool
-// keeps working immediately afterward -- no close, no reopen, no
-// re-migration. At one Reset per vector across the ~300-vector suite,
-// avoiding a real close/reopen/re-migrate round trip per vector is what
-// keeps the Postgres backend's wall-clock cost in the same ballpark as
-// SQLite's rather than a full order of magnitude slower.
-//
-// The table list is discovered from information_schema rather than
-// hardcoded, so it stays correct as migrations add tables. Like
-// recreatePostgresConformanceSchema before it, this only ever touches
-// schema (postgresConformanceSchema): unlike metadata.Resettable.Reset,
-// which scans and drops tables across *every* non-system schema in the
-// database -- appropriate for its actual use (preparing a target for
-// RestoreFrom), not safe to call on every vector reset since it would also
-// destroy database/plugin/metadata/postgres's own concurrently running
-// tests' tables in the shared dingo_test database.
-//
-// schema_migrations itself is deliberately excluded: it is the migration
-// runner's own bookkeeping table (database/plugin/metadata/sqlstore/migrations/runner.go),
-// not conformance data. Truncating it would desync tracked migration state
-// from the physical schema without reverting any DDL -- a later
-// construction against this same, already-migrated schema would see an
-// empty schema_migrations table, decide every migration (including ones
-// whose columns/tables already physically exist from the first
-// construction) still needs to run, and fail with a duplicate
-// column/table error partway through re-applying already-applied DDL.
-func truncatePostgresConformanceSchema(dsn, schema string) error {
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return fmt.Errorf("open postgres admin connection: %w", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(
-		`SELECT table_name FROM information_schema.tables
-WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name <> 'schema_migrations'`,
-		schema,
-	)
-	if err != nil {
-		return fmt.Errorf("list postgres schema %q tables: %w", schema, err)
-	}
-	defer rows.Close()
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("scan postgres table name: %w", err)
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list postgres schema %q tables: %w", schema, err)
-	}
-	if len(tables) == 0 {
-		// Nothing migrated yet (e.g. Reset called before any construction
-		// ever ran migrations against this schema) -- nothing to truncate.
-		return nil
-	}
-
-	quoted := make([]string, len(tables))
-	for i, table := range tables {
-		quoted[i] = pgQuoteQualified(schema, table)
-	}
-	if _, err := db.Exec(
-		"TRUNCATE TABLE " + strings.Join(quoted, ", ") + " CASCADE",
-	); err != nil {
-		return fmt.Errorf("truncate postgres schema %q: %w", schema, err)
-	}
-	return nil
+// pgQuoteIdent double-quotes a single PostgreSQL identifier, doubling any
+// embedded quote.
+func pgQuoteIdent(ident string) string {
+	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }
 
 // pgQuoteQualified double-quotes schema and table independently, so an
 // identifier requiring escaping in either part is handled correctly
 // (`"schema"."table"`, not a single quoted "schema.table").
 func pgQuoteQualified(schema, table string) string {
-	quote := func(ident string) string {
-		return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
-	}
-	return quote(schema) + "." + quote(table)
+	return pgQuoteIdent(schema) + "." + pgQuoteIdent(table)
 }

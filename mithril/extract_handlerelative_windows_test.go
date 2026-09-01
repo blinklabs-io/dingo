@@ -134,17 +134,26 @@ func TestHandleRelativeRmdirSurvivesParentSubstitution(t *testing.T) {
 
 func TestHandleRelativeRenameSurvivesParentSubstitution(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real", "staging"), 0o750))
+	require.NoError(
+		t,
+		os.MkdirAll(filepath.Join(dir, "real", "staging"), 0o750),
+	)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "destreal"), 0o750))
 
 	root, err := os.OpenRoot(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = root.Close() })
 
-	oldParent, oldBase, releaseOld, err := openVerifiedParent(root, "real/staging")
+	oldParent, oldBase, releaseOld, err := openVerifiedParent(
+		root,
+		"real/staging",
+	)
 	require.NoError(t, err)
 	defer releaseOld()
-	newParent, newBase, releaseNew, err := openVerifiedParent(root, "destreal/moved")
+	newParent, newBase, releaseNew, err := openVerifiedParent(
+		root,
+		"destreal/moved",
+	)
 	require.NoError(t, err)
 	defer releaseNew()
 	oldDirFile, oldDir, err := rootDirHandle(oldParent)
@@ -166,7 +175,9 @@ func TestHandleRelativeRenameSurvivesParentSubstitution(t *testing.T) {
 	elsewhereNew := filepath.Join(dir, "elsewhere-new")
 	require.NoError(t, os.MkdirAll(elsewhereNew, 0o750))
 	requireDirectorySwap(
-		t, filepath.Join(dir, "destreal"), filepath.Join(dir, "destreal.moved-aside"),
+		t,
+		filepath.Join(dir, "destreal"),
+		filepath.Join(dir, "destreal.moved-aside"),
 	)
 	requireSymlinkSupport(t, elsewhereNew, filepath.Join(dir, "destreal"))
 

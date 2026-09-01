@@ -406,7 +406,10 @@ func tallyDRepVotes(
 	if err != nil {
 		return fmt.Errorf("drep total stake: %w", err)
 	}
-	tally.DRepAbstainStake, err = addUint64(tally.DRepAbstainStake, abstainPower)
+	tally.DRepAbstainStake, err = addUint64(
+		tally.DRepAbstainStake,
+		abstainPower,
+	)
 	if err != nil {
 		return fmt.Errorf("drep abstain stake: %w", err)
 	}

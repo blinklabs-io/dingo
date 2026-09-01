@@ -169,7 +169,10 @@ func (n *NodeControl) containerID(
 	}
 	container := string(bytes.TrimSpace([]byte(out)))
 	if container == "" {
-		return "", fmt.Errorf("resolve %s container: no container found", service)
+		return "", fmt.Errorf(
+			"resolve %s container: no container found",
+			service,
+		)
 	}
 	return container, nil
 }
