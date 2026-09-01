@@ -34,10 +34,9 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// MaxLocalStateQueryItems bounds collections on query paths that perform
-// database work for each resolved item. Explicit over-limit filters are
-// rejected before database access; state-derived collections are checked
-// before their per-item reads begin.
+// MaxLocalStateQueryItems bounds caller-controlled collections on query paths
+// that perform database work for each requested item. Explicit over-limit
+// filters are rejected before database access.
 const MaxLocalStateQueryItems = 1000
 
 // ErrLocalStateQueryLimitExceeded identifies a LocalStateQuery request whose
@@ -843,15 +842,14 @@ func (ls *LedgerState) queryShelleyDRepState(
 	}
 	result := make(olocalstatequery.DRepStateResult)
 	var dreps []*models.Drep
+	var allDelegators map[string][]olocalstatequery.StakeCredential
 	if len(creds) == 0 {
 		all, err := ls.db.GetActiveDreps(nil)
 		if err != nil {
 			return nil, err
 		}
-		if err := checkLocalStateQueryItemLimit(
-			"GetDRepState",
-			len(all),
-		); err != nil {
+		allDelegators, err = ls.allDRepDelegators()
+		if err != nil {
 			return nil, err
 		}
 		dreps = all
@@ -882,9 +880,18 @@ func (ls *LedgerState) queryShelleyDRepState(
 		if drep == nil {
 			continue
 		}
-		delegators, err := ls.drepDelegators(drep)
-		if err != nil {
-			return nil, err
+		var delegators []olocalstatequery.StakeCredential
+		if allDelegators != nil {
+			delegators = allDelegators[models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			}.MapKey()]
+		} else {
+			var err error
+			delegators, err = ls.drepDelegators(drep)
+			if err != nil {
+				return nil, err
+			}
 		}
 		key := olocalstatequery.StakeCredential{
 			Tag:   uint64(drep.CredentialTag),
@@ -901,6 +908,57 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// expects (verified against cardano-node: an empty result is the CBOR
 	// `81 a0`, i.e. [ {} ]).
 	return []any{result}, nil
+}
+
+// allDRepDelegators loads active accounts in batches and groups their voting
+// delegations by DRep. This preserves the unrestricted empty GetDRepState form
+// without issuing one database query for every active DRep.
+func (ls *LedgerState) allDRepDelegators() (
+	map[string][]olocalstatequery.StakeCredential,
+	error,
+) {
+	refs, err := ls.db.Metadata().GetActiveAccountCredentials(nil)
+	if err != nil {
+		return nil, err
+	}
+	accounts, err := ls.db.GetAccountsByCredential(refs, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	ret := make(map[string][]olocalstatequery.StakeCredential)
+	for _, ref := range refs {
+		account := accounts[ref.MapKey()]
+		if account == nil || len(account.Drep) == 0 ||
+			account.DrepType > models.DrepTypeScriptHash {
+			continue
+		}
+		drepKey := models.StakeCredentialRef{
+			Tag: uint8(account.DrepType),
+			Key: account.Drep,
+		}.MapKey()
+		ret[drepKey] = append(
+			ret[drepKey],
+			olocalstatequery.StakeCredential{
+				Tag:   uint64(ref.Tag),
+				Bytes: ledger.NewBlake2b224(ref.Key),
+			},
+		)
+	}
+	for key := range ret {
+		slices.SortFunc(
+			ret[key],
+			func(a, b olocalstatequery.StakeCredential) int {
+				if a.Tag < b.Tag {
+					return -1
+				}
+				if a.Tag > b.Tag {
+					return 1
+				}
+				return bytes.Compare(a.Bytes[:], b.Bytes[:])
+			},
+		)
+	}
+	return ret, nil
 }
 
 // queryShelleyAccountState answers GetAccountState: the chain's treasury and

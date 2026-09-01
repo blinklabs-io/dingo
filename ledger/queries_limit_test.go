@@ -97,10 +97,10 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 	}
 }
 
-// TestLocalStateQueryEmptyDRepStateBoundsResolvedWork verifies that the
-// empty-filter form cannot bypass the work limit when chain state contains
-// more DReps than the handler may process with per-DRep delegator reads.
-func TestLocalStateQueryEmptyDRepStateBoundsResolvedWork(t *testing.T) {
+// TestLocalStateQueryEmptyDRepStateRemainsUnrestricted verifies that the
+// empty-filter form can return more DReps than the caller-list limit because
+// its delegators are loaded in batches instead of with one read per DRep.
+func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 	db := newTestDB(t)
 	txn := db.MetadataTxn(true)
 	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
@@ -116,14 +116,16 @@ func TestLocalStateQueryEmptyDRepStateBoundsResolvedWork(t *testing.T) {
 	}
 	require.NoError(t, txn.Commit())
 
-	result, err := (&LedgerState{db: db}).queryShelleyDRepState(nil)
-	require.Nil(t, result)
-	require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
-
-	var limitErr *LocalStateQueryLimitError
-	require.ErrorAs(t, err, &limitErr)
-	require.Equal(t, "GetDRepState", limitErr.Query)
-	require.Equal(t, itemCount, limitErr.Items)
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+	result, err := ls.queryShelleyDRepState(nil)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	dreps, ok := outer[0].(olocalstatequery.DRepStateResult)
+	require.True(t, ok)
+	require.Len(t, dreps, itemCount)
 }
 
 // TestLocalStateQueryLargeBatchHandlers verifies that handlers backed by batch
@@ -133,6 +135,12 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	itemCount := MaxLocalStateQueryItems + 1
 
 	credentials := make([]lcommon.Credential, itemCount)
+	for i := range credentials {
+		binary.BigEndian.PutUint64(
+			credentials[i].Credential[20:],
+			uint64(i),
+		)
+	}
 	result, err := (&LedgerState{db: db}).
 		queryShelleyFilteredVoteDelegatees(credentials)
 	require.NoError(t, err)

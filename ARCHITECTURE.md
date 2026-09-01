@@ -2588,12 +2588,12 @@ Query paths that retain database work per resolved item are bounded by
 `ledger.MaxLocalStateQueryItems` (currently 1000). This applies to
 `GetDRepState` and `GetStakeDelegDeposits`. Explicit oversized filters are
 rejected before database or consensus-state access. The empty `GetDRepState`
-form first resolves the active DReps in one read, then rejects an oversized
-result before performing any per-DRep delegator reads. Filtered
-`GetStakeSnapshots` and `GetFilteredVoteDelegatees` instead use existing batch
-database operations, removing their per-item read amplification without a
-client-visible item limit. Existing result ordering and partial-result
-behavior remain unchanged.
+form remains unrestricted: it loads active DReps once and obtains their
+delegators through chunked account reads instead of one read per DRep.
+Filtered `GetStakeSnapshots` and `GetFilteredVoteDelegatees` likewise use
+existing batch database operations, removing their per-item read amplification
+without a client-visible item limit. Existing result ordering and
+partial-result behavior remain unchanged.
 
 In-process callers receive a `ledger.LocalStateQueryLimitError` that matches
 `ledger.ErrLocalStateQueryLimitExceeded`. LocalStateQuery has no query-level
