@@ -528,7 +528,8 @@ func (m *VoteManager) EnableVoting(
 	if m.keyProvider != nil {
 		m.logger.Debug(
 			"leios voting key matches the on-chain registration, skipping static registry",
-			"pool", poolKeyHash.String(),
+			"pool",
+			poolKeyHash.String(),
 		)
 	} else if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
 		return fmt.Errorf("register local leios voting key: %w", err)
@@ -1709,8 +1710,10 @@ func (m *VoteManager) emitPrototypeVote(
 	if !resolvedOK || !resolved.Equal(votingKey.PublicKey()) {
 		m.logger.Error(
 			"configured leios voting key no longer matches the resolved public key for this pool, not voting",
-			"slot", record.slot,
-			"voter_id", voterId,
+			"slot",
+			record.slot,
+			"voter_id",
+			voterId,
 		)
 		return
 	}

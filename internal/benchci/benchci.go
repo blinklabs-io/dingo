@@ -144,7 +144,14 @@ func runBenchstat(oldFile, newFile string) (string, error) {
 	// oldFile/newFile are workflow-controlled local file paths (a prior
 	// benchmark-data run file and this run's fresh output), not
 	// attacker-influenced input; benchstatModule is a compile-time constant.
-	cmd := exec.Command("go", "run", benchstatModule, "-format=csv", oldFile, newFile) //nolint:gosec // G204: paths are workflow-controlled, not attacker input
+	cmd := exec.Command(
+		"go",
+		"run",
+		benchstatModule,
+		"-format=csv",
+		oldFile,
+		newFile,
+	) //nolint:gosec // G204: paths are workflow-controlled, not attacker input
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -227,7 +234,10 @@ func parseSecOpTable(csv string) (map[string]benchstatRow, error) {
 		}
 	}
 	if !foundSecOpTable {
-		return nil, fmt.Errorf("benchci: no %q table found in benchstat output", secOpMetric)
+		return nil, fmt.Errorf(
+			"benchci: no %q table found in benchstat output",
+			secOpMetric,
+		)
 	}
 	return rows, nil
 }
@@ -300,7 +310,8 @@ func evaluateCurated(rows map[string]benchstatRow, curated []string) []Row {
 			// against shortBase.
 			nameNoPrefix := strings.TrimPrefix(name, "Benchmark")
 			shortName := gomaxprocsSuffix.ReplaceAllString(nameNoPrefix, "")
-			if shortName != shortBase && !strings.HasPrefix(shortName, shortBase+"/") {
+			if shortName != shortBase &&
+				!strings.HasPrefix(shortName, shortBase+"/") {
 				continue
 			}
 			matched = true
@@ -315,7 +326,8 @@ func evaluateCurated(rows map[string]benchstatRow, curated []string) []Row {
 				DeltaPercent: row.deltaPercent,
 				Significant:  row.significant,
 				Found:        true,
-				Flagged:      row.significant && row.deltaPercent > RegressionThresholdPercent,
+				Flagged: row.significant &&
+					row.deltaPercent > RegressionThresholdPercent,
 			})
 		}
 		if !matched {
@@ -342,7 +354,16 @@ func renderMarkdown(results []Row) string {
 		if r.Flagged {
 			flagged = "**yes**"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %t | %s |\n", r.Name, r.Old, r.New, delta, r.Significant, flagged)
+		fmt.Fprintf(
+			&b,
+			"| %s | %s | %s | %s | %t | %s |\n",
+			r.Name,
+			r.Old,
+			r.New,
+			delta,
+			r.Significant,
+			flagged,
+		)
 	}
 	return b.String()
 }

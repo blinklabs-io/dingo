@@ -276,7 +276,8 @@ RETURNING id`,
 				return nil
 			}
 			if previousErr == nil && previousEpoch.Valid && previousSlot.Valid &&
-				previousEpoch.Int64 >= 0 && previousSlot.Int64 >= 0 &&
+				previousEpoch.Int64 >= 0 &&
+				previousSlot.Int64 >= 0 &&
 				uint64(previousEpoch.Int64) == *proposal.RatifiedEpoch &&
 				uint64(previousSlot.Int64) == *proposal.RatifiedSlot {
 				return nil

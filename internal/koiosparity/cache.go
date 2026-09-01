@@ -605,7 +605,10 @@ func (c *Cache) GetAccountCoverage(
 // eventually re-commit a fresh, fully consistent complete = true row —
 // no further explicit --force-refresh required. A no-op, not an error, if
 // no coverage row exists yet for this (network, epoch).
-func (c *Cache) MarkAccountCoverageIncomplete(network string, epoch uint64) error {
+func (c *Cache) MarkAccountCoverageIncomplete(
+	network string,
+	epoch uint64,
+) error {
 	_, err := c.db.Exec(
 		`UPDATE koios_account_coverage SET complete = 0 WHERE network = ? AND epoch = ?`,
 		network,

@@ -61,8 +61,10 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 	offsets := &database.BlockIngestionResult{
 		TxOffsets: map[[32]byte]database.CborOffset{
 			txHash: {
-				BlockSlot:  blockSlot,
-				ByteLength: uint32(len(txCbor)), // #nosec G115 -- fixture is bounded
+				BlockSlot: blockSlot,
+				ByteLength: uint32(
+					len(txCbor),
+				), // #nosec G115 -- fixture is bounded
 			},
 		},
 	}

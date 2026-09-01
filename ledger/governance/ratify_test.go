@@ -98,7 +98,9 @@ func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
 		DRepYesStake:   1,
 		DRepTotalStake: 100,
 	}
-	d := ShouldRatify(ratifyInputs(tally, pparams, 5, 1, big.NewRat(2, 3), 9, false))
+	d := ShouldRatify(
+		ratifyInputs(tally, pparams, 5, 1, big.NewRat(2, 3), 9, false),
+	)
 	assert.False(t, d.Ratified)
 }
 
@@ -155,17 +157,21 @@ func TestShouldRatify_BootstrapPerBodyRequirements(t *testing.T) {
 			wantRatify: true,
 		},
 		{
-			name:       "security parameter change requires SPO",
-			action:     lcommon.GovActionTypeParameterChange,
-			tally:      withSPO(withCC(base(lcommon.GovActionTypeParameterChange))),
+			name:   "security parameter change requires SPO",
+			action: lcommon.GovActionTypeParameterChange,
+			tally: withSPO(
+				withCC(base(lcommon.GovActionTypeParameterChange)),
+			),
 			param:      securityUpdate,
 			activeCC:   2,
 			wantRatify: true,
 		},
 		{
-			name:       "hard fork requires CC and SPO",
-			action:     lcommon.GovActionTypeHardForkInitiation,
-			tally:      withSPO(withCC(base(lcommon.GovActionTypeHardForkInitiation))),
+			name:   "hard fork requires CC and SPO",
+			action: lcommon.GovActionTypeHardForkInitiation,
+			tally: withSPO(
+				withCC(base(lcommon.GovActionTypeHardForkInitiation)),
+			),
 			activeCC:   2,
 			wantRatify: true,
 		},
@@ -387,7 +393,8 @@ func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
 			name := fmt.Sprintf("PV%d/%s/votes-%d", major, tc.name, votes)
 			t.Run(name, func(t *testing.T) {
 				want := tc.required != 0 && votes&tc.required == tc.required
-				if tc.bootstrap && tc.action != lcommon.GovActionTypeParameterChange &&
+				if tc.bootstrap &&
+					tc.action != lcommon.GovActionTypeParameterChange &&
 					tc.action != lcommon.GovActionTypeHardForkInitiation {
 					want = false
 				}

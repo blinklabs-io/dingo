@@ -333,7 +333,10 @@ func validateLeiosEndorserBlockTx(
 			return fmt.Errorf("unwrap endorser tx %d: %w", index, err)
 		}
 		if bytesRead != len(txCbor) {
-			return fmt.Errorf("endorser tx %d has trailing wrapper bytes", index)
+			return fmt.Errorf(
+				"endorser tx %d has trailing wrapper bytes",
+				index,
+			)
 		}
 		txCbor = inner
 	}
@@ -371,7 +374,10 @@ func leiosEndorserBlockTxValidator(
 		return nil, fmt.Errorf("decode leios endorser block: %w", err)
 	}
 	if err := block.Validate(); err != nil {
-		return nil, fmt.Errorf("validate leios endorser block references: %w", err)
+		return nil, fmt.Errorf(
+			"validate leios endorser block references: %w",
+			err,
+		)
 	}
 	if len(block.TransactionReferences) != txCount {
 		return nil, fmt.Errorf(
@@ -931,10 +937,14 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
 		o.config.Logger.Debug(
 			"leios EB reloaded from blob store exceeds max entry size; serving uncached",
-			"component", "network",
-			"hash", hex.EncodeToString(hash),
-			"size", n,
-			"max_size", leiosEndorserBlockCacheMaxEntryBytes,
+			"component",
+			"network",
+			"hash",
+			hex.EncodeToString(hash),
+			"size",
+			n,
+			"max_size",
+			leiosEndorserBlockCacheMaxEntryBytes,
 		)
 		return data, true
 	}

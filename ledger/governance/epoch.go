@@ -201,11 +201,16 @@ func ProcessEpoch(
 				if in.Logger != nil {
 					in.Logger.Warn(
 						"governance proposal failed deterministic enactment preflight; returned it to pending",
-						"component", "governance",
-						"tx_hash", shortHash(proposal.TxHash),
-						"action_index", proposal.ActionIndex,
-						"error", err,
-						"epoch", in.NewEpoch,
+						"component",
+						"governance",
+						"tx_hash",
+						shortHash(proposal.TxHash),
+						"action_index",
+						proposal.ActionIndex,
+						"error",
+						err,
+						"epoch",
+						in.NewEpoch,
 					)
 				}
 				return false, nil

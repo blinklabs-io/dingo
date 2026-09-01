@@ -36,7 +36,11 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 	}{
 		// Unambiguous prototype identities: allowed.
 		{name: "name only", network: "musashi"},
-		{name: "name and matching magic", network: "musashi", networkMagic: 164},
+		{
+			name:         "name and matching magic",
+			network:      "musashi",
+			networkMagic: 164,
+		},
 		{name: "magic only", networkMagic: 164},
 		{
 			name:         "custom name with prototype magic",
@@ -46,11 +50,23 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 
 		// Unambiguous non-prototype identities: allowed (bypasses stay off).
 		{name: "preview by name", network: "preview"},
-		{name: "preview by name and magic", network: "preview", networkMagic: 2},
-		{name: "preprod by name and magic", network: "preprod", networkMagic: 1},
+		{
+			name:         "preview by name and magic",
+			network:      "preview",
+			networkMagic: 2,
+		},
+		{
+			name:         "preprod by name and magic",
+			network:      "preprod",
+			networkMagic: 1,
+		},
 		{name: "mainnet", network: "mainnet", networkMagic: 764824073},
 		{name: "devnet", network: "devnet", networkMagic: 42},
-		{name: "custom private net", network: "private-net", networkMagic: 9999},
+		{
+			name:         "custom private net",
+			network:      "private-net",
+			networkMagic: 9999,
+		},
 		{name: "unset"},
 
 		// Devnet is excluded from the conflict set, for the same reason
@@ -189,8 +205,16 @@ func TestMusashiPrototypeNetwork(t *testing.T) {
 		},
 		// A conflicting identity is not the prototype network: the bypasses
 		// must stay off even if startup validation was never run.
-		{name: "preview with prototype magic", network: "preview", networkMagic: 164},
-		{name: "prototype name with preview magic", network: "musashi", networkMagic: 2},
+		{
+			name:         "preview with prototype magic",
+			network:      "preview",
+			networkMagic: 164,
+		},
+		{
+			name:         "prototype name with preview magic",
+			network:      "musashi",
+			networkMagic: 2,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

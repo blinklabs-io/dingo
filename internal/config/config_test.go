@@ -1409,7 +1409,10 @@ network: "preview"
 	}
 	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled ||
 		!cfg.Midnight.AllowInsecureRemote {
-		t.Fatalf("expected environment to enable Midnight server policy: %+v", cfg.Midnight)
+		t.Fatalf(
+			"expected environment to enable Midnight server policy: %+v",
+			cfg.Midnight,
+		)
 	}
 	if cfg.Midnight.Host != "127.0.0.3" {
 		t.Fatalf(
@@ -1838,7 +1841,11 @@ func TestLoad_RejectsRetiredLeiosVoterPublicKeysEnv(t *testing.T) {
 
 	_, err := LoadConfig("")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported")
+	assert.Contains(
+		t,
+		err.Error(),
+		"DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported",
+	)
 }
 
 // GetConfig hands out snapshots, so nested plugin config values must be

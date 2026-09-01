@@ -200,7 +200,11 @@ func TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAva
 				nil,
 			)
 			err = m.Start(context.Background())
-			require.ErrorIs(t, err, dblifecycle.ErrCloudPrimaryAutomaticSnapshots)
+			require.ErrorIs(
+				t,
+				err,
+				dblifecycle.ErrCloudPrimaryAutomaticSnapshots,
+			)
 			require.ErrorContains(t, err, blobPluginName)
 
 			manualDir := filepath.Join(t.TempDir(), "manual")

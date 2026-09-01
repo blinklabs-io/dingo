@@ -1121,7 +1121,8 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	if len(txs) == 0 {
 		f.logger.Debug("leios EB skipped: no valid transactions", "slot", slot)
 		if f.metrics != nil {
-			f.metrics.leiosEbSkipped.WithLabelValues("no_valid_transactions").Inc()
+			f.metrics.leiosEbSkipped.WithLabelValues("no_valid_transactions").
+				Inc()
 		}
 		return nil, nil
 	}
@@ -1200,7 +1201,11 @@ func selectValidLeiosTransactions(
 				}
 				selected = append(selected, mempoolTx)
 				for _, input := range tx.Consumed() {
-					key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+					key := fmt.Sprintf(
+						"%s:%d",
+						input.Id().String(),
+						input.Index(),
+					)
 					consumed[key] = struct{}{}
 				}
 				for _, utxo := range tx.Produced() {
@@ -1244,7 +1249,9 @@ func buildLeiosEB(
 		}
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.NewBlake2b256(raw),
-			TransactionSize: uint16(len(tx.Cbor)), // #nosec G115 -- bounded above
+			TransactionSize: uint16(
+				len(tx.Cbor),
+			), // #nosec G115 -- bounded above
 		})
 		bodies = append(bodies, tx.Cbor)
 	}

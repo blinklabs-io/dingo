@@ -61,8 +61,12 @@ func TestBuildRenameInformationLayout(t *testing.T) {
 	nameLen := binary.LittleEndian.Uint32(buf[rootDirOffset+handleSize:])
 	assert.Equal(t, uint32(len("dest.tmp")*2), nameLen,
 		"FileNameLength must count UTF-16 bytes, excluding any terminator")
-	assert.Len(t, buf, nameOffset+int(nameLen),
-		"the buffer must hold exactly the header plus the encoded name, no extra padding")
+	assert.Len(
+		t,
+		buf,
+		nameOffset+int(nameLen),
+		"the buffer must hold exactly the header plus the encoded name, no extra padding",
+	)
 
 	gotName := windows.UTF16ToString(
 		unsafe.Slice((*uint16)(unsafe.Pointer(&buf[nameOffset])), nameLen/2),
@@ -84,6 +88,8 @@ func TestBuildRenameInformationEmptyName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, buf, nameOffset)
 	assert.Equal(
-		t, uint32(0), binary.LittleEndian.Uint32(buf[rootDirOffset+handleSize:]),
+		t,
+		uint32(0),
+		binary.LittleEndian.Uint32(buf[rootDirOffset+handleSize:]),
 	)
 }

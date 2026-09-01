@@ -824,7 +824,10 @@ func TestAddLocalBlockRejectsStaleParentAndPreservesPendingHeaders(
 		t.Fatalf("expected stale parent error, got %v", err)
 	}
 	if got := c.HeaderCount(); got != 1 {
-		t.Fatalf("expected rejected block to preserve pending header, got %d", got)
+		t.Fatalf(
+			"expected rejected block to preserve pending header, got %d",
+			got,
+		)
 	}
 	tip := c.Tip()
 	if !bytes.Equal(tip.Point.Hash, testBlocks[2].Hash().Bytes()) {

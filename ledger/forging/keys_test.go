@@ -122,7 +122,9 @@ func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 
 func TestPoolCredentialsRejectsPermissiveSecretKeyModes(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix mode test; Windows DACL checks are covered by keystore tests")
+		t.Skip(
+			"Unix mode test; Windows DACL checks are covered by keystore tests",
+		)
 	}
 
 	tests := []struct {

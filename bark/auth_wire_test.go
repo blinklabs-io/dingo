@@ -178,7 +178,10 @@ func TestDatabaseServiceAuthenticationAndOperatorAuthorization(t *testing.T) {
 				// identity. Both enforce the authentication boundary.
 				return
 			}
-			require.Fail(t, "an untrusted certificate reached a read-only handler")
+			require.Fail(
+				t,
+				"an untrusted certificate reached a read-only handler",
+			)
 		},
 	)
 

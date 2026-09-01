@@ -263,13 +263,18 @@ func TestSharedSQLStoreWithdrawalCredentialTagsRemainDistinct(t *testing.T) {
 		require.NoError(t, err)
 		hash := lcommon.Blake2b256{byte(0xe2 + i)}
 		transaction := &mockTransaction{
-			hash:        hash,
-			isValid:     true,
-			withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(17)},
+			hash:    hash,
+			isValid: true,
+			withdrawals: map[*lcommon.Address]*big.Int{
+				&address: big.NewInt(17),
+			},
 		}
 		require.NoError(t, store.SetTransaction(
 			transaction,
-			ocommon.Point{Slot: uint64(20 + i), Hash: bytes.Repeat([]byte{byte(0xe4 + i)}, 32)},
+			ocommon.Point{
+				Slot: uint64(20 + i),
+				Hash: bytes.Repeat([]byte{byte(0xe4 + i)}, 32),
+			},
 			0,
 			nil,
 			true,
@@ -415,9 +420,11 @@ func TestSharedSQLStoreZeroWithdrawalValidatesAccountAndBalance(t *testing.T) {
 			)
 			require.NoError(t, err)
 			transaction := &mockTransaction{
-				hash:        lcommon.Blake2b256{0xf8},
-				isValid:     true,
-				withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(0)},
+				hash:    lcommon.Blake2b256{0xf8},
+				isValid: true,
+				withdrawals: map[*lcommon.Address]*big.Int{
+					&address: big.NewInt(0),
+				},
 			}
 			err = store.SetTransaction(
 				transaction,

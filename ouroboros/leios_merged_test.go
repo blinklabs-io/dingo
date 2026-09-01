@@ -506,8 +506,11 @@ func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
 					testDijkstraAnnouncementHeaderRaw(t),
 				),
 			)
-			require.NoError(t, err,
-				"accepted-ignore and existing suppression must keep the bearer usable")
+			require.NoError(
+				t,
+				err,
+				"accepted-ignore and existing suppression must keep the bearer usable",
+			)
 			require.Equal(t, 1, announcementLedger.validated)
 			require.Same(t, conn, cm.GetConnectionById(conn.Id()),
 				"the announcement callback must not disconnect the peer")
@@ -859,7 +862,9 @@ func testLeiosManifestTx(
 	require.NoError(t, err)
 	return cbor.RawMessage(wrapped), lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txElems[0]),
-		TransactionSize: uint16(len(txCbor)), //nolint:gosec // test fixture is small
+		TransactionSize: uint16(
+			len(txCbor),
+		), //nolint:gosec // test fixture is small
 	}
 }
 
@@ -907,7 +912,10 @@ func TestValidateLeiosEndorserBlockTxsRejectsMalformedManifest(t *testing.T) {
 		"zero reference size":  zeroSizeManifest,
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := validateLeiosEndorserBlockTxs(manifest, []cbor.RawMessage{tx})
+			err := validateLeiosEndorserBlockTxs(
+				manifest,
+				[]cbor.RawMessage{tx},
+			)
 			require.Error(t, err)
 		})
 	}
@@ -934,11 +942,19 @@ func TestValidateLeiosEndorserBlockTxsRejectsWrongSizeAndMalformedBody(
 			if name == "wrong size" {
 				candidateRef.TransactionSize++
 				manifest, err = lcommon.LeiosEndorserBlock{
-					TransactionReferences: []lcommon.LeiosTransactionReference{candidateRef},
+					TransactionReferences: []lcommon.LeiosTransactionReference{
+						candidateRef,
+					},
 				}.MarshalCBOR()
 				require.NoError(t, err)
 			}
-			require.Error(t, validateLeiosEndorserBlockTxs(manifest, []cbor.RawMessage{candidate}))
+			require.Error(
+				t,
+				validateLeiosEndorserBlockTxs(
+					manifest,
+					[]cbor.RawMessage{candidate},
+				),
+			)
 		})
 	}
 }
@@ -983,7 +999,9 @@ func (r *recordingManifestTxRequester) BlockTxsRequest(
 	return oleiosfetch.NewMsgBlockTxsFull(point, bitmaps, txs), nil
 }
 
-func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(t *testing.T) {
+func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(
+	t *testing.T,
+) {
 	tx1, ref1 := testLeiosManifestTx(t, 1)
 	tx2, ref2 := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -1014,7 +1032,9 @@ func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(t *testing.T) 
 	))
 }
 
-func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(t *testing.T) {
+func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(
+	t *testing.T,
+) {
 	tx1, ref1 := testLeiosManifestTx(t, 1)
 	tx2, ref2 := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -1054,7 +1074,9 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(t *testing.T) 
 	require.True(t, cached.completeTxCache())
 }
 
-func TestLoadLeiosEBFromDBRejectsTransactionsThatMismatchManifest(t *testing.T) {
+func TestLoadLeiosEBFromDBRejectsTransactionsThatMismatchManifest(
+	t *testing.T,
+) {
 	_, ref := testLeiosManifestTx(t, 1)
 	mismatchedTx, _ := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -1457,7 +1479,11 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 		LeiosClosureWaitTimeout: 20 * time.Millisecond,
 	})
 	block := models.Block{Cbor: certRB, Slot: 77, Hash: []byte{0x77}}
-	got, err := o.serveLeiosCertRbWithWait(block, ebHash, gouroboros.ConnectionId{})
+	got, err := o.serveLeiosCertRbWithWait(
+		block,
+		ebHash,
+		gouroboros.ConnectionId{},
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)

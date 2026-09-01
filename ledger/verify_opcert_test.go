@@ -416,8 +416,12 @@ func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
 	bad := createTestBlock(t, [32]byte{0xD5}, 0, tamperOpCertSig)
 	staleness, err = ls.ValidateLeiosAnnouncementHeader(bad.block.Header())
 	require.ErrorContains(t, err, "cold-key signature")
-	require.Equal(t, LeiosAnnouncementFreshOCIN, staleness,
-		"an invalid header must fail before receiving a meaningful OCIN verdict")
+	require.Equal(
+		t,
+		LeiosAnnouncementFreshOCIN,
+		staleness,
+		"an invalid header must fail before receiving a meaningful OCIN verdict",
+	)
 }
 
 // TestOpCertNoGapRuleApplies pins the TPraos→Praos boundary: the opcert no-gap

@@ -129,7 +129,10 @@ func newTestRecycler(
 	return r, components
 }
 
-func newTestTickState(lastProgressSlot uint64, lastProgressAt time.Time) *tickState {
+func newTestTickState(
+	lastProgressSlot uint64,
+	lastProgressAt time.Time,
+) *tickState {
 	st := newTickState()
 	st.lastProgressSlot = lastProgressSlot
 	st.lastProgressAt = lastProgressAt
@@ -178,7 +181,11 @@ func TestTickRecyclesStalledActiveConnection(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, connId, recycleEvt.ConnectionId)
 	assert.Equal(t, "stalled_active_connection", recycleEvt.Reason)
-	assert.True(t, events[0].async, "connection recycle must be published async")
+	assert.True(
+		t,
+		events[0].async,
+		"connection recycle must be published async",
+	)
 	assert.NotContains(t, st.recycleAt, connId.String())
 	assert.Contains(t, st.lastRecycled, connId.String())
 }
@@ -488,7 +495,11 @@ func TestTickResyncsOnLocalTipPlateau(t *testing.T) {
 	resyncEvt, ok := events[0].evt.Data.(event.ChainsyncResyncEvent)
 	require.True(t, ok)
 	assert.Equal(t, connId, resyncEvt.ConnectionId)
-	assert.Equal(t, event.ChainsyncResyncReasonLocalTipPlateau, resyncEvt.Reason)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		resyncEvt.Reason,
+	)
 	assert.False(
 		t,
 		events[0].async,
