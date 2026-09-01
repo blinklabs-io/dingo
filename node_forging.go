@@ -323,14 +323,22 @@ func (n *Node) initBlockForger(
 		}
 	}
 
-	// Wire the durable last-forged-slot fence. Without a metadata store
-	// the forger falls back to its in-memory fence, which cannot survive
-	// a restart.
+	// Wire the durable last-forged-slot fence. A block producer must not
+	// start without it: the in-memory fallback cannot survive a restart,
+	// which is precisely the case the fence exists for. The forging
+	// package still tolerates a nil store for embedders and dev-mode
+	// wiring, so refuse here rather than there.
 	var forgeFence forging.ForgeFenceStore
 	if n.db != nil {
 		forgeFence = forging.NewSyncStateForgeFenceStore(
 			n.db.Metadata(),
 			poolKeyHash,
+		)
+	}
+	if forgeFence == nil {
+		_ = election.Stop()
+		return errors.New(
+			"block producer requires a metadata store for the forge fence",
 		)
 	}
 
