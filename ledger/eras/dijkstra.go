@@ -285,9 +285,12 @@ func ValidateTxDijkstra(
 }
 
 var dijkstraPhase1UtxoValidationRules = buildIndexedUtxoValidationRules(
-	gdijkstra.UtxoValidationRuleDescriptors(),
+	gdijkstra.UtxoValidationRules,
 	utxoValidationRuleReplacement{
-		id: lcommon.UtxoValidationRulePlutusScripts,
+		id: utxoValidationRulePlutusScripts,
+		classifier: conwayPlutusUtxoValidationRuleClassifier(
+			&gdijkstra.DijkstraProtocolParameters{},
+		),
 	},
 )
 

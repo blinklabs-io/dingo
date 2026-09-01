@@ -161,12 +161,18 @@ var allegraUtxoValidationRules = buildAllegraValidationRules()
 // path, including for transactions rebuilt from block components.
 func buildAllegraValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
-		allegra.UtxoValidationRuleDescriptors(),
+		allegra.UtxoValidationRules,
 		utxoValidationRuleReplacement{
-			id: lcommon.UtxoValidationRuleFeeTooSmall,
+			id: utxoValidationRuleFeeTooSmall,
+			classifier: feeTooSmallUtxoValidationRuleClassifier(
+				&allegra.AllegraProtocolParameters{MinFeeB: 1},
+			),
 		},
 		utxoValidationRuleReplacement{
-			id: lcommon.UtxoValidationRuleMaxTxSize,
+			id: utxoValidationRuleMaxTxSize,
+			classifier: maxTxSizeUtxoValidationRuleClassifier(
+				&allegra.AllegraProtocolParameters{},
+			),
 		},
 	)
 }

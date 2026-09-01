@@ -17,6 +17,7 @@ package eras
 import (
 	"errors"
 	"fmt"
+	"iter"
 	"math"
 	"math/big"
 
@@ -94,18 +95,156 @@ func checkPoolMarginFloor(
 
 type indexedUtxoValidationRule struct {
 	index          int
-	id             lcommon.UtxoValidationRuleId
+	id             utxoValidationRuleId
 	validationFunc lcommon.UtxoValidationRuleFunc
 }
 
+type utxoValidationRuleId string
+
+const (
+	utxoValidationRuleConwayFeaturesWithPlutusV1V2 utxoValidationRuleId = "conway-features-with-plutus-v1-v2"
+	utxoValidationRuleFeeTooSmall                  utxoValidationRuleId = "fee-too-small"
+	utxoValidationRuleMaxTxSize                    utxoValidationRuleId = "max-tx-size"
+	utxoValidationRulePlutusScripts                utxoValidationRuleId = "plutus-scripts"
+)
+
+type utxoValidationRuleClassifier func(
+	lcommon.UtxoValidationRuleFunc,
+) bool
+
 type utxoValidationRuleReplacement struct {
-	id              lcommon.UtxoValidationRuleId
+	id              utxoValidationRuleId
+	classifier      utxoValidationRuleClassifier
 	replacementFunc lcommon.UtxoValidationRuleFunc
 }
 
-type utxoValidationRuleDescriptor interface {
-	lcommon.UtxoValidationRuleDescriptor |
-		*lcommon.UtxoValidationRuleDescriptor
+type utxoValidationRuleProbe struct {
+	tx lcommon.Transaction
+	ls lcommon.LedgerState
+	pp lcommon.ProtocolParameters
+}
+
+type utxoValidationRuleProbeTx struct {
+	lcommon.Transaction
+	cbor                 []byte
+	fee                  *big.Int
+	isValid              bool
+	witnesses            lcommon.TransactionWitnessSet
+	currentTreasuryValue *big.Int
+}
+
+func (t *utxoValidationRuleProbeTx) Cbor() []byte {
+	return t.cbor
+}
+
+func (*utxoValidationRuleProbeTx) Type() int {
+	return 0
+}
+
+func (t *utxoValidationRuleProbeTx) Fee() *big.Int {
+	return t.fee
+}
+
+func (t *utxoValidationRuleProbeTx) IsValid() bool {
+	return t.isValid
+}
+
+func (t *utxoValidationRuleProbeTx) Witnesses() lcommon.TransactionWitnessSet {
+	return t.witnesses
+}
+
+func (*utxoValidationRuleProbeTx) Inputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (*utxoValidationRuleProbeTx) ReferenceInputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (*utxoValidationRuleProbeTx) Certificates() []lcommon.Certificate {
+	return nil
+}
+
+func (*utxoValidationRuleProbeTx) Withdrawals() map[*lcommon.Address]*big.Int {
+	return nil
+}
+
+func (*utxoValidationRuleProbeTx) AssetMint() *lcommon.MultiAsset[lcommon.MultiAssetTypeMint] {
+	return nil
+}
+
+func (*utxoValidationRuleProbeTx) VotingProcedures() lcommon.VotingProcedures {
+	return nil
+}
+
+func (*utxoValidationRuleProbeTx) ProposalProcedures() []lcommon.ProposalProcedure {
+	return nil
+}
+
+func (t *utxoValidationRuleProbeTx) CurrentTreasuryValue() *big.Int {
+	return t.currentTreasuryValue
+}
+
+type utxoValidationRuleProbeWitnesses struct {
+	redeemers       lcommon.TransactionWitnessRedeemers
+	plutusV1Scripts []lcommon.PlutusV1Script
+}
+
+func (*utxoValidationRuleProbeWitnesses) Vkey() []lcommon.VkeyWitness {
+	return nil
+}
+
+func (*utxoValidationRuleProbeWitnesses) NativeScripts() []lcommon.NativeScript {
+	return nil
+}
+
+func (*utxoValidationRuleProbeWitnesses) Bootstrap() []lcommon.BootstrapWitness {
+	return nil
+}
+
+func (*utxoValidationRuleProbeWitnesses) PlutusData() []lcommon.Datum {
+	return nil
+}
+
+func (w *utxoValidationRuleProbeWitnesses) PlutusV1Scripts() []lcommon.PlutusV1Script {
+	return w.plutusV1Scripts
+}
+
+func (*utxoValidationRuleProbeWitnesses) PlutusV2Scripts() []lcommon.PlutusV2Script {
+	return nil
+}
+
+func (*utxoValidationRuleProbeWitnesses) PlutusV3Scripts() []lcommon.PlutusV3Script {
+	return nil
+}
+
+func (w *utxoValidationRuleProbeWitnesses) Redeemers() lcommon.TransactionWitnessRedeemers {
+	return w.redeemers
+}
+
+type utxoValidationRuleProbeRedeemers struct{}
+
+func (utxoValidationRuleProbeRedeemers) Indexes(lcommon.RedeemerTag) []uint {
+	return nil
+}
+
+func (utxoValidationRuleProbeRedeemers) Value(
+	uint,
+	lcommon.RedeemerTag,
+) lcommon.RedeemerValue {
+	return lcommon.RedeemerValue{}
+}
+
+func (utxoValidationRuleProbeRedeemers) Iter() iter.Seq2[
+	lcommon.RedeemerKey,
+	lcommon.RedeemerValue,
+] {
+	return func(yield func(lcommon.RedeemerKey, lcommon.RedeemerValue) bool) {
+		yield(
+			lcommon.RedeemerKey{Tag: lcommon.RedeemerTagSpend},
+			lcommon.RedeemerValue{},
+		)
+	}
 }
 
 const conwayRefScriptCostStride = 25_600
@@ -168,81 +307,204 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 	return false
 }
 
-// buildIndexedUtxoValidationRules finds each target by its stable descriptor
-// ID and preserves the target's original upstream position. A nil replacement
-// removes the target; a non-nil replacement substitutes it in place.
-func buildIndexedUtxoValidationRules[D utxoValidationRuleDescriptor](
-	descriptors []D,
+// utxoValidationRuleErrorClassifier identifies a rule by the concrete error
+// it returns for a controlled transaction. Unrelated rules can require ledger
+// state or transaction fields that a probe intentionally does not provide, so
+// a panic means only that the rule did not match this classifier.
+func utxoValidationRuleErrorClassifier[E error](
+	probe utxoValidationRuleProbe,
+) utxoValidationRuleClassifier {
+	return func(rule lcommon.UtxoValidationRuleFunc) (matched bool) {
+		defer func() {
+			if recover() != nil {
+				matched = false
+			}
+		}()
+		err := rule(probe.tx, 0, probe.ls, probe.pp)
+		_, matched = errors.AsType[E](err)
+		return matched
+	}
+}
+
+func feeTooSmallUtxoValidationRuleClassifier(
+	pp lcommon.ProtocolParameters,
+) utxoValidationRuleClassifier {
+	return utxoValidationRuleErrorClassifier[shelley.FeeTooSmallUtxoError](
+		utxoValidationRuleProbe{
+			tx: &utxoValidationRuleProbeTx{
+				cbor: []byte{0x80},
+				fee:  new(big.Int),
+			},
+			pp: pp,
+		},
+	)
+}
+
+func maxTxSizeUtxoValidationRuleClassifier(
+	pp lcommon.ProtocolParameters,
+) utxoValidationRuleClassifier {
+	return utxoValidationRuleErrorClassifier[shelley.MaxTxSizeUtxoError](
+		utxoValidationRuleProbe{
+			tx: &utxoValidationRuleProbeTx{
+				cbor: []byte{0x80},
+				fee:  new(big.Int),
+			},
+			pp: pp,
+		},
+	)
+}
+
+func unsupportedPlutusUtxoValidationRuleClassifier(
+	pp lcommon.ProtocolParameters,
+) utxoValidationRuleClassifier {
+	return utxoValidationRuleErrorClassifier[lcommon.PlutusScriptValidationUnsupportedError](utxoValidationRuleProbe{
+		tx: &utxoValidationRuleProbeTx{
+			isValid: true,
+			witnesses: &utxoValidationRuleProbeWitnesses{
+				redeemers: utxoValidationRuleProbeRedeemers{},
+			},
+		},
+		pp: pp,
+	})
+}
+
+func conwayPlutusUtxoValidationRuleClassifier(
+	pp lcommon.ProtocolParameters,
+) utxoValidationRuleClassifier {
+	witnesses := &utxoValidationRuleProbeWitnesses{
+		redeemers: utxoValidationRuleProbeRedeemers{},
+	}
+	return func(rule lcommon.UtxoValidationRuleFunc) (matched bool) {
+		defer func() {
+			if recover() != nil {
+				matched = false
+			}
+		}()
+		validErr := rule(
+			&utxoValidationRuleProbeTx{
+				isValid:   true,
+				witnesses: witnesses,
+			},
+			0,
+			nil,
+			pp,
+		)
+		if _, ok := errors.AsType[conway.ExtraRedeemerError](validErr); !ok {
+			return false
+		}
+		// Phase-2 execution is skipped when a block producer declares the
+		// transaction invalid. The phase-1 extraneous-redeemer rule returns
+		// the same concrete error for the valid probe but still runs here.
+		return rule(
+			&utxoValidationRuleProbeTx{witnesses: witnesses},
+			0,
+			nil,
+			pp,
+		) == nil
+	}
+}
+
+func conwayFeaturesUtxoValidationRuleClassifier() utxoValidationRuleClassifier {
+	return utxoValidationRuleErrorClassifier[conway.CurrentTreasuryValueWithPlutusV1V2Error](utxoValidationRuleProbe{
+		tx: &utxoValidationRuleProbeTx{
+			witnesses: &utxoValidationRuleProbeWitnesses{
+				plutusV1Scripts: []lcommon.PlutusV1Script{{0x01}},
+			},
+			currentTreasuryValue: big.NewInt(1),
+		},
+		pp: &conway.ConwayProtocolParameters{},
+	})
+}
+
+// buildIndexedUtxoValidationRules finds each target by stable validation
+// behavior and preserves the target's original upstream position. A nil
+// replacement removes the target; a non-nil replacement substitutes it in
+// place. Invalid, ambiguous, duplicate, or missing metadata fails closed.
+func buildIndexedUtxoValidationRules(
+	rules []lcommon.UtxoValidationRuleFunc,
 	replacements ...utxoValidationRuleReplacement,
 ) []indexedUtxoValidationRule {
-	normalized := make(
-		[]lcommon.UtxoValidationRuleDescriptor,
-		len(descriptors),
-	)
-	for idx, descriptor := range descriptors {
-		switch tmpDescriptor := any(descriptor).(type) {
-		case lcommon.UtxoValidationRuleDescriptor:
-			normalized[idx] = tmpDescriptor
-		case *lcommon.UtxoValidationRuleDescriptor:
-			if tmpDescriptor == nil {
-				panic(fmt.Errorf(
-					"UTxO validation rule descriptor at index %d is nil",
-					idx,
-				))
-			}
-			normalized[idx] = *tmpDescriptor
+	for idx, rule := range rules {
+		if rule == nil {
+			panic(fmt.Sprintf(
+				"UTxO validation rule at index %d is nil",
+				idx,
+			))
 		}
 	}
-	rules, err := lcommon.UtxoValidationRulesFromDescriptors(normalized)
-	if err != nil {
-		panic(err)
-	}
 
-	replacementById := make(
-		map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement,
+	replacementIndexById := make(
+		map[utxoValidationRuleId]int,
 		len(replacements),
 	)
-	replacementIds := make(
-		[]lcommon.UtxoValidationRuleId,
-		0,
-		len(replacements),
-	)
-	for _, replacement := range replacements {
+	for idx, replacement := range replacements {
 		if replacement.id == "" {
 			panic("UTxO validation rule replacement has an empty ID")
 		}
-		if _, ok := replacementById[replacement.id]; ok {
+		if replacement.classifier == nil {
+			panic(fmt.Sprintf(
+				"UTxO validation rule replacement ID %q has a nil classifier",
+				replacement.id,
+			))
+		}
+		if _, ok := replacementIndexById[replacement.id]; ok {
 			panic(fmt.Sprintf(
 				"UTxO validation rule replacement ID %q is configured more than once",
 				replacement.id,
 			))
 		}
-		replacementById[replacement.id] = replacement
-		replacementIds = append(replacementIds, replacement.id)
+		replacementIndexById[replacement.id] = idx
 	}
 
-	matched := make(map[lcommon.UtxoValidationRuleId]bool, len(replacements))
+	matchedRuleIndexById := make(map[utxoValidationRuleId]int, len(replacements))
 	ret := make([]indexedUtxoValidationRule, 0, len(rules))
 	for idx, validationFunc := range rules {
-		descriptor := normalized[idx]
-		if replacement, ok := replacementById[descriptor.Id]; ok {
-			matched[descriptor.Id] = true
-			validationFunc = replacement.replacementFunc
+		var matchedReplacement utxoValidationRuleReplacement
+		matchedReplacementFound := false
+		for _, replacement := range replacements {
+			if !replacement.classifier(validationFunc) {
+				continue
+			}
+			if matchedReplacementFound {
+				panic(fmt.Sprintf(
+					"UTxO validation rule at index %d matches replacement IDs %q and %q",
+					idx,
+					matchedReplacement.id,
+					replacement.id,
+				))
+			}
+			if previousIdx, ok := matchedRuleIndexById[replacement.id]; ok {
+				panic(fmt.Sprintf(
+					"UTxO validation rule replacement ID %q matches upstream rules at indexes %d and %d",
+					replacement.id,
+					previousIdx,
+					idx,
+				))
+			}
+			matchedReplacement = replacement
+			matchedReplacementFound = true
+		}
+
+		var ruleId utxoValidationRuleId
+		if matchedReplacementFound {
+			matchedRuleIndexById[matchedReplacement.id] = idx
+			ruleId = matchedReplacement.id
+			validationFunc = matchedReplacement.replacementFunc
 			if validationFunc == nil {
 				continue
 			}
 		}
 		ret = append(ret, indexedUtxoValidationRule{
 			index:          idx,
-			id:             descriptor.Id,
+			id:             ruleId,
 			validationFunc: validationFunc,
 		})
 	}
-	for _, replacementId := range replacementIds {
-		if !matched[replacementId] {
+	for _, replacement := range replacements {
+		if _, ok := matchedRuleIndexById[replacement.id]; !ok {
 			panic(fmt.Sprintf(
-				"UTxO validation rule replacement ID %q was not found in upstream descriptors",
-				replacementId,
+				"UTxO validation rule replacement ID %q was not found in upstream rules",
+				replacement.id,
 			))
 		}
 	}

@@ -262,17 +262,23 @@ func conwayValidationRules(
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
-		conway.UtxoValidationRuleDescriptors(),
+		conway.UtxoValidationRules,
 		utxoValidationRuleReplacement{
-			id: lcommon.
-				UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+			id:              utxoValidationRuleConwayFeaturesWithPlutusV1V2,
+			classifier:      conwayFeaturesUtxoValidationRuleClassifier(),
 			replacementFunc: validateConwayFeaturesWithNeededPlutusV1V2,
 		},
 		utxoValidationRuleReplacement{
-			id: lcommon.UtxoValidationRuleFeeTooSmall,
+			id: utxoValidationRuleFeeTooSmall,
+			classifier: feeTooSmallUtxoValidationRuleClassifier(
+				&conway.ConwayProtocolParameters{MinFeeB: 1},
+			),
 		},
 		utxoValidationRuleReplacement{
-			id: lcommon.UtxoValidationRulePlutusScripts,
+			id: utxoValidationRulePlutusScripts,
+			classifier: conwayPlutusUtxoValidationRuleClassifier(
+				&conway.ConwayProtocolParameters{},
+			),
 		},
 	)
 }

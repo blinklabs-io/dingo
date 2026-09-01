@@ -213,8 +213,7 @@ func decodeConwayFeaturesTx(
 func conwayFeaturesRule(t *testing.T) lcommon.UtxoValidationRuleFunc {
 	t.Helper()
 	for _, rule := range conwayUtxoValidationRules {
-		if rule.id == lcommon.
-			UtxoValidationRuleConwayFeaturesWithPlutusV1V2 {
+		if rule.id == utxoValidationRuleConwayFeaturesWithPlutusV1V2 {
 			return rule.validationFunc
 		}
 	}

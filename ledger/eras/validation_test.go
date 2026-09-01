@@ -310,21 +310,29 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 }
 
 func TestAlonzoValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	requireIndexedRulesMatchDescriptors(
+	classifier := unsupportedPlutusUtxoValidationRuleClassifier(
+		&alonzo.AlonzoProtocolParameters{},
+	)
+	requireIndexedRulesMatchUpstreamShape(
 		t,
 		alonzoUtxoValidationRules,
-		alonzo.UtxoValidationRuleDescriptors(),
-		lcommon.UtxoValidationRulePlutusScripts,
+		alonzo.UtxoValidationRules,
+		1,
 	)
+	requireIndexedRulesExcludeClassifier(t, alonzoUtxoValidationRules, classifier)
 }
 
 func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	requireIndexedRulesMatchDescriptors(
+	classifier := unsupportedPlutusUtxoValidationRuleClassifier(
+		&babbage.BabbageProtocolParameters{},
+	)
+	requireIndexedRulesMatchUpstreamShape(
 		t,
 		babbageUtxoValidationRules,
-		babbage.UtxoValidationRuleDescriptors(),
-		lcommon.UtxoValidationRulePlutusScripts,
+		babbage.UtxoValidationRules,
+		1,
 	)
+	requireIndexedRulesExcludeClassifier(t, babbageUtxoValidationRules, classifier)
 }
 
 func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
@@ -493,48 +501,58 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 }
 
 func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	requireIndexedRulesMatchDescriptors(
+	feeClassifier := feeTooSmallUtxoValidationRuleClassifier(
+		&conway.ConwayProtocolParameters{MinFeeB: 1},
+	)
+	plutusClassifier := conwayPlutusUtxoValidationRuleClassifier(
+		&conway.ConwayProtocolParameters{},
+	)
+	requireIndexedRulesMatchUpstreamShape(
 		t,
 		conwayUtxoValidationRules,
-		conway.UtxoValidationRuleDescriptors(),
-		lcommon.UtxoValidationRuleFeeTooSmall,
-		lcommon.UtxoValidationRulePlutusScripts,
+		conway.UtxoValidationRules,
+		2,
 	)
+	requireIndexedRulesExcludeClassifier(t, conwayUtxoValidationRules, feeClassifier)
+	requireIndexedRulesExcludeClassifier(t, conwayUtxoValidationRules, plutusClassifier)
 	requireIndexedRulesIncludeId(
 		t,
 		conwayUtxoValidationRules,
-		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		utxoValidationRuleConwayFeaturesWithPlutusV1V2,
 		"Conway validation must install Dingo's needed-script rule",
 	)
 }
 
 func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
-	requireIndexedRulesMatchDescriptors(
+	requireIndexedRulesMatchUpstreamShape(
 		t,
 		conwayPhase1UtxoValidationRules,
-		conway.UtxoValidationRuleDescriptors(),
-		lcommon.UtxoValidationRuleFeeTooSmall,
-		lcommon.UtxoValidationRulePlutusScripts,
+		conway.UtxoValidationRules,
+		2,
 	)
-	requireIndexedRulesIncludeId(
+	requireIndexedRulesIncludeClassifier(
 		t,
 		conwayPhase1UtxoValidationRules,
-		lcommon.UtxoValidationRuleExUnitsTooBig,
+		exUnitsTooBigUtxoValidationRuleClassifier(
+			&conway.ConwayProtocolParameters{},
+		),
 		"Conway phase-1 replay must still enforce ExUnits limits",
 	)
 }
 
 func TestDijkstraPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
-	requireIndexedRulesMatchDescriptors(
+	requireIndexedRulesMatchUpstreamShape(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		gdijkstra.UtxoValidationRuleDescriptors(),
-		lcommon.UtxoValidationRulePlutusScripts,
+		gdijkstra.UtxoValidationRules,
+		1,
 	)
-	requireIndexedRulesIncludeId(
+	requireIndexedRulesIncludeClassifier(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		lcommon.UtxoValidationRuleExUnitsTooBig,
+		exUnitsTooBigUtxoValidationRuleClassifier(
+			&gdijkstra.DijkstraProtocolParameters{},
+		),
 		"Dijkstra phase-1 replay must still enforce ExUnits limits",
 	)
 }
@@ -1000,98 +1018,101 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 	)
 }
 
-func TestBuildIndexedUtxoValidationRulesFollowsDescriptorIds(t *testing.T) {
+func TestBuildIndexedUtxoValidationRulesFollowsSemanticClassifiers(
+	t *testing.T,
+) {
+	feeErr := errors.New("fee rule")
+	plutusErr := errors.New("Plutus rule")
+	replacementErr := errors.New("replacement rule")
+	type testRule struct {
+		kind string
+		err  error
+	}
 	tests := []struct {
-		name string
-		ids  []lcommon.UtxoValidationRuleId
+		name  string
+		rules []testRule
 	}{
 		{
 			name: "inserted rules",
-			ids: []lcommon.UtxoValidationRuleId{
-				lcommon.UtxoValidationRuleMetadata,
-				"inserted-rule",
-				lcommon.UtxoValidationRuleFeeTooSmall,
-				lcommon.UtxoValidationRulePlutusScripts,
-				lcommon.UtxoValidationRuleMaxTxSize,
+			rules: []testRule{
+				{kind: "metadata"},
+				{kind: "inserted"},
+				{kind: "fee", err: feeErr},
+				{kind: "Plutus", err: plutusErr},
+				{kind: "max-size"},
 			},
 		},
 		{
 			name: "reordered rules",
-			ids: []lcommon.UtxoValidationRuleId{
-				lcommon.UtxoValidationRuleMaxTxSize,
-				lcommon.UtxoValidationRulePlutusScripts,
-				lcommon.UtxoValidationRuleMetadata,
-				lcommon.UtxoValidationRuleFeeTooSmall,
+			rules: []testRule{
+				{kind: "max-size"},
+				{kind: "Plutus", err: plutusErr},
+				{kind: "metadata"},
+				{kind: "fee", err: feeErr},
 			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			calls := []string{}
-			newRule := func(marker string) lcommon.UtxoValidationRuleFunc {
-				return func(
+			rules := make([]lcommon.UtxoValidationRuleFunc, 0, len(tc.rules))
+			for _, testRule := range tc.rules {
+				ruleErr := testRule.err
+				rules = append(rules, func(
 					lcommon.Transaction,
 					uint64,
 					lcommon.LedgerState,
 					lcommon.ProtocolParameters,
 				) error {
-					calls = append(calls, marker)
-					return nil
-				}
-			}
-			descriptors := make(
-				[]lcommon.UtxoValidationRuleDescriptor,
-				0,
-				len(tc.ids),
-			)
-			for _, id := range tc.ids {
-				descriptors = append(
-					descriptors,
-					lcommon.UtxoValidationRuleDescriptor{
-						Id:        id,
-						Validator: newRule(string(id)),
-					},
-				)
+					return ruleErr
+				})
 			}
 			got := buildIndexedUtxoValidationRules(
-				descriptors,
+				rules,
 				utxoValidationRuleReplacement{
-					id: lcommon.UtxoValidationRuleFeeTooSmall,
+					id:         utxoValidationRuleFeeTooSmall,
+					classifier: testUtxoValidationRuleErrorClassifier(feeErr),
 				},
 				utxoValidationRuleReplacement{
-					id:              lcommon.UtxoValidationRulePlutusScripts,
-					replacementFunc: newRule("replacement"),
+					id:         utxoValidationRulePlutusScripts,
+					classifier: testUtxoValidationRuleErrorClassifier(plutusErr),
+					replacementFunc: func(
+						lcommon.Transaction,
+						uint64,
+						lcommon.LedgerState,
+						lcommon.ProtocolParameters,
+					) error {
+						return replacementErr
+					},
 				},
 			)
 
-			expectedIds := []lcommon.UtxoValidationRuleId{}
-			expectedIndexes := []int{}
-			expectedCalls := []string{}
-			for idx, id := range tc.ids {
-				switch id {
-				case lcommon.UtxoValidationRuleFeeTooSmall:
+			expectedPosition := 0
+			for idx, testRule := range tc.rules {
+				if testRule.kind == "fee" {
 					continue
-				case lcommon.UtxoValidationRulePlutusScripts:
-					expectedCalls = append(expectedCalls, "replacement")
-				default:
-					expectedCalls = append(expectedCalls, string(id))
 				}
-				expectedIds = append(expectedIds, id)
-				expectedIndexes = append(expectedIndexes, idx)
+				rule := got[expectedPosition]
+				require.Equal(t, idx, rule.index)
+				if testRule.kind == "Plutus" {
+					require.Equal(t, utxoValidationRulePlutusScripts, rule.id)
+					require.ErrorIs(
+						t,
+						rule.validationFunc(nil, 0, nil, nil),
+						replacementErr,
+					)
+				} else {
+					require.Empty(t, rule.id)
+				}
+				expectedPosition++
 			}
-			require.Len(t, got, len(expectedIds))
-			for idx, rule := range got {
-				require.Equal(t, expectedIndexes[idx], rule.index)
-				require.Equal(t, expectedIds[idx], rule.id)
-				require.NoError(t, rule.validationFunc(nil, 0, nil, nil))
-			}
-			require.Equal(t, expectedCalls, calls)
+			require.Len(t, got, expectedPosition)
 		})
 	}
 }
 
-func TestConwayValidationReportsOriginalDescriptorIndex(t *testing.T) {
+func TestConwayValidationReportsOriginalRuleIndex(t *testing.T) {
 	validationErr := errors.New("validation failed")
+	removedErr := errors.New("removed rule")
 	validator := func(
 		lcommon.Transaction,
 		uint64,
@@ -1101,22 +1122,29 @@ func TestConwayValidationReportsOriginalDescriptorIndex(t *testing.T) {
 		return nil
 	}
 	rules := buildIndexedUtxoValidationRules(
-		[]lcommon.UtxoValidationRuleDescriptor{
-			{Id: "first", Validator: validator},
-			{Id: "removed", Validator: validator},
-			{
-				Id: "failing",
-				Validator: func(
-					lcommon.Transaction,
-					uint64,
-					lcommon.LedgerState,
-					lcommon.ProtocolParameters,
-				) error {
-					return validationErr
-				},
+		[]lcommon.UtxoValidationRuleFunc{
+			validator,
+			func(
+				lcommon.Transaction,
+				uint64,
+				lcommon.LedgerState,
+				lcommon.ProtocolParameters,
+			) error {
+				return removedErr
+			},
+			func(
+				lcommon.Transaction,
+				uint64,
+				lcommon.LedgerState,
+				lcommon.ProtocolParameters,
+			) error {
+				return validationErr
 			},
 		},
-		utxoValidationRuleReplacement{id: "removed"},
+		utxoValidationRuleReplacement{
+			id:         "removed",
+			classifier: testUtxoValidationRuleErrorClassifier(removedErr),
+		},
 	)
 	require.Equal(t, 2, rules[1].index)
 
@@ -1142,26 +1170,60 @@ func TestConwayValidationReportsOriginalDescriptorIndex(t *testing.T) {
 	assert.Contains(t, err.Error(), "conway utxo validation rule 2")
 }
 
-func TestEraValidationRulesUseAuthoritativeDescriptors(t *testing.T) {
+func TestShelleyValidationRuleClassificationSurvivesWrappersAndReordering(
+	t *testing.T,
+) {
 	original := slices.Clone(shelley.UtxoValidationRules)
 	t.Cleanup(func() {
 		shelley.UtxoValidationRules = original
 	})
-	shelley.UtxoValidationRules[0] = nil
+
+	wrapped := make([]lcommon.UtxoValidationRuleFunc, 0, len(original)+1)
+	for _, rule := range original {
+		wrappedRule := rule
+		wrapped = append(wrapped, func(
+			tx lcommon.Transaction,
+			slot uint64,
+			ls lcommon.LedgerState,
+			pp lcommon.ProtocolParameters,
+		) error {
+			return wrappedRule(tx, slot, ls, pp)
+		})
+	}
+	slices.Reverse(wrapped)
+	wrapped = slices.Insert(
+		wrapped,
+		len(wrapped)/2,
+		func(
+			lcommon.Transaction,
+			uint64,
+			lcommon.LedgerState,
+			lcommon.ProtocolParameters,
+		) error {
+			return nil
+		},
+	)
+	shelley.UtxoValidationRules = wrapped
 
 	rules := buildShelleyValidationRules()
-	require.Len(t, rules, len(original)-2)
-	for idx, rule := range rules {
-		require.NotNil(
-			t,
-			rule.validationFunc,
-			"legacy rule mutation leaked into descriptor rule at index %d",
-			idx,
-		)
-	}
+	requireIndexedRulesMatchUpstreamShape(t, rules, wrapped, 2)
+	requireIndexedRulesExcludeClassifier(
+		t,
+		rules,
+		feeTooSmallUtxoValidationRuleClassifier(
+			&shelley.ShelleyProtocolParameters{MinFeeB: 1},
+		),
+	)
+	requireIndexedRulesExcludeClassifier(
+		t,
+		rules,
+		maxTxSizeUtxoValidationRuleClassifier(
+			&shelley.ShelleyProtocolParameters{},
+		),
+	)
 }
 
-func TestBuildIndexedUtxoValidationRulesRejectsMalformedDescriptors(
+func TestBuildIndexedUtxoValidationRulesRejectsMalformedMetadata(
 	t *testing.T,
 ) {
 	validator := func(
@@ -1172,68 +1234,87 @@ func TestBuildIndexedUtxoValidationRulesRejectsMalformedDescriptors(
 	) error {
 		return nil
 	}
+	classifier := testUtxoValidationRuleErrorClassifier(errors.New("target"))
 	tests := []struct {
-		name        string
-		descriptors []lcommon.UtxoValidationRuleDescriptor
-		err         string
+		name      string
+		build     func()
+		panicText string
 	}{
 		{
-			name: "empty ID",
-			descriptors: []lcommon.UtxoValidationRuleDescriptor{
-				{Id: "valid", Validator: validator},
-				{Validator: validator},
+			name: "nil upstream rule",
+			build: func() {
+				buildIndexedUtxoValidationRules(
+					[]lcommon.UtxoValidationRuleFunc{validator, nil},
+				)
 			},
-			err: "UTxO validation rule descriptor at index 1 has an empty ID",
+			panicText: "UTxO validation rule at index 1 is nil",
 		},
 		{
-			name: "duplicate ID",
-			descriptors: []lcommon.UtxoValidationRuleDescriptor{
-				{Id: "duplicate", Validator: validator},
-				{Id: "valid", Validator: validator},
-				{Id: "duplicate", Validator: validator},
+			name: "empty replacement ID",
+			build: func() {
+				buildIndexedUtxoValidationRules(
+					[]lcommon.UtxoValidationRuleFunc{validator},
+					utxoValidationRuleReplacement{classifier: classifier},
+				)
 			},
-			err: "UTxO validation rule descriptor at index 2 has duplicate ID " +
-				"\"duplicate\" (first used at index 0)",
+			panicText: "UTxO validation rule replacement has an empty ID",
 		},
 		{
-			name: "nil validator",
-			descriptors: []lcommon.UtxoValidationRuleDescriptor{
-				{Id: "valid", Validator: validator},
-				{Id: "nil-validator"},
+			name: "nil classifier",
+			build: func() {
+				buildIndexedUtxoValidationRules(
+					[]lcommon.UtxoValidationRuleFunc{validator},
+					utxoValidationRuleReplacement{id: "nil-classifier"},
+				)
 			},
-			err: "UTxO validation rule descriptor at index 1 with ID " +
-				"\"nil-validator\" has a nil validator",
+			panicText: "UTxO validation rule replacement ID \"nil-classifier\" has a nil classifier",
+		},
+		{
+			name: "duplicate replacement ID",
+			build: func() {
+				buildIndexedUtxoValidationRules(
+					[]lcommon.UtxoValidationRuleFunc{validator},
+					utxoValidationRuleReplacement{
+						id: "duplicate", classifier: classifier,
+					},
+					utxoValidationRuleReplacement{
+						id: "duplicate", classifier: classifier,
+					},
+				)
+			},
+			panicText: "UTxO validation rule replacement ID \"duplicate\" is configured more than once",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.PanicsWithError(t, tc.err, func() {
-				buildIndexedUtxoValidationRules(tc.descriptors)
-			})
+			require.PanicsWithValue(t, tc.panicText, tc.build)
 		})
 	}
 }
 
-func TestBuildIndexedUtxoValidationRulesRejectsNilDescriptorPointer(
-	t *testing.T,
-) {
-	validator := func(
+func TestBuildIndexedUtxoValidationRulesRejectsDuplicateMatch(t *testing.T) {
+	targetErr := errors.New("target")
+	targetRule := func(
 		lcommon.Transaction,
 		uint64,
 		lcommon.LedgerState,
 		lcommon.ProtocolParameters,
 	) error {
-		return nil
+		return targetErr
 	}
-	descriptors := []*lcommon.UtxoValidationRuleDescriptor{
-		{Id: "valid", Validator: validator},
-		nil,
-	}
-	require.PanicsWithError(
+	require.PanicsWithValue(
 		t,
-		"UTxO validation rule descriptor at index 1 is nil",
+		"UTxO validation rule replacement ID \"target\" matches upstream rules at indexes 0 and 1",
 		func() {
-			buildIndexedUtxoValidationRules(descriptors)
+			buildIndexedUtxoValidationRules(
+				[]lcommon.UtxoValidationRuleFunc{targetRule, targetRule},
+				utxoValidationRuleReplacement{
+					id: "target",
+					classifier: testUtxoValidationRuleErrorClassifier(
+						targetErr,
+					),
+				},
+			)
 		},
 	)
 }
@@ -1241,58 +1322,180 @@ func TestBuildIndexedUtxoValidationRulesRejectsNilDescriptorPointer(
 func TestBuildIndexedUtxoValidationRulesPanicsWhenRuleIsMissing(t *testing.T) {
 	require.PanicsWithValue(
 		t,
-		"UTxO validation rule replacement ID \"plutus-scripts\" was not found in upstream descriptors",
+		"UTxO validation rule replacement ID \"plutus-scripts\" was not found in upstream rules",
 		func() {
 			buildIndexedUtxoValidationRules(
-				[]lcommon.UtxoValidationRuleDescriptor{
-					{
-						Id:        lcommon.UtxoValidationRuleMetadata,
-						Validator: shelley.UtxoValidateMetadata,
-					},
-				},
+				[]lcommon.UtxoValidationRuleFunc{shelley.UtxoValidateMetadata},
 				utxoValidationRuleReplacement{
-					id: lcommon.UtxoValidationRulePlutusScripts,
+					id: utxoValidationRulePlutusScripts,
+					classifier: testUtxoValidationRuleErrorClassifier(
+						errors.New("missing"),
+					),
 				},
 			)
 		},
 	)
 }
 
-func requireIndexedRulesMatchDescriptors(
+func TestBuildIndexedUtxoValidationRulesRejectsAmbiguousMetadata(t *testing.T) {
+	firstErr := errors.New("first")
+	secondErr := errors.New("second")
+	require.PanicsWithValue(
+		t,
+		"UTxO validation rule at index 0 matches replacement IDs \"first\" and \"second\"",
+		func() {
+			buildIndexedUtxoValidationRules(
+				[]lcommon.UtxoValidationRuleFunc{func(
+					lcommon.Transaction,
+					uint64,
+					lcommon.LedgerState,
+					lcommon.ProtocolParameters,
+				) error {
+					return errors.Join(firstErr, secondErr)
+				}},
+				utxoValidationRuleReplacement{
+					id: "first",
+					classifier: testUtxoValidationRuleErrorClassifier(
+						firstErr,
+					),
+				},
+				utxoValidationRuleReplacement{
+					id: "second",
+					classifier: testUtxoValidationRuleErrorClassifier(
+						secondErr,
+					),
+				},
+			)
+		},
+	)
+}
+
+func TestBuildIndexedUtxoValidationRulesIgnoresUnrelatedProbePanic(
+	t *testing.T,
+) {
+	targetErr := errors.New("target")
+	rules := buildIndexedUtxoValidationRules(
+		[]lcommon.UtxoValidationRuleFunc{
+			func(
+				lcommon.Transaction,
+				uint64,
+				lcommon.LedgerState,
+				lcommon.ProtocolParameters,
+			) error {
+				panic("probe requires more transaction state")
+			},
+			func(
+				lcommon.Transaction,
+				uint64,
+				lcommon.LedgerState,
+				lcommon.ProtocolParameters,
+			) error {
+				return targetErr
+			},
+		},
+		utxoValidationRuleReplacement{
+			id:         "target",
+			classifier: testUtxoValidationRuleErrorClassifier(targetErr),
+		},
+	)
+	require.Len(t, rules, 1)
+	require.Equal(t, 0, rules[0].index)
+}
+
+func testUtxoValidationRuleErrorClassifier(
+	want error,
+) utxoValidationRuleClassifier {
+	return func(rule lcommon.UtxoValidationRuleFunc) (matched bool) {
+		defer func() {
+			if recover() != nil {
+				matched = false
+			}
+		}()
+		return errors.Is(rule(nil, 0, nil, nil), want)
+	}
+}
+
+func exUnitsTooBigUtxoValidationRuleClassifier(
+	pp lcommon.ProtocolParameters,
+) utxoValidationRuleClassifier {
+	return utxoValidationRuleErrorClassifier[alonzo.ExUnitsTooBigUtxoError](
+		utxoValidationRuleProbe{
+			tx: &conway.ConwayTransaction{
+				WitnessSet: conway.ConwayTransactionWitnessSet{
+					WsRedeemers: conway.ConwayRedeemers{
+						Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+							{Tag: lcommon.RedeemerTagSpend}: {
+								ExUnits: lcommon.ExUnits{
+									Memory: 1,
+									Steps:  1,
+								},
+							},
+						},
+					},
+				},
+			},
+			pp: pp,
+		},
+	)
+}
+
+func requireIndexedRulesMatchUpstreamShape(
 	t *testing.T,
 	rules []indexedUtxoValidationRule,
-	descriptors []lcommon.UtxoValidationRuleDescriptor,
-	removedIds ...lcommon.UtxoValidationRuleId,
+	upstream []lcommon.UtxoValidationRuleFunc,
+	removed int,
 ) {
 	t.Helper()
-	removed := make(map[lcommon.UtxoValidationRuleId]struct{}, len(removedIds))
-	for _, id := range removedIds {
-		removed[id] = struct{}{}
-	}
-	expectedPosition := 0
-	for originalIndex, descriptor := range descriptors {
-		if _, ok := removed[descriptor.Id]; ok {
-			continue
-		}
-		require.Less(t, expectedPosition, len(rules))
-		rule := rules[expectedPosition]
-		require.Equal(t, originalIndex, rule.index)
-		require.Equal(t, descriptor.Id, rule.id)
+	require.Len(t, rules, len(upstream)-removed)
+	previousIndex := -1
+	for _, rule := range rules {
+		require.Greater(t, rule.index, previousIndex)
+		require.Less(t, rule.index, len(upstream))
 		require.NotNil(t, rule.validationFunc)
-		expectedPosition++
+		previousIndex = rule.index
 	}
-	require.Len(t, rules, expectedPosition)
 }
 
 func requireIndexedRulesIncludeId(
 	t *testing.T,
 	rules []indexedUtxoValidationRule,
-	want lcommon.UtxoValidationRuleId,
+	want utxoValidationRuleId,
 	message string,
 ) {
 	t.Helper()
 	for _, rule := range rules {
 		if rule.id == want {
+			return
+		}
+	}
+	require.Fail(t, message)
+}
+
+func requireIndexedRulesExcludeClassifier(
+	t *testing.T,
+	rules []indexedUtxoValidationRule,
+	classifier utxoValidationRuleClassifier,
+) {
+	t.Helper()
+	for _, rule := range rules {
+		require.False(
+			t,
+			classifier(rule.validationFunc),
+			"upstream rule at index %d should have been removed",
+			rule.index,
+		)
+	}
+}
+
+func requireIndexedRulesIncludeClassifier(
+	t *testing.T,
+	rules []indexedUtxoValidationRule,
+	classifier utxoValidationRuleClassifier,
+	message string,
+) {
+	t.Helper()
+	for _, rule := range rules {
+		if classifier(rule.validationFunc) {
 			return
 		}
 	}
@@ -1549,20 +1752,50 @@ func TestPreAlonzoRebuiltWireSize(t *testing.T) {
 }
 
 func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
-	requireIndexedRulesMatchDescriptors(
+	shelleyFeeClassifier := feeTooSmallUtxoValidationRuleClassifier(
+		&shelley.ShelleyProtocolParameters{MinFeeB: 1},
+	)
+	shelleyMaxSizeClassifier := maxTxSizeUtxoValidationRuleClassifier(
+		&shelley.ShelleyProtocolParameters{},
+	)
+	requireIndexedRulesMatchUpstreamShape(
 		t,
 		shelleyUtxoValidationRules,
-		shelley.UtxoValidationRuleDescriptors(),
-		lcommon.UtxoValidationRuleFeeTooSmall,
-		lcommon.UtxoValidationRuleMaxTxSize,
+		shelley.UtxoValidationRules,
+		2,
+	)
+	requireIndexedRulesExcludeClassifier(
+		t,
+		shelleyUtxoValidationRules,
+		shelleyFeeClassifier,
+	)
+	requireIndexedRulesExcludeClassifier(
+		t,
+		shelleyUtxoValidationRules,
+		shelleyMaxSizeClassifier,
 	)
 
-	requireIndexedRulesMatchDescriptors(
+	allegraFeeClassifier := feeTooSmallUtxoValidationRuleClassifier(
+		&allegra.AllegraProtocolParameters{MinFeeB: 1},
+	)
+	allegraMaxSizeClassifier := maxTxSizeUtxoValidationRuleClassifier(
+		&allegra.AllegraProtocolParameters{},
+	)
+	requireIndexedRulesMatchUpstreamShape(
 		t,
 		allegraUtxoValidationRules,
-		allegra.UtxoValidationRuleDescriptors(),
-		lcommon.UtxoValidationRuleFeeTooSmall,
-		lcommon.UtxoValidationRuleMaxTxSize,
+		allegra.UtxoValidationRules,
+		2,
+	)
+	requireIndexedRulesExcludeClassifier(
+		t,
+		allegraUtxoValidationRules,
+		allegraFeeClassifier,
+	)
+	requireIndexedRulesExcludeClassifier(
+		t,
+		allegraUtxoValidationRules,
+		allegraMaxSizeClassifier,
 	)
 }
 
