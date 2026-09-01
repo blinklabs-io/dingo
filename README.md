@@ -602,9 +602,11 @@ The Preview API path was also measured in a profiled run on 2026-08-31/09-01
 using the SQLite bulk-load pragmas and a retained Mithril artifact cache. It
 completed in **7h 36m 07s** end-to-end, including the historical metadata
 backfill (24,547s) and deferred index rebuild (16m). The earlier Preview API
-baseline was approximately 20h 53m, so this run was 63.6% faster. Peak space
-was approximately 76 GB (46 GB database plus 30 GB Mithril cache); steady
-state after removing the cache was approximately 46 GB.
+baseline was approximately 20h 53m, so this run used 63.6% less elapsed time.
+The approximately 30 GB Mithril cache is optional after the snapshot has been
+downloaded; peak space was approximately 76 GB when it was retained (46 GB
+database plus 30 GB cache), while steady state after removing it was
+approximately 46 GB.
 
 ### Disk Space Requirements
 
@@ -615,6 +617,7 @@ Bootstrapping requires temporary disk space for both the downloaded snapshot and
 | mainnet |      ~180 GB | ~200+ GB |      ~400 GB |
 | preprod |       ~60 GB |   ~80 GB |      ~150 GB |
 | preview |       ~15 GB |   ~25 GB |       ~50 GB |
+| preview (API mode) | ~15 GB | ~46 GB | ~61 GB (or ~76 GB with retained cache) |
 
 These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
 
