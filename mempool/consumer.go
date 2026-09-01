@@ -95,6 +95,15 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 		if m.nextTxIdx < len(m.mempool.transactions) {
 			poolTx := m.mempool.transactions[m.nextTxIdx]
 			if poolTx != nil {
+				// A body larger than this consumer's total byte budget can never
+				// become cacheable. Skip it so it cannot permanently pin the
+				// cursor and prevent later transactions from being relayed.
+				if int64(len(poolTx.Cbor)) > m.cacheLimitBytes {
+					m.nextTxIdx++
+					m.nextTxIdxMu.Unlock()
+					m.mempool.RUnlock()
+					continue
+				}
 				cached, aggregateChanged := m.cacheTransaction(poolTx)
 				if !cached {
 					m.nextTxIdxMu.Unlock()
@@ -171,8 +180,9 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 }
 
 // cacheTransaction reserves both the per-consumer and aggregate retained-byte
-// budgets before storing an advertised body. The caller keeps the cursor on
-// this transaction when reservation fails, preserving later retransmission.
+// budgets before storing an advertised body. Permanently oversized bodies are
+// filtered by NextTx; temporary reservation failures keep the cursor on the
+// transaction, preserving later retransmission.
 func (m *MempoolConsumer) cacheTransaction(
 	tx *MempoolTransaction,
 ) (bool, <-chan struct{}) {

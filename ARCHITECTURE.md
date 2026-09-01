@@ -3772,7 +3772,10 @@ embedded users. A secondary 1,024-entry default bound remains, and
 enforced by declining to advertise, not by eviction: a
 body is only ever served to the peer from this cache, and
 dropping one already advertised would silently omit a transaction the peer
-legitimately requested. A non-blocking `NextTx` returns nil once the cache is
+legitimately requested. A body larger than the consumer's entire byte budget
+is skipped for that consumer because it can never become cacheable; this keeps
+it from permanently blocking the cursor and prevents it from starving later,
+relayable transactions. A non-blocking `NextTx` returns nil once the cache is
 full; a blocking one parks until a slot frees rather than answering empty, since
 the peer's pull loop has no backoff for an empty reply and would spin
 request/reply without pacing. Shutdown or connection cleanup releases a parked

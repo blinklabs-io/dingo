@@ -1309,6 +1309,38 @@ func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	assert.NotNil(t, consumer.GetTxFromCache("large"))
 }
 
+func TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           event.NewEventBus(nil, nil),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          newMockValidator(),
+		MempoolCapacity:    10,
+		ConsumerCacheSize:  10,
+		ConsumerCacheBytes: 4,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
+
+	m.transactions = append(m.transactions,
+		&MempoolTransaction{Hash: "oversized", Cbor: make([]byte, 5)},
+		&MempoolTransaction{Hash: "relayable", Cbor: make([]byte, 3)},
+	)
+
+	nonBlocking := mustAddConsumer(t, m, newTestConnectionId(10))
+	tx := nonBlocking.NextTx(false)
+	require.NotNil(t, tx)
+	assert.Equal(t, "relayable", tx.Hash)
+	assert.Equal(t, 2, nonBlocking.nextTxIdx)
+	assert.Nil(t, nonBlocking.GetTxFromCache("oversized"))
+
+	blocking := mustAddConsumer(t, m, newTestConnectionId(11))
+	tx = blocking.NextTx(true)
+	require.NotNil(t, tx)
+	assert.Equal(t, "relayable", tx.Hash)
+	assert.Equal(t, 2, blocking.nextTxIdx)
+}
+
 func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
