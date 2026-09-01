@@ -15,11 +15,15 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -190,4 +194,122 @@ func TestLedgerProcessBlockProducerTrustGatedByCaller(t *testing.T) {
 		require.ErrorIs(t, plutusErr.Err, errOverDeclaredBudget)
 		require.False(t, sawTrust, "phase-2 validator must see trust disabled on replay")
 	})
+}
+
+// budgetTrustPipelineBlock is budgetTrustProbeBlock's block wrapped with a real
+// Dijkstra block CBOR so it survives the immutable-load pipeline's CBOR-offset
+// computation (database.ComputeOffsets), which runs BEFORE the phase-2
+// validator and rejects the bare mock's placeholder CBOR. The CBOR encodes a
+// minimal [header, block_body] Dijkstra block whose body is
+// [invalid_txs=nil, [ [tx_body={}, witness={}, aux=nil] ], leios=nil, peras=nil]
+// so ExtractTransactionOffsets finds exactly one transaction location. The
+// wrapped mock transaction produces no outputs, so extractOutputOffsets is a
+// no-op and the placeholder body needs no real UTxOs.
+type budgetTrustPipelineBlock struct {
+	*validityOutcomeTestBlock
+}
+
+// budgetTrustPipelineBlockBody is the Dijkstra block_body:
+// [invalid_transactions=nil, [ [tx_body={}, witness={}, aux=nil] ],
+//
+//	leios_certificate=nil, peras_certificate=nil]
+//
+// It is the CBOR the block-body-size envelope check measures (fields[1] of a
+// Dijkstra block), so BlockBodySize below must return its exact length.
+var budgetTrustPipelineBlockBody = []byte{
+	0x84, // block_body array(4)
+	0xf6, // invalid_transactions = nil
+	0x81, // transactions array(1)
+	0x83, // tx array(3): [body, witness, aux]
+	0xa0, // body = {}
+	0xa0, // witness = {}
+	0xf6, // aux = nil
+	0xf6, // leios_certificate = nil
+	0xf6, // peras_certificate = nil
+}
+
+func (b *budgetTrustPipelineBlock) Cbor() []byte {
+	cbor := []byte{
+		0x82, // array(2): [header, block_body]
+		0x80, // header = []
+	}
+	return append(cbor, budgetTrustPipelineBlockBody...)
+}
+
+// BlockBodySize must equal len(fields[1]) of Cbor above, or the envelope
+// block-body-size check rejects the block before the phase-2 validator runs.
+func (b *budgetTrustPipelineBlock) BlockBodySize() uint64 {
+	return uint64(len(budgetTrustPipelineBlockBody))
+}
+
+// TestProcessTrustedBlockBatchesPassesStrictTrust pins ledger/state.go's
+// ProcessTrustedBlockBatches call site (the `false` argument to
+// ledgerProcessBlocksFromSource). It drives an over-declared-budget block
+// through the REAL ProcessTrustedBlockBatches entry point end-to-end and
+// asserts the phase-2 validator observes trust DISABLED and the overage is
+// REJECTED. Flipping that `false` to `true` makes the validator observe trust
+// ENABLED and tolerate the overage, turning both assertions red — which the
+// sibling TestLedgerProcessBlockProducerTrustGatedByCaller cannot catch because
+// it feeds the flag straight to ledgerProcessBlock and never exercises the
+// ProcessTrustedBlockBatches call site.
+func TestProcessTrustedBlockBatchesPassesStrictTrust(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	block := &budgetTrustPipelineBlock{budgetTrustProbeBlock()}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{{
+		Slot:        block.SlotNumber(),
+		Hash:        block.Hash().Bytes(),
+		BlockNumber: block.BlockNumber(),
+		Type:        gdijkstra.BlockTypeDijkstra,
+		Cbor:        block.Cbor(),
+	}}))
+
+	var sawTrust, ran bool
+	testEra := budgetTrustProbeEra(&sawTrust, &ran)
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	ls := &LedgerState{
+		db:                db,
+		chain:             cm.PrimaryChain(),
+		activeEras:        []eras.EraDesc{testEra},
+		currentEra:        testEra,
+		currentPParams:    budgetTrustProbePParams(),
+		validationEnabled: true,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: nodeConfig,
+			Logger:            testLogger(),
+		},
+		currentEpoch: models.Epoch{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1000,
+			LengthInSlots: 1000,
+			EraId:         testEra.Id,
+		},
+	}
+
+	batches := make(chan []gledger.Block, 1)
+	batches <- []gledger.Block{block}
+	close(batches)
+
+	err = ls.ProcessTrustedBlockBatches(context.Background(), batches)
+
+	require.True(
+		t,
+		ran,
+		"phase-2 validator must run when driven through ProcessTrustedBlockBatches",
+	)
+	require.False(
+		t,
+		sawTrust,
+		"ProcessTrustedBlockBatches must pass trust=false (state.go immutable-load call site); flipping it to true fails here",
+	)
+	require.Error(
+		t,
+		err,
+		"immutable-load replay must reject the over-declared-budget block",
+	)
 }
