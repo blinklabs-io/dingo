@@ -30,16 +30,12 @@ Run the full suite:
 go test ./internal/test/conformance/
 ```
 
-Run with verbose vector-level output (useful when investigating a failure):
+Run with verbose vector-level output (useful when investigating a failure).
+This also prints the per-vector pass/fail statistics, which a separate
+`…WithResults` test used to produce from its own second replay of the corpus:
 
 ```bash
 go test -v ./internal/test/conformance/ -run TestRulesConformanceVectors
-```
-
-Run the variant that reports per-vector pass/fail statistics:
-
-```bash
-go test -v ./internal/test/conformance/ -run TestRulesConformanceVectorsWithResults
 ```
 
 Run a single vector by substring match (delegated by the harness):
@@ -125,11 +121,13 @@ re-migration -- which is what keeps the cost of a Reset (and so the whole
 vector suite, which resets once per vector) from being a real
 close/reopen/re-migrate network round trip every time.
 
-`TestRulesConformanceVectorsWithResultsPostgres` runs the SQLite and
-Postgres harnesses in the same test and compares vector counts instead of
-asserting a hardcoded number, so the two runs should exercise the identical
-vector count with identical pass counts, and the comparison stays correct
-even as the embedded `ouroboros-mock` vector corpus grows or shrinks.
+`TestRulesConformanceVectorsPostgres` also compares its results against the
+SQLite baseline rather than asserting a hardcoded number, so the two backends
+should exercise the identical vector count with identical pass counts, and the
+comparison stays correct even as the embedded `ouroboros-mock` vector corpus
+grows or shrinks. Both backends' replays are memoized per process (see
+[Corpus replay budget](#corpus-replay-budget)), so the comparison reuses the
+SQLite run the gate already performed instead of rebuilding a baseline.
 
 ## MySQL backend
 
@@ -183,8 +181,9 @@ vector. `TestMain` drops the process database and removes this directory
 once, after every test in the process has finished -- see
 `conformance_main_test.go`.
 
-`TestRulesConformanceVectorsWithResultsMysql` follows the same
-count-comparison approach as the Postgres variant, for the same reason.
+`TestRulesConformanceVectorsMysql` follows the same count-comparison approach
+as the Postgres variant, for the same reason, and likewise reuses the memoized
+SQLite baseline.
 
 ## When to run them
 
@@ -216,18 +215,73 @@ Cross-repo change cascades that must re-run this suite:
    `database.SetTransactionMetadataOnly` and `ledger/governance`, not an
    in-memory mirror -- and comparing expected vs. actual ledger state after
    each step.
-4. `RunAllVectors` fails the Go test on any vector mismatch;
-   `RunAllVectorsWithResults` returns structured pass/fail counts instead
-   so progress can be tracked.
+4. Each backend replays the corpus once per process through
+   `RunAllVectorsWithResults`, which returns structured per-vector results.
+   `assertCorpus` turns those results back into named per-vector subtests and
+   fails on any mismatch, so the single replay serves as both the pass/fail
+   gate and the progress statistics. See
+   [Corpus replay budget](#corpus-replay-budget).
 5. Between vectors, `Reset()` clears the real backend (not just in-memory
    bookkeeping) so each vector starts from a genuinely empty database --
    see each backend's own "Reset semantics" above for how.
+
+## Corpus replay budget
+
+One full replay of the vector corpus is the single most expensive thing in this
+package -- 917s of Linux CI time with real Postgres and MySQL attached -- and
+the corpus exercises `gouroboros` ledger rules, which do not vary by storage
+backend. Replaying it more than once per backend therefore buys no additional
+rule coverage.
+
+Each backend replays the corpus **exactly once per `go test` process**, and
+every consumer reads that one memoized result set: the pass/fail gate, the
+progress statistics, and the cross-backend comparison. The vector extraction is
+shared the same way, once rather than once per replay. See `corpus_test.go`.
+
+Before this, a Linux CI run with both DSNs configured replayed the corpus eight
+times:
+
+| Test | sqlite | postgres | mysql |
+|---|---|---|---|
+| `TestRulesConformanceVectors` | 1 | | |
+| `TestRulesConformanceVectorsWithResults` | 1 | | |
+| `TestRulesConformanceVectorsPostgres` | | 1 | |
+| `…WithResultsPostgres` | 1 | 1 | |
+| `TestRulesConformanceVectorsMysql` | | | 1 |
+| `…WithResultsMysql` | 1 | | 1 |
+| **total** | **4** | **2** | **2** |
+
+Two redundancies stacked: each `…WithResults` test re-ran the corpus purely to
+count rather than assert, and each cross-backend comparison rebuilt its own
+SQLite baseline from scratch instead of reusing one.
+
+### Why any per-backend replay earns its cost
+
+The per-dialect replays are not rule coverage -- they drive Dingo's storage
+layer through each dialect's semantics, and that has found real bugs. Both
+came from #3599, and neither is a ledger-rule bug:
+
+- `loadPoolAssociations` held a `pool_registration` cursor open while issuing
+  nested per-row queries on the same connection. SQLite tolerates concurrently
+  open cursors on one connection; MySQL and PostgreSQL do not, so a pool with
+  at least one owner or relay corrupted the connection once returned to the
+  pool, surfacing as a spurious "pool not found" on the next unrelated read.
+- `go-sql-driver/mysql` reports the number of rows an `UPDATE` actually
+  changed, not the number its `WHERE` clause matched, unlike `sqlite3` and
+  `lib/pq`. A DRep voting again in the same epoch with an unchanged
+  activity/expiry epoch matched a real row but changed no column, so MySQL
+  reported `affected == 0` -- indistinguishable from the row not existing.
+
+Both were found by driving the storage layer through the corpus's variety of
+access patterns. That needs **one** pass per dialect, not several.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `conformance_test.go` | Go test entry points, SQLite backend (`TestRulesConformanceVectors`, `…WithResults`) |
+| `conformance_test.go` | Go test entry point, SQLite backend (`TestRulesConformanceVectors`) |
+| `corpus_test.go` | Memoized per-backend corpus replay, shared assertion/reporting/comparison helpers, and the shared vector extraction |
+| `corpus_main_test.go` | `TestMain` for the untagged build — removes the shared vector extraction (`!dingo_extra_plugins` build tag) |
 | `conformance_postgres_test.go` | Go test entry points, PostgreSQL backend, including restart/rollback/invalid-DSN acceptance tests (`dingo_extra_plugins` build tag) |
 | `conformance_mysql_test.go` | Go test entry points, MySQL backend, including restart/rollback/invalid-DSN acceptance tests (`dingo_extra_plugins` build tag) |
 | `conformance_main_test.go` | `TestMain` — drops this process's Postgres schema and MySQL database and removes their paired blob directories once, after every test in the process has finished (`dingo_extra_plugins` build tag) |
