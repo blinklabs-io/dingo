@@ -649,6 +649,33 @@ graph TB
 
 The block production pipeline from leader election through broadcast.
 
+Two invariants keep the forger from advertising or repeating a block it has
+not durably adopted:
+
+- **Publish after acceptance.** `BlockForgedEvent` and the Leios
+  announcement enqueued alongside it (`node_forging.go`) run only after
+  `AddBlock` accepts the block. A rejected block is never advertised, so
+  peers cannot fetch a block this node does not have. Build-versus-adopt
+  stays observable through the `Forge_forged_int` and
+  `Forge_could_not_forge_int` counters.
+- **Duplicate-slot fence.** The chain-tip check (`currentSlot <= tipSlot`)
+  cannot see a slot whose block was signed and diffused but never adopted,
+  and it forgets slots entirely when the tip rolls back or the process
+  restarts. `ForgeFenceStore` (`ledger/forging/store.go`, persisted in
+  `sync_state` under `forge_fence:<poolid>`) records the highest slot the
+  node committed to *before* the header for that slot is signed, and the
+  forger refuses any slot at or below it. Refusing a slot the node did not
+  actually use costs one block; signing a second, different block for a
+  slot whose first block may already have reached peers is equivocation.
+  A fence that cannot be read fails forger construction, and one that
+  cannot be written fails the forge, rather than signing unprotected.
+  The `dingo_metrics_forgeFenceBlocked_int` counter is zero in normal
+  operation: any increment points at a slot-clock regression or a
+  rolled-back database. The fence lives in `sync_state`, so a Mithril
+  import that ends in a full `ClearSyncState` drops it; a producer
+  bootstrapped from a snapshot has only the chain-tip check until it
+  next forges (issue #3736).
+
 ```mermaid
 sequenceDiagram
     participant SC as SlotClock
@@ -658,6 +685,7 @@ sequenceDiagram
     participant MP as Mempool
     participant LS as LedgerState
     participant PC as PrimaryChain
+    participant DB as ForgeFenceStore
     participant EB as EventBus
 
     Note over SC,EB: Epoch Preparation
@@ -675,6 +703,7 @@ sequenceDiagram
     else is leader
         LE-->>BF: true (vrfProof, vrfOutput)
         BF->>BF: check sync tolerance (tip not stale)
+        BF->>DB: reserveForgeSlot: reject slot <= fence, else persist it
         BF->>BB: BuildBlock(slot, kesPeriod)
         BB->>MP: drain eligible transactions
         BB->>LS: validate each tx against current state
@@ -683,7 +712,7 @@ sequenceDiagram
         BB-->>BF: block + CBOR
         BF->>PC: AddLocalBlock(forgedBlock) via BlockBroadcaster
         PC->>EB: publish ChainUpdateEvent, before AddLocalBlock returns
-        BF->>EB: publish BlockForgedEvent
+        BF->>EB: publish BlockForgedEvent, only after AddLocalBlock succeeds
         BF->>MP: remove confirmed transactions (RemoveTxsByHash)
     end
 
@@ -778,6 +807,7 @@ dingo/
 │   │   ├── builder.go   # DefaultBlockBuilder, block assembly
 │   │   ├── keys.go      # PoolCredentials (VRF/KES/OpCert)
 │   │   ├── slot_tracker.go # Slot battle detection
+│   │   ├── store.go     # Persisted last-forged-slot fence
 │   │   ├── events.go    # Forging events
 │   │   └── metrics.go   # Forging metrics
 │   ├── leader/          # Leader election
@@ -1215,7 +1245,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.pool_restored` | LedgerState | Pool state restored after rollback |
 | `epoch.transition` | LedgerState | Epoch boundary crossed |
 | `hardfork.transition` | LedgerState | Hard fork transition |
-| `block.forged` | BlockForger | Block successfully forged |
+| `block.forged` | BlockForger | Block forged and adopted onto the chain |
 | `forging.slot_battle` | SlotTracker | Competing blocks at same slot |
 | `leios.eb_quorum` | Leios VoteManager | Endorser block reached stake quorum; certificate built (consumed by the Leios PipelineManager for inclusion eligibility) |
 | `leios.vote_emitted` | Leios VoteManager | Locally signed prototype vote ready for node wiring to enqueue on each peer's LeiosNotify stream |
