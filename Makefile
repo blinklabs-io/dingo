@@ -7,7 +7,7 @@ GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name
 
 # Gather every Go module directory. Nested modules have their own go.mod and
 # are therefore outside the root module's ./..., so they need their own run.
-GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
+GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.claude' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
 
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
@@ -129,8 +129,11 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
+# -timeout matches the race-enabled CI jobs (go-test.yml's go-test (Linux,
+# race) and publish.yml's release gate) so a local run and CI cannot disagree
+# about which slow package is a hang. ./ledger alone runs 9-13 minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
-	go test $(GO_TAG_FLAGS) -v -race -timeout 20m ./...
+	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
 
 test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
 	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .

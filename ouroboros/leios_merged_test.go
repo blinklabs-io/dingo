@@ -863,7 +863,7 @@ func testLeiosManifestTx(
 	// Test fixture is small, so the length fits in uint16.
 	txSize := uint16(len(txCbor)) //nolint:gosec // G115
 	return cbor.RawMessage(wrapped), lcommon.LeiosTransactionReference{
-		TransactionHash: lcommon.Blake2b256Hash(txElems[0]),
+		TransactionHash: lcommon.Blake2b256Hash(txCbor),
 		TransactionSize: txSize,
 	}
 }
@@ -887,7 +887,7 @@ func TestValidateLeiosEndorserBlockTxsBindsManifestOrder(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := validateLeiosEndorserBlockTxs(manifestRaw, txs)
-			require.ErrorContains(t, err, "endorser tx 0 body hash mismatch")
+			require.ErrorContains(t, err, "endorser tx 0 hash mismatch")
 		})
 	}
 }
@@ -1054,7 +1054,7 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(
 		2,
 		manifestRaw,
 	)
-	require.ErrorContains(t, err, "endorser tx 0 body hash mismatch")
+	require.ErrorContains(t, err, "endorser tx 0 hash mismatch")
 	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.False(t, cached.completeTxCache())

@@ -30,6 +30,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// uplcProgramVersion110 is UPLC program version 1.1.0, the version Plutus V3
+// and V4 scripts are encoded with.
+var uplcProgramVersion110 = lang.LanguageVersion{1, 1, 0}
+
 type declaredValidityConwayTx struct {
 	*mockConwayFeeTx
 	valid bool
@@ -44,7 +48,11 @@ func newDijkstraGuardingValidityOutcomeTx(
 ) *gdijkstra.DijkstraTransaction {
 	t.Helper()
 	program := &syn.Program[syn.DeBruijn]{
-		Version: version,
+		// The UPLC program version is not the ledger language version. Plutus
+		// V3 and V4 scripts carry UPLC 1.1.0; lang.LanguageVersionV3/V4
+		// ({1,2,0} and {1,3,0}) select the cost model and are not valid
+		// program versions.
+		Version: uplcProgramVersion110,
 		Term: &syn.Lambda[syn.DeBruijn]{
 			Body: &syn.Constant{Con: &syn.Unit{}},
 		},

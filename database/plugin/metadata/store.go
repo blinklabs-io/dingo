@@ -905,6 +905,21 @@ type TransactionStore interface {
 		types.Txn,
 	) error
 
+	// SetTransactionLeiosClosure stores a transaction on the Leios
+	// endorser-block closure path. Identical to SetTransaction except a
+	// consumed input already spent by a different transaction is a no-op
+	// instead of ErrUtxoConflict, matching the reference ledger's
+	// applyLeiosClosure (ValidateNone) on a legitimate cross-EB double-consume
+	// (see BatchedTxIngestOpts.SkipConsumedInputRecovery).
+	SetTransactionLeiosClosure(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
+		map[int]uint64, // certDeposits
+		bool, // skipWithdrawalWitness
+		types.Txn,
+	) error
+
 	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
 	// for batched transaction ingestion.
 	NewBatchAccumulator() types.MetadataBatchAccumulator
