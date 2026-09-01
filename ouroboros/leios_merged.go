@@ -356,8 +356,8 @@ func validateLeiosEndorserBlockTx(
 			ref.TransactionSize,
 		)
 	}
-	if bodyHash := lcommon.Blake2b256Hash(txElems[0]); bodyHash != ref.TransactionHash {
-		return fmt.Errorf("endorser tx %d body hash mismatch", index)
+	if txHash := lcommon.Blake2b256Hash(txCbor); txHash != ref.TransactionHash {
+		return fmt.Errorf("endorser tx %d hash mismatch", index)
 	}
 	return nil
 }

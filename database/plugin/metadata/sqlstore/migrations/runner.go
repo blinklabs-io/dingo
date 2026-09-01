@@ -31,6 +31,9 @@ type Runner struct {
 	Locker   Locker
 	Logger   *slog.Logger
 	Now      func() time.Time
+	// Rebind converts ? placeholders to the dialect's own form for data-driven
+	// backfills. Leave nil for a dialect that takes ? directly.
+	Rebind func(string) string
 }
 
 type state struct {
@@ -223,9 +226,18 @@ func (r *Runner) runBackfill(
 		if err != nil {
 			return cursor, err
 		}
+		rebind := r.Rebind
+		if rebind == nil {
+			rebind = func(query string) string { return query }
+		}
 		result, err := migration.Backfill(
 			ctx,
-			Batch{Tx: tx, Cursor: cursor, Limit: limit},
+			Batch{
+				Tx:     tx,
+				Cursor: cursor,
+				Limit:  limit,
+				Rebind: rebind,
+			},
 		)
 		if err != nil {
 			_ = tx.Rollback()

@@ -1,3 +1,5 @@
+//go:build linux && devnet
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build devnet
 
 package devnet
 
@@ -178,9 +178,9 @@ func (n *NodeControl) containerID(
 // be diagnosable after the network is gone: what every node's chain
 // actually did, which containers were up, and each service's logs.
 //
-// The writing itself lives in artifacts.go, untagged, so what a failure
-// preserves is covered by an ordinary test run. This method supplies the
-// Docker side of it.
+// The writing itself lives in artifacts.go without the optional devnet tag,
+// so what a failure preserves is covered by an ordinary Linux test run. This
+// method supplies the Docker side of it.
 func (n *NodeControl) CaptureFailureArtifacts(
 	ctx context.Context,
 	name string,

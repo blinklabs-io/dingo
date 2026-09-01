@@ -95,7 +95,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	}
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, historicalBackfill, txn,
+		skipWithdrawalWitness, historicalBackfill, false, txn,
 	)
 }
 
@@ -109,7 +109,30 @@ func (s *Store) SetTransaction(
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, txn,
+		skipWithdrawalWitness, false, false, txn,
+	)
+}
+
+// SetTransactionLeiosClosure records a transaction on the Leios endorser-block
+// closure path (the Musashi/Haskell-conformant ValidateNone apply). It behaves
+// like SetTransaction except that a consumed input already spent by a
+// *different* transaction is treated as a no-op instead of ErrUtxoConflict,
+// matching the reference ledger's applyLeiosClosure: two certified endorser
+// blocks may legitimately name the same input across blocks, and the canonical
+// chain folds the closure without re-validation rather than rejecting it. Do
+// not use this for ranking-block application, where a real double-spend must
+// still fail.
+func (s *Store) SetTransactionLeiosClosure(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	txn types.Txn,
+) error {
+	return s.setTransaction(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, false, true, txn,
 	)
 }
 
@@ -120,6 +143,18 @@ func (s *Store) setTransaction(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	historicalBackfill bool,
+	// tolerateConsumedInputConflict makes a consumed input that is already
+	// spent by a *different* transaction a no-op instead of ErrUtxoConflict.
+	// Set only on the Leios endorser-block closure path (ValidateNone), where
+	// the reference ledger's applyLeiosClosure folds the certified closure onto
+	// the UTxO set without re-validation: re-consuming an input an earlier
+	// certified endorser-block transaction already spent is Map.delete on a
+	// missing key (a no-op), not a fault. Two certified endorser blocks can name
+	// the same input across blocks (a legitimate cross-EB double-consume the
+	// canonical chain tolerates); Dingo previously wedged the ledger pipeline on
+	// it. Normal ranking-block application leaves this false so a real
+	// double-spend still fails.
+	tolerateConsumedInputConflict bool,
 	txn types.Txn,
 ) error {
 	if transaction == nil {
@@ -219,13 +254,12 @@ RETURNING id`,
 				if err != nil {
 					return err
 				}
-				if err := s.refreshRewardLiveStakeRefs(
-					ctx,
-					db,
-					certificateRefs,
-					point.Slot,
-				); err != nil {
-					return err
+				if !historicalBackfill {
+					if err := s.refreshRewardLiveStakeRefs(
+						ctx, db, certificateRefs, point.Slot,
+					); err != nil {
+						return err
+					}
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
@@ -348,12 +382,25 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 						input.Index(),
 					)
 				}
+				// Leios closure path: the input is already spent by an earlier
+				// certified endorser-block transaction. The reference ledger
+				// treats this re-consume as a no-op (applyLeiosClosure folds the
+				// closure without re-validation), so skip this input instead of
+				// wedging the pipeline. The produced outputs and the remaining
+				// consumed inputs of this transaction are still applied.
+				if tolerateConsumedInputConflict {
+					continue
+				}
 				return fmt.Errorf(
-					"%w: %x:%d",
+					"%w: %x:%d (already spent_by=%x deleted_slot=%d, this_tx=%x)",
 					types.ErrUtxoConflict,
 					input.Id().Bytes(),
 					input.Index(),
+					spentBy, deletedSlot, hash,
 				)
+			}
+			if historicalBackfill {
+				return nil
 			}
 			stakeRefs, err := queryUtxoStakeRefs(ctx, db, refs, false)
 			if err != nil {
@@ -910,13 +957,14 @@ ON CONFLICT (
 		); err != nil {
 			return err
 		}
-		if err := s.refreshRewardLiveStakeAggregate(
-			ctx,
-			db,
-			models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
-			slot,
-		); err != nil {
-			return err
+		if !historicalBackfill {
+			if err := s.refreshRewardLiveStakeAggregate(
+				ctx, db,
+				models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
+				slot,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

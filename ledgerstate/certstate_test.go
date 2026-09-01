@@ -468,3 +468,124 @@ func toFixed28(src []byte) [28]byte {
 	copy(dst[:], src)
 	return dst
 }
+
+// committeeVStateFixture builds a committee hot-key map and resignation map
+// with distinguishable credential tags.
+func committeeVStateFixture(t *testing.T) (hotMap, resignMap []byte) {
+	t.Helper()
+	keyHash := bytes.Repeat([]byte{0x44}, 28)
+	scriptHash := bytes.Repeat([]byte{0x55}, 28)
+	hotHash := bytes.Repeat([]byte{0x66}, 28)
+	keyCredential, err := cbor.Encode([]any{uint64(0), keyHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptCredential, err := cbor.Encode([]any{uint64(1), scriptHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotCredential, err := cbor.Encode([]any{uint64(0), hotHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotMap = append([]byte{0xa1}, keyCredential...)
+	hotMap = append(hotMap, hotCredential...)
+	resignMap = append([]byte{0xa1}, scriptCredential...)
+	resignMap = append(resignMap, 0xf5)
+	return hotMap, resignMap
+}
+
+// A nested committee state followed by a dormant-epoch field must still be
+// unwrapped; the field count cannot be the signal.
+func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(t *testing.T) {
+	hotMap, resignMap := committeeVStateFixture(t)
+	nested := append([]byte{0x82}, hotMap...)
+	nested = append(nested, resignMap...)
+
+	hotKeys, resignations := parseCommitteeVState(
+		// [committeeState, dormantEpoch]
+		[][]byte{nested, {0x00}},
+	)
+	if len(hotKeys) != 1 || len(resignations) != 1 {
+		t.Fatalf(
+			"nested committee state was dropped: %d authorizations, %d resignations",
+			len(hotKeys),
+			len(resignations),
+		)
+	}
+	if hotKeys[0].Cold.Type != CredentialTypeKey {
+		t.Fatalf("cold credential tag not preserved: %#v", hotKeys[0])
+	}
+	if resignations[0].Type != CredentialTypeScript {
+		t.Fatalf("resignation tag not preserved: %#v", resignations[0])
+	}
+}
+
+// The flattened Conway CertState inlines the VState fields, so committee state
+// must be recovered there too rather than silently dropped.
+func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
+	hotMap, resignMap := committeeVStateFixture(t)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	drepHash := bytes.Repeat([]byte{0x88}, 28)
+	drepCredential, err := cbor.Encode([]any{uint64(0), drepHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drepMap := append([]byte{0xa1}, drepCredential...)
+	drepMap = append(drepMap, 0x80)
+
+	// DState must be the largest credential-keyed map so it is identified
+	// ahead of the DRep and committee maps.
+	dstate := []byte{0xa2}
+	for _, tag := range []byte{0x77, 0x78} {
+		delegatorCredential, err := cbor.Encode(
+			[]any{uint64(0), bytes.Repeat([]byte{tag}, 28)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dstate = append(dstate, delegatorCredential...)
+		dstate = append(dstate, 0x80)
+	}
+
+	certState := [][]byte{
+		drepMap,
+		hotMap,
+		resignMap,
+		poolState,
+		dstate,
+		{0x00},
+	}
+	result, err := parseCertStateConway(certState)
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	if result == nil {
+		t.Fatal("no parsed cert state")
+	}
+	if len(result.CommitteeHotKeys) != 1 {
+		t.Fatalf(
+			"committee authorizations were dropped: %#v",
+			result.CommitteeHotKeys,
+		)
+	}
+	if len(result.CommitteeResignations) != 1 {
+		t.Fatalf(
+			"committee resignations were dropped: %#v",
+			result.CommitteeResignations,
+		)
+	}
+	if result.CommitteeHotKeys[0].Cold.Type != CredentialTypeKey {
+		t.Fatalf(
+			"cold credential tag not preserved: %#v",
+			result.CommitteeHotKeys[0],
+		)
+	}
+	if result.CommitteeResignations[0].Type != CredentialTypeScript {
+		t.Fatalf(
+			"resignation tag not preserved: %#v",
+			result.CommitteeResignations[0],
+		)
+	}
+}

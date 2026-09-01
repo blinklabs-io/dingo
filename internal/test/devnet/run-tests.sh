@@ -19,7 +19,7 @@
 # This script:
 #   1. Starts the DevNet (configurator + all nodes)
 #   2. Waits for all nodes to become healthy
-#   3. Runs the Go integration tests tagged with //go:build devnet
+#   3. Runs the Go integration tests tagged with //go:build linux && devnet
 #   4. Tears down the DevNet and reports results
 #
 # Usage:

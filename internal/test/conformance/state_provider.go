@@ -406,26 +406,31 @@ func (p *DingoStateProvider) RewardAccountBalance(
 func (p *DingoStateProvider) CommitteeMember(
 	coldKey common.Blake2b224,
 ) (*common.CommitteeMember, error) {
-	keyMember, err := p.CommitteeCredentialMember(common.Credential{
+	resolve := func(
+		credential common.Credential,
+	) (*common.CommitteeMember, error) {
+		member, err := p.legacyCommitteeMember(credential)
+		if err != nil {
+			return nil, err
+		}
+		if member != nil {
+			return member, nil
+		}
+		return p.proposedCommitteeMember(credential)
+	}
+	keyMember, err := resolve(common.Credential{
 		CredType:   common.CredentialTypeAddrKeyHash,
 		Credential: coldKey,
 	})
 	if err != nil {
 		return nil, err
 	}
-	scriptMember, err := p.CommitteeCredentialMember(common.Credential{
+	scriptMember, err := resolve(common.Credential{
 		CredType:   common.CredentialTypeScriptHash,
 		Credential: coldKey,
 	})
 	if err != nil {
 		return nil, err
-	}
-	if keyMember != nil && !keyMember.Resigned &&
-		(scriptMember == nil || scriptMember.Resigned) {
-		return keyMember, nil
-	}
-	if scriptMember != nil && !scriptMember.Resigned && keyMember == nil {
-		return scriptMember, nil
 	}
 	if keyMember != nil && scriptMember != nil {
 		return nil, nil
@@ -451,6 +456,21 @@ func (p *DingoStateProvider) CommitteeCredentialMember(
 		return member, nil
 	}
 	resignedMember := member
+	member, err = p.proposedCommitteeMember(coldCredential)
+	if err != nil {
+		return nil, err
+	}
+	if member == nil {
+		return resignedMember, nil
+	}
+	return member, nil
+}
+
+// proposedCommitteeMember resolves a member named by a pending, not yet
+// enacted UpdateCommittee proposal.
+func (p *DingoStateProvider) proposedCommitteeMember(
+	coldCredential common.Credential,
+) (*common.CommitteeMember, error) {
 	proposals, err := withBadConnRetry(
 		func() ([]*models.GovernanceProposal, error) {
 			return p.manager.db.GetActiveGovernanceProposals(
@@ -482,10 +502,44 @@ func (p *DingoStateProvider) CommitteeCredentialMember(
 		// resignation from the replaced term must not leak into the successor.
 		member.Resigned = false
 	}
-	if member == nil {
-		return resignedMember, nil
-	}
 	return member, nil
+}
+
+// legacyCommitteeMember mirrors ledger.LedgerView.legacyCommitteeCredentialMember:
+// the first seated term for a tagged credential, returned even when resigned,
+// with no pending-successor resolution.
+func (p *DingoStateProvider) legacyCommitteeMember(
+	coldCredential common.Credential,
+) (*common.CommitteeMember, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
+		return p.manager.db.GetCommitteeMembers(nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee members: %w", err)
+	}
+	for _, member := range members {
+		if member.ColdCredentialTag != coldTag ||
+			common.NewBlake2b224(member.ColdCredHash) != coldCredential.Credential {
+			continue
+		}
+		result := &common.CommitteeMember{
+			ColdKey:     coldCredential.Credential,
+			ExpiryEpoch: member.ExpiresEpoch,
+		}
+		if err := p.populateCommitteeMemberStatus(
+			coldCredential,
+			member.TermStartSlot,
+			result,
+		); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	return nil, nil
 }
 
 // realCommitteeMember reads an enacted committee member's full state
@@ -606,17 +660,42 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee members: %w", err)
 	}
-	hashCounts := make(map[string]int, len(realMembers))
-	for _, dbMember := range realMembers {
-		hashCounts[string(dbMember.ColdCredHash)]++
+	// A credential is (tag, hash), and several rows for one credential are its
+	// successive terms. Counting hashes alone dropped a re-elected member, and
+	// conflated a key credential with a script credential of the same hash.
+	// CommitteeCredentialMember already resolves a credential to its latest
+	// term, so resolve once per unique credential.
+	type credentialKey struct {
+		tag  uint8
+		hash string
 	}
+	tagsByHash := make(map[string]map[uint8]struct{}, len(realMembers))
+	seen := make(map[credentialKey]struct{}, len(realMembers))
+	order := make([]credentialKey, 0, len(realMembers))
 	for _, dbMember := range realMembers {
-		if hashCounts[string(dbMember.ColdCredHash)] != 1 {
+		key := credentialKey{
+			tag:  dbMember.ColdCredentialTag,
+			hash: string(dbMember.ColdCredHash),
+		}
+		if tagsByHash[key.hash] == nil {
+			tagsByHash[key.hash] = make(map[uint8]struct{}, 1)
+		}
+		tagsByHash[key.hash][key.tag] = struct{}{}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		order = append(order, key)
+	}
+	for _, key := range order {
+		// The legacy list shape cannot carry a credential tag, so a hash
+		// seated under both tags stays ambiguous and is omitted.
+		if len(tagsByHash[key.hash]) != 1 {
 			continue
 		}
 		member, err := p.CommitteeCredentialMember(common.Credential{
-			CredType:   uint(dbMember.ColdCredentialTag),
-			Credential: common.NewBlake2b224(dbMember.ColdCredHash),
+			CredType:   uint(key.tag),
+			Credential: common.NewBlake2b224([]byte(key.hash)),
 		})
 		if err != nil {
 			return nil, err

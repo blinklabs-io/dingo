@@ -219,11 +219,15 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T
 			wantHot: true,
 		},
 		{
-			name: "resignation without prior authorization",
+			// A resignation recorded after the replacement proposal belongs to
+			// the term it happened in. Carrying it into the pending term would
+			// reject the re-elected member's authorization as resigned. The
+			// conformance provider already applies this rule.
+			name: "resignation does not carry into the pending term",
 			seed: func(t *testing.T, db *database.Database, cold lcommon.Credential) {
 				seedCommitteeCredentialResignation(t, db, cold, 1, 1)
 			},
-			wantResigned: true,
+			wantResigned: false,
 		},
 	}
 	for _, test := range tests {
@@ -732,4 +736,75 @@ func certificateName(certificate lcommon.Certificate) string {
 	default:
 		return "unknown certificate"
 	}
+}
+
+// An unsupported hot credential tag must be reported as invalid regardless of
+// whether any authorizations exist. The tag check used to sit inside the loop
+// over authorizations, so an empty committee returned no member and no error.
+func TestLedgerViewCommitteeHotCredentialMemberRejectsUnsupportedTag(
+	t *testing.T,
+) {
+	lv, _ := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	unsupported := lcommon.Credential{
+		CredType:   99,
+		Credential: committeeTestCredential(0x81).Credential,
+	}
+
+	member, err := lv.CommitteeHotCredentialMember(unsupported)
+	require.Error(
+		t,
+		err,
+		"an unsupported hot credential tag must not be reported as absent",
+	)
+	require.Nil(t, member)
+	require.ErrorContains(t, err, "invalid committee hot credential")
+}
+
+// A re-elected member has several committee_member rows for one credential.
+// Counting hashes alone dropped it from the seated list entirely.
+func TestLedgerViewCommitteeMembersIncludesReelectedMember(t *testing.T) {
+	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	cold := committeeTestCredential(0x91)
+	seedCommitteeMemberTerm(t, db, cold, 100, 10)
+	seedCommitteeMemberTerm(t, db, cold, 200, 20)
+
+	members, err := lv.CommitteeMembers()
+	require.NoError(t, err)
+	require.Len(
+		t,
+		members,
+		1,
+		"a re-elected credential is one seated member, not an ambiguous hash",
+	)
+	require.Equal(t, cold.Credential, members[0].ColdKey)
+	require.Equal(
+		t,
+		uint64(200),
+		members[0].ExpiryEpoch,
+		"the latest term is the seated one",
+	)
+}
+
+func seedCommitteeMemberTerm(
+	t *testing.T,
+	db *database.Database,
+	coldCredential lcommon.Credential,
+	expiresEpoch uint64,
+	termStartSlot uint64,
+) {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO committee_member (
+    cold_cred_hash, cold_credential_tag, expires_epoch,
+    term_start_slot, term_start_slot_set, added_slot
+) VALUES (?, ?, ?, ?, TRUE, ?)`,
+		coldCredential.Credential[:],
+		coldCredential.CredType,
+		expiresEpoch,
+		termStartSlot,
+		termStartSlot,
+	)
+	require.NoError(t, err)
 }

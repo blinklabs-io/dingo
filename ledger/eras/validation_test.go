@@ -664,6 +664,24 @@ func taggedCommitteeCredentialKey(credential lcommon.Credential) string {
 	))
 }
 
+// findIndexedUtxoValidationRule returns the composed rule whose upstream
+// function name matches want, and names it when absent.
+func findIndexedUtxoValidationRule(
+	t *testing.T,
+	rules []indexedUtxoValidationRule,
+	want lcommon.UtxoValidationRuleFunc,
+) lcommon.UtxoValidationRuleFunc {
+	t.Helper()
+	wantName := utxoValidationRuleName(want)
+	for _, candidate := range rules {
+		if utxoValidationRuleName(candidate.validationFunc) == wantName {
+			return candidate.validationFunc
+		}
+	}
+	t.Fatalf("validation rule %s is not registered", wantName)
+	return nil
+}
+
 func TestConwayCommitteeCertificateRulePreservesCredentialTag(t *testing.T) {
 	var hash lcommon.Blake2b224
 	hash[0] = 0xc1
@@ -694,15 +712,11 @@ func TestConwayCommitteeCertificateRulePreservesCredentialTag(t *testing.T) {
 		},
 	}
 
-	var rule lcommon.UtxoValidationRuleFunc
-	for _, candidate := range conwayUtxoValidationRules {
-		if utxoValidationRuleName(candidate.validationFunc) ==
-			utxoValidationRuleName(validateCommitteeCertificates) {
-			rule = candidate.validationFunc
-			break
-		}
-	}
-	require.NotNil(t, rule)
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
 	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
 	var notMember conway.NotCommitteeMemberError
 	require.ErrorAs(t, err, &notMember)
@@ -734,15 +748,11 @@ func TestConwayUnknownVoterRulePreservesCredentialTag(t *testing.T) {
 		},
 	}
 
-	var rule lcommon.UtxoValidationRuleFunc
-	for _, candidate := range conwayUtxoValidationRules {
-		if utxoValidationRuleName(candidate.validationFunc) ==
-			utxoValidationRuleName(validateUnknownVoters) {
-			rule = candidate.validationFunc
-			break
-		}
-	}
-	require.NotNil(t, rule)
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+	)
 	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
 	var unknown conway.UnknownVoterError
 	require.ErrorAs(t, err, &unknown)

@@ -179,6 +179,7 @@ func parseCertStateConway(
 	// We call parseDRepMap directly because the raw element is a
 	// DRep map, not a VState array [drepMap, ccHotKeys, ...].
 	drepFound := false
+	drepIdx := -1
 	for i, elem := range certState {
 		if len(elem) == 0 || i == pIdx || i == dIdx {
 			continue
@@ -199,10 +200,29 @@ func parseCertStateConway(
 			}
 			result.DReps = dreps
 			drepFound = true
+			drepIdx = i
 			break
 		}
 	}
 	_ = drepFound
+
+	// Recover the committee hot-key authorizations and resignations. The
+	// flattened layout inlines the VState fields into the top-level array, so
+	// they are not reached by parseVState the way the 3-element layout is.
+	// Try each remaining element as the start of a committee state and keep the
+	// first that yields any committee data.
+	for i, elem := range certState {
+		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
+			continue
+		}
+		hotKeys, resignations := parseCommitteeVState(certState[i:])
+		if len(hotKeys) == 0 && len(resignations) == 0 {
+			continue
+		}
+		result.CommitteeHotKeys = hotKeys
+		result.CommitteeResignations = resignations
+		break
+	}
 
 	// Parse PState if found
 	if pIdx >= 0 {
@@ -1521,6 +1541,14 @@ func parseVState(data []byte) (
 	return dreps, hotKeys, resignations, warning
 }
 
+// isCborArray reports whether data begins a definite or indefinite CBOR array.
+func isCborArray(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	return data[0]>>5 == 4 || data[0] == 0x9f
+}
+
 func parseCommitteeVState(
 	fields [][]byte,
 ) ([]ParsedCommitteeHotKey, []Credential) {
@@ -1529,11 +1557,15 @@ func parseCommitteeVState(
 	if len(fields) == 0 {
 		return nil, nil
 	}
-	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders
-	// wrap these two fields in one committee-state array, so accept both.
+	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders wrap
+	// those two fields in one committee-state array, which may itself be
+	// followed by dormant-epoch or extension fields. Detect the wrapper by its
+	// own shape rather than by the absence of trailing fields: ccHotKeys is a
+	// map, so an array here can only be the wrapper.
 	committeeFields := fields
-	if len(fields) == 1 {
-		if nested, err := decodeRawElements(fields[0]); err == nil && len(nested) >= 2 {
+	if isCborArray(fields[0]) {
+		if nested, err := decodeRawElements(fields[0]); err == nil &&
+			len(nested) >= 2 {
 			committeeFields = nested
 		}
 	}

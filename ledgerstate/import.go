@@ -17,7 +17,6 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -3346,7 +3345,9 @@ func persistImportedCommitteeCertificates(
 	slotBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(slotBytes, slot)
 	seed := append([]byte("mithril-committee"), slotBytes...)
-	hash := sha256.Sum256(seed)
+	// Transaction identities on Cardano are Blake2b-256. A SHA-256 digest here
+	// would hand consumers a hash that cannot be a transaction id.
+	hash := lcommon.Blake2b256Hash(seed)
 	tx := importedCommitteeTransaction{hash: hash, certs: certs}
 	return db.SetTransactionMetadataOnly(
 		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{}, txn,

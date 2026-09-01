@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"strings"
 )
 
 const governanceProposalColumns = `
@@ -738,18 +739,64 @@ func (s *Store) GetResignedCommitteeMembers(
 	if err != nil {
 		return nil, err
 	}
-	for _, credential := range coldCredentials {
-		var resigned bool
-		if err := db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM resign_committee_cold
-    WHERE cold_credential_tag = ? AND cold_credential = ?
-      AND added_slot >= ?
-)`, credential.CredentialTag, credential.Credential, credential.TermStartSlot).Scan(&resigned); err != nil {
+	// One round trip per member turns an epoch voting-state load into a query
+	// per committee seat, so fetch the latest resignation slot for the whole
+	// set at once. EXISTS(added_slot >= termStart) is equivalent to
+	// MAX(added_slot) >= termStart, so the term comparison still happens per
+	// credential, just in Go.
+	latest := make(map[string]uint64, len(coldCredentials))
+	chunkSize := s.dialect.ParameterLimit() / 2
+	if chunkSize < 1 {
+		chunkSize = 1
+	}
+	for start := 0; start < len(coldCredentials); start += chunkSize {
+		end := min(start+chunkSize, len(coldCredentials))
+		chunk := coldCredentials[start:end]
+		predicates := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, credential := range chunk {
+			predicates = append(
+				predicates,
+				"(cold_credential_tag = ? AND cold_credential = ?)",
+			)
+			args = append(args, credential.CredentialTag, credential.Credential)
+		}
+		query := `
+SELECT cold_credential_tag, cold_credential, MAX(added_slot)
+FROM resign_committee_cold
+WHERE (` + strings.Join(predicates, " OR ") + `)
+GROUP BY cold_credential_tag, cold_credential`
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
+		if err != nil {
 			return nil, err
 		}
-		if resigned {
-			ret[credential.Key()] = true
+		for rows.Next() {
+			var tag uint8
+			var credential []byte
+			var addedSlot uint64
+			if err := rows.Scan(&tag, &credential, &addedSlot); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			key := models.CommitteeCredential{
+				CredentialTag: tag,
+				Credential:    credential,
+			}.Key()
+			if existing, ok := latest[key]; !ok || addedSlot > existing {
+				latest[key] = addedSlot
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	for _, credential := range coldCredentials {
+		key := credential.Key()
+		if addedSlot, ok := latest[key]; ok &&
+			addedSlot >= credential.TermStartSlot {
+			ret[key] = true
 		}
 	}
 	return ret, nil

@@ -101,8 +101,10 @@ Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
 advertising readiness. The current registry has migrations 1 through 8:
-`v1alpha1`, `leios-key-registration`, `token-registry-metadata`, and
-`account-import-baseline`. `DATABASE.md` is the source of truth for their
+`v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
+`account-import-baseline`, `leios-snapshot-keys`,
+`governance-ratification-history`, `committee-credential-tags`, and
+`committee-term-start-presence`. `DATABASE.md` is the source of truth for their
 schema changes and upgrade behavior. It then checks the read pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
@@ -2330,7 +2332,11 @@ delegation view, validates the signing delegate, and charges the resolved
 genesis issuer against the rolling `k`-signature PBFT window. Each main block's
 delegation payload is signature-checked and scheduled for activation after
 `2k` slots; activation replaces the issuer's delegate, while self-delegation
-revokes the prior delegate. The in-memory delegation and issuer-window states
+revokes the prior delegate. The payload is passed to the delegation state as
+the CBOR it arrived in rather than as decoded certificates, because a
+certificate's signature covers the wire encoding of its epoch field and
+re-encoding a decoded value cannot reproduce a non-canonical encoding the
+issuer signed. The in-memory delegation and issuer-window states
 are updated only after the block transaction commits. On startup or after a
 rollback, the delegation view is reconstructed from the canonical Byron chain
 through the applied tip, while the issuer window retains only its last `k`
@@ -6681,6 +6687,17 @@ make docs-parity
 The package has no build tag, so `go test ./...` runs it on every platform in
 CI as well. Adding a documented value that a file in the tree already owns
 belongs in a rule here, not in a second hard-coded copy.
+
+### DevNet Platform Boundary
+
+`internal/test/devnet/` is a Linux-only integration harness. It requires a
+native Linux Docker engine, Bash, Linux container networking, and Unix
+ownership semantics; emulated or remote Docker clients on macOS and Windows do
+not provide an equivalent test environment. Every Go file in that tree carries
+a `linux` build constraint, so ordinary `go build ./...` and `go test ./...`
+retain their full commands while excluding the harness on unsupported hosts.
+`TestDevnetFilesStayLinuxOnly` enforces the constraint for newly added files.
+Native Linux is the authoritative platform for DevNet validation.
 
 ## Design Patterns
 

@@ -646,7 +646,7 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 			ExpiryEpoch: found.ExpiresEpoch,
 		}
 		if err := lv.populateCommitteeMemberStatus(
-			coldCredential, found.TermStartSlot, member,
+			coldCredential, found.TermStartSlot, member, false,
 		); err != nil {
 			return nil, err
 		}
@@ -690,6 +690,7 @@ func (lv *LedgerView) CommitteeCredentialMember(
 		coldCredential,
 		found.TermStartSlot,
 		member,
+		false,
 	); err != nil {
 		return nil, err
 	}
@@ -709,30 +710,42 @@ func (lv *LedgerView) CommitteeCredentialMember(
 	return member, nil
 }
 
+// populateCommitteeMemberStatus fills in resignation and hot-key authorization
+// for a term starting at termStartSlot.
+//
+// A pending term is one a proposal has not yet enacted. Its termStartSlot is
+// the proposal's own added slot, so a resignation recorded during the member's
+// previous term sits at or after it and would otherwise be read as a
+// resignation from a term that has not begun. A resignation belongs to the term
+// it occurred in, so a pending term is never resigned and a re-elected member
+// can still authorize a hot credential.
 func (lv *LedgerView) populateCommitteeMemberStatus(
 	coldCredential lcommon.Credential,
 	termStartSlot uint64,
 	member *lcommon.CommitteeMember,
+	pending bool,
 ) error {
 	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
 	if err != nil {
 		return fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	resigned, err := lv.ls.db.IsCommitteeMemberResigned(
-		coldTag,
-		coldCredential.Credential[:],
-		termStartSlot,
-		lv.txn,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"check committee member resignation: %w",
-			err,
+	if !pending {
+		resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+			coldTag,
+			coldCredential.Credential[:],
+			termStartSlot,
+			lv.txn,
 		)
-	}
-	member.Resigned = resigned
-	if resigned {
-		return nil
+		if err != nil {
+			return fmt.Errorf(
+				"check committee member resignation: %w",
+				err,
+			)
+		}
+		member.Resigned = resigned
+		if resigned {
+			return nil
+		}
 	}
 	authorization, err := lv.ls.db.GetCommitteeMember(
 		coldTag,
@@ -774,7 +787,12 @@ func (lv *LedgerView) proposedCommitteeMember(
 		return nil, err
 	}
 	if member != nil {
-		if err := lv.populateCommitteeMemberStatus(coldCredential, termStart, member); err != nil {
+		if err := lv.populateCommitteeMemberStatus(
+			coldCredential,
+			termStart,
+			member,
+			true,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -797,16 +815,16 @@ func (lv *LedgerView) committeeSnapshot() (
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
+	}
 	currentEpoch, _ := lv.committeeSnapshot()
 	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
 	}
 	for _, authorization := range authorizations {
-		hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
-		if err != nil {
-			return nil, fmt.Errorf("invalid committee hot credential: %w", err)
-		}
 		if authorization.HotCredentialTag != hotTag ||
 			!bytes.Equal(authorization.HotCredential, hotCredential.Credential[:]) {
 			continue
@@ -828,33 +846,107 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 }
 
 // CommitteeMembers returns all seated committee members.
+//
+// Resolution runs off the single GetCommitteeMembers load rather than calling
+// CommitteeCredentialMember per seat, which would reload the whole set for
+// every member. Resignations are fetched for the whole set in one query.
 func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get committee members: %w", err)
 	}
-	hashCounts := make(map[string]int, len(dbMembers))
-	for _, m := range dbMembers {
-		hashCounts[string(m.ColdCredHash)]++
+	// A credential is (tag, hash). Several rows for one credential are its
+	// successive terms, and only the latest is seated. Counting hashes alone
+	// would drop a re-elected member as if it were an alias.
+	type credentialKey struct {
+		tag  uint8
+		hash string
 	}
-
-	members := make([]lcommon.CommitteeMember, 0, len(dbMembers))
+	latest := make(map[credentialKey]*models.CommitteeMember, len(dbMembers))
+	order := make([]credentialKey, 0, len(dbMembers))
+	tagsByHash := make(map[string]map[uint8]struct{}, len(dbMembers))
 	for _, m := range dbMembers {
-		// The legacy list shape cannot carry a credential tag. Omit ambiguous
-		// hashes rather than aliasing key and script members.
-		if hashCounts[string(m.ColdCredHash)] != 1 {
+		key := credentialKey{tag: m.ColdCredentialTag, hash: string(m.ColdCredHash)}
+		if tagsByHash[key.hash] == nil {
+			tagsByHash[key.hash] = make(map[uint8]struct{}, 1)
+		}
+		tagsByHash[key.hash][key.tag] = struct{}{}
+		found, ok := latest[key]
+		if !ok {
+			latest[key] = m
+			order = append(order, key)
 			continue
 		}
-		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
-			CredType:   uint(m.ColdCredentialTag),
-			Credential: lcommon.NewBlake2b224(m.ColdCredHash),
+		if m.TermStartSlot > found.TermStartSlot ||
+			(m.TermStartSlot == found.TermStartSlot && m.AddedSlot > found.AddedSlot) ||
+			(m.TermStartSlot == found.TermStartSlot && m.AddedSlot == found.AddedSlot && m.ID > found.ID) {
+			latest[key] = m
+		}
+	}
+
+	credentials := make([]models.CommitteeCredential, 0, len(order))
+	for _, key := range order {
+		found := latest[key]
+		credentials = append(credentials, models.CommitteeCredential{
+			CredentialTag: found.ColdCredentialTag,
+			Credential:    found.ColdCredHash,
+			TermStartSlot: found.TermStartSlot,
 		})
-		if err != nil {
-			return nil, err
+	}
+	resigned, err := lv.ls.db.GetResignedCommitteeMembers(credentials, lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get resigned committee members: %w", err)
+	}
+
+	members := make([]lcommon.CommitteeMember, 0, len(order))
+	for _, key := range order {
+		// The legacy list shape cannot carry a credential tag, so a hash
+		// seated under both tags stays ambiguous and is omitted rather than
+		// aliasing a key member onto a script member.
+		if len(tagsByHash[key.hash]) != 1 {
+			continue
 		}
-		if member != nil {
+		found := latest[key]
+		coldCredential := lcommon.Credential{
+			CredType:   uint(found.ColdCredentialTag),
+			Credential: lcommon.NewBlake2b224(found.ColdCredHash),
+		}
+		member := &lcommon.CommitteeMember{
+			ColdKey:     coldCredential.Credential,
+			ExpiryEpoch: found.ExpiresEpoch,
+		}
+		credentialKey := models.CommitteeCredential{
+			CredentialTag: found.ColdCredentialTag,
+			Credential:    found.ColdCredHash,
+		}.Key()
+		member.Resigned = resigned[credentialKey]
+		if member.Resigned {
+			// A re-election may replace a resigned term before enactment.
+			proposed, err := lv.proposedCommitteeMember(coldCredential)
+			if err != nil {
+				return nil, err
+			}
+			if proposed != nil {
+				members = append(members, *proposed)
+				continue
+			}
 			members = append(members, *member)
+			continue
 		}
+		authorization, err := lv.ls.db.GetCommitteeMember(
+			found.ColdCredentialTag,
+			found.ColdCredHash,
+			found.TermStartSlot,
+			lv.txn,
+		)
+		if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
+			return nil, fmt.Errorf("get committee hot credential: %w", err)
+		}
+		if authorization != nil {
+			hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
+			member.HotKey = &hotKey
+		}
+		members = append(members, *member)
 	}
 	return members, nil
 }

@@ -184,10 +184,10 @@ var shelleyUtxoValidationRules = buildShelleyValidationRules()
 
 // buildShelleyValidationRules drops the upstream fee and max-size rules so
 // ValidateTxShelley can apply the Dingo checks that size a transaction with
-// TxSizeForFee. buildIndexedUtxoValidationRulesWithSkips panics at package
-// initialization if either hardcoded index stops resolving to the named
-// upstream function, so an upstream rename or reordering fails loudly instead
-// of silently leaving the upstream rule in place.
+// TxSizeForFee. buildIndexedUtxoValidationRulesWithSkips resolves each skip by
+// upstream validation function name and panics at package initialization if a
+// name stops matching exactly one upstream rule, so an upstream rename fails
+// loudly instead of silently leaving the upstream rule in place.
 func buildShelleyValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRulesWithSkips(
 		shelley.UtxoValidationRules,

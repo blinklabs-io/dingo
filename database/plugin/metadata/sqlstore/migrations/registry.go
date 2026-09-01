@@ -150,7 +150,9 @@ func committeeTermStartBackfill(
 		lastID = parsed
 	}
 	rows, err := batch.Tx.QueryContext(ctx,
-		"SELECT id FROM committee_member WHERE id > ? AND NOT term_start_slot_set ORDER BY id LIMIT ?",
+		batch.Rebind(
+			"SELECT id FROM committee_member WHERE id > ? AND NOT term_start_slot_set ORDER BY id LIMIT ?",
+		),
 		lastID, batch.Limit,
 	)
 	if err != nil {
@@ -173,7 +175,10 @@ func committeeTermStartBackfill(
 	}
 	for _, id := range ids {
 		if _, err := batch.Tx.ExecContext(ctx,
-			"UPDATE committee_member SET term_start_slot_set = TRUE WHERE id = ?", id,
+			batch.Rebind(
+				"UPDATE committee_member SET term_start_slot_set = TRUE WHERE id = ?",
+			),
+			id,
 		); err != nil {
 			return BatchResult{}, err
 		}
