@@ -674,7 +674,7 @@ not durably adopted:
   rolled-back database. The fence lives in `sync_state`, so a Mithril
   import that ends in a full `ClearSyncState` drops it; a producer
   bootstrapped from a snapshot has only the chain-tip check until it
-  next forges.
+  next forges (issue #3736).
 
 ```mermaid
 sequenceDiagram
