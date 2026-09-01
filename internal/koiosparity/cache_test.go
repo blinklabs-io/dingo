@@ -23,6 +23,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
+	t *testing.T,
+) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        0,
+		PreStaking:   true,
+		EpochEndTime: now.Add(-time.Hour),
+		FetchedAt:    now.Add(-time.Minute),
+	}, nil, nil))
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:       "preview",
+		Epoch:         0,
+		LastCheckedAt: now,
+		Status:        StatusPass,
+	}))
+
+	epochs, err := cache.GetEpochsNeedingCheck("preview", true)
+	require.NoError(t, err)
+	require.Empty(t, epochs,
+		"pre-staking epochs never have account coverage and must not be requeued for its absence")
+}
+
 // TestCommitEpochDataWithTotals exercises the actual SQL generated for the
 // koios_totals upsert against a real SQLite file — a pure-Go struct test
 // cannot catch a column-name mismatch (e.g. DepositsDRep versus the persisted
@@ -279,4 +307,50 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	got, err = cache.GetAccountRewardsForEpoch("preview", 50)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
+}
+
+// TestCommitEpochMismatchesRollsBackOnFailedInsert proves #3410's fix:
+// CommitEpochMismatches deletes and (re)inserts an epoch's mismatch rows in a
+// single transaction, so a write failure partway through the insert rolls
+// the delete back with it instead of leaving the epoch with zero evidence. A
+// BEFORE INSERT trigger raises an error for one sentinel field value so the
+// first row of the replacement batch inserts fine and the second aborts the
+// whole transaction, without touching the production schema.
+func TestCommitEpochMismatchesRollsBackOnFailedInsert(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	const network = "preview"
+	const epoch = uint64(42)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	prior := []CheckMismatch{{
+		Network:    network,
+		Epoch:      epoch,
+		Field:      "prior_evidence",
+		DingoValue: "1",
+		KoiosValue: "2",
+		Category:   CategoryDBError,
+		CheckedAt:  now,
+	}}
+	require.NoError(t, cache.CommitEpochMismatches(network, epoch, prior))
+
+	_, err = cache.db.Exec(`
+		CREATE TRIGGER fail_on_sentinel BEFORE INSERT ON check_mismatches
+		WHEN NEW.field = 'force_fail'
+		BEGIN SELECT RAISE(ABORT, 'forced test failure'); END`)
+	require.NoError(t, err)
+
+	replacement := []CheckMismatch{
+		{Network: network, Epoch: epoch, Field: "ok_row", Category: CategoryDBError, CheckedAt: now},
+		{Network: network, Epoch: epoch, Field: "force_fail", Category: CategoryDBError, CheckedAt: now},
+	}
+	err = cache.CommitEpochMismatches(network, epoch, replacement)
+	require.Error(t, err)
+
+	got, err := cache.GetMismatches(network, epoch, "")
+	require.NoError(t, err)
+	require.Len(t, got, 1, "a failed replacement must leave the prior evidence intact")
+	require.Equal(t, "prior_evidence", got[0].Field)
 }

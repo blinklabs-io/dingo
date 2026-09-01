@@ -89,18 +89,10 @@ type StakeDistributionProvider interface {
 // "keyless" committee seat: it still occupies a stake-weighted voter id,
 // but can never contribute a verified signature).
 //
-// This is a current-state lookup, not frozen to a snapshot epoch: it reads
-// whatever is registered against poolKeyHashes right now, the same
-// simplification already made for VRF key hash in PoolDistr2 (see
-// poolVrfKeyHashes). A key registered or rotated between when the epoch's
-// stake snapshot was captured and when this is called becomes visible
-// immediately. On a live network with one canonical current state this
-// distinction rarely matters, but two nodes computing the same epoch's
-// committee at different wall-clock times around a key rotation could
-// still cache different resolved keys for that epoch (committeeAndParamsForEpoch
-// memoizes per epoch on first use) -- acceptable for the current prototype,
-// worth revisiting if this needs to reproduce a specific historical epoch's
-// resolution exactly.
+// The lookup is frozen to snapshotEpoch: implementations must return the key
+// stored with the same historical stake snapshot used to select the committee.
+// A key registered or rotated after that boundary is not visible until a later
+// snapshot captures it.
 //
 // poolKeyHashes names exactly the epoch's committee members (the
 // stake-coverage prefix ComputeCommittee already selected from the
@@ -113,6 +105,7 @@ type StakeDistributionProvider interface {
 // trip on every new-epoch committee computation.
 type LeiosKeyProvider interface {
 	GetLeiosKeys(
+		snapshotEpoch uint64,
 		poolKeyHashes []string,
 	) (map[string]*lcommon.LeiosKey, error)
 }
@@ -149,15 +142,17 @@ type VoteManagerConfig struct {
 	StakeProvider  StakeDistributionProvider
 	EpochProvider  EpochProvider
 	ParamsProvider CommitteeParamsProvider
-	// KeyProvider supplies on-chain registered BLS keys per epoch. Nil
-	// disables on-chain key resolution entirely; committee members then
-	// resolve only through Registry (useful for tests and for local
-	// operator-configured override keys).
+	// KeyProvider supplies on-chain registered BLS keys per epoch. When
+	// non-nil it is the authoritative key source: a key absent from its
+	// PoP-verified result is a keyless seat and Registry is ignored. Nil
+	// explicitly selects the Registry-only private test/devnet seam.
 	KeyProvider LeiosKeyProvider
 	// SlotProvider enables the vote slot acceptance window. When nil
 	// the window check is disabled and votes for any resolvable slot
 	// are accepted.
 	SlotProvider SlotProvider
+	// Registry is a private test/devnet key source used only when KeyProvider
+	// is nil. Production composition always supplies KeyProvider.
 	Registry     *VoterRegistry
 	PromRegistry prometheus.Registerer
 	// VoteWindowSlots is the offset after an EB's produce slot at which
@@ -252,8 +247,7 @@ type ebTally struct {
 // epochEntry memoizes the committee, quorum threshold, and resolved,
 // PoP-verified on-chain voter keys for an epoch. onChainKeys holds only
 // keys that passed VerifyLeiosKeyProofOfPossession; a committee member
-// absent from it has no usable on-chain key for the epoch (keyless,
-// pending a Registry override).
+// absent from it has no usable on-chain key for the epoch and is keyless.
 type epochEntry struct {
 	committee   *Committee
 	tau         *big.Rat
@@ -273,7 +267,7 @@ type VoteManager struct {
 	stakeProvider  StakeDistributionProvider
 	epochProvider  EpochProvider
 	paramsProvider CommitteeParamsProvider
-	keyProvider    LeiosKeyProvider // nil disables on-chain key resolution
+	keyProvider    LeiosKeyProvider // nil explicitly enables Registry-only mode
 	slotProvider   SlotProvider     // nil disables the slot window check
 	// voteWindowSlots is the past bound of the vote acceptance window: a
 	// vote whose slot is this many slots or more behind the current slot
@@ -503,14 +497,10 @@ func (m *VoteManager) EnableVoting(
 	// epoch transition landing a key rotation between a caller's
 	// ValidateVotingKey check and this call.
 	//
-	// Only fall through to registering in the static registry when there
-	// is no on-chain key to compare against. Requiring a registry entry
-	// unconditionally would make an on-chain-only key that already passed
-	// ValidateVotingKey fail to enable voting anyway, on nothing more than
-	// a stale entry a peer or this operator never got around to updating
-	// in leiosVoterPublicKeys -- the on-chain key is already the stronger,
-	// PoP-verified trust source, so a conflict against a weaker one it has
-	// superseded is not a real problem.
+	// Registry is deliberately consulted only in the explicit private
+	// harness mode where no KeyProvider is wired. With a provider present,
+	// absence is authoritative: auto-registering key here would let this
+	// node emit a vote that reference-compatible peers reject.
 	onChain, onChainKnown, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
 	if err != nil {
 		return fmt.Errorf(
@@ -519,15 +509,23 @@ func (m *VoteManager) EnableVoting(
 			err,
 		)
 	}
-	if onChainKnown && !onChain.Equal(key.PublicKey()) {
-		return fmt.Errorf(
-			"configured leios voting key does not match the on-chain registered key for pool %s",
-			poolKeyHash.String(),
-		)
+	if m.keyProvider != nil {
+		if !onChainKnown {
+			return fmt.Errorf(
+				"no usable on-chain leios voting key for pool %s",
+				poolKeyHash.String(),
+			)
+		}
+		if !onChain.Equal(key.PublicKey()) {
+			return fmt.Errorf(
+				"configured leios voting key does not match the on-chain registered key for pool %s",
+				poolKeyHash.String(),
+			)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if onChainKnown {
+	if m.keyProvider != nil {
 		m.logger.Debug(
 			"leios voting key matches the on-chain registration, skipping static registry",
 			"pool", poolKeyHash.String(),
@@ -541,11 +539,10 @@ func (m *VoteManager) EnableVoting(
 }
 
 // ValidateVotingKey verifies that an operator-supplied voting key matches a
-// resolvable public key for the pool: its PoP-verified on-chain registered
-// key takes precedence, falling back to the static leiosVoterPublicKeys
-// registry. A pool with a valid on-chain registration therefore needs no
-// registry entry to enable voting -- requiring one here would defeat the
-// on-chain key rollout for every operator who registered for real.
+// resolvable public key for the pool. A configured KeyProvider is authoritative:
+// its PoP-verified on-chain registration must exist and match. Registry is
+// consulted only in the explicit private test/devnet mode where KeyProvider is
+// nil.
 //
 // Deliberately not scoped to the current epoch's committee: resolution
 // goes through resolveOnChainKeyForPool, not the epoch-cached (and, since
@@ -568,12 +565,18 @@ func (m *VoteManager) ValidateVotingKey(
 			err,
 		)
 	}
-	if !ok {
+	if !ok && m.keyProvider == nil {
 		registered, ok = m.registry.PublicKeyFor(poolKeyHash[:])
 	}
 	if !ok {
+		if m.keyProvider != nil {
+			return fmt.Errorf(
+				"no usable on-chain leios voting public key for pool %x",
+				poolKeyHash,
+			)
+		}
 		return fmt.Errorf(
-			"no resolvable leios voting public key for pool %x (checked the on-chain registration and leios-voter-public-keys)",
+			"no static leios voting public key for pool %x in private registry mode",
 			poolKeyHash,
 		)
 	}
@@ -701,8 +704,8 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 // resolveOnChainKeys fetches raw registered Leios keys from keyProvider for
 // a snapshot epoch and returns only those whose proof of possession
 // verifies. A nil keyProvider (no ledger wired, e.g. in tests) yields an
-// empty map with no error -- on-chain keys are an additive resolution
-// source on top of Registry, not a hard dependency of it. A provider error
+// empty map with no error -- this is the explicit Registry-only private
+// test/devnet mode. A provider error
 // is returned rather than swallowed into an empty map: the caller must not
 // cache an empty result for a transient failure, since that would make
 // every seat keyless for the rest of the epoch even after the store
@@ -715,7 +718,7 @@ func (m *VoteManager) resolveOnChainKeys(
 	if m.keyProvider == nil {
 		return verified, nil
 	}
-	raw, err := m.keyProvider.GetLeiosKeys(poolKeyHashes)
+	raw, err := m.keyProvider.GetLeiosKeys(snapshotEpoch, poolKeyHashes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve on-chain leios keys for snapshot epoch %d: %w",
@@ -758,14 +761,8 @@ func (m *VoteManager) resolveOnChainKeys(
 // validity of their key.
 //
 // A key-provider error is returned, not swallowed into "no on-chain key
-// found": callers resolve that case to "fall back to the static registry,"
-// and a transient lookup failure is not the same as a genuine absence.
-// Treating them the same would let EnableVoting register a possibly-stale
-// or wrong local key while the real on-chain key is momentarily
-// unreachable -- EnableVoting would then report success, but every
-// subsequent emission would still resolve the real on-chain key once the
-// failure clears and silently reject that stale key, so the operator would
-// have no signal anything is wrong until their pool never actually votes.
+// found": a transient lookup failure is not the same as a genuine absence,
+// and both must block production voting rather than consulting Registry.
 func (m *VoteManager) resolveOnChainKeyForPool(
 	poolKeyHash []byte,
 ) (*bls12381.G2Affine, bool, error) {
@@ -779,12 +776,10 @@ func (m *VoteManager) resolveOnChainKeyForPool(
 	return pub, ok, nil
 }
 
-// resolveVoterKey resolves a committee member's voting public key: the
-// epoch's PoP-verified on-chain key takes precedence, falling back to
-// Registry (a locally configured override, or the node's own key before it
-// is visible on-chain). A member resolving to neither is keyless for the
-// epoch -- membership is still valid, but its vote/signature can never be
-// verified.
+// resolveVoterKey resolves a committee member's voting public key. With a
+// KeyProvider, the epoch's PoP-verified on-chain result is authoritative and a
+// missing key is a keyless seat. Registry is used only when KeyProvider is nil,
+// the explicit private test/devnet seam.
 func (m *VoteManager) resolveVoterKey(
 	entry *epochEntry,
 	poolKeyHash []byte,
@@ -793,6 +788,9 @@ func (m *VoteManager) resolveVoterKey(
 		if pub, ok := entry.onChainKeys[hex.EncodeToString(poolKeyHash)]; ok {
 			return pub, true
 		}
+	}
+	if m.keyProvider != nil {
+		return nil, false
 	}
 	return m.registry.PublicKeyFor(poolKeyHash)
 }
@@ -906,8 +904,8 @@ func (m *VoteManager) HandleVote(
 		}
 		verified = true
 	} else {
-		// Keyless committee seat: the pool has no usable on-chain or
-		// locally-configured key, so the vote counts toward observed
+		// Keyless committee seat: the pool has no usable authoritative key,
+		// so the vote counts toward observed
 		// stake but cannot be verified or aggregated into a certificate.
 		m.logger.Debug(
 			"no registered voting key for leios voter, skipping signature verification",
@@ -1014,7 +1012,7 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		VoterId:           vote.VoterId,
 		VoteSignature:     vote.VoteSignature,
 	}
-	m.insertVote(
+	inserted := m.insertVote(
 		connKey,
 		resolved,
 		record.epoch,
@@ -1024,6 +1022,17 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		entry.tau,
 		vote.AnnouncingRbHash,
 	)
+	// Re-diffuse a newly accepted peer vote the same way a locally emitted
+	// one is diffused. insertVote's dedup/equivocation gate above means this
+	// fires exactly once per distinct vote, so a relay forwards it to its
+	// other peers instead of stopping it at the connection that delivered
+	// it, without re-broadcasting a resubmission or an equivocation attempt.
+	if inserted {
+		m.eventBus.Publish(VoteReceivedEventType, event.NewEvent(
+			VoteReceivedEventType,
+			VoteReceivedEvent{Vote: vote, OriginConnKey: connKey},
+		))
+	}
 	return nil
 }
 

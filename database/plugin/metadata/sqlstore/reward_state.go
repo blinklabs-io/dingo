@@ -36,7 +36,7 @@ func (s *Store) SaveRewardAdaPots(
 	if pots == nil {
 		return errors.New("save reward ADA pots: pots are nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -50,7 +50,7 @@ func (s *Store) SaveRewardAdaPots(
 		return err
 	}
 	id, err := queries.SaveRewardAdaPots(
-		context.Background(),
+		ctx,
 		sqlitequery.SaveRewardAdaPotsParams{
 			Epoch:        epoch,
 			Treasury:     decimalUint64(pots.Treasury),
@@ -71,7 +71,7 @@ func (s *Store) GetRewardAdaPots(
 	epoch uint64,
 	txn types.Txn,
 ) (*models.RewardAdaPots, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func (s *Store) GetRewardAdaPots(
 	if err != nil {
 		return nil, err
 	}
-	row, err := queries.GetRewardAdaPots(context.Background(), sqlEpoch)
+	row, err := queries.GetRewardAdaPots(ctx, sqlEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -121,7 +121,7 @@ func (s *Store) SaveRewardSnapshot(
 	if snapshot == nil {
 		return errors.New("save reward snapshot: snapshot is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -131,13 +131,40 @@ func (s *Store) SaveRewardSnapshot(
 		return err
 	}
 	id, err := queries.SaveRewardSnapshot(
-		context.Background(),
+		ctx,
 		sqlitequery.SaveRewardSnapshotParams(params),
 	)
 	if err != nil {
 		return fmt.Errorf("save reward snapshot: %w", err)
 	}
 	snapshot.ID = uint(id)
+	return nil
+}
+
+func (s *Store) DeleteProvisionalRewardSnapshot(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) error {
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	err = s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			return s.operationalQueries(db).DeleteProvisionalRewardSnapshot(
+				ctx,
+				sqlitequery.DeleteProvisionalRewardSnapshotParams{
+					Epoch:        sqlEpoch,
+					SnapshotType: snapshotType,
+				},
+			)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("delete provisional reward snapshot: %w", err)
+	}
 	return nil
 }
 
@@ -157,12 +184,11 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 	}
 	proceed := false
 	err = s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
 			id, err := queries.InsertRewardSnapshot(
-				context.Background(),
+				ctx,
 				sqlitequery.InsertRewardSnapshotParams(params),
 			)
 			if err == nil {
@@ -174,7 +200,7 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 				return err
 			}
 			existing, err := queries.GetRewardSnapshot(
-				context.Background(),
+				ctx,
 				sqlitequery.GetRewardSnapshotParams{
 					Epoch:        params.Epoch,
 					SnapshotType: params.SnapshotType,
@@ -187,7 +213,7 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 				return nil
 			}
 			updated, err := queries.UpdateFallbackRewardSnapshot(
-				context.Background(),
+				ctx,
 				sqlitequery.UpdateFallbackRewardSnapshotParams{
 					TotalActiveStake:   params.TotalActiveStake,
 					TotalPoolCount:     params.TotalPoolCount,
@@ -224,7 +250,7 @@ func (s *Store) ClaimFallbackRewardSnapshotGuard(
 			"ClaimFallbackRewardSnapshotGuard: transaction is required",
 		)
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return false, 0, err
 	}
@@ -238,7 +264,7 @@ func (s *Store) ClaimFallbackRewardSnapshotGuard(
 		return false, 0, err
 	}
 	id, err := queries.InsertRewardSnapshot(
-		context.Background(),
+		ctx,
 		sqlitequery.InsertRewardSnapshotParams(params),
 	)
 	if err == nil {
@@ -251,7 +277,7 @@ func (s *Store) ClaimFallbackRewardSnapshotGuard(
 		)
 	}
 	existing, err := queries.GetRewardSnapshot(
-		context.Background(),
+		ctx,
 		sqlitequery.GetRewardSnapshotParams{
 			Epoch:        params.Epoch,
 			SnapshotType: params.SnapshotType,
@@ -281,13 +307,13 @@ func (s *Store) ReleaseFallbackRewardSnapshotGuard(
 	if guardID == 0 {
 		return nil
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
 	queries := s.operationalQueries(db)
 	rows, err := queries.ReleaseFallbackRewardSnapshotGuard(
-		context.Background(),
+		ctx,
 		int64(guardID),
 	)
 	if err != nil {
@@ -307,7 +333,7 @@ func (s *Store) GetRewardSnapshot(
 	snapshotType string,
 	txn types.Txn,
 ) (*models.RewardSnapshot, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +343,7 @@ func (s *Store) GetRewardSnapshot(
 		return nil, err
 	}
 	row, err := queries.GetRewardSnapshot(
-		context.Background(),
+		ctx,
 		sqlitequery.GetRewardSnapshotParams{
 			Epoch:        sqlEpoch,
 			SnapshotType: snapshotType,
@@ -340,7 +366,7 @@ func (s *Store) SaveRewardPoolInputs(
 		"pool inputs",
 		len(inputs),
 		txn,
-		func(queries *sqlitequery.Queries, index int) error {
+		func(queries *sqlitequery.Queries, ctx context.Context, index int) error {
 			input := inputs[index]
 			if input == nil {
 				return errors.New("input is nil")
@@ -350,7 +376,7 @@ func (s *Store) SaveRewardPoolInputs(
 				return err
 			}
 			id, err := queries.SaveRewardPoolInput(
-				context.Background(),
+				ctx,
 				params,
 			)
 			if err != nil {
@@ -366,7 +392,7 @@ func (s *Store) GetRewardPoolInputs(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.RewardPoolInput, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +401,7 @@ func (s *Store) GetRewardPoolInputs(
 	if err != nil {
 		return nil, err
 	}
-	rows, err := queries.GetRewardPoolInputs(context.Background(), sqlEpoch)
+	rows, err := queries.GetRewardPoolInputs(ctx, sqlEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("get reward pool inputs: %w", err)
 	}
@@ -398,7 +424,7 @@ func (s *Store) SaveRewardStakeInputs(
 		"stake inputs",
 		len(inputs),
 		txn,
-		func(queries *sqlitequery.Queries, index int) error {
+		func(queries *sqlitequery.Queries, ctx context.Context, index int) error {
 			input := inputs[index]
 			if input == nil {
 				return errors.New("input is nil")
@@ -408,7 +434,7 @@ func (s *Store) SaveRewardStakeInputs(
 				return err
 			}
 			id, err := queries.SaveRewardStakeInput(
-				context.Background(),
+				ctx,
 				params,
 			)
 			if err != nil {
@@ -424,7 +450,7 @@ func (s *Store) GetRewardStakeInputs(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +459,7 @@ func (s *Store) GetRewardStakeInputs(
 	if err != nil {
 		return nil, err
 	}
-	rows, err := queries.GetRewardStakeInputs(context.Background(), sqlEpoch)
+	rows, err := queries.GetRewardStakeInputs(ctx, sqlEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("get reward stake inputs: %w", err)
 	}
@@ -456,15 +482,15 @@ func (s *Store) DeleteRewardInputsForEpoch(
 		"inputs for epoch",
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			if err := q.DeleteRewardPoolInputsForEpoch(
-				context.Background(),
+				ctx,
 				value,
 			); err != nil {
 				return err
 			}
 			return q.DeleteRewardStakeInputsForEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -479,15 +505,15 @@ func (s *Store) DeleteRewardOutputsForEpoch(
 		"outputs for epoch",
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			if err := q.DeleteRewardPoolOutputsForEpoch(
-				context.Background(),
+				ctx,
 				value,
 			); err != nil {
 				return err
 			}
 			return q.DeleteRewardAccountOutputsForEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -502,7 +528,7 @@ func (s *Store) SaveRewardPoolOutputs(
 		"pool outputs",
 		len(outputs),
 		txn,
-		func(queries *sqlitequery.Queries, index int) error {
+		func(queries *sqlitequery.Queries, ctx context.Context, index int) error {
 			output := outputs[index]
 			if output == nil {
 				return errors.New("output is nil")
@@ -512,7 +538,7 @@ func (s *Store) SaveRewardPoolOutputs(
 				return err
 			}
 			id, err := queries.SaveRewardPoolOutput(
-				context.Background(),
+				ctx,
 				params,
 			)
 			if err != nil {
@@ -528,7 +554,7 @@ func (s *Store) GetRewardPoolOutputs(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.RewardPoolOutput, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -537,7 +563,7 @@ func (s *Store) GetRewardPoolOutputs(
 	if err != nil {
 		return nil, err
 	}
-	rows, err := queries.GetRewardPoolOutputs(context.Background(), sqlEpoch)
+	rows, err := queries.GetRewardPoolOutputs(ctx, sqlEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("get reward pool outputs: %w", err)
 	}
@@ -597,9 +623,8 @@ func (s *Store) SaveRewardAccountOutputs(
 	}
 	resolvedIDs := make(map[rewardAccountOutputKey]uint, len(uniqueParams))
 	err := s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			// SQLite's parameter limit is the binding constraint in the default
 			// deployment. Keep each statement bounded while reducing the million-row
 			// reward import from one round trip per row to one per chunk.
@@ -607,6 +632,7 @@ func (s *Store) SaveRewardAccountOutputs(
 			for start := 0; start < len(uniqueParams); start += chunkSize {
 				end := min(start+chunkSize, len(uniqueParams))
 				ids, err := s.saveRewardAccountOutputChunk(
+					ctx,
 					db,
 					uniqueParams[start:end],
 				)
@@ -648,6 +674,7 @@ type rewardAccountOutputKey struct {
 }
 
 func (s *Store) saveRewardAccountOutputChunk(
+	ctx context.Context,
 	db queryer,
 	params []sqlitequery.SaveRewardAccountOutputParams,
 ) ([]int64, error) {
@@ -679,7 +706,7 @@ ON CONFLICT (epoch, credential_tag, staking_key, pool_key_hash, reward_type)
 DO UPDATE SET amount = excluded.amount, spendable = excluded.spendable,
 guarded = excluded.guarded, captured_slot = excluded.captured_slot,
 boundary_slot = excluded.boundary_slot`
-	if _, err := db.ExecContext(context.Background(), query, args...); err != nil {
+	if _, err := db.ExecContext(ctx, query, args...); err != nil {
 		return nil, fmt.Errorf("insert reward account output batch: %w", err)
 	}
 
@@ -700,7 +727,7 @@ boundary_slot = excluded.boundary_slot`
 		)
 	}
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		`SELECT id, epoch, credential_tag, staking_key, pool_key_hash, reward_type
 FROM reward_account_output WHERE `+strings.Join(
 			predicates,
@@ -756,7 +783,7 @@ func (s *Store) GetRewardAccountOutputs(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -766,7 +793,7 @@ func (s *Store) GetRewardAccountOutputs(
 		return nil, err
 	}
 	rows, err := queries.GetRewardAccountOutputs(
-		context.Background(),
+		ctx,
 		sqlEpoch,
 	)
 	if err != nil {
@@ -795,7 +822,7 @@ func (s *Store) GetRewardAccountOutputsByCredential(
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -813,7 +840,7 @@ WHERE credential_tag = ? AND staking_key = ?
 	args := []any{credentialTag, stakingKey}
 	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -875,13 +902,13 @@ func (s *Store) CountRewardAccountOutputsByCredential(
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	var count int
 	err = db.QueryRowContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(`
 SELECT COUNT(*)
 FROM reward_account_output
@@ -908,12 +935,11 @@ func (s *Store) DeleteRewardStateAfterSlot(
 		return err
 	}
 	err = s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
 			if err := q.DeleteRewardAdaPotsAfterSlot(
-				context.Background(),
+				ctx,
 				sqlSlot,
 			); err != nil {
 				return err
@@ -923,31 +949,31 @@ func (s *Store) DeleteRewardStateAfterSlot(
 				BoundarySlot: sqlSlot,
 			}
 			if err := q.DeleteRewardSnapshotsAfterSlot(
-				context.Background(),
+				ctx,
 				pair,
 			); err != nil {
 				return err
 			}
 			if err := q.DeleteRewardPoolInputsAfterSlot(
-				context.Background(),
+				ctx,
 				sqlitequery.DeleteRewardPoolInputsAfterSlotParams(pair),
 			); err != nil {
 				return err
 			}
 			if err := q.DeleteRewardStakeInputsAfterSlot(
-				context.Background(),
+				ctx,
 				sqlitequery.DeleteRewardStakeInputsAfterSlotParams(pair),
 			); err != nil {
 				return err
 			}
 			if err := q.DeleteRewardPoolOutputsAfterSlot(
-				context.Background(),
+				ctx,
 				sqlitequery.DeleteRewardPoolOutputsAfterSlotParams(pair),
 			); err != nil {
 				return err
 			}
 			return q.DeleteRewardAccountOutputsAfterSlot(
-				context.Background(),
+				ctx,
 				sqlitequery.DeleteRewardAccountOutputsAfterSlotParams(pair),
 			)
 		},
@@ -966,15 +992,15 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 		"state before epoch",
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			if err := q.DeleteRewardStakeInputsBeforeEpoch(
-				context.Background(),
+				ctx,
 				value,
 			); err != nil {
 				return err
 			}
 			return q.DeleteRewardAccountOutputsBeforeEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -989,9 +1015,9 @@ func (s *Store) DeleteRewardStakeInputBeforeEpoch(
 		"stake input before epoch",
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteRewardStakeInputsBeforeEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -1002,18 +1028,17 @@ func (s *Store) saveRewardRows(
 	description string,
 	count int,
 	txn types.Txn,
-	save func(*sqlitequery.Queries, int) error,
+	save func(*sqlitequery.Queries, context.Context, int) error,
 ) error {
 	if count == 0 {
 		return nil
 	}
 	err := s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
 			for index := range count {
-				if err := save(queries, index); err != nil {
+				if err := save(queries, ctx, index); err != nil {
 					return err
 				}
 			}
@@ -1030,18 +1055,17 @@ func (s *Store) deleteRewardPair(
 	description string,
 	value uint64,
 	txn types.Txn,
-	deleteFn func(*sqlitequery.Queries, int64) error,
+	deleteFn func(*sqlitequery.Queries, context.Context, int64) error,
 ) error {
 	sqlValue, err := checkedInt64(value)
 	if err != nil {
 		return err
 	}
 	err = s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
-			return deleteFn(queries, sqlValue)
+			return deleteFn(queries, ctx, sqlValue)
 		},
 	)
 	if err != nil {

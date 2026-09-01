@@ -138,15 +138,45 @@ func newChainsyncServerFixture(
 	mode csmock.Mode,
 ) *chainsyncServerFixture {
 	t.Helper()
+	return newChainsyncServerFixtureWithConfig(t, mode, OuroborosConfig{})
+}
+
+// newChainsyncServerFixtureWithConfig is newChainsyncServerFixture with extra
+// OuroborosConfig fields (EnableLeios, LeiosClosureWaitTimeout, ...) folded in.
+// ConnManager, EventBus and Logger are always supplied by the fixture and
+// override anything set in cfg.
+//
+// The connection manager's ConnClosedFunc is wired to the same
+// ReleaseLeiosServeWaiters call the node makes, so a disconnect releases a
+// parked NtC serving wait exactly as it does in production. The callback
+// closes over the o variable rather than a value because the manager has to
+// exist before newOuroboros can be given it; it can only fire after
+// AddConnection below, by which point o is assigned.
+func newChainsyncServerFixtureWithConfig(
+	t *testing.T,
+	mode csmock.Mode,
+	cfg OuroborosConfig,
+) *chainsyncServerFixture {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
 
+	var o *Ouroboros
 	ledgerState := newTestLedgerState(t)
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			EventBus: bus,
 			Logger:   logger,
+			ConnClosedFunc: func(
+				connId ouroboros.ConnectionId,
+				_ bool,
+				_ error,
+			) {
+				if o != nil {
+					o.ReleaseLeiosServeWaiters(connId)
+				}
+			},
 		},
 	)
 	t.Cleanup(func() {
@@ -158,11 +188,10 @@ func newChainsyncServerFixture(
 		_ = connManager.Stop(stopCtx)
 	})
 
-	o := newOuroboros(OuroborosConfig{
-		ConnManager: connManager,
-		EventBus:    bus,
-		Logger:      logger,
-	})
+	cfg.ConnManager = connManager
+	cfg.EventBus = bus
+	cfg.Logger = logger
+	o = newOuroboros(cfg)
 	o.ledgerState = ledgerState
 	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 
@@ -269,7 +298,7 @@ func (f *chainsyncServerFixture) setTip(
 // state being asserted on.
 func (f *chainsyncServerFixture) registeredClient(
 	t *testing.T,
-) (*dchainsync.ChainsyncClientState, bool) {
+) (*dchainsync.ChainsyncClientStateSnapshot, bool) {
 	t.Helper()
 	connId, ok := f.observedConnId()
 	if !ok {
@@ -452,6 +481,78 @@ func TestChainsyncServerFindIntersectAcceptsNormalPointList(t *testing.T) {
 
 	msg := f.observe(t)
 	require.True(t, msg.IsIntersectFound())
+}
+
+// TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget verifies
+// duplicate points within one request are deduplicated before the
+// per-connection work budget is charged. A list of chainsyncMaxFindIntersectPoints
+// copies of the same point is at the point-count limit but collapses to a
+// single point after deduplication, so it must be charged as 1 point of work,
+// not chainsyncMaxFindIntersectPoints.
+func TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+
+	// An empty chain intersects any in-bounds request at origin, so
+	// IntersectFound here only tells us the request wasn't rejected — the
+	// assertion that matters is the second request below.
+	point := makeFindIntersectPoints(1)[0]
+	dup := make([]ocommon.Point, chainsyncMaxFindIntersectPoints)
+	for i := range dup {
+		dup[i] = point
+	}
+	require.NoError(t, f.h.FindIntersect(dup))
+	require.True(t, f.observe(t).IsIntersectFound())
+
+	// Had the duplicate-heavy request above been charged its full
+	// un-deduplicated size, it would have exhausted the entire work budget
+	// on its own, and this distinct-point request — within both the
+	// point-count and work-budget limits by itself — would be rejected too.
+	require.NoError(
+		t,
+		f.h.FindIntersect(
+			makeFindIntersectPoints(chainsyncMaxFindIntersectPoints-1),
+		),
+	)
+	require.True(
+		t,
+		f.observe(t).IsIntersectFound(),
+		"a duplicate-heavy request must not exhaust the work budget meant for distinct points",
+	)
+}
+
+// TestChainsyncServerFindIntersectRateLimitsRepeatedRequests verifies the
+// per-connection work budget bounds cumulative work across many in-bounds
+// requests, not just the size of a single request: a second full-size
+// request immediately following the first must be rejected even though
+// each is within the point-count limit on its own. The limiter's clock is
+// pinned so the assertion holds regardless of how long the wire round trips
+// actually take, rather than relying on them staying under the 5s a full
+// burst would need to refill at chainsyncFindIntersectBudgetRate.
+func TestChainsyncServerFindIntersectRateLimitsRepeatedRequests(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.o.chainsyncFindIntersectLimiter.nowFunc = func() time.Time {
+		return now
+	}
+
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
+	require.NoError(t, f.h.FindIntersect(points))
+	require.True(
+		t,
+		f.observe(t).IsIntersectFound(),
+		"first full-size request should be within the work budget",
+	)
+
+	require.NoError(t, f.h.FindIntersect(points))
+	require.True(
+		t,
+		f.observe(t).IsIntersectNotFound(),
+		"a repeated full-size request over the per-connection work budget must be rejected",
+	)
 }
 
 // =============================================================================

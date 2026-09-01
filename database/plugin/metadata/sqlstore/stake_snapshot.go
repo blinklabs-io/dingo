@@ -35,7 +35,7 @@ func (s *Store) SavePoolStakeSnapshot(
 	if snapshot == nil {
 		return errors.New("save pool stake snapshot: snapshot is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func (s *Store) SavePoolStakeSnapshot(
 		return err
 	}
 	id, err := queries.SavePoolStakeSnapshot(
-		context.Background(),
+		ctx,
 		sqlitequery.SavePoolStakeSnapshotParams(params),
 	)
 	if err != nil {
@@ -63,9 +63,8 @@ func (s *Store) SavePoolStakeSnapshots(
 		return nil
 	}
 	err := s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
 			for _, snapshot := range snapshots {
 				if snapshot == nil {
@@ -76,7 +75,7 @@ func (s *Store) SavePoolStakeSnapshots(
 					return err
 				}
 				id, err := queries.SavePoolStakeSnapshot(
-					context.Background(),
+					ctx,
 					sqlitequery.SavePoolStakeSnapshotParams(params),
 				)
 				if err != nil {
@@ -99,7 +98,7 @@ func (s *Store) GetPoolStakeSnapshot(
 	poolKeyHash []byte,
 	txn types.Txn,
 ) (*models.PoolStakeSnapshot, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +108,7 @@ func (s *Store) GetPoolStakeSnapshot(
 		return nil, err
 	}
 	row, err := queries.GetPoolStakeSnapshot(
-		context.Background(),
+		ctx,
 		sqlitequery.GetPoolStakeSnapshotParams{
 			Epoch:        sqlEpoch,
 			SnapshotType: snapshotType,
@@ -130,7 +129,7 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 	snapshotType string,
 	txn types.Txn,
 ) ([]*models.PoolStakeSnapshot, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +139,7 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 		return nil, err
 	}
 	rows, err := queries.GetPoolStakeSnapshotsByEpoch(
-		context.Background(),
+		ctx,
 		sqlitequery.GetPoolStakeSnapshotsByEpochParams{
 			Epoch:        sqlEpoch,
 			SnapshotType: snapshotType,
@@ -164,6 +163,7 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 // expects, in the order it scans them.
 const poolStakeSnapshotColumns = `id, epoch, snapshot_type, pool_key_hash,
 total_stake, stake_denominator, delegator_count, captured_slot,
+leios_key_public, leios_key_possession_proof,
 calculation_version, reward_account_auto_vote,
 reward_account_auto_vote_resolved`
 
@@ -187,7 +187,7 @@ func (s *Store) GetPoolStakeSnapshotsForPools(
 	if len(poolKeyHashes) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +231,7 @@ func (s *Store) GetPoolStakeSnapshotsForPools(
 			" WHERE epoch = ? AND snapshot_type = ?" +
 			" AND pool_key_hash IN (" +
 			strings.Join(placeholders, ",") + ") ORDER BY id"
-		chunkRows, err := s.scanPoolStakeSnapshots(db, query, args)
+		chunkRows, err := s.scanPoolStakeSnapshots(ctx, db, query, args)
 		if err != nil {
 			return nil, err
 		}
@@ -241,12 +241,13 @@ func (s *Store) GetPoolStakeSnapshotsForPools(
 }
 
 func (s *Store) scanPoolStakeSnapshots(
+	ctx context.Context,
 	db queryer,
 	query string,
 	args []any,
 ) ([]*models.PoolStakeSnapshot, error) {
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -266,6 +267,8 @@ func (s *Store) scanPoolStakeSnapshots(
 			&row.StakeDenominator,
 			&row.DelegatorCount,
 			&row.CapturedSlot,
+			&row.LeiosKeyPublic,
+			&row.LeiosKeyPossessionProof,
 			&row.CalculationVersion,
 			&row.RewardAccountAutoVote,
 			&row.RewardAccountAutoVoteResolved,
@@ -286,7 +289,7 @@ func (s *Store) GetTotalActiveStake(
 	snapshotType string,
 	txn types.Txn,
 ) (uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -297,7 +300,7 @@ func (s *Store) GetTotalActiveStake(
 	}
 	if snapshotType == models.PoolStakeSnapshotTypeMark {
 		summary, err := queries.GetEpochSummary(
-			context.Background(),
+			ctx,
 			sqlEpoch,
 		)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -315,7 +318,7 @@ func (s *Store) GetTotalActiveStake(
 			return value, nil
 		}
 	}
-	value, err := sumUint64Rows(db, s.dialect.Rebind(`
+	value, err := sumUint64Rows(ctx, db, s.dialect.Rebind(`
 SELECT total_stake FROM pool_stake_snapshot
 WHERE epoch = ? AND snapshot_type = ?`), sqlEpoch, snapshotType)
 	if err != nil {
@@ -331,7 +334,7 @@ func (s *Store) SaveEpochSummary(
 	if summary == nil {
 		return errors.New("save epoch summary: summary is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -353,7 +356,7 @@ func (s *Store) SaveEpochSummary(
 		return err
 	}
 	id, err := queries.SaveEpochSummary(
-		context.Background(),
+		ctx,
 		sqlitequery.SaveEpochSummaryParams{
 			Epoch: epoch,
 			TotalActiveStake: strconv.FormatUint(
@@ -378,7 +381,7 @@ func (s *Store) GetEpochSummary(
 	epoch uint64,
 	txn types.Txn,
 ) (*models.EpochSummary, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +390,7 @@ func (s *Store) GetEpochSummary(
 	if err != nil {
 		return nil, err
 	}
-	row, err := queries.GetEpochSummary(context.Background(), sqlEpoch)
+	row, err := queries.GetEpochSummary(ctx, sqlEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -400,12 +403,12 @@ func (s *Store) GetEpochSummary(
 func (s *Store) GetLatestEpochSummary(
 	txn types.Txn,
 ) (*models.EpochSummary, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	queries := s.operationalQueries(db)
-	row, err := queries.GetLatestEpochSummary(context.Background())
+	row, err := queries.GetLatestEpochSummary(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -420,7 +423,7 @@ func (s *Store) DeletePoolStakeSnapshotsForEpoch(
 	snapshotType string,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -430,7 +433,7 @@ func (s *Store) DeletePoolStakeSnapshotsForEpoch(
 		return err
 	}
 	err = queries.DeletePoolStakeSnapshotsForEpoch(
-		context.Background(),
+		ctx,
 		sqlitequery.DeletePoolStakeSnapshotsForEpochParams{
 			Epoch:        sqlEpoch,
 			SnapshotType: snapshotType,
@@ -450,9 +453,9 @@ func (s *Store) DeletePoolStakeSnapshotsAfterEpoch(
 		"after",
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeletePoolStakeSnapshotsAfterEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -467,9 +470,9 @@ func (s *Store) DeletePoolStakeSnapshotsBeforeEpoch(
 		"before",
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeletePoolStakeSnapshotsBeforeEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -484,9 +487,9 @@ func (s *Store) DeleteEpochSummariesAfterEpoch(
 		"summaries after",
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, value int64) error {
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteEpochSummariesAfterEpoch(
-				context.Background(),
+				ctx,
 				value,
 			)
 		},
@@ -497,9 +500,9 @@ func (s *Store) deleteSnapshotsByEpoch(
 	description string,
 	epoch uint64,
 	txn types.Txn,
-	deleteFn func(*sqlitequery.Queries, int64) error,
+	deleteFn func(*sqlitequery.Queries, context.Context, int64) error,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -508,7 +511,7 @@ func (s *Store) deleteSnapshotsByEpoch(
 	if err != nil {
 		return err
 	}
-	if err := deleteFn(queries, sqlEpoch); err != nil {
+	if err := deleteFn(queries, ctx, sqlEpoch); err != nil {
 		return fmt.Errorf(
 			"delete pool stake snapshot %s epoch: %w",
 			description,
@@ -526,6 +529,8 @@ type poolStakeSnapshotQueryParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -559,8 +564,14 @@ func poolStakeSnapshotParams(
 			uint64(snapshot.StakeDenominator),
 			10,
 		),
-		DelegatorCount:     delegatorCount,
-		CapturedSlot:       capturedSlot,
+		DelegatorCount: delegatorCount,
+		CapturedSlot:   capturedSlot,
+		LeiosKeyPublic: append(
+			[]byte(nil), snapshot.LeiosKeyPublic...,
+		),
+		LeiosKeyPossessionProof: append(
+			[]byte(nil), snapshot.LeiosKeyPossessionProof...,
+		),
 		CalculationVersion: calculationVersion,
 		RewardAccountAutoVote: int64(
 			snapshot.RewardAccountAutoVote,
@@ -593,6 +604,12 @@ func poolStakeSnapshotFromSQLite(
 		StakeDenominator: types.Uint64(stakeDenominator),
 		DelegatorCount:   uint64(row.DelegatorCount),
 		CapturedSlot:     uint64(row.CapturedSlot),
+		LeiosKeyPublic: append(
+			[]byte(nil), row.LeiosKeyPublic...,
+		),
+		LeiosKeyPossessionProof: append(
+			[]byte(nil), row.LeiosKeyPossessionProof...,
+		),
 		CalculationVersion: uint(
 			row.CalculationVersion,
 		),

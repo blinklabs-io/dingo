@@ -23,11 +23,13 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
@@ -89,6 +91,7 @@ type mockConwayFeeTx struct {
 	certificates       []lcommon.Certificate
 	withdrawals        map[*lcommon.Address]*big.Int
 	assetMint          *lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
+	outputs            []lcommon.TransactionOutput
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
 }
@@ -110,7 +113,7 @@ func (m *mockConwayFeeTx) Produced() []lcommon.Utxo {
 }
 
 func (m *mockConwayFeeTx) Outputs() []lcommon.TransactionOutput {
-	return nil
+	return m.outputs
 }
 
 func (m *mockConwayFeeTx) TTL() uint64 {
@@ -181,6 +184,49 @@ func (o testAddressScriptOutput) ScriptRef() lcommon.Script {
 	return o.scriptRef
 }
 
+// newTestKeyAddress returns a testnet payment address with a key credential and
+// no staking part, so no script purpose ever resolves to it.
+func newTestKeyAddress(t *testing.T) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	return addr
+}
+
+// newTestScriptAddress returns the testnet payment address that locks a UTxO
+// with the given script, so spending it creates a script purpose needing s.
+func newTestScriptAddress(t *testing.T, s lcommon.Script) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		s.Hash().Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+	return addr
+}
+
+// newTestScriptStakeAddress returns the testnet reward address whose stake
+// credential is the given script, so withdrawing from it creates a rewarding
+// purpose needing s.
+func newTestScriptStakeAddress(t *testing.T, s lcommon.Script) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneScript,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		s.Hash().Bytes(),
+	)
+	require.NoError(t, err)
+	return addr
+}
+
 // mockWitnessSet implements TransactionWitnessSet for
 // testing, returning only redeemers.
 type mockWitnessSet struct {
@@ -230,6 +276,7 @@ type mockRedeemers struct {
 		key lcommon.RedeemerKey
 		val lcommon.RedeemerValue
 	}
+	valueOverride *lcommon.RedeemerValue
 }
 
 func (m *mockRedeemers) Indexes(
@@ -242,6 +289,9 @@ func (m *mockRedeemers) Value(
 	_ uint,
 	_ lcommon.RedeemerTag,
 ) lcommon.RedeemerValue {
+	if m.valueOverride != nil {
+		return *m.valueOverride
+	}
 	return lcommon.RedeemerValue{}
 }
 
@@ -297,10 +347,11 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 
 func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// A zero declared budget is intentional: restrictive validation should
-	// execute this script with the enormous budget and classify the resulting
-	// overage as a Plutus disagreement. The script is small enough that its CEK
-	// steps remain in the trailing slippage batch. Haskell flushes that batch on
-	// a successful return, producing the complete 112100 CPU / 800 memory cost.
+	// execute this script with the protocol transaction budget and classify the
+	// resulting overage as a Plutus disagreement. The script is small enough
+	// that its CEK steps remain in the trailing slippage batch. Haskell flushes
+	// that batch on a successful return, producing the complete 112100 CPU / 800
+	// memory cost.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -318,18 +369,19 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		validate func(lcommon.Transaction, lcommon.LedgerState) error
+		validate func(lcommon.Transaction, lcommon.LedgerState, lcommon.ExUnits) error
 		reset    func()
 	}{
 		{
 			name: "alonzo",
-			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState, maxTxExUnits lcommon.ExUnits) error {
 				return ValidateTxAlonzo(
 					tx,
 					0,
 					ls,
 					&alonzo.AlonzoProtocolParameters{
 						ProtocolMajor: 5,
+						MaxTxExUnits:  maxTxExUnits,
 					},
 				)
 			},
@@ -339,13 +391,14 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		},
 		{
 			name: "babbage",
-			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState, maxTxExUnits lcommon.ExUnits) error {
 				return ValidateTxBabbage(
 					tx,
 					0,
 					ls,
 					&babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
+						MaxTxExUnits:  maxTxExUnits,
 					},
 				)
 			},
@@ -416,7 +469,10 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					addr:       addr,
 				},
 			)
-			err = tc.validate(tx, ls)
+			err = tc.validate(tx, ls, lcommon.ExUnits{
+				Steps:  1_000_000,
+				Memory: 1_000_000,
+			})
 			require.Error(t, err)
 
 			var plutusErr conway.PlutusScriptFailedError
@@ -429,11 +485,39 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 				plutusErr.Err.Error(),
 				"script exceeded declared budget: used (112100 cpu, 800 mem)",
 			)
+
+			t.Run("restrictive evaluation is capped by protocol transaction budget", func(t *testing.T) {
+				err := tc.validate(tx, ls, lcommon.ExUnits{
+					Steps:  1_000,
+					Memory: 100,
+				})
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "out of budget")
+			})
+
+			t.Run("valid execution remains accepted within both budgets", func(t *testing.T) {
+				value := lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
+					Steps:  112_100,
+					Memory: 800,
+				}}
+				witnesses.redeemers.(*mockRedeemers).valueOverride = &value
+				require.NoError(t, tc.validate(tx, ls, lcommon.ExUnits{
+					Steps:  1_000_000,
+					Memory: 1_000_000,
+				}))
+			})
 		})
 	}
 }
 
 func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidateConwayFeaturesRuleIndex,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
+		"conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
+	)
 	requireRuleIndexResolvesToFunc(
 		t,
 		conway.UtxoValidationRules,
@@ -449,6 +533,18 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		"conway.UtxoValidatePlutusScripts",
 	)
 	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
+		"Conway validation must count only needed PlutusV1/V2 scripts",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		validateConwayFeaturesWithNeededPlutusV1V2,
+		"Conway validation must install Dingo's needed-script rule",
+	)
 	requireIndexedRulesExcludeFunc(
 		t,
 		conwayUtxoValidationRules,
@@ -628,6 +724,135 @@ func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(
 			assert.Equal(t, scriptHash, missing.ScriptHash)
 		})
 	}
+}
+
+func TestValidateTxPlutusConwayWithdrawalRedeemerUsesStakeCredential(
+	t *testing.T,
+) {
+	plutusScript := lcommon.PlutusV2Script([]byte{0x01, 0x02})
+	scriptHash := plutusScript.Hash()
+	keyHash := make([]byte, lcommon.AddressHashSize)
+	keyHash[0] = 0xaa
+
+	newAddress := func(
+		t *testing.T,
+		addrType uint8,
+		paymentAddr []byte,
+		stakingAddr []byte,
+	) *lcommon.Address {
+		t.Helper()
+		addr, err := lcommon.NewAddressFromParts(
+			addrType,
+			lcommon.AddressNetworkTestnet,
+			paymentAddr,
+			stakingAddr,
+		)
+		require.NoError(t, err)
+		return &addr
+	}
+
+	rewardScript := newAddress(
+		t,
+		lcommon.AddressTypeNoneScript,
+		nil,
+		scriptHash.Bytes(),
+	)
+	baseKeyScript := newAddress(
+		t,
+		lcommon.AddressTypeKeyScript,
+		keyHash,
+		scriptHash.Bytes(),
+	)
+	baseScriptKey := newAddress(
+		t,
+		lcommon.AddressTypeScriptKey,
+		scriptHash.Bytes(),
+		keyHash,
+	)
+	enterprise := newAddress(
+		t,
+		lcommon.AddressTypeKeyNone,
+		keyHash,
+		nil,
+	)
+	keyBase := newAddress(
+		t,
+		lcommon.AddressTypeKeyKey,
+		keyHash,
+		keyHash,
+	)
+	malformed := &lcommon.Address{}
+
+	validate := func(
+		t *testing.T,
+		withdrawals map[*lcommon.Address]*big.Int,
+	) error {
+		t.Helper()
+		tx := &mockConwayFeeTx{
+			mockFeeTx: mockFeeTx{
+				txType: txTypeAlonzo,
+				witnesses: &mockWitnessSet{
+					plutusV2Scripts: []lcommon.PlutusV2Script{plutusScript},
+				},
+			},
+			withdrawals: withdrawals,
+		}
+		return ValidateTxPlutusConway(
+			tx,
+			0,
+			newMockLedgerState(),
+			&conway.ConwayProtocolParameters{},
+		)
+	}
+
+	t.Run("script stake credentials require a reward redeemer", func(t *testing.T) {
+		tests := []struct {
+			name string
+			addr *lcommon.Address
+		}{
+			{name: "reward address", addr: rewardScript},
+			{name: "base address", addr: baseKeyScript},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := validate(t, map[*lcommon.Address]*big.Int{
+					tt.addr: big.NewInt(1),
+				})
+				var missing conway.MissingRedeemerForScriptError
+				require.ErrorAs(t, err, &missing)
+				assert.Equal(t, scriptHash, missing.ScriptHash)
+				assert.Equal(t, lcommon.RedeemerTagReward, missing.Tag)
+				assert.Equal(t, uint32(0), missing.Index)
+			})
+		}
+	})
+
+	t.Run("key and absent stake credentials do not require a redeemer", func(t *testing.T) {
+		for name, addr := range map[string]*lcommon.Address{
+			"script payment and key stake": baseScriptKey,
+			"enterprise address":           enterprise,
+			"malformed address":            malformed,
+		} {
+			t.Run(name, func(t *testing.T) {
+				require.NoError(t, validate(t, map[*lcommon.Address]*big.Int{
+					addr: big.NewInt(1),
+				}))
+			})
+		}
+	})
+
+	t.Run("redeemer indexes retain withdrawal ordering", func(t *testing.T) {
+		err := validate(t, map[*lcommon.Address]*big.Int{
+			keyBase:       big.NewInt(1),
+			baseKeyScript: big.NewInt(1),
+			rewardScript:  big.NewInt(1),
+		})
+		var missing conway.MissingRedeemerForScriptError
+		require.ErrorAs(t, err, &missing)
+		assert.Equal(t, scriptHash, missing.ScriptHash)
+		assert.Equal(t, lcommon.RedeemerTagReward, missing.Tag)
+		assert.Equal(t, uint32(1), missing.Index)
+	})
 }
 
 func TestValidateTxPlutusConwayNativeScriptWitnessWithoutRedeemerPasses(
@@ -1114,6 +1339,406 @@ func TestTxSizeForFee(t *testing.T) {
 			}
 			size := TxSizeForFee(tx)
 			assert.Equal(t, tc.expected, size)
+		})
+	}
+}
+
+// Preprod transaction a00696a0c2d70c381a265a845e43c55e1d00f96b27c06defc015dc92eb206240
+// (epoch 4, block height 50): the Shelley protocol update that proposed
+// protocol version 3.0. Its seven protocol_param_update maps each hold a
+// single entry on the wire; there are no explicit null placeholders.
+const preprodShelleyUpdateTxCborHex = "83a50081825820a3d6f2627a56fe7921eeda546abfe164321881d41549b7f2fbf09ea0b718d75800018182581d609e5614893238cf85e284c61ec56d5efd9f9cdc4863ba7e1bf00c2c7d1b006983fdc406aeb2021a000325a5031a00015f900682a7581c637f2e950b0fd8f8e3e811c5fbeb19e411e7a2bf37272b84b29c1a0ba10e820300581c8a4b77c4f534f8b8cc6f269e5ebb7ba77fa63a476e50e05e66d7051ca10e820300581cb00470cd193d67aac47c373602fccd4195aad3002c169b5570de1126a10e820300581cb260ffdb6eba541fcf18601923457307647dce807851b9d19da133aba10e820300581cced1599fd821a39593e00592e5292bdc1437ae0f7af388ef5257344aa10e820300581cdd2a7d71a05bed11db61555ba4c658cb1ce06c8024193d064f2a66aea10e820300581cf3b9e74f7d0f24d2314ea5dfbca94b65b2059d1ff94d97436b82d5b4a10e82030004a100888258208b0960d234bda67d52432c5d1a26aca2bfb5b9a09f966d9592a7bf0c728a1ecd584079130103d611a2b85df2de100e2d2ce6aea72128e64f1fb79e7b2cb40b4454c9f05b9142a594f975097f0f816fdf864fe26ee5579e6dc02e62105a7b3458900b825820618b625df30de53895ff29e7a3770dca56c2ff066d4aa05a6971905deecef6db5840716fa941c04771b8205a94d5f7e6fdcfe637a3375778edba0d5833d7a5e08881163be8658bc3dbdb93959642eb1a19402528b8a75cb6786cd630fd58c3dc330682582069a14b724409e0ceef671c76ec4f8bce7509b5919bb971b3855bf92ca56532225840842b04b05e906ed5c89f6bcf89415fcec9401cc6054c2391e73a21f0ad580b5d5ef66be713da2d6237b2434a29e547dab8d54b13da5492d6e08f0143cbe4140c825820d1a8de6caa8fd9b175c59862ecdd5abcd0477b84b82a0e52faecc6b3c85100a45840b634b807e001f4af4d68f773299d840a3da5e0cacb0f88ecbd45fa695eed80489bfd0092bb44f8f31b1177a3368b7f07957b69b592b5e966a45e274ddacd1a0e8258209aae625d4d15bcb3733d420e064f1cd338f386e0af049fcd42b455a69d28ad3658406955e59c61a19da7ace2ee42b90fd8ae1661a1ca98737c9ceb84e00329c4e4d5f3117a495f7c6e09570d8c4c0377f7712c409b59e357e6276c3d51e789777004825820942bb3aaab0f6442b906b65ba6ddbf7969caa662d90968926211a3d56532f11d58403b1565de7fe0ed617804b9b4ed54f026c2fa4a80627c7228a097e255c984950935ab78de08d7c31dd1ef0377cb81708330ed751a98161e3a1af0b8f3e2317f00825820d4dd69a41071bc2dc8e64a97f4bd6379524ce0c2b665728043a067e34d3e218a5840e9951169a573e3379b933f065bb2e0612fce67d110057b65de956473148dc5efdeff8ef1b4a7a01643227f844813bfd8f5be89916269fe3eccf6049f9281c1078258208ef320c2df6654a6188c45e9c639c0a686bf5a865295587d399dfeb05fe74ab65840c8818274f8e29ca6e21061494268369743dbaec05436731d29655e49ccf6f37a7a9a35072b7f70c80c709fa65497da2e8ac21c97c3150395975f8b9d4a393c02f6"
+
+// The same transaction body re-encoded by gouroboros, whose
+// ShelleyProtocolParameterUpdate fields carry no omitempty tag and therefore
+// emit an explicit CBOR null for every absent optional field. This is 210
+// bytes longer than the bytes that were actually on the wire and is not a
+// transaction that exists on preprod.
+const preprodShelleyUpdateTxReencodedCborHex = "83a50081825820a3d6f2627a56fe7921eeda546abfe164321881d41549b7f2fbf09ea0b718d75800018182581d609e5614893238cf85e284c61ec56d5efd9f9cdc4863ba7e1bf00c2c7d1b006983fdc406aeb2021a000325a5031a00015f900682a7581c637f2e950b0fd8f8e3e811c5fbeb19e411e7a2bf37272b84b29c1a0bb000f601f602f603f604f605f606f607f608f609f60af60bf60cf60df60e8203000ff6581c8a4b77c4f534f8b8cc6f269e5ebb7ba77fa63a476e50e05e66d7051cb000f601f602f603f604f605f606f607f608f609f60af60bf60cf60df60e8203000ff6581cb00470cd193d67aac47c373602fccd4195aad3002c169b5570de1126b000f601f602f603f604f605f606f607f608f609f60af60bf60cf60df60e8203000ff6581cb260ffdb6eba541fcf18601923457307647dce807851b9d19da133abb000f601f602f603f604f605f606f607f608f609f60af60bf60cf60df60e8203000ff6581cced1599fd821a39593e00592e5292bdc1437ae0f7af388ef5257344ab000f601f602f603f604f605f606f607f608f609f60af60bf60cf60df60e8203000ff6581cdd2a7d71a05bed11db61555ba4c658cb1ce06c8024193d064f2a66aeb000f601f602f603f604f605f606f607f608f609f60af60bf60cf60df60e8203000ff6581cf3b9e74f7d0f24d2314ea5dfbca94b65b2059d1ff94d97436b82d5b4b000f601f602f603f604f605f606f607f608f609f60af60bf60cf60df60e8203000ff604a100888258208b0960d234bda67d52432c5d1a26aca2bfb5b9a09f966d9592a7bf0c728a1ecd584079130103d611a2b85df2de100e2d2ce6aea72128e64f1fb79e7b2cb40b4454c9f05b9142a594f975097f0f816fdf864fe26ee5579e6dc02e62105a7b3458900b825820618b625df30de53895ff29e7a3770dca56c2ff066d4aa05a6971905deecef6db5840716fa941c04771b8205a94d5f7e6fdcfe637a3375778edba0d5833d7a5e08881163be8658bc3dbdb93959642eb1a19402528b8a75cb6786cd630fd58c3dc330682582069a14b724409e0ceef671c76ec4f8bce7509b5919bb971b3855bf92ca56532225840842b04b05e906ed5c89f6bcf89415fcec9401cc6054c2391e73a21f0ad580b5d5ef66be713da2d6237b2434a29e547dab8d54b13da5492d6e08f0143cbe4140c825820d1a8de6caa8fd9b175c59862ecdd5abcd0477b84b82a0e52faecc6b3c85100a45840b634b807e001f4af4d68f773299d840a3da5e0cacb0f88ecbd45fa695eed80489bfd0092bb44f8f31b1177a3368b7f07957b69b592b5e966a45e274ddacd1a0e8258209aae625d4d15bcb3733d420e064f1cd338f386e0af049fcd42b455a69d28ad3658406955e59c61a19da7ace2ee42b90fd8ae1661a1ca98737c9ceb84e00329c4e4d5f3117a495f7c6e09570d8c4c0377f7712c409b59e357e6276c3d51e789777004825820942bb3aaab0f6442b906b65ba6ddbf7969caa662d90968926211a3d56532f11d58403b1565de7fe0ed617804b9b4ed54f026c2fa4a80627c7228a097e255c984950935ab78de08d7c31dd1ef0377cb81708330ed751a98161e3a1af0b8f3e2317f00825820d4dd69a41071bc2dc8e64a97f4bd6379524ce0c2b665728043a067e34d3e218a5840e9951169a573e3379b933f065bb2e0612fce67d110057b65de956473148dc5efdeff8ef1b4a7a01643227f844813bfd8f5be89916269fe3eccf6049f9281c1078258208ef320c2df6654a6188c45e9c639c0a686bf5a865295587d399dfeb05fe74ab65840c8818274f8e29ca6e21061494268369743dbaec05436731d29655e49ccf6f37a7a9a35072b7f70c80c709fa65497da2e8ac21c97c3150395975f8b9d4a393c02f6"
+
+// TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes pins the fee-relevant
+// size of a pre-Alonzo protocol-update transaction to its preserved wire
+// bytes. The Haskell ledger's sizeShelleyTxF re-serializes
+// [body, wits, auxiliary_data], and the body/wits encoders emit their
+// memoized original bytes, so the fee size equals the on-wire length. Deriving
+// the size from a re-encoded body instead would undercharge this transaction
+// by 210 bytes and accept a fee that cardano-node rejects.
+func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	require.Len(t, txCbor, 1_156)
+
+	tx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"a00696a0c2d70c381a265a845e43c55e1d00f96b27c06defc015dc92eb206240",
+		tx.Hash().String(),
+	)
+
+	// Shelley minFeeA/minFeeB were 44/155381 at preprod epoch 4, and the
+	// transaction declares exactly the minimum fee for its wire size.
+	const (
+		minFeeA = 44
+		minFeeB = 155_381
+	)
+	assert.Equal(t, uint64(1_156), TxSizeForFee(tx))
+	assert.Equal(t, uint64(206_245), CalculateMinFee(
+		TxSizeForFee(tx),
+		lcommon.ExUnits{},
+		minFeeA,
+		minFeeB,
+		nil,
+		nil,
+	))
+	assert.Equal(t, big.NewInt(206_245), tx.Fee())
+	assert.NoError(t, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
+
+	// Negative case: the null-expanded encoding of the same body is 1366
+	// bytes, so the declared fee of 206245 is below the minimum. Sizing
+	// pre-Alonzo transactions from anything other than their wire bytes must
+	// not make this variant pass.
+	reencodedCbor, err := hex.DecodeString(
+		preprodShelleyUpdateTxReencodedCborHex,
+	)
+	require.NoError(t, err)
+	require.Len(t, reencodedCbor, 1_366)
+
+	reencodedTx, err := shelley.NewShelleyTransactionFromCbor(reencodedCbor)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1_366), TxSizeForFee(reencodedTx))
+	assert.Equal(t, uint64(215_485), CalculateMinFee(
+		TxSizeForFee(reencodedTx),
+		lcommon.ExUnits{},
+		minFeeA,
+		minFeeB,
+		nil,
+		nil,
+	))
+	assert.ErrorContains(
+		t,
+		ValidateTxFee(reencodedTx, minFeeA, minFeeB, nil, nil),
+		"transaction fee 206245 is less than the calculated minimum fee 215485",
+	)
+}
+
+func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(t *testing.T) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	wireTx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	// ShelleyBlock.Transactions constructs this shape from the separately
+	// decoded body and witness components. The upstream transaction body now
+	// preserves its original wire bytes, so rebuilding the transaction retains
+	// the canonical encoding used for fee calculation.
+	blockTx := &shelley.ShelleyTransaction{
+		Body:       wireTx.Body,
+		WitnessSet: wireTx.WitnessSet,
+	}
+	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
+	assert.Len(t, blockTx.Cbor(), 1_156)
+	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
+}
+
+// TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes covers the
+// same wire-byte preservation in Allegra. The preprod fixture body uses only
+// fields Allegra shares with Shelley, so it decodes in both eras.
+func TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes(
+	t *testing.T,
+) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	wireTx, err := allegra.NewAllegraTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_156), TxSizeForFee(wireTx))
+
+	blockTx := &allegra.AllegraTransaction{
+		Body:       wireTx.Body,
+		WitnessSet: wireTx.WitnessSet,
+	}
+	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
+	assert.Len(t, blockTx.Cbor(), 1_156)
+	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
+}
+
+// TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection pins the reason Mary
+// is excluded from preAlonzoRebuiltWireSize: MaryTransactionBody also
+// implements MarshalCBOR and returns its preserved bytes, so a rebuilt Mary
+// transaction already encodes to its wire size. If upstream loses that method,
+// this test fails and the helper's supported transaction types must be
+// reconsidered.
+func TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection(t *testing.T) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	wireTx, err := mary.NewMaryTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	blockTx := &mary.MaryTransaction{
+		Body:       wireTx.Body,
+		WitnessSet: wireTx.WitnessSet,
+	}
+	assert.Len(t, blockTx.Cbor(), 1_156)
+	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
+	_, rebuilt := preAlonzoRebuiltWireSize(blockTx)
+	assert.False(t, rebuilt)
+}
+
+func TestPreAlonzoRebuiltWireSize(t *testing.T) {
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	wireTx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	t.Run("decoded from complete cbor", func(t *testing.T) {
+		// Stored transaction CBOR is the encoding the node received, so it is
+		// never recomputed from components.
+		_, ok := preAlonzoRebuiltWireSize(wireTx)
+		assert.False(t, ok)
+	})
+	t.Run("rebuilt from components", func(t *testing.T) {
+		size, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{
+			Body:       wireTx.Body,
+			WitnessSet: wireTx.WitnessSet,
+		})
+		require.True(t, ok)
+		// 1-byte array header + 343-byte body + 811-byte witness set +
+		// 1-byte CBOR null auxiliary data.
+		assert.Equal(t, uint64(1_156), size)
+	})
+	t.Run("no preserved component bytes", func(t *testing.T) {
+		_, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{})
+		assert.False(t, ok)
+	})
+	t.Run("missing witness set bytes", func(t *testing.T) {
+		_, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{
+			Body: wireTx.Body,
+		})
+		assert.False(t, ok)
+	})
+	t.Run("metadata without preserved auxiliary bytes", func(t *testing.T) {
+		// Metadata is present but its original auxiliary-data bytes are not,
+		// so the wire size cannot be rebuilt and the caller must fall back.
+		_, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{
+			Body:       wireTx.Body,
+			WitnessSet: wireTx.WitnessSet,
+			TxMetadata: &lcommon.MetaInt{},
+		})
+		assert.False(t, ok)
+	})
+	t.Run("post-alonzo transaction", func(t *testing.T) {
+		_, ok := preAlonzoRebuiltWireSize(&conway.ConwayTransaction{})
+		assert.False(t, ok)
+	})
+}
+
+func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		shelley.UtxoValidationRules,
+		shelleyUtxoValidateFeeTooSmallRuleIndex,
+		shelley.UtxoValidateFeeTooSmallUtxo,
+		"shelley.UtxoValidateFeeTooSmallUtxo",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		shelley.UtxoValidationRules,
+		shelleyUtxoValidateMaxTxSizeRuleIndex,
+		shelley.UtxoValidateMaxTxSizeUtxo,
+		"shelley.UtxoValidateMaxTxSizeUtxo",
+	)
+	require.Len(
+		t,
+		shelleyUtxoValidationRules,
+		len(shelley.UtxoValidationRules)-2,
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		shelleyUtxoValidationRules,
+		shelley.UtxoValidateFeeTooSmallUtxo,
+		"Shelley validation must size the minimum fee with TxSizeForFee",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		shelleyUtxoValidationRules,
+		shelley.UtxoValidateMaxTxSizeUtxo,
+		"Shelley validation must size the max-size check with TxSizeForFee",
+	)
+
+	requireRuleIndexResolvesToFunc(
+		t,
+		allegra.UtxoValidationRules,
+		allegraUtxoValidateFeeTooSmallRuleIndex,
+		allegra.UtxoValidateFeeTooSmallUtxo,
+		"allegra.UtxoValidateFeeTooSmallUtxo",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		allegra.UtxoValidationRules,
+		allegraUtxoValidateMaxTxSizeRuleIndex,
+		allegra.UtxoValidateMaxTxSizeUtxo,
+		"allegra.UtxoValidateMaxTxSizeUtxo",
+	)
+	require.Len(
+		t,
+		allegraUtxoValidationRules,
+		len(allegra.UtxoValidationRules)-2,
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		allegraUtxoValidationRules,
+		allegra.UtxoValidateFeeTooSmallUtxo,
+		"Allegra validation must size the minimum fee with TxSizeForFee",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		allegraUtxoValidationRules,
+		allegra.UtxoValidateMaxTxSizeUtxo,
+		"Allegra validation must size the max-size check with TxSizeForFee",
+	)
+}
+
+// TestValidateTxPreAlonzoRebuiltUpdateTxSizes drives ValidateTxShelley and
+// ValidateTxAllegra with the preprod protocol-update transaction rebuilt the
+// way a block delivers it. Both the upstream and Dingo fee and max-size rules
+// must use the 1156 bytes that were on the wire. The empty mock ledger state
+// fails other rules, so each assertion is on the fee or size message
+// specifically.
+func TestValidateTxPreAlonzoRebuiltUpdateTxSizes(t *testing.T) {
+	const (
+		preprodMinFeeA   = 44
+		preprodMinFeeB   = 155_381
+		preprodMaxTxSize = 16_384
+
+		dingoFeeTooSmall  = "is less than the calculated minimum fee"
+		dingoSizeTooLarge = "exceeds maximum"
+	)
+
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	shelleyWireTx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	allegraWireTx, err := allegra.NewAllegraTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name             string
+		tx               lcommon.Transaction
+		validateTx       lcommon.UtxoValidationRuleFunc
+		upstreamFeeRule  lcommon.UtxoValidationRuleFunc
+		upstreamSizeRule lcommon.UtxoValidationRuleFunc
+	}{
+		{
+			name: "shelley",
+			tx: &shelley.ShelleyTransaction{
+				Body:       shelleyWireTx.Body,
+				WitnessSet: shelleyWireTx.WitnessSet,
+			},
+			validateTx:       ValidateTxShelley,
+			upstreamFeeRule:  shelley.UtxoValidateFeeTooSmallUtxo,
+			upstreamSizeRule: shelley.UtxoValidateMaxTxSizeUtxo,
+		},
+		{
+			name: "allegra",
+			tx: &allegra.AllegraTransaction{
+				Body:       allegraWireTx.Body,
+				WitnessSet: allegraWireTx.WitnessSet,
+			},
+			validateTx:       ValidateTxAllegra,
+			upstreamFeeRule:  allegra.UtxoValidateFeeTooSmallUtxo,
+			upstreamSizeRule: allegra.UtxoValidateMaxTxSizeUtxo,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := newMockLedgerState()
+			require.Len(t, tc.tx.Cbor(), 1_156)
+			require.Equal(t, uint64(1_156), TxSizeForFee(tc.tx))
+
+			pparams := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: preprodMaxTxSize,
+			}
+			// Upstream and Dingo both size the rebuilt transaction from its
+			// preserved component bytes.
+			require.NoError(t, tc.upstreamFeeRule(tc.tx, 0, ls, pparams))
+			err := tc.validateTx(tc.tx, 0, ls, pparams)
+			require.Error(t, err, "unresolvable inputs must still fail")
+			assert.NotContains(t, err.Error(), dingoFeeTooSmall)
+			assert.NotContains(t, err.Error(), "fee too small")
+
+			// Raising minFeeA by one lovelace puts the declared fee below the
+			// minimum for the wire size too, so the replacement fee check is
+			// running rather than silently absent.
+			tighterFee := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA + 1,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: preprodMaxTxSize,
+			}
+			require.ErrorContains(
+				t,
+				tc.validateTx(tc.tx, 0, ls, tighterFee),
+				dingoFeeTooSmall,
+			)
+
+			// Fee and max-size must be judged against the same preserved wire
+			// size. A limit between the old re-encoded size and the wire size
+			// is accepted by both implementations.
+			narrowSize := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: 1_200,
+			}
+			require.NoError(t, tc.upstreamSizeRule(tc.tx, 0, ls, narrowSize))
+			err = tc.validateTx(tc.tx, 0, ls, narrowSize)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), dingoSizeTooLarge)
+			assert.NotContains(t, err.Error(), "transaction size too large")
+
+			// A limit below the wire size is still enforced.
+			tinySize := &shelley.ShelleyProtocolParameters{
+				MinFeeA:   preprodMinFeeA,
+				MinFeeB:   preprodMinFeeB,
+				MaxTxSize: 1_000,
+			}
+			require.ErrorContains(
+				t,
+				tc.validateTx(tc.tx, 0, ls, tinySize),
+				"transaction size 1156 exceeds maximum 1000",
+			)
+		})
+	}
+}
+
+func TestValidateTxPreAlonzoRejectsWrongProtocolParams(t *testing.T) {
+	tests := []struct {
+		name       string
+		validateTx lcommon.UtxoValidationRuleFunc
+	}{
+		{name: "shelley", validateTx: ValidateTxShelley},
+		{name: "allegra", validateTx: ValidateTxAllegra},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := newMockLedgerState()
+			require.ErrorIs(
+				t,
+				tc.validateTx(
+					&shelley.ShelleyTransaction{},
+					0,
+					ls,
+					&conway.ConwayProtocolParameters{},
+				),
+				ErrIncompatibleProtocolParams,
+			)
+			// A nil typed pointer must not be dereferenced for MinFeeA.
+			var nilPparams *shelley.ShelleyProtocolParameters
+			require.ErrorIs(
+				t,
+				tc.validateTx(&shelley.ShelleyTransaction{}, 0, ls, nilPparams),
+				ErrIncompatibleProtocolParams,
+			)
 		})
 	}
 }
@@ -2957,4 +3582,32 @@ func TestConwayPlutusRejectsNilPparams(t *testing.T) {
 		nilPparams,
 	)
 	assert.ErrorIs(t, certErr, ErrIncompatibleProtocolParams)
+}
+
+// TestPreAlonzoCertDepositRejectsNilPparams completes the typed-nil guard
+// across the pre-Alonzo eras.
+//
+// TestConwayPlutusRejectsNilPparams already pins CertDepositConway, and the
+// ValidateTx path was guarded for these eras, but their CertDeposit functions
+// kept an ok-only assertion and then read PoolDeposit and KeyDeposit directly.
+// A typed nil satisfies the assertion, so an unguarded nil panicked here while
+// the sibling era returned an error.
+func TestPreAlonzoCertDepositRejectsNilPparams(t *testing.T) {
+	certs := []lcommon.Certificate{
+		&lcommon.StakeRegistrationCertificate{},
+		&lcommon.PoolRegistrationCertificate{},
+	}
+	for _, cert := range certs {
+		var nilShelley *shelley.ShelleyProtocolParameters
+		_, err := CertDepositShelley(cert, nilShelley)
+		assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+
+		var nilAllegra *allegra.AllegraProtocolParameters
+		_, err = CertDepositAllegra(cert, nilAllegra)
+		assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+
+		var nilMary *mary.MaryProtocolParameters
+		_, err = CertDepositMary(cert, nilMary)
+		assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+	}
 }

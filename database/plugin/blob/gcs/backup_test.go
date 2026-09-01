@@ -25,8 +25,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,6 +84,29 @@ func newTestGCSStore(t *testing.T) *BlobStoreGCS {
 		)
 	}
 	return store
+}
+
+func TestResetBatchUsesFreshTimeoutForEveryGCSDelete(t *testing.T) {
+	keys := [][]byte{[]byte("first"), []byte("second")}
+	deleteCalls := 0
+	err := deleteBatchIndividually(
+		t.Context(),
+		keys,
+		10*time.Millisecond,
+		func(ctx context.Context, _ []byte) error {
+			deleteCalls++
+			if deleteCalls == 1 {
+				// Consume the first operation's complete timeout. A batch-wide
+				// context would now be expired and never issue the second delete.
+				<-ctx.Done()
+				return types.ErrBlobKeyNotFound
+			}
+			require.NoError(t, ctx.Err())
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, len(keys), deleteCalls)
 }
 
 // TestBackupRestoreRoundTrip validates the full round trip against a real

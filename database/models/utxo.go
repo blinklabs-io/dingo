@@ -35,6 +35,15 @@ var (
 	ErrExactAddressRequiresCbor = errors.New(
 		"exact address matching requires output CBOR",
 	)
+	ErrDescendingKeysetUnsupported = errors.New(
+		"keyset pagination (After) does not support Descending",
+	)
+	ErrOffsetKeysetUnsupported = errors.New(
+		"keyset pagination (After) does not support Offset",
+	)
+	ErrOffsetRequiresCoarseMatch = errors.New(
+		"offset requires address patterns that do not need exact-address CBOR filtering",
+	)
 )
 
 // UtxoAddressPattern carries explicit address-match intent through the shared
@@ -322,7 +331,26 @@ type UtxoOrderingCursor struct {
 //     satisfy any pattern. Fields within a pattern are ANDed; patterns are ORed.
 //
 // After + Limit: keyset pagination; Limit <= 0 means no SQL LIMIT. SearchUtxos sets Limit to
-// effective page size + 1.
+// effective page size + 1. Mutually exclusive with Offset and Descending (both page-number
+// pagination controls); GetUtxosByAddressWithOrdering errors if After is combined with
+// either one.
+//
+// Offset: page-number pagination; > 0 means SQL OFFSET. Only valid when the address
+// patterns do not require CBOR-based exact-address filtering (see
+// RequiresExactAddressFilter): the coarse SQL predicate over-matches address forms sharing
+// a payment/delegation credential (for example pointer addresses), so skipping rows in SQL
+// would skip a different set of rows than skipping exact matches. Combine with Limit for a
+// bounded page; GetUtxosByAddressWithOrdering errors if Offset is set on a query that
+// requires exact-address filtering.
+//
+// Descending: reverses SQL ORDER BY direction (newest first) instead of the default
+// ascending (oldest first) producing-transaction-position order.
+//
+// SkipAssets: when true, GetUtxosByAddressWithOrdering does not load each
+// row's native assets. Set this for a candidate scan whose rows are
+// discarded or only used to confirm an exact-address match (see
+// RequiresExactAddressFilter) and never returned to a caller that reads
+// Utxo.Assets, to avoid materializing asset data that is thrown away.
 //
 // FilterByAsset: when true, AssetPolicyID is required; AssetName nil matches any name under
 // the policy (same semantics as GetUtxosByAssets).
@@ -331,6 +359,9 @@ type UtxoWithOrderingQuery struct {
 	AddressPatterns   []UtxoAddressPattern
 	After             *UtxoOrderingCursor
 	Limit             int
+	Offset            int
+	Descending        bool
+	SkipAssets        bool
 	FilterByAsset     bool
 	AssetPolicyID     []byte
 	AssetName         []byte
@@ -343,13 +374,17 @@ func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
 func UtxoLedgerToModel(
 	utxo ledger.Utxo,
 	slot uint64,
-) Utxo {
+) (Utxo, error) {
 	outAddr := utxo.Output.Address()
+	amount, err := checkedUint64FromBigInt(utxo.Output.Amount())
+	if err != nil {
+		return Utxo{}, fmt.Errorf("utxo amount: %w", err)
+	}
 	ret := Utxo{
 		TxId:      utxo.Id.Id().Bytes(),
 		Cbor:      utxo.Output.Cbor(),
 		AddedSlot: slot,
-		Amount:    types.Uint64(utxo.Output.Amount().Uint64()),
+		Amount:    types.Uint64(amount),
 		OutputIdx: utxo.Id.Index(),
 	}
 	var zeroHash ledger.Blake2b224
@@ -376,10 +411,14 @@ func UtxoLedgerToModel(
 		ret.DatumHash = append([]byte(nil), dh[:]...)
 	}
 	if multiAsset := utxo.Output.Assets(); multiAsset != nil {
-		ret.Assets = ConvertMultiAssetToModels(multiAsset)
+		assets, err := ConvertMultiAssetToModels(multiAsset)
+		if err != nil {
+			return Utxo{}, fmt.Errorf("utxo assets: %w", err)
+		}
+		ret.Assets = assets
 	}
 
-	return ret
+	return ret, nil
 }
 
 func StakeCredentialTagFromAddress(addr ledger.Address) (uint8, bool) {

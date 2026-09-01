@@ -58,6 +58,9 @@ type BlobStoreS3 struct {
 	prefix        string
 	region        string
 	timeout       time.Duration
+	// listPageSize is a test seam for exercising paginator boundaries with a
+	// small real S3 dataset. Zero leaves the SDK/service default unchanged.
+	listPageSize int32
 }
 
 const maxBlobReadBytes int64 = 256 << 20
@@ -405,6 +408,9 @@ func (it *s3StreamIterator) reset(seek []byte) {
 	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String(it.store.bucket),
 	}
+	if it.store.listPageSize > 0 {
+		input.MaxKeys = aws.Int32(it.store.listPageSize)
+	}
 	if prefix := it.store.fullKey(string(it.prefix)); prefix != "" {
 		input.Prefix = aws.String(prefix)
 	} else if it.store.prefix != "" {
@@ -638,18 +644,23 @@ func (d *BlobStoreS3) GetBlock(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
-	if types.IsBlockTombstone(cborData) {
-		return nil, types.BlockMetadata{},
-			&types.HistoryExpiredError{Slot: slot, Hash: hash}
-	}
+	isTombstone := types.IsBlockTombstone(cborData)
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataBytes, err := d.resolveKey(ctx, t, metadataKey)
 	if err != nil {
+		if isTombstone && errors.Is(err, types.ErrBlobKeyNotFound) {
+			return nil, types.BlockMetadata{},
+				&types.HistoryExpiredError{Slot: slot, Hash: hash}
+		}
 		return nil, types.BlockMetadata{}, err
 	}
 	var tmpMetadata types.BlockMetadata
 	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
 		return nil, types.BlockMetadata{}, err
+	}
+	if isTombstone {
+		return nil, tmpMetadata,
+			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	return cborData, tmpMetadata, nil
 }
@@ -689,11 +700,8 @@ func (d *BlobStoreS3) DeleteBlock(
 //   - bh<hash>: BlockByHash resolves only through this index and treats
 //     a missing entry as a hard miss (ErrBlockNotFound), so the entry
 //     must survive tombstoning to keep the block reachable by hash.
-//
-// What goes:
-//   - bp_metadata: GetBlock short-circuits on the expiry marker before
-//     reading metadata, and no other caller asks for local metadata of an
-//     expired block — bark's archive response carries its own.
+//   - bp_metadata: carries the local block ID, which Bark's archive does not
+//     know and primary-chain membership checks require.
 func (d *BlobStoreS3) TombstoneBlock(
 	txn types.Txn,
 	slot uint64,
@@ -707,9 +715,7 @@ func (d *BlobStoreS3) TombstoneBlock(
 		return err
 	}
 	key := types.BlockBlobKey(slot, hash)
-	metadataKey := types.BlockBlobMetadataKey(key)
 	t.stageSet(key, types.BlockTombstone())
-	t.stageDelete(metadataKey)
 	return nil
 }
 
@@ -1154,7 +1160,11 @@ type reverseKeyFile struct {
 }
 
 func writeReverseKey(file *os.File, key string) error {
-	if len(key) > math.MaxUint32 {
+	// len(key) is compared as int64 rather than directly against the
+	// untyped constant math.MaxUint32: on a 32-bit platform int is 32
+	// bits wide and that constant does not fit in it, so the naive
+	// comparison fails to compile.
+	if int64(len(key)) > math.MaxUint32 {
 		return fmt.Errorf("key length %d exceeds uint32 maximum", len(key))
 	}
 	length := make([]byte, 4)

@@ -26,41 +26,34 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	gouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// liveLifecycleTestDataDir returns the immutable testdata directory used
-// elsewhere in the repo (internal/integration, database package tests) —
-// real preview-testnet blocks.
-func liveLifecycleTestDataDir() string {
-	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(
-		filepath.Dir(thisFile),
-		"database",
-		"immutable",
-		"testdata",
-	)
-}
 
 // newLiveLifecycleTestNode hand-builds a partial but real *Node — real
 // database, chain manager, ledger state (loaded with real blocks), event
@@ -125,6 +118,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 	db, err := database.New(&database.Config{
 		DataDir: tmpDir,
 		Logger:  logger,
+		Network: "preview",
 	}, stores)
 	require.NoError(t, err)
 
@@ -148,16 +142,43 @@ func newLiveLifecycleTestNodeWithGenesis(
 		cardanoNodeCfg = newNodeTestCardanoNodeCfg(t)
 	}
 
-	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:                 db,
-		ChainManager:             cm,
-		EventBus:                 eventBus,
-		CardanoNodeConfig:        cardanoNodeCfg,
-		Logger:                   logger,
-		ValidateHistorical:       false,
-		DatabaseWorkerPoolConfig: workerPoolCfg,
-	})
+	cfg := NewConfig(
+		WithDatabasePath(tmpDir),
+		WithLogger(logger),
+		WithNetwork("preview"),
+		WithCardanoNodeConfig(cardanoNodeCfg),
+		WithPluginSelection(
+			plugin.CapabilityStorageBlob,
+			storageSelections.Blob,
+		),
+		WithPluginSelection(
+			plugin.CapabilityStorageMetadata,
+			storageSelections.Metadata,
+		),
+		WithDatabaseWorkerPoolConfig(workerPoolCfg),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{
+		config:       cfg,
+		eventBus:     eventBus,
+		db:           db,
+		pluginHost:   pluginHost,
+		chainManager: cm,
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+
+	// Build the initial LedgerState through the node's own
+	// ledgerStateConfig(), the way Run() does, instead of a hand-written
+	// config literal. reinitializeCoreStorage rebuilds it from that same
+	// method, so a behavior asserted before and after a live
+	// restore/truncate is compared against identical production wiring on
+	// both sides rather than against a harness config that happens to omit
+	// the field under test.
+	ledgerState, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	require.NoError(t, err)
+	n.ledgerState = ledgerState
 	// Build the harness ouroboros the way Run() does: every dependency up
 	// front, through the validating constructor, so the live-restore
 	// reconstruction assertions below exercise the production path rather
@@ -188,39 +209,11 @@ func newLiveLifecycleTestNodeWithGenesis(
 	}
 	ouro, err := ouroborosPkg.NewOuroboros(ouroborosCfg)
 	require.NoError(t, err)
-	require.NoError(t, ledgerState.Start(context.Background()))
-
-	cfg := NewConfig(
-		WithDatabasePath(tmpDir),
-		WithLogger(logger),
-		WithNetwork("preview"),
-		WithCardanoNodeConfig(cardanoNodeCfg),
-		WithPluginSelection(
-			plugin.CapabilityStorageBlob,
-			storageSelections.Blob,
-		),
-		WithPluginSelection(
-			plugin.CapabilityStorageMetadata,
-			storageSelections.Metadata,
-		),
-		WithDatabaseWorkerPoolConfig(workerPoolCfg),
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	n := &Node{
-		config:       cfg,
-		eventBus:     eventBus,
-		db:           db,
-		pluginHost:   pluginHost,
-		chainManager: cm,
-		ledgerState:  ledgerState,
-		// Retained so reinitializeNetworkingCore can rebuild ouroboros the
-		// way Run() does.
-		ouroborosConfig: ouroborosCfg,
-		ctx:             ctx,
-		cancel:          cancel,
-	}
+	// Retained so reinitializeNetworkingCore can rebuild ouroboros the way
+	// Run() does.
+	n.ouroborosConfig = ouroborosCfg
 	n.ouroborosRef.Store(ouro)
+	require.NoError(t, ledgerState.Start(context.Background()))
 	t.Cleanup(func() {
 		cancel()
 		if n.pluginHost != nil {
@@ -256,32 +249,19 @@ func newLiveLifecycleTestNodeWithGenesis(
 	return n, points
 }
 
-// loadLiveLifecycleTestBlocks loads numBlocks real blocks from the
-// immutable testdata into c, mirroring
-// internal/integration.loadBlocksFromImmutable (a different package, so
-// not directly reusable).
+// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c.
+// The lifecycle tests configure the Babbage hard-fork override where needed.
 func loadLiveLifecycleTestBlocks(
 	t *testing.T,
 	c *chain.Chain,
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	imm, err := immutable.New(liveLifecycleTestDataDir())
+	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
 	require.NoError(t, err)
-
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err)
-	defer iter.Close()
 
 	var points []ocommon.Point
-	for range numBlocks {
-		immBlock, err := iter.Next()
-		require.NoError(t, err)
-		if immBlock == nil {
-			break
-		}
-		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		require.NoError(t, err)
+	for _, block := range blocks {
 		require.NoError(t, c.AddBlock(block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
@@ -289,51 +269,19 @@ func loadLiveLifecycleTestBlocks(
 		})
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
-	if len(points) < numBlocks {
-		t.Skipf(
-			"not enough blocks in testdata: got %d, need %d",
-			len(points),
-			numBlocks,
-		)
-	}
+	require.Len(t, points, numBlocks)
 	return points
 }
 
-// loadRawLiveLifecycleTestBlocks loads the first numBlocks real blocks from
-// the immutable testdata WITHOUT adding them to any chain, so a caller can
-// feed them in one at a time later (e.g. to simulate new blocks arriving
-// live after a truncate/restore, extending from whatever tip the operation
-// left rather than from the original full chain).
+// loadRawLiveLifecycleTestBlocks loads generated blocks without adding them to
+// a chain, so callers can feed them in one at a time later.
 func loadRawLiveLifecycleTestBlocks(
 	t *testing.T,
 	numBlocks int,
 ) []gledger.Block {
 	t.Helper()
-	imm, err := immutable.New(liveLifecycleTestDataDir())
+	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
 	require.NoError(t, err)
-
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err)
-	defer iter.Close()
-
-	var blocks []gledger.Block
-	for range numBlocks {
-		immBlock, err := iter.Next()
-		require.NoError(t, err)
-		if immBlock == nil {
-			break
-		}
-		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		require.NoError(t, err)
-		blocks = append(blocks, block)
-	}
-	if len(blocks) < numBlocks {
-		t.Skipf(
-			"not enough blocks in testdata: got %d, need %d",
-			len(blocks),
-			numBlocks,
-		)
-	}
 	return blocks
 }
 
@@ -581,6 +529,241 @@ func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivity
 	)
 }
 
+// genesisSelectionTestWindowSlots is the Genesis density window the test
+// chain selector reports. The preview testdata blocks are 20 slots apart,
+// so a 25-slot window anchored at a fork intersection contains exactly one
+// local block: a competing fork with two headers packed into the slots
+// right after that intersection has density two against the local chain's
+// one, while still being SHORTER in block number. That is the only shape
+// where the Genesis density decision and the Praos length decision
+// disagree, which is what makes the fork tests fail if the injected
+// GenesisSelectionStateFunc goes missing.
+const genesisSelectionTestWindowSlots = 25
+
+// newGenesisSelectionTestNode is newLiveLifecycleTestNode plus the two
+// fields fork resolution needs before it will consult Genesis selection at
+// all: n.chainSelector, the source the injected GenesisSelectionStateFunc
+// resolves, parked in Genesis mode; and n.connManager, because the ledger
+// drops a chainsync event whose connection is not registered with it.
+func newGenesisSelectionTestNode(
+	t *testing.T,
+	numBlocks int,
+) (*Node, []ocommon.Point) {
+	t.Helper()
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	// Reuse the connection manager the harness ouroboros was built with, so
+	// the ledger's liveness gate and its blockfetch requests resolve the
+	// same instance -- exactly as they do after a live rebuild, where
+	// reinitializeNetworkingCore hands the rebuilt manager to both.
+	n.connManager = n.ouroboros().ConnManager()
+	// No EventBus: the selector must stay in Genesis mode for the whole
+	// test, and a live one would let peer-tip and rollback events drive its
+	// one-way transition to Praos.
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			Logger:             n.config.logger,
+			GenesisMode:        true,
+			GenesisWindowSlots: genesisSelectionTestWindowSlots,
+		},
+	)
+	active, window := n.chainSelector.GenesisSelectionState()
+	require.True(t, active, "test selector must start in Genesis mode")
+	require.Equal(t, uint64(genesisSelectionTestWindowSlots), window)
+	return n, points
+}
+
+// registerGenesisForkTestPeer registers a mock node-to-node connection with
+// the node's CURRENT connection manager and returns its connection ID.
+// ledger.LedgerState ignores a chainsync event whose connection is not
+// registered, so each phase of a lifecycle test needs its own peer: the
+// live rebuild replaces the connection manager along with everything else.
+func registerGenesisForkTestPeer(
+	t *testing.T,
+	n *Node,
+) gouroboros.ConnectionId {
+	t.Helper()
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		ouroboros_mock.ConversationKeepAlive,
+	)
+	oConn, err := gouroboros.New(
+		gouroboros.WithConnection(mockConn),
+		gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		gouroboros.WithNodeToNode(true),
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		n.connManager.AddConnection(oConn, false, "127.0.0.1:33273"),
+	)
+	t.Cleanup(func() { _ = oConn.Close() })
+	return oConn.Id()
+}
+
+// requireGenesisDeepForkWins drives a competing fork that only Ouroboros
+// Genesis density selection can win, and requires the ledger to switch to
+// it.
+//
+// The fork branches off the local chain at points[ancestorIdx] -- several
+// blocks behind the local tip, so resolving it is a deep rollback -- and
+// carries two headers packed into the first few slots after that
+// intersection. It is strictly SHORTER than the local chain in block
+// number and its headers sit at earlier slots than the local tip, so Praos
+// length comparison rejects it outright: without Genesis selection the
+// ledger discards both headers as stale roll-forwards and the tip never
+// moves. With Genesis selection active the same two headers are denser
+// inside the window anchored at the intersection than the local chain is
+// (two blocks versus one), so the ledger must roll back to the
+// intersection.
+//
+// The first header alone only ties the local density, which exercises the
+// documented equal-density fallback to Praos; the second header is what
+// makes the peer's branch win, and it can only be evaluated by walking the
+// peer's recorded header history back to the intersection.
+func requireGenesisDeepForkWins(
+	t *testing.T,
+	n *Node,
+	points []ocommon.Point,
+	ancestorIdx int,
+) {
+	t.Helper()
+	require.Greater(t, len(points), ancestorIdx+1)
+	ancestor := points[ancestorIdx]
+	localTipBefore := n.ledgerState.Tip()
+	require.Greater(
+		t,
+		localTipBefore.Point.Slot,
+		ancestor.Slot,
+		"the local tip must be ahead of the fork intersection for this to be a deep fork",
+	)
+
+	// Real Conway blocks from the shared ouroboros-mock fixtures rather than
+	// a locally defined header stub: their headers round-trip through CBOR,
+	// so the ledger sees the same hashes and prev-hashes a peer would send.
+	// Block numbers continue from the intersection, which keeps the branch
+	// shorter than the local chain.
+	forkBlocks, err := fixtures.GenerateConwayChain(
+		uint64(ancestorIdx)+1,
+		lcommon.NewBlake2b256(ancestor.Hash),
+		ancestor.Slot+2,
+		2,
+		2,
+	)
+	require.NoError(t, err)
+	forkTipBlock := forkBlocks[len(forkBlocks)-1]
+	require.Less(
+		t,
+		forkTipBlock.SlotNumber(),
+		localTipBefore.Point.Slot,
+		"the fork must stay behind the local tip so Praos alone rejects it",
+	)
+	require.Less(
+		t,
+		forkTipBlock.BlockNumber(),
+		localTipBefore.BlockNumber,
+		"the fork must be shorter than the local chain so Praos alone rejects it",
+	)
+	forkTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			forkTipBlock.SlotNumber(),
+			forkTipBlock.Hash().Bytes(),
+		),
+		BlockNumber: forkTipBlock.BlockNumber(),
+	}
+
+	connId := registerGenesisForkTestPeer(t, n)
+	for _, blk := range forkBlocks {
+		n.eventBus.Publish(
+			ledger.ChainsyncEventType,
+			event.NewEvent(ledger.ChainsyncEventType, ledger.ChainsyncEvent{
+				ConnectionId: connId,
+				Point: ocommon.NewPoint(
+					blk.SlotNumber(),
+					blk.Hash().Bytes(),
+				),
+				BlockHeader: blk.Header(),
+				Tip:         forkTip,
+				BlockNumber: blk.BlockNumber(),
+				Type:        uint(blk.Type()),
+			}),
+		)
+	}
+
+	require.EventuallyWithT(
+		t,
+		func(collect *assert.CollectT) {
+			assert.Equal(
+				collect,
+				ancestor.Slot,
+				n.ledgerState.Tip().Point.Slot,
+				"current ledger tip slot",
+			)
+		},
+		10*time.Second,
+		20*time.Millisecond,
+		"ledger did not roll back to the Genesis-selected fork intersection at slot %d",
+		ancestor.Slot,
+	)
+}
+
+// TestLiveTruncatePreservesGenesisForkSelection is the behavioral guard for
+// issue #3273: reinitializeCoreStorage rebuilt LedgerStateConfig without
+// GenesisSelectionStateFunc, so a node that had Ouroboros Genesis selection
+// active silently fell back to Praos-length-only fork resolution after a
+// live truncate and stayed there until the process restarted.
+//
+// Both halves drive the same deep fork that only Genesis density can win --
+// before the truncate against the ledger Run() would have built, and after
+// it against the one the lifecycle path rebuilt.
+func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
+	const numBlocks = 25
+	n, points := newGenesisSelectionTestNode(t, numBlocks)
+
+	// Before: Genesis density resolves a deep fork 4 blocks behind the tip.
+	requireGenesisDeepForkWins(t, n, points, numBlocks-5)
+
+	targetSlot := points[10].Slot
+	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: &targetSlot,
+	})
+	require.NoError(t, err)
+	require.Equal(t, targetSlot, n.ledgerState.Tip().Point.Slot)
+
+	// After: the rebuilt ledger must still consult the same selector. A
+	// different intersection is used because the truncate discarded the
+	// blocks the first half rolled back to.
+	requireGenesisDeepForkWins(t, n, points, 5)
+}
+
+// TestLiveRestorePreservesGenesisForkSelection is
+// TestLiveTruncatePreservesGenesisForkSelection for the Restore half of the
+// same live-lifecycle path, which rebuilds the ledger through the same
+// reinitializeCoreStorage call.
+func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
+	const numBlocks = 25
+	n, points := newGenesisSelectionTestNode(t, numBlocks)
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap-3273")
+	manifest, err := lifecycleSnapshot(t, n, snapshotDir)
+	require.NoError(t, err)
+	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
+
+	// Before: Genesis density resolves a deep fork 4 blocks behind the tip.
+	requireGenesisDeepForkWins(t, n, points, numBlocks-5)
+
+	_, err = n.Restore(context.Background(), snapshotDir)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		points[len(points)-1].Slot,
+		n.ledgerState.Tip().Point.Slot,
+		"restore must bring the pre-fork tip back",
+	)
+
+	// After: the rebuilt ledger must still consult the same selector.
+	requireGenesisDeepForkWins(t, n, points, numBlocks-10)
+}
+
 // TestLiveTruncateIsSerializedAgainstConcurrentCalls exercises
 // n.liveLifecycleMu: two Truncate calls racing must not interleave their
 // quiesce/rebuild sequences.
@@ -661,34 +844,21 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 	}
 }
 
-// TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode
-// guards against a real half-torn-down state this package used to leave
-// the node in: quiesceForLiveLifecycleOp attempts every one of its stop
-// calls regardless of an earlier one failing, so by the time either it or
-// closeStorageForLiveLifecycleOp returns a non-nil error (e.g. because
-// ctx's deadline passed), the node is already substantially quiesced —
-// forger/mempool/connections/APIs stopped. Truncate/Restore used to just
-// return that error without attempting to resume, leaving the process
-// running but silently unresponsive with no forging, mempool, or
-// networking and no indication a restart was needed. They must instead
-// attempt reinitializeAndResume and bring the node back up on its
-// untouched original data directory.
-//
-// closeStorageForLiveLifecycleOp's deferredIndexMaintenanceDone select is
-// used here as a deterministic failure trigger: setting that channel
-// without ever closing it, combined with a ctx that expires before the
-// select is reached, forces exactly one clean, reproducible error out of
-// closeStorageForLiveLifecycleOp without needing to fake any component's
-// Stop method.
-func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
+// TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed guards the
+// boundary between context-bounded provider shutdown and live storage reopen.
+// A provider may honor the deadline by returning while its one-time cleanup
+// continues in the background. StopCapability has already relinquished that
+// instance, so reopening the same data directory would race the old cleanup.
+// The node must request a supervised restart instead.
+func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	t *testing.T,
 ) {
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	oldCtx := n.ctx
-	oldDB := n.db
-
+	// Expire the operation context before provider shutdown. The real Badger
+	// provider then returns from CloseContext at the deadline while its owned
+	// close continues asynchronously.
 	n.deferredIndexMaintenanceDone = make(chan struct{})
 
 	shortCtx, cancel := context.WithTimeout(
@@ -704,10 +874,72 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "close storage")
+	require.ErrorContains(t, err, "could not confirm")
+	require.Error(t, n.ctx.Err())
+	require.Nil(t, n.db, "storage must not be reopened before provider drain")
 
-	// n.ctx (the node's own long-lived context, distinct from shortCtx
-	// above) must survive untouched, and every subsystem quiesced during
-	// the failed attempt must have been rebuilt rather than left down.
+	// Wait for the provider-owned background close before TempDir cleanup. A
+	// scratch runtime can acquire the same path only after the old Badger lock
+	// is released; the cancelled Node itself remains stopped and never reopens.
+	require.Eventually(t, func() bool {
+		deps := n.storageDependencies(n.config.dataDir)
+		deps.PromRegistry = n.config.promRegistry
+		runtime, openErr := internalplugins.OpenDatabase(
+			context.Background(),
+			n.databaseConfig(),
+			n.storageSelections(),
+			deps,
+		)
+		if openErr != nil {
+			return false
+		}
+		return runtime.Close(context.Background()) == nil
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestLiveTruncateResumesAfterCompletedStorageStopFailure proves that an
+// ordinary provider Stop error still resumes the quiesced node when every
+// provider has completed cleanup. The synthetic provider returns its error
+// synchronously; the real Badger provider behind it also closes before
+// StopCapability returns.
+func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
+	const numBlocks = 10
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	stopFailure := errors.New("completed storage stop failure")
+	require.NoError(t, plugin.Register[string, struct{}, struct{}](
+		n.pluginHost,
+		plugin.Descriptor{
+			Capability: plugin.CapabilityStorageBlob,
+			Name:       "test-stop-error",
+		},
+		func() struct{} { return struct{}{} },
+		func(context.Context, struct{}, struct{}) (string, plugin.Instance, error) {
+			return "test", plugin.Lifecycle{
+				StopFunc: func(context.Context) error { return stopFailure },
+			}, nil
+		},
+	))
+	_, err := plugin.Resolve[string](
+		context.Background(),
+		n.pluginHost,
+		plugin.CapabilityStorageBlob,
+		"test-stop-error",
+		nil,
+		struct{}{},
+	)
+	require.NoError(t, err)
+
+	oldCtx := n.ctx
+	oldDB := n.db
+	targetSlot := points[len(points)/2].Slot
+	_, err = n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.ErrorIs(t, err, stopFailure)
+	require.ErrorContains(t, err, "close storage")
+
 	require.Same(t, oldCtx, n.ctx)
 	require.NoError(t, n.ctx.Err())
 	require.NotSame(t, oldDB, n.db, "storage must be reopened fresh on resume")
@@ -717,9 +949,6 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
 	require.NotNil(t, n.connManager)
 	require.NotNil(t, n.peerGov)
 
-	// Nothing was actually truncated — the failure happened before the
-	// data directory was ever touched — so every original block must
-	// still be present.
 	tip, tipErr := n.db.GetTip(nil)
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
@@ -727,18 +956,14 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
 		_, blockErr := database.BlockByHash(n.db, p.Hash)
 		require.NoErrorf(
 			t, blockErr,
-			"block at slot %d missing after a resumed truncate failure", p.Slot,
+			"block at slot %d missing after a resumed stop failure", p.Slot,
 		)
 	}
 }
 
 // TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed guards
 // against the actual use-after-close race errStorageDrainUnconfirmed exists
-// to prevent — the opposite of
-// TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode
-// above. That test's failure trigger (deferredIndexMaintenanceDone) is a
-// clean failure with no goroutine left running, so resuming on it is
-// safe. Here the trigger is a real dbWorkerPool worker still executing an
+// to prevent. Here the trigger is a real dbWorkerPool worker still executing an
 // operation against the *old* database when Close's bounded wait gives up
 // on it, which is exactly the case reinitializeAndResume must not paper
 // over: reopening storage while that worker might still be using it would
@@ -831,7 +1056,7 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 	// database.New against this same data directory (Truncate's tmpDB, and
 	// later reinitializeCoreStorage's reopen) observes a mismatch and
 	// returns a recoverable CommitTimestampError.
-	metaTxn := n.db.Metadata().Transaction()
+	metaTxn := n.db.Metadata().Transaction(t.Context())
 	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
 	require.NoError(t, metaTxn.Commit())
 
@@ -907,6 +1132,19 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	}
 }
 
+func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{ctx: ctx, cancel: cancel}
+	pendingErr := errors.Join(
+		lifecycle.ErrRestoreRollbackPending,
+		errors.New("injected remote rollback failure"),
+	)
+
+	err := n.stopForPendingRestoreRollback(pendingErr, nil)
+	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
+	require.Error(t, n.ctx.Err(), "node must stop instead of reopening unsafe stores")
+}
+
 // TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a
 // severe regression found via manual live testing (dingo#1651 follow-up):
 // a Restore that failed because the blob backup was corrupted used to
@@ -975,8 +1213,8 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 
 // TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss confirms the other
 // half of the same fix: restoring a snapshot from a genuinely different
-// network onto a running node must be rejected — caught by
-// validateRestoredAgainstNodeConfig before the swap — with the node's own
+// network onto a running node must be rejected by the manifest compatibility
+// callback before restore preflight can reset either remote store, with the node's own
 // data and tip left completely untouched and the node still usable,
 // rather than the node being torn down (dingo#1651 follow-up).
 func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
@@ -1016,12 +1254,12 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	oldCtx := n.ctx
 	_, err = n.Restore(context.Background(), snapshotDir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "node settings mismatch")
+	require.Contains(t, err.Error(), "manifest network")
 
 	// n.db is deliberately not asserted to be the same pointer here --
 	// see TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss's
 	// identical comment: Restore now quiesces and closes storage before
-	// validateRestoredAgainstNodeConfig runs at all, so a rejected restore
+	// the manifest compatibility callback runs, so a rejected restore
 	// still ends up with a freshly reopened *database.Database over the
 	// same untouched data, not the original pointer.
 	require.Same(t, oldCtx, n.ctx)
@@ -1390,6 +1628,13 @@ func smallEpochGenesisCfgForLifecycleTest(
 	cfg := newNodeTestCardanoNodeCfg(t)
 	require.NotNil(t, cfg.ShelleyGenesis())
 	cfg.ShelleyGenesis().EpochLength = 100
+	// The generated lifecycle blocks are valid Babbage blocks. Enable the
+	// Babbage-era test override so the live ledger pipeline accepts them after
+	// a truncate; preview otherwise stops at Alonzo.
+	enabled := true
+	epoch := uint64(0)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestBabbageHardForkAtEpoch = &epoch
 	return cfg
 }
 

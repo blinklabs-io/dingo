@@ -242,9 +242,12 @@ type SlotClockProvider interface {
 	ChainTipSlot() uint64
 	// NextSlotTime returns the wall-clock time when the next slot begins.
 	NextSlotTime() (time.Time, error)
-	// UpstreamTipSlot returns the latest known tip slot from upstream peers.
-	// Returns 0 if no upstream tip is known.
+	// UpstreamTipSlot returns the latest admitted header slot from upstream
+	// peers. Returns 0 if no corroborated target is available.
 	UpstreamTipSlot() uint64
+	// UpstreamSyncStatus reports whether a live upstream is selected and its
+	// corroborated target.
+	UpstreamSyncStatus() (targetSlot uint64, active bool)
 }
 
 // ForgerConfig holds configuration for the block forger.
@@ -610,19 +613,23 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	// Skip if the chain is still syncing from a peer.
-	// Compare against the upstream peer tip rather than the wall
-	// clock. Forging while syncing creates blocks that conflict
+	// Compare against the admitted upstream header frontier rather than the
+	// wall clock. Forging while syncing creates blocks that conflict
 	// with the peer's chain, causing persistent header mismatches
 	// and resync loops.
 	// See forgeSyncToleranceSlots for the tolerance rationale.
-	upstreamTip := f.slotClock.UpstreamTipSlot()
-	if upstreamTip > 0 &&
-		upstreamTip > tipSlot &&
-		upstreamTip-tipSlot > f.forgeSyncToleranceSlots {
+	upstreamTip, upstreamActive := f.slotClock.UpstreamSyncStatus()
+	if upstreamActive && (upstreamTip == 0 ||
+		(upstreamTip > tipSlot &&
+			upstreamTip-tipSlot > f.forgeSyncToleranceSlots)) {
 		if f.metrics != nil {
+			gap := uint64(0)
+			if upstreamTip > tipSlot {
+				gap = upstreamTip - tipSlot
+			}
 			f.metrics.forgeSyncSkip.Inc()
 			f.metrics.tipGapSlots.Set(
-				float64(upstreamTip - tipSlot),
+				float64(gap),
 			)
 		}
 		f.logger.Debug(
@@ -635,7 +642,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	// Check if we're the leader for this slot
-	isLeader := f.leaderChecker.ShouldProduceBlock(currentSlot)
+	isLeader := f.checkLeaderSafe(currentSlot)
 	if !isLeader {
 		f.logger.Debug(
 			"forge check: not leader for slot",
@@ -740,7 +747,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		if block != nil {
 			blockHashStr = hex.EncodeToString(block.Hash().Bytes())
 		}
-		validationErr := f.blockValidator.ValidateForgedBlock(block, blockCbor)
+		validationErr := f.validateForgedBlockSafe(block, blockCbor)
 		validationDuration := time.Since(validateStart)
 		if f.metrics != nil {
 			f.metrics.forgeValidationDuration.Observe(
@@ -786,7 +793,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// Attempt local adoption immediately after building and validation. Keep
 	// observability callbacks out of this critical path: subscribers may be
 	// slow, while the block's parent must still be the active chain tip.
-	addErr := f.blockBroadcaster.AddBlock(block, blockCbor)
+	addErr := f.addBlockSafe(block, blockCbor)
 	if f.blockForged != nil {
 		func() {
 			defer func() {
@@ -910,6 +917,72 @@ func (f *BlockForger) incCouldNotForge() {
 	if f.metrics != nil {
 		f.metrics.forgeCouldNot.Inc()
 	}
+}
+
+// checkLeaderSafe calls the pluggable LeaderChecker, recovering any
+// panic so a misbehaving implementation cannot terminate the forger's
+// producer-loop goroutine. A recovered panic is treated as "not
+// leader" for this slot, the same conservative outcome as a checker
+// that simply returns false.
+func (f *BlockForger) checkLeaderSafe(slot uint64) (isLeader bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			isLeader = false
+			f.reportForgeCallbackPanic("selection", r)
+		}
+	}()
+	return f.leaderChecker.ShouldProduceBlock(slot)
+}
+
+// validateForgedBlockSafe calls the pluggable BlockValidator,
+// recovering any panic so a misbehaving implementation cannot
+// terminate the forger's producer-loop goroutine. A recovered panic
+// is treated as a validation failure so the block is dropped rather
+// than adopted with unknown validity.
+func (f *BlockForger) validateForgedBlockSafe(
+	block ledger.Block,
+	blockCbor []byte,
+) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("block validator panic: %v", r)
+			f.reportForgeCallbackPanic("validation", r)
+		}
+	}()
+	return f.blockValidator.ValidateForgedBlock(block, blockCbor)
+}
+
+// addBlockSafe calls the pluggable BlockBroadcaster, recovering any
+// panic so a misbehaving implementation cannot terminate the forger's
+// producer-loop goroutine. A recovered panic is treated as a publish
+// failure, matching the existing error path for a broadcaster that
+// returns an error.
+func (f *BlockForger) addBlockSafe(
+	block ledger.Block,
+	blockCbor []byte,
+) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("block broadcaster panic: %v", r)
+			f.reportForgeCallbackPanic("publication", r)
+		}
+	}()
+	return f.blockBroadcaster.AddBlock(block, blockCbor)
+}
+
+// reportForgeCallbackPanic logs and records metrics for a panic
+// recovered from a pluggable forging callback. Safe to call when
+// metrics are nil.
+func (f *BlockForger) reportForgeCallbackPanic(phase string, r any) {
+	if f.metrics != nil {
+		f.metrics.forgePanicRecovered.WithLabelValues(phase).Inc()
+	}
+	f.logger.Error(
+		"forge callback panic recovered",
+		"phase", phase,
+		"panic", r,
+		"stack", string(debug.Stack()),
+	)
 }
 
 // updateKESMetrics updates KES gauges after a successful KES

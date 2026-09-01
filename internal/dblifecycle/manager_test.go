@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -25,16 +26,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,11 +50,81 @@ import (
 // process registry.
 var testDestinationRegistry = lifecycle.NewDestinationRegistry()
 
+// testManagerBlobPlugin is deliberately not the production Badger selector:
+// the manager rejects automatic snapshots for the real selector until the
+// backup path can capture a version without holding the commit barrier. The
+// manager tests below exercise event handling and retention with a real
+// Badger-backed database; the policy itself has a focused test below.
+const testManagerBlobPlugin = "badger-test"
+
 func newManagerTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	return db
+}
+
+// cloudPrimaryBackupStore is a contract-compatible cloud-primary test double.
+// It delegates storage to Badger but owns its Backuper implementation so the
+// test proves lifecycle.Snapshot uses the provider selected as s3 or gcs.
+type cloudPrimaryBackupStore struct {
+	*badger.BlobStoreBadger
+	backupCalled *atomic.Bool
+}
+
+func (s *cloudPrimaryBackupStore) Backup(
+	ctx context.Context,
+	w io.Writer,
+) error {
+	s.backupCalled.Store(true)
+	return s.BlobStoreBadger.Backup(ctx, w)
+}
+
+func cloudPrimaryTestProvider(
+	name string,
+	backupCalled *atomic.Bool,
+) dbtest.StorageProvider {
+	return dbtest.StorageProvider{
+		Name: name,
+		Register: func(host *plugin.Host) error {
+			return plugin.Register[blob.BlobStore](
+				host,
+				plugin.Descriptor{
+					Capability:  plugin.CapabilityStorageBlob,
+					Name:        name,
+					Description: "cloud-primary snapshot test provider",
+				},
+				func() struct{} { return struct{}{} },
+				func(
+					_ context.Context,
+					_ struct{},
+					deps blob.ProviderDependencies,
+				) (blob.BlobStore, plugin.Instance, error) {
+					store, err := badger.New(
+						badger.WithDataDir(deps.DataDir),
+						badger.WithLogger(deps.Logger),
+						badger.WithGc(false),
+						badger.WithDeferOpen(),
+					)
+					if err != nil {
+						return nil, nil, err
+					}
+					cloudStore := &cloudPrimaryBackupStore{
+						BlobStoreBadger: store,
+						backupCalled:    backupCalled,
+					}
+					return cloudStore, plugin.Lifecycle{
+						StartFunc: func(context.Context) error {
+							return cloudStore.Start()
+						},
+						StopFunc: func(context.Context) error {
+							return cloudStore.Stop()
+						},
+					}, nil
+				},
+			)
+		},
+	}
 }
 
 func publishEpochTransition(eb *event.EventBus, newEpoch uint64) {
@@ -76,7 +151,7 @@ func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled: false,
 		SnapshotDir:     snapshotDir,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -85,6 +160,114 @@ func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
 		_, err := os.Stat(snapshotDir)
 		return err == nil
 	}, 200*time.Millisecond, 10*time.Millisecond)
+}
+
+// TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAvailable
+// proves that an epoch-boundary snapshot cannot begin an unbounded remote
+// object walk while holding the commit barrier. The manager is the automatic
+// path only: manual lifecycle snapshots remain available for an operator who
+// deliberately accepts their duration.
+func TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAvailable(
+	t *testing.T,
+) {
+	for _, blobPluginName := range []string{"s3", "gcs"} {
+		t.Run(blobPluginName, func(t *testing.T) {
+			var backupCalled atomic.Bool
+			db, err := dbtest.NewDatabaseWithOptions(
+				t,
+				dbtest.Options{
+					Config: &database.Config{DataDir: t.TempDir()},
+					Blob: cloudPrimaryTestProvider(
+						blobPluginName,
+						&backupCalled,
+					),
+				},
+			)
+			require.NoError(t, err)
+			eb := event.NewEventBus(nil, nil)
+			t.Cleanup(eb.Stop)
+
+			m := dblifecycle.NewManager(
+				db,
+				eb,
+				config.DatabaseLifecycleConfig{
+					SnapshotEnabled: true,
+					SnapshotDir:     t.TempDir(),
+				},
+				blobPluginName,
+				"sqlite",
+				testDestinationRegistry,
+				nil,
+			)
+			err = m.Start(context.Background())
+			require.ErrorIs(t, err, dblifecycle.ErrCloudPrimaryAutomaticSnapshots)
+			require.ErrorContains(t, err, blobPluginName)
+
+			manualDir := filepath.Join(t.TempDir(), "manual")
+			manifest, err := lifecycle.Snapshot(
+				context.Background(),
+				db,
+				manualDir,
+				lifecycle.TriggerManual,
+				"test",
+				blobPluginName,
+				"sqlite",
+			)
+			require.NoError(t, err)
+			require.True(t, backupCalled.Load())
+			require.Equal(t, lifecycle.TriggerManual, manifest.Trigger)
+			require.FileExists(
+				t,
+				filepath.Join(manualDir, lifecycle.ManifestFileName),
+			)
+		})
+	}
+}
+
+// TestManagerRejectsBadgerAutomaticSnapshotsButManualSnapshotsRemainAvailable
+// proves that the epoch-boundary path fails closed while Badger's explicitly
+// requested manual snapshot path remains available. Badger's native backup
+// API does not expose a separate, cheap MVCC-version capture operation, so a
+// full automatic backup would otherwise hold the commit barrier for its whole
+// production-scale stream.
+func TestManagerRejectsBadgerAutomaticSnapshotsButManualSnapshotsRemainAvailable(
+	t *testing.T,
+) {
+	db := newManagerTestDB(t)
+	eb := event.NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+
+	m := dblifecycle.NewManager(
+		db,
+		eb,
+		config.DatabaseLifecycleConfig{
+			SnapshotEnabled: true,
+			SnapshotDir:     t.TempDir(),
+		},
+		"badger",
+		"sqlite",
+		testDestinationRegistry,
+		nil,
+	)
+	err := m.Start(context.Background())
+	require.ErrorIs(t, err, dblifecycle.ErrBadgerAutomaticSnapshots)
+
+	manualDir := filepath.Join(t.TempDir(), "manual")
+	manifest, err := lifecycle.Snapshot(
+		context.Background(),
+		db,
+		manualDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+	require.Equal(t, lifecycle.TriggerManual, manifest.Trigger)
+	require.FileExists(
+		t,
+		filepath.Join(manualDir, lifecycle.ManifestFileName),
+	)
 }
 
 // TestManagerCapturesSnapshotOnEpochBoundary verifies that an
@@ -99,7 +282,7 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -125,7 +308,7 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 2,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -154,7 +337,7 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -192,7 +375,7 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
 		SnapshotRetention:    2,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -322,7 +505,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -439,7 +622,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestpanic://bucket/prefix",
-	}, "badger", "sqlite", testDestinationRegistry, logger)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -528,7 +711,7 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestfail://bucket/prefix",
-	}, "badger", "sqlite", testDestinationRegistry, logger)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -632,7 +815,7 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestblocking://bucket/prefix",
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(ctx))
 	// Registered immediately after Start succeeds (before any assertion
 	// that could fail): if this test fails before reaching the explicit
@@ -763,7 +946,7 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestflaky://bucket/prefix",
-	}, "badger", "sqlite", testDestinationRegistry, logger)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -855,7 +1038,7 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestflaky2://bucket/prefix",
-	}, "badger", "sqlite", testDestinationRegistry, logger)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -926,7 +1109,7 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 		destDir,
 		lifecycle.TriggerEpochBoundary,
 		"test-version",
-		"badger",
+		testManagerBlobPlugin,
 		"sqlite",
 	)
 	require.NoError(t, err)
@@ -949,7 +1132,7 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 		db,
 		eb2,
 		cfg,
-		"badger",
+		testManagerBlobPlugin,
 		"sqlite",
 		testDestinationRegistry,
 		logger2,
@@ -1132,7 +1315,7 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        1,
 		SnapshotCloudDestination: cloudDest,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -1216,7 +1399,7 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 		SnapshotEveryNEpochs:           1,
 		SnapshotCloudDestination:       baseCloudDest,
 		SnapshotCloudDestinationPrefix: "node-a",
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -1259,7 +1442,7 @@ func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
 					SnapshotCloudDestination:       "managerfaketest://bucket/prefix",
 					SnapshotCloudDestinationPrefix: prefix,
 				},
-				"badger",
+				testManagerBlobPlugin,
 				"sqlite",
 				testDestinationRegistry,
 				nil,
@@ -1294,7 +1477,7 @@ func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "managerfaketest://bucket/prefix",
-	}, "badger", "sqlite", testDestinationRegistry, logger)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -1323,7 +1506,7 @@ func TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet(t *testing.T) {
 		SnapshotEveryNEpochs:           1,
 		SnapshotCloudDestination:       "managerfaketest://bucket/prefix",
 		SnapshotCloudDestinationPrefix: "node-a",
-	}, "badger", "sqlite", testDestinationRegistry, logger)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -1363,7 +1546,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
-	}, "badger", "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 

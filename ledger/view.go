@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -71,6 +73,24 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // in the MinPoolMarginProvider method signature a compile error instead of a
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
+
+// Keep the optional Conway governance capability wired to the concrete view
+// used for transaction validation. Without this interface, gouroboros falls
+// back to weaker existence-only proposal ancestry checks.
+var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
+
+// The Conway reward-withdrawal rule discovers this capability with a runtime
+// type assertion on the *LedgerView passed to ValidateTx*. On protocol versions
+// 10 and 11 a failed assertion rejects every affected withdrawal
+// (DRepDelegationStateUnavailableError), so signature drift here is a
+// consensus-level break. Make it a compile error instead.
+var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
+
+// Byron redeem and bootstrap witness verification asserts this capability at
+// runtime and fails the transaction when it is absent, so drift in
+// ByronProtocolMagic would reject every Byron transaction carrying those
+// witnesses rather than fail to build.
+var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
@@ -206,19 +226,21 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
+	var hasReg bool
+	var regLatestSlot uint64
+	var regLatestCertID uint
 	if len(pool.Registration) > 0 {
 		var latestIdx int
-		var latestSlot uint64
-		var latestCertID uint
 		for i, reg := range pool.Registration {
 			// Use CertificateID for deterministic disambiguation when slots are equal
-			if reg.AddedSlot > latestSlot ||
-				(reg.AddedSlot == latestSlot && reg.CertificateID > latestCertID) {
-				latestSlot = reg.AddedSlot
-				latestCertID = reg.CertificateID
+			if reg.AddedSlot > regLatestSlot ||
+				(reg.AddedSlot == regLatestSlot && reg.CertificateID > regLatestCertID) {
+				regLatestSlot = reg.AddedSlot
+				regLatestCertID = reg.CertificateID
 				latestIdx = i
 			}
 		}
+		hasReg = true
 		reg := pool.Registration[latestIdx]
 		tmp := lcommon.PoolRegistrationCertificate{
 			CertType: uint(lcommon.CertificateTypePoolRegistration),
@@ -270,18 +292,37 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		currentReg = &tmp
 	}
+	// pendingEpoch reports the target epoch of the pool's latest retirement
+	// certificate -- the one most recently added by (AddedSlot,
+	// CertificateID), not the maximum epoch value across every retirement
+	// row: a later retirement certificate replaces the prior schedule even
+	// when it moves the target epoch earlier (retire@10 then retire@5 must
+	// report 5, not 10). A later pool registration cancels a pending
+	// retirement -- mirroring poolIsActive's ordering rule
+	// (internal/test/conformance/state_provider.go) -- so pendingEpoch is
+	// nil whenever the latest registration was added after the latest
+	// retirement.
 	var pendingEpoch *uint64
 	if len(pool.Retirement) > 0 {
-		var latestEpoch uint64
-		var found bool
-		for _, r := range pool.Retirement {
-			if !found || r.Epoch > latestEpoch {
-				latestEpoch = r.Epoch
-				found = true
+		var retLatestIdx int
+		var retLatestSlot uint64
+		var retLatestCertID uint
+		var hasRet bool
+		for i, r := range pool.Retirement {
+			if !hasRet || r.AddedSlot > retLatestSlot ||
+				(r.AddedSlot == retLatestSlot && r.CertificateID > retLatestCertID) {
+				retLatestSlot = r.AddedSlot
+				retLatestCertID = r.CertificateID
+				retLatestIdx = i
+				hasRet = true
 			}
 		}
-		if found {
-			pendingEpoch = &latestEpoch
+		registrationSupersedesRetirement := hasReg &&
+			(regLatestSlot > retLatestSlot ||
+				(regLatestSlot == retLatestSlot && regLatestCertID > retLatestCertID))
+		if hasRet && !registrationSupersedesRetirement {
+			epoch := pool.Retirement[retLatestIdx].Epoch
+			pendingEpoch = &epoch
 		}
 	}
 	return currentReg, pendingEpoch, nil
@@ -393,12 +434,33 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 }
 
 // RewardAccountBalance returns the current reward balance for a stake credential.
-// TODO: implement reward account balance retrieval. Requires per-account reward
-// balance tracking which is not yet stored in the database.
+// Missing and inactive reward accounts are represented by a nil balance, as
+// required by the gouroboros reward-state contract. A registered account with
+// a zero balance returns a non-nil pointer to zero.
 func (lv *LedgerView) RewardAccountBalance(
 	cred lcommon.Credential,
 ) (*uint64, error) {
-	return nil, ErrNotImplemented
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if account == nil {
+		return nil, nil
+	}
+	balance := uint64(account.Reward)
+	return &balance, nil
 }
 
 // CostModels returns which Plutus language versions have cost
@@ -734,10 +796,15 @@ func (lv *LedgerView) TreasuryValue() (uint64, error) {
 func (lv *LedgerView) GovActionById(
 	id lcommon.GovActionId,
 ) (*lcommon.GovActionState, error) {
+	txn := lv.txn
+	if txn == nil {
+		txn = lv.ls.db.MetadataTxn(false)
+		defer txn.Release()
+	}
 	proposal, err := lv.ls.db.GetGovernanceProposal(
 		id.TransactionId[:],
 		id.GovActionIdx,
-		lv.txn,
+		txn,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrGovernanceProposalNotFound) {
@@ -745,19 +812,230 @@ func (lv *LedgerView) GovActionById(
 		}
 		return nil, fmt.Errorf("get governance proposal: %w", err)
 	}
+	// Expired proposals are no longer members of their purpose tree.
+	if proposal.ExpiredEpoch != nil {
+		return nil, nil
+	}
+	// The current enacted root must remain resolvable because content-aware
+	// rules compare a new action with its predecessor. Older enacted actions
+	// must not be returned: ancestry validation would otherwise mistake them
+	// for pending members of the purpose tree.
+	if proposal.EnactedEpoch != nil {
+		isRoot, err := lv.governanceProposalIsPurposeRoot(proposal, txn)
+		if err != nil {
+			return nil, err
+		}
+		if !isRoot {
+			return nil, nil
+		}
+	}
+	action, err := governance.DecodeGovActionForPParams(
+		proposal.GovActionCbor,
+		proposal.ActionType,
+		lv.ls.GetCurrentPParams(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("decode governance proposal action: %w", err)
+	}
+	var expirySlot uint64
+	if proposal.EnactedEpoch == nil {
+		expirySlot, err = lv.governanceProposalExpirySlot(proposal, txn)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &lcommon.GovActionState{
 		ActionId:   id,
 		ActionType: lcommon.GovActionType(proposal.ActionType),
+		ExpirySlot: expirySlot,
+		Action:     action,
 	}, nil
+}
+
+func (lv *LedgerView) governanceProposalIsPurposeRoot(
+	proposal *models.GovernanceProposal,
+	txn *database.Txn,
+) (bool, error) {
+	actionTypes := governancePurposeActionTypes(proposal.ActionType)
+	if len(actionTypes) == 0 {
+		return false, nil
+	}
+	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(actionTypes, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"get governance proposal purpose root: %w",
+			err,
+		)
+	}
+	return root != nil &&
+		root.ActionIndex == proposal.ActionIndex &&
+		bytes.Equal(root.TxHash, proposal.TxHash), nil
+}
+
+func governancePurposeActionTypes(actionType uint8) []uint8 {
+	switch lcommon.GovActionType(actionType) {
+	case lcommon.GovActionTypeParameterChange:
+		return []uint8{uint8(lcommon.GovActionTypeParameterChange)}
+	case lcommon.GovActionTypeHardForkInitiation:
+		return []uint8{uint8(lcommon.GovActionTypeHardForkInitiation)}
+	case lcommon.GovActionTypeNoConfidence,
+		lcommon.GovActionTypeUpdateCommittee:
+		return []uint8{
+			uint8(lcommon.GovActionTypeNoConfidence),
+			uint8(lcommon.GovActionTypeUpdateCommittee),
+		}
+	case lcommon.GovActionTypeNewConstitution:
+		return []uint8{uint8(lcommon.GovActionTypeNewConstitution)}
+	case lcommon.GovActionTypeTreasuryWithdrawal,
+		lcommon.GovActionTypeInfo:
+		return nil
+	default:
+		return nil
+	}
+}
+
+// GovPurposeRoots returns the latest enacted action for each CIP-1694
+// governance purpose. A non-nil result with nil fields means Dingo has
+// authoritatively determined that the corresponding purpose has no root.
+func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
+	txn := lv.txn
+	if txn == nil {
+		txn = lv.ls.db.MetadataTxn(false)
+		defer txn.Release()
+	}
+	parameterChange, err := lv.governancePurposeRoot(
+		governancePurposeActionTypes(
+			uint8(lcommon.GovActionTypeParameterChange),
+		),
+		txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get parameter-change purpose root: %w", err)
+	}
+	hardFork, err := lv.governancePurposeRoot(
+		governancePurposeActionTypes(
+			uint8(lcommon.GovActionTypeHardForkInitiation),
+		),
+		txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get hard-fork purpose root: %w", err)
+	}
+	committee, err := lv.governancePurposeRoot(
+		governancePurposeActionTypes(
+			uint8(lcommon.GovActionTypeNoConfidence),
+		),
+		txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get committee purpose root: %w", err)
+	}
+	constitution, err := lv.governancePurposeRoot(
+		governancePurposeActionTypes(
+			uint8(lcommon.GovActionTypeNewConstitution),
+		),
+		txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get constitution purpose root: %w", err)
+	}
+	return &lcommon.GovPurposeRoots{
+		PParamUpdate: parameterChange,
+		HardFork:     hardFork,
+		Committee:    committee,
+		Constitution: constitution,
+	}, nil
+}
+
+func (lv *LedgerView) governancePurposeRoot(
+	actionTypes []uint8,
+	txn *database.Txn,
+) (*lcommon.GovActionId, error) {
+	proposal, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+		actionTypes,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if proposal == nil {
+		return nil, nil
+	}
+	if len(proposal.TxHash) != len(lcommon.Blake2b256{}) {
+		return nil, fmt.Errorf(
+			"invalid governance proposal transaction hash length: %d",
+			len(proposal.TxHash),
+		)
+	}
+	var transactionID lcommon.Blake2b256
+	copy(transactionID[:], proposal.TxHash)
+	return &lcommon.GovActionId{
+		TransactionId: transactionID,
+		GovActionIdx:  proposal.ActionIndex,
+	}, nil
+}
+
+func (lv *LedgerView) governanceProposalExpirySlot(
+	proposal *models.GovernanceProposal,
+	txn *database.Txn,
+) (uint64, error) {
+	if proposal.ExpiresEpoch < proposal.ProposedEpoch {
+		return 0, fmt.Errorf(
+			"governance proposal expiry epoch %d precedes proposed epoch %d",
+			proposal.ExpiresEpoch,
+			proposal.ProposedEpoch,
+		)
+	}
+	epoch, err := lv.ls.db.GetEpoch(proposal.ProposedEpoch, txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get governance proposal epoch %d: %w",
+			proposal.ProposedEpoch,
+			err,
+		)
+	}
+	if epoch == nil {
+		return 0, fmt.Errorf(
+			"governance proposal epoch %d not found",
+			proposal.ProposedEpoch,
+		)
+	}
+	if epoch.LengthInSlots == 0 {
+		return 0, fmt.Errorf(
+			"governance proposal epoch %d has zero length",
+			proposal.ProposedEpoch,
+		)
+	}
+	epochDelta := proposal.ExpiresEpoch - proposal.ProposedEpoch
+	if epochDelta == math.MaxUint64 {
+		return 0, errors.New("governance proposal expiry slot overflows")
+	}
+	epochCount := epochDelta + 1
+	epochLength := uint64(epoch.LengthInSlots)
+	if epochCount > math.MaxUint64/epochLength {
+		return 0, errors.New("governance proposal expiry slot overflows")
+	}
+	span := epochCount * epochLength
+	if epoch.StartSlot > math.MaxUint64-(span-1) {
+		return 0, errors.New("governance proposal expiry slot overflows")
+	}
+	return epoch.StartSlot + span - 1, nil
 }
 
 // GovActionExists returns whether a governance action exists.
 func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
-	action, err := lv.GovActionById(id)
+	proposal, err := lv.ls.db.GetGovernanceProposal(
+		id.TransactionId[:],
+		id.GovActionIdx,
+		lv.txn,
+	)
 	if err != nil {
 		return false
 	}
-	return action != nil
+	// Voting procedures may target only pending actions. GovActionById also
+	// resolves the current enacted purpose root for content-aware predecessor
+	// rules, so it cannot be used as the existence predicate here.
+	return proposal.EnactedEpoch == nil && proposal.ExpiredEpoch == nil
 }
 
 // StakeDistribution represents the stake distribution at an epoch boundary.
@@ -797,33 +1075,46 @@ func (lv *LedgerView) GetStakeDistribution(
 	return dist, nil
 }
 
-// GetLeiosKeys returns the registered Dijkstra/Leios BLS key for each named
-// pool that has one, keyed by lowercase-hex pool key hash. A pool absent
-// from the result has no registered leios_key. The returned keys are raw
-// (gouroboros length-validated only); callers must verify proof of
-// possession themselves before treating a key as usable -- this mirrors
-// poolVrfKeyHashes, which similarly resolves current pool params rather
-// than the historical stake snapshot GetStakeDistribution reads.
+// GetLeiosKeys returns the Dijkstra/Leios BLS key frozen with each named pool's
+// Mark stake snapshot for epoch. A pool absent from the result has no captured
+// key. The returned keys are raw; callers must verify proof of possession
+// before treating a key as usable.
 func (lv *LedgerView) GetLeiosKeys(
+	epoch uint64,
 	poolKeyHashes []lcommon.PoolKeyHash,
 ) (map[string]*lcommon.LeiosKey, error) {
 	out := make(map[string]*lcommon.LeiosKey, len(poolKeyHashes))
 	if len(poolKeyHashes) == 0 {
 		return out, nil
 	}
-	pools, err := lv.ls.db.Metadata().
-		GetPools(poolKeyHashes, (*lv.txn).Metadata())
-	if err != nil {
-		return nil, fmt.Errorf("get pools: %w", err)
+	rawPoolKeyHashes := make([][]byte, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		rawPoolKeyHashes = append(
+			rawPoolKeyHashes,
+			append([]byte(nil), poolKeyHash[:]...),
+		)
 	}
-	for _, pool := range pools {
-		if len(pool.LeiosKeyPublic) == 0 ||
-			len(pool.LeiosKeyPossessionProof) == 0 {
+	snapshots, err := lv.ls.db.Metadata().GetPoolStakeSnapshotsForPools(
+		epoch,
+		models.PoolStakeSnapshotTypeMark,
+		rawPoolKeyHashes,
+		(*lv.txn).Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
+	}
+	for _, snapshot := range snapshots {
+		if len(snapshot.LeiosKeyPublic) == 0 ||
+			len(snapshot.LeiosKeyPossessionProof) == 0 {
 			continue
 		}
-		out[hex.EncodeToString(pool.PoolKeyHash)] = &lcommon.LeiosKey{
-			PublicKey:       pool.LeiosKeyPublic,
-			PossessionProof: pool.LeiosKeyPossessionProof,
+		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{
+			PublicKey: append(
+				[]byte(nil), snapshot.LeiosKeyPublic...,
+			),
+			PossessionProof: append(
+				[]byte(nil), snapshot.LeiosKeyPossessionProof...,
+			),
 		}
 	}
 	return out, nil

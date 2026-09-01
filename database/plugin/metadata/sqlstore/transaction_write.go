@@ -73,12 +73,53 @@ func (s *Store) SetTransactionBatched(
 	)
 }
 
+// SetTransactionBatchedHistorical is the historical-replay variant. It keeps
+// the public MetadataStore contract stable while allowing API backfill to
+// preserve snapshot-boundary reward balances instead of applying live-slot
+// withdrawal sufficiency checks.
+func (s *Store) SetTransactionBatchedHistorical(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+		return fmt.Errorf(
+			"SetTransactionBatchedHistorical: wrong accumulator type %T",
+			accumulator,
+		)
+	}
+	return s.setTransaction(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, historicalBackfill, txn,
+	)
+}
+
 func (s *Store) SetTransaction(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
 	index uint32,
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
+	txn types.Txn,
+) error {
+	return s.setTransaction(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, false, txn,
+	)
+}
+
+func (s *Store) setTransaction(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
 	txn types.Txn,
 ) error {
 	if transaction == nil {
@@ -100,17 +141,17 @@ func (s *Store) SetTransaction(
 		}
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			collateralFee, err := collateralFeeForTransaction(
+				ctx,
 				db,
 				transaction,
 			)
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(db, `
+			transactionID, err := queryReturnedID(ctx, db, `
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -136,6 +177,7 @@ RETURNING id`,
 				return fmt.Errorf("create transaction %x: %w", hash, err)
 			}
 			if err := s.applyTransactionMetadataLabels(
+				ctx,
 				db,
 				transactionID,
 				point.Slot,
@@ -144,6 +186,7 @@ RETURNING id`,
 				return err
 			}
 			if err := s.applyTransactionAssetMintBurn(
+				ctx,
 				db,
 				transaction,
 				hash,
@@ -154,15 +197,18 @@ RETURNING id`,
 			}
 			if transaction.IsValid() {
 				if err := s.applyTransactionWithdrawals(
+					ctx,
 					db,
 					transaction,
 					point.Slot,
 					hash,
 					skipWithdrawalWitness,
+					historicalBackfill,
 				); err != nil {
 					return err
 				}
 				certificateRefs, err := s.applyTransactionCertificates(
+					ctx,
 					db,
 					transactionID,
 					transaction.Certificates(),
@@ -173,12 +219,12 @@ RETURNING id`,
 				if err != nil {
 					return err
 				}
-				if err := s.refreshRewardLiveStakeRefs(
-					db,
-					certificateRefs,
-					point.Slot,
-				); err != nil {
-					return err
+				if !historicalBackfill {
+					if err := s.refreshRewardLiveStakeRefs(
+						ctx, db, certificateRefs, point.Slot,
+					); err != nil {
+						return err
+					}
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
@@ -189,7 +235,14 @@ RETURNING id`,
 			)
 			producedStakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
-				model := models.UtxoLedgerToModel(produced, point.Slot)
+				model, err := models.UtxoLedgerToModel(produced, point.Slot)
+				if err != nil {
+					return fmt.Errorf(
+						"convert output %d: %w",
+						produced.Id.Index(),
+						err,
+					)
+				}
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
 					id := uint(transactionID)
@@ -198,7 +251,7 @@ RETURNING id`,
 					id := uint(transactionID)
 					model.TransactionID = &id
 				}
-				if err := s.insertUtxoModel(db, &model, true); err != nil {
+				if err := s.insertUtxoModel(ctx, db, &model, true); err != nil {
 					return fmt.Errorf(
 						"create output %x#%d: %w",
 						model.TxId,
@@ -217,6 +270,7 @@ RETURNING id`,
 				}
 			}
 			if err := s.applyTransactionAPIDetails(
+				ctx,
 				db,
 				transactionID,
 				transaction,
@@ -245,7 +299,7 @@ RETURNING id`,
 					Hash: input.Id().Bytes(),
 					Idx:  input.Index(),
 				})
-				result, err := db.ExecContext(context.Background(), `
+				result, err := db.ExecContext(ctx, `
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
@@ -269,7 +323,7 @@ WHERE tx_id = ? AND output_idx = ?
 					deletedSlot uint64
 					spentBy     []byte
 				)
-				err = db.QueryRowContext(context.Background(), `
+				err = db.QueryRowContext(ctx, `
 SELECT deleted_slot, spent_at_tx_id
 FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 					input.Id().Bytes(),
@@ -300,12 +354,15 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 					input.Index(),
 				)
 			}
-			stakeRefs, err := queryUtxoStakeRefs(db, refs, false)
+			if historicalBackfill {
+				return nil
+			}
+			stakeRefs, err := queryUtxoStakeRefs(ctx, db, refs, false)
 			if err != nil {
 				return err
 			}
 			stakeRefs = append(stakeRefs, producedStakeRefs...)
-			return s.refreshRewardLiveStakeRefs(db, stakeRefs, point.Slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
 		},
 	)
 }
@@ -324,17 +381,17 @@ func (s *Store) SetGapBlockTransaction(
 	}
 	hash := transaction.Hash().Bytes()
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			collateralFee, err := collateralFeeForTransaction(
+				ctx,
 				db,
 				transaction,
 			)
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(db, `
+			transactionID, err := queryReturnedID(ctx, db, `
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -359,7 +416,14 @@ RETURNING id`,
 			collateralReturn := transaction.CollateralReturn()
 			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
-				model := models.UtxoLedgerToModel(produced, point.Slot)
+				model, err := models.UtxoLedgerToModel(produced, point.Slot)
+				if err != nil {
+					return fmt.Errorf(
+						"convert output %d: %w",
+						produced.Id.Index(),
+						err,
+					)
+				}
 				id := uint(transactionID)
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
@@ -367,7 +431,7 @@ RETURNING id`,
 				} else {
 					model.TransactionID = &id
 				}
-				if err := s.insertUtxoModel(db, &model, true); err != nil {
+				if err := s.insertUtxoModel(ctx, db, &model, true); err != nil {
 					return err
 				}
 				if len(model.StakingKey) > 0 {
@@ -377,7 +441,7 @@ RETURNING id`,
 					))
 				}
 			}
-			return s.refreshRewardLiveStakeRefs(db, stakeRefs, point.Slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
 		},
 	)
 }
@@ -391,14 +455,13 @@ func (s *Store) RecomputeGapCollateralFee(
 		return nil
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			fee, err := collateralFeeForTransaction(db, transaction)
+		func(db queryer, ctx context.Context) error {
+			fee, err := collateralFeeForTransaction(ctx, db, transaction)
 			if err != nil {
 				return err
 			}
-			_, err = db.ExecContext(context.Background(), `
+			_, err = db.ExecContext(ctx, `
 UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
 				decimalUint64(types.Uint64(fee)),
 				transaction.Hash().Bytes(),
@@ -415,10 +478,9 @@ func (s *Store) SetGenesisTransaction(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			id, err := queryReturnedID(db, `
+		func(db queryer, ctx context.Context) error {
+			id, err := queryReturnedID(ctx, db, `
 INSERT INTO "transaction" (
     hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -440,7 +502,7 @@ RETURNING id`,
 			for i := range outputs {
 				outputs[i].ID = 0
 				outputs[i].TransactionID = &transactionID
-				if err := s.insertUtxoModel(db, &outputs[i], true); err != nil {
+				if err := s.insertUtxoModel(ctx, db, &outputs[i], true); err != nil {
 					return err
 				}
 				refs = append(refs, models.NewStakeCredentialRef(
@@ -448,7 +510,7 @@ RETURNING id`,
 					outputs[i].StakingKey,
 				))
 			}
-			return s.refreshRewardLiveStakeRefs(db, refs, 0)
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)
 		},
 	)
 }
@@ -458,10 +520,9 @@ func (s *Store) DeleteTransactionsAfterSlot(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			rows, err := db.QueryContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			rows, err := db.QueryContext(ctx, `
 SELECT hash FROM "transaction" WHERE slot > ?`,
 				slot,
 			)
@@ -490,7 +551,7 @@ SELECT hash FROM "transaction" WHERE slot > ?`,
 				for i, hash := range hashes[start:end] {
 					args[i] = hash
 				}
-				stakeRows, err := db.QueryContext(context.Background(), `
+				stakeRows, err := db.QueryContext(ctx, `
 SELECT DISTINCT credential_tag, staking_key FROM utxo
 WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 					args...,
@@ -515,58 +576,59 @@ WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 						err,
 					)
 				}
-				if _, err := db.ExecContext(context.Background(), `
+				if _, err := db.ExecContext(ctx, `
 UPDATE utxo SET spent_at_tx_id = NULL, deleted_slot = 0
 WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 					args...,
 				); err != nil {
 					return err
 				}
-				if _, err := db.ExecContext(context.Background(), `
+				if _, err := db.ExecContext(ctx, `
 UPDATE utxo SET collateral_by_tx_id = NULL
 WHERE collateral_by_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 					args...,
 				); err != nil {
 					return err
 				}
-				if _, err := db.ExecContext(context.Background(), `
+				if _, err := db.ExecContext(ctx, `
 UPDATE utxo SET referenced_by_tx_id = NULL
 WHERE referenced_by_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 					args...,
 				); err != nil {
 					return err
 				}
-				if _, err := db.ExecContext(context.Background(), `
+				if _, err := db.ExecContext(ctx, `
 DELETE FROM utxo_reference_input
 WHERE transaction_hash IN (`+bindPlaceholders(len(args))+`)`, args...); err != nil {
 					return err
 				}
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM transaction_metadata_label WHERE slot > ?`,
 				slot,
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM asset_mint_burn WHERE slot > ?`,
 				slot,
 			); err != nil {
 				return err
 			}
 			if _, err := db.ExecContext(
-				context.Background(),
+				ctx,
 				`DELETE FROM "transaction" WHERE slot > ?`,
 				slot,
 			); err != nil {
 				return err
 			}
-			return s.refreshRewardLiveStakeRefs(db, refs, slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
 }
 
 func (s *Store) insertUtxoModel(
+	ctx context.Context,
 	db queryer,
 	utxo *models.Utxo,
 	ignoreConflict bool,
@@ -580,7 +642,7 @@ func (s *Store) insertUtxoModel(
 		conflict = " ON CONFLICT (tx_id, output_idx) DO NOTHING"
 	}
 	var id int64
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -605,7 +667,7 @@ RETURNING id`,
 		params.PaymentScript,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) && ignoreConflict {
-		err = db.QueryRowContext(context.Background(), `
+		err = db.QueryRowContext(ctx, `
 SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			params.TxID,
 			params.OutputIdx,
@@ -614,7 +676,7 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// Snapshot imports can create an output before its producer
 			// transaction is replayed. Once that transaction is known, fill in
 			// the provenance without overwriting an already-linked output.
-			_, err = db.ExecContext(context.Background(), `
+			_, err = db.ExecContext(ctx, `
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
@@ -634,7 +696,7 @@ WHERE id = ?`,
 		asset := &utxo.Assets[i]
 		asset.UtxoID = utxo.ID
 		err := q.ImportAsset(
-			context.Background(),
+			ctx,
 			sqlitequery.ImportAssetParams{
 				Name:        asset.Name,
 				NameHex:     asset.NameHex,
@@ -651,7 +713,7 @@ WHERE id = ?`,
 			return err
 		}
 		var assetID uint
-		if err := db.QueryRowContext(context.Background(), `
+		if err := db.QueryRowContext(ctx, `
 SELECT id FROM asset
 WHERE utxo_id = ? AND policy_id = ? AND name = ?
 ORDER BY id DESC LIMIT 1`,
@@ -667,6 +729,7 @@ ORDER BY id DESC LIMIT 1`,
 }
 
 func collateralFeeForTransaction(
+	ctx context.Context,
 	db queryer,
 	transaction lcommon.Transaction,
 ) (uint64, error) {
@@ -689,7 +752,7 @@ func collateralFeeForTransaction(
 		}
 		seen[key] = struct{}{}
 		var amount string
-		err := db.QueryRowContext(context.Background(), `
+		err := db.QueryRowContext(ctx, `
 SELECT amount FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			input.Id().Bytes(),
 			input.Index(),
@@ -729,11 +792,13 @@ func nullBytes(value []byte) any {
 }
 
 func (s *Store) applyTransactionWithdrawals(
+	ctx context.Context,
 	db queryer,
 	transaction lcommon.Transaction,
 	slot uint64,
 	txHash []byte,
 	skipWithdrawalWitness bool,
+	historicalBackfill bool,
 ) error {
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
@@ -759,7 +824,7 @@ func (s *Store) applyTransactionWithdrawals(
 			// SkipWithdrawalWitnessWrite), so gate-off callers elide the
 			// insert rather than growing an unbounded, never-pruned table
 			// nothing reads (issue #2919).
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 INSERT INTO account_withdrawal_witness (
     staking_key, credential_tag, tx_hash, added_slot
 ) VALUES (?, ?, ?, ?)
@@ -772,12 +837,9 @@ ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`,
 				return err
 			}
 		}
-		if amount.Sign() == 0 {
-			continue
-		}
 		var accountID uint
 		var reward sql.NullString
-		err := db.QueryRowContext(context.Background(), `
+		err := db.QueryRowContext(ctx, `
 SELECT id, reward FROM account
 WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			tag,
@@ -790,7 +852,7 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			return err
 		}
 		var exists bool
-		if err := db.QueryRowContext(context.Background(), `
+		if err := db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM account_reward_delta
     WHERE withdrawal = TRUE AND tx_hash = ?
@@ -809,13 +871,31 @@ SELECT EXISTS (
 		if err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(context.Background(), `
-UPDATE account SET reward = '0' WHERE id = ?`,
-			accountID,
-		); err != nil {
-			return err
+		if !historicalBackfill && amount.Uint64() > previous {
+			return fmt.Errorf(
+				"reward withdrawal amount %s exceeds account balance %d: %w",
+				amount.String(),
+				previous,
+				models.ErrRewardWithdrawalExceedsBalance,
+			)
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if amount.Sign() == 0 {
+			continue
+		}
+		// Historical API backfill replays withdrawals before the imported
+		// snapshot balance's intervening credits are available. Record the
+		// withdrawal history, but leave that trusted boundary balance untouched.
+		if !historicalBackfill {
+			rewardAfter := previous - amount.Uint64()
+			if _, err := db.ExecContext(ctx, `
+UPDATE account SET reward = ? WHERE id = ?`,
+				strconv.FormatUint(rewardAfter, 10),
+				accountID,
+			); err != nil {
+				return err
+			}
+		}
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO account_reward_delta (
     staking_key, credential_tag, tx_hash, amount, previous_reward,
     added_slot, withdrawal
@@ -832,12 +912,14 @@ ON CONFLICT (
 		); err != nil {
 			return err
 		}
-		if err := s.refreshRewardLiveStakeAggregate(
-			db,
-			models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
-			slot,
-		); err != nil {
-			return err
+		if !historicalBackfill {
+			if err := s.refreshRewardLiveStakeAggregate(
+				ctx, db,
+				models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
+				slot,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -22,10 +22,12 @@ import (
 	"reflect"
 	"runtime"
 
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 // ErrExUnitsOverflow is returned when ExUnits
@@ -106,15 +108,21 @@ type utxoValidationRuleSkip struct {
 const (
 	noUtxoValidationRuleIndex = -1
 
-	// Positions in gouroboros v0.193.3 UtxoValidationRules. Function
+	// Positions in gouroboros v0.202.4
+	// UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// their runtime function names before filtering by index.
+	shelleyUtxoValidateFeeTooSmallRuleIndex    = 6
+	shelleyUtxoValidateMaxTxSizeRuleIndex      = 15
+	allegraUtxoValidateFeeTooSmallRuleIndex    = 6
+	allegraUtxoValidateMaxTxSizeRuleIndex      = 14
 	alonzoUtxoValidatePlutusScriptsRuleIndex   = 27
-	babbageUtxoValidatePlutusScriptsRuleIndex  = 31
+	babbageUtxoValidatePlutusScriptsRuleIndex  = 32
+	conwayUtxoValidateConwayFeaturesRuleIndex  = 19
 	conwayUtxoValidateFeeTooSmallRuleIndex     = 24
 	conwayUtxoValidateExUnitsTooBigRuleIndex   = 39
-	conwayUtxoValidatePlutusScriptsRuleIndex   = 43
-	dijkstraUtxoValidatePlutusScriptsRuleIndex = 38
+	conwayUtxoValidatePlutusScriptsRuleIndex   = 44
+	dijkstraUtxoValidatePlutusScriptsRuleIndex = 44
 
 	conwayRefScriptCostStride = 25_600
 )
@@ -124,6 +132,26 @@ func shouldSkipPhase2Validation(
 ) bool {
 	skipper, ok := ls.(phase2ValidationSkipper)
 	return ok && skipper.SkipPhase2Validation()
+}
+
+// validatePlutusOutcome requires the locally evaluated phase-2 result to
+// match the transaction's declared validity flag. A failed script is the
+// expected outcome for an invalid transaction; every other validation error
+// remains a hard failure because it does not establish that script execution
+// itself failed.
+func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
+	if tx.IsValid() {
+		return phase2Err
+	}
+	if phase2Err == nil {
+		return errors.New(
+			"transaction declared invalid but Plutus scripts succeeded",
+		)
+	}
+	if _, ok := errors.AsType[conway.PlutusScriptFailedError](phase2Err); ok {
+		return nil
+	}
+	return phase2Err
 }
 
 // txHasRedeemers reports whether the transaction carries at least one redeemer.
@@ -318,13 +346,109 @@ const txTypeAlonzo = 4
 // on-wire 4-element format is exactly the 1-byte IsValid
 // field. Pre-Alonzo transactions (Byron through Mary) do
 // not contain an IsValid byte, so their full CBOR length
-// is the fee-relevant size.
+// is the fee-relevant size — except when the transaction
+// was rebuilt from block components, which
+// preAlonzoRebuiltWireSize handles.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
+	if size, ok := preAlonzoRebuiltWireSize(tx); ok {
+		return size
+	}
 	fullSize := uint64(len(tx.Cbor()))
 	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
 		return fullSize - 1
 	}
 	return fullSize
+}
+
+// preAlonzoRebuiltWireSize returns the wire size of a Shelley or Allegra
+// transaction that was rebuilt from separately decoded components rather than
+// decoded from a complete transaction encoding.
+//
+// ShelleyBlock.Transactions and AllegraBlock.Transactions construct each
+// transaction from the block's parallel body, witness-set, and auxiliary-data
+// arrays, so the resulting value carries no stored transaction CBOR. The
+// current upstream body and witness encoders preserve their component wire
+// bytes; this helper explicitly reconstructs the fee-relevant transaction
+// size from those bytes and the three-element transaction envelope.
+//
+// The size is rebuilt from the preserved component bytes: a 1-byte
+// definite-length 3-element array header, the body and witness-set bytes as
+// they appeared on the wire, and either the auxiliary data bytes or a 1-byte
+// CBOR null. A non-empty body or witness-set Cbor() is only ever set by that
+// component's UnmarshalCBOR, so these bytes are the ones that were decoded.
+//
+// Transactions that do carry stored transaction CBOR are left to the caller's
+// len(tx.Cbor()), so no size that a node observed on the wire is recomputed
+// here. MaryTransactionBody likewise implements MarshalCBOR and returns its
+// preserved bytes, so Mary does not need this helper.
+func preAlonzoRebuiltWireSize(tx lcommon.Transaction) (uint64, bool) {
+	var storedCbor, bodyCbor, witnessCbor []byte
+	var auxData lcommon.AuxiliaryData
+	var metadata lcommon.TransactionMetadatum
+	switch tmpTx := tx.(type) {
+	case *shelley.ShelleyTransaction:
+		storedCbor = tmpTx.DecodeStoreCbor.Cbor()
+		bodyCbor = tmpTx.Body.Cbor()
+		witnessCbor = tmpTx.WitnessSet.Cbor()
+		auxData = tmpTx.AuxiliaryData()
+		metadata = tmpTx.Metadata()
+	case *allegra.AllegraTransaction:
+		storedCbor = tmpTx.DecodeStoreCbor.Cbor()
+		bodyCbor = tmpTx.Body.Cbor()
+		witnessCbor = tmpTx.WitnessSet.Cbor()
+		auxData = tmpTx.AuxiliaryData()
+		metadata = tmpTx.Metadata()
+	default:
+		return 0, false
+	}
+	if len(storedCbor) > 0 {
+		// Decoded from a complete transaction encoding, so those are the
+		// bytes the node received.
+		return 0, false
+	}
+	if len(bodyCbor) == 0 || len(witnessCbor) == 0 {
+		return 0, false
+	}
+	// The third wire element is the auxiliary data, or CBOR null when the
+	// transaction has none. Bail out rather than guess when auxiliary data is
+	// present but its original bytes are not, so the caller falls back to
+	// len(tx.Cbor()).
+	auxSize := 1 // CBOR null auxiliary data
+	switch {
+	case auxData != nil && len(auxData.Cbor()) > 0:
+		auxSize = len(auxData.Cbor())
+	case auxData != nil || metadata != nil:
+		return 0, false
+	}
+	// 1 byte for the definite-length 3-element array header.
+	return uint64(1 + len(bodyCbor) + len(witnessCbor) + auxSize), true
+}
+
+// validatePreAlonzoTx runs a pre-Alonzo era's UTxO validation rules and then
+// applies Dingo's size and fee checks in place of the upstream fee and
+// max-size rules that buildIndexedUtxoValidationRulesWithSkips removed.
+//
+// Both replacements derive their size from TxSizeForFee. Keeping both checks
+// on TxSizeForFee makes the local validation path explicit and consistent with
+// the fee calculation, matching cardano-ledger, where validateMaxTxSizeUTxO
+// and the minimum-fee calculation both read sizeTxF.
+func validatePreAlonzoTx(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+	rules []indexedUtxoValidationRule,
+	maxTxSize uint,
+	minFeeA uint,
+	minFeeB uint,
+) error {
+	errs := make([]error, 0, len(rules)+2)
+	for _, rule := range rules {
+		errs = append(errs, rule.validationFunc(tx, slot, ls, pp))
+	}
+	errs = append(errs, ValidateTxSize(tx, maxTxSize))
+	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
+	return errors.Join(errs...)
 }
 
 // ValidateTxSize checks that the transaction size does

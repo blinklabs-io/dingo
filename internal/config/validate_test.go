@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ func validTestConfig() *Config {
 		RelayPort:            3001,
 		PrivatePort:          3002,
 		MetricsPort:          12798,
+		DebugBindAddr:        DefaultDebugBindAddr,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 		Cache:                DefaultCacheConfig(),
@@ -210,7 +212,8 @@ func TestValidate(t *testing.T) {
 			name: "distinct bind addresses may share a port",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.BindAddr = "127.0.0.1"
+				c.Midnight.ServerEnabled = true
+				c.DebugBindAddr = "127.0.0.1"
 				c.PrivateBindAddr = "127.0.0.1"
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
@@ -230,7 +233,8 @@ func TestValidate(t *testing.T) {
 			name: "wildcard bind address collides with specific",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.BindAddr = "0.0.0.0"
+				c.Midnight.ServerEnabled = true
+				c.DebugBindAddr = "0.0.0.0"
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
 				c.Midnight.Port = 13000
@@ -598,6 +602,160 @@ func TestValidateMidnightEnabledAllowedInDevMode(t *testing.T) {
 	assert.NoError(t, cfg.validate(RunModeDev, minUnprivilegedPort))
 }
 
+func TestValidateMidnightServerPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Config)
+		wantErr   string
+	}{
+		{
+			name: "disabled server ignores configured port",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.Port = maxPort + 1
+			},
+		},
+		{
+			name: "disabled server ignores listener collision",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.Host = c.BindAddr
+				c.Midnight.Port = c.RelayPort
+			},
+		},
+		{
+			name: "disabled server ignores remote plaintext host",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.Host = "0.0.0.0"
+			},
+		},
+		{
+			name: "enabled server requires api storage",
+			configure: func(c *Config) {
+				c.Midnight.ServerEnabled = true
+			},
+			wantErr: `midnight.serverEnabled requires storageMode "api"`,
+		},
+		{
+			name: "enabled server requires a port",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Port = 0
+			},
+			wantErr: "midnight.port must be set",
+		},
+		{
+			name: "enabled server allowed in dev mode",
+			configure: func(c *Config) {
+				c.RunMode = RunModeDev
+				c.Midnight.ServerEnabled = true
+			},
+		},
+		{
+			name: "reflection requires server",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ReflectionEnabled = true
+			},
+			wantErr: "midnight.reflectionEnabled requires midnight.serverEnabled",
+		},
+		{
+			name: "loopback ipv4 plaintext",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "127.0.0.1"
+			},
+		},
+		{
+			name: "loopback ipv6 plaintext",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "::1"
+			},
+		},
+		{
+			name: "localhost plaintext",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "localhost"
+			},
+		},
+		{
+			name: "remote plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "192.0.2.1"
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "wildcard ipv4 plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "0.0.0.0"
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "wildcard ipv6 plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "::"
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "unspecified plaintext denied",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = ""
+			},
+			wantErr: "midnight.allowInsecureRemote",
+		},
+		{
+			name: "remote plaintext explicit override",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "192.0.2.1"
+				c.Midnight.AllowInsecureRemote = true
+			},
+		},
+		{
+			name: "remote tls",
+			configure: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.Midnight.ServerEnabled = true
+				c.Midnight.Host = "192.0.2.1"
+				c.TlsCertFilePath = "/tls/server.crt"
+				c.TlsKeyFilePath = "/tls/server.key"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.configure(cfg)
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
 // TestValidateDelegatorInactivity pins the CIP-0163 range check: the
 // inactivity window is only validated when the gate is enabled, and must
 // fall in [1, 10000] when it is.
@@ -789,6 +947,9 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			cfg.DatabaseLifecycle.SnapshotDir = dir
 			cfg.BarkPort = 8091
 			cfg.BarkClientCAFilePath = "/certs/ca.crt"
+			cfg.BarkOperatorCertificateFingerprints = []string{
+				strings.Repeat("00", 32),
+			}
 			cfg.TlsCertFilePath = "/certs/tls.crt"
 			cfg.TlsKeyFilePath = "/certs/tls.key"
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
@@ -799,6 +960,58 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			}
 		},
 	)
+}
+
+func TestValidateBarkDatabaseServiceSecurity(t *testing.T) {
+	newConfig := func(t *testing.T) *Config {
+		t.Helper()
+		cfg := validTestConfig()
+		cfg.BarkPort = 8091
+		cfg.DatabaseLifecycle.SnapshotDir = t.TempDir()
+		cfg.BarkClientCAFilePath = "/certs/ca.crt"
+		cfg.BarkOperatorCertificateFingerprints = []string{
+			strings.Repeat("AB:", 31) + "AB",
+		}
+		cfg.TlsCertFilePath = "/certs/tls.crt"
+		cfg.TlsKeyFilePath = "/certs/tls.key"
+		return cfg
+	}
+
+	t.Run("complete policy", func(t *testing.T) {
+		require.NoError(
+			t,
+			newConfig(t).validate(RunModeServe, minUnprivilegedPort),
+		)
+	})
+
+	t.Run("missing client CA", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkClientCAFilePath = ""
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(t, err, "barkClientCaFilePath is required")
+	})
+
+	t.Run("missing operator allowlist", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkOperatorCertificateFingerprints = nil
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"barkOperatorCertificateFingerprints requires at least one",
+		)
+	})
+
+	t.Run("invalid operator fingerprint", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkOperatorCertificateFingerprints = []string{"not-a-fingerprint"}
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"must be a 32-byte SHA-256 certificate fingerprint",
+		)
+	})
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {

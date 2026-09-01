@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"sync"
 	"testing"
@@ -173,6 +174,59 @@ func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	require.Equal(t, []uint64{10, 20, 40}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h40"), pt.observedPoints[2].Hash)
+}
+
+func TestApplyRollbackDoesNotPromoteAdvertisedTipToObserved(t *testing.T) {
+	connId := newTestConnectionId(1)
+	observedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("observed")},
+		BlockNumber: 10,
+	}
+	pt := NewPeerChainTip(connId, observedTip, nil)
+	rollbackPoint := ocommon.Point{Slot: 90, Hash: []byte("rollback")}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("network")},
+		BlockNumber: math.MaxUint64,
+	}
+
+	pt.ApplyRollback(rollbackPoint, advertisedTip)
+
+	assert.Equal(t, advertisedTip, pt.Tip)
+	assert.Equal(t, rollbackPoint, pt.SelectionTip().Point)
+	assert.NotEqual(t, advertisedTip, pt.SelectionTip())
+}
+
+func TestApplyRollbackRestoresDeliveredFrontierFromHistory(t *testing.T) {
+	connId := newTestConnectionId(1)
+	delivered := []ochainsync.Tip{
+		{
+			Point:       ocommon.Point{Slot: 80, Hash: []byte("block-8")},
+			BlockNumber: 8,
+		},
+		{
+			Point:       ocommon.Point{Slot: 90, Hash: []byte("block-9")},
+			BlockNumber: 9,
+		},
+		{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("block-10")},
+			BlockNumber: 10,
+		},
+	}
+	pt := NewPeerChainTip(connId, delivered[0], nil)
+	for _, tip := range delivered {
+		pt.UpdateTipWithObserved(tip, tip, nil)
+		pt.recordObservedTipHistory(tip, 3)
+	}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("network")},
+		BlockNumber: 100,
+	}
+
+	pt.ApplyRollback(delivered[0].Point, advertisedTip)
+
+	assert.Equal(t, delivered[0], pt.SelectionTip())
+	require.Len(t, pt.observedTipHistory, 1)
+	assert.Equal(t, delivered[0], pt.observedTipHistory[0])
 }
 
 // confirmsRecentChain requires the witness's chain, as far as it reaches into
@@ -549,42 +603,50 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 		Point:       ocommon.Point{Slot: 100000, Hash: []byte("net-tip")},
 		BlockNumber: 100000,
 	}
-	deliver := func(slot uint64) {
-		obs := ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: slot,
-				Hash: []byte(fmt.Sprintf("h%d", slot)),
-			},
-			BlockNumber: slot,
+	var delivered uint64
+	deliverThrough := func(target uint64) {
+		for delivered < target {
+			next := min(delivered+cs.securityParam, target)
+			obs := ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: next,
+					Hash: []byte(fmt.Sprintf("h%d", next)),
+				},
+				BlockNumber: next,
+			}
+			require.True(t, cs.updatePeerTipObserved(
+				peerA,
+				advertised,
+				obs,
+				nil,
+			))
+			require.True(t, cs.updatePeerTipObserved(
+				peerB,
+				advertised,
+				obs,
+				nil,
+			))
+			cs.SetLocalTip(obs)
+			delivered = next
 		}
-		require.True(t, cs.updatePeerTipObserved(peerA, advertised, obs, nil))
-		require.True(t, cs.updatePeerTipObserved(peerB, advertised, obs, nil))
 	}
 
 	// Both peers advertise slot 100000 but have only delivered the slot-1
 	// header. The far advertised tip has not been delivered, so the node must
 	// stay in Genesis (no premature exit on early observed headers).
-	deliver(1)
+	deliverThrough(1)
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode(),
 		"must not exit Genesis on early observed headers")
 
 	// Sync progresses: headers are delivered up to slot 50000 and the local tip
 	// follows. Still far below the advertised tip, so stay in Genesis.
-	deliver(50000)
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 50000, Hash: []byte("local-50000")},
-		BlockNumber: 50000,
-	})
+	deliverThrough(50000)
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
 	// Only once the peers have DELIVERED headers up to within the window (30) of
 	// their advertised tip — and the local tip has caught up — does the node
 	// exit to Praos.
-	deliver(99990)
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 99990, Hash: []byte("local-99990")},
-		BlockNumber: 99990,
-	})
+	deliverThrough(99990)
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
 }
 

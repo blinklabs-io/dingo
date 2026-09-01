@@ -28,14 +28,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// forgerTestValidator is a controllable BlockValidator stub.
+// forgerTestValidator is a controllable BlockValidator stub. Setting
+// panic makes ValidateForgedBlock panic instead of returning err, to
+// exercise forger.go's callback panic recovery.
 type forgerTestValidator struct {
 	err   error
+	panic bool
 	calls int
 }
 
 func (v *forgerTestValidator) ValidateForgedBlock(ledger.Block, []byte) error {
 	v.calls++
+	if v.panic {
+		panic("validator panic")
+	}
 	return v.err
 }
 

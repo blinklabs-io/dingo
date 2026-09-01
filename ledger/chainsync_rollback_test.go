@@ -28,7 +28,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -450,6 +452,41 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	// Keep the test at header admission; no blockfetch worker is needed.
+	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+
+	forkHash := testHashBytes("fork-frontier-header")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	advertisedSlot := ^uint64(0)
+	require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advertisedSlot,
+				testHashBytes("unbound-fork-tip"),
+			),
+			BlockNumber: advertisedSlot,
+		},
+	}))
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, header.slot, fixture.ls.chain.HeaderTip().Point.Slot)
+	assert.Equal(t, header.slot, fixture.ls.syncUpstreamTipSlot.Load())
 }
 
 func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
@@ -2156,6 +2193,204 @@ func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
 		readChainResultCh,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
+}
+
+func TestHandleEventChainsyncBlockHeaderIgnoresHistoricalPrimaryHeader(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		return true, 100
+	}
+
+	// Leave the applied ledger at currentTip while extending the authoritative
+	// primary chain two blocks farther. A replayed header for the first of those
+	// blocks is historical relative to the primary tip, but it is not a fork.
+	block3Hash := testHashBytes("historical-primary-block-3")
+	block4Hash := testHashBytes("historical-primary-block-4")
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        30,
+			Hash:        block3Hash,
+			BlockNumber: 3,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+		{
+			Slot:        40,
+			Hash:        block4Hash,
+			BlockNumber: 4,
+			Type:        1,
+			PrevHash:    block3Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        ocommon.NewPoint(30, block3Hash),
+		BlockHeader: mockHeader{
+			hash:        lcommon.NewBlake2b256(block3Hash),
+			prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+			blockNumber: 3,
+			slot:        30,
+		},
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(40, block4Hash),
+			BlockNumber: 4,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(
+		t,
+		ochainsync.Tip{
+			Point:       ocommon.NewPoint(40, block4Hash),
+			BlockNumber: 4,
+		},
+		fixture.ls.chain.Tip(),
+	)
+}
+
+// A Byron epoch-boundary block sits at slot 0 with a real hash, so rejecting
+// every slot-zero point would classify a replay of that block as a fork.
+// Only the origin point, which carries no hash, is rejected outright.
+func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
+	)
+	genesisHash := testHashBytes("byron-boundary-slot-zero")
+	abandonedHash := testHashBytes("abandoned-slot-zero-fork")
+	// Persist the abandoned block first at ID 1. Adding the primary block
+	// below reuses ID 1 for the authoritative index while retaining this blob,
+	// matching the append-only fork shape primaryChainContainsBlock must reject.
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   0,
+		Hash:   abandonedHash,
+		Cbor:   []byte{0x80},
+		Type:   1,
+		Number: 0,
+	}, nil))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+			{
+				Slot:        0,
+				Hash:        genesisHash,
+				BlockNumber: 0,
+				Type:        1,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
+	ls, err := NewLedgerState(
+		LedgerStateConfig{
+			Database:          db,
+			ChainManager:      cm,
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	)
+	require.NoError(t, err)
+	localTip := ls.chain.Tip()
+	require.Equal(t, uint64(0), localTip.Point.Slot)
+	require.Equal(t, genesisHash, localTip.Point.Hash)
+
+	assert.True(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPoint(0, genesisHash)},
+		localTip,
+	))
+	// Blob presence is insufficient: the abandoned block is still retrievable
+	// by hash, but ID 1 now indexes the primary block above.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPoint(0, abandonedHash)},
+		localTip,
+	))
+	// The origin point is not a block and is not evidence of a duplicate.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: ocommon.NewPointOrigin()},
+		localTip,
+	))
+	// A competing slot-zero block is still a candidate fork.
+	assert.False(t, ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				0,
+				testHashBytes("competing-slot-zero"),
+			),
+		},
+		localTip,
+	))
+}
+
+func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+	lookupCalls := 0
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		lookupCalls++
+		return models.Block{}, models.ErrBlockNotFound
+	}
+
+	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				localTip.Point.Slot,
+				testHashBytes("unknown-fork-header"),
+			),
+		},
+		localTip,
+	))
+	assert.Equal(t, 1, lookupCalls)
+}
+
+func TestHeaderAlreadyOnPrimaryChainSupportsLegacyHashIndexMiss(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+
+	txn := fixture.ls.db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return fixture.ls.db.Blob().Delete(
+			txn.Blob(),
+			types.BlockHashIndexKey(localTip.Point.Hash),
+		)
+	}))
+
+	assert.True(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{Point: localTip.Point},
+		localTip,
+	))
+}
+
+func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+	lookupCalled := false
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		lookupCalled = true
+		return models.Block{}, errors.New("unexpected lookup")
+	}
+
+	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
+		ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				localTip.Point.Slot+1,
+				testHashBytes("header-beyond-local-tip"),
+			),
+		},
+		localTip,
+	))
+	assert.False(t, lookupCalled)
 }
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {

@@ -2876,6 +2876,100 @@ func TestPeerGovernor_LoadTopologyConfig_ValencyStored(t *testing.T) {
 	assert.Equal(t, 1, publicRootCount, "should have 1 public root peer")
 }
 
+// TestPeerGovernor_LoadTopologyConfig_EnforcesRootTarget verifies that the
+// configured root target changes the topology peers retained by the governor,
+// while local roots remain available to satisfy their configured valency.
+func TestPeerGovernor_LoadTopologyConfig_EnforcesRootTarget(t *testing.T) {
+	topologyConfig := &topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "192.0.2.1",
+				Port:    3001,
+			}},
+			Valency: 1,
+		}},
+		PublicRoots: []topology.TopologyConfigP2PPublicRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "192.0.2.2", Port: 3001},
+				{Address: "192.0.2.3", Port: 3001},
+				{Address: "192.0.2.4", Port: 3001},
+			},
+		}},
+	}
+	tests := []struct {
+		name       string
+		target     int
+		wantRoots  int
+		wantPublic int
+	}{
+		{name: "explicit", target: 2, wantRoots: 2, wantPublic: 1},
+		{name: "default", target: 0, wantRoots: 4, wantPublic: 3},
+		{name: "unlimited", target: -1, wantRoots: 4, wantPublic: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pg := NewPeerGovernor(PeerGovernorConfig{
+				TargetNumberOfRootPeers: tt.target,
+			})
+			pg.LoadTopologyConfig(topologyConfig)
+
+			rootCount := 0
+			localCount := 0
+			publicCount := 0
+			for _, peer := range pg.peers {
+				switch peer.Source {
+				case PeerSourceTopologyLocalRoot:
+					rootCount++
+					localCount++
+				case PeerSourceTopologyPublicRoot:
+					rootCount++
+					publicCount++
+				}
+			}
+
+			assert.Equal(t, tt.wantRoots, rootCount)
+			assert.Equal(t, 1, localCount)
+			assert.Equal(t, tt.wantPublic, publicCount)
+		})
+	}
+}
+
+// TestPeerGovernor_LoadTopologyConfig_RootTargetPreservesOverlappingLocalRoot
+// verifies that a public-root entry cannot overwrite operator-mandated local
+// root ownership or its group valencies when both resolve to the same address.
+func TestPeerGovernor_LoadTopologyConfig_RootTargetPreservesOverlappingLocalRoot(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		TargetNumberOfRootPeers: 2,
+	})
+	pg.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "192.0.2.1",
+				Port:    3001,
+			}},
+			Valency:     1,
+			WarmValency: 1,
+		}},
+		PublicRoots: []topology.TopologyConfigP2PPublicRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "192.0.2.1",
+				Port:    3001,
+			}},
+			Valency:     9,
+			WarmValency: 9,
+		}},
+	})
+
+	require.Len(t, pg.peers, 1)
+	assert.EqualValues(t, PeerSourceTopologyLocalRoot, pg.peers[0].Source)
+	assert.Equal(t, uint(1), pg.peers[0].Valency)
+	assert.Equal(t, uint(1), pg.peers[0].WarmValency)
+	assert.Equal(t, "local-root-0", pg.peers[0].GroupID)
+}
+
 func TestPeerGovernor_LoadTopologyConfig_ExitedBootstrapKeepsBootstrapSource(
 	t *testing.T,
 ) {

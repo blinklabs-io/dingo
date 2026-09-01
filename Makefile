@@ -5,6 +5,10 @@ ROOT_DIR=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 # worktrees so sibling checkouts do not affect formatting or rebuild inputs.
 GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name '*.go' -print)
 
+# Gather every Go module directory. Nested modules have their own go.mod and
+# are therefore outside the root module's ./..., so they need their own run.
+GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.claude' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
+
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 
@@ -21,6 +25,9 @@ PROTOC_ZIP=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARC
 PROTOC=$(PROTOC_DIR)/bin/protoc
 SQLC_VERSION=v1.31.1
 SQLC=go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+# The scanner floats along with the advisory database it reads; a pin parks a
+# new advisory behind a stale version instead of forcing it to be fixed.
+GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@latest
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
 PROTOC_SHA256_linux_aarch_64=4a802ed23d70f7bad7eb19e5a3e724b3aa967250d572cadfd537c1ba939aee6a
@@ -37,7 +44,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check gorm-check test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -70,8 +77,16 @@ format: mod-tidy ## Run mod-tidy, then format code
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
+# golangci-lint covers one module for one GOOS per run. The loop reaches every
+# nested module, and the GOOS=windows run reaches files behind
+# `//go:build windows`, which the host build excludes. CI runs the same scopes
+# in .github/workflows/golangci-lint.yml.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
-	golangci-lint run ./...
+	@for dir in $(GO_MODULE_DIRS); do \
+		echo "golangci-lint run ./... ($$dir)"; \
+		(cd $$dir && golangci-lint run ./...) || exit 1; \
+	done
+	GOOS=windows golangci-lint run ./...
 	nilaway $(GO_TAG_FLAGS) ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
@@ -100,16 +115,8 @@ sql: ## Generate typed database/sql queries with pinned sqlc
 sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 	git diff --exit-code -- database/plugin/metadata/sqlstore/internal/query
 
-gorm-check: ## Fail if the removed ORM returns to source or dependencies
-	@status=0; \
-	grep -RInE --exclude-dir=.git --exclude-dir=.worktrees \
-		--include='*.go' --include='go.mod' --include='go.sum' \
-		'gorm\.io|github.com/glebarez/sqlite|otelgorm' . || status=$$?; \
-	case "$$status" in \
-		0) echo 'gorm-check: forbidden ORM reference found' >&2; exit 1 ;; \
-		1) exit 0 ;; \
-		*) echo "gorm-check: scanner failed with status $$status" >&2; exit "$$status" ;; \
-	esac
+govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
+	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
 
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
@@ -122,11 +129,21 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
+# -timeout matches the race-enabled CI jobs (go-test.yml's go-test (Linux,
+# race) and publish.yml's release gate) so a local run and CI cannot disagree
+# about which slow package is a hang. ./ledger alone runs 9-13 minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
-	go test $(GO_TAG_FLAGS) -v -race -timeout 20m ./...
+	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
+
+test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
+	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .
 
 bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
+
+bench-ci: mod-tidy ## Run mod-tidy, then the curated CI benchmark suite (count=10) plus a GOMAXPROCS lock-contention sweep
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockProcessingThroughput|BlockProcessingThroughputPredecoded|BlockBatchProcessingThroughput|RawBlockBatchProcessingThroughput|VerifyBlockHeader|TransactionValidation|ChainSyncFromGenesis|RealBlockProcessing|EraTransitionPerformanceRealData|TestLoad|BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipFlushOnlyPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchVerifiedHeaderDispatch|BlockfetchClientBlockMetrics|UpdateConnectionMetrics|HasInboundPeerAddress|Reconcile|PublishSubscribers|BlockMemoryUsage|HotCacheGet|HotCachePut|HotCacheGetMiss|BlockLRUCacheGet|BlockLRUCachePut|TieredCacheHotHit|CachedBlockExtract|CborOffsetEncode|CborOffsetDecode|StorageModeIngest|StorageModeIngestSteadyState)$$' -benchmem -count=10 -timeout=90m ./...
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockLRUParallelReadHeavy|BlockLRUParallelBalanced|BlockLRUParallelReadOnly|HotCacheParallelGet|TryReserveInboundSlotParallel|ConcurrentQueries|TipSnapshotReadOnly|TipSnapshotReadUnderWriter)$$' -benchmem -count=10 -cpu=1,4,8,16 -timeout=30m ./...
 
 bench-mempool-revalidation: ## Benchmark FIFO admission during normal and degenerate rebuilds
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkFIFO(AdmissionNoRevalidation|Revalidation)$$' -benchmem ./mempool

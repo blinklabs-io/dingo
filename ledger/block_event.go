@@ -135,9 +135,9 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 // the shared worker pool reorders (blinklabs-io/dingo#2287).
 //
 // This stays asynchronous rather than becoming a PublishBlocking like
-// publishBlockEvent: the forward-path caller runs inside the block-apply
-// database transaction, so parking it on subscriber backpressure would hold
-// that transaction open.
+// publishBlockEvent: the forward path calls it from a database AfterCommit
+// callback. Enqueueing here keeps subscriber work out of Commit while still
+// ensuring the transaction is durable before any Apply becomes visible.
 func (ls *LedgerState) publishTransactionEvent(evt TransactionEvent) {
 	if ls.config.EventBus == nil {
 		return
@@ -178,8 +178,12 @@ func (ls *LedgerState) publishBlockEvent(
 		event.NewEvent(BlockEventType, evt),
 	); err != nil {
 		// ErrEventBusStopped is expected during teardown when the bus shuts
-		// down before LedgerState finishes draining its last events.
-		if errors.Is(err, event.ErrEventBusStopped) {
+		// down before LedgerState finishes draining its last events. An ordinary
+		// subscriber may also be detached after it stops draining; that is an
+		// isolated optional-consumer failure, not a reason to stop the node or
+		// report the block as unpublished to the lossless subscribers.
+		if errors.Is(err, event.ErrEventBusStopped) ||
+			errors.Is(err, event.ErrEventSubscriberStalled) {
 			return
 		}
 		publishErr := fmt.Errorf(

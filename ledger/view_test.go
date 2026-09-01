@@ -15,13 +15,24 @@
 package ledger
 
 import (
+	"bytes"
+	"io"
+	"log/slog"
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,13 +62,193 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)
 
-	balance, err := lv.RewardAccountBalance(lcommon.Credential{})
-	require.ErrorIs(t, err, ErrNotImplemented)
-	require.Nil(t, balance)
-
 	treasury, err := lv.TreasuryValue()
 	require.ErrorIs(t, err, ErrNotImplemented)
 	require.Zero(t, treasury)
+}
+
+func TestLedgerViewRewardAccountBalance(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
+	for _, tag := range []uint8{0, 1} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey:    key,
+			CredentialTag: tag,
+			Reward:        types.Uint64(100 + uint64(tag)),
+			Active:        true,
+		}))
+	}
+	inactive := bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: inactive,
+		Reward:     55,
+		Active:     false,
+	}))
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+	credential := func(tag uint, value []byte) lcommon.Credential {
+		return lcommon.Credential{
+			CredType:   tag,
+			Credential: lcommon.NewBlake2b224(value),
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		cred lcommon.Credential
+		want *uint64
+	}{
+		{name: "key credential", cred: credential(0, key), want: new(uint64(100))},
+		{name: "script credential", cred: credential(1, key), want: new(uint64(101))},
+		{name: "missing credential", cred: credential(0, bytes.Repeat([]byte{0xa3}, 28))},
+		{name: "inactive credential", cred: credential(0, inactive)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := lv.RewardAccountBalance(tc.cred)
+			require.NoError(t, err)
+			if tc.want == nil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			require.Equal(t, *tc.want, *got)
+		})
+	}
+	zero := bytes.Repeat([]byte{0xa4}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: zero,
+		Reward:     0,
+		Active:     true,
+	}))
+	got, err := lv.RewardAccountBalance(credential(0, zero))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Zero(t, *got)
+
+	_, err = lv.RewardAccountBalance(lcommon.Credential{CredType: 2})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsupported stake credential tag")
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+	_, err = lv.RewardAccountBalance(credential(0, key))
+	require.Error(t, err)
+}
+
+// TestLedgerViewPoolCurrentStatePendingRetirement proves PoolCurrentState's
+// pending-retirement epoch tracks the pool's latest retirement certificate
+// by insertion order (AddedSlot), not the maximum epoch value across every
+// retirement row on the pool: a later retirement certificate replaces the
+// prior schedule even when it targets an earlier epoch, and a later pool
+// registration cancels a pending retirement entirely -- mirroring
+// poolIsActive's ordering rule in
+// internal/test/conformance/state_provider.go, which this adapter's own
+// review caught duplicating this same defect from.
+func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xb1}, 28)),
+	)
+
+	applyCert := func(slot uint64, txIDSeed byte, cert lcommon.Certificate) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+	registrationCert := func(seed byte) *lcommon.PoolRegistrationCertificate {
+		return &lcommon.PoolRegistrationCertificate{
+			CertType: uint(lcommon.CertificateTypePoolRegistration),
+			Operator: poolKeyHash,
+			VrfKeyHash: lcommon.VrfKeyHash(
+				lcommon.NewBlake2b256([]byte{seed, 0x02}),
+			),
+			Pledge: 1_000_000,
+			Cost:   340_000_000,
+			Margin: cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{seed, 0x03}),
+			),
+		}
+	}
+	retirementCert := func(epoch uint64) *lcommon.PoolRetirementCertificate {
+		return &lcommon.PoolRetirementCertificate{
+			CertType:    uint(lcommon.CertificateTypePoolRetirement),
+			PoolKeyHash: poolKeyHash,
+			Epoch:       epoch,
+		}
+	}
+
+	applyCert(1, 0x01, registrationCert(0x01))
+
+	// A retirement targeting epoch 10, then a later retirement targeting an
+	// EARLIER epoch (5): the later certificate must win regardless of its
+	// epoch value being smaller than the one it replaces.
+	applyCert(2, 0x02, retirementCert(10))
+	applyCert(3, 0x03, retirementCert(5))
+
+	_, pendingEpoch, err := lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.NotNil(t, pendingEpoch)
+	require.Equal(
+		t,
+		uint64(5),
+		*pendingEpoch,
+		"a later retirement certificate must replace the prior schedule even when it moves the target epoch earlier",
+	)
+
+	// A later re-registration cancels the pending retirement entirely.
+	applyCert(4, 0x04, registrationCert(0x04))
+
+	_, pendingEpoch, err = lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		pendingEpoch,
+		"a later pool registration must cancel a pending retirement",
+	)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
 func TestLedgerViewSkipPhase2Validation(t *testing.T) {

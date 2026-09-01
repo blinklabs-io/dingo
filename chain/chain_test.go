@@ -1426,6 +1426,43 @@ func TestRecentPointsNoDatabase(t *testing.T) {
 	}
 }
 
+func TestPointAtDepthNoDatabase(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, block := range testBlocks[:4] {
+		if err := c.AddBlock(block, nil); err != nil {
+			t.Fatalf("unexpected error adding block: %s", err)
+		}
+	}
+
+	tip, found, err := c.PointAtDepth(0)
+	if err != nil {
+		t.Fatalf("unexpected tip lookup error: %s", err)
+	}
+	if !found || !reflect.DeepEqual(tip, blockPoint(testBlocks[3])) {
+		t.Fatalf("unexpected tip point: found=%t point=%v", found, tip)
+	}
+
+	point, found, err := c.PointAtDepth(2)
+	if err != nil {
+		t.Fatalf("unexpected depth lookup error: %s", err)
+	}
+	if !found || !reflect.DeepEqual(point, blockPoint(testBlocks[1])) {
+		t.Fatalf("unexpected depth-2 point: found=%t point=%v", found, point)
+	}
+
+	_, found, err = c.PointAtDepth(4)
+	if err != nil {
+		t.Fatalf("unexpected origin lookup error: %s", err)
+	}
+	if found {
+		t.Fatal("a chain shorter than k must have origin as its immutable tip")
+	}
+}
+
 func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {

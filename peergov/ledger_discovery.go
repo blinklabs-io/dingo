@@ -39,7 +39,6 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	if p.config.LedgerPeerProvider == nil {
 		p.config.Logger.Debug(
 			"ledger peer discovery skipped: provider is nil",
-			"component", "peergov",
 		)
 		return
 	}
@@ -64,10 +63,14 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 
 	// Count existing ledger peers to determine how many we need.
 	urgent := p.ledgerPeersUrgent()
+	if !urgent {
+		// Recovered: the next starvation event starts again at the base
+		// emergency cadence rather than an escalated one.
+		p.emergencyRefreshRounds.Store(0)
+	}
 	needed := p.ledgerPeerDeficit()
 	p.config.Logger.Debug(
 		"ledger peer discovery starting",
-		"component", "peergov",
 		"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
 		"needed", needed,
 		"emergency", urgent,
@@ -89,17 +92,38 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	// collapsed peer pool while the ledger still lists plenty of relays.
 	refreshInterval := p.config.LedgerPeerRefreshInterval
 	if urgent {
-		refreshInterval = p.config.EmergencyLedgerPeerRefreshInterval
+		refreshInterval = p.emergencyLedgerRefreshInterval()
 	}
 	now := time.Now().UnixNano()
 	lastRefresh := p.lastLedgerPeerRefresh.Load()
 	if time.Duration(now-lastRefresh) < refreshInterval {
 		return
 	}
-	if !p.lastLedgerPeerRefresh.CompareAndSwap(lastRefresh, now) {
-		// Another goroutine claimed the refresh
+
+	// The timestamp gates when discovery may begin, but a slow provider can
+	// outlive that interval. Hold a separate generation-owned claim across the
+	// provider query and candidate pass so a later tick cannot overlap it.
+	generation := p.ledgerDiscoveryGeneration.Add(1)
+	if !p.ledgerDiscoveryInFlight.CompareAndSwap(0, generation) {
 		return
 	}
+	claimedTimestamp := false
+	completed := false
+	defer func() {
+		if claimedTimestamp && !completed {
+			p.lastLedgerPeerRefresh.CompareAndSwap(now, lastRefresh)
+		}
+		p.ledgerDiscoveryInFlight.CompareAndSwap(generation, 0)
+	}()
+
+	// A prior owner may have completed between the first interval check and
+	// this generation obtaining the claim. Recheck while ownership is held.
+	lastRefresh = p.lastLedgerPeerRefresh.Load()
+	if time.Duration(now-lastRefresh) < refreshInterval ||
+		!p.lastLedgerPeerRefresh.CompareAndSwap(lastRefresh, now) {
+		return
+	}
+	claimedTimestamp = true
 
 	// Get pool relays from ledger
 	if err := ctx.Err(); err != nil {
@@ -112,9 +136,9 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 			"error", err,
 			"emergency", urgent,
 		)
-		// Reset timestamp to allow retry on next reconciliation cycle
-		// rather than waiting for the full refresh interval
-		p.lastLedgerPeerRefresh.Store(lastRefresh)
+		return
+	}
+	if err := ctx.Err(); err != nil {
 		return
 	}
 
@@ -141,6 +165,15 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 			"emergency", urgent,
 		)
 	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	if urgent {
+		// Count only a complete urgent round. Interval-gated, failed, canceled,
+		// or panicking rounds retain the existing backoff and retry immediately.
+		p.emergencyRefreshRounds.Add(1)
+	}
+	completed = true
 }
 
 // ledgerPeersUrgent reports whether the node is critically short of connected
@@ -158,6 +191,36 @@ func (p *PeerGovernor) ledgerPeersUrgent() bool {
 	upstreams := p.countEligibleUpstreamsLocked()
 	p.mu.Unlock()
 	return upstreams < p.config.MinHotPeers
+}
+
+// emergencyLedgerRefreshInterval returns the refresh interval for an urgent
+// ledger-discovery round. It starts at the configured emergency cadence and
+// doubles for each consecutive round the node has spent short of upstreams,
+// capped at the normal refresh interval so an urgent node never discovers
+// less often than a healthy one. The counter resets on recovery, so a
+// genuinely transient collapse is still served at the base cadence.
+//
+// Without the escalation a node whose relay pool is polluted (dead
+// hostnames, wrong-network relays) never leaves the urgent state and runs
+// discovery at the base cadence indefinitely, re-walking the whole relay set
+// every round for as long as the node is up.
+func (p *PeerGovernor) emergencyLedgerRefreshInterval() time.Duration {
+	base := p.config.EmergencyLedgerPeerRefreshInterval
+	normal := p.config.LedgerPeerRefreshInterval
+	if normal <= 0 || base >= normal {
+		return base
+	}
+	interval := base
+	for range p.emergencyRefreshRounds.Load() {
+		if interval >= normal {
+			break
+		}
+		interval *= emergencyLedgerRefreshBackoffFactor
+	}
+	if interval > normal {
+		return normal
+	}
+	return interval
 }
 
 // ledgerPeerDeficit returns how many more ledger peers are needed to reach
@@ -242,6 +305,16 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	if err := ctx.Err(); err != nil {
 		return false
 	}
+	// Decide what can be decided without DNS first. Discovery re-offers the
+	// full relay set on every round, so resolving ahead of the deny and
+	// exists checks re-resolves every already-connected peer and every dead
+	// hostname every round; neither lookup can change the outcome. Deny
+	// entries for an unresolvable hostname are keyed on exactly the
+	// lock-free normalized form, which is what makes the dead-hostname case
+	// answerable here.
+	if p.ledgerPeerRejectedWithoutDNS(address) {
+		return false
+	}
 	// Resolve address (with DNS lookup) before acquiring lock to avoid
 	// blocking while holding the mutex. Ledger relay hostnames are
 	// attacker-supplied, and resolveLedgerDialTarget's fast path dials
@@ -275,20 +348,26 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		return false
 	}
 
+	hostnameNormalized := p.normalizeAddress(address)
+
 	// Check deny list
 	if p.isDeniedLocked(normalized) ||
-		p.isDeniedLocked(p.normalizeAddress(address)) {
+		p.isDeniedLocked(hostnameNormalized) {
 		p.mu.Unlock()
 		return false
 	}
 
-	// Check for existing peer using cached NormalizedAddress
+	// Check for existing peer using cached NormalizedAddress. The address
+	// comparison is normalized on both sides, as in AddPeer, so a peer
+	// holding the same hostname under different casing is not duplicated.
 	exists := false
 	for _, peer := range p.peers {
 		if peer == nil {
 			continue
 		}
-		if peer.NormalizedAddress == normalized || peer.Address == address {
+		if peer.NormalizedAddress == normalized ||
+			peer.NormalizedAddress == hostnameNormalized ||
+			p.normalizeAddress(peer.Address) == hostnameNormalized {
 			exists = true
 			break
 		}
@@ -355,4 +434,36 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	p.publishEvent(evt.eventType, evt.data)
 
 	return added
+}
+
+// ledgerPeerRejectedWithoutDNS reports whether a ledger relay candidate can
+// be rejected from the raw address alone, before any DNS lookup.
+//
+// Only rejection is decided here: a peer is never added without a
+// resolution, so a candidate that survives this check still goes through the
+// full post-resolution deny and exists checks under the lock.
+func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
+	hostnameNormalized := p.normalizeAddress(address)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// A deny entry recorded for an unresolvable hostname is keyed on the
+	// lowercased hostname, so this catches exactly the candidates whose
+	// resolution would fail anyway.
+	if p.isDeniedLocked(hostnameNormalized) {
+		return true
+	}
+	for _, peer := range p.peers {
+		if peer == nil {
+			continue
+		}
+		// Both sides are normalized, matching AddPeer: Peer.Address is
+		// stored verbatim, so a topology or gossip peer can hold the same
+		// relay hostname under different casing.
+		if peer.NormalizedAddress != hostnameNormalized &&
+			p.normalizeAddress(peer.Address) != hostnameNormalized {
+			continue
+		}
+		return true
+	}
+	return false
 }

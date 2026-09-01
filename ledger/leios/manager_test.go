@@ -70,16 +70,19 @@ func (f *fakeStakeProvider) setError(err error) {
 }
 
 type fakeLeiosKeyProvider struct {
-	mu   sync.Mutex
-	keys map[string]*lcommon.LeiosKey
-	err  error
+	mu            sync.Mutex
+	keys          map[string]*lcommon.LeiosKey
+	err           error
+	snapshotEpoch uint64
 }
 
 func (f *fakeLeiosKeyProvider) GetLeiosKeys(
+	snapshotEpoch uint64,
 	_ []string,
 ) (map[string]*lcommon.LeiosKey, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.snapshotEpoch = snapshotEpoch
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -851,6 +854,98 @@ func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
 	assert.Equal(t, vote.VoteSignature, resolved.VoteSignature)
 }
 
+// TestVoteManagerPeerPrototypeVoteRequeuedForRelay guards issue #3288: a
+// relay stored a peer's vote for its own tally but never queued it back up
+// for its other peers, so a block producer behind that relay never observed
+// quorum. A newly accepted peer vote must publish VoteReceivedEventType
+// (node_leios.go's subscriber feeds this into the origin-aware Ouroboros
+// enqueue path) with the exact signed fields and connection key the peer sent.
+func TestVoteManagerPeerPrototypeVoteRequeuedForRelay(t *testing.T) {
+	fixture := newManagerFixture(t)
+	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
+
+	requeued := testutil.RequireReceive(
+		t, receivedCh, 2*time.Second, "peer vote requeued for relay",
+	)
+	data, ok := requeued.Data.(VoteReceivedEvent)
+	require.True(t, ok)
+	assert.Equal(t, vote, data.Vote)
+	assert.Equal(t, "conn-a", data.OriginConnKey)
+}
+
+// TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement
+// covers the other acceptance path into insertVote: a vote received before
+// its announcing ranking block is known is queued, then resolved and
+// inserted from ObserveAnnouncement's pending-vote flush rather than from
+// HandlePrototypeVote directly. That path must requeue for relay too.
+func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
+	t *testing.T,
+) {
+	fixture := newManagerFixture(t)
+	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
+	testutil.RequireNoReceive(
+		t,
+		receivedCh,
+		300*time.Millisecond,
+		"a vote pending its announcing ranking block must not be relayed yet",
+	)
+
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	requeued := testutil.RequireReceive(
+		t,
+		receivedCh,
+		2*time.Second,
+		"queued peer vote requeued for relay once its ranking block resolves",
+	)
+	data, ok := requeued.Data.(VoteReceivedEvent)
+	require.True(t, ok)
+	assert.Equal(t, vote, data.Vote)
+	assert.Equal(t, "conn-a", data.OriginConnKey)
+}
+
+// TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay confirms the
+// requeue is gated by insertVote's dedup check, not fired unconditionally --
+// a resubmission of a vote already on record must not cause a second
+// diffusion round trip.
+func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(t *testing.T) {
+	fixture := newManagerFixture(t)
+	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
+	testutil.RequireReceive(
+		t, receivedCh, 2*time.Second, "first delivery requeued for relay",
+	)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-b", vote))
+	testutil.RequireNoReceive(
+		t,
+		receivedCh,
+		300*time.Millisecond,
+		"a resubmitted vote already on record must not be requeued again",
+	)
+}
+
 func TestVoteManagerQueuedInvalidPrototypeVoteDoesNotSuppressValidVote(
 	t *testing.T,
 ) {
@@ -1155,6 +1250,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
 	var member CommitteeMember
+	var keyProvider *fakeLeiosKeyProvider
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
@@ -1162,7 +1258,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 			emptyRegistry, regErr := NewVoterRegistry(nil)
 			require.NoError(t, regErr)
 			cfg.Registry = emptyRegistry
-			cfg.KeyProvider = &fakeLeiosKeyProvider{
+			keyProvider = &fakeLeiosKeyProvider{
 				keys: map[string]*lcommon.LeiosKey{
 					hex.EncodeToString(member.PoolKeyHash): {
 						PublicKey:       key.PublicKeyBytes(),
@@ -1170,6 +1266,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 					},
 				},
 			}
+			cfg.KeyProvider = keyProvider
 		},
 	)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -1181,12 +1278,155 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 		VoterId:           member.VoterId,
 		VoteSignature:     sig,
 	}))
+	keyProvider.mu.Lock()
+	resolvedSnapshotEpoch := keyProvider.snapshotEpoch
+	keyProvider.mu.Unlock()
+	require.Equal(
+		t,
+		CommitteeSnapshotEpoch(5),
+		resolvedSnapshotEpoch,
+		"key lookup must use the same snapshot epoch as committee stake",
+	)
 	fixture.mgr.mu.Lock()
 	stored, ok := fixture.mgr.votesById[lcommon.LeiosVoteId{
 		SlotNo: 577, VoterId: member.VoterId,
 	}]
 	fixture.mgr.mu.Unlock()
 	require.True(t, ok)
+	assert.True(t, stored.verified)
+}
+
+// TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat proves a
+// production-shaped manager (non-nil ledger key provider) never promotes a
+// keyless seat through the private-harness static registry. The vote remains
+// observable for membership/stake diagnostics, but it is not verified and
+// cannot contribute to a certificate.
+func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
+	t *testing.T,
+) {
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			// Keep the fixture's populated Registry while wiring the same
+			// non-nil key-provider shape production composition uses. The
+			// provider deliberately has no registration for member.
+			cfg.KeyProvider = &fakeLeiosKeyProvider{}
+		},
+	)
+	rbHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer",
+		fixture.makePrototypeVote(t, member.VoterId, rbHash),
+	))
+	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
+	fixture.mgr.mu.Lock()
+	stored := fixture.mgr.votesById[voteID]
+	tally := fixture.mgr.tallies[tallyKey{
+		slotNo:           577,
+		ebHash:           ebHash,
+		announcingRbHash: rbHash,
+	}]
+	fixture.mgr.mu.Unlock()
+
+	require.NotNil(t, stored)
+	assert.False(
+		t,
+		stored.verified,
+		"static registry must not verify a keyless on-chain seat in reference mode",
+	)
+	require.NotNil(t, tally)
+	assert.Zero(
+		t,
+		tally.verifiedStake,
+		"a static fallback vote must not contribute certificate stake",
+	)
+}
+
+// TestVoteManagerReferenceModeRejectsLocalStaticFallback proves production
+// composition cannot auto-register the local signing key when the pool has no
+// usable on-chain registration. Registry-based local voting remains available
+// only to managers constructed without a KeyProvider (the private test seam).
+func TestVoteManagerReferenceModeRejectsLocalStaticFallback(t *testing.T) {
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	key := fixture.keys[member.VoterId]
+
+	err := fixture.mgr.ValidateVotingKey(poolKeyHash, key)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain")
+	err = fixture.mgr.EnableVoting(poolKeyHash, key)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain")
+
+	fixture.mgr.mu.Lock()
+	votingKey := fixture.mgr.votingKey
+	fixture.mgr.mu.Unlock()
+	assert.Nil(t, votingKey, "a keyless pool must remain non-voting")
+}
+
+// TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch exercises both
+// sides of the production trust boundary: a configured static key cannot
+// verify a vote when it differs from the PoP-verified on-chain registration,
+// while the registered key is accepted for the same committee seat.
+func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(t *testing.T) {
+	onChainKey := testSigningKey(t, 203)
+	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	require.NoError(t, err)
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       onChainKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	rbHash := lcommon.NewBlake2b256([]byte("on-chain-authority-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("on-chain-authority-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	// The fixture's default key is still present in Registry, but conflicts
+	// with the on-chain registration and therefore must be rejected.
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer-static",
+		fixture.makePrototypeVote(t, member.VoterId, rbHash),
+	))
+	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteID}))
+
+	sig, err := SignVote(onChainKey, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer-on-chain",
+		lcommon.LeiosPrototypeVote{
+			AnnouncingRbHash: rbHash,
+			VoterId:          member.VoterId,
+			VoteSignature:    sig,
+		},
+	))
+	fixture.mgr.mu.Lock()
+	stored := fixture.mgr.votesById[voteID]
+	fixture.mgr.mu.Unlock()
+	require.NotNil(t, stored)
 	assert.True(t, stored.verified)
 }
 
@@ -1305,13 +1545,10 @@ func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
 	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
 }
 
-// TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches
-// proves a real on-chain key rotation is not blocked by a peer's or this
-// operator's own leios-voter-public-keys entry still holding the
-// pre-rotation key: EnableVoting must not fail just because
-// RegisterPublicKey's conflict check would, since the on-chain key is
-// already the stronger, PoP-verified trust source ValidateVotingKey
-// resolved against.
+// TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches proves
+// a real on-chain key rotation is not blocked by a private-harness Registry
+// entry still holding the pre-rotation key: a non-nil KeyProvider is the
+// authoritative, PoP-verified trust source.
 func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 	t *testing.T,
 ) {

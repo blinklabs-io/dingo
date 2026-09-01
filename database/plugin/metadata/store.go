@@ -113,15 +113,21 @@ type SettingsStore interface {
 // chain-transaction domain, which is a different thing entirely.
 type TxnStore interface {
 	// Transaction creates a new metadata transaction on the write
-	// connection pool. Use ReadTransaction for read-only access to
-	// avoid contending with writers.
-	Transaction() types.Txn
+	// connection pool, bound to ctx. Per database/sql's own BeginTx
+	// contract, canceling ctx rolls the transaction back instead of
+	// leaving it to a caller's eventual Commit/Rollback -- see the
+	// sqlstore implementation's doc comment for exactly which
+	// statements that covers today. Use ReadTransaction for read-only
+	// access to avoid contending with writers. A nil ctx is treated as
+	// context.Background().
+	Transaction(ctx context.Context) types.Txn
 
 	// ReadTransaction creates a read-only metadata transaction using
-	// the read connection pool (when available). This avoids blocking
-	// on the write connection, which is critical for operations like
-	// FindIntersect that must complete within protocol timeouts.
-	ReadTransaction() types.Txn
+	// the read connection pool (when available), bound to ctx the same
+	// way Transaction is. This avoids blocking on the write connection,
+	// which is critical for operations like FindIntersect that must
+	// complete within protocol timeouts.
+	ReadTransaction(ctx context.Context) types.Txn
 }
 
 // SlotRangeStats is the canonical block coverage for an inclusive slot range.
@@ -226,6 +232,16 @@ type GovernanceStore interface {
 	SetGovernanceProposal(
 		*models.GovernanceProposal,
 		types.Txn,
+	) error
+
+	// ClearGovernanceProposalRatification moves a proposal back to the active,
+	// pending state at transitionSlot after a deterministic enactment
+	// precondition failure.
+	ClearGovernanceProposalRatification(
+		txHash []byte,
+		actionIndex uint32,
+		transitionSlot uint64,
+		txn types.Txn,
 	) error
 
 	// GetChildGovernanceProposals returns all active proposals whose parent
@@ -642,6 +658,16 @@ type UtxoStore interface {
 		*models.UtxoWithOrderingQuery,
 		types.Txn,
 	) ([]models.UtxoWithOrdering, error)
+
+	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
+	// matching q's coarse SQL predicate, without materializing rows. It
+	// errors if q's address patterns require CBOR-based exact-address
+	// filtering (see models.RequiresExactAddressFilter), since the coarse
+	// predicate alone would over-count. See models.UtxoWithOrderingQuery.
+	CountUtxosByAddressWithOrdering(
+		*models.UtxoWithOrderingQuery,
+		types.Txn,
+	) (int, error)
 
 	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
 	GetUtxosByAddressAtSlot(
@@ -1598,6 +1624,24 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// LatestPoolOpCertSequenceAfter returns the highest observed op-cert
+	// sequence for a pool strictly after the given slot.
+	LatestPoolOpCertSequenceAfter(
+		lcommon.PoolKeyHash,
+		uint64, // afterSlot
+		types.Txn,
+	) (uint64, bool, error)
+
+	// LatestPoolOpCertSequenceAtOrBefore returns the highest op-cert sequence
+	// observed for a pool no later than the supplied canonical-chain slot.
+	// This is the chain-dependent counter view at a historical point; pools
+	// with no issuer row by that point are absent rather than counter zero.
+	LatestPoolOpCertSequenceAtOrBefore(
+		lcommon.PoolKeyHash,
+		uint64, // slot
+		types.Txn,
+	) (uint64, bool, error)
+
 	// LatestPoolOpCertSequences returns the highest observed op-cert sequence
 	// for every pool that has issued a block, keyed by pool key hash. Pools
 	// that have never issued one are absent rather than reported as zero.
@@ -2140,6 +2184,10 @@ type MetadataStore interface {
 		string, // snapshotType
 		types.Txn,
 	) (*models.RewardSnapshot, error)
+
+	// DeleteProvisionalRewardSnapshot deletes a non-authoritative reward
+	// snapshot for an epoch and type. Authoritative boundary state is retained.
+	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
 
 	// SaveRewardPoolInputs saves per-pool reward inputs for an epoch.
 	SaveRewardPoolInputs(

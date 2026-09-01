@@ -16,6 +16,7 @@ package database
 
 import (
 	"crypto/rand"
+	"fmt"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -98,6 +99,55 @@ func BenchmarkHotCacheParallelGet(b *testing.B) {
 			i++
 		}
 	})
+}
+
+// BenchmarkHotCacheCardinality verifies that routine hit and replacement
+// costs stay flat as configured cache cardinality grows. Population happens
+// before the timer so the benchmark reports only steady-state operations.
+func BenchmarkHotCacheCardinality(b *testing.B) {
+	for _, cardinality := range []int{1000, 10000, 50000} {
+		b.Run(fmt.Sprintf("Get/%d", cardinality), func(b *testing.B) {
+			cache, key := populatedHotCache(cardinality)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				cache.Get(key)
+			}
+		})
+
+		b.Run(fmt.Sprintf("Put/%d", cardinality), func(b *testing.B) {
+			cache, key := populatedHotCache(cardinality)
+			value := []byte("replacement-value")
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				cache.Put(key, value)
+			}
+		})
+
+		b.Run(fmt.Sprintf("Churn/%d", cardinality), func(b *testing.B) {
+			cache, _ := populatedHotCache(cardinality)
+			value := []byte("replacement-value")
+			key := make([]byte, 0, 32)
+			nextKey := cardinality
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				key = fmt.Appendf(key[:0], "key-%08d", nextKey)
+				cache.Put(key, value)
+				nextKey++
+			}
+		})
+	}
+}
+
+func populatedHotCache(cardinality int) (*HotCache, []byte) {
+	cache := NewHotCache(cardinality, 0)
+	value := []byte("cached-value")
+	for i := range cardinality {
+		cache.Put(fmt.Appendf(nil, "key-%08d", i), value)
+	}
+	return cache, []byte("key-00000000")
 }
 
 // BenchmarkBlockLRUCacheGet measures block LRU cache hit performance

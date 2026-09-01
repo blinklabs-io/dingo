@@ -55,13 +55,14 @@ func (a *leiosStakeDistributionAdapter) GetStakeDistribution(
 // resolving registered Leios keys for exactly the pools the caller names
 // (the same set VoteManager already fetched a stake distribution for). It
 // returns raw (unverified) keys -- VoteManager itself checks proof of
-// possession before trusting one. This is a current-state lookup (see
-// leios.LeiosKeyProvider's doc comment), not frozen to a snapshot epoch.
+// possession before trusting one. Keys come from the same historical Mark
+// snapshot as the committee stake.
 type leiosKeyProviderAdapter struct {
 	ledgerState *ledger.LedgerState
 }
 
 func (a *leiosKeyProviderAdapter) GetLeiosKeys(
+	snapshotEpoch uint64,
 	poolKeyHashesHex []string,
 ) (_ map[string]*lcommon.LeiosKey, err error) {
 	if a.ledgerState == nil {
@@ -97,7 +98,10 @@ func (a *leiosKeyProviderAdapter) GetLeiosKeys(
 			)
 		}
 	}()
-	return a.ledgerState.NewView(txn).GetLeiosKeys(poolKeyHashes)
+	return a.ledgerState.NewView(txn).GetLeiosKeys(
+		snapshotEpoch,
+		poolKeyHashes,
+	)
 }
 
 // leiosCommitteeParamsAdapter adapts ledger.LedgerState to
@@ -186,13 +190,9 @@ func leiosCommitteeParamsFromPParams(
 }
 
 // initLeiosVoteManager builds and starts the Leios vote manager and wires
-// it into the ouroboros component's protocol handlers. Invalid voter
-// registry entries are fatal at startup.
+// it into the ouroboros component's protocol handlers. The ledger key provider
+// is authoritative; production composition does not install a static registry.
 func (n *Node) initLeiosVoteManager(ctx context.Context) error {
-	registry, err := leios.NewVoterRegistry(n.config.leiosVoterPublicKeys)
-	if err != nil {
-		return fmt.Errorf("invalid leios voter public keys: %w", err)
-	}
 	stakeAdapter := &leiosStakeDistributionAdapter{
 		inner: stakeDistributionAdapter{
 			ledgerState: n.ledgerState,
@@ -220,7 +220,6 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// timing the pipeline manager uses, so the two components admit
 		// votes over the same window and cannot drift.
 		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
-		Registry:        registry,
 		PromRegistry:    n.config.promRegistry,
 	})
 	if err != nil {
@@ -250,6 +249,24 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 				return
 			}
 			n.ouroboros().EnqueueLeiosPrototypeVote(data.Vote)
+		},
+	)
+	// Received votes are re-diffused the same way locally emitted ones are.
+	// Without this, a relay stores a peer's vote for its own tally but never
+	// forwards it, so a block producer behind that relay never observes
+	// quorum. Tracked and unsubscribed alongside leiosVoteEmittedSubId for
+	// the same live-lifecycle-reinit reason.
+	n.leiosVoteReceivedSubId = n.eventBus.SubscribeFunc(
+		leios.VoteReceivedEventType,
+		func(evt event.Event) {
+			data, ok := evt.Data.(leios.VoteReceivedEvent)
+			if !ok {
+				return
+			}
+			n.ouroboros().EnqueueLeiosPrototypeVoteFromPeer(
+				data.Vote,
+				data.OriginConnKey,
+			)
 		},
 	)
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
@@ -330,13 +347,8 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
 	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-		// ValidateVotingKey's own error already names which sources it
-		// checked (the on-chain registration and leiosVoterPublicKeys) and
-		// whether the problem was "not found" or "found but mismatched," so
-		// no remedy is added here: the on-chain key takes precedence over
-		// leiosVoterPublicKeys, so directing every failure at the static
-		// registry would be wrong advice whenever the real problem is a key
-		// that no longer matches the pool's on-chain registration.
+		// ValidateVotingKey reports whether the PoP-verified on-chain key is
+		// missing or mismatched. Production has no static-key fallback.
 		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
 	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {

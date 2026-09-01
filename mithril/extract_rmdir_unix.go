@@ -37,8 +37,8 @@ import (
 // handle, which is exactly that. name is a single path component, so it cannot
 // traverse out of root even before the handle constrains it.
 //
-// fullPath is unused here; the Windows implementation needs it because it has
-// no handle-relative removal to address the entry through.
+// fullPath is unused here; the Windows implementation keeps it only to name
+// the operation in its returned error, not to address the entry.
 func removeEmptyExtractDir(root *os.Root, name, _ string) error {
 	dir, err := root.Open(".")
 	if err != nil {

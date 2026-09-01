@@ -19,12 +19,12 @@ import "context"
 // OrderedQueueSize is the per-event-type buffer behind PublishOrdered. It is
 // larger than AsyncQueueSize because an ordered lane is drained by exactly one
 // worker rather than by the shared pool, so it has to absorb the same bursts
-// with less drain throughput. The ledger publishes ledger.tx from inside its
-// block-apply database transaction, and a publisher that parks holds that
-// transaction open, so the buffer is sized to swallow a bulk-sync batch's
-// transactions rather than to bound memory tightly. It is still bounded:
-// past this point the publisher waits, exactly as it already did on a full
-// shared async queue.
+// with less drain throughput. The ledger publishes ledger.tx from an
+// after-commit callback, and a publisher that parks delays the block-apply
+// pipeline even though the transaction is already durable, so the buffer is
+// sized to swallow a bulk-sync batch's transactions rather than to bound
+// memory tightly. It is still bounded: past this point the publisher waits,
+// exactly as it already did on a full shared async queue.
 const OrderedQueueSize = 10000
 
 // orderedLane is one event type's FIFO plus the single worker that drains it.
@@ -51,8 +51,11 @@ type orderedLane struct {
 // producer sequence -- a ledger rollback's transaction undo events followed by
 // the next block's transaction events -- is exactly the case this is for.
 //
-// Like PublishAsync it does not drop: a full lane makes the publisher wait for
-// capacity rather than discarding the event, and only shutdown releases that
+// Like PublishAsync it does not drop for a live subscriber: a full lane makes
+// the publisher wait for capacity rather than discarding the event. A stalled
+// ordinary subscriber is detached after the delivery timeout, which lets its
+// lane make progress for healthy subscribers; a lossless subscription instead
+// remains blocked until lifecycle cancellation. Shutdown also releases the
 // wait. Returns false when the EventBus is stopped or closed.
 //
 // Each event type gets its own lane, so a slow subscriber delays only its own
@@ -63,11 +66,12 @@ func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
 }
 
 // PublishOrderedContext is PublishOrdered that also abandons the publish when
-// ctx is done. Only shutdown otherwise releases a publisher waiting on a full
-// lane, so a caller on a shutdown-critical goroutine -- one something else
-// waits for before the EventBus itself stops, such as a LedgerState the node
-// closes while keeping the bus running for a live restore -- must pass a
-// context it cancels, or that wait is unbounded.
+// ctx is done. An ordinary stalled subscriber is detached after the delivery
+// timeout, while a lossless subscriber waits for lifecycle cancellation. A
+// caller on a shutdown-critical goroutine -- one something else waits for
+// before the EventBus itself stops, such as a LedgerState the node closes while
+// keeping the bus running for a live restore -- must pass a context it cancels
+// when it needs a shorter bound.
 //
 // Abandoning is not a drop in the delivery-guarantee sense: the event was
 // never accepted, and the false return says so.

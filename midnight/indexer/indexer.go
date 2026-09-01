@@ -21,6 +21,7 @@ package indexer
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -75,6 +76,24 @@ type Config struct {
 	// events, processing any blocks whose slot is >= the last checkpoint slot.
 	// Node.go provides this via database.ForEachBlockInRangeDB.
 	BlockIterator func(startSlot, endSlot uint64, fn func(models.Block) error) error
+	// LedgerTipSlot reports the slot of the last block the ledger has applied
+	// and committed, which is where backfill stops.
+	//
+	// The blob store can hold blocks well past that point: a Mithril bootstrap
+	// imports raw blocks up to the certified immutable tip while leaving the
+	// metadata ledger cursor at the (earlier) imported ledger state, and
+	// LedgerState.Start then replays that whole suffix, emitting a live
+	// BlockEvent for each block. Sweeping the suffix here as well would index
+	// every one of those blocks twice -- harmless for the rows themselves,
+	// which insert idempotently, but a duplicated scan of the post-snapshot
+	// range and a matching overcount on the event counters. Bounding the sweep
+	// leaves the suffix to the ordinary catch-up path instead.
+	//
+	// Node.go provides this via database.Database.GetTip; LedgerState.Tip() is
+	// not usable because the indexer starts before LedgerState.Start loads it.
+	// Nil means "scan every stored block", which is what an embedder wiring
+	// only BlockIterator gets.
+	LedgerTipSlot func() (uint64, error)
 	blockDecoder  func(models.Block) ([]lcommon.Transaction, error)
 	// FatalErrorFunc is called when the indexer encounters an error that
 	// cannot be recovered without risking a checkpoint gap. Node wiring
@@ -470,6 +489,10 @@ func (idx *Indexer) loadTrackedUTxOs() error {
 	if cp != nil {
 		idx.checkpointSlot = cp.LastSlot
 	}
+	// Publish the resume point immediately: an indexer that never runs a
+	// backfill (no BlockIterator) or that starts already caught up would
+	// otherwise report slot 0 until its first live block.
+	idx.metrics.setCheckpoint(idx.checkpointSlot)
 	return nil
 }
 
@@ -506,12 +529,77 @@ func (idx *Indexer) Start() error {
 	return nil
 }
 
-// backfill iterates all blocks stored in the database starting from the last
-// checkpoint slot and processes each one through the midnight indexer.
+// backfillEndSlot resolves the exclusive upper bound of the catch-up sweep.
+// It is one past the applied ledger tip, so the tip block itself is included
+// and every later stored block is left to ledger replay. A nil resolver keeps
+// the unbounded sweep; a failing one is fatal rather than silently falling
+// back to it, because an unbounded sweep is precisely the behaviour the bound
+// exists to prevent.
+func (idx *Indexer) backfillEndSlot() (uint64, error) {
+	if idx.config.LedgerTipSlot == nil {
+		return math.MaxUint64, nil
+	}
+	tipSlot, err := idx.config.LedgerTipSlot()
+	if err != nil {
+		return 0, fmt.Errorf(
+			"midnight indexer: backfill: resolving ledger tip: %w",
+			err,
+		)
+	}
+	if tipSlot == math.MaxUint64 {
+		return math.MaxUint64, nil
+	}
+	return tipSlot + 1, nil
+}
+
+// backfill iterates the blocks stored in the database from the last checkpoint
+// slot through the applied ledger tip and processes each one through the
+// midnight indexer.
 func (idx *Indexer) backfill() error {
+	endSlot, err := idx.backfillEndSlot()
+	if err != nil {
+		return err
+	}
+	// endSlot is exclusive, so the last slot this sweep can reach is one
+	// below it. Report that, not endSlot, so the logged target and the gauge
+	// are both ledger-tip slots and comparable to checkpointSlot.
+	bounded := endSlot != math.MaxUint64
+	if bounded {
+		idx.metrics.setBackfillTarget(endSlot - 1)
+	}
+	// A checkpoint at or past the exclusive end means the last processed
+	// block already is the ledger tip: there is no gap to close.
+	if idx.checkpointSlot >= endSlot {
+		if idx.config.Logger != nil {
+			idx.config.Logger.Info(
+				"midnight indexer: backfill: already at ledger tip",
+				"checkpoint_slot", idx.checkpointSlot,
+			)
+		}
+		return nil
+	}
+	if idx.config.Logger != nil {
+		if bounded {
+			idx.config.Logger.Info(
+				"midnight indexer: backfill: catching up to ledger tip",
+				"checkpoint_slot", idx.checkpointSlot,
+				"target_slot", endSlot-1,
+				"slots_behind", endSlot-1-idx.checkpointSlot,
+			)
+		} else {
+			// No resolver was configured, so there is no target to be behind
+			// of; say so rather than reporting a gap against MaxUint64.
+			idx.config.Logger.Info(
+				"midnight indexer: backfill: scanning all stored blocks",
+				"checkpoint_slot", idx.checkpointSlot,
+			)
+		}
+	}
+	idx.metrics.beginBackfill()
+	defer idx.metrics.endBackfill()
 	return idx.config.BlockIterator(
 		idx.checkpointSlot,
-		math.MaxUint64,
+		endSlot,
 		func(block models.Block) error {
 			var txs []lcommon.Transaction
 			if idx.config.blockDecoder != nil {
@@ -576,6 +664,7 @@ func (idx *Indexer) updateCheckpoint(slot uint64) error {
 		return err
 	}
 	idx.checkpointSlot = slot
+	idx.metrics.setCheckpoint(slot)
 	return nil
 }
 
@@ -1119,7 +1208,13 @@ func (idx *Indexer) processBlock(
 	// commit, or not at all. Without this, a paginated reader that saw one
 	// row for a key and advanced its cursor past it would permanently miss
 	// a sibling row for that same key committed moments later.
-	txn := idx.config.Metadata.Transaction()
+	// context.Background(): processBlock runs off an EventBus subscriber
+	// callback (handleBlockEvent) with no ctx of its own, and Indexer has
+	// no stored lifecycle context to derive one from -- the same
+	// propagation boundary documented on database.NewTxn, not a gap
+	// within the metadata store itself. Giving Indexer its own
+	// Start/Stop-scoped context is a separate change.
+	txn := idx.config.Metadata.Transaction(context.Background())
 	defer txn.Rollback() //nolint:errcheck
 
 	// processTx/processOutput (and the epoch-advance/pruning steps below)

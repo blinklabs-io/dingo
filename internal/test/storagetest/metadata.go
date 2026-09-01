@@ -48,7 +48,7 @@ func RunMetadataStoreConformance(
 	store := newStore(t)
 
 	t.Run("CommitTimestampRoundTrip", func(t *testing.T) {
-		txn := store.Transaction()
+		txn := store.Transaction(t.Context())
 		require.NoError(t, store.SetCommitTimestamp(555, txn))
 		require.NoError(t, txn.Commit())
 
@@ -143,7 +143,7 @@ func RunMetadataStoreConformance(
 	})
 
 	t.Run("TransactionCommitPersists", func(t *testing.T) {
-		txn := store.Transaction()
+		txn := store.Transaction(t.Context())
 		require.NoError(t, store.SetCommitTimestamp(777, txn))
 		require.NoError(t, txn.Commit())
 
@@ -156,7 +156,7 @@ func RunMetadataStoreConformance(
 		baseline, err := store.GetCommitTimestamp()
 		require.NoError(t, err)
 
-		txn := store.Transaction()
+		txn := store.Transaction(t.Context())
 		require.NoError(t, store.SetCommitTimestamp(baseline+1, txn))
 		require.NoError(t, txn.Rollback())
 
@@ -166,7 +166,7 @@ func RunMetadataStoreConformance(
 	})
 
 	t.Run("ReadTransactionSucceeds", func(t *testing.T) {
-		txn := store.ReadTransaction()
+		txn := store.ReadTransaction(t.Context())
 		require.NoError(t, txn.Rollback())
 	})
 
@@ -182,7 +182,7 @@ func RunMetadataStoreConformance(
 			// out ReadTransaction as the read connection pool a caller
 			// should use for exactly this kind of query, so the combination
 			// -- not just each half in isolation -- needs to actually work.
-			txn := store.ReadTransaction()
+			txn := store.ReadTransaction(t.Context())
 			defer func() { require.NoError(t, txn.Rollback()) }()
 
 			count, err := slotRangeStore.CountTransactionsInSlotRange(
@@ -224,7 +224,7 @@ func RunMetadataStoreConformance(
 		// GovernanceStore-only caller has no ReadTransaction of its own,
 		// so the combination it will actually use in production is a
 		// transaction handed in from outside.
-		txn := store.ReadTransaction()
+		txn := store.ReadTransaction(t.Context())
 		defer func() { require.NoError(t, txn.Rollback()) }()
 
 		proposals, err := governanceStore.GetActiveGovernanceProposals(
@@ -252,12 +252,103 @@ func RunMetadataStoreConformance(
 		require.Empty(t, dreps)
 	})
 
+	t.Run("GovernanceRatificationHistoryRestoresRepeatedCycles", func(t *testing.T) {
+		proposal := &models.GovernanceProposal{
+			TxHash:        []byte(conformanceGateName(t, "proposal")),
+			ActionIndex:   0,
+			ActionType:    6,
+			ProposedEpoch: 1,
+			ExpiresEpoch:  100,
+			AnchorURL:     "https://example.invalid/governance",
+			AnchorHash:    []byte("conformance-governance-anchor"),
+			ReturnAddress: []byte("conformance-return-address"),
+			AddedSlot:     500,
+		}
+		setRatification := func(epoch, slot uint64) {
+			proposal.RatifiedEpoch = &epoch
+			proposal.RatifiedSlot = &slot
+			write := store.Transaction(t.Context())
+			defer func() { require.NoError(t, write.Rollback()) }()
+			require.NoError(
+				t,
+				governanceStore.SetGovernanceProposal(proposal, write),
+			)
+			require.NoError(t, write.Commit())
+		}
+		clearRatification := func(slot uint64) {
+			write := store.Transaction(t.Context())
+			defer func() { require.NoError(t, write.Rollback()) }()
+			require.NoError(t, governanceStore.ClearGovernanceProposalRatification(
+				proposal.TxHash,
+				proposal.ActionIndex,
+				slot,
+				write,
+			))
+			require.NoError(t, write.Commit())
+			proposal.RatifiedEpoch = nil
+			proposal.RatifiedSlot = nil
+		}
+		rollback := func(slot uint64) {
+			write := store.Transaction(t.Context())
+			defer func() { require.NoError(t, write.Rollback()) }()
+			require.NoError(
+				t,
+				governanceStore.DeleteGovernanceProposalsAfterSlot(slot, write),
+			)
+			require.NoError(t, write.Commit())
+		}
+		readMarker := func() (*uint64, *uint64) {
+			read := store.ReadTransaction(t.Context())
+			defer func() { require.NoError(t, read.Rollback()) }()
+			got, err := governanceStore.GetGovernanceProposal(
+				proposal.TxHash,
+				proposal.ActionIndex,
+				read,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			return got.RatifiedEpoch, got.RatifiedSlot
+		}
+
+		setRatification(5, 550)
+		clearRatification(600)
+		setRatification(7, 700)
+		clearRatification(800)
+		epoch, slot := readMarker()
+		require.Nil(t, epoch)
+		require.Nil(t, slot)
+
+		rollback(700)
+		epoch, slot = readMarker()
+		require.NotNil(t, epoch)
+		require.NotNil(t, slot)
+		require.Equal(t, uint64(7), *epoch)
+		require.Equal(t, uint64(700), *slot)
+
+		rollback(600)
+		epoch, slot = readMarker()
+		require.Nil(t, epoch)
+		require.Nil(t, slot)
+
+		rollback(599)
+		epoch, slot = readMarker()
+		require.NotNil(t, epoch)
+		require.NotNil(t, slot)
+		require.Equal(t, uint64(5), *epoch)
+		require.Equal(t, uint64(550), *slot)
+
+		rollback(549)
+		epoch, slot = readMarker()
+		require.Nil(t, epoch)
+		require.Nil(t, slot)
+	})
+
 	t.Run("ConstitutionRoundTripThroughNarrowStore", func(t *testing.T) {
 		// A write as well as a read: a domain interface that can only be
 		// read from would still compile at every call site the split
 		// moved over, so the round trip is what proves the narrowing is
 		// usable rather than merely type-correct.
-		write := store.Transaction()
+		write := store.Transaction(t.Context())
 		// Registered before the write, not after it: require.NoError
 		// stops the subtest on failure, so a SetConstitution error would
 		// otherwise leave this transaction holding its connection for the
@@ -275,7 +366,7 @@ func RunMetadataStoreConformance(
 		))
 		require.NoError(t, write.Commit())
 
-		read := store.ReadTransaction()
+		read := store.ReadTransaction(t.Context())
 		defer func() { require.NoError(t, read.Rollback()) }()
 
 		got, err := governanceStore.GetConstitution(read)
@@ -294,7 +385,7 @@ func RunMetadataStoreConformance(
 		// evidence that each newly split interface is wired to a working
 		// backend on this dialect, which a compile-time assertion cannot
 		// show.
-		txn := store.ReadTransaction()
+		txn := store.ReadTransaction(t.Context())
 		defer func() { require.NoError(t, txn.Rollback()) }()
 
 		utxo, err := utxoStore.GetUtxo(
@@ -333,7 +424,7 @@ func RunMetadataStoreConformance(
 		const bound = 10 * time.Second
 		start := time.Now()
 
-		txn := store.Transaction()
+		txn := store.Transaction(t.Context())
 		require.NoError(t, store.SetCommitTimestamp(1, txn))
 		require.NoError(t, txn.Commit())
 		_, err := store.GetCommitTimestamp()

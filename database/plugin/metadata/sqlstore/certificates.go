@@ -52,10 +52,9 @@ func (s *Store) DeleteCertificatesAfterSlot(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			if _, err := db.ExecContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner
 WHERE pool_registration_id IN (
     SELECT id FROM pool_registration WHERE added_slot > ?
@@ -64,7 +63,7 @@ WHERE pool_registration_id IN (
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_relay
 WHERE pool_registration_id IN (
     SELECT id FROM pool_registration WHERE added_slot > ?
@@ -73,7 +72,7 @@ WHERE pool_registration_id IN (
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM move_instantaneous_rewards_reward
 WHERE mir_id IN (
     SELECT id FROM move_instantaneous_rewards WHERE added_slot > ?
@@ -84,7 +83,7 @@ WHERE mir_id IN (
 			}
 			for _, table := range rollbackCertificateTables {
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					"DELETE FROM "+table+" WHERE added_slot > ?",
 					slot,
 				); err != nil {
@@ -92,7 +91,7 @@ WHERE mir_id IN (
 				}
 			}
 			_, err := db.ExecContext(
-				context.Background(),
+				ctx,
 				"DELETE FROM certs WHERE slot > ?",
 				slot,
 			)
@@ -106,11 +105,11 @@ func (s *Store) GetMIRCertsInSlotRange(
 	endSlot uint64,
 	txn types.Txn,
 ) ([]models.MIREffect, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetMIRCertsInSlotRange: resolve db: %w", err)
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT id, pot, other_pot
 FROM move_instantaneous_rewards
 WHERE added_slot >= ? AND added_slot < ?
@@ -148,7 +147,7 @@ ORDER BY added_slot ASC, id ASC`,
 		return nil, err
 	}
 	for i := range effects {
-		rewardRows, err := db.QueryContext(context.Background(), `
+		rewardRows, err := db.QueryContext(ctx, `
 SELECT credential, credential_tag, amount
 FROM move_instantaneous_rewards_reward
 WHERE mir_id = ?
@@ -191,12 +190,12 @@ func (s *Store) GetGenesisDelegationForSlot(
 	blockSlot uint64,
 	txn types.Txn,
 ) (*models.GenesisDelegation, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	var ret models.GenesisDelegation
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 SELECT id, genesis_hash, genesis_delegate_hash, vrf_key_hash, added_slot,
        block_index, cert_index, certificate_id
 FROM genesis_delegation

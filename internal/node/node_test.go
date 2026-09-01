@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,31 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 			"expected a log mentioning the metrics listener, got: %q",
 			logged,
 		)
+	}
+}
+
+func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
+	cfg := &config.Config{
+		BindAddr:      "0.0.0.0",
+		DebugBindAddr: "127.0.0.1",
+		DebugPort:     6060,
+	}
+
+	srv := newPprofDebugServer(cfg)
+	if srv == nil {
+		t.Fatal("expected enabled pprof debug server")
+	}
+	if got, want := srv.Addr, "127.0.0.1:6060"; got != want {
+		t.Fatalf("pprof address = %q, want %q", got, want)
+	}
+
+	cfg.DebugBindAddr = "0.0.0.0"
+	srv = newPprofDebugServer(cfg)
+	if srv == nil {
+		t.Fatal("expected explicitly exposed pprof debug server")
+	}
+	if got, want := srv.Addr, "0.0.0.0:6060"; got != want {
+		t.Fatalf("explicit wildcard pprof address = %q, want %q", got, want)
 	}
 }
 
@@ -220,5 +246,126 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 			"expected api.auth.token to flow through, got %+v",
 			got.Auth,
 		)
+	}
+}
+
+// TestBuildDingoConfigWiresBarkOperatorFingerprints pins the production
+// composition boundary between loaded YAML/env/CLI configuration and the root
+// configuration that Run passes to dingo.New and, in turn, Bark.
+func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		strings.Repeat("ab", 32),
+		strings.Repeat("cd", 32),
+	}
+	cfg := &config.Config{
+		BarkOperatorCertificateFingerprints: want,
+	}
+
+	built := buildDingoConfig(
+		cfg,
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.BarkOperatorCertificateFingerprints(); !slices.Equal(
+		got,
+		want,
+	) {
+		t.Fatalf(
+			"expected Bark operator fingerprints to flow through, got %v",
+			got,
+		)
+	}
+}
+
+// TestBuildDingoConfigWiresMidnightServerPolicy pins the composition boundary
+// between YAML/env/CLI configuration and the root node configuration used by
+// both initial startup and live API reinitialization.
+func TestBuildDingoConfigWiresMidnightServerPolicy(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Midnight: config.MidnightConfig{
+			Enabled:                     true,
+			ServerEnabled:               true,
+			ReflectionEnabled:           true,
+			AllowInsecureRemote:         true,
+			Port:                        50052,
+			Host:                        "127.0.0.2",
+			CNightPolicyID:              "policy",
+			PermissionedCandidatePolicy: "permissioned",
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeAPI,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	got := built.Midnight()
+	if got != cfg.Midnight {
+		t.Fatalf("expected Midnight config to flow through, got %+v", got)
+	}
+}
+
+// TestRootPeerTargetComposition verifies Cardano fallback values and Dingo's
+// higher-precedence root-peer setting reach the top-level Dingo configuration.
+func TestRootPeerTargetComposition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		dingoTarget   int
+		cardanoTarget int
+		want          int
+	}{
+		{name: "cardano explicit", cardanoTarget: 12, want: 12},
+		{name: "default", want: 0},
+		{name: "unlimited", cardanoTarget: -1, want: -1},
+		{
+			name:          "dingo config takes precedence",
+			dingoTarget:   7,
+			cardanoTarget: 12,
+			want:          7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{TargetNumberOfRootPeers: tt.dingoTarget}
+			applyRootPeerTargetFallback(cfg, tt.cardanoTarget)
+
+			built := buildDingoConfig(
+				cfg,
+				slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+				nil,
+				nil,
+				false,
+				dingo.StorageModeCore,
+				30*time.Second,
+				chainsync.DefaultStallTimeout,
+				chainsync.HeaderSyncStrategyPrimary,
+			)
+
+			if got := built.TargetNumberOfRootPeers(); got != tt.want {
+				t.Fatalf("expected root-peer target %d, got %d", tt.want, got)
+			}
+		})
 	}
 }

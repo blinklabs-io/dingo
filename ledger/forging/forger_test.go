@@ -49,6 +49,7 @@ type forgerTestSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
 	upstreamTipSlot   uint64
+	upstreamActive    bool
 	slotsPerKESPeriod uint64
 }
 
@@ -70,6 +71,38 @@ func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
 
 func (c forgerTestSlotClock) UpstreamTipSlot() uint64 {
 	return c.upstreamTipSlot
+}
+
+func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
+	return c.upstreamTipSlot, c.upstreamActive || c.upstreamTipSlot > 0
+}
+
+func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			upstreamActive:    true,
+			slotsPerKESPeriod: 100,
+		},
+		ForgeSyncToleranceSlots: 99,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
 }
 
 type forgerTestBuilder struct {
@@ -100,6 +133,7 @@ func (b *forgerTestBuilder) BuildBlockWithLeios(
 
 type forgerTestBroadcaster struct {
 	err   error
+	panic bool
 	calls int
 }
 
@@ -108,7 +142,31 @@ func (b *forgerTestBroadcaster) AddBlock(
 	[]byte,
 ) error {
 	b.calls++
+	if b.panic {
+		panic("broadcaster panic")
+	}
 	return b.err
+}
+
+// forgerTestPanicOnceLeader panics on its first ShouldProduceBlock
+// call and reports leadership normally afterward, for exercising the
+// forge cycle that follows a recovered panic.
+type forgerTestPanicOnceLeader struct {
+	calls int
+}
+
+func (l *forgerTestPanicOnceLeader) ShouldProduceBlock(uint64) bool {
+	l.calls++
+	if l.calls == 1 {
+		panic("leader check panic")
+	}
+	return true
+}
+
+func (l *forgerTestPanicOnceLeader) NextLeaderSlot(
+	fromSlot uint64,
+) (uint64, bool) {
+	return fromSlot, true
 }
 
 type forgerTestBlock struct {
@@ -198,6 +256,95 @@ func TestCheckAndForgeProductionRemovesConfirmedTransactions(t *testing.T) {
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Equal(t, []string{tx.Hash().String()}, remover.hashes)
+}
+
+func TestCheckAndForgeProductionUsesRetainedReconnectFrontier(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(114220801, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       114220801,
+			chainTipSlot:      114220600,
+			upstreamTipSlot:   114220800,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+	)
+}
+
+func TestCheckAndForgeProductionWaitsForEventPairedCorroboratedTarget(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(101, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       101,
+			chainTipSlot:      100,
+			upstreamTipSlot:   200,
+			upstreamActive:    true,
+			slotsPerKESPeriod: 100,
+		},
+		ForgeSyncToleranceSlots: 99,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
+}
+
+func TestCheckAndForgeProductionProceedsWithoutUpstreamFrontier(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			// This is the value exposed after a close-before-switch event.
+			upstreamTipSlot: 0,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
 }
 
 func (c *forgerTestLeiosChecker) MayProduceEndorserBlock(
@@ -379,6 +526,138 @@ func TestCheckAndForgeProductionRecoversBlockForgedObserverPanic(
 	assert.Equal(t, 1, builder.calls)
 	assert.Equal(t, 1, broadcaster.calls)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
+}
+
+func TestCheckAndForgeProductionRecoversLeaderCheckPanic(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	leader := &forgerTestPanicOnceLeader{}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	// A panic from the leader checker must not escape checkAndForgeProduction
+	// (which would otherwise crash the producer-loop goroutine); it is
+	// treated as "not leader" for the slot, same as a checker that simply
+	// returns false.
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 1, leader.calls)
+	assert.Equal(t, 0, builder.calls)
+	assert.Equal(t, 0, broadcaster.calls)
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeNotLeader))
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			forger.metrics.forgePanicRecovered.WithLabelValues("selection"),
+		),
+	)
+
+	// The following forge cycle proceeds normally: worker accounting and
+	// running state were not corrupted by the recovered panic.
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 2, leader.calls)
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
+}
+
+func TestCheckAndForgeProductionRecoversBlockValidatorPanic(t *testing.T) {
+	block := newForgerTestBlock(10, 2)
+	broadcaster := &forgerTestBroadcaster{}
+	validator := &forgerTestValidator{panic: true}
+
+	forger := newForgerWithValidator(t, block, nil, broadcaster, validator)
+
+	// A panic from the validator must not escape checkAndForgeProduction; it
+	// is treated as a validation failure so the block is dropped rather than
+	// adopted with unknown validity.
+	err := forger.checkAndForgeProduction(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "self-validation failed")
+	assert.Equal(t, 1, validator.calls)
+	assert.Equal(t, 0, broadcaster.calls)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeValidationFailed),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			forger.metrics.forgePanicRecovered.WithLabelValues("validation"),
+		),
+	)
+
+	// The following forge cycle proceeds normally.
+	validator.panic = false
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 2, validator.calls)
+	assert.Equal(t, 1, broadcaster.calls)
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
+}
+
+func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{panic: true}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	// A panic from the broadcaster must not escape checkAndForgeProduction;
+	// it is treated as a publish failure, matching the existing error path
+	// for a broadcaster that returns an error.
+	err = forger.checkAndForgeProduction(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to add block")
+	assert.Equal(t, 1, broadcaster.calls)
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
+	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			forger.metrics.forgePanicRecovered.WithLabelValues("publication"),
+		),
+	)
+
+	// The following forge cycle proceeds normally.
+	broadcaster.panic = false
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 2, broadcaster.calls)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }
 

@@ -16,10 +16,14 @@ package models
 
 import (
 	"bytes"
+	"math"
+	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,12 +90,59 @@ func TestUtxoLedgerToModelPaymentScript(t *testing.T) {
 				},
 			}
 
-			model := UtxoLedgerToModel(utxo, 42)
+			model, err := UtxoLedgerToModel(utxo, 42)
+			require.NoError(t, err)
 			assert.Equal(t, tc.wantScript, model.PaymentScript)
 			// Payment hash is recorded regardless of credential type.
 			assert.Equal(t, payHash, model.PaymentKey)
 		})
 	}
+}
+
+// TestUtxoLedgerToModelPropagatesAssetOverflowError exercises the asset
+// overflow guard end-to-end through a real ledger.TransactionOutput (a Mary
+// output, the era multi-asset was introduced in) rather than only unit
+// testing ConvertMultiAssetToModels/checkedUint64FromBigInt directly: it
+// confirms UtxoLedgerToModel itself surfaces the error and returns a
+// zero-value Utxo instead of a model with a wrapped asset amount.
+func TestUtxoLedgerToModelPropagatesAssetOverflowError(t *testing.T) {
+	payHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkMainnet,
+		payHash,
+		nil,
+	)
+	require.NoError(t, err)
+
+	var policyId lcommon.Blake2b224
+	policyId[0] = 0xdd
+	overflowAmount := new(big.Int).SetUint64(math.MaxUint64)
+	overflowAmount.Add(overflowAmount, big.NewInt(1))
+	multiAsset := lcommon.NewMultiAsset[lcommon.MultiAssetTypeOutput](
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeOutput{
+			policyId: {
+				cbor.NewByteString([]byte("asset")): overflowAmount,
+			},
+		},
+	)
+
+	utxo := ledger.Utxo{
+		Id: shelley.NewShelleyTransactionInput(
+			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+			0,
+		),
+		Output: &mary.MaryTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount: mary.MaryTransactionOutputValue{
+				Amount: 1_000_000,
+				Assets: &multiAsset,
+			},
+		},
+	}
+
+	_, err = UtxoLedgerToModel(utxo, 42)
+	assert.Error(t, err)
 }
 
 func TestMatchesUtxoAddressPatternsRejectsEmptyPattern(t *testing.T) {

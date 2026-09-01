@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -307,6 +309,30 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 	assert.Equal(t, connA, *active)
 }
 
+func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(t *testing.T) {
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connId := newNodeTestConnId(3001)
+	state.SetClientConnId(connId)
+	n := &Node{
+		chainsyncState: state,
+		config:         Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+
+	active := config.GetActiveConnectionFunc()
+	require.NotNil(t, active)
+	assert.Equal(t, connId, *active)
+
+	n.liveLifecycleMu.Lock()
+	active = config.GetActiveConnectionFunc()
+	n.liveLifecycleMu.Unlock()
+	assert.Nil(t, active)
+}
+
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	connId := newNodeTestConnId(3003)
 	n := &Node{}
@@ -353,6 +379,81 @@ func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
 	require.ErrorIs(t, firstErr, wantErr)
 	require.ErrorIs(t, secondErr, wantErr)
 	require.Equal(t, firstErr, secondErr)
+}
+
+// TestStartupFailureCleanupCancelsBeforeAllowingShutdown verifies the
+// signal-during-startup lifecycle boundary. Run owns startupLifecycleMu while
+// it unwinds its LIFO stack; shutdown must wait for that rollback rather than
+// closing the same partially initialized resource concurrently.
+func TestStartupFailureCleanupCancelsBeforeAllowingShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rollbackStarted := make(chan struct{})
+	releaseRollback := make(chan struct{})
+	var releaseRollbackOnce sync.Once
+	release := func() { releaseRollbackOnce.Do(func() { close(releaseRollback) }) }
+	defer release()
+	rollbackDone := make(chan struct{})
+	shutdownFuncStarted := make(chan struct{})
+	shutdownDone := make(chan error, 1)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ctx:    ctx,
+		cancel: cancel,
+		shutdownFuncs: []func(context.Context) error{
+			func(context.Context) error {
+				close(shutdownFuncStarted)
+				return nil
+			},
+		},
+	}
+
+	// Match Run's startup section: cleanupFailedStartup owns the gate until
+	// every started component's rollback completes.
+	n.startupLifecycleMu.Lock()
+	go func() {
+		defer close(rollbackDone)
+		n.cleanupFailedStartup([]func(){func() {
+			close(rollbackStarted)
+			<-releaseRollback
+		}})
+	}()
+	testutil.RequireReceive(
+		t,
+		rollbackStarted,
+		time.Second,
+		"startup rollback to begin",
+	)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+
+	go func() {
+		shutdownDone <- n.shutdown()
+	}()
+	// If shutdown did not take the same gate, its phase-four callback would
+	// run while the startup rollback is intentionally blocked above.
+	testutil.RequireNoReceive(
+		t,
+		shutdownFuncStarted,
+		50*time.Millisecond,
+		"normal shutdown while startup rollback owns the lifecycle gate",
+	)
+
+	release()
+	testutil.RequireReceive(
+		t,
+		rollbackDone,
+		time.Second,
+		"startup rollback completion",
+	)
+	testutil.RequireReceive(
+		t,
+		shutdownFuncStarted,
+		time.Second,
+		"normal shutdown after startup rollback completion",
+	)
+	require.NoError(t, <-shutdownDone)
 }
 
 func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -39,6 +40,7 @@ func TestPostgresSQLStoreIntegration(t *testing.T) {
 		"pgx",
 		postgresDSNWithSearchPath(t, dsn, schema),
 		"postgres",
+		schema,
 	)
 }
 
@@ -62,6 +64,7 @@ func TestMySQLSQLStoreIntegration(t *testing.T) {
 		"mysql",
 		mysqlDSNWithDatabase(t, dsn, database),
 		"mysql",
+		database,
 	)
 }
 
@@ -83,7 +86,10 @@ func mysqlDSNWithDatabase(t *testing.T, dsn, database string) string {
 	return parsed.FormatDSN()
 }
 
-func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
+func testSQLStoreIntegration(
+	t *testing.T,
+	driver, dsn, dialectName, lockNamespace string,
+) {
 	t.Helper()
 	db, err := OpenDB(driver, dsn, dialectName)
 	require.NoError(t, err)
@@ -95,19 +101,11 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	case "postgres":
 		dialect = PostgresDialect()
 		registry, err = migrations.PostgresRegistry()
-		locker = migrations.NewAdvisoryLocker(
-			"postgres",
-			0x64696e676f6d6574,
-			time.Second,
-		)
+		locker = integrationMigrationLocker("postgres", lockNamespace)
 	case "mysql":
 		dialect = MySQLDialect()
 		registry, err = migrations.MySQLRegistry()
-		locker = migrations.NewAdvisoryLocker(
-			"mysql",
-			0x64696e676f6d6574,
-			time.Second,
-		)
+		locker = integrationMigrationLocker("mysql", lockNamespace)
 	}
 	require.NoError(t, err)
 	store, err := New(Config{
@@ -121,7 +119,7 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	require.NoError(t, store.Start(context.Background()))
 	require.True(t, store.Ready())
 
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(42, txn))
 	require.NoError(t, store.SetNetworkState(11, 22, 33, txn))
 	require.NoError(t, txn.Commit())
@@ -294,13 +292,75 @@ INSERT INTO redeemer (
 	).Scan(&redeemerCount))
 	require.Equal(t, 1, redeemerCount)
 
+	// Restoring a retained index is dialect DDL of its own, so simulate the
+	// state a binary whose manifest still deferred one leaves on disk.
+	// idx_utxo_staking_deleted_amount is the composite case: it is not a
+	// foreign-key child index, so every dialect can drop it, and it includes
+	// columns MySQL can only key with an explicit prefix length.
+	var retained deferred.Index
+	for _, index := range deferred.Retained {
+		if index.Name == "idx_utxo_staking_deleted_amount" {
+			retained = index
+		}
+	}
+	require.NotEmpty(
+		t,
+		retained.Name,
+		"deferred.Retained must still name the composite live-stake index",
+	)
+	catalog := newDialectQueryer(db, dialect.Name())
+	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
+	require.NoError(t, err)
+	exists, err := store.deferredIndexExists(t.Context(), catalog, retained)
+	require.NoError(t, err)
+	require.False(
+		t,
+		exists,
+		"the simulated pre-change cycle must leave %s absent",
+		retained.Name,
+	)
+
 	// The deferred-index lifecycle is also shared across dialects.  In
 	// particular, MySQL requires `DROP INDEX ... ON table` and a non-IF-NOT-
 	// EXISTS CREATE form, while sync_state has no synthetic id column.
 	require.NoError(t, store.DropDeferredIndexes())
+	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
+	require.NoError(t, err)
+	require.True(
+		t,
+		exists,
+		"%s must be restored on %s: an index the manifest no longer names "+
+			"has no other path back",
+		retained.Name,
+		dialect.Name(),
+	)
 	pending, err := store.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.True(t, pending)
+
+	// The critical rebuild is the last step before the node serves API
+	// writes, so it restores the retained set too. Drop it again to reach the
+	// state a cycle interrupted by an older binary leaves behind.
+	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
+	require.NoError(t, err)
+	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
+	require.NoError(t, err)
+	require.True(
+		t,
+		exists,
+		"%s must be restored by the critical rebuild on %s",
+		retained.Name,
+		dialect.Name(),
+	)
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(
+		t,
+		pending,
+		"the critical rebuild must leave the marker for the lazy remainder",
+	)
+
 	require.NoError(t, store.BuildDeferredIndexes())
 	pending, err = store.HasDeferredIndexesPending()
 	require.NoError(t, err)

@@ -87,7 +87,7 @@ jobs:
           unzip -q awscliv2.zip
           sudo ./aws/install --update
           aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
@@ -96,7 +96,12 @@ jobs:
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 20m ./...
+        # The ledger package legitimately approaches 20 minutes under the race
+        # detector on hosted runners. Keep a finite package-level hang guard
+        # while leaving enough headroom for the complete release suite.
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+      - name: govulncheck
+        run: make govulncheck
 
   create-draft-release:
     runs-on: ubuntu-latest
@@ -156,7 +161,15 @@ jobs:
   # Run the platform-specific suite only after Linux release validation and
   # draft creation have succeeded.
   go-test-other:
-    name: go-test (${{ matrix.platform }}) (${{ matrix.go-version }})
+    # Deliberately unnamed, so GitHub generates `go-test-other (<platform>,
+    # <go-version>)`. A custom `name:` carrying matrix references collided with
+    # the platform jobs in go-test.yml, which render on a tag's own main-branch
+    # push, and branch protection matches a check by name — two workflows
+    # claiming one context make a required check ambiguous. It also rendered
+    # literally as
+    # `go-test (${{ matrix.platform }}) (${{ matrix.go-version }})` on every
+    # non-tag push, because this job is skipped there and a skipped matrix job
+    # never expands its matrix.
     needs: [ci, create-draft-release]
     # The only job in this workflow without an explicit grant, so it inherited
     # repository or organization defaults. It builds and runs tests and needs
@@ -185,10 +198,11 @@ jobs:
     env:
       CGO_ENABLED: 0
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
+          cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
@@ -241,12 +255,13 @@ jobs:
     steps:
       - run: git config --global --add safe.directory "$PWD"
         shell: bash
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
+          cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
@@ -304,18 +319,18 @@ jobs:
       packages: write
     steps:
       - run: git config --global --add safe.directory "$PWD"
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           fetch-depth: 0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
       - name: Login to Docker Hub
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
           username: blinklabs
           password: ${{ secrets.DOCKER_PASSWORD }} # uses token
       - name: Login to GHCR
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -416,13 +431,15 @@ jobs:
       packages: write
     runs-on: ubuntu-latest
     steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
       - name: Login to Docker Hub
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
           username: blinklabs
           password: ${{ secrets.DOCKER_PASSWORD }} # uses token
       - name: Login to GHCR
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -450,30 +467,13 @@ jobs:
           set -euo pipefail
           while IFS= read -r image_tag; do
             [ -n "$image_tag" ] || continue
-            image_repository="${image_tag%:*}"
-            amd64_refs="$(
-              docker manifest inspect "${image_tag}-amd64" |
-                jq -er --arg repository "$image_repository" \
-                  '.manifests[] | select(.digest | type == "string" and length > 0) | "\($repository)@\(.digest)"'
-            )"
-            arm64_refs="$(
-              docker manifest inspect "${image_tag}-arm64" |
-                jq -er --arg repository "$image_repository" \
-                  '.manifests[] | select(.digest | type == "string" and length > 0) | "\($repository)@\(.digest)"'
-            )"
-            mapfile -t amd64_manifests <<< "$amd64_refs"
-            mapfile -t arm64_manifests <<< "$arm64_refs"
-            if (( ${#amd64_manifests[@]} == 0 || ${#arm64_manifests[@]} == 0 )); then
-              echo "both amd64 and arm64 manifests are required" >&2
-              exit 1
-            fi
-            docker manifest create "$image_tag" \
-              "${amd64_manifests[@]}" \
-              "${arm64_manifests[@]}"
-            docker manifest push "$image_tag"
+            docker buildx imagetools create \
+              --tag "$image_tag" \
+              "${image_tag}-amd64" \
+              "${image_tag}-arm64"
           done <<< "$IMAGE_TAGS"
       # Checkout repo so README.md is available for next step
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
       # Update Docker Hub from README
       - name: Docker Hub Description
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0 https://github.com/peter-evans/dockerhub-description/releases/tag/v5.0.0

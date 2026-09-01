@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -53,6 +54,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 )
 
@@ -283,6 +285,57 @@ func TestShouldSkipPhase2ValidationForBlockRequiresSecurityParam(t *testing.T) {
 		1000,
 		eras.ShelleyEraDesc.Id,
 	))
+}
+
+func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		validationEnabled bool
+		shouldValidate    bool
+		deepHistorical    bool
+		wantSkip          bool
+	}{
+		{
+			name:              "historical validation keeps phase two enabled",
+			validationEnabled: true,
+			shouldValidate:    true,
+			deepHistorical:    true,
+		},
+		{
+			name:           "trusted replay skips deep historical phase two",
+			shouldValidate: true,
+			deepHistorical: true,
+			wantSkip:       true,
+		},
+		{
+			name:              "unvalidated block does not skip phase two",
+			validationEnabled: true,
+			deepHistorical:    true,
+		},
+		{
+			name:           "disabled validation does not skip an unvalidated block",
+			shouldValidate: false,
+			deepHistorical: true,
+		},
+		{
+			name:              "non-historical block does not skip phase two",
+			validationEnabled: true,
+			shouldValidate:    true,
+			deepHistorical:    false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.wantSkip, shouldSkipConfiguredPhase2Validation(
+				test.validationEnabled,
+				test.shouldValidate,
+				test.deepHistorical,
+			))
+		})
+	}
 }
 
 func TestShouldSkipPhase2ValidationForBlockAtCurrentTipRefreshesChainTip(
@@ -1099,6 +1152,96 @@ func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
 		ls.isNearTipWithStabilityWindow(990, 10),
 		"explicit window must accept an equal upstream gap",
 	)
+}
+
+func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing.T) {
+	activeConnID := testChainsyncConnId(6000, 3091)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConnID
+			},
+			GetPeerSyncTargetFunc: func(
+				ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return ochainsync.Tip{
+					Point:       ocommon.NewPoint(1000, []byte("network-head")),
+					BlockNumber: 1000,
+				}, true
+			},
+			CardanoNodeConfig: newNonceReadyTestConfig(t),
+		},
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(5, nil)},
+	}
+	ls.syncUpstreamTipSlot.Store(5)
+	ls.publishActiveUpstream(activeConnID)
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      activeConnID,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(1000, nil)},
+		SyncTargetTrusted: true,
+	})
+
+	assert.Equal(t, uint64(5), ls.syncUpstreamTipSlot.Load(),
+		"the admitted frontier remains available for bookkeeping")
+	assert.Equal(t, uint64(1000), ls.UpstreamTipSlot(),
+		"sync consumers must use the corroborated remote target")
+	assert.InDelta(t, 0.005, ls.SyncProgress(), 0.000001)
+	assert.False(t, ls.isNearTip(5),
+		"a restarted node with only a few admitted headers remains in catch-up")
+}
+
+func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(t *testing.T) {
+	connA := testChainsyncConnId(6000, 3092)
+	connB := testChainsyncConnId(6000, 3093)
+	activeConn := connA
+	targets := map[string]uint64{
+		connIdKey(connA): 100,
+		connIdKey(connB): 200,
+	}
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId { return &activeConn },
+			GetPeerSyncTargetFunc: func(connId ouroboros.ConnectionId) (ochainsync.Tip, bool) {
+				return ochainsync.Tip{Point: ocommon.NewPoint(targets[connIdKey(connId)], nil)}, true
+			},
+		},
+	}
+
+	ls.publishActiveUpstream(connA)
+	assert.Zero(t, ls.UpstreamTipSlot(), "active selection alone must not trust a target")
+	// Model the independent queues: a rejected peer-tip observation R is
+	// delivered before ledger later admits header V. R must not be recovered
+	// from mutable selector state when V is published.
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId: connA,
+		SyncTarget:   ochainsync.Tip{Point: ocommon.NewPoint(999, nil)},
+	})
+	assert.Zero(t, ls.UpstreamTipSlot())
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      connA,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(100, nil)},
+		SyncTargetTrusted: true,
+	})
+	assert.Equal(t, uint64(100), ls.UpstreamTipSlot())
+
+	// A→B changes the authoritative active connection before the ledger has
+	// processed the switch. The A snapshot must not be visible as B's target.
+	activeConn = connB
+	target, active := ls.UpstreamSyncStatus()
+	assert.True(t, active)
+	assert.Zero(t, target)
+	ls.publishActiveUpstream(connB)
+	assert.Zero(t, ls.UpstreamTipSlot())
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId:      connB,
+		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(200, nil)},
+		SyncTargetTrusted: true,
+	})
+	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
+
+	// A deferred or rejected header never reaches the trusted publication path.
+	ls.recordAdmittedHeaderFrontier(ChainsyncEvent{ConnectionId: connB}, false)
+	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
 }
 
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
@@ -2152,6 +2295,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
+			false,
 		)
 		require.NoError(t, err)
 
@@ -2271,6 +2415,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
+				false,
 			)
 			return err
 		})
@@ -2400,6 +2545,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
+				false,
 			)
 			return err
 		})
@@ -3379,6 +3525,158 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 			assert.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {"k": 432, "protocolMagic": 2},
+		"blockVersionData": {"slotDuration": "20000"}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	newLedger := func(
+		t *testing.T,
+		explicitShelleyHardFork bool,
+		experimentalHardForks bool,
+		shelleyHardForkEpoch uint64,
+	) *LedgerState {
+		t.Helper()
+		cfg := &cardano.CardanoNodeConfig{
+			ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+		}
+		require.NoError(t, cfg.LoadByronGenesisFromReader(
+			strings.NewReader(byronGenesisJSON),
+		))
+		require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+			strings.NewReader(shelleyGenesisJSON),
+		))
+		if explicitShelleyHardFork {
+			// ExperimentalHardForksEnabled is set independently: preview ships
+			// TestShelleyHardForkAtEpoch with the flag false, and
+			// CardanoNodeConfig.HardForkEpoch reports nothing in that case.
+			if experimentalHardForks {
+				cfg.ExperimentalHardForksEnabled = new(true)
+			}
+			cfg.TestShelleyHardForkAtEpoch = new(shelleyHardForkEpoch)
+		}
+
+		db := newTestDB(t)
+		cm, err := chain.NewManager(db, nil)
+		require.NoError(t, err)
+		ls, err := NewLedgerState(LedgerStateConfig{
+			Database:          db,
+			ChainManager:      cm,
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		})
+		require.NoError(t, err)
+		require.NoError(t, ls.PrepareEpochCacheForStartup())
+		return ls
+	}
+
+	t.Run("real network retains Byron until its on-chain boundary", func(t *testing.T) {
+		ls := newLedger(t, false, false, 0)
+		require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+		assert.Nil(t, ls.currentPParams)
+		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+		assert.Equal(t, uint(4320), ls.currentEpoch.LengthInSlots)
+		assert.Equal(t, uint(20000), ls.currentEpoch.SlotLength)
+	})
+
+	t.Run("explicit test hard fork still starts in Shelley", func(t *testing.T) {
+		ls := newLedger(t, true, true, 0)
+		require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
+		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+		assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
+		assert.Equal(t, uint(1000), ls.currentEpoch.SlotLength)
+	})
+
+	// preview's shipped shape: TestShelleyHardForkAtEpoch: 0 with
+	// ExperimentalHardForksEnabled: False. Reading the declaration through
+	// CardanoNodeConfig.HardForkEpoch hides it, because that accessor returns
+	// (0, false) unless the experimental flag is set -- which forced a node
+	// back to Byron on a network with no Byron prefix and left currentPParams
+	// nil for every GetCurrentPParams consumer (api/utxorpc ReadParams
+	// returned "current protocol parameters empty").
+	t.Run(
+		"explicit hard fork without experimental flag starts in Shelley",
+		func(t *testing.T) {
+			ls := newLedger(t, true, false, 0)
+			require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
+			assert.NotNil(
+				t,
+				ls.currentPParams,
+				"a post-Byron start must expose protocol parameters",
+			)
+			assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+			assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
+		},
+	)
+
+	// A nonzero declaration means Shelley arrives some epochs in, so epochs
+	// 0..N-1 are Byron: that is a Byron prefix, not the absence of one. Only
+	// an explicit epoch 0 marks a network that never had one.
+	t.Run(
+		"nonzero hard-fork epoch keeps the Byron start",
+		func(t *testing.T) {
+			ls := newLedger(t, true, false, 5)
+			require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+			assert.Nil(t, ls.currentPParams)
+		},
+	)
+}
+
+func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
+	cardanoConfig, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"mainnet/config.json",
+		"mainnet",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, cardanoConfig.ByronGenesis())
+	require.NotNil(t, cardanoConfig.ShelleyGenesis())
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cardanoConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, ls.PrepareEpochCacheForStartup())
+
+	require.Len(t, ls.epochCache, 1)
+	assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
+	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+	assert.Equal(t, uint(20000), ls.currentEpoch.SlotLength)
+	assert.Equal(t, uint(21600), ls.currentEpoch.LengthInSlots)
 }
 
 // newTestEpoch is a convenience builder for models.Epoch.
@@ -4648,4 +4946,144 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 	})
 
 	require.NoError(t, ls.Close())
+}
+
+// TestReconstructTransitionInfoIgnoresStaleShelleyPParamsUnderByron pins the
+// Byron guard as a backstop rather than a redundancy.
+//
+// It is not covered by the currentPParams == nil check that follows it. The
+// reachable shape is a rollback into Byron: rollbackChainAndState sets
+// currentEra to Byron and then calls this function, and before the ppComputed
+// change it skipped the currentPParams assignment whenever the recomputed
+// value was nil -- which is exactly what Byron computes. That left a Shelley
+// value in place under a Byron era, and without this guard
+// reconstructTransitionInfo would read the Shelley protocol version out of it
+// and fabricate a transition at epoch zero.
+//
+// The rollback path itself is not driven here; that needs a chain fixture
+// spanning the Byron-Shelley boundary. This asserts the guard holds for the
+// state that path can produce.
+func TestReconstructTransitionInfoIgnoresStaleShelleyPParamsUnderByron(
+	t *testing.T,
+) {
+	shelleyPParams := &shelley.ShelleyProtocolParameters{
+		ProtocolMajor: 2,
+		ProtocolMinor: 0,
+	}
+
+	ls := &LedgerState{
+		currentEra: eras.ByronEraDesc,
+		// The stale value a rollback into Byron used to leave behind.
+		currentPParams: shelleyPParams,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+	}
+
+	ls.reconstructTransitionInfo()
+
+	require.Equal(
+		t,
+		hardfork.NewTransitionUnknown(),
+		ls.transitionInfo,
+		"a Shelley pparams value under a Byron era must not be read as a transition",
+	)
+}
+
+// TestWarnOnPreByronPrefixEpochCache pins the detection of a database written
+// before the Byron prefix was preserved at startup. The startup fix only
+// applies to an empty database, so an operator who already began a preprod or
+// mainnet from-genesis sync keeps epoch 0 tagged Shelley at slot 0 and sees the
+// same overlay rejection as before -- with nothing to say the binary already
+// carries the fix. The warning is the only signal, so it needs to fire exactly
+// on that shape.
+func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {"k": 432, "protocolMagic": 2},
+		"blockVersionData": {"slotDuration": "20000"}
+	}`
+
+	newLedger := func(
+		t *testing.T, withByron, shelleyAtGenesis bool,
+	) (*LedgerState, *bytes.Buffer) {
+		t.Helper()
+		cfg := &cardano.CardanoNodeConfig{}
+		if withByron {
+			require.NoError(t, cfg.LoadByronGenesisFromReader(
+				strings.NewReader(byronGenesisJSON),
+			))
+		}
+		if shelleyAtGenesis {
+			cfg.TestShelleyHardForkAtEpoch = new(uint64)
+		}
+		var logs bytes.Buffer
+		return &LedgerState{
+			config: LedgerStateConfig{
+				CardanoNodeConfig: cfg,
+				Logger: slog.New(slog.NewTextHandler(
+					&logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+				)),
+			},
+		}, &logs
+	}
+
+	const warning = "database predates Byron prefix preservation"
+
+	t.Run("stale shape warns", func(t *testing.T) {
+		ls, logs := newLedger(t, true, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+			{EpochId: 1, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.Contains(t, logs.String(), warning)
+	})
+
+	t.Run("stale shape warns once per process", func(t *testing.T) {
+		// loadEpochs runs twice on startup, from PrepareEpochCacheForStartup
+		// and again from Start, and both take the populated-cache branch on a
+		// database that already has epochs. An operator in exactly the
+		// situation this diagnoses should not see it twice.
+		ls, logs := newLedger(t, true, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.Equal(t, 1, strings.Count(logs.String(), warning))
+	})
+
+	t.Run("byron epoch zero is silent", func(t *testing.T) {
+		ls, logs := newLedger(t, true, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ByronEraDesc.Id},
+			{EpochId: 4, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
+
+	t.Run("shelley declared at genesis is silent", func(t *testing.T) {
+		// preview's shape: no Byron prefix to preserve, so epoch 0 being
+		// Shelley is correct rather than stale.
+		ls, logs := newLedger(t, true, true)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
+
+	t.Run("no byron genesis is silent", func(t *testing.T) {
+		ls, logs := newLedger(t, false, false)
+		ls.epochCache = []models.Epoch{
+			{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+		}
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
+
+	t.Run("empty cache is silent", func(t *testing.T) {
+		ls, logs := newLedger(t, true, false)
+		ls.warnOnPreByronPrefixEpochCache()
+		assert.NotContains(t, logs.String(), warning)
+	})
 }

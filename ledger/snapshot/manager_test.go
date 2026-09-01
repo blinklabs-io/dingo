@@ -2185,3 +2185,137 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		require.Equal(t, authoritativeEvt.EpochNonce, after.EpochNonce)
 	})
 }
+
+// TestCaptureGenesisSnapshot_FreshSyncNoGenesisPools covers a network whose
+// Shelley genesis registers no pools, so the genesis stake distribution is
+// legitimately empty and the first pools register on chain during epoch 0.
+// Preview is such a network.
+//
+// The epoch-0 mark snapshot must still be persisted, empty. cardano-ledger has
+// an empty Go stake distribution at genesis, and the reward rounds at the
+// boundaries into epochs 1, 2 and 3 all resolve against snapshot epoch 0.
+// Without the row those rounds skip for a missing reward snapshot and the ADA
+// pots never move, which left preview's treasury at 0 and its reserves at the
+// genesis value through epoch 3 (dingo #3381).
+//
+// This is distinct from the post-Mithril case, where an empty distribution at
+// slot 0 means the pool data predates the import rather than that no stake
+// existed; that case is keyed on a nonzero latest epoch and still skips.
+func TestCaptureGenesisSnapshot_FreshSyncNoGenesisPools(t *testing.T) {
+	db := setupTestDB(t)
+
+	// A true fresh sync: epoch 0 is the only epoch, and no pools exist.
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 86400},
+	})
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(0, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		rewardSnapshot,
+		"a fresh sync with no genesis pools must still seed epoch 0's mark "+
+			"reward snapshot so the bootstrap reward rounds can run",
+	)
+	require.Equal(t, uint64(0), rewardSnapshot.Epoch)
+	require.Equal(t, uint64(0), rewardSnapshot.TotalPoolCount)
+	require.Equal(t, uint64(0), rewardSnapshot.TotalDelegators)
+	require.Equal(t, uint64(0), uint64(rewardSnapshot.TotalActiveStake))
+
+	poolInputs, err := db.Metadata().GetRewardPoolInputs(0, nil)
+	require.NoError(t, err)
+	require.Empty(t, poolInputs)
+
+	stakeInputs, err := db.Metadata().GetRewardStakeInputs(0, nil)
+	require.NoError(t, err)
+	require.Empty(t, stakeInputs)
+}
+
+// TestCaptureGenesisSnapshot_PostMithrilNoPoolsSkipsGenesisRow is the negative
+// case: an empty distribution at slot 0 with a later current epoch means the
+// pool data predates a Mithril import, not that the network had no stake.
+// Seeding an empty epoch-0 reward snapshot there would present a fabricated
+// basis to the reward calculation, so the row must stay absent.
+func TestCaptureGenesisSnapshot_PostMithrilNoPoolsSkipsGenesisRow(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 10, StartSlot: 4320000, LengthInSlots: 432000},
+	})
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(0, "mark", nil)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		rewardSnapshot,
+		"an empty slot-0 distribution behind a later epoch is a Mithril "+
+			"import, not a stakeless genesis",
+	)
+}
+
+// TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync covers the
+// error path of the epoch lookup that classifies an empty slot-0
+// distribution.
+//
+// The fresh-sync branch is keyed on the latest epoch being 0, and a failed
+// GetEpochs would otherwise leave that variable at its zero value — making a
+// post-Mithril database indistinguishable from a stakeless genesis and
+// persisting a fabricated empty epoch-0 mark snapshot that later reward
+// calculation could consume as its basis.
+//
+// The lookup only runs when the distribution is empty, so this cannot make a
+// node with genesis pools fail. Every caller routes the returned error
+// through HandleGenesisSnapshotError, which is fatal only for a block
+// producer and a warning otherwise.
+func TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 86400},
+	})
+
+	// Make GetEpochs fail while leaving the stake-distribution queries
+	// working: slot_length is scanned by GetEpochs and by nothing the
+	// genesis distribution reads, so a non-numeric value there fails that
+	// lookup alone. Dropping the epoch table would instead fail
+	// calculateSnapshotDistribution first and never reach the branch under
+	// test.
+	raw := snapshotSQLDB(t, db)
+	_, err := raw.Exec(`UPDATE epoch SET slot_length = 'not-a-number'`)
+	require.NoError(t, err)
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	err = mgr.CaptureGenesisSnapshot(context.Background())
+	require.Error(
+		t,
+		err,
+		"a failed epoch lookup must be reported, not silently treated as a "+
+			"fresh sync",
+	)
+
+	rewardSnapshot, sErr := db.Metadata().GetRewardSnapshot(0, "mark", nil)
+	require.NoError(t, sErr)
+	require.Nil(
+		t,
+		rewardSnapshot,
+		"no epoch-0 mark snapshot may be persisted when the database's "+
+			"current epoch could not be determined",
+	)
+}

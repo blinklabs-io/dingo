@@ -48,13 +48,23 @@ var errExactAddressCandidateScanLimit = errors.New(
 	"exact address candidate scan limit reached",
 )
 
-// deleteUtxoBlobs performs best-effort deletion of blob data for the given
-// [models.Utxo] entries. Metadata remains the authoritative source of truth;
-// blob deletions are supplementary. The caller [*Txn] is ignored — this
-// function always creates and commits its own blob-only batches via the
-// [Database], so callers should not expect blob deletes to participate in any
-// outer transaction.
-func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
+// deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
+// Metadata remains the authoritative source of truth; blob deletions are
+// supplementary. The caller [*Txn] is ignored — this function always creates
+// and commits its own blob-only batches via the [Database], so callers should
+// not expect blob deletes to participate in any outer transaction.
+//
+// Failures do not stop the remaining deletes, but they are counted and
+// reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
+// metadata that names these objects, after which nothing can reach them
+// again.
+//
+// txn is used only to time that count. An object is not stranded until the
+// metadata naming it is durably gone, so the counter is incremented from an
+// after-commit callback; if the enclosing transaction rolls back, the row
+// still names the blob and nothing was orphaned. A nil txn has no commit to
+// wait for and counts immediately.
+func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 	const batchSize = 500
 	blob := d.Blob()
 	if blob == nil {
@@ -93,11 +103,18 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
 		}
 	}
 	if deleteErrors > 0 {
+		recordBlobOrphansOnCommit(txn, deleteErrors)
 		d.logger.Warn(
 			"UTxO blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
+			len(utxos),
+		)
+		return fmt.Errorf(
+			"%w: %d of %d UTxO blobs",
+			ErrBlobDeleteIncomplete,
+			deleteErrors,
 			len(utxos),
 		)
 	}
@@ -701,9 +718,143 @@ func (d *Database) UtxosByAddressWithOrdering(
 			Slot:       last.TxSlot,
 			BlockIndex: last.TxBlockIndex,
 			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
 		}
 	}
 	return ret, nil
+}
+
+// MatchingUtxoRefsByAddressWithOrdering returns the (TxId, OutputIdx)
+// references of every live UTxO matching q's address patterns, in ascending
+// producing-transaction-position order, without loading assets or
+// retaining full rows. Unlike CountUtxosByAddressWithOrdering, this works
+// for exact-address patterns too: it scans coarse SQL candidates in keyset
+// batches (see UtxosByAddressWithOrdering's identical loop) and CBOR-decodes
+// each to confirm the match, which is the same per-candidate cost the
+// coarse predicate alone cannot avoid, but skips the asset loading and full
+// UtxoWithOrdering retention a straight fetch would pay for every candidate
+// instead of only the page a caller goes on to request via UtxosByRefs.
+//
+// The result both is the accurate total (its length) and can be sliced for
+// a page's worth of references to pass to UtxosByRefs, letting a caller
+// avoid materializing more than one page of an address's UTxO history.
+func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
+	q *models.UtxoWithOrderingQuery,
+	txn *Txn,
+) ([]models.UtxoId, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	if q == nil {
+		return nil, models.ErrNilUtxoWithOrderingQuery
+	}
+	if q.MatchAllAddresses ||
+		!models.RequiresExactAddressFilter(q.AddressPatterns) {
+		scanQuery := *q
+		scanQuery.SkipAssets = true
+		utxos, err := d.utxoStore().GetUtxosByAddressWithOrdering(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		refs := make([]models.UtxoId, len(utxos))
+		for i := range utxos {
+			refs[i] = models.UtxoId{
+				Hash: utxos[i].TxId,
+				Idx:  utxos[i].OutputIdx,
+			}
+		}
+		return refs, nil
+	}
+
+	// Unlike UtxosByAddressWithOrdering's page-fill scan, this loop must
+	// visit every coarse candidate to produce an accurate total and cannot
+	// stop early once a page's worth of matches is found, so it does not
+	// apply exactAddressCandidateScanLimit: that cap bounds work spent
+	// filling one bounded page, and applying it here would turn a valid
+	// high-cardinality address listing into a server error instead of
+	// bounding cost, which SkipAssets and the reference-only result
+	// already do.
+	scanQuery := *q
+	scanQuery.Limit = 1024
+	scanQuery.SkipAssets = true
+	scanQuery.Offset = 0
+	scanQuery.Descending = false
+	refs := []models.UtxoId{}
+	for {
+		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		for i := range batch {
+			if err := loadCbor(&batch[i].Utxo, txn); err != nil {
+				return nil, err
+			}
+			output, err := batch[i].Decode()
+			if err != nil {
+				return nil, fmt.Errorf(
+					"decode UTxO %x#%d for exact address match: %w",
+					batch[i].TxId,
+					batch[i].OutputIdx,
+					err,
+				)
+			}
+			match, err := models.MatchesUtxoAddressPatterns(
+				output.Address(),
+				q.AddressPatterns,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if match {
+				refs = append(refs, models.UtxoId{
+					Hash: batch[i].TxId,
+					Idx:  batch[i].OutputIdx,
+				})
+			}
+		}
+		if len(batch) < scanQuery.Limit || len(batch) == 0 {
+			break
+		}
+		last := batch[len(batch)-1]
+		scanQuery.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
+		}
+	}
+	return refs, nil
+}
+
+// CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
+// q's coarse SQL predicate. See MetadataStore.CountUtxosByAddressWithOrdering:
+// it errors if q's address patterns require CBOR-based exact-address
+// filtering, since Dingo has no cheap way to compute an exact-address total
+// without decoding every coarse candidate's output CBOR.
+func (d *Database) CountUtxosByAddressWithOrdering(
+	q *models.UtxoWithOrderingQuery,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	if q == nil {
+		return 0, models.ErrNilUtxoWithOrderingQuery
+	}
+	count, err := d.utxoStore().
+		CountUtxosByAddressWithOrdering(q, txn.Metadata())
+	if err != nil {
+		return 0, fmt.Errorf("count utxos by address: %w", err)
+	}
+	return count, nil
 }
 
 func (d *Database) UtxosByAddressAtSlot(
@@ -868,8 +1019,18 @@ func (d *Database) UtxosDeleteConsumed(
 		deleteUtxos[idx] = models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx}
 	}
 
-	// Delete blob data first (best effort)
-	_ = deleteUtxoBlobs(d, utxos, txn)
+	// Delete blob data first. A failure here does not stop the metadata
+	// delete below: metadata is the source of truth, and leaving a consumed
+	// UTxO in the live set to keep its blob reachable would be the worse
+	// outcome. The objects it strands are counted and logged rather than
+	// passed over, because nothing reclaims them afterwards.
+	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
+		d.logger.Error(
+			"consumed UTxO blob delete left unreachable objects",
+			"error", blobErr,
+			"utxos", len(utxos),
+		)
+	}
 
 	// Then delete metadata (source of truth)
 	err = d.utxoStore().DeleteUtxos(deleteUtxos, txn.Metadata())
@@ -906,8 +1067,17 @@ func (d *Database) UtxosDeleteRolledback(
 		return err
 	}
 
-	// Delete blob data first (best effort)
-	_ = deleteUtxoBlobs(d, utxos, txn)
+	// Delete blob data first. As above, a failure must not stop the metadata
+	// delete: a rolled-back UTxO cannot stay in the live set. The stranded
+	// objects are counted and logged instead of ignored.
+	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
+		d.logger.Error(
+			"rolled-back UTxO blob delete left unreachable objects",
+			"error", blobErr,
+			"slot", slot,
+			"utxos", len(utxos),
+		)
+	}
 
 	// Then delete metadata (source of truth)
 	err = d.utxoStore().DeleteUtxosAfterSlot(slot, txn.Metadata())

@@ -57,7 +57,9 @@
 // ledger.tx uses PublishOrdered. A subscriber deriving state from it can
 // rely on a block's transactions arriving in index order, and on a
 // rollback's undo events (Rollback: true) arriving before any
-// transaction event the ledger emits afterwards. See
+// transaction event the ledger emits afterwards. Forward Apply events are
+// registered with the database transaction's AfterCommit hook, so a rollback
+// or failed commit publishes none. See
 // blinklabs-io/dingo#2287: while those undo events were emitted from a
 // detached goroutine, a subscriber could apply an undo after the redo
 // that followed it and stay wrong indefinitely.
@@ -68,26 +70,32 @@
 // happens-before -- see the ledger.tx section of ARCHITECTURE.md for how
 // the rollback and block-apply paths establish theirs.
 //
-// Only shutdown releases a publisher waiting on a full lane. A caller on
-// a goroutine something else waits for before the bus stops must use
-// PublishOrderedContext and cancel that context, or the wait is
-// unbounded.
+// A healthy subscriber drains a full lane; the ordinary policy detaches a
+// stalled one after the delivery timeout. A caller on a goroutine something
+// else waits for before the bus stops must still use PublishOrderedContext and
+// cancel that context when it needs a shorter bound than the subscriber-
+// delivery timeout.
 //
 // # Delivery guarantees
 //
-// The bus does not drop events. When a subscriber's channel buffer or
-// the shared async queue is full, the publisher waits for capacity
-// rather than discarding the event, so ingestion slows instead of
-// losing work that subscribers derive state from. Waiting is bounded
-// only by shutdown: Stop, Close, and Unsubscribe all release publishers
-// parked on a full buffer. Buffers themselves stay bounded, so
-// backpressure never trades event loss for unbounded memory.
+// The bus does not drop events for a live subscriber. When a subscriber's
+// channel buffer or the shared async queue is full, the publisher waits for
+// capacity rather than discarding the event, so ingestion slows instead of
+// losing work that subscribers derive state from. A subscriber that remains
+// full for the delivery timeout is detached by the ordinary subscription
+// policy: events already accepted into its channel retain their order, while
+// the event that cannot be accepted and later events continue only to healthy
+// subscribers. A lossless owner can explicitly select the blocking policy when
+// detaching its stream would make recovery unsafe. This bounds a dead ordinary
+// subscriber's impact without trading unbounded memory for liveness. Stop,
+// Close, and Unsubscribe also release publishers parked on a full buffer.
 //
-// The practical consequence is that a subscriber which stops draining
-// stalls its publishers. It also means a publisher must not hold a lock
+// The practical consequence is that a slow subscriber backpressures its
+// publishers until it drains or is detached. A publisher must not hold a lock
 // that a subscriber of the same event acquires: once the buffer fills,
-// the subscriber waits for the lock and the publisher waits for the
-// capacity the subscriber would free, and neither proceeds. Queue such
+// the subscriber waits for the lock and the publisher waits for the capacity
+// the subscriber would free, and neither proceeds until the delivery bound
+// detaches that subscriber. Queue such
 // events and publish them after releasing the lock (see ledger's
 // pendingPublishes). Subscribers that take a channel from Subscribe
 // must drain it for as long as they hold the subscription and must

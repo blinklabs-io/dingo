@@ -40,6 +40,15 @@ plugins:
     #     database: "postgres"
     #     sslMode: "require"
     #     timeZone: "UTC"
+    #     # Both bound a single statement/lock wait server-side; zero (the
+    #     # default) leaves Postgres's own default -- no limit -- in
+    #     # effect. Values are milliseconds, matching Postgres's own GUC
+    #     # units. The mysql provider has the same two fields plus
+    #     # readTimeout/writeTimeout, but lockTimeout there is whole
+    #     # seconds (innodb_lock_wait_timeout's native unit) -- see
+    #     # DATABASE.md.
+    #     statementTimeout: "30s"
+    #     lockTimeout: "10s"
   mempool:
     # "fifo" preserves successful-admission order. "dag" additionally indexes
     # transaction dependencies and uses deterministic topological ordering.
@@ -155,6 +164,12 @@ metricsPort: 12798
 # CLI: --debug-port  Env: DINGO_DEBUG_PORT
 debugPort: 0
 
+# Address for the unauthenticated pprof listener. This is deliberately
+# independent of bindAddr and privateBindAddr and stays on loopback by default.
+# Set a wildcard address only when an external network control protects it.
+# CLI: --debug-bind-addr  Env: DINGO_DEBUG_BIND_ADDR
+debugBindAddr: "127.0.0.1"
+
 # Enable OpenTelemetry tracing. Disabled by default: with no collector
 # listening, the OTLP exporter logs noisy connection errors. When enabled,
 # spans are sent via OTLP HTTP; configure the destination with the standard
@@ -229,17 +244,24 @@ barkHost: ""
 
 # PEM CA bundle Bark verifies client certificates (mTLS) against. Required
 # whenever the database lifecycle service is enabled (barkPort set alongside
-# databaseLifecycle.snapshotDir below): its destructive DatabaseService RPCs
-# (CreateSnapshot, DeleteSnapshot, VerifySnapshot, Restore, Truncate,
-# CancelOperation) refuse any caller whose connection didn't present a
-# certificate verified against this CA -- Dingo refuses to start rather than
-# mount them unauthenticated. Also requires tlsCertFilePath/tlsKeyFilePath
-# above to be set. Read-only RPCs (status/catalog/Archive) never require a
-# client certificate. dingoctl's --client-cert/--client-key/--ca-cert flags
-# are the client side of this.
+# databaseLifecycle.snapshotDir below): every DatabaseService RPC requires a
+# certificate verified against this CA. ArchiveService remains public.
+# Also requires tlsCertFilePath/tlsKeyFilePath above to be set. dingoctl's
+# --client-cert/--client-key/--ca-cert flags are the client side of this.
 # Can be overridden with DINGO_BARK_CLIENT_CA_FILE_PATH
 # CLI: --bark-client-ca-file-path
 barkClientCaFilePath: ""
+
+# SHA-256 fingerprints of client certificate DER bytes authorized to invoke
+# destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
+# VerifySnapshot, Restore, Truncate, CancelOperation). Hex is matched
+# case-insensitively and may contain colons. At least one is required whenever
+# the database lifecycle service is enabled; a CA-valid certificate not in this
+# list may use read-only DatabaseService RPCs but receives PERMISSION_DENIED for
+# destructive ones.
+# Can be overridden with DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS
+# CLI: --bark-operator-certificate-fingerprints
+barkOperatorCertificateFingerprints: []
 
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
@@ -453,17 +475,13 @@ startEra: ""
 # stake-truncated voting committee, the node signs and emits one Leios
 # vote per observed endorser block.
 #
-# leiosVoterPublicKeys maps hex pool key hashes to hex-encoded 96-byte
-# compressed BLS12-381 public keys. It stands in for CIP-0164 key
-# registration (not yet specified) so vote signatures can be verified on
-# test networks. Votes from voters without a registered key still count
-# toward observed stake but cannot contribute to certificates.
+# The signing key must match the pool's proof-of-possession-verified on-chain
+# registration. A pool without a usable on-chain key is keyless and cannot emit
+# a vote or contribute verified stake to a certificate. Static voter-key
+# overrides are intentionally unsupported in reference-compatible mode.
 #
-# Can be overridden with the DINGO_LEIOS_VOTE_SIGNING_KEY_FILE and
-# DINGO_LEIOS_VOTER_PUBLIC_KEYS environment variables
+# Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
-# leiosVoterPublicKeys:
-#   "<pool key hash hex>": "<compressed G2 public key hex>"
 
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command
@@ -508,9 +526,10 @@ blockPipelineValidateEnabled: false
 strictUtxoValidation: true
 
 # Peer targets - target number of peers in each state
-# These are goals the system works toward, not hard limits.
+# Known, established, and active peer targets are goals, not hard limits.
+# A positive root target limits newly selected public roots; local roots remain.
 # Use 0 for default values, -1 for unlimited
-# Default: known=150, established=50, active=20
+# Default: known=150, established=50, active=20, root=60
 #
 # Target number of known (cold) peers
 # CLI: --target-known-peers
@@ -521,6 +540,9 @@ targetNumberOfEstablishedPeers: 0
 # Target number of active (hot) peers
 # CLI: --target-active-peers
 targetNumberOfActivePeers: 0
+# Target number of root peers selected from topology
+# CLI: --target-root-peers
+targetNumberOfRootPeers: 0
 
 # Per-source quotas for active peers
 # These specify how active peer slots are distributed by source.
@@ -584,18 +606,31 @@ genesisBootstrap:
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
-# not enough. Setting port to 0 disables the Midnight gRPC server while
-# leaving indexing eligible to run.
-# CLI: --midnight-enabled, --midnight-port, --midnight-host
-# Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
-# Address and policy fields are YAML only.
+# not enough. The gRPC server is a separate, explicit opt-in and also requires
+# API storage mode. It can serve persisted Midnight rows without running the
+# indexer. Plaintext is loopback-only unless allowInsecureRemote is set; use
+# tlsCertFilePath/tlsKeyFilePath for a protected remote listener.
+# CLI: --midnight-enabled, --midnight-server-enabled,
+#   --midnight-reflection-enabled, --midnight-allow-insecure-remote,
+#   --midnight-port, --midnight-host
+# Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_SERVER_ENABLED,
+#   DINGO_MIDNIGHT_REFLECTION_ENABLED, DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE,
+#   DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
+# Midnight chain addresses and policy-ID/asset-name constants are YAML only.
 midnight:
   # Enable the Midnight indexer. Default: false.
   enabled: false
-  # gRPC listen port
+  # Enable the Midnight gRPC server. Default: false.
+  serverEnabled: false
+  # Expose gRPC service discovery. Requires serverEnabled. Default: false.
+  reflectionEnabled: false
+  # Allow plaintext on a wildcard, hostname, or concrete non-loopback bind.
+  # Use only when transport security is supplied outside Dingo. Default: false.
+  allowInsecureRemote: false
+  # gRPC listen port. Must be non-zero when serverEnabled is true.
   port: 50051
-  # gRPC listen address
-  host: "0.0.0.0"
+  # gRPC listen address. Plaintext defaults to loopback-only.
+  host: "127.0.0.1"
   # Midnight network constants. Known network defaults are applied when
   # available; set these explicitly for custom networks or overrides.
   cnightPolicyId: ""
@@ -696,7 +731,8 @@ mithril:
   # Remove temporary files after loading completes
   # Default: true
   cleanupAfterLoad: true
-  # Verify the Mithril certificate chain from snapshot back to genesis
+  # Verify STM certificates back to the pinned Mithril genesis key from the
+  # selected Cardano network config. Set false only for an unverified bootstrap.
   # Default: true
   verifyCertificates: true
 
@@ -785,7 +821,10 @@ mithril:
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
 databaseLifecycle:
-  # Capture automatic database snapshots at epoch boundaries
+  # Capture automatic database snapshots at epoch boundaries. Unsupported
+  # when the primary blob provider is s3 or gcs: their remote-object backup
+  # walk can hold the commit barrier for an unbounded duration. Manual
+  # `dingo database snapshot` remains available in that configuration.
   # Default: false
   # CLI: --db-snapshot-enabled
   snapshotEnabled: false
@@ -795,10 +834,10 @@ databaseLifecycle:
   # mounted at all (it's silently skipped, leaving only bark's Archive
   # service, if this is empty). Every snapshot is always written here,
   # regardless of whether snapshotCloudDestination is also set. Setting
-  # this alongside barkPort also requires barkClientCaFilePath (and
-  # tlsCertFilePath/tlsKeyFilePath) above -- Dingo refuses to start
-  # otherwise, since the DatabaseService's destructive RPCs must not be
-  # mounted without a way to authenticate callers.
+  # this alongside barkPort also requires barkClientCaFilePath,
+  # barkOperatorCertificateFingerprints, and tlsCertFilePath/tlsKeyFilePath
+  # above -- Dingo refuses to start otherwise, since DatabaseService must not
+  # be mounted without both authentication and operator authorization.
   #
   # Docker image note: the container always runs as a non-root user with a
   # pinned UID:GID of 1000:1000 (see Dockerfile) and never chowns anything

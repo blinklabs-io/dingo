@@ -80,11 +80,24 @@ func (c *chunk) Next() (*Block, error) {
 		// This triggers even though we check it above
 		// #nosec G115
 		currOffset := int64(c.currentEntry.BlockOffset)
+		if currOffset > c.fileSize {
+			return nil, fmt.Errorf(
+				"current block offset %d is beyond chunk size %d",
+				currOffset,
+				c.fileSize,
+			)
+		}
 
 		// We've reached the last entry in the chunk, so we calculate
 		// block size based on the size of the file
 		blockSize := c.fileSize - currOffset
-		blockData := make([]byte, blockSize)
+		if blockSize > int64(math.MaxInt) {
+			return nil, fmt.Errorf(
+				"block size %d exceeds platform allocation limit",
+				blockSize,
+			)
+		}
+		blockData := make([]byte, int(blockSize))
 		// Seek to offset
 		if _, err := c.file.Seek(currOffset, 0); err != nil {
 			return nil, err
@@ -129,9 +142,36 @@ func (c *chunk) Next() (*Block, error) {
 		// This triggers even though we check it above
 		// #nosec G115
 		nextOffset := int64(c.nextEntry.BlockOffset)
+		if currOffset > c.fileSize {
+			return nil, fmt.Errorf(
+				"current block offset %d is beyond chunk size %d",
+				currOffset,
+				c.fileSize,
+			)
+		}
+		if nextOffset > c.fileSize {
+			return nil, fmt.Errorf(
+				"next block offset %d is beyond chunk size %d",
+				nextOffset,
+				c.fileSize,
+			)
+		}
+		if nextOffset <= currOffset {
+			return nil, fmt.Errorf(
+				"next block offset %d does not follow current block offset %d",
+				nextOffset,
+				currOffset,
+			)
+		}
 
 		blockSize := nextOffset - currOffset
-		blockData := make([]byte, blockSize)
+		if blockSize > int64(math.MaxInt) {
+			return nil, fmt.Errorf(
+				"block size %d exceeds platform allocation limit",
+				blockSize,
+			)
+		}
+		blockData := make([]byte, int(blockSize))
 		// Seek to offset
 		if _, err := c.file.Seek(currOffset, 0); err != nil {
 			return nil, err
