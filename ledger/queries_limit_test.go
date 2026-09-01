@@ -44,9 +44,9 @@ func TestLocalStateQueryItemLimitBoundary(t *testing.T) {
 
 	var limitErr *LocalStateQueryLimitError
 	require.ErrorAs(t, err, &limitErr)
-	require.Equal(t, "boundary", limitErr.Query)
-	require.Equal(t, MaxLocalStateQueryItems+1, limitErr.Items)
-	require.Equal(t, MaxLocalStateQueryItems, limitErr.Limit)
+	require.Equal(t, "boundary", limitErr.QueryName)
+	require.Equal(t, MaxLocalStateQueryItems+1, limitErr.SubmittedItemCount)
+	require.Equal(t, MaxLocalStateQueryItems, limitErr.MaximumAllowedItemCount)
 }
 
 // TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork verifies that
@@ -90,9 +90,9 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 
 			var limitErr *LocalStateQueryLimitError
 			require.True(t, errors.As(err, &limitErr))
-			require.Equal(t, test.query, limitErr.Query)
-			require.Equal(t, itemCount, limitErr.Items)
-			require.Equal(t, MaxLocalStateQueryItems, limitErr.Limit)
+			require.Equal(t, test.query, limitErr.QueryName)
+			require.Equal(t, itemCount, limitErr.SubmittedItemCount)
+			require.Equal(t, MaxLocalStateQueryItems, limitErr.MaximumAllowedItemCount)
 		})
 	}
 }

@@ -47,22 +47,22 @@ var ErrLocalStateQueryLimitExceeded = errors.New(
 
 // LocalStateQueryLimitError describes an over-limit LocalStateQuery request.
 // In-process callers can use errors.Is for the stable category and errors.As
-// for the query name and counts. Node-to-client protocol errors terminate the
-// connection, so an over-the-wire client observes a closed connection rather
-// than this Go error value.
+// for QueryName, SubmittedItemCount, and MaximumAllowedItemCount. Node-to-client
+// protocol errors terminate the connection, so an over-the-wire client
+// observes a closed connection rather than this Go error value.
 type LocalStateQueryLimitError struct {
-	Query string
-	Items int
-	Limit int
+	QueryName               string
+	SubmittedItemCount      int
+	MaximumAllowedItemCount int
 }
 
 func (e *LocalStateQueryLimitError) Error() string {
 	return fmt.Sprintf(
 		"%s: %s: got %d items, limit %d",
 		ErrLocalStateQueryLimitExceeded,
-		e.Query,
-		e.Items,
-		e.Limit,
+		e.QueryName,
+		e.SubmittedItemCount,
+		e.MaximumAllowedItemCount,
 	)
 }
 
@@ -75,9 +75,9 @@ func checkLocalStateQueryItemLimit(query string, items int) error {
 		return nil
 	}
 	return &LocalStateQueryLimitError{
-		Query: query,
-		Items: items,
-		Limit: MaxLocalStateQueryItems,
+		QueryName:               query,
+		SubmittedItemCount:      items,
+		MaximumAllowedItemCount: MaxLocalStateQueryItems,
 	}
 }
 
