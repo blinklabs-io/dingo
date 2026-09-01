@@ -96,7 +96,10 @@ jobs:
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 20m ./...
+        # The ledger package legitimately approaches 20 minutes under the race
+        # detector on hosted runners. Keep a finite package-level hang guard
+        # while leaving enough headroom for the complete release suite.
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
       - name: govulncheck
         run: make govulncheck
 
