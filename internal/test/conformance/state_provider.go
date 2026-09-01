@@ -636,9 +636,10 @@ func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, err
 // It never falls back to the govState mirror: that mirror is seeded from
 // the same vector state LoadInitialState writes to the backend, so falling
 // back to it would let a backend that drops or cannot read a constitution
-// row still report the vector as passing. Missing or unreadable
+// row still report the vector as passing. Missing or malformed
 // constitution state fails closed through
-// governance.ConstitutionFromModel.
+// governance.ConstitutionFromModel, and a failed read is returned as the
+// wrapped store error.
 func (p *DingoStateProvider) Constitution() (*common.Constitution, error) {
 	stored, err := withBadConnRetry(func() (*models.Constitution, error) {
 		return p.manager.db.GetConstitution(nil)

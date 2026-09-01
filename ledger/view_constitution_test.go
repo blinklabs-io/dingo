@@ -222,7 +222,9 @@ func TestLedgerViewConstitutionMissingFailsClosed(t *testing.T) {
 // TestLedgerViewConstitutionUnreadableFailsClosed proves a constitution
 // store that cannot be read at all fails closed the same way a missing one
 // does: the read error is propagated, never flattened into a valid-looking
-// constitution with no guardrails script.
+// constitution with no guardrails script. The propagated error is the
+// wrapped store error and not ErrConstitutionUnavailable, which is reserved
+// for state that was read and found missing or malformed.
 func TestLedgerViewConstitutionUnreadableFailsClosed(t *testing.T) {
 	lv, db := constitutionTestView(t)
 	require.NoError(t, db.SetConstitution(&models.Constitution{
@@ -246,6 +248,7 @@ func TestLedgerViewConstitutionUnreadableFailsClosed(t *testing.T) {
 	got, err = lv.Constitution()
 	require.Error(t, err)
 	require.Nil(t, got)
+	require.NotErrorIs(t, err, governance.ErrConstitutionUnavailable)
 
 	guardrailsErr := constitutionTestGuardrails(t, lv, nil)
 	require.Error(t, guardrailsErr)

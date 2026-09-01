@@ -16,10 +16,12 @@ package governance
 
 import (
 	"bytes"
+	"encoding/hex"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 )
 
@@ -116,6 +118,124 @@ func TestConstitutionFromModelMalformedAnchorFailsClosed(t *testing.T) {
 				),
 			})
 			require.ErrorIs(t, err, ErrConstitutionUnavailable)
+			require.Nil(t, got)
+		})
+	}
+}
+
+// TestConstitutionFromGenesisMapsAnchorAndScript proves the Conway genesis
+// anchor and guardrails script hash are decoded onto a slot-0 row, which is
+// what makes the genesis constitution the enacted one on a chain that has
+// never enacted a NewConstitution action.
+func TestConstitutionFromGenesisMapsAnchorAndScript(t *testing.T) {
+	anchorHash := hex.EncodeToString(
+		bytes.Repeat([]byte{0x66}, lcommon.Blake2b256Size),
+	)
+	script := hex.EncodeToString(
+		bytes.Repeat([]byte{0x67}, lcommon.Blake2b224Size),
+	)
+	got, err := ConstitutionFromGenesis(&conway.ConwayGenesis{
+		Constitution: conway.ConwayGenesisConstitution{
+			Anchor: conway.ConwayGenesisConstitutionAnchor{
+				DataHash: anchorHash,
+				Url:      "ipfs://example",
+			},
+			Script: script,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "ipfs://example", got.AnchorURL)
+	require.Equal(t, anchorHash, hex.EncodeToString(got.AnchorHash))
+	require.Equal(t, script, hex.EncodeToString(got.PolicyHash))
+	require.Equal(t, uint64(0), got.AddedSlot)
+}
+
+// TestConstitutionFromGenesisWithoutScript proves a genesis constitution
+// that declares no guardrails script maps to a nil policy hash, which
+// ConstitutionFromModel then reports as "no guardrails script required"
+// rather than as an empty-but-present hash.
+func TestConstitutionFromGenesisWithoutScript(t *testing.T) {
+	got, err := ConstitutionFromGenesis(&conway.ConwayGenesis{
+		Constitution: conway.ConwayGenesisConstitution{
+			Anchor: conway.ConwayGenesisConstitutionAnchor{
+				DataHash: hex.EncodeToString(
+					bytes.Repeat([]byte{0x68}, lcommon.Blake2b256Size),
+				),
+				Url: "ipfs://no-guardrails",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Nil(t, got.PolicyHash)
+
+	mapped, err := ConstitutionFromModel(got)
+	require.NoError(t, err)
+	require.Nil(t, mapped.ScriptHash)
+}
+
+// TestConstitutionFromGenesisAbsent proves a nil genesis config, and one
+// that declares no constitution at all, both map to no row and no error, so
+// genesis initialization seeds nothing instead of failing.
+func TestConstitutionFromGenesisAbsent(t *testing.T) {
+	got, err := ConstitutionFromGenesis(nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	got, err = ConstitutionFromGenesis(&conway.ConwayGenesis{})
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
+// TestConstitutionFromGenesisMalformed proves a declared constitution whose
+// anchor hash or guardrails script hash is not hex of the required length is
+// rejected rather than seeded. A wrong guardrails hash would reject every
+// parameter-change and treasury-withdrawal proposal on the chain.
+func TestConstitutionFromGenesisMalformed(t *testing.T) {
+	validAnchor := hex.EncodeToString(
+		bytes.Repeat([]byte{0x69}, lcommon.Blake2b256Size),
+	)
+	validScript := hex.EncodeToString(
+		bytes.Repeat([]byte{0x6a}, lcommon.Blake2b224Size),
+	)
+	for name, constitution := range map[string]conway.ConwayGenesisConstitution{
+		"anchor not hex": {
+			Anchor: conway.ConwayGenesisConstitutionAnchor{
+				DataHash: "not-hex",
+			},
+			Script: validScript,
+		},
+		"anchor short": {
+			Anchor: conway.ConwayGenesisConstitutionAnchor{
+				DataHash: validAnchor[2:],
+			},
+			Script: validScript,
+		},
+		"anchor absent with url": {
+			Anchor: conway.ConwayGenesisConstitutionAnchor{
+				Url: "ipfs://anchorless",
+			},
+			Script: validScript,
+		},
+		"script not hex": {
+			Anchor: conway.ConwayGenesisConstitutionAnchor{
+				DataHash: validAnchor,
+			},
+			Script: "not-hex",
+		},
+		"script wrong length": {
+			Anchor: conway.ConwayGenesisConstitutionAnchor{
+				DataHash: validAnchor,
+			},
+			Script: validAnchor,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ConstitutionFromGenesis(&conway.ConwayGenesis{
+				Constitution: constitution,
+			})
+			require.Error(t, err)
 			require.Nil(t, got)
 		})
 	}

@@ -771,8 +771,9 @@ func (lv *LedgerView) DRepDelegation(
 // Constitution returns the enacted constitution: its anchor URL, anchor
 // hash, and optional guardrails policy hash.
 //
-// Constitution state that is missing or unreadable fails closed with
-// governance.ErrConstitutionUnavailable rather than reporting an
+// Constitution state that is missing or malformed fails closed with
+// governance.ErrConstitutionUnavailable; a constitution store that cannot
+// be read at all returns the wrapped store error. Neither reports an
 // empty-but-valid constitution, which gouroboros' guardrails rule would
 // read as "no guardrails script required".
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {

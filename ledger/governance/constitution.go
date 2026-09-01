@@ -16,11 +16,13 @@ package governance
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
 // ErrConstitutionUnavailable reports that no usable enacted constitution
@@ -34,7 +36,9 @@ import (
 // record or read would accept proposals carrying no policy hash on a chain
 // whose constitution does require one. Returning this error instead makes
 // gouroboros wrap it in conway.ConstitutionLookupError and reject the
-// transaction: missing or unreadable constitution state fails closed.
+// transaction: missing or malformed constitution state fails closed. A
+// store read that fails outright is propagated by the caller as its own
+// wrapped error, which gouroboros classifies the same way.
 var ErrConstitutionUnavailable = errors.New(
 	"enacted constitution unavailable",
 )
@@ -54,6 +58,13 @@ var ErrConstitutionUnavailable = errors.New(
 // ErrConstitutionUnavailable: the caller has no constitution it can prove,
 // and truncating or zero-padding a short digest into the contract's
 // fixed-size array would silently publish a wrong anchor.
+//
+// The guardrails policy hash is deliberately not length-checked here. It is
+// a variable-length []byte in the contract, so no value is lost by passing
+// it through, and gouroboros rejects a non-nil hash that is not
+// Blake2b224Size with conway.MalformedConstitutionError, which names the
+// offending length. Pre-empting that with ErrConstitutionUnavailable would
+// report a malformed guardrails hash as a failed lookup instead.
 func ConstitutionFromModel(
 	stored *models.Constitution,
 ) (*lcommon.Constitution, error) {
@@ -78,4 +89,84 @@ func ConstitutionFromModel(
 		ret.ScriptHash = bytes.Clone(stored.PolicyHash)
 	}
 	return ret, nil
+}
+
+// ConstitutionFromGenesis maps the Conway genesis constitution onto a stored
+// constitution row at slot 0.
+//
+// A Conway chain's constitution is enacted at genesis and replaced only by a
+// NewConstitution governance action, so the genesis anchor and guardrails
+// script hash are the enacted constitution until such an action is enacted
+// at a later slot. Recording it at slot 0 lets the constitution lookup,
+// which reads the highest non-deleted added_slot, return an enactment
+// whenever one exists and the genesis constitution otherwise.
+//
+// A genesis config that records no constitution at all maps to a nil row and
+// no error: there is nothing to seed. A recorded constitution whose anchor
+// hash or guardrails script hash is not hex of the required length is
+// reported as an error instead, because guardrails validation compares that
+// script hash against the policy hash of every parameter-change and
+// treasury-withdrawal proposal, and a wrong value would reject all of them.
+func ConstitutionFromGenesis(
+	genesis *conway.ConwayGenesis,
+) (*models.Constitution, error) {
+	if genesis == nil {
+		return nil, nil
+	}
+	anchor := genesis.Constitution.Anchor
+	script := genesis.Constitution.Script
+	if anchor.DataHash == "" && anchor.Url == "" && script == "" {
+		return nil, nil
+	}
+	anchorHash, err := decodeGenesisConstitutionHash(
+		"anchor hash",
+		anchor.DataHash,
+		lcommon.Blake2b256Size,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var policyHash []byte
+	if script != "" {
+		policyHash, err = decodeGenesisConstitutionHash(
+			"guardrails script hash",
+			script,
+			lcommon.Blake2b224Size,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &models.Constitution{
+		AnchorURL:  anchor.Url,
+		AnchorHash: anchorHash,
+		PolicyHash: policyHash,
+		AddedSlot:  0,
+	}, nil
+}
+
+// decodeGenesisConstitutionHash decodes one hex-encoded genesis constitution
+// hash and requires it to be exactly size bytes.
+func decodeGenesisConstitutionHash(
+	field string,
+	encoded string,
+	size int,
+) ([]byte, error) {
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decode genesis constitution %s: %w",
+			field,
+			err,
+		)
+	}
+	if len(decoded) != size {
+		return nil, fmt.Errorf(
+			"genesis constitution %s length %d, want %d",
+			field,
+			len(decoded),
+			size,
+		)
+	}
+	return decoded, nil
 }
