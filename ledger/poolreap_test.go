@@ -323,3 +323,51 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1_300), uint64(state.Treasury))
 }
+
+// TestApplyPoolRetirements_RefundsHeldNotCharged: the boundary refunds the
+// deposit the effective registration retains, not the amount the protocol
+// parameters in force at that registration's slot would have charged. The two
+// differ for a re-registration, which pays no new pool deposit and carries the
+// earlier held amount forward.
+func TestApplyPoolRetirements_RefundsHeldNotCharged(t *testing.T) {
+	ls, db, gdb := newPoolreapTestLedger(t)
+
+	const (
+		charged      = uint64(800)
+		held         = uint64(500)
+		newEpoch     = uint64(5)
+		boundarySlot = uint64(1_000)
+	)
+	keyHash := reapCred28(0xDD)
+	rewardAccount := reapCred28(0x44)
+	seedRetiringPool(
+		t,
+		gdb,
+		keyHash,
+		rewardAccount,
+		charged,
+		100,
+		newEpoch,
+		200,
+	)
+	_, err := gdb.Exec(
+		"UPDATE pool_registration SET deposit_held = ? WHERE pool_key_hash = ?",
+		strconv.FormatUint(held, 10),
+		keyHash,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: rewardAccount,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+
+	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+
+	account, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, held, uint64(account.Reward),
+		"refund is the held deposit, not the charged deposit")
+}

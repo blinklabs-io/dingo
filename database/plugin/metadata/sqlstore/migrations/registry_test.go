@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 6)
+	require.Len(t, registry, 7)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -86,6 +86,49 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[5].SQL["sqlite"].Expand[3],
 		"INSERT INTO `governance_proposal_ratification_history`",
 	)
+	require.Equal(t, 7, registry[6].Version)
+	require.Equal(t, "pool-registration-deposit-held", registry[6].Name)
+	require.Len(t, registry[6].SQL["sqlite"].Expand, 2)
+	require.Equal(
+		t,
+		"ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text",
+		registry[6].SQL["sqlite"].Expand[0],
+	)
+	// The backfill must stay restricted to NULL so an interrupted upgrade can
+	// re-run it without overwriting a carried-forward held amount.
+	require.Contains(
+		t,
+		registry[6].SQL["sqlite"].Expand[1],
+		"WHERE `deposit_held` IS NULL",
+	)
+}
+
+// TestDepositHeldMigrationTranslatesForProviders guards the v7 migration's one
+// dialect hazard: the ALTER adds a TEXT column, which MySQL must not be handed
+// with a key prefix and PostgreSQL must receive with requoted identifiers.
+func TestDepositHeldMigrationTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+
+	postgres, err := PostgresRegistry()
+	require.NoError(t, err)
+	postgresSQL := strings.Join(postgres[6].SQL["postgres"].Expand, "\n")
+	require.Contains(
+		t,
+		postgresSQL,
+		`ALTER TABLE "pool_registration" ADD COLUMN "deposit_held" text`,
+	)
+	require.Contains(t, postgresSQL, `UPDATE "pool_registration"`)
+	require.NotContains(t, postgresSQL, "`")
+
+	mysql, err := MySQLRegistry()
+	require.NoError(t, err)
+	mysqlSQL := strings.Join(mysql[6].SQL["mysql"].Expand, "\n")
+	require.Contains(
+		t,
+		mysqlSQL,
+		"ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text",
+	)
+	require.NotContains(t, mysqlSQL, "(255)")
 }
 
 // TestMySQLRegistryPrefixesAccountBaselinePrimaryKey guards the v4 migration's
@@ -149,7 +192,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 6)
+	require.Len(t, registry, 7)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

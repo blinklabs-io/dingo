@@ -147,9 +147,14 @@ type PoolRetirement struct {
 // PoolRetirementRefund identifies a pool retiring at an epoch boundary along
 // with the reward account and deposit needed to refund its POOLREAP deposit.
 // It is a query result, not a persisted table.
+//
+// DepositHeld is the amount the pool's effective registration retains
+// (`pool_registration.deposit_held`), not the deposit the current protocol
+// parameters would charge: a re-registration pays no new pool deposit, so the
+// refundable amount is the one the pool's first registration paid.
 type PoolRetirementRefund struct {
 	PoolKeyHash                []byte
 	RewardAccount              []byte
 	RewardAccountCredentialTag uint8
-	DepositAmount              types.Uint64
+	DepositHeld                types.Uint64
 }

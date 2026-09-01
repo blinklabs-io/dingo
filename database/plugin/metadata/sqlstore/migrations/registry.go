@@ -35,6 +35,7 @@ const (
 	accountBaselineSchemaRelease               = "account-import-baseline"
 	leiosSnapshotKeySchemaRelease              = "leios-snapshot-keys"
 	governanceRatificationHistorySchemaRelease = "governance-ratification-history"
+	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -53,6 +54,7 @@ var schemaVersions = []struct {
 		Name:    governanceRatificationHistorySchemaRelease,
 		Dir:     "v6",
 	},
+	{Version: 7, Name: poolDepositHeldSchemaRelease, Dir: "v7"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

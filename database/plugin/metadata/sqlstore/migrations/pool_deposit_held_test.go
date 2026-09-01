@@ -1,0 +1,165 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package migrations_test
+
+import (
+	"context"
+	"database/sql"
+	"path/filepath"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	_ "github.com/glebarez/go-sqlite"
+	"github.com/stretchr/testify/require"
+)
+
+// depositHeldBackfillDB returns a database migrated to the version before the
+// pool deposit-held column exists, so a test can seed the legacy registration
+// rows the v7 backfill reads.
+func depositHeldBackfillDB(
+	t *testing.T,
+) (*sql.DB, func(versions []migrations.Migration)) {
+	t.Helper()
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	db, err := sql.Open("sqlite", "file:"+databasePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	require.Len(t, registry, 7)
+	runTo := func(versions []migrations.Migration) {
+		runner := migrations.Runner{
+			DB:       db,
+			Dialect:  "sqlite",
+			Registry: versions,
+			Locker: migrations.NewFileLocker(
+				databasePath + ".migrate.lock",
+			),
+		}
+		require.NoError(t, runner.Run(ctx))
+	}
+	runTo(registry[:6])
+	return db, runTo
+}
+
+func seedLegacyPoolRegistration(
+	t *testing.T,
+	db *sql.DB,
+	keyHash []byte,
+	slot uint64,
+	deposit any,
+) {
+	t.Helper()
+	ctx := context.Background()
+	result, err := db.ExecContext(ctx, `
+INSERT INTO pool (pool_key_hash, latest_op_cert_sequence, pledge, cost,
+    reward_account_credential_tag)
+VALUES (?, 0, '0', '0', 0)`,
+		keyHash,
+	)
+	require.NoError(t, err)
+	poolID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+INSERT INTO pool_registration (
+    pool_id, pool_key_hash, added_slot, deposit_amount
+) VALUES (?, ?, ?, ?)`,
+		poolID, keyHash, slot, deposit,
+	)
+	require.NoError(t, err)
+}
+
+func depositHeldValue(t *testing.T, db *sql.DB, keyHash []byte) sql.NullString {
+	t.Helper()
+	var held sql.NullString
+	require.NoError(t, db.QueryRowContext(context.Background(), `
+SELECT deposit_held FROM pool_registration WHERE pool_key_hash = ?`,
+		keyHash,
+	).Scan(&held))
+	return held
+}
+
+// A registration written before the deposit-held column existed is credited
+// with its own recorded deposit. That is exactly the value the pre-change
+// refund path read from the latest registration, so the migration reproduces
+// the refund the node would already have applied.
+func TestDepositHeldBackfillCreditsRecordedDeposit(t *testing.T) {
+	t.Parallel()
+	db, runTo := depositHeldBackfillDB(t)
+	keyHash := []byte("legacy-pool-key-hash-0000001")
+	seedLegacyPoolRegistration(t, db, keyHash, 100, "500000000")
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	held := depositHeldValue(t, db, keyHash)
+	require.True(t, held.Valid)
+	require.Equal(t, "500000000", held.String)
+}
+
+// A legacy registration with no recorded deposit -- what the genesis and
+// Mithril-import paths write -- is credited with zero rather than left NULL, so
+// the refund reads a definite amount.
+func TestDepositHeldBackfillCreditsZeroForNullDeposit(t *testing.T) {
+	t.Parallel()
+	db, runTo := depositHeldBackfillDB(t)
+	keyHash := []byte("legacy-pool-key-hash-0000002")
+	seedLegacyPoolRegistration(t, db, keyHash, 100, nil)
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	held := depositHeldValue(t, db, keyHash)
+	require.True(t, held.Valid)
+	require.Equal(t, "0", held.String)
+}
+
+// The backfill statement is re-runnable: an upgrade interrupted after the
+// backfill committed but before its phase row advanced replays it, and it must
+// not overwrite a held amount that carry-forward has since written.
+func TestDepositHeldBackfillReplayKeepsCarriedForwardAmount(t *testing.T) {
+	t.Parallel()
+	db, runTo := depositHeldBackfillDB(t)
+	keyHash := []byte("legacy-pool-key-hash-0000003")
+	seedLegacyPoolRegistration(t, db, keyHash, 100, "900000000")
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	// Stand in for a later re-registration whose held amount was carried
+	// forward from an earlier, cheaper registration.
+	_, err = db.ExecContext(context.Background(), `
+UPDATE pool_registration SET deposit_held = '500000000'
+WHERE pool_key_hash = ?`,
+		keyHash,
+	)
+	require.NoError(t, err)
+
+	// Replay only the backfill statement; the ALTER cannot be re-executed on
+	// SQLite and an interrupted upgrade would fail before reaching it anyway.
+	_, err = db.ExecContext(
+		context.Background(),
+		registry[6].SQL["sqlite"].Expand[1],
+	)
+	require.NoError(t, err)
+
+	held := depositHeldValue(t, db, keyHash)
+	require.True(t, held.Valid)
+	require.Equal(t, "500000000", held.String)
+}
