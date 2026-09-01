@@ -19,6 +19,7 @@ package conformance
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -149,10 +150,133 @@ func newDingoMysqlStateManagerAtDatabase(
 	if err != nil {
 		return nil, err
 	}
-	m.wipeMetadata = func() error {
-		return truncateMysqlConformanceDatabase(rootDSN, database)
+	resetter, err := newMysqlResetter(rootDSN, database)
+	if err != nil {
+		return nil, errors.Join(err, m.Close())
 	}
+	m.wipeMetadata = func() error {
+		return resetter.reset(context.Background())
+	}
+	m.closeExtra = resetter.Close
 	return m, nil
+}
+
+// newMysqlResetter opens the one admin connection this manager's Reset reuses
+// for its whole lifetime, replacing a per-vector sql.Open/Close.
+//
+// DBName is cleared because MySQL rejects Ping and most statements against a
+// DSN naming a database that does not exist yet, though it always does here
+// once the store has been constructed once.
+//
+// MySQL has no multi-table TRUNCATE, so unlike PostgreSQL this backend still
+// issues one statement per table -- but only for tables a vector actually
+// wrote, rather than all 84 every time. See reset_cost.go for why TRUNCATE is
+// kept over a single batched DELETE.
+func newMysqlResetter(rootDSN, database string) (*backendResetter, error) {
+	cfg, err := mysqldriver.ParseDSN(rootDSN)
+	if err != nil {
+		return nil, fmt.Errorf("parse mysql root DSN: %w", err)
+	}
+	cfg.DBName = ""
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("open mysql admin connection: %w", err)
+	}
+	return &backendResetter{
+		db: db,
+		listTables: func(
+			ctx context.Context,
+			db *sql.DB,
+		) ([]string, error) {
+			return listMysqlConformanceTables(ctx, db, database)
+		},
+		qualify: func(table string) string {
+			return mysqlQuoteIdentifier(database) + "." +
+				mysqlQuoteIdentifier(table)
+		},
+		truncate: func(
+			ctx context.Context,
+			db *sql.DB,
+			qualified []string,
+		) error {
+			return truncateMysqlTables(ctx, db, qualified)
+		},
+	}, nil
+}
+
+// truncateMysqlTables empties exactly the given tables with foreign key
+// checks disabled.
+//
+// The disable/restore pair must run on the same session as the TRUNCATEs --
+// FOREIGN_KEY_CHECKS is a session variable, and a pooled *sql.DB may hand each
+// statement a different connection -- so this pins one conn for the duration.
+func truncateMysqlTables(
+	ctx context.Context,
+	db *sql.DB,
+	qualified []string,
+) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire mysql admin connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(
+		ctx, "SET FOREIGN_KEY_CHECKS=0",
+	); err != nil {
+		return fmt.Errorf("disable mysql foreign key checks: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=1")
+	}()
+	for _, table := range qualified {
+		if _, err := conn.ExecContext(
+			ctx, "TRUNCATE TABLE "+table,
+		); err != nil {
+			return fmt.Errorf("truncate mysql table %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// listMysqlConformanceTables returns database's base tables, excluding
+// schema_migrations -- see listPostgresConformanceTables for why that table is
+// never truncated.
+func listMysqlConformanceTables(
+	ctx context.Context,
+	db *sql.DB,
+	database string,
+) ([]string, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		"SELECT table_name FROM information_schema.tables "+
+			"WHERE table_schema = ? AND table_type = 'BASE TABLE' "+
+			"AND table_name <> 'schema_migrations'",
+		database,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"list mysql database %q tables: %w",
+			database,
+			err,
+		)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan mysql table name: %w", err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"list mysql database %q tables: %w",
+			database,
+			err,
+		)
+	}
+	return tables, nil
 }
 
 // mysqlDSNWithDatabase returns dsn with its DBName set to database,
@@ -165,108 +289,6 @@ func mysqlDSNWithDatabase(dsn, database string) (string, error) {
 	}
 	cfg.DBName = database
 	return cfg.FormatDSN(), nil
-}
-
-// truncateMysqlConformanceDatabase empties every base table in database, in
-// place, over an admin connection built from rootDSN (with DBName cleared,
-// since MySQL rejects Ping/most statements against a DSN naming a database
-// that doesn't exist yet -- though it always does here once the store has
-// been constructed once). Used as DingoStateManager's wipeMetadata hook
-// (see Reset in state_manager.go).
-//
-// This truncates rather than drops the database: unlike
-// metadata.Resettable.Reset (database/plugin/metadata/mysql's own Reset
-// callback, which drops tables individually, requiring a fresh migration
-// run -- and, for the database-per-suite provisioning this constructor
-// relies on, a fresh CREATE DATABASE -- before the store is usable again),
-// TRUNCATE keeps every table in place, so the already-open store's
-// connection pool keeps working immediately afterward -- no close, no
-// reopen, no re-migration. At one Reset per vector across the ~300-vector
-// suite, avoiding a real close/reopen/re-migrate round trip per vector is
-// what keeps the MySQL backend's wall-clock cost in the same ballpark as
-// SQLite's rather than a full order of magnitude slower.
-//
-// The table list is discovered from information_schema rather than
-// hardcoded, so it stays correct as migrations add tables.
-//
-// schema_migrations itself is deliberately excluded: it is the migration
-// runner's own bookkeeping table (database/plugin/metadata/sqlstore/migrations/runner.go),
-// not conformance data. Truncating it would desync tracked migration state
-// from the physical schema without reverting any DDL -- a later
-// construction against this same, already-migrated database would see an
-// empty schema_migrations table, decide every migration (including ones
-// whose columns/tables already physically exist from the first
-// construction) still needs to run, and fail with a duplicate
-// column/table error partway through re-applying already-applied DDL.
-func truncateMysqlConformanceDatabase(rootDSN, database string) error {
-	cfg, err := mysqldriver.ParseDSN(rootDSN)
-	if err != nil {
-		return fmt.Errorf("parse mysql root DSN: %w", err)
-	}
-	cfg.DBName = ""
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		return fmt.Errorf("open mysql admin connection: %w", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(
-		"SELECT table_name FROM information_schema.tables "+
-			"WHERE table_schema = ? AND table_type = 'BASE TABLE' "+
-			"AND table_name <> 'schema_migrations'",
-		database,
-	)
-	if err != nil {
-		return fmt.Errorf("list mysql database %q tables: %w", database, err)
-	}
-	defer rows.Close()
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("scan mysql table name: %w", err)
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list mysql database %q tables: %w", database, err)
-	}
-	if len(tables) == 0 {
-		// Nothing migrated yet (e.g. Reset called before any construction
-		// ever ran migrations against this database) -- nothing to
-		// truncate.
-		return nil
-	}
-
-	conn, err := db.Conn(context.Background())
-	if err != nil {
-		return fmt.Errorf("acquire mysql admin connection: %w", err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(
-		context.Background(), "SET FOREIGN_KEY_CHECKS=0",
-	); err != nil {
-		return fmt.Errorf("disable mysql foreign key checks: %w", err)
-	}
-	defer func() {
-		_, _ = conn.ExecContext(
-			context.Background(), "SET FOREIGN_KEY_CHECKS=1",
-		)
-	}()
-	quotedDB := mysqlQuoteIdentifier(database)
-	for _, table := range tables {
-		quoted := quotedDB + "." + mysqlQuoteIdentifier(table)
-		if _, err := conn.ExecContext(
-			context.Background(), "TRUNCATE TABLE "+quoted,
-		); err != nil {
-			return fmt.Errorf(
-				"truncate mysql table %s: %w",
-				quoted,
-				err,
-			)
-		}
-	}
-	return nil
 }
 
 // mysqlQuoteIdentifier backtick-quotes a MySQL identifier, doubling any
