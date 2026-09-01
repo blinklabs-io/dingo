@@ -460,15 +460,24 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
 		return
 	}
-	ls.deferredHeaderValidationMu.Lock()
-	defer ls.deferredHeaderValidationMu.Unlock()
+	// Lock and recheck PER KEY rather than across the whole loop: a large
+	// eviction must not hold deferredHeaderValidationMu across one DB
+	// transaction per marker, which would block header apply and new deferrals
+	// for the full cleanup. The recheck and the delete stay together under the
+	// per-key lock so a point re-deferred (and re-persisted) between them can't
+	// have its fresh marker dropped; the lock is released between keys so apply
+	// can interleave.
 	for _, k := range mapKeys {
-		// Re-admitted since eviction: its marker is now backing a live pin.
+		ls.deferredHeaderValidationMu.Lock()
 		if _, ok := ls.deferredHeaderValidation[k]; ok {
+			// Re-admitted since eviction: its marker is now backing a live pin.
+			ls.deferredHeaderValidationMu.Unlock()
 			continue
 		}
 		syncKey := deferredHeaderValidationSyncStatePrefix + k
-		if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+		err := ls.db.DeleteSyncState(syncKey, nil)
+		ls.deferredHeaderValidationMu.Unlock()
+		if err != nil {
 			ls.config.Logger.Warn(
 				"failed to delete stale deferred-header marker",
 				"key", syncKey,

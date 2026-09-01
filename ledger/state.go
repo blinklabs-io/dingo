@@ -1456,6 +1456,23 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 
 	ls.loadMithrilTrustBoundary()
+	// Repopulate the in-memory deferred-header set from the persisted markers
+	// so the snapshot retention floor covers headers still awaiting apply from
+	// before the restart (issue #3727, finding 3): without this the first
+	// post-restart epoch cleanup could prune a pool-stake snapshot such a
+	// header needs. Runs here, before the database worker pool and cleanup
+	// timer start, because it only reads ls.db directly and must FAIL CLOSED:
+	// a scan failure that continued would leave the floor unpinned, and once
+	// the apply cursor passes a pre-restart deferred header its now-pruned
+	// snapshot is hard-rejected instead of deferred (the exact bug this PR
+	// fixes). Aborting before any resource starts means there is nothing to
+	// unwind on failure.
+	if err := ls.repopulateDeferredHeaderValidation(); err != nil {
+		return fmt.Errorf(
+			"failed to repopulate deferred-header validation set: %w",
+			err,
+		)
+	}
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -1497,21 +1514,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Load current tip
 	if err := ls.loadTip(); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
-	}
-	// Repopulate the in-memory deferred-header set from the persisted markers
-	// so the snapshot retention floor covers headers still awaiting apply from
-	// before the restart (issue #3727, finding 3): without this the first
-	// post-restart epoch cleanup could prune a pool-stake snapshot such a
-	// header needs. Fail closed: a scan failure that continued would leave the
-	// floor unpinned, and once the apply cursor passes a pre-restart deferred
-	// header its now-pruned snapshot is hard-rejected instead of deferred (the
-	// exact bug this PR fixes). Abort startup so the operator retries rather
-	// than run with an unpinned retention floor.
-	if err := ls.repopulateDeferredHeaderValidation(); err != nil {
-		return fmt.Errorf(
-			"failed to repopulate deferred-header validation set: %w",
-			err,
-		)
 	}
 	// Reconstruct the evolving-nonce fold across Mithril "gap blocks" (blocks
 	// between the ledger-state snapshot slot and the trust boundary) that were
