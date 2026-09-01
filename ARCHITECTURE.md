@@ -8001,8 +8001,8 @@ merge; unit and conformance tests do not exercise full multi-node timing.
 
 ### Epoch Boundary State Transitions
 
-`processEpochRollover` (ledger) applies the Conway EPOCH rule's state changes in
-a fixed order, mirroring `cardano-ledger`'s sequencing:
+`processEpochRollover` (ledger) applies the Conway-or-later EPOCH rule's state
+changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
 
 1. Delayed stake reward application (`applyStakeRewards`): apply the reward
    update derived from the mark snapshot three epochs back — credit spendable
@@ -8063,6 +8063,13 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    Proposals already durably marked enacted at this exact boundary are replayed
    fail-closed instead: skipping one after the stake-reward pot reset would keep
    its enacted marker while losing its effects.
+
+   The governance adapter resolves both Conway and Dijkstra protocol-parameter
+   types. Action decoding follows the active parameter type, so a Dijkstra
+   parameter-change payload is decoded as a Dijkstra action and update rather
+   than the narrower Conway shape. Deterministic preflight clones protocol
+   parameters through `eras.CloneGovernanceProtocolParameters`, preserving
+   Dijkstra's extension fields; unsupported future parameter types fail closed.
 
    The subsequent RATIFY pass carries the post-ENACT treasury as a running
    budget. Each accepted treasury withdrawal consumes that budget; an
