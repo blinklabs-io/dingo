@@ -52,6 +52,11 @@ func TestMain(m *testing.M) {
 	// of returning early.
 	cleanupFailed := false
 
+	if err := cleanupCorpusTestdata(); err != nil {
+		log.Printf("conformance: remove shared vector extraction: %v", err)
+		cleanupFailed = true
+	}
+
 	if postgresProcessBlobDir != "" {
 		if isPostgresConformanceConfigured() {
 			if err := dropPostgresSchema(
