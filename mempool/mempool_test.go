@@ -1385,8 +1385,9 @@ func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 	assert.Equal(t, int64(0), retainedConsumerCacheBytes(second), "consumer removal releases bytes")
 }
 
-// TestMempoolConsumer_RemovalRejectsLaterCacheWrites verifies that cancellation
-// prevents a removed consumer from reserving bytes or repopulating its cache.
+// TestMempoolConsumer_RemovalRejectsLaterCacheWrites directly verifies the
+// cacheTransaction cancellation guard: a removed consumer cannot reserve bytes
+// or repopulate its cache even if an insertion is attempted after cancellation.
 func TestMempoolConsumer_RemovalRejectsLaterCacheWrites(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -4207,10 +4208,12 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnConsumerRemoval(t *testing.T) {
 	))
 }
 
-// TestMempoolConsumer_RemovalCannotRepopulateFullCache verifies that a NextTx
-// blocked on a full cache cannot race the final removal clear, insert another
-// body, and leak its aggregate byte reservation.
-func TestMempoolConsumer_RemovalCannotRepopulateFullCache(t *testing.T) {
+// TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes verifies the
+// concurrent-removal end state: a NextTx blocked on a full cache is released
+// without another advertisement, and the final clear releases both byte
+// counters. TestMempoolConsumer_RemovalRejectsLaterCacheWrites separately
+// exercises the post-cancellation cacheTransaction guard.
+func TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
