@@ -312,4 +312,10 @@ func TestProcessTrustedBlockBatchesPassesStrictTrust(t *testing.T) {
 		err,
 		"immutable-load replay must reject the over-declared-budget block",
 	)
+	// Assert the SPECIFIC phase-2 verdict, not merely that some error
+	// occurred, so an incidental later state-transition or DB error cannot
+	// mask a case where the validator ran but did not reject on budget.
+	var plutusErr conway.PlutusScriptFailedError
+	require.ErrorAs(t, err, &plutusErr)
+	require.ErrorIs(t, plutusErr.Err, errOverDeclaredBudget)
 }
