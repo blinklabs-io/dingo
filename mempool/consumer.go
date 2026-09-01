@@ -38,6 +38,9 @@ type MempoolConsumer struct {
 	// onWaitForTx is a test-only hook invoked after a blocking NextTx has
 	// subscribed for additions and is ready to be cancelled.
 	onWaitForTx func()
+	// onCacheCleared is a test-only hook invoked after ClearCache releases
+	// the cache lifecycle lock.
+	onCacheCleared func()
 }
 
 func newConsumer(
@@ -210,12 +213,15 @@ func (m *MempoolConsumer) GetTxFromCache(hash string) *MempoolTransaction {
 func (m *MempoolConsumer) ClearCache() {
 	if m != nil {
 		m.cacheMutex.Lock()
-		defer m.cacheMutex.Unlock()
 		released := m.cacheBytes
 		m.cache = make(map[string]*MempoolTransaction)
 		m.cacheBytes = 0
 		m.mempool.releaseRelayCacheBytes(released)
 		m.signalCacheSlotLocked()
+		m.cacheMutex.Unlock()
+		if m.onCacheCleared != nil {
+			m.onCacheCleared()
+		}
 	}
 }
 

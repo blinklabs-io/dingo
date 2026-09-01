@@ -4164,6 +4164,55 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnConsumerRemoval(t *testing.T) {
 	))
 }
 
+func TestMempoolConsumer_RemovalCannotRepopulateFullCache(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1024 * 1024,
+		ConsumerCacheSize: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
+
+	addMockTransactions(t, m, 2)
+	connID := newTestConnectionId(1)
+	consumer := mustAddConsumer(t, m, connID)
+	require.NotNil(t, consumer.NextTx(false))
+
+	got := make(chan *MempoolTransaction, 1)
+	go func() { got <- consumer.NextTx(true) }()
+	dingotestutil.RequireNoReceive(t, got, 100*time.Millisecond, "cache is full")
+
+	cacheCleared := make(chan struct{})
+	releaseClear := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClear) }) }
+	defer release()
+	consumer.onCacheCleared = func() {
+		close(cacheCleared)
+		<-releaseClear
+	}
+	removed := make(chan struct{})
+	go func() {
+		m.RemoveConsumer(connID)
+		close(removed)
+	}()
+	dingotestutil.RequireReceive(t, cacheCleared, 2*time.Second, "final cache clear")
+
+	assert.Nil(t, dingotestutil.RequireReceive(
+		t, got, 2*time.Second, "blocking NextTx released by removal",
+	), "cancelled consumer must not advertise another transaction")
+	release()
+	dingotestutil.RequireReceive(t, removed, 2*time.Second, "consumer removal")
+	assert.Equal(t, int64(0), retainedConsumerCacheBytes(consumer))
+	m.relayCacheMutex.Lock()
+	assert.Equal(t, int64(0), m.relayCacheBytes)
+	m.relayCacheMutex.Unlock()
+}
+
 // blockingRejectingValidator blocks until released like
 // blockingSessionValidator, then reports one designated transaction invalid so
 // a test can observe whether revalidation actually published its result.
