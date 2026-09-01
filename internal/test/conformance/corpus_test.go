@@ -75,6 +75,10 @@ func corpusTestdataRoot() (string, error) {
 			testdataErr = fmt.Errorf("create testdata dir: %w", err)
 			return
 		}
+		// Record the directory before extraction, not after: a failure
+		// below still leaves a real directory on disk, and
+		// cleanupCorpusTestdata's empty-string early return would skip it.
+		testdataDir = dir
 		// ExtractEmbeddedTestdata returns the extracted root, which is a
 		// "testdata" subdirectory of dir, not dir itself. Use the returned
 		// path; dir is only what gets removed on cleanup.
@@ -83,7 +87,7 @@ func corpusTestdataRoot() (string, error) {
 			testdataErr = fmt.Errorf("extract embedded testdata: %w", err)
 			return
 		}
-		testdataDir, testdataRoot = dir, root
+		testdataRoot = root
 	})
 	return testdataRoot, testdataErr
 }
@@ -231,6 +235,14 @@ func corpusCounts(results []conformance.VectorResult) (int, int) {
 // means extraction or discovery diverged rather than a rule behaving
 // differently; a vector failing here that SQLite passed is a dialect
 // divergence, which is what running the corpus on this backend is for.
+//
+// The vector comparison is deliberately one-directional. The opposite
+// divergence -- SQLite failing a vector this backend passes -- is not silent:
+// assertCorpus runs over every backend's own results, including SQLite's in
+// TestRulesConformanceVectors, and fails on any vector that backend failed. So
+// a divergence in either direction turns the run red; naming it here as well
+// would only duplicate the SQLite gate. What this direction adds is
+// attribution, pointing at the backend rather than at the corpus.
 func assertBackendMatchesSqlite(
 	t *testing.T,
 	backend string,

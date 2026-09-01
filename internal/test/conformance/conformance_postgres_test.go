@@ -141,7 +141,24 @@ var (
 func postgresCorpusResults(t *testing.T) []conformance.VectorResult {
 	t.Helper()
 	postgresCorpusOnce.Do(func() {
-		sm := newTestPostgresConformanceManager(t)
+		// Construct here rather than through
+		// newTestPostgresConformanceManager: that helper reports a
+		// construction failure with require.NoError on its own
+		// *testing.T, and sync.Once marks itself done even when its
+		// function unwinds through t.FailNow's runtime.Goexit. A later
+		// consumer in the same process would then read a zero-value
+		// corpusRun -- nil results and nil error -- pass its
+		// require.NoError, and fail in assertCorpus with a misleading
+		// "produced no vectors" instead of the construction failure.
+		// Storing the error keeps corpusRun's documented contract, and
+		// matches sqliteCorpusResults.
+		sm, err := NewDingoPostgresStateManager(postgresConformanceDSN())
+		if err != nil {
+			postgresCorpusRun = corpusRun{
+				err: fmt.Errorf("new postgres state manager: %w", err),
+			}
+			return
+		}
 		defer sm.Close()
 		postgresCorpusRun = replayCorpus(sm)
 	})

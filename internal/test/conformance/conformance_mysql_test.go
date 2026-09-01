@@ -117,7 +117,24 @@ var (
 func mysqlCorpusResults(t *testing.T) []conformance.VectorResult {
 	t.Helper()
 	mysqlCorpusOnce.Do(func() {
-		sm := newTestMysqlConformanceManager(t)
+		// Construct here rather than through
+		// newTestMysqlConformanceManager: that helper reports a
+		// construction failure with require.NoError on its own
+		// *testing.T, and sync.Once marks itself done even when its
+		// function unwinds through t.FailNow's runtime.Goexit. A later
+		// consumer in the same process would then read a zero-value
+		// corpusRun -- nil results and nil error -- pass its
+		// require.NoError, and fail in assertCorpus with a misleading
+		// "produced no vectors" instead of the construction failure.
+		// Storing the error keeps corpusRun's documented contract, and
+		// matches sqliteCorpusResults.
+		sm, err := NewDingoMysqlStateManager(mysqlConformanceRootDSN())
+		if err != nil {
+			mysqlCorpusRun = corpusRun{
+				err: fmt.Errorf("new mysql state manager: %w", err),
+			}
+			return
+		}
 		defer sm.Close()
 		mysqlCorpusRun = replayCorpus(sm)
 	})
