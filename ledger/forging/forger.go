@@ -1247,11 +1247,12 @@ func buildLeiosEB(
 		if !ok || len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
+		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
+		// on one line so the directive stays attached to the conversion.
+		size := uint16(len(tx.Cbor)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.NewBlake2b256(raw),
-			TransactionSize: uint16(
-				len(tx.Cbor),
-			), // #nosec G115 -- bounded above
+			TransactionSize: size,
 		})
 		bodies = append(bodies, tx.Cbor)
 	}
