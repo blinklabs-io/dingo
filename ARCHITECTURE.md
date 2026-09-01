@@ -2559,6 +2559,19 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
+- `Constitution` exposes the enacted constitution — anchor URL, anchor hash,
+  and the optional guardrails policy hash — mapped from the stored
+  `constitution` row by `ledger/governance`'s `ConstitutionFromModel`, which
+  the conformance state provider in `internal/test/conformance` reuses so
+  both report the same shape. gouroboros' guardrails rule reads a nil
+  constitution as "this chain has no guardrails script" and reads the policy
+  hash by nil-ness as well as by value, so a stored zero-length policy hash
+  is normalized to nil, and constitution state that is missing, malformed, or
+  unreadable fails closed with `governance.ErrConstitutionUnavailable`
+  instead of reporting an empty-but-valid constitution. Guardrails
+  validation then rejects the transaction with
+  `conway.ConstitutionLookupError` rather than accepting a parameter-change
+  or treasury-withdrawal proposal that carries no policy hash.
 - `RewardAccountBalance` lookup for a full, tag-aware stake credential. It
   returns the active account's current reward balance, including zero, or nil
   for an absent or inactive account. This implements the ledger-state
