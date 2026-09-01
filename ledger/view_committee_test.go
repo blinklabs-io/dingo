@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -295,6 +296,129 @@ func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
 	require.Equal(t, uint64(42), scriptVoter.ExpiryEpoch)
 }
 
+func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
+	tests := []struct {
+		name       string
+		expiries   []uint64
+		wantMember bool
+	}{
+		{
+			name:       "shared credential with boundary-active member",
+			expiries:   []uint64{5, 6},
+			wantMember: true,
+		},
+		{
+			name:       "expired member",
+			expiries:   []uint64{4},
+			wantMember: false,
+		},
+	}
+	eras := []struct {
+		name     string
+		pparams  lcommon.ProtocolParameters
+		buildTx  func(lcommon.VotingProcedures) lcommon.Transaction
+		validate func(
+			lcommon.Transaction,
+			uint64,
+			lcommon.LedgerState,
+			lcommon.ProtocolParameters,
+		) error
+	}{
+		{
+			name:    "conway",
+			pparams: &conway.ConwayProtocolParameters{},
+			buildTx: func(votes lcommon.VotingProcedures) lcommon.Transaction {
+				return &conway.ConwayTransaction{
+					Body: conway.ConwayTransactionBody{
+						TxVotingProcedures: votes,
+					},
+					TxIsValid: true,
+				}
+			},
+			validate: eras.ValidateTxConway,
+		},
+		{
+			name:    "dijkstra",
+			pparams: &gdijkstra.DijkstraProtocolParameters{},
+			buildTx: func(votes lcommon.VotingProcedures) lcommon.Transaction {
+				return &gdijkstra.DijkstraTransaction{
+					Body: gdijkstra.DijkstraTransactionBody{
+						TxVotingProcedures: votes,
+					},
+					TxIsValid: true,
+				}
+			},
+			validate: eras.ValidateTxDijkstra,
+		},
+	}
+
+	for _, test := range tests {
+		for _, era := range eras {
+			t.Run(test.name+"/"+era.name, func(t *testing.T) {
+				lv, db := committeeTestView(t, era.pparams)
+				lv.pinCommitteeState(5, era.pparams)
+				lv.skipPhase2Validation = true
+				hot := committeeTestCredential(0xb0)
+				members := make(
+					[]*models.CommitteeMember,
+					0,
+					len(test.expiries),
+				)
+				for i, expiry := range test.expiries {
+					cold := committeeTestCredential(byte(0xb1 + i))
+					members = append(members, &models.CommitteeMember{
+						ColdCredentialTag: uint8(cold.CredType),
+						ColdCredHash:      cold.Credential[:],
+						ExpiresEpoch:      expiry,
+					})
+					seedCommitteeCredentialAuthorization(
+						t,
+						db,
+						cold,
+						hot,
+						uint64(i+1),
+						1,
+					)
+				}
+				require.NoError(t, db.SetCommitteeMembers(members, nil))
+
+				member, err := lv.CommitteeHotCredentialMember(hot)
+				require.NoError(t, err)
+				if test.wantMember {
+					require.NotNil(
+						t,
+						member,
+						"at least one active matching member must authorize the hot credential",
+					)
+				} else {
+					require.Nil(
+						t,
+						member,
+						"a member expired before the pinned epoch must not authorize the hot credential",
+					)
+				}
+
+				voter := &lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: [28]byte(hot.Credential),
+				}
+				err = era.validate(
+					era.buildTx(lcommon.VotingProcedures{voter: {}}),
+					0,
+					lv,
+					era.pparams,
+				)
+				var unknown conway.UnknownVoterError
+				if test.wantMember {
+					require.False(t, errors.As(err, &unknown), "%v", err)
+				} else {
+					require.ErrorAs(t, err, &unknown)
+				}
+			})
+		}
+	}
+}
+
 func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0x91)
@@ -356,6 +480,48 @@ func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
 	stored, err = db.GetCommitteeMembers(nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 2)
+}
+
+func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
+	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	cold := committeeTestCredential(0xa2)
+	require.NoError(t, db.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(cold.CredType),
+			ColdCredHash:      cold.Credential[:],
+			ExpiresEpoch:      20,
+			TermStartSlot:     0,
+			TermStartSlotSet:  true,
+			AddedSlot:         10,
+		}},
+		nil,
+	))
+
+	assertTermStart := func(wantStart uint64) {
+		t.Helper()
+		members, err := db.GetCommitteeMembers(nil)
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+		require.Equal(t, wantStart, members[0].TermStartSlot)
+		require.True(t, members[0].TermStartSlotSet)
+	}
+	assertTermStart(0)
+
+	require.NoError(t, db.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(cold.CredType),
+			ColdCredHash:      cold.Credential[:],
+			ExpiresEpoch:      30,
+			TermStartSlot:     15,
+			TermStartSlotSet:  true,
+			AddedSlot:         20,
+		}},
+		nil,
+	))
+	assertTermStart(15)
+
+	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(15, nil))
+	assertTermStart(0)
 }
 
 func TestLedgerViewCommitteeMember(t *testing.T) {

@@ -411,6 +411,31 @@ func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 	assert.Nil(t, got, "NoConfidence should clear the enacted quorum")
 }
 
+func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+	credential := &lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(testBytes(28, 0x7a)),
+	}
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 50},
+		&lcommon.UpdateCommitteeGovAction{
+			CredEpochs: map[*lcommon.Credential]uint{credential: 20},
+			Quorum:     cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		0,
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	require.Zero(
+		t,
+		members[0].TermStartSlot,
+		"slot zero is a valid membership term start, not an unset marker",
+	)
+}
+
 func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	t *testing.T,
 ) {

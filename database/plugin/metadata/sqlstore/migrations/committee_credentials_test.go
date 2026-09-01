@@ -32,7 +32,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 7)
+	require.Len(t, registry, 8)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -72,15 +72,41 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	runTo(registry[:7])
+	explicitZeroCold := []byte{0x55, 0x66}
+	_, err = db.Exec(
+		"INSERT INTO committee_member "+
+			"(cold_credential_tag, cold_cred_hash, expires_epoch, "+
+			"term_start_slot, added_slot) VALUES (?, ?, ?, ?, ?)",
+		1,
+		explicitZeroCold,
+		42,
+		0,
+		23,
+	)
+	require.NoError(t, err)
+
 	runTo(registry)
 	var coldTag, termStart uint64
+	var termStartSet bool
 	require.NoError(t, db.QueryRow(
-		"SELECT cold_credential_tag, term_start_slot "+
+		"SELECT cold_credential_tag, term_start_slot, term_start_slot_set "+
 			"FROM committee_member WHERE cold_cred_hash = ?",
 		cold,
-	).Scan(&coldTag, &termStart))
+	).Scan(&coldTag, &termStart, &termStartSet))
 	require.Zero(t, coldTag)
 	require.Equal(t, uint64(17), termStart)
+	require.True(t, termStartSet)
+
+	var explicitTermStart uint64
+	var explicitTermStartSet bool
+	require.NoError(t, db.QueryRow(
+		"SELECT term_start_slot, term_start_slot_set "+
+			"FROM committee_member WHERE cold_cred_hash = ?",
+		explicitZeroCold,
+	).Scan(&explicitTermStart, &explicitTermStartSet))
+	require.Zero(t, explicitTermStart)
+	require.True(t, explicitTermStartSet)
 
 	var authColdTag, authHotTag uint64
 	require.NoError(t, db.QueryRow(

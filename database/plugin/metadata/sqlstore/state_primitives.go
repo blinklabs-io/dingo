@@ -206,8 +206,10 @@ func (s *Store) SetCommitteeMembers(
 					return err
 				}
 				termStartSlot := member.TermStartSlot
-				if termStartSlot == 0 {
+				termStartSlotSet := member.TermStartSlotSet
+				if !termStartSlotSet {
 					termStartSlot = member.AddedSlot
+					termStartSlotSet = true
 				}
 				sqlTermStartSlot, err := checkedInt64(termStartSlot)
 				if err != nil {
@@ -241,6 +243,7 @@ func (s *Store) SetCommitteeMembers(
 						ColdCredHash:      member.ColdCredHash,
 						ExpiresEpoch:      expiresEpoch,
 						TermStartSlot:     sqlTermStartSlot,
+						TermStartSlotSet:  termStartSlotSet,
 						AddedSlot:         addedSlot,
 						DeletedSlot:       deletedSlot,
 					},
@@ -493,6 +496,7 @@ func committeeMemberFromSQLite(
 		ColdCredHash:      row.ColdCredHash,
 		ExpiresEpoch:      uint64(row.ExpiresEpoch),
 		TermStartSlot:     uint64(row.TermStartSlot),
+		TermStartSlotSet:  row.TermStartSlotSet,
 		AddedSlot:         uint64(row.AddedSlot),
 		DeletedSlot:       uint64Pointer(row.DeletedSlot),
 	}

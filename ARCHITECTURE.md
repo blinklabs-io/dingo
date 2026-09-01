@@ -2564,7 +2564,10 @@ The `LedgerView` interface provides query access to ledger state:
   term-scoped permanent resignation, including a resignation with no earlier
   authorization. Each membership carries a `term_start_slot`; explicit removal
   followed by re-election creates a fresh term without discarding the prior
-  term's rollback history. The legacy hash-only `CommitteeMember` and
+  term's rollback history, and an explicit presence bit preserves a valid
+  slot-zero term start. Hot-voter resolution accepts any matching exact tagged
+  authorization whose member is active at the pinned epoch; expiry is
+  inclusive. The legacy hash-only `CommitteeMember` and
   `CommitteeMembers` methods omit ambiguous same-hash key/script identities
   instead of selecting one by map iteration.
 - The Conway and Dijkstra validation compositions replace the pinned

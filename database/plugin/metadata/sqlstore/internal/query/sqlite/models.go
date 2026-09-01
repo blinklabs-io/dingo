@@ -85,6 +85,7 @@ type CommitteeMember struct {
 	ColdCredHash      []byte
 	ExpiresEpoch      int64
 	TermStartSlot     int64
+	TermStartSlotSet  bool
 	AddedSlot         int64
 	DeletedSlot       sql.NullInt64
 }

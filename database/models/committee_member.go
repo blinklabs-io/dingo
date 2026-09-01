@@ -26,9 +26,12 @@ type CommitteeMember struct {
 	ColdCredentialTag uint8
 	ColdCredHash      []byte // 28-byte credential hash
 	ExpiresEpoch      uint64
-	TermStartSlot     uint64  // Slot from which credentials apply to this term
-	AddedSlot         uint64  // Slot when imported/registered
-	DeletedSlot       *uint64 // For rollback support
+	TermStartSlot     uint64 // Slot from which credentials apply to this term
+	// TermStartSlotSet distinguishes an explicit slot-zero term start from a
+	// legacy caller that leaves TermStartSlot unset and expects AddedSlot.
+	TermStartSlotSet bool
+	AddedSlot        uint64  // Slot when imported/registered
+	DeletedSlot      *uint64 // For rollback support
 }
 
 // CommitteeCredential preserves a committee credential's key/script tag with

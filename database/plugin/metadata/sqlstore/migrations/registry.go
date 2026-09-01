@@ -36,6 +36,7 @@ const (
 	leiosSnapshotKeySchemaRelease              = "leios-snapshot-keys"
 	governanceRatificationHistorySchemaRelease = "governance-ratification-history"
 	committeeCredentialTagsSchemaRelease       = "committee-credential-tags"
+	committeeTermStartPresenceSchemaRelease    = "committee-term-start-presence"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -55,6 +56,7 @@ var schemaVersions = []struct {
 		Dir:     "v6",
 	},
 	{Version: 7, Name: committeeCredentialTagsSchemaRelease, Dir: "v7"},
+	{Version: 8, Name: committeeTermStartPresenceSchemaRelease, Dir: "v8"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

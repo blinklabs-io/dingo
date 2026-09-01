@@ -3044,9 +3044,12 @@ func importGovState(
 						)
 					}
 					members[i] = &models.CommitteeMember{
-						ColdCredHash: cm.ColdCredential.Hash,
-						ExpiresEpoch: cm.ExpiresEpoch,
-						AddedSlot:    currentEpochSlot,
+						ColdCredentialTag: uint8(cm.ColdCredential.Type),
+						ColdCredHash:      cm.ColdCredential.Hash,
+						ExpiresEpoch:      cm.ExpiresEpoch,
+						TermStartSlot:     currentEpochSlot,
+						TermStartSlotSet:  true,
+						AddedSlot:         currentEpochSlot,
 					}
 				}
 				if err := store.SetCommitteeMembers(

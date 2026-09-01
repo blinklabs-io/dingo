@@ -126,6 +126,7 @@ CREATE TABLE committee_member (
     cold_cred_hash BLOB NOT NULL,
     expires_epoch INTEGER NOT NULL,
     term_start_slot INTEGER NOT NULL,
+    term_start_slot_set BOOLEAN NOT NULL DEFAULT FALSE,
     added_slot INTEGER NOT NULL,
     deleted_slot INTEGER,
     UNIQUE (cold_credential_tag, cold_cred_hash, added_slot)

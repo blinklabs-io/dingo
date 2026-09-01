@@ -497,6 +497,7 @@ func applyUpdateCommittee(
 			ColdCredHash:      hash[:],
 			ExpiresEpoch:      uint64(expiry),
 			TermStartSlot:     termStartSlot,
+			TermStartSlotSet:  true,
 			AddedSlot:         ctx.Slot,
 		})
 	}

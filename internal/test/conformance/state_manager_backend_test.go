@@ -396,6 +396,69 @@ func TestCommitteeMemberResignationPermanentlyClearsHotKey(t *testing.T) {
 	assertState(true, nil)
 }
 
+func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
+	tests := []struct {
+		name       string
+		expiries   []uint64
+		wantMember bool
+	}{
+		{
+			name:       "shared credential with boundary-active member",
+			expiries:   []uint64{5, 6},
+			wantMember: true,
+		},
+		{
+			name:       "expired member",
+			expiries:   []uint64{4},
+			wantMember: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m, err := NewDingoStateManager()
+			require.NoError(t, err)
+			defer func() { require.NoError(t, m.Close()) }()
+
+			hot := testHash28(0x73)
+			state := &conformance.ParsedInitialState{
+				CurrentEpoch:         5,
+				CommitteeMembers:     make(map[common.Blake2b224]uint64),
+				HotKeyAuthorizations: make(map[common.Blake2b224]common.Blake2b224),
+			}
+			for i, expiry := range test.expiries {
+				cold := testHash28(byte(0x74 + i))
+				state.CommitteeMembers[cold] = expiry
+				state.HotKeyAuthorizations[cold] = hot
+			}
+			require.NoError(t, m.LoadInitialState(
+				state,
+				&conway.ConwayProtocolParameters{},
+			))
+
+			member, err := NewDingoStateProvider(m).CommitteeHotCredentialMember(
+				common.Credential{
+					CredType:   common.CredentialTypeAddrKeyHash,
+					Credential: hot,
+				},
+			)
+			require.NoError(t, err)
+			if test.wantMember {
+				require.NotNil(
+					t,
+					member,
+					"at least one active matching member must authorize the hot credential",
+				)
+			} else {
+				require.Nil(
+					t,
+					member,
+					"a member expired before the current epoch must not authorize the hot credential",
+				)
+			}
+		})
+	}
+}
+
 // TestPoolCurrentStatePendingRetirement proves PoolCurrentState's pending
 // retirement epoch tracks the pool's latest retirement certificate by
 // insertion order (AddedSlot), not the maximum epoch value across every

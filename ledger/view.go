@@ -753,11 +753,11 @@ func (lv *LedgerView) committeeSnapshot() (
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	currentEpoch, _ := lv.committeeSnapshot()
 	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
 	}
-	var matched *lcommon.CommitteeMember
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != uint8(hotCredential.CredType) ||
 			!bytes.Equal(authorization.HotCredential, hotCredential.Credential[:]) {
@@ -770,15 +770,13 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		if err != nil {
 			return nil, err
 		}
-		if member == nil || member.Resigned {
+		if member == nil || member.Resigned ||
+			member.ExpiryEpoch < currentEpoch {
 			continue
 		}
-		if matched != nil {
-			return nil, nil
-		}
-		matched = member
+		return member, nil
 	}
-	return matched, nil
+	return nil, nil
 }
 
 // CommitteeMembers returns all seated committee members.

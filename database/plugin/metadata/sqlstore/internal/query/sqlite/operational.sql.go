@@ -1508,7 +1508,7 @@ func (q *Queries) GetBlockSlotRangeStats(ctx context.Context, arg GetBlockSlotRa
 
 const getCommitteeMembers = `-- name: GetCommitteeMembers :many
 SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       added_slot, deleted_slot
+       term_start_slot_set, added_slot, deleted_slot
 FROM committee_member
 WHERE deleted_slot IS NULL
 ORDER BY id
@@ -1529,6 +1529,7 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
 			&i.TermStartSlot,
+			&i.TermStartSlotSet,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -1547,7 +1548,7 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 
 const getCommitteeMembersIncludeDeleted = `-- name: GetCommitteeMembersIncludeDeleted :many
 SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       added_slot, deleted_slot
+       term_start_slot_set, added_slot, deleted_slot
 FROM committee_member
 ORDER BY id
 `
@@ -1567,6 +1568,7 @@ func (q *Queries) GetCommitteeMembersIncludeDeleted(ctx context.Context) ([]Comm
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
 			&i.TermStartSlot,
+			&i.TermStartSlotSet,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -4325,11 +4327,12 @@ func (q *Queries) SetBlockNonce(ctx context.Context, arg SetBlockNonceParams) er
 const setCommitteeMember = `-- name: SetCommitteeMember :one
 INSERT INTO committee_member (
     cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-    added_slot, deleted_slot
-) VALUES (?, ?, ?, ?, ?, ?)
+    term_start_slot_set, added_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (cold_credential_tag, cold_cred_hash, added_slot) DO UPDATE SET
     expires_epoch = excluded.expires_epoch,
     term_start_slot = excluded.term_start_slot,
+    term_start_slot_set = excluded.term_start_slot_set,
     added_slot = excluded.added_slot,
     deleted_slot = excluded.deleted_slot
 RETURNING id
@@ -4340,6 +4343,7 @@ type SetCommitteeMemberParams struct {
 	ColdCredHash      []byte
 	ExpiresEpoch      int64
 	TermStartSlot     int64
+	TermStartSlotSet  bool
 	AddedSlot         int64
 	DeletedSlot       sql.NullInt64
 }
@@ -4350,6 +4354,7 @@ func (q *Queries) SetCommitteeMember(ctx context.Context, arg SetCommitteeMember
 		arg.ColdCredHash,
 		arg.ExpiresEpoch,
 		arg.TermStartSlot,
+		arg.TermStartSlotSet,
 		arg.AddedSlot,
 		arg.DeletedSlot,
 	)

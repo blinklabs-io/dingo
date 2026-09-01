@@ -243,11 +243,12 @@ WHERE deleted_slot > ?;
 -- name: SetCommitteeMember :one
 INSERT INTO committee_member (
     cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-    added_slot, deleted_slot
-) VALUES (?, ?, ?, ?, ?, ?)
+    term_start_slot_set, added_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (cold_credential_tag, cold_cred_hash, added_slot) DO UPDATE SET
     expires_epoch = excluded.expires_epoch,
     term_start_slot = excluded.term_start_slot,
+    term_start_slot_set = excluded.term_start_slot_set,
     added_slot = excluded.added_slot,
     deleted_slot = excluded.deleted_slot
 RETURNING id;
@@ -265,14 +266,14 @@ LIMIT 1;
 
 -- name: GetCommitteeMembers :many
 SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       added_slot, deleted_slot
+       term_start_slot_set, added_slot, deleted_slot
 FROM committee_member
 WHERE deleted_slot IS NULL
 ORDER BY id;
 
 -- name: GetCommitteeMembersIncludeDeleted :many
 SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       added_slot, deleted_slot
+       term_start_slot_set, added_slot, deleted_slot
 FROM committee_member
 ORDER BY id;
 

@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 7)
+	require.Len(t, registry, 8)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -86,6 +86,15 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[5].SQL["sqlite"].Expand[3],
 		"INSERT INTO `governance_proposal_ratification_history`",
 	)
+	require.Equal(t, 7, registry[6].Version)
+	require.Equal(t, "committee-credential-tags", registry[6].Name)
+	require.Equal(t, 8, registry[7].Version)
+	require.Equal(t, "committee-term-start-presence", registry[7].Name)
+	require.Contains(
+		t,
+		registry[7].SQL["sqlite"].Expand,
+		"UPDATE `committee_member` SET `term_start_slot_set` = true",
+	)
 }
 
 func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
@@ -106,6 +115,11 @@ func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
 		"DROP INDEX `idx_committee_member_cold_cred_hash` ON `committee_member`",
 	)
 	require.NotContains(t, mysqlSQL, "DROP INDEX IF EXISTS")
+
+	postgresPresence := strings.Join(postgres[7].SQL["postgres"].Expand, "\n")
+	require.Contains(t, postgresPresence, `"term_start_slot_set" boolean`)
+	mysqlPresence := strings.Join(mysql[7].SQL["mysql"].Expand, "\n")
+	require.Contains(t, mysqlPresence, "`term_start_slot_set` boolean")
 }
 
 // TestMySQLRegistryPrefixesAccountBaselinePrimaryKey guards the v4 migration's
@@ -169,7 +183,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 7)
+	require.Len(t, registry, 8)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

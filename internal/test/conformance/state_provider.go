@@ -627,7 +627,6 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("lookup active committee hot credentials: %w", err)
 	}
-	var matched *common.CommitteeMember
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != uint8(hotCredential.CredType) ||
 			common.NewBlake2b224(authorization.HotCredential) !=
@@ -641,15 +640,13 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		if err != nil {
 			return nil, err
 		}
-		if member == nil || member.Resigned {
+		if member == nil || member.Resigned ||
+			member.ExpiryEpoch < p.manager.currentEpoch {
 			continue
 		}
-		if matched != nil {
-			return nil, nil
-		}
-		matched = member
+		return member, nil
 	}
-	return matched, nil
+	return nil, nil
 }
 
 // DRepRegistration looks up a DRep registration by credential hash. The
