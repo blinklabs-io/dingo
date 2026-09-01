@@ -132,6 +132,19 @@ type LeiosBlockBuilder interface {
 	) (ledger.Block, []byte, error)
 }
 
+// credentialGenerationBlockBuilder lets the production builder consume the
+// exact credential generation pinned by BlockForger. It is intentionally
+// package-private: BlockBuilder and LeiosBlockBuilder remain API-compatible,
+// while DefaultBlockBuilder avoids re-reading mutable shared credentials.
+type credentialGenerationBlockBuilder interface {
+	buildBlockWithCredentialGeneration(
+		slot uint64,
+		kesPeriod uint64,
+		leios LeiosBlockData,
+		generation *credentialGeneration,
+	) (ledger.Block, []byte, error)
+}
+
 // BlockBroadcaster submits built blocks to the chain.
 type BlockBroadcaster interface {
 	// AddBlock adds a block to the local chain and propagates to peers.
@@ -256,7 +269,8 @@ type ForgerConfig struct {
 	Logger       *slog.Logger
 	SlotDuration time.Duration
 
-	// Production mode configuration
+	// Production mode configuration. Credentials must have passed
+	// ValidateKESPeriod so the forger can enforce the genesis KES lifetime.
 	Credentials      *PoolCredentials
 	LeaderChecker    LeaderChecker
 	BlockBuilder     BlockBuilder
@@ -357,6 +371,15 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		if cfg.SlotClock == nil {
 			return nil, errors.New("production mode requires slot clock")
 		}
+		generation := cfg.Credentials.acquireCredentialGeneration()
+		_, _, _, err := generation.validatedKESProtocolLifetime()
+		generation.release()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"production mode requires a validated KES protocol lifetime: %w",
+				err,
+			)
+		}
 		if cfg.LeiosProduceChecker != nil && cfg.LeiosTxValidator == nil {
 			return nil, errors.New(
 				"production Leios forging requires transaction validator",
@@ -389,15 +412,9 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	// Dynamic gauges (currentKESPeriod, remainingKESPeriods) are
 	// updated on every slot-win in updateKESMetrics().
 	if f.metrics != nil && f.creds != nil {
-		opCert := f.creds.GetOpCert()
-		if opCert != nil {
-			f.metrics.opCertStartKES.Set(
-				float64(opCert.KESPeriod),
-			)
-			f.metrics.opCertExpiryKES.Set(
-				float64(f.creds.OpCertExpiryPeriod()),
-			)
-		}
+		generation := f.creds.acquireCredentialGeneration()
+		f.updateKESPolicyMetrics(generation)
+		generation.release()
 	}
 
 	return f, nil
@@ -429,7 +446,9 @@ func (f *BlockForger) Start(ctx context.Context) error {
 					currentSlot,
 					slotsPerKES,
 				); err == nil {
-					f.updateKESMetrics(kesPeriod)
+					generation := f.creds.acquireCredentialGeneration()
+					f.updateKESMetrics(kesPeriod, generation)
+					generation.release()
 				}
 			}
 		}
@@ -641,7 +660,64 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	// Check if we're the leader for this slot
+	// Compute and enforce the protocol KES lifetime before Praos leader
+	// selection, Leios work, or ranking-block construction. The expiry was
+	// checked for overflow when the production forger was created, so these
+	// comparisons cannot wrap.
+	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
+	if slotsPerKESPeriod == 0 {
+		return errors.New("slots per KES period is zero")
+	}
+	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
+	if err != nil {
+		return err
+	}
+	generation := f.creds.acquireCredentialGeneration()
+	generationReleased := false
+	defer func() {
+		if !generationReleased {
+			generation.release()
+		}
+	}()
+	f.updateKESMetrics(kesPeriod, generation)
+	opCertStart, maxEvolutions, opCertExpiry, policyErr := generation.validatedKESProtocolLifetime()
+	if policyErr != nil {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: KES protocol lifetime is not validated",
+			"slot", currentSlot,
+			"current_kes_period", kesPeriod,
+			"credential_generation", generation.id,
+			"error", policyErr,
+		)
+		return nil
+	}
+	if kesPeriod < opCertStart {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: operational certificate is not yet valid",
+			"slot", currentSlot,
+			"current_kes_period", kesPeriod,
+			"opcert_start_period", opCertStart,
+			"opcert_expiry_period", opCertExpiry,
+			"max_kes_evolutions", maxEvolutions,
+		)
+		return nil
+	}
+	if kesPeriod >= opCertExpiry {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: operational certificate expired; rotate the operational certificate",
+			"slot", currentSlot,
+			"current_kes_period", kesPeriod,
+			"opcert_start_period", opCertStart,
+			"opcert_expiry_period", opCertExpiry,
+			"max_kes_evolutions", maxEvolutions,
+		)
+		return nil
+	}
+
+	// Check if we're the leader for this slot only after the KES gate.
 	isLeader := f.checkLeaderSafe(currentSlot)
 	if !isLeader {
 		f.logger.Debug(
@@ -655,7 +731,32 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	// We are the slot leader
+	// The credential snapshot owns its secret material, so the callback above
+	// never holds a writer-blocking lease. A reload still invalidates this
+	// attempt before any Leios or block-construction work begins.
+	if err := generation.ensureCurrent(); err != nil {
+		f.incCouldNotForge()
+		f.logger.Warn(
+			"forge skip: credentials changed during leader selection",
+			"slot", currentSlot,
+			"selected_generation", generation.id,
+			"error", err,
+		)
+		return nil
+	}
+	if err := generation.validateKESPeriod(kesPeriod); err != nil {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: credential generation became invalid during leader selection",
+			"slot", currentSlot,
+			"credential_generation", generation.id,
+			"error", err,
+		)
+		return nil
+	}
+
+	// We are the slot leader with the same credential generation that passed
+	// the pre-selection gate.
 	if f.metrics != nil {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
@@ -704,38 +805,45 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			}
 		}
 	}
+	// Leios providers, mempool access, transaction validation, and broadcaster
+	// callbacks are all pluggable. They run without credential locks; if one
+	// reloads or revalidates credentials, abandon the ranking-block attempt
+	// before evolving or consuming the selected snapshot.
+	if err := generation.ensureCurrent(); err != nil {
+		f.incCouldNotForge()
+		f.logger.Warn(
+			"forge skip: credentials changed during Leios processing",
+			"slot", currentSlot,
+			"selected_generation", generation.id,
+			"error", err,
+		)
+		return nil
+	}
 
 	f.logger.Info("producing block", "slot", currentSlot)
 
-	// Calculate KES period for this slot
-	// KES period = slot / slots_per_kes_period
-	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
-	if slotsPerKESPeriod == 0 {
-		return errors.New("slots per KES period is zero")
-	}
-	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
-	if err != nil {
-		return err
-	}
-
 	// Ensure KES key is at correct period
-	if err := f.creds.UpdateKESPeriod(kesPeriod); err != nil {
+	if err := generation.updateKESPeriod(kesPeriod); err != nil {
+		f.incCouldNotForge()
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
-
-	// Update KES metrics after successful evolution
-	f.updateKESMetrics(kesPeriod)
 
 	// Build the block
 	block, blockCbor, err := f.buildBlock(
 		currentSlot,
 		kesPeriod,
 		leiosBlockData,
+		generation,
 	)
 	if err != nil {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
 	}
+	// Key material is no longer needed after the block is signed. Zeroize the
+	// independently owned snapshot before invoking pluggable validation,
+	// adoption, or observer callbacks.
+	generation.release()
+	generationReleased = true
 
 	// Optionally self-validate before adoption and diffusion.
 	// Runs here — before success metrics and the blockForged observer — so
@@ -898,17 +1006,45 @@ func (f *BlockForger) buildBlock(
 	slot uint64,
 	kesPeriod uint64,
 	leiosData LeiosBlockData,
+	generation *credentialGeneration,
 ) (ledger.Block, []byte, error) {
-	if leiosData.empty() {
-		return f.blockBuilder.BuildBlock(slot, kesPeriod)
-	}
-	leiosBuilder, ok := f.blockBuilder.(LeiosBlockBuilder)
-	if !ok {
-		return nil, nil, errors.New(
-			"leios block data requires a LeiosBlockBuilder",
+	var (
+		block     ledger.Block
+		blockCbor []byte
+		err       error
+	)
+	if generationBuilder, ok := f.blockBuilder.(credentialGenerationBlockBuilder); ok {
+		block, blockCbor, err = generationBuilder.buildBlockWithCredentialGeneration(
+			slot,
+			kesPeriod,
+			leiosData,
+			generation,
+		)
+	} else if leiosData.empty() {
+		block, blockCbor, err = f.blockBuilder.BuildBlock(slot, kesPeriod)
+	} else {
+		leiosBuilder, ok := f.blockBuilder.(LeiosBlockBuilder)
+		if !ok {
+			return nil, nil, errors.New(
+				"leios block data requires a LeiosBlockBuilder",
+			)
+		}
+		block, blockCbor, err = leiosBuilder.BuildBlockWithLeios(
+			slot,
+			kesPeriod,
+			leiosData,
 		)
 	}
-	return leiosBuilder.BuildBlockWithLeios(slot, kesPeriod, leiosData)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Custom builders cannot consume the package-private immutable snapshot.
+	// Reject their output (and any default-builder output racing a callback
+	// reload) if the selected owner generation changed while the callback ran.
+	if err := generation.ensureCurrent(); err != nil {
+		return nil, nil, err
+	}
+	return block, blockCbor, nil
 }
 
 // incCouldNotForge increments Forge_could_not_forge. Safe to call
@@ -985,27 +1121,30 @@ func (f *BlockForger) reportForgeCallbackPanic(phase string, r any) {
 	)
 }
 
-// updateKESMetrics updates KES gauges after a successful KES
-// period update. Safe to call when metrics are nil.
+// updateKESMetrics updates KES protocol-lifetime gauges for the current slot.
+// Safe to call when metrics are nil.
 func (f *BlockForger) updateKESMetrics(
 	currentPeriod uint64,
+	generation *credentialGeneration,
 ) {
 	if f.metrics == nil {
 		return
 	}
 	f.metrics.currentKESPeriod.Set(float64(currentPeriod))
 	f.metrics.remainingKESPeriods.Set(
-		float64(f.creds.PeriodsRemaining(currentPeriod)),
+		float64(generation.periodsRemaining(currentPeriod)),
 	)
-	opCert := f.creds.GetOpCert()
-	if opCert != nil {
-		f.metrics.opCertStartKES.Set(
-			float64(opCert.KESPeriod),
-		)
-		f.metrics.opCertExpiryKES.Set(
-			float64(f.creds.OpCertExpiryPeriod()),
-		)
+	f.updateKESPolicyMetrics(generation)
+}
+
+func (f *BlockForger) updateKESPolicyMetrics(
+	generation *credentialGeneration,
+) {
+	if f.metrics == nil {
+		return
 	}
+	f.metrics.opCertStartKES.Set(float64(generation.opCertStartKES))
+	f.metrics.opCertExpiryKES.Set(float64(generation.opCertExpiryKES))
 }
 
 // RecordSlotBattle increments the slot battles counter. This is
@@ -1063,7 +1202,18 @@ func (f *BlockForger) SignBlockHeader(
 		return nil, errors.New("credentials not loaded")
 	}
 
-	return f.creds.KESSign(kesPeriod, headerBytes)
+	generation := f.creds.acquireCredentialGeneration()
+	defer generation.release()
+	if err := generation.validateKESPeriod(kesPeriod); err != nil {
+		return nil, fmt.Errorf(
+			"cannot sign block header outside operational certificate lifetime: %w",
+			err,
+		)
+	}
+	if err := generation.updateKESPeriod(kesPeriod); err != nil {
+		return nil, fmt.Errorf("failed to update KES period: %w", err)
+	}
+	return generation.kesSign(kesPeriod, headerBytes)
 }
 
 // SlotTracker returns the forger's slot tracker, which can be used
