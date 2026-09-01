@@ -598,6 +598,14 @@ runs on 2026-08-26 and 2026-08-28, from bootstrap start through completion:
 Mainnet's total includes its index rebuild; subsequent restarts reused the
 completed database rather than repeating the bootstrap.
 
+The Preview API path was also measured in a profiled run on 2026-08-31/09-01
+using the SQLite bulk-load pragmas and a retained Mithril artifact cache. It
+completed in **7h 36m 07s** end-to-end, including the historical metadata
+backfill (24,547s) and deferred index rebuild (16m). The earlier Preview API
+baseline was approximately 20h 53m, so this run was 63.6% faster. Peak space
+was approximately 76 GB (46 GB database plus 30 GB Mithril cache); steady
+state after removing the cache was approximately 46 GB.
+
 ### Disk Space Requirements
 
 Bootstrapping requires temporary disk space for both the downloaded snapshot and the Dingo database:
