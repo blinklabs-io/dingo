@@ -34,10 +34,10 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// MaxLocalStateQueryItems bounds caller-controlled collections on query paths
-// that perform database work for each requested item. The limit is checked
-// before any database read so an over-limit request cannot return a partial
-// response or monopolize the LocalStateQuery connection.
+// MaxLocalStateQueryItems bounds collections on query paths that perform
+// database work for each resolved item. Explicit over-limit filters are
+// rejected before database access; state-derived collections are checked
+// before their per-item reads begin.
 const MaxLocalStateQueryItems = 1000
 
 // ErrLocalStateQueryLimitExceeded identifies a LocalStateQuery request whose
@@ -47,8 +47,10 @@ var ErrLocalStateQueryLimitExceeded = errors.New(
 )
 
 // LocalStateQueryLimitError describes an over-limit LocalStateQuery request.
-// Callers can use errors.Is(err, ErrLocalStateQueryLimitExceeded) for the
-// stable error category and errors.As for the query name and counts.
+// In-process callers can use errors.Is for the stable category and errors.As
+// for the query name and counts. Node-to-client protocol errors terminate the
+// connection, so an over-the-wire client observes a closed connection rather
+// than this Go error value.
 type LocalStateQueryLimitError struct {
 	Query string
 	Items int
@@ -575,15 +577,6 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
 ) (any, error) {
 	pools, all := q.PoolFilter()
-	if !all {
-		if err := checkLocalStateQueryItemLimit(
-			"GetStakeSnapshots",
-			len(pools),
-		); err != nil {
-			return nil, err
-		}
-	}
-
 	consensus := ls.loadConsensusSnapshot()
 	epoch := consensus.currentEpoch.EpochId
 	setEpoch, hasSet := priorEpoch(epoch, 1)
@@ -647,34 +640,40 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 			}
 		}
 	} else {
-		// A pool filter is bounded by the caller, so read only the requested
-		// pools' snapshots rather than every pool's.
+		// Read each epoch's requested pools in one batch. This keeps database
+		// round trips constant as the caller's filter grows.
+		mark, err := ls.markStakeForPools(epoch, pools, metaTxn)
+		if err != nil {
+			return nil, err
+		}
+		var set map[string]uint64
+		if hasSet {
+			set, err = ls.markStakeForPools(setEpoch, pools, metaTxn)
+			if err != nil {
+				return nil, err
+			}
+		}
+		var snapshotGo map[string]uint64
+		if hasGo {
+			snapshotGo, err = ls.markStakeForPools(goEpoch, pools, metaTxn)
+			if err != nil {
+				return nil, err
+			}
+		}
 		poolSnapshots = make(
 			map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot,
 			len(pools),
 		)
 		for _, pool := range pools {
-			hash := make([]byte, len(pool))
-			copy(hash, pool[:])
-			mark, err := ls.poolSnapshotStake(epoch, true, hash, metaTxn)
-			if err != nil {
-				return nil, err
-			}
-			set, err := ls.poolSnapshotStake(setEpoch, hasSet, hash, metaTxn)
-			if err != nil {
-				return nil, err
-			}
-			snapshotGo, err := ls.poolSnapshotStake(goEpoch, hasGo, hash, metaTxn)
-			if err != nil {
-				return nil, err
-			}
-			if omitZeroPools && mark == 0 && set == 0 && snapshotGo == 0 {
+			hash := string(pool[:])
+			markStake, setStake, goStake := mark[hash], set[hash], snapshotGo[hash]
+			if omitZeroPools && markStake == 0 && setStake == 0 && goStake == 0 {
 				continue
 			}
-			poolSnapshots[ledger.NewBlake2b224(hash)] = &olocalstatequery.PoolStakeSnapshot{
-				StakeMark: mark,
-				StakeSet:  set,
-				StakeGo:   snapshotGo,
+			poolSnapshots[ledger.NewBlake2b224(pool[:])] = &olocalstatequery.PoolStakeSnapshot{
+				StakeMark: markStake,
+				StakeSet:  setStake,
+				StakeGo:   goStake,
 			}
 		}
 	}
@@ -739,34 +738,6 @@ func (ls *LedgerState) markStakeByPool(
 		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
 	return byPool, nil
-}
-
-// poolSnapshotStake returns a single pool's mark-snapshot stake at the given
-// epoch, or 0 when the epoch does not exist (exists=false) or has no snapshot
-// row for the pool. Used for the bounded pool-filter path; the all-pools path
-// uses markStakeByPool to avoid a per-pool query.
-func (ls *LedgerState) poolSnapshotStake(
-	epoch uint64,
-	exists bool,
-	poolKeyHash []byte,
-	txn types.Txn,
-) (uint64, error) {
-	if !exists {
-		return 0, nil
-	}
-	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
-		epoch,
-		snapshotTypeMark,
-		poolKeyHash,
-		txn,
-	)
-	if err != nil {
-		return 0, err
-	}
-	if snapshot == nil {
-		return 0, nil
-	}
-	return uint64(snapshot.TotalStake), nil
 }
 
 // markStakeForPools reads the mark snapshot for just the pools named, keyed by
@@ -874,6 +845,12 @@ func (ls *LedgerState) queryShelleyDRepState(
 	if len(creds) == 0 {
 		all, err := ls.db.GetActiveDreps(nil)
 		if err != nil {
+			return nil, err
+		}
+		if err := checkLocalStateQueryItemLimit(
+			"GetDRepState",
+			len(all),
+		); err != nil {
 			return nil, err
 		}
 		dreps = all
@@ -1172,29 +1149,40 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	creds []lcommon.Credential,
 ) (any, error) {
-	if err := checkLocalStateQueryItemLimit(
-		"GetFilteredVoteDelegatees",
-		len(creds),
-	); err != nil {
-		return nil, err
-	}
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
+	refs := make([]models.StakeCredentialRef, 0, len(creds))
+	seen := make(map[string]struct{}, len(creds))
 	for _, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 		if err != nil {
 			return nil, err
 		}
-		account, err := ls.db.GetAccountByCredential(
-			credentialTag,
-			cred.Credential[:],
-			false,
-			nil,
-		)
+		ref := models.StakeCredentialRef{
+			Tag: credentialTag,
+			Key: cred.Credential[:],
+		}
+		key := ref.MapKey()
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, ref)
+	}
+	accounts, err := ls.db.GetAccountsByCredential(refs, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, cred := range creds {
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 		if err != nil {
-			if errors.Is(err, models.ErrAccountNotFound) {
-				continue
-			}
 			return nil, err
+		}
+		account, ok := accounts[models.StakeCredentialRef{
+			Tag: credentialTag,
+			Key: cred.Credential[:],
+		}.MapKey()]
+		if !ok {
+			continue
 		}
 		if account == nil ||
 			(len(account.Drep) == 0 &&

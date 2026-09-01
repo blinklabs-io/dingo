@@ -15,9 +15,11 @@
 package ledger
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -59,25 +61,11 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 		itemCount,
 	)
 	credentials := make([]lcommon.Credential, itemCount)
-	poolIds := make([]gledger.PoolId, itemCount)
-	stakeSnapshots := &olocalstatequery.ShelleyStakeSnapshotsQuery{
-		Pools: []cbor.SetType[gledger.PoolId]{
-			cbor.NewSetType(poolIds, true),
-		},
-	}
-
 	tests := []struct {
 		name  string
 		query string
 		run   func() (any, error)
 	}{
-		{
-			name:  "stake snapshots",
-			query: "GetStakeSnapshots",
-			run: func() (any, error) {
-				return ls.queryShelleyStakeSnapshots(stakeSnapshots)
-			},
-		},
 		{
 			name:  "DRep state",
 			query: "GetDRepState",
@@ -90,13 +78,6 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			query: "GetStakeDelegDeposits",
 			run: func() (any, error) {
 				return ls.queryShelleyStakeDelegDeposits(stakeCredentials)
-			},
-		},
-		{
-			name:  "filtered vote delegatees",
-			query: "GetFilteredVoteDelegatees",
-			run: func() (any, error) {
-				return ls.queryShelleyFilteredVoteDelegatees(credentials)
 			},
 		},
 	}
@@ -114,6 +95,65 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			require.Equal(t, MaxLocalStateQueryItems, limitErr.Limit)
 		})
 	}
+}
+
+// TestLocalStateQueryEmptyDRepStateBoundsResolvedWork verifies that the
+// empty-filter form cannot bypass the work limit when chain state contains
+// more DReps than the handler may process with per-DRep delegator reads.
+func TestLocalStateQueryEmptyDRepStateBoundsResolvedWork(t *testing.T) {
+	db := newTestDB(t)
+	txn := db.MetadataTxn(true)
+	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
+	itemCount := MaxLocalStateQueryItems + 1
+	for i := range itemCount {
+		credential := make([]byte, 28)
+		binary.BigEndian.PutUint64(credential[20:], uint64(i))
+		require.NoError(t, db.CreateDrep(txn, &models.Drep{
+			Credential: credential,
+			Active:     true,
+			AddedSlot:  1,
+		}))
+	}
+	require.NoError(t, txn.Commit())
+
+	result, err := (&LedgerState{db: db}).queryShelleyDRepState(nil)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
+
+	var limitErr *LocalStateQueryLimitError
+	require.ErrorAs(t, err, &limitErr)
+	require.Equal(t, "GetDRepState", limitErr.Query)
+	require.Equal(t, itemCount, limitErr.Items)
+}
+
+// TestLocalStateQueryLargeBatchHandlers verifies that handlers backed by batch
+// database primitives accept collections larger than the per-item work limit.
+func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
+	db := newTestDB(t)
+	itemCount := MaxLocalStateQueryItems + 1
+
+	credentials := make([]lcommon.Credential, itemCount)
+	result, err := (&LedgerState{db: db}).
+		queryShelleyFilteredVoteDelegatees(credentials)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	poolIds := make([]gledger.PoolId, itemCount)
+	for i := range poolIds {
+		binary.BigEndian.PutUint64(poolIds[i][20:], uint64(i))
+	}
+	query := &olocalstatequery.ShelleyStakeSnapshotsQuery{
+		Pools: []cbor.SetType[gledger.PoolId]{
+			cbor.NewSetType(poolIds, true),
+		},
+	}
+	ls := &LedgerState{db: db}
+	ls.consensus.Store(
+		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
+	)
+	result, err = ls.queryShelleyStakeSnapshots(query)
+	require.NoError(t, err)
+	require.NotNil(t, result)
 }
 
 // TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded verifies that
