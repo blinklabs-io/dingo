@@ -160,9 +160,10 @@ jobs:
   go-test-other:
     # Deliberately unnamed, so GitHub generates `go-test-other (<platform>,
     # <go-version>)`. A custom `name:` carrying matrix references collided with
-    # go-test-platforms.yml, which renders the same string on a tag, and branch
-    # protection matches a check by name — two workflows claiming one context
-    # make a required check ambiguous. It also rendered literally as
+    # the platform jobs in go-test.yml, which render on a tag's own main-branch
+    # push, and branch protection matches a check by name — two workflows
+    # claiming one context make a required check ambiguous. It also rendered
+    # literally as
     # `go-test (${{ matrix.platform }}) (${{ matrix.go-version }})` on every
     # non-tag push, because this job is skipped there and a skipped matrix job
     # never expands its matrix.

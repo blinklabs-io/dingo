@@ -129,8 +129,11 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
+# -timeout matches the race-enabled CI jobs (go-test.yml's go-test (Linux,
+# race) and publish.yml's release gate) so a local run and CI cannot disagree
+# about which slow package is a hang. ./ledger alone runs 9-13 minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
-	go test $(GO_TAG_FLAGS) -v -race -timeout 20m ./...
+	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
 
 test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
 	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .
