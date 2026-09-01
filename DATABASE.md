@@ -194,9 +194,10 @@ this migration forward; a network that changed `poolDeposit` before the upgrade
 would need a resync from genesis to agree byte-for-byte with a genesis-synced
 node, which no live Cardano network requires because `poolDeposit` has never
 changed on one. The backfill is restricted to NULL so an interrupted upgrade can
-replay it without overwriting a carried-forward amount, and
-`GetPoolsRetiringAtEpoch` reads `COALESCE(deposit_held, deposit_amount)` so a
-database whose backfill has not run still yields the pre-change refund.
+replay it without overwriting a carried-forward amount, the `ALTER TABLE` is
+replay-safe through the runner rather than through the statement (see below),
+and `GetPoolsRetiringAtEpoch` reads `COALESCE(deposit_held, deposit_amount)` so
+a database whose backfill has not run still yields the pre-change refund.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -204,9 +205,28 @@ Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
 Phases are `expand`, `backfill`, `contract`, and `complete`. The runner marks a
 phase dirty before work, executes idempotent DDL, commits each data batch and
 cursor checkpoint in the same transaction, and only marks a version complete
-after contract/index DDL succeeds. Completed checksum drift, registry gaps,
-unknown phases, inconsistent completion state, and a database newer than the
-binary are hard startup errors. File-backed SQLite uses a cross-process lock
+after contract/index DDL succeeds.
+
+Each DDL statement runs on its own in autocommit and the phase advance is a
+separate write, so a process that stops in between replays the whole phase on
+the next start; every statement in a migration resource therefore has to
+tolerate having already been applied. `CREATE TABLE`/`CREATE INDEX` carry
+`IF NOT EXISTS` and data statements filter rows they have already written, but
+`ALTER TABLE ... ADD COLUMN` cannot carry that guard: migration resources are
+authored once in SQLite syntax and translated per dialect, and SQLite has no
+`ADD COLUMN IF NOT EXISTS`. The runner supplies it instead. When an
+`ALTER TABLE ... ADD COLUMN` fails, it queries the live schema for that column
+(`pragma_table_info` on SQLite, `information_schema.columns` on PostgreSQL and
+MySQL) and skips the statement only when the column is already present, so an
+interrupted upgrade resumes into the backfill rather than failing forever on a
+duplicate column, and an `ALTER` that failed for any other reason still fails
+the migration. This is why an operator sees no duplicate-column error after a
+crash mid-upgrade on versions `v2`, `v5`, and `v7`; the same run tolerates a
+duplicate index or foreign-key name on MySQL.
+
+Completed checksum drift, registry gaps, unknown phases, inconsistent
+completion state, and a database newer than the binary are hard startup errors.
+File-backed SQLite uses a cross-process lock
 file and in-memory SQLite uses a process lock. Store readiness remains false
 until the locked, offline run succeeds. PostgreSQL/MySQL advisory locks are
 connection-owned for the complete migration run. Bulk-load session settings are held on a dedicated

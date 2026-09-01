@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -329,4 +330,246 @@ func TestRunnerRejectsNewerSchema(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.ErrorIs(t, runner.Run(context.Background()), ErrNewerSchema)
+}
+
+// addColumnMigration adds a column to a table an earlier statement in the same
+// expand phase creates, the shape versions 2, 5, and 7 all use.
+func addColumnMigration() Migration {
+	return Migration{
+		Version:          1,
+		Name:             "add_column",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"CREATE TABLE IF NOT EXISTS item (id INTEGER PRIMARY KEY)",
+					"ALTER TABLE `item` ADD COLUMN `note` text",
+					"INSERT INTO item (id, note) VALUES (1, 'seeded') " +
+						"ON CONFLICT (id) DO NOTHING",
+				},
+			},
+		},
+	}
+}
+
+// An expand phase runs each statement in its own autocommit and the phase
+// advance is a separate write, so a process that stops in between replays the
+// whole phase. An ALTER TABLE ADD COLUMN cannot carry its own IF NOT EXISTS
+// guard -- migrations are authored in SQLite syntax, which has no such form --
+// so the runner has to recognize the already-added column; otherwise the replay
+// fails and the migration never reaches the statements after it.
+func TestRunnerReplaysExpandPhaseWithAppliedAddColumn(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	runner := testRunner(db, addColumnMigration())
+	require.NoError(t, runner.Run(context.Background()))
+
+	_, err := db.Exec(`
+UPDATE schema_migrations
+SET phase = 'expand', dirty = 1, completed_at = NULL
+WHERE version = 1`)
+	require.NoError(t, err)
+	_, err = db.Exec("DELETE FROM item")
+	require.NoError(t, err)
+
+	require.NoError(t, runner.Run(context.Background()))
+
+	var note string
+	require.NoError(t, db.QueryRow(
+		"SELECT note FROM item WHERE id = 1",
+	).Scan(&note))
+	require.Equal(t, "seeded", note)
+}
+
+// The replay tolerance is verified against the live schema, so an ALTER TABLE
+// ADD COLUMN that fails for any reason other than the column already being
+// there still fails the migration.
+func TestRunnerReportsAddColumnFailureOnMissingTable(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	migration := Migration{
+		Version:          1,
+		Name:             "add_column_missing_table",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"ALTER TABLE `absent` ADD COLUMN `note` text",
+				},
+			},
+		},
+	}
+	err := testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+}
+
+// Every ALTER TABLE ADD COLUMN the shipped registries produce has to be
+// recognizable to the replay guard in each dialect's quoting, or an upgrade
+// interrupted between the committed DDL and its phase advance would still fail
+// on a duplicate column. The registry translates SQLite-authored statements per
+// dialect, so this pins the guard against that translation drifting.
+func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
+	t.Parallel()
+	// v2 adds four columns, v5 two, and v7 one.
+	const shippedAddColumns = 7
+	for _, dialect := range []struct {
+		name string
+		load func() ([]Migration, error)
+	}{
+		{name: "sqlite", load: SQLiteRegistry},
+		{name: "postgres", load: PostgresRegistry},
+		{name: "mysql", load: MySQLRegistry},
+	} {
+		registry, err := dialect.load()
+		require.NoError(t, err)
+		matched := 0
+		for _, migration := range registry {
+			phases := migration.SQL[dialect.name]
+			for _, statement := range append(
+				append([]string{}, phases.Expand...),
+				phases.Contract...,
+			) {
+				if !strings.Contains(
+					strings.ToUpper(statement),
+					"ADD COLUMN",
+				) {
+					continue
+				}
+				match := addColumnPattern.FindStringSubmatch(statement)
+				require.Len(
+					t,
+					match,
+					3,
+					"%s: unrecognized ADD COLUMN: %s",
+					dialect.name,
+					statement,
+				)
+				require.NotEmpty(t, match[1], dialect.name)
+				require.NotEmpty(t, match[2], dialect.name)
+				matched++
+			}
+		}
+		require.Equal(t, shippedAddColumns, matched, dialect.name)
+	}
+
+	// SQLite and MySQL keep backticks and PostgreSQL is requoted to double
+	// quotes, but nothing forces a future migration to quote at all, and the
+	// resource may wrap the statement across lines.
+	for _, statement := range []string{
+		"ALTER TABLE pool_registration ADD COLUMN deposit_held text",
+		"alter table `x` add column `y` blob",
+		`ALTER TABLE "x" ADD COLUMN "y" BYTEA`,
+		"ALTER TABLE `x` ADD COLUMN `y` text NOT NULL DEFAULT '0'",
+		"ALTER TABLE  `x`   ADD   COLUMN   `y`  text",
+		"ALTER TABLE `x`\n  ADD COLUMN `y` text",
+	} {
+		require.Len(
+			t,
+			addColumnPattern.FindStringSubmatch(statement),
+			3,
+			"must recognize: %s",
+			statement,
+		)
+	}
+
+	// The guard must not claim any other failing DDL, or a real failure would
+	// be skipped whenever the named column happens to exist.
+	for _, statement := range []string{
+		"ALTER TABLE `x` ADD CONSTRAINT `c` FOREIGN KEY (`a`) " +
+			"REFERENCES `b`(`i`)",
+		"ALTER TABLE `x` DROP COLUMN `y`",
+		"ALTER TABLE `x` RENAME COLUMN `y` TO `z`",
+		"CREATE TABLE `x` (`y` text)",
+		"CREATE INDEX `i` ON `x` (`y`)",
+		"UPDATE `x` SET `y` = 1",
+	} {
+		require.Empty(
+			t,
+			addColumnPattern.FindStringSubmatch(statement),
+			"must not recognize: %s",
+			statement,
+		)
+	}
+}
+
+// The skip is gated on the statement being an ALTER TABLE ADD COLUMN, so a
+// different statement that fails against a table already carrying that column
+// still fails the migration.
+func TestRunnerDoesNotSkipNonAddColumnFailure(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	migration := Migration{
+		Version:          1,
+		Name:             "non_add_column_failure",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"CREATE TABLE IF NOT EXISTS item (id INTEGER PRIMARY KEY)",
+					"ALTER TABLE `item` ADD COLUMN `note` text",
+					// `note` exists, but this statement is not an ADD COLUMN
+					// and fails on its own terms.
+					"UPDATE item SET note = no_such_column",
+				},
+			},
+		},
+	}
+	err := testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+	require.ErrorContains(t, err, "statement 3")
+
+	// The version must stay unfinished rather than being marked complete.
+	var phase string
+	require.NoError(t, db.QueryRow(
+		"SELECT phase FROM schema_migrations WHERE version = 1",
+	).Scan(&phase))
+	require.Equal(t, string(PhaseExpand), phase)
+}
+
+// execDDL runs each statement in its own autocommit and the phase advance is a
+// separate write, so any version can be replayed from its expand phase after an
+// interrupted upgrade. Replaying expand also replays backfill and contract, so
+// this covers every phase of every shipped version against a database that
+// already has the version's full effect applied.
+func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
+	t.Parallel()
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	for _, migration := range registry {
+		t.Run(migration.Name, func(t *testing.T) {
+			t.Parallel()
+			db := openTestDB(t)
+			runner := &Runner{
+				DB:       db,
+				Dialect:  "sqlite",
+				Registry: registry,
+				Locker:   NewProcessLocker(),
+			}
+			require.NoError(t, runner.Run(context.Background()))
+
+			_, err := db.Exec(`
+UPDATE schema_migrations
+SET phase = 'expand', dirty = 1, completed_at = NULL
+WHERE version = ?`, migration.Version)
+			require.NoError(t, err)
+
+			require.NoError(
+				t,
+				runner.Run(context.Background()),
+				"version %d must replay its expand phase",
+				migration.Version,
+			)
+
+			var phase string
+			var dirty bool
+			var completed sql.NullInt64
+			require.NoError(t, db.QueryRow(`
+SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = ?`,
+				migration.Version,
+			).Scan(&phase, &dirty, &completed))
+			require.Equal(t, string(PhaseComplete), phase)
+			require.False(t, dirty)
+			require.True(t, completed.Valid)
+		})
+	}
 }

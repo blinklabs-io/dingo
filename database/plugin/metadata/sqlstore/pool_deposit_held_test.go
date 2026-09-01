@@ -237,9 +237,12 @@ func TestPoolDepositHeldDecreasedParameterRefundsOriginal(t *testing.T) {
 }
 
 // Repeated registrations carry the first registration's amount forward through
-// every later one, including two in the same block distinguished only by
-// block_index, and including a re-registration that cancels a pending
-// retirement.
+// every later one, including a re-registration that cancels a pending
+// retirement. Each registration is at its own slot because two registrations of
+// one pool cannot both persist in one block: the insert resolves the unique
+// (pool_id, added_slot) key first-write-wins, so the block_index tie-break
+// between pool certificates is exercised by
+// TestPoolDepositHeldSameBlockRetirementsOrderByBlockIndex instead.
 func TestPoolDepositHeldRepeatedRegistrationsCarryForward(t *testing.T) {
 	t.Parallel()
 	store := newDepositHeldStore(t)
@@ -440,5 +443,46 @@ func TestPoolDepositHeldSyntheticRetirementChargesReRegistration(t *testing.T) {
 		t,
 		uint64(800),
 		depositHeldRefund(t, store, pool, 3, 3_000),
+	)
+}
+
+// pool_retirement has no unique (pool_id, added_slot) key, so two retirement
+// certificates for one pool can share a block and only block_index orders them:
+// the later transaction's certificate is the effective retirement. That
+// tie-break is load-bearing for the held amount here, because
+// the superseded certificate names an epoch the chain has already reached, so
+// reading it instead would place the re-registration after a reap and charge a
+// new deposit.
+func TestPoolDepositHeldSameBlockRetirementsOrderByBlockIndex(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 6)
+	pool := depositHeldPoolKey(0xaa)
+
+	writeDepositHeldCert(t, store, 100, 0, depositHeldRegistration(pool), 500)
+	// Both retirements sit in the block at slot 200, in different
+	// transactions, and the second one supersedes the first.
+	writeDepositHeldCert(t, store, 200, 0, depositHeldRetirement(pool, 1), 0)
+	writeDepositHeldCert(t, store, 200, 1, depositHeldRetirement(pool, 4), 0)
+	// Slot 2_500 is in epoch 2: the effective retirement at epoch 4 is still
+	// pending, so this re-registration cancels it and keeps the earlier
+	// deposit. The superseded epoch-1 retirement was reaped long ago, so
+	// losing the tie-break would charge 900 here.
+	writeDepositHeldCert(t, store, 2_500, 0, depositHeldRegistration(pool), 900)
+	writeDepositHeldCert(t, store, 2_600, 0, depositHeldRetirement(pool, 5), 0)
+
+	require.Equal(t, "500", depositHeldColumn(t, store, pool, 2_500))
+
+	// The refund query resolves the same tie: the pool never retires at epoch
+	// 1, and its epoch-5 retirement refunds the held amount.
+	refunds, err := store.GetPoolsRetiringAtEpoch(1, 1_000, nil)
+	require.NoError(t, err)
+	for _, refund := range refunds {
+		require.NotEqual(t, pool.Bytes(), refund.PoolKeyHash)
+	}
+	require.Equal(
+		t,
+		uint64(500),
+		depositHeldRefund(t, store, pool, 5, 5_000),
 	)
 }

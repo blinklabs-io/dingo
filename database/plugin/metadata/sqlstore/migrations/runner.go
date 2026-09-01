@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -609,10 +610,83 @@ func execDDL(
 				isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
 				continue
 			}
+			if isAddColumnAlreadyApplied(ctx, conn, dialect, statement) {
+				continue
+			}
 			return fmt.Errorf("statement %d: %w", index+1, err)
 		}
 	}
 	return nil
+}
+
+// addColumnPattern matches the ALTER TABLE ... ADD COLUMN form the migration
+// resources use, in any of the three dialects' quoting styles. Migrations are
+// authored in SQLite syntax and the registry rewrites only identifier quoting
+// and column types, so the shape is the same on every backend.
+var addColumnPattern = regexp.MustCompile(
+	"(?i)^ALTER\\s+TABLE\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?\\s+" +
+		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s|$)",
+)
+
+// isAddColumnAlreadyApplied reports whether a failed statement is an
+// ALTER TABLE ... ADD COLUMN whose column is already present in the live
+// schema, which is exactly the state an upgrade interrupted between the
+// committed DDL and its phase advance leaves behind.
+//
+// execDDL runs each statement on its own in autocommit, and the runner records
+// the phase advance in a separate statement afterwards, so a process that stops
+// in between replays the whole expand phase on the next start. The statement
+// cannot carry its own guard: migration resources are authored once in SQLite
+// syntax and translated per dialect, and SQLite has no
+// ADD COLUMN IF NOT EXISTS. Without this the replay fails with a duplicate
+// column error and never reaches the backfill.
+//
+// The live schema is queried rather than the driver error text: only a column
+// that actually exists turns the failure into a skip, and no dialect has to be
+// matched by message. A statement that is not an ADD COLUMN never reaches the
+// query, so no other failing DDL is skipped because the named column happens to
+// exist.
+//
+// Existence is checked, not the declared type: an operator who hand-added a
+// same-named column of another type would have it accepted here. A transient
+// fault on an already-added column is also skipped, but that cannot complete a
+// broken upgrade, because the remaining statements and the phase-advance and
+// contract writes run unguarded on the same connection.
+func isAddColumnAlreadyApplied(
+	ctx context.Context,
+	conn *sql.Conn,
+	dialect string,
+	statement string,
+) bool {
+	match := addColumnPattern.FindStringSubmatch(strings.TrimSpace(statement))
+	if len(match) != 3 {
+		return false
+	}
+	var query string
+	switch dialect {
+	case "sqlite":
+		query = "SELECT 1 FROM pragma_table_info(?) WHERE name = ?"
+	case "postgres":
+		query = "SELECT 1 FROM information_schema.columns " +
+			"WHERE table_schema = current_schema() " +
+			"AND table_name = $1 AND column_name = $2"
+	case "mysql":
+		query = "SELECT 1 FROM information_schema.columns " +
+			"WHERE table_schema = DATABASE() " +
+			"AND table_name = ? AND column_name = ?"
+	default:
+		return false
+	}
+	var found int
+	if err := conn.QueryRowContext(
+		ctx,
+		query,
+		match[1],
+		match[2],
+	).Scan(&found); err != nil {
+		return false
+	}
+	return found != 0
 }
 
 func boundedCursor(cursor string) string {

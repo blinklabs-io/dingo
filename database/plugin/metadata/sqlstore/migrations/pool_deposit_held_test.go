@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
@@ -151,15 +152,97 @@ WHERE pool_key_hash = ?`,
 	)
 	require.NoError(t, err)
 
-	// Replay only the backfill statement; the ALTER cannot be re-executed on
-	// SQLite and an interrupted upgrade would fail before reaching it anyway.
+	// Replay the backfill statement on its own, so this asserts its NULL guard
+	// rather than the runner's handling of the rest of the expand phase.
 	_, err = db.ExecContext(
 		context.Background(),
-		registry[6].SQL["sqlite"].Expand[1],
+		depositHeldBackfillStatement(t, registry),
 	)
 	require.NoError(t, err)
 
 	held := depositHeldValue(t, db, keyHash)
 	require.True(t, held.Valid)
 	require.Equal(t, "500000000", held.String)
+}
+
+// depositHeldBackfillStatement resolves the deposit-held backfill by migration
+// name and statement content rather than by position, so adding or reordering a
+// statement in v7/sqlite/expand.sql fails this lookup instead of silently
+// pointing the test at a different statement.
+func depositHeldBackfillStatement(
+	t *testing.T,
+	registry []migrations.Migration,
+) string {
+	t.Helper()
+	var found []string
+	for _, migration := range registry {
+		if migration.Name != "pool-registration-deposit-held" {
+			continue
+		}
+		for _, statement := range migration.SQL["sqlite"].Expand {
+			if strings.HasPrefix(statement, "UPDATE `pool_registration`") &&
+				strings.Contains(statement, "`deposit_held`") {
+				found = append(found, statement)
+			}
+		}
+	}
+	require.Len(
+		t,
+		found,
+		1,
+		"the deposit-held migration must contain exactly one backfill statement",
+	)
+	return found[0]
+}
+
+// An upgrade interrupted after the expand phase's ALTER TABLE committed but
+// before the phase row advanced replays the whole expand phase on the next
+// start. SQLite has no ADD COLUMN IF NOT EXISTS, so without the runner
+// tolerating an already-present column that replay would fail with a duplicate
+// column error and the migration would never reach its backfill.
+func TestDepositHeldExpandPhaseReplaysAfterInterruptedUpgrade(t *testing.T) {
+	t.Parallel()
+	db, runTo := depositHeldBackfillDB(t)
+	keyHash := []byte("legacy-pool-key-hash-0000004")
+	seedLegacyPoolRegistration(t, db, keyHash, 100, "700000000")
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	ctx := context.Background()
+	// Rewind version 7 to the durable state such an interruption leaves: the
+	// column exists because its ALTER committed, the phase row still says
+	// expand, and the backfill has not run.
+	_, err = db.ExecContext(ctx, `
+UPDATE schema_migrations
+SET phase = 'expand', dirty = 1, completed_at = NULL
+WHERE version = 7`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(
+		ctx,
+		"UPDATE pool_registration SET deposit_held = NULL",
+	)
+	require.NoError(t, err)
+
+	runTo(registry)
+
+	held := depositHeldValue(t, db, keyHash)
+	require.True(t, held.Valid)
+	require.Equal(
+		t,
+		"700000000",
+		held.String,
+		"the replayed expand phase must still run its backfill",
+	)
+
+	var phase string
+	var dirty bool
+	var completed sql.NullInt64
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 7`,
+	).Scan(&phase, &dirty, &completed))
+	require.Equal(t, "complete", phase)
+	require.False(t, dirty)
+	require.True(t, completed.Valid)
 }
