@@ -665,8 +665,9 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 			len(pools),
 		)
 		for _, pool := range pools {
-			hash := string(pool[:])
-			markStake, setStake, goStake := mark[hash], set[hash], snapshotGo[hash]
+			markStake := mark[string(pool[:])]
+			setStake := set[string(pool[:])]
+			goStake := snapshotGo[string(pool[:])]
 			if omitZeroPools && markStake == 0 && setStake == 0 && goStake == 0 {
 				continue
 			}
