@@ -56,6 +56,7 @@ func TestPostgresAccountBaselineBackfill(t *testing.T) {
 		postgresDSNWithSearchPath(t, dsn, schema),
 		"postgres",
 		registry,
+		schema,
 	)
 }
 
@@ -82,6 +83,7 @@ func TestMySQLAccountBaselineBackfill(t *testing.T) {
 		mysqlDSNWithDatabase(t, dsn, database),
 		"mysql",
 		registry,
+		database,
 	)
 }
 
@@ -91,6 +93,7 @@ func testAccountBaselineBackfill(
 	dsn string,
 	dialectName string,
 	registry []migrations.Migration,
+	lockNamespace string,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -102,11 +105,7 @@ func testAccountBaselineBackfill(
 			DB:       db,
 			Dialect:  dialectName,
 			Registry: versions,
-			Locker: migrations.NewAdvisoryLocker(
-				dialectName,
-				0x64696e676f6261,
-				time.Second,
-			),
+			Locker:   integrationMigrationLocker(dialectName, lockNamespace),
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
