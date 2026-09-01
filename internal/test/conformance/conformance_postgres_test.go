@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,102 +131,57 @@ func newTestPostgresConformanceManager(t *testing.T) *DingoStateManager {
 	return sm
 }
 
-// TestRulesConformanceVectorsPostgres is the strict pass/fail gate for the
-// Postgres-backed DingoStateManager: it fails immediately on the first
-// vector mismatch (via harness.RunAllVectors), mirroring
-// TestRulesConformanceVectors in conformance_test.go.
+var (
+	postgresCorpusOnce sync.Once
+	postgresCorpusRun  corpusRun
+)
+
+// postgresCorpusResults returns the Postgres backend's memoized corpus replay.
+// Callers must have already skipped when Postgres is not configured.
+func postgresCorpusResults(t *testing.T) []conformance.VectorResult {
+	t.Helper()
+	postgresCorpusOnce.Do(func() {
+		// Construct here rather than through
+		// newTestPostgresConformanceManager: that helper reports a
+		// construction failure with require.NoError on its own
+		// *testing.T, and sync.Once marks itself done even when its
+		// function unwinds through t.FailNow's runtime.Goexit. A later
+		// consumer in the same process would then read a zero-value
+		// corpusRun -- nil results and nil error -- pass its
+		// require.NoError, and fail in assertCorpus with a misleading
+		// "produced no vectors" instead of the construction failure.
+		// Storing the error keeps corpusRun's documented contract, and
+		// matches sqliteCorpusResults.
+		sm, err := NewDingoPostgresStateManager(postgresConformanceDSN())
+		if err != nil {
+			postgresCorpusRun = corpusRun{
+				err: fmt.Errorf("new postgres state manager: %w", err),
+			}
+			return
+		}
+		defer sm.Close()
+		postgresCorpusRun = replayCorpus(sm)
+	})
+	require.NoError(t, postgresCorpusRun.err, "postgres corpus replay")
+	return postgresCorpusRun.results
+}
+
+// TestRulesConformanceVectorsPostgres is the pass/fail gate for the
+// Postgres-backed DingoStateManager, and also reports the progress statistics
+// and the SQLite comparison that previously each cost their own corpus replay.
+//
+// The corpus exercises gouroboros ledger rules, which do not vary by storage
+// backend, so this run is not here for rule coverage -- it is here to drive
+// Dingo's storage layer through Postgres' dialect. See corpus_test.go for the
+// two real bugs that found and for why one pass per dialect is the right
+// amount.
 func TestRulesConformanceVectorsPostgres(t *testing.T) {
 	skipIfPostgresConformanceNotConfigured(t)
 
-	testdataRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
-	require.NoError(t, err, "failed to extract embedded testdata")
-
-	sm := newTestPostgresConformanceManager(t)
-	defer sm.Close()
-
-	harness := conformance.NewHarness(sm, conformance.HarnessConfig{
-		TestdataRoot: testdataRoot,
-		Debug:        testing.Verbose(),
-	})
-
-	harness.RunAllVectors(t)
-}
-
-// TestRulesConformanceVectorsWithResultsPostgres runs the harness against
-// both the SQLite-backed and Postgres-backed state managers in the same
-// test and compares them, rather than asserting a hardcoded vector count:
-// the two runs should exercise the identical number of vectors with
-// identical pass counts, and the comparison stays correct even as the
-// embedded ouroboros-mock vector corpus grows or shrinks.
-func TestRulesConformanceVectorsWithResultsPostgres(t *testing.T) {
-	skipIfPostgresConformanceNotConfigured(t)
-
-	sqliteRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
-	require.NoError(t, err, "failed to extract embedded testdata")
-
-	sqliteSm, err := NewDingoStateManager()
-	require.NoError(t, err)
-	defer sqliteSm.Close()
-
-	sqliteHarness := conformance.NewHarness(sqliteSm, conformance.HarnessConfig{
-		TestdataRoot: sqliteRoot,
-	})
-	sqliteResults, err := sqliteHarness.RunAllVectorsWithResults()
-	require.NoError(t, err, "failed to run sqlite vectors")
-
-	pgRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
-	require.NoError(t, err, "failed to extract embedded testdata")
-
-	pgSm := newTestPostgresConformanceManager(t)
-	defer pgSm.Close()
-
-	pgHarness := conformance.NewHarness(pgSm, conformance.HarnessConfig{
-		TestdataRoot: pgRoot,
-	})
-	pgResults, err := pgHarness.RunAllVectorsWithResults()
-	require.NoError(t, err, "failed to run postgres vectors")
-
-	var pgPassed, pgFailed int
-	for _, result := range pgResults {
-		if result.Success {
-			pgPassed++
-		} else {
-			pgFailed++
-		}
-	}
-
-	t.Logf("Conformance Test Results (PostgreSQL):")
-	t.Logf("  Total vectors: %d", len(pgResults))
-	t.Logf("  Passed: %d", pgPassed)
-	t.Logf("  Failed: %d", pgFailed)
-	if len(pgResults) > 0 {
-		t.Logf(
-			"  Pass rate: %.1f%%",
-			float64(pgPassed)/float64(len(pgResults))*100,
-		)
-	}
-	if pgFailed > 0 && testing.Verbose() {
-		t.Log("First failures:")
-		failCount := 0
-		for _, result := range pgResults {
-			if !result.Success && failCount < 5 {
-				t.Logf("  %s: %v", result.Title, result.Error)
-				failCount++
-			}
-		}
-		if pgFailed > 5 {
-			t.Logf("  ... and %d more failures", pgFailed-5)
-		}
-	}
-
-	require.Equal(
-		t,
-		len(sqliteResults),
-		len(pgResults),
-		"postgres backend exercised a different number of vectors than "+
-			"sqlite; vector discovery/extraction should be backend-invariant",
-	)
-	require.Zero(t, pgFailed, "postgres backend failed vectors sqlite passed")
+	results := postgresCorpusResults(t)
+	reportCorpus(t, "postgres", results)
+	assertBackendMatchesSqlite(t, "postgres", results)
+	assertCorpus(t, "postgres", results)
 }
 
 // TestNewDingoPostgresStateManagerRestartSurvivesReopen proves state
