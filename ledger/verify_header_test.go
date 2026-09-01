@@ -456,10 +456,22 @@ func TestVerifyBlockHeaderTPraosNonceVRF(t *testing.T) {
 		era       lcommon.Era
 		blockType int
 	}{
-		{name: "Shelley", era: shelley.EraShelley, blockType: shelley.BlockTypeShelley},
-		{name: "Allegra", era: allegra.EraAllegra, blockType: allegra.BlockTypeAllegra},
+		{
+			name:      "Shelley",
+			era:       shelley.EraShelley,
+			blockType: shelley.BlockTypeShelley,
+		},
+		{
+			name:      "Allegra",
+			era:       allegra.EraAllegra,
+			blockType: allegra.BlockTypeAllegra,
+		},
 		{name: "Mary", era: mary.EraMary, blockType: mary.BlockTypeMary},
-		{name: "Alonzo", era: alonzo.EraAlonzo, blockType: alonzo.BlockTypeAlonzo},
+		{
+			name:      "Alonzo",
+			era:       alonzo.EraAlonzo,
+			blockType: alonzo.BlockTypeAlonzo,
+		},
 	}
 	tests := []struct {
 		name    string
@@ -1852,7 +1864,11 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotUsesPoolThreshold(
 		err,
 		"a non-overlay slot must apply the Praos leader threshold",
 	)
-	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
 
 	// A stale decentralized parameter set can classify this future slot as
 	// genesisOverlayNone. Header verification must defer before that

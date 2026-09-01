@@ -150,6 +150,12 @@ type DingoStateManager struct {
 	// dataDir wiping never touches -- see state_manager_postgres.go and
 	// state_manager_mysql.go.
 	wipeMetadata func() error
+
+	// closeExtra, when set, releases backend-scoped resources the manager
+	// owns beyond its database -- currently the long-lived admin connection
+	// backendResetter holds so Reset does not reconnect per vector (see
+	// reset_cost.go). Close joins its error.
+	closeExtra func() error
 }
 
 // newDingoStateManager opens a real backend per opts and wraps it in a
@@ -219,6 +225,9 @@ func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 // finished.
 func (m *DingoStateManager) Close() error {
 	err := closeRealDatabase(m.db, m.host)
+	if m.closeExtra != nil {
+		err = errors.Join(err, m.closeExtra())
+	}
 	if m.ownsDataDir && m.dataDir != "" {
 		if rmErr := os.RemoveAll(m.dataDir); rmErr != nil {
 			err = errors.Join(err, rmErr)

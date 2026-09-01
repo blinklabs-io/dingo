@@ -1036,7 +1036,10 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 					credential := &lcommon.Credential{
 						CredType: lcommon.CredentialTypeAddrKeyHash,
 					}
-					copy(credential.Credential[:], testBytes(28, byte(testIndex+1)))
+					copy(
+						credential.Credential[:],
+						testBytes(28, byte(testIndex+1)),
+					)
 					members[credential] = *test.memberExpiry
 				}
 				action = &lcommon.UpdateCommitteeGovAction{

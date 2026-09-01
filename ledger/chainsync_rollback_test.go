@@ -467,21 +467,24 @@ func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
 	advertisedSlot := ^uint64(0)
-	require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-		ConnectionId: fixture.connId,
-		Point: ocommon.NewPoint(
-			header.SlotNumber(),
-			header.Hash().Bytes(),
-		),
-		BlockHeader: header,
-		Tip: ochainsync.Tip{
+	require.NoError(
+		t,
+		fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+			ConnectionId: fixture.connId,
 			Point: ocommon.NewPoint(
-				advertisedSlot,
-				testHashBytes("unbound-fork-tip"),
+				header.SlotNumber(),
+				header.Hash().Bytes(),
 			),
-			BlockNumber: advertisedSlot,
-		},
-	}))
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					advertisedSlot,
+					testHashBytes("unbound-fork-tip"),
+				),
+				BlockNumber: advertisedSlot,
+			},
+		}),
+	)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 	require.Equal(t, 1, fixture.ls.chain.HeaderCount())

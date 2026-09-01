@@ -287,7 +287,9 @@ func TestShouldSkipPhase2ValidationForBlockRequiresSecurityParam(t *testing.T) {
 	))
 }
 
-func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(t *testing.T) {
+func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	tests := []struct {
@@ -329,11 +331,15 @@ func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(t *testi
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, test.wantSkip, shouldSkipConfiguredPhase2Validation(
-				test.validationEnabled,
-				test.shouldValidate,
-				test.deepHistorical,
-			))
+			require.Equal(
+				t,
+				test.wantSkip,
+				shouldSkipConfiguredPhase2Validation(
+					test.validationEnabled,
+					test.shouldValidate,
+					test.deepHistorical,
+				),
+			)
 		})
 	}
 }
@@ -1154,7 +1160,9 @@ func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
 	)
 }
 
-func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing.T) {
+func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(
+	t *testing.T,
+) {
 	activeConnID := testChainsyncConnId(6000, 3091)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -1190,7 +1198,9 @@ func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(t *testing
 		"a restarted node with only a few admitted headers remains in catch-up")
 }
 
-func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(t *testing.T) {
+func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(
+	t *testing.T,
+) {
 	connA := testChainsyncConnId(6000, 3092)
 	connB := testChainsyncConnId(6000, 3093)
 	activeConn := connA
@@ -1202,13 +1212,19 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(t *testin
 		config: LedgerStateConfig{
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId { return &activeConn },
 			GetPeerSyncTargetFunc: func(connId ouroboros.ConnectionId) (ochainsync.Tip, bool) {
-				return ochainsync.Tip{Point: ocommon.NewPoint(targets[connIdKey(connId)], nil)}, true
+				return ochainsync.Tip{
+					Point: ocommon.NewPoint(targets[connIdKey(connId)], nil),
+				}, true
 			},
 		},
 	}
 
 	ls.publishActiveUpstream(connA)
-	assert.Zero(t, ls.UpstreamTipSlot(), "active selection alone must not trust a target")
+	assert.Zero(
+		t,
+		ls.UpstreamTipSlot(),
+		"active selection alone must not trust a target",
+	)
 	// Model the independent queues: a rejected peer-tip observation R is
 	// delivered before ledger later admits header V. R must not be recovered
 	// from mutable selector state when V is published.
@@ -3598,22 +3614,28 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		return ls
 	}
 
-	t.Run("real network retains Byron until its on-chain boundary", func(t *testing.T) {
-		ls := newLedger(t, false, false, 0)
-		require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
-		assert.Nil(t, ls.currentPParams)
-		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
-		assert.Equal(t, uint(4320), ls.currentEpoch.LengthInSlots)
-		assert.Equal(t, uint(20000), ls.currentEpoch.SlotLength)
-	})
+	t.Run(
+		"real network retains Byron until its on-chain boundary",
+		func(t *testing.T) {
+			ls := newLedger(t, false, false, 0)
+			require.Equal(t, eras.ByronEraDesc.Id, ls.currentEpoch.EraId)
+			assert.Nil(t, ls.currentPParams)
+			assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+			assert.Equal(t, uint(4320), ls.currentEpoch.LengthInSlots)
+			assert.Equal(t, uint(20000), ls.currentEpoch.SlotLength)
+		},
+	)
 
-	t.Run("explicit test hard fork still starts in Shelley", func(t *testing.T) {
-		ls := newLedger(t, true, true, 0)
-		require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
-		assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
-		assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
-		assert.Equal(t, uint(1000), ls.currentEpoch.SlotLength)
-	})
+	t.Run(
+		"explicit test hard fork still starts in Shelley",
+		func(t *testing.T) {
+			ls := newLedger(t, true, true, 0)
+			require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
+			assert.Equal(t, uint64(0), ls.currentEpoch.StartSlot)
+			assert.Equal(t, uint(432000), ls.currentEpoch.LengthInSlots)
+			assert.Equal(t, uint(1000), ls.currentEpoch.SlotLength)
+		},
+	)
 
 	// preview's shipped shape: TestShelleyHardForkAtEpoch: 0 with
 	// ExperimentalHardForksEnabled: False. Reading the declaration through

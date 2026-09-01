@@ -252,96 +252,105 @@ func RunMetadataStoreConformance(
 		require.Empty(t, dreps)
 	})
 
-	t.Run("GovernanceRatificationHistoryRestoresRepeatedCycles", func(t *testing.T) {
-		proposal := &models.GovernanceProposal{
-			TxHash:        []byte(conformanceGateName(t, "proposal")),
-			ActionIndex:   0,
-			ActionType:    6,
-			ProposedEpoch: 1,
-			ExpiresEpoch:  100,
-			AnchorURL:     "https://example.invalid/governance",
-			AnchorHash:    []byte("conformance-governance-anchor"),
-			ReturnAddress: []byte("conformance-return-address"),
-			AddedSlot:     500,
-		}
-		setRatification := func(epoch, slot uint64) {
-			proposal.RatifiedEpoch = &epoch
-			proposal.RatifiedSlot = &slot
-			write := store.Transaction(t.Context())
-			defer func() { require.NoError(t, write.Rollback()) }()
-			require.NoError(
-				t,
-				governanceStore.SetGovernanceProposal(proposal, write),
-			)
-			require.NoError(t, write.Commit())
-		}
-		clearRatification := func(slot uint64) {
-			write := store.Transaction(t.Context())
-			defer func() { require.NoError(t, write.Rollback()) }()
-			require.NoError(t, governanceStore.ClearGovernanceProposalRatification(
-				proposal.TxHash,
-				proposal.ActionIndex,
-				slot,
-				write,
-			))
-			require.NoError(t, write.Commit())
-			proposal.RatifiedEpoch = nil
-			proposal.RatifiedSlot = nil
-		}
-		rollback := func(slot uint64) {
-			write := store.Transaction(t.Context())
-			defer func() { require.NoError(t, write.Rollback()) }()
-			require.NoError(
-				t,
-				governanceStore.DeleteGovernanceProposalsAfterSlot(slot, write),
-			)
-			require.NoError(t, write.Commit())
-		}
-		readMarker := func() (*uint64, *uint64) {
-			read := store.ReadTransaction(t.Context())
-			defer func() { require.NoError(t, read.Rollback()) }()
-			got, err := governanceStore.GetGovernanceProposal(
-				proposal.TxHash,
-				proposal.ActionIndex,
-				read,
-			)
-			require.NoError(t, err)
-			require.NotNil(t, got)
-			return got.RatifiedEpoch, got.RatifiedSlot
-		}
+	t.Run(
+		"GovernanceRatificationHistoryRestoresRepeatedCycles",
+		func(t *testing.T) {
+			proposal := &models.GovernanceProposal{
+				TxHash:        []byte(conformanceGateName(t, "proposal")),
+				ActionIndex:   0,
+				ActionType:    6,
+				ProposedEpoch: 1,
+				ExpiresEpoch:  100,
+				AnchorURL:     "https://example.invalid/governance",
+				AnchorHash:    []byte("conformance-governance-anchor"),
+				ReturnAddress: []byte("conformance-return-address"),
+				AddedSlot:     500,
+			}
+			setRatification := func(epoch, slot uint64) {
+				proposal.RatifiedEpoch = &epoch
+				proposal.RatifiedSlot = &slot
+				write := store.Transaction(t.Context())
+				defer func() { require.NoError(t, write.Rollback()) }()
+				require.NoError(
+					t,
+					governanceStore.SetGovernanceProposal(proposal, write),
+				)
+				require.NoError(t, write.Commit())
+			}
+			clearRatification := func(slot uint64) {
+				write := store.Transaction(t.Context())
+				defer func() { require.NoError(t, write.Rollback()) }()
+				require.NoError(
+					t,
+					governanceStore.ClearGovernanceProposalRatification(
+						proposal.TxHash,
+						proposal.ActionIndex,
+						slot,
+						write,
+					),
+				)
+				require.NoError(t, write.Commit())
+				proposal.RatifiedEpoch = nil
+				proposal.RatifiedSlot = nil
+			}
+			rollback := func(slot uint64) {
+				write := store.Transaction(t.Context())
+				defer func() { require.NoError(t, write.Rollback()) }()
+				require.NoError(
+					t,
+					governanceStore.DeleteGovernanceProposalsAfterSlot(
+						slot,
+						write,
+					),
+				)
+				require.NoError(t, write.Commit())
+			}
+			readMarker := func() (*uint64, *uint64) {
+				read := store.ReadTransaction(t.Context())
+				defer func() { require.NoError(t, read.Rollback()) }()
+				got, err := governanceStore.GetGovernanceProposal(
+					proposal.TxHash,
+					proposal.ActionIndex,
+					read,
+				)
+				require.NoError(t, err)
+				require.NotNil(t, got)
+				return got.RatifiedEpoch, got.RatifiedSlot
+			}
 
-		setRatification(5, 550)
-		clearRatification(600)
-		setRatification(7, 700)
-		clearRatification(800)
-		epoch, slot := readMarker()
-		require.Nil(t, epoch)
-		require.Nil(t, slot)
+			setRatification(5, 550)
+			clearRatification(600)
+			setRatification(7, 700)
+			clearRatification(800)
+			epoch, slot := readMarker()
+			require.Nil(t, epoch)
+			require.Nil(t, slot)
 
-		rollback(700)
-		epoch, slot = readMarker()
-		require.NotNil(t, epoch)
-		require.NotNil(t, slot)
-		require.Equal(t, uint64(7), *epoch)
-		require.Equal(t, uint64(700), *slot)
+			rollback(700)
+			epoch, slot = readMarker()
+			require.NotNil(t, epoch)
+			require.NotNil(t, slot)
+			require.Equal(t, uint64(7), *epoch)
+			require.Equal(t, uint64(700), *slot)
 
-		rollback(600)
-		epoch, slot = readMarker()
-		require.Nil(t, epoch)
-		require.Nil(t, slot)
+			rollback(600)
+			epoch, slot = readMarker()
+			require.Nil(t, epoch)
+			require.Nil(t, slot)
 
-		rollback(599)
-		epoch, slot = readMarker()
-		require.NotNil(t, epoch)
-		require.NotNil(t, slot)
-		require.Equal(t, uint64(5), *epoch)
-		require.Equal(t, uint64(550), *slot)
+			rollback(599)
+			epoch, slot = readMarker()
+			require.NotNil(t, epoch)
+			require.NotNil(t, slot)
+			require.Equal(t, uint64(5), *epoch)
+			require.Equal(t, uint64(550), *slot)
 
-		rollback(549)
-		epoch, slot = readMarker()
-		require.Nil(t, epoch)
-		require.Nil(t, slot)
-	})
+			rollback(549)
+			epoch, slot = readMarker()
+			require.Nil(t, epoch)
+			require.Nil(t, slot)
+		},
+	)
 
 	t.Run("ConstitutionRoundTripThroughNarrowStore", func(t *testing.T) {
 		// A write as well as a read: a domain interface that can only be

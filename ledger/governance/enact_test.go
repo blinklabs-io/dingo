@@ -290,8 +290,16 @@ func TestEnactProposal_DijkstraHardForkPreservesPParams(t *testing.T) {
 	require.True(t, result.PParamsChanged)
 	updated, ok := result.UpdatedPParams.(*gdijkstra.DijkstraProtocolParameters)
 	require.True(t, ok, "hard-fork enactment must retain the Dijkstra type")
-	require.Equal(t, action.ProtocolVersion.Major, updated.ProtocolVersion.Major)
-	require.Equal(t, action.ProtocolVersion.Minor, updated.ProtocolVersion.Minor)
+	require.Equal(
+		t,
+		action.ProtocolVersion.Major,
+		updated.ProtocolVersion.Major,
+	)
+	require.Equal(
+		t,
+		action.ProtocolVersion.Minor,
+		updated.ProtocolVersion.Minor,
+	)
 
 	gotNonVersion := *updated
 	gotNonVersion.ProtocolVersion = original.ProtocolVersion

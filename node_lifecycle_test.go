@@ -1142,7 +1142,11 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 
 	err := n.stopForPendingRestoreRollback(pendingErr, nil)
 	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
-	require.Error(t, n.ctx.Err(), "node must stop instead of reopening unsafe stores")
+	require.Error(
+		t,
+		n.ctx.Err(),
+		"node must stop instead of reopening unsafe stores",
+	)
 }
 
 // TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a

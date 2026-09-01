@@ -323,6 +323,25 @@ func (n *Node) initBlockForger(
 		}
 	}
 
+	// Wire the durable last-forged-slot fence. A block producer must not
+	// start without it: the in-memory fallback cannot survive a restart,
+	// which is precisely the case the fence exists for. The forging
+	// package still tolerates a nil store for embedders and dev-mode
+	// wiring, so refuse here rather than there.
+	var forgeFence forging.ForgeFenceStore
+	if n.db != nil {
+		forgeFence = forging.NewSyncStateForgeFenceStore(
+			n.db.Metadata(),
+			poolKeyHash,
+		)
+	}
+	if forgeFence == nil {
+		_ = election.Stop()
+		return errors.New(
+			"block producer requires a metadata store for the forge fence",
+		)
+	}
+
 	// Wire self-validation when the operator opts in. The validator runs
 	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
 	var blockValidator forging.BlockValidator
@@ -346,6 +365,7 @@ func (n *Node) initBlockForger(
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
 		BlockValidator:                  blockValidator,
+		ForgeFence:                      forgeFence,
 		PromRegistry:                    n.config.promRegistry,
 		LeiosProduceChecker:             leiosChecker,
 		LeiosEBBroadcaster:              leiosEBCaster,

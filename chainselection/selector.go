@@ -917,7 +917,10 @@ func (cs *ChainSelector) GetPeerSyncTarget(
 	}
 	observed := peerTip.SelectionTip()
 	advertised := peerTip.Tip
-	if safeAddUint64(observed.Point.Slot, cs.genesisWindowSlotsLocked()) < advertised.Point.Slot {
+	if safeAddUint64(
+		observed.Point.Slot,
+		cs.genesisWindowSlotsLocked(),
+	) < advertised.Point.Slot {
 		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
 	}
 	if advertised.Point.Slot == 0 && advertised.BlockNumber == 0 {

@@ -568,7 +568,11 @@ func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 		func() (int, error) { panic("simulated decode panic") },
 		func(isMiss bool) { outcomes = append(outcomes, isMiss) },
 	)
-	require.Error(t, err, "a decodeFn panic must be returned as a normal error, not propagated")
+	require.Error(
+		t,
+		err,
+		"a decodeFn panic must be returned as a normal error, not propagated",
+	)
 	require.Contains(t, err.Error(), "decode panicked")
 
 	require.Equal(

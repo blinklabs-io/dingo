@@ -52,6 +52,7 @@ func (b *validityOutcomeTestBlock) Type() int {
 func (b *validityOutcomeTestBlock) Hash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256Hash([]byte("validity-outcome-block"))
 }
+
 func (b *validityOutcomeTestBlock) Header() lcommon.BlockHeader { return b.header }
 func (b *validityOutcomeTestBlock) PrevHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
@@ -163,8 +164,14 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 					txHash: {BlockSlot: 10, ByteLength: 1},
 				},
 				UtxoOffsets: map[database.UtxoRef]database.CborOffset{
-					{TxId: txHash, OutputIdx: 0}: {BlockSlot: 10, ByteLength: 1},
-					{TxId: txHash, OutputIdx: 1}: {BlockSlot: 10, ByteLength: 1},
+					{TxId: txHash, OutputIdx: 0}: {
+						BlockSlot:  10,
+						ByteLength: 1,
+					},
+					{TxId: txHash, OutputIdx: 1}: {
+						BlockSlot:  10,
+						ByteLength: 1,
+					},
 				},
 			}
 
@@ -191,7 +198,9 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				phase1Reached = true
 				phase2Reached = true
 				if tt.declaredValid == tt.phase2Fails {
-					return errors.New("Dijkstra declared validity does not match phase-2 result")
+					return errors.New(
+						"Dijkstra declared validity does not match phase-2 result",
+					)
 				}
 				return nil
 			}
@@ -230,34 +239,39 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(
-					txn,
-					ocommon.NewPoint(10, block.Hash().Bytes()),
-					block,
-					true,
-					false,
-					false,
-					nil,
-					envelopeParent{origin: true},
-					offsets,
-					testEra,
-					pparams,
-					nil,
-					0,
-				)
-				return err
-			})
+			processErr := db.Transaction(true).
+				Do(func(txn *database.Txn) error {
+					_, err := ls.ledgerProcessBlock(
+						txn,
+						ocommon.NewPoint(10, block.Hash().Bytes()),
+						block,
+						true,
+						false,
+						false,
+						nil,
+						envelopeParent{origin: true},
+						offsets,
+						testEra,
+						pparams,
+						nil,
+						0,
+					)
+					return err
+				})
 			require.True(t, phase1Reached)
 			require.True(t, phase2Reached)
 
-			regular, err := db.Metadata().GetUtxoIncludingSpent(regularInputID, 0, nil)
+			regular, err := db.Metadata().
+				GetUtxoIncludingSpent(regularInputID, 0, nil)
 			require.NoError(t, err)
-			collateral, err := db.Metadata().GetUtxoIncludingSpent(collateralInputID, 0, nil)
+			collateral, err := db.Metadata().
+				GetUtxoIncludingSpent(collateralInputID, 0, nil)
 			require.NoError(t, err)
-			outputRow, err := db.Metadata().GetUtxoIncludingSpent(tx.Hash().Bytes(), 0, nil)
+			outputRow, err := db.Metadata().
+				GetUtxoIncludingSpent(tx.Hash().Bytes(), 0, nil)
 			require.NoError(t, err)
-			returnRow, err := db.Metadata().GetUtxoIncludingSpent(tx.Hash().Bytes(), 1, nil)
+			returnRow, err := db.Metadata().
+				GetUtxoIncludingSpent(tx.Hash().Bytes(), 1, nil)
 			require.NoError(t, err)
 			tip, err := db.GetTip(nil)
 			require.NoError(t, err)
@@ -385,24 +399,25 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 				true,
 				true,
 			)
-			processErr := db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(
-					txn,
-					ocommon.NewPoint(10, block.Hash().Bytes()),
-					block,
-					true,
-					false,
-					skipPhase2,
-					nil,
-					envelopeParent{origin: true},
-					offsets,
-					testEra,
-					pparams,
-					nil,
-					0,
-				)
-				return err
-			})
+			processErr := db.Transaction(true).
+				Do(func(txn *database.Txn) error {
+					_, err := ls.ledgerProcessBlock(
+						txn,
+						ocommon.NewPoint(10, block.Hash().Bytes()),
+						block,
+						true,
+						false,
+						skipPhase2,
+						nil,
+						envelopeParent{origin: true},
+						offsets,
+						testEra,
+						pparams,
+						nil,
+						0,
+					)
+					return err
+				})
 			require.True(t, phase2Called)
 			if tt.wantValidationErr {
 				var plutusErr conway.PlutusScriptFailedError
@@ -494,7 +509,11 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 				)
 				return err
 			})
-			require.True(t, called, "validated block must run transaction validation")
+			require.True(
+				t,
+				called,
+				"validated block must run transaction validation",
+			)
 			require.ErrorIs(t, err, sentinel)
 		})
 	}

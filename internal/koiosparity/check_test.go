@@ -589,7 +589,9 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 // koios_totals table is dropped after seeding to force GetTotals to fail
 // with a real DB error partway through checkEpoch, well after the point
 // where the old code had already deleted the prior rows.
-func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(t *testing.T) {
+func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(
+	t *testing.T,
+) {
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -642,14 +644,19 @@ func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(t *testing.T
 		Category:   CategoryDBError,
 		CheckedAt:  fetchedAt,
 	}}
-	require.NoError(t, cache.CommitEpochMismatches(network, koiosEpoch, priorEvidence))
+	require.NoError(
+		t,
+		cache.CommitEpochMismatches(network, koiosEpoch, priorEvidence),
+	)
 
 	// Force cache.GetTotals to fail with a real DB error (not sql.ErrNoRows),
 	// simulating the koios_totals read failing partway through checkEpoch.
 	_, err = cache.db.Exec("DROP TABLE koios_totals")
 	require.NoError(t, err)
 
-	dingoSource, err := OpenDingoDB(DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir})
+	dingoSource, err := OpenDingoDB(
+		DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+	)
 	require.NoError(t, err)
 	defer dingoSource.Close() //nolint:errcheck
 
