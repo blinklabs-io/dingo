@@ -61,8 +61,27 @@ func newChainUpdateEvent() event.Event {
 func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
 	eventBus := event.NewEventBus(nil, nil)
 	// Stop releases the goroutines parked on the stalled subscriber / full
-	// lane at the end of the test.
-	t.Cleanup(eventBus.Stop)
+	// lane at the end of the test. Run it under a bounded wait: if Stop's
+	// shutdown path ever regresses and fails to release those parked
+	// publishers, an unbounded t.Cleanup(eventBus.Stop) would hang the whole
+	// `go test` binary in Stop with no diagnostic. Fail the test instead so
+	// the regression is visible.
+	t.Cleanup(func() {
+		stopped := make(chan struct{})
+		go func() {
+			eventBus.Stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			t.Error(
+				"eventBus.Stop did not return within 10s: it failed to " +
+					"release the publishers parked on the stalled subscriber / " +
+					"full ordered lane (shutdown backpressure-release regressed)",
+			)
+		}
+	})
 
 	// Terminal chain.update subscriber, buffer 1, deliberately never drained.
 	// Lossless (SubscriberBackpressureBlock) means a full buffer blocks the
