@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -49,7 +50,15 @@ type syncStateForgeFenceRecord struct {
 
 // syncStateForgeFenceStore persists the last-forged-slot fence in
 // metadata sync state, alongside the leader schedule.
+//
+// StoreLastForgedSlot is a read-modify-write, so mu makes the
+// forward-only guarantee a property of this type rather than of its
+// caller. The forger drives it from a single goroutine today, but that
+// is not something an exported store should depend on. mu does not span
+// processes; two nodes sharing a data directory would corrupt the chain
+// database long before the fence mattered.
 type syncStateForgeFenceStore struct {
+	mu     sync.Mutex
 	store  syncStateStore
 	poolID lcommon.PoolKeyHash
 	key    string
@@ -80,6 +89,14 @@ func (s *syncStateForgeFenceStore) LoadLastForgedSlot() (
 	bool,
 	error,
 ) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadLocked()
+}
+
+// loadLocked is LoadLastForgedSlot's body, for callers already holding
+// mu.
+func (s *syncStateForgeFenceStore) loadLocked() (uint64, bool, error) {
 	raw, err := s.store.GetSyncState(s.key, nil)
 	if err != nil {
 		return 0, false, fmt.Errorf("load forge fence %q: %w", s.key, err)
@@ -124,7 +141,9 @@ func (s *syncStateForgeFenceStore) LoadLastForgedSlot() (
 // StoreLastForgedSlot records slot as used. The fence only ever moves
 // forward: a lower slot leaves the stronger recorded value in place.
 func (s *syncStateForgeFenceStore) StoreLastForgedSlot(slot uint64) error {
-	current, ok, err := s.LoadLastForgedSlot()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok, err := s.loadLocked()
 	if err != nil {
 		return err
 	}

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -29,6 +30,7 @@ import (
 )
 
 type mockSyncStateStore struct {
+	mu     sync.Mutex
 	values map[string]string
 	getErr error
 	setErr error
@@ -42,6 +44,8 @@ func (m *mockSyncStateStore) GetSyncState(
 	key string,
 	_ types.Txn,
 ) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.getErr != nil {
 		return "", m.getErr
 	}
@@ -53,6 +57,8 @@ func (m *mockSyncStateStore) SetSyncState(
 	value string,
 	_ types.Txn,
 ) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.setErr != nil {
 		return m.setErr
 	}
@@ -255,4 +261,29 @@ func TestSyncStateForgeFenceStoreAcceptsExplicitZeroSlot(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, uint64(0), slot)
+}
+
+// TestSyncStateForgeFenceStoreConcurrentStoresKeepHighest makes the
+// store's forward-only guarantee a property of the type rather than of
+// its caller. The forger drives it from one goroutine today, but a
+// read-modify-write on an exported type should not depend on that.
+func TestSyncStateForgeFenceStoreConcurrentStoresKeepHighest(t *testing.T) {
+	backing := newMockSyncStateStore()
+	store := NewSyncStateForgeFenceStore(backing, storeTestPoolID("pool"))
+
+	const highest = 500
+	var wg sync.WaitGroup
+	for slot := 1; slot <= highest; slot++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			assert.NoError(t, store.StoreLastForgedSlot(uint64(slot)))
+		}()
+	}
+	wg.Wait()
+
+	slot, ok, err := store.LoadLastForgedSlot()
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, uint64(highest), slot)
 }
