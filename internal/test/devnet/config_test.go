@@ -224,8 +224,14 @@ func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
 			environment := environments[service]
 			for _, bound := range []string{"MIN", "MAX"} {
 				key := "TXPUMP_TX_COUNT_" + bound
-				requireComposeEnvInt(t, service, environment, key, 1,
-					"DevNet txpump batches must not create unconfirmed dependency chains")
+				requireComposeEnvInt(
+					t,
+					service,
+					environment,
+					key,
+					1,
+					"DevNet txpump batches must not create unconfirmed dependency chains",
+				)
 			}
 			requireComposeEnvInt(t, service, environment,
 				"TXPUMP_CONFIRMATION_SLOTS", 600,

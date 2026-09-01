@@ -133,7 +133,9 @@ func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return c.upstreamTipSlot, c.upstreamActive || c.upstreamTipSlot > 0
 }
 
-func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(t *testing.T) {
+func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(
+	t *testing.T,
+) {
 	creds := setupTestCredentials(t)
 	block := newForgerTestBlock(10, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
@@ -889,7 +891,9 @@ func TestCheckAndForgeProductionUsesRetainedReconnectFrontier(t *testing.T) {
 	)
 }
 
-func TestCheckAndForgeProductionWaitsForEventPairedCorroboratedTarget(t *testing.T) {
+func TestCheckAndForgeProductionWaitsForEventPairedCorroboratedTarget(
+	t *testing.T,
+) {
 	creds := setupTestCredentials(t)
 	block := newForgerTestBlock(101, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
@@ -1165,7 +1169,11 @@ func TestCheckAndForgeProductionRecoversLeaderCheckPanic(t *testing.T) {
 	assert.Equal(t, 1, leader.calls)
 	assert.Equal(t, 0, builder.calls)
 	assert.Equal(t, 0, broadcaster.calls)
-	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeNotLeader))
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeNotLeader),
+	)
 	assert.Equal(
 		t,
 		float64(1),

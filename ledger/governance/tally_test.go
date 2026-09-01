@@ -318,13 +318,21 @@ func TestTallySPOVotesExplicitNoAndAbstainStakeOverflow(t *testing.T) {
 		}
 		t.Run("just below overflow succeeds", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(1)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(1)},
+				votes,
+				tally,
+			)
 			require.NoError(t, err)
 			assert.Equal(t, maxUint64, tally.SPONoStake)
 		})
 		t.Run("just above overflow fails", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(2)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(2)},
+				votes,
+				tally,
+			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "overflows uint64")
 		})
@@ -337,13 +345,21 @@ func TestTallySPOVotesExplicitNoAndAbstainStakeOverflow(t *testing.T) {
 		}
 		t.Run("just below overflow succeeds", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(1)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(1)},
+				votes,
+				tally,
+			)
 			require.NoError(t, err)
 			assert.Equal(t, maxUint64, tally.SPOAbstainStake)
 		})
 		t.Run("just above overflow fails", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(2)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(2)},
+				votes,
+				tally,
+			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "overflows uint64")
 		})

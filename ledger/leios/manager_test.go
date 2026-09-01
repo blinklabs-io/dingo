@@ -922,7 +922,9 @@ func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
 // requeue is gated by insertVote's dedup check, not fired unconditionally --
 // a resubmission of a vote already on record must not cause a second
 // diffusion round trip.
-func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(t *testing.T) {
+func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(
+	t *testing.T,
+) {
 	fixture := newManagerFixture(t)
 	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
@@ -1229,7 +1231,11 @@ func TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee(
 	committee, err := fixture.mgr.CommitteeForEpoch(5)
 	require.NoError(t, err)
 	_, isMember := committee.VoterIdFor(poolKeyHash[:])
-	require.False(t, isMember, "test setup: pool must have no stake and no committee seat")
+	require.False(
+		t,
+		isMember,
+		"test setup: pool must have no stake and no committee seat",
+	)
 
 	require.NoError(t, fixture.mgr.ValidateVotingKey(poolKeyHash, key))
 	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, key))
@@ -1381,7 +1387,9 @@ func TestVoteManagerReferenceModeRejectsLocalStaticFallback(t *testing.T) {
 // sides of the production trust boundary: a configured static key cannot
 // verify a vote when it differs from the PoP-verified on-chain registration,
 // while the registered key is accepted for the same committee seat.
-func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(t *testing.T) {
+func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(
+	t *testing.T,
+) {
 	onChainKey := testSigningKey(t, 203)
 	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
 	require.NoError(t, err)
@@ -1481,7 +1489,9 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 // keyless" for the epoch: committeeAndParamsForEpoch must fail outright
 // (not cache an empty onChainKeys map) so a later, successful call can
 // still resolve keys normally once the failure clears.
-func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(t *testing.T) {
+func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(
+	t *testing.T,
+) {
 	key := testSigningKey(t, 126)
 	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
@@ -1636,7 +1646,9 @@ func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
 // found": treating the two the same would make ValidateVotingKey silently
 // fall back to the static registry during exactly the kind of outage that
 // should instead block startup until it clears.
-func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(t *testing.T) {
+func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(
+	t *testing.T,
+) {
 	member := CommitteeMember{}
 	fixture := newManagerFixture(
 		t,
@@ -1649,7 +1661,10 @@ func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(t *testing.T) 
 	)
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	err := fixture.mgr.ValidateVotingKey(poolKeyHash, fixture.keys[member.VoterId])
+	err := fixture.mgr.ValidateVotingKey(
+		poolKeyHash,
+		fixture.keys[member.VoterId],
+	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "store temporarily unavailable")
 }

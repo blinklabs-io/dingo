@@ -283,7 +283,9 @@ func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 	assert.Zero(t, target)
 }
 
-func TestAdvanceUpstreamTipSlotDoesNotPublishWithoutAdmittedTarget(t *testing.T) {
+func TestAdvanceUpstreamTipSlotDoesNotPublishWithoutAdmittedTarget(
+	t *testing.T,
+) {
 	activeConnID := testChainsyncConnId(6000, 3041)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -341,7 +343,9 @@ func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
 	assert.False(t, active)
 }
 
-func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(t *testing.T) {
+func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(
+	t *testing.T,
+) {
 	targetConnId := testChainsyncConnId(6000, 3031)
 	activeConnId := testChainsyncConnId(6000, 3032)
 	ls := &LedgerState{
@@ -915,7 +919,10 @@ func newChainSwitchFallbackFixture(
 			) (ochainsync.Tip, bool) {
 				if sameConnectionId(connId, connId3) {
 					return ochainsync.Tip{
-						Point:       ocommon.NewPoint(200, []byte("active-tip")),
+						Point: ocommon.NewPoint(
+							200,
+							[]byte("active-tip"),
+						),
 						BlockNumber: 10,
 					}, true
 				}
@@ -1287,7 +1294,11 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		return &connID
 	}
 	ls.publishActiveUpstream(connID)
-	assert.Zero(t, ls.UpstreamTipSlot(), "selection alone must not publish a target")
+	assert.Zero(
+		t,
+		ls.UpstreamTipSlot(),
+		"selection alone must not publish a target",
+	)
 
 	// This header is accepted and establishes the initial upstream tip.
 	accepted := mockHeader{
@@ -1308,7 +1319,9 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 			),
 			BlockNumber: advertisedSlot,
 		},
-		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(accepted.slot, []byte("accepted-target"))},
+		SyncTarget: ochainsync.Tip{
+			Point: ocommon.NewPoint(accepted.slot, []byte("accepted-target")),
+		},
 		SyncTargetTrusted: true,
 	}))
 	require.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
@@ -1327,10 +1340,18 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		BlockHeader:  rejected,
 		Point:        ocommon.NewPoint(rejected.slot, rejected.hash.Bytes()),
 		Tip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(advertisedSlot-1, []byte("rejected-tip")),
+			Point: ocommon.NewPoint(
+				advertisedSlot-1,
+				[]byte("rejected-tip"),
+			),
 			BlockNumber: advertisedSlot - 1,
 		},
-		SyncTarget: ochainsync.Tip{Point: ocommon.NewPoint(advertisedSlot-1, []byte("rejected-target"))},
+		SyncTarget: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advertisedSlot-1,
+				[]byte("rejected-target"),
+			),
+		},
 	}))
 	assert.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot(),
@@ -2410,14 +2431,17 @@ func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
 		assert.Equal(t, delivered, got)
 	})
 
-	t.Run("zero delivered frontier is not the advertised tip", func(t *testing.T) {
-		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
-			NewTip:            advertised,
-			NewObservedTipSet: true,
-		})
-		assert.Equal(t, ochainsync.Tip{}, got)
-		assert.NotEqual(t, advertised, got)
-	})
+	t.Run(
+		"zero delivered frontier is not the advertised tip",
+		func(t *testing.T) {
+			got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+				NewTip:            advertised,
+				NewObservedTipSet: true,
+			})
+			assert.Equal(t, ochainsync.Tip{}, got)
+			assert.NotEqual(t, advertised, got)
+		},
+	)
 
 	t.Run("unset falls back to the advertised tip", func(t *testing.T) {
 		// Older events and direct unit-test or integration constructors.
