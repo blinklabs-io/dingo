@@ -35,6 +35,7 @@ const (
 	accountBaselineSchemaRelease               = "account-import-baseline"
 	leiosSnapshotKeySchemaRelease              = "leios-snapshot-keys"
 	governanceRatificationHistorySchemaRelease = "governance-ratification-history"
+	committeeCredentialTagsSchemaRelease       = "committee-credential-tags"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -53,6 +54,7 @@ var schemaVersions = []struct {
 		Name:    governanceRatificationHistorySchemaRelease,
 		Dir:     "v6",
 	},
+	{Version: 7, Name: committeeCredentialTagsSchemaRelease, Dir: "v7"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -222,6 +224,11 @@ func translateSchemaSQLInSchema(
 				value,
 				"CREATE UNIQUE INDEX IF NOT EXISTS",
 				"CREATE UNIQUE INDEX",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_committee_member_cold_cred_hash`",
+				"DROP INDEX `idx_committee_member_cold_cred_hash` ON `committee_member`",
 			)
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {

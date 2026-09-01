@@ -344,10 +344,13 @@ RETURNING id`,
 	case *lcommon.AuthCommitteeHotCertificate:
 		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
+			cert.ColdCredential.CredType,
 			cert.ColdCredential.Credential[:],
+			cert.HotCredential.CredType,
 			cert.HotCredential.Credential[:],
 			certificateID,
 			slot,
@@ -362,10 +365,12 @@ RETURNING id`,
 		}
 		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO resign_committee_cold (
-    anchor_url, cold_credential, anchor_hash, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?)
+    anchor_url, cold_credential_tag, cold_credential, anchor_hash,
+    certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
 			anchorURL,
+			cert.ColdCredential.CredType,
 			cert.ColdCredential.Credential[:],
 			anchorHash,
 			certificateID,

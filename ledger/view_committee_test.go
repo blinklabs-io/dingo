@@ -16,12 +16,15 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -44,9 +47,15 @@ func committeeTestView(
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	ls := &LedgerState{db: db, currentPParams: pparams}
+	ls := &LedgerState{
+		db:             db,
+		currentPParams: pparams,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
+		},
+	}
 	ls.publishSnapshotsLocked()
-	return &LedgerView{ls: ls}, db
+	return ls.NewView(nil), db
 }
 
 func storeCommitteeUpdateProposal(
@@ -56,6 +65,24 @@ func storeCommitteeUpdateProposal(
 	credential lcommon.Credential,
 	expiry uint64,
 ) {
+	storeCommitteeUpdateProposalInTxn(
+		t,
+		db,
+		seed,
+		credential,
+		expiry,
+		nil,
+	)
+}
+
+func storeCommitteeUpdateProposalInTxn(
+	t *testing.T,
+	db *database.Database,
+	seed byte,
+	credential lcommon.Credential,
+	expiry uint64,
+	txn *database.Txn,
+) {
 	t.Helper()
 	action, err := lcommon.NewUpdateCommitteeGovAction(
 		nil,
@@ -64,12 +91,18 @@ func storeCommitteeUpdateProposal(
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)
-	storeGovernanceTestProposal(t, db, &models.GovernanceProposal{
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
 		TxHash:        governanceTestHash(seed),
 		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
 		ProposedEpoch: 0,
 		ExpiresEpoch:  100,
-	}, action)
+		AnchorHash:    make([]byte, 32),
+		ReturnAddress: make([]byte, 29),
+		GovActionCbor: encoded,
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, txn))
 }
 
 func seedCommitteeAuthorization(
@@ -80,14 +113,44 @@ func seedCommitteeAuthorization(
 	certificateID uint64,
 	slot uint64,
 ) {
+	seedCommitteeCredentialAuthorization(
+		t,
+		db,
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: coldKey,
+		},
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: hotKey,
+		},
+		certificateID,
+		slot,
+	)
+}
+
+func seedCommitteeCredentialAuthorization(
+	t *testing.T,
+	db *database.Database,
+	coldCredential lcommon.Credential,
+	hotCredential lcommon.Credential,
+	certificateID uint64,
+	slot uint64,
+) {
 	t.Helper()
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
 INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`,
-		coldKey[:], hotKey[:], certificateID, slot,
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)`,
+		coldCredential.CredType,
+		coldCredential.Credential[:],
+		hotCredential.CredType,
+		hotCredential.Credential[:],
+		certificateID,
+		slot,
 	)
 	require.NoError(t, err)
 }
@@ -99,16 +162,200 @@ func seedCommitteeResignation(
 	certificateID uint64,
 	slot uint64,
 ) {
+	seedCommitteeCredentialResignation(
+		t,
+		db,
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: coldKey,
+		},
+		certificateID,
+		slot,
+	)
+}
+
+func seedCommitteeCredentialResignation(
+	t *testing.T,
+	db *database.Database,
+	coldCredential lcommon.Credential,
+	certificateID uint64,
+	slot uint64,
+) {
 	t.Helper()
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
 INSERT INTO resign_committee_cold (
-    cold_credential, certificate_id, added_slot
-) VALUES (?, ?, ?)`,
-		coldKey[:], certificateID, slot,
+    cold_credential_tag, cold_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`,
+		coldCredential.CredType,
+		coldCredential.Credential[:],
+		certificateID,
+		slot,
 	)
 	require.NoError(t, err)
+}
+
+func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T) {
+	tests := []struct {
+		name         string
+		seed         func(*testing.T, *database.Database, lcommon.Credential)
+		wantHot      bool
+		wantResigned bool
+	}{
+		{
+			name: "authorization",
+			seed: func(t *testing.T, db *database.Database, cold lcommon.Credential) {
+				seedCommitteeCredentialAuthorization(
+					t,
+					db,
+					cold,
+					committeeTestCredential(0x72),
+					1,
+					1,
+				)
+			},
+			wantHot: true,
+		},
+		{
+			name: "resignation without prior authorization",
+			seed: func(t *testing.T, db *database.Database, cold lcommon.Credential) {
+				seedCommitteeCredentialResignation(t, db, cold, 1, 1)
+			},
+			wantResigned: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+			cold := committeeTestCredential(0x71)
+			storeCommitteeUpdateProposal(t, db, 0x73, cold, 90)
+			test.seed(t, db, cold)
+
+			member, err := lv.CommitteeCredentialMember(cold)
+			require.NoError(t, err)
+			require.NotNil(t, member)
+			require.Equal(t, test.wantResigned, member.Resigned)
+			if test.wantHot {
+				require.NotNil(t, member.HotKey)
+				require.Equal(t, committeeTestCredential(0x72).Credential, *member.HotKey)
+			} else {
+				require.Nil(t, member.HotKey)
+			}
+		})
+	}
+}
+
+func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
+	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	hash := committeeTestCredential(0x81).Credential
+	keyCold := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	scriptCold := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: hash,
+	}
+	hotHash := committeeTestCredential(0x82).Credential
+	keyHot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hotHash,
+	}
+	scriptHot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: hotHash,
+	}
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredentialTag: 0, ColdCredHash: hash[:], ExpiresEpoch: 41},
+		{ColdCredentialTag: 1, ColdCredHash: hash[:], ExpiresEpoch: 42},
+	}, nil))
+	seedCommitteeCredentialAuthorization(t, db, keyCold, keyHot, 1, 1)
+	seedCommitteeCredentialAuthorization(t, db, scriptCold, scriptHot, 2, 1)
+
+	keyMember, err := lv.CommitteeCredentialMember(keyCold)
+	require.NoError(t, err)
+	require.NotNil(t, keyMember)
+	require.Equal(t, uint64(41), keyMember.ExpiryEpoch)
+	scriptMember, err := lv.CommitteeCredentialMember(scriptCold)
+	require.NoError(t, err)
+	require.NotNil(t, scriptMember)
+	require.Equal(t, uint64(42), scriptMember.ExpiryEpoch)
+
+	legacy, err := lv.CommitteeMember(hash)
+	require.NoError(t, err)
+	require.Nil(t, legacy)
+	keyVoter, err := lv.CommitteeHotCredentialMember(keyHot)
+	require.NoError(t, err)
+	require.NotNil(t, keyVoter)
+	require.Equal(t, uint64(41), keyVoter.ExpiryEpoch)
+	scriptVoter, err := lv.CommitteeHotCredentialMember(scriptHot)
+	require.NoError(t, err)
+	require.NotNil(t, scriptVoter)
+	require.Equal(t, uint64(42), scriptVoter.ExpiryEpoch)
+}
+
+func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
+	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	cold := committeeTestCredential(0x91)
+	storeCommitteeUpdateProposal(t, db, 0x92, cold, 90)
+
+	lv.ls.currentEpoch = models.Epoch{EpochId: 101}
+	lv.ls.publishSnapshotsLocked()
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.NotNil(t, member, "pinned validation view must keep epoch zero")
+
+	fresh := lv.ls.NewView(nil)
+	member, err = fresh.CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.Nil(t, member, "fresh view must observe the later epoch")
+}
+
+func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
+	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	hash := committeeTestCredential(0xa1).Credential
+	members := []*models.CommitteeMember{
+		{
+			ColdCredentialTag: 0,
+			ColdCredHash:      hash[:],
+			ExpiresEpoch:      41,
+			AddedSlot:         10,
+		},
+		{
+			ColdCredentialTag: 1,
+			ColdCredHash:      hash[:],
+			ExpiresEpoch:      42,
+			AddedSlot:         10,
+		},
+	}
+	txn := db.MetadataTxn(true)
+	require.NoError(t, db.SetCommitteeMembers(members, txn))
+	require.NoError(t, txn.Rollback())
+	txn.Release()
+
+	stored, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Empty(t, stored)
+
+	require.NoError(t, db.SetCommitteeMembers(members, nil))
+	require.NoError(t, db.SoftDeleteCommitteeMembers(
+		[]models.CommitteeCredential{{
+			CredentialTag: 1,
+			Credential:    hash[:],
+		}},
+		50,
+		nil,
+	))
+	stored, err = db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.Equal(t, uint8(0), stored[0].ColdCredentialTag)
+
+	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(49, nil))
+	stored, err = db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, stored, 2)
 }
 
 func TestLedgerViewCommitteeMember(t *testing.T) {
@@ -228,9 +475,11 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	})
 }
 
-func TestLedgerViewPendingCommitteeCertificateValidation(t *testing.T) {
+func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
+	t *testing.T,
+) {
 	pparams := &conway.ConwayProtocolParameters{}
-	lv, db := committeeTestView(t, pparams)
+	initialView, db := committeeTestView(t, pparams)
 	seated := committeeTestCredential(0x61)
 	require.NoError(t, db.SetCommitteeMembers(
 		[]*models.CommitteeMember{{
@@ -240,7 +489,13 @@ func TestLedgerViewPendingCommitteeCertificateValidation(t *testing.T) {
 		nil,
 	))
 	proposed := committeeTestCredential(0x62)
-	storeCommitteeUpdateProposal(t, db, 0x63, proposed, 90)
+	txn := db.MetadataTxn(true)
+	t.Cleanup(func() {
+		require.NoError(t, txn.Rollback())
+		txn.Release()
+	})
+	storeCommitteeUpdateProposalInTxn(t, db, 0x63, proposed, 90, txn)
+	lv := initialView.ls.NewView(txn)
 
 	certificates := []lcommon.Certificate{
 		&lcommon.AuthCommitteeHotCertificate{
@@ -253,23 +508,52 @@ func TestLedgerViewPendingCommitteeCertificateValidation(t *testing.T) {
 			ColdCredential: proposed,
 		},
 	}
+	credentials := []struct {
+		name          string
+		credential    lcommon.Credential
+		wantNotMember bool
+	}{
+		{name: "matching key credential", credential: proposed},
+		{
+			name: "opposite script credential",
+			credential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeScriptHash,
+				Credential: proposed.Credential,
+			},
+			wantNotMember: true,
+		},
+	}
 	for _, certificate := range certificates {
-		t.Run(certificateName(certificate), func(t *testing.T) {
-			tx := &conway.ConwayTransaction{
-				Body: conway.ConwayTransactionBody{
-					TxCertificates: []lcommon.CertificateWrapper{{
-						Type:        certificate.Type(),
-						Certificate: certificate,
-					}},
-				},
-			}
-			require.NoError(t, conway.UtxoValidateCommitteeCertificates(
-				tx,
-				0,
-				lv,
-				pparams,
-			))
-		})
+		for _, credential := range credentials {
+			t.Run(certificateName(certificate)+"/"+credential.name, func(t *testing.T) {
+				switch cert := certificate.(type) {
+				case *lcommon.AuthCommitteeHotCertificate:
+					cert.ColdCredential = credential.credential
+				case *lcommon.ResignCommitteeColdCertificate:
+					cert.ColdCredential = credential.credential
+				}
+				tx := &conway.ConwayTransaction{
+					Body: conway.ConwayTransactionBody{
+						TxCertificates: []lcommon.CertificateWrapper{{
+							Type:        certificate.Type(),
+							Certificate: certificate,
+						}},
+					},
+				}
+				err := eras.ValidateTxConway(tx, 0, lv, pparams)
+				var notMember conway.NotCommitteeMemberError
+				if credential.wantNotMember {
+					require.ErrorAs(t, err, &notMember)
+				} else {
+					require.False(
+						t,
+						errors.As(err, &notMember),
+						"matching uncommitted proposal was rejected: %v",
+						err,
+					)
+				}
+			})
+		}
 	}
 }
 

@@ -1507,7 +1507,8 @@ func (q *Queries) GetBlockSlotRangeStats(ctx context.Context, arg GetBlockSlotRa
 }
 
 const getCommitteeMembers = `-- name: GetCommitteeMembers :many
-SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
+SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
+       added_slot, deleted_slot
 FROM committee_member
 WHERE deleted_slot IS NULL
 ORDER BY id
@@ -1524,8 +1525,10 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 		var i CommitteeMember
 		if err := rows.Scan(
 			&i.ID,
+			&i.ColdCredentialTag,
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
+			&i.TermStartSlot,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -1543,7 +1546,8 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 }
 
 const getCommitteeMembersIncludeDeleted = `-- name: GetCommitteeMembersIncludeDeleted :many
-SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
+SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
+       added_slot, deleted_slot
 FROM committee_member
 ORDER BY id
 `
@@ -1559,8 +1563,10 @@ func (q *Queries) GetCommitteeMembersIncludeDeleted(ctx context.Context) ([]Comm
 		var i CommitteeMember
 		if err := rows.Scan(
 			&i.ID,
+			&i.ColdCredentialTag,
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
+			&i.TermStartSlot,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -4318,26 +4324,32 @@ func (q *Queries) SetBlockNonce(ctx context.Context, arg SetBlockNonceParams) er
 
 const setCommitteeMember = `-- name: SetCommitteeMember :one
 INSERT INTO committee_member (
-    cold_cred_hash, expires_epoch, added_slot, deleted_slot
-) VALUES (?, ?, ?, ?)
-ON CONFLICT (cold_cred_hash) DO UPDATE SET
+    cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
+    added_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (cold_credential_tag, cold_cred_hash, added_slot) DO UPDATE SET
     expires_epoch = excluded.expires_epoch,
+    term_start_slot = excluded.term_start_slot,
     added_slot = excluded.added_slot,
     deleted_slot = excluded.deleted_slot
 RETURNING id
 `
 
 type SetCommitteeMemberParams struct {
-	ColdCredHash []byte
-	ExpiresEpoch int64
-	AddedSlot    int64
-	DeletedSlot  sql.NullInt64
+	ColdCredentialTag int64
+	ColdCredHash      []byte
+	ExpiresEpoch      int64
+	TermStartSlot     int64
+	AddedSlot         int64
+	DeletedSlot       sql.NullInt64
 }
 
 func (q *Queries) SetCommitteeMember(ctx context.Context, arg SetCommitteeMemberParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, setCommitteeMember,
+		arg.ColdCredentialTag,
 		arg.ColdCredHash,
 		arg.ExpiresEpoch,
+		arg.TermStartSlot,
 		arg.AddedSlot,
 		arg.DeletedSlot,
 	)
@@ -4657,16 +4669,17 @@ func (q *Queries) SoftDeleteAllCommitteeMembers(ctx context.Context, deletedSlot
 const softDeleteCommitteeMember = `-- name: SoftDeleteCommitteeMember :exec
 UPDATE committee_member
 SET deleted_slot = ?
-WHERE cold_cred_hash = ? AND deleted_slot IS NULL
+WHERE cold_credential_tag = ? AND cold_cred_hash = ? AND deleted_slot IS NULL
 `
 
 type SoftDeleteCommitteeMemberParams struct {
-	DeletedSlot  sql.NullInt64
-	ColdCredHash []byte
+	DeletedSlot       sql.NullInt64
+	ColdCredentialTag int64
+	ColdCredHash      []byte
 }
 
 func (q *Queries) SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteCommitteeMemberParams) error {
-	_, err := q.db.ExecContext(ctx, softDeleteCommitteeMember, arg.DeletedSlot, arg.ColdCredHash)
+	_, err := q.db.ExecContext(ctx, softDeleteCommitteeMember, arg.DeletedSlot, arg.ColdCredentialTag, arg.ColdCredHash)
 	return err
 }
 

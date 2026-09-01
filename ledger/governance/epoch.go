@@ -327,26 +327,23 @@ func ProcessEpoch(
 		}
 	}
 
-	// --- ORPHAN REMOVAL --------------------------------------------------
-	// Proposals that reference a just-enacted or just-expired proposal as
-	// their parent are "orphaned": their anchor is gone from the active
-	// pool and can never become a chain root. The spec (Conway EPOCH)
-	// calls this set `removedDueToEnactment` and requires deposits to be
-	// returned (or sent to treasury) for all of them. The sweep is
-	// transitive — orphans of orphans are also removed — so we run a BFS
-	// over the dependency graph seeded with every enacted and expired
-	// proposal from this tick.
-	orphanSeeds := make(
-		[]*models.GovernanceProposal,
-		0,
-		len(successfullyEnacted)+
-			len(replayedExpired)+len(expired),
+	// --- COMPETING SUBTREE REMOVAL ---------------------------------------
+	// Enactment advances a purpose chain: descendants of the enacted action
+	// remain valid, while competing siblings and their descendants are
+	// removed. Natural expiry removes descendants of the expired action.
+	expiredSeeds := append(
+		append(make([]*models.GovernanceProposal, 0,
+			len(replayedExpired)+len(expired)), replayedExpired...),
+		expired...,
 	)
-	orphanSeeds = append(orphanSeeds, successfullyEnacted...)
-	orphanSeeds = append(orphanSeeds, replayedExpired...)
-	orphanSeeds = append(orphanSeeds, expired...)
 	orphanCount, err := removeOrphanedProposals(
-		in.DB, in.Txn, orphanSeeds, in.NewEpoch, in.BoundarySlot, in.Logger,
+		in.DB,
+		in.Txn,
+		successfullyEnacted,
+		expiredSeeds,
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Logger,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("remove orphaned proposals: %w", err)
@@ -958,76 +955,108 @@ func refundProposalDeposit(
 	return nil
 }
 
-// removeOrphanedProposals performs a BFS over the live proposal dependency
-// graph starting from seeds (enacted + expired proposals from this tick).
-// For each seed it finds active proposals that reference it as their parent.
-// Those dependents are "orphaned" — their anchor is no longer pending and can
-// never become a chain root — so their deposits are refunded and they are
-// marked expired at the boundary slot (using expired_epoch/expired_slot so
-// the existing slot-based rollback path reverts this tick cleanly). The sweep
-// is transitive: each newly-orphaned proposal is itself added to the queue so
-// its dependents are also swept.
+// removeOrphanedProposals removes the losing branches of governance purpose
+// chains. Descendants of enacted proposals remain eligible to follow the new
+// root. Active siblings that share the enacted proposal's former parent and
+// purpose are removed with their full subtrees. Expired proposals instead
+// remove their own descendant subtrees.
 func removeOrphanedProposals(
 	db *database.Database,
 	txn *database.Txn,
-	seeds []*models.GovernanceProposal,
+	enacted []*models.GovernanceProposal,
+	expired []*models.GovernanceProposal,
 	epoch uint64,
 	slot uint64,
 	logger *slog.Logger,
 ) (int, error) {
-	queue := append(make([]*models.GovernanceProposal, 0, len(seeds)), seeds...)
-	count := 0
-	for len(queue) > 0 {
-		parent := queue[0]
-		queue = queue[1:]
-		children, err := db.GetChildGovernanceProposals(
-			parent.TxHash, parent.ActionIndex, txn,
+	active, err := db.GetActiveGovernanceProposals(epoch, txn)
+	if err != nil {
+		return 0, fmt.Errorf("get active governance proposals: %w", err)
+	}
+	children := make(map[string][]*models.GovernanceProposal)
+	for _, proposal := range active {
+		children[proposalParentKey(proposal)] = append(
+			children[proposalParentKey(proposal)],
+			proposal,
 		)
-		if err != nil {
-			return count, fmt.Errorf(
-				"get children of proposal %s#%d: %w",
-				shortHash(parent.TxHash),
-				parent.ActionIndex,
-				err,
-			)
+	}
+	queue := make([]*models.GovernanceProposal, 0)
+	for _, proposal := range expired {
+		queue = append(queue, children[proposalIdentityKey(proposal)]...)
+	}
+	for _, winner := range enacted {
+		winnerPurpose := govActionPurposeOf(
+			lcommon.GovActionType(winner.ActionType),
+		)
+		if winnerPurpose == purposeNone {
+			continue
 		}
-		for _, child := range children {
-			if err := refundProposalDeposit(db, txn, child, slot); err != nil {
-				return count, fmt.Errorf(
-					"refund orphaned proposal deposit %s#%d: %w",
-					shortHash(child.TxHash),
-					child.ActionIndex,
-					err,
-				)
+		for _, sibling := range children[proposalParentKey(winner)] {
+			if govActionPurposeOf(
+				lcommon.GovActionType(sibling.ActionType),
+			) == winnerPurpose {
+				queue = append(queue, sibling)
 			}
-			expiredEpoch := epoch
-			expiredSlot := slot
-			child.ExpiredEpoch = &expiredEpoch
-			child.ExpiredSlot = &expiredSlot
-			if err := db.SetGovernanceProposal(child, txn); err != nil {
-				return count, fmt.Errorf(
-					"mark orphaned proposal expired %s#%d: %w",
-					shortHash(child.TxHash),
-					child.ActionIndex,
-					err,
-				)
-			}
-			if logger != nil {
-				logger.Info(
-					"removed orphaned governance proposal",
-					"component", "governance",
-					"tx_hash", shortHash(child.TxHash),
-					"action_index", child.ActionIndex,
-					"parent_tx_hash", shortHash(parent.TxHash),
-					"parent_action_index", parent.ActionIndex,
-					"epoch", epoch,
-				)
-			}
-			queue = append(queue, child)
-			count++
 		}
 	}
+	removed := make(map[string]struct{})
+	count := 0
+	for len(queue) > 0 {
+		proposal := queue[0]
+		queue = queue[1:]
+		identity := proposalIdentityKey(proposal)
+		if _, ok := removed[identity]; ok {
+			continue
+		}
+		removed[identity] = struct{}{}
+		if err := refundProposalDeposit(db, txn, proposal, slot); err != nil {
+			return count, fmt.Errorf(
+				"refund removed proposal deposit %s#%d: %w",
+				shortHash(proposal.TxHash), proposal.ActionIndex, err,
+			)
+		}
+		expiredEpoch := epoch
+		expiredSlot := slot
+		proposal.ExpiredEpoch = &expiredEpoch
+		proposal.ExpiredSlot = &expiredSlot
+		if err := db.SetGovernanceProposal(proposal, txn); err != nil {
+			return count, fmt.Errorf(
+				"mark removed proposal expired %s#%d: %w",
+				shortHash(proposal.TxHash), proposal.ActionIndex, err,
+			)
+		}
+		if logger != nil {
+			logger.Info(
+				"removed competing governance proposal",
+				"component", "governance",
+				"tx_hash", shortHash(proposal.TxHash),
+				"action_index", proposal.ActionIndex,
+				"epoch", epoch,
+			)
+		}
+		queue = append(queue, children[identity]...)
+		count++
+	}
 	return count, nil
+}
+
+func proposalIdentityKey(proposal *models.GovernanceProposal) string {
+	if proposal == nil {
+		return ""
+	}
+	return fmt.Sprintf("%x#%d", proposal.TxHash, proposal.ActionIndex)
+}
+
+func proposalParentKey(proposal *models.GovernanceProposal) string {
+	if proposal == nil || len(proposal.ParentTxHash) == 0 ||
+		proposal.ParentActionIdx == nil {
+		return "root"
+	}
+	return fmt.Sprintf(
+		"%x#%d",
+		proposal.ParentTxHash,
+		*proposal.ParentActionIdx,
+	)
 }
 
 func rewardAccountStakeCredential(returnAddress []byte) (uint8, []byte, error) {

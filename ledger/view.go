@@ -46,6 +46,11 @@ var ErrNotImplemented = errors.New("not implemented")
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
+	// Committee proposal resolution must use the same immutable consensus
+	// publication as the validation that owns this view.
+	committeeEpoch       uint64
+	committeePParams     lcommon.ProtocolParameters
+	committeeStatePinned bool
 	// intraBlockUtxos tracks outputs created by earlier transactions in the same block.
 	// Key format: hex(txId) + ":" + outputIdx
 	intraBlockUtxos map[string]lcommon.Utxo
@@ -55,6 +60,16 @@ type LedgerView struct {
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	skipPhase2Validation bool
+}
+
+func (lv *LedgerView) pinCommitteeState(
+	epoch uint64,
+	pparams lcommon.ProtocolParameters,
+) *LedgerView {
+	lv.committeeEpoch = epoch
+	lv.committeePParams = pparams
+	lv.committeeStatePinned = true
+	return lv
 }
 
 func (lv *LedgerView) SkipPhase2Validation() bool {
@@ -74,6 +89,9 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
+// Compile-time guard for the tag-aware committee validation capability.
+var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
+
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
 // back to weaker existence-only proposal ancestry checks.
@@ -85,6 +103,10 @@ var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 // (DRepDelegationStateUnavailableError), so signature drift here is a
 // consensus-level break. Make it a compile error instead.
 var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
+
+// These methods intentionally compile against the released Gouroboros API as
+// ordinary methods. Once the credential-aware committee capability is
+// released, this assertion can be enabled without changing Dingo's provider.
 
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
@@ -551,12 +573,45 @@ func extractRawCostModels(
 	}
 }
 
-// CommitteeMember returns a seated or pending proposed committee member by
-// cold key. Seated state takes precedence so its authorization and resignation
-// status remain authoritative. Returns nil if the cold key is neither seated
-// nor proposed by an active UpdateCommittee action.
+// CommitteeStateAvailable reports that this SQL-backed view is authoritative,
+// including when no committee members are seated.
+func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
+	return lv != nil && lv.ls != nil && lv.ls.db != nil, nil
+}
+
+// CommitteeMember preserves the legacy hash-only contract. It returns nil
+// when key and script credentials with the same hash are both members rather
+// than choosing one by iteration order.
 func (lv *LedgerView) CommitteeMember(
 	coldKey lcommon.Blake2b224,
+) (*lcommon.CommitteeMember, error) {
+	keyMember, err := lv.CommitteeCredentialMember(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: coldKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	scriptMember, err := lv.CommitteeCredentialMember(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: coldKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if keyMember != nil && scriptMember != nil {
+		return nil, nil
+	}
+	if keyMember != nil {
+		return keyMember, nil
+	}
+	return scriptMember, nil
+}
+
+// CommitteeCredentialMember resolves a seated or pending proposed committee
+// member by full tagged cold credential identity.
+func (lv *LedgerView) CommitteeCredentialMember(
+	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
 	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
 	if err != nil {
@@ -564,45 +619,72 @@ func (lv *LedgerView) CommitteeMember(
 	}
 	var found *models.CommitteeMember
 	for _, member := range dbMembers {
-		if string(member.ColdCredHash) == string(coldKey[:]) {
+		if member.ColdCredentialTag == uint8(coldCredential.CredType) &&
+			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
 			found = member
 			break
 		}
 	}
 	if found == nil {
-		return lv.proposedCommitteeMember(coldKey)
-	}
-
-	hotByCold, err := lv.committeeHotCredentialsByCold()
-	if err != nil {
-		return nil, err
+		return lv.proposedCommitteeMember(coldCredential)
 	}
 	member := &lcommon.CommitteeMember{
-		ColdKey:     coldKey,
+		ColdKey:     coldCredential.Credential,
 		ExpiryEpoch: found.ExpiresEpoch,
 	}
-	if hotKey, ok := hotByCold[string(coldKey[:])]; ok {
-		member.HotKey = &hotKey
-		return member, nil
+	if err := lv.populateCommitteeMemberStatus(
+		coldCredential,
+		found.TermStartSlot,
+		member,
+	); err != nil {
+		return nil, err
 	}
+	return member, nil
+}
 
-	resigned, err := lv.ls.db.IsCommitteeMemberResigned(coldKey[:], lv.txn)
+func (lv *LedgerView) populateCommitteeMemberStatus(
+	coldCredential lcommon.Credential,
+	termStartSlot uint64,
+	member *lcommon.CommitteeMember,
+) error {
+	resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+		uint8(coldCredential.CredType),
+		coldCredential.Credential[:],
+		termStartSlot,
+		lv.txn,
+	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"check committee member resignation: %w",
 			err,
 		)
 	}
 	member.Resigned = resigned
-	return member, nil
+	if resigned {
+		return nil
+	}
+	authorization, err := lv.ls.db.GetCommitteeMember(
+		uint8(coldCredential.CredType),
+		coldCredential.Credential[:],
+		termStartSlot,
+		lv.txn,
+	)
+	if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
+		return fmt.Errorf("get committee hot credential: %w", err)
+	}
+	if authorization != nil {
+		hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
+		member.HotKey = &hotKey
+	}
+	return nil
 }
 
 func (lv *LedgerView) proposedCommitteeMember(
-	coldKey lcommon.Blake2b224,
+	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
-	state := lv.ls.loadConsensusSnapshot()
+	epoch, pparams := lv.committeeSnapshot()
 	proposals, err := lv.ls.db.GetActiveGovernanceProposals(
-		state.currentEpoch.EpochId,
+		epoch,
 		lv.txn,
 	)
 	if err != nil {
@@ -617,7 +699,7 @@ func (lv *LedgerView) proposedCommitteeMember(
 		action, err := governance.DecodeGovActionForPParams(
 			proposal.GovActionCbor,
 			proposal.ActionType,
-			state.currentPParams,
+			pparams,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -633,16 +715,70 @@ func (lv *LedgerView) proposedCommitteeMember(
 			)
 		}
 		for credential, expiry := range update.CredEpochs {
-			if credential == nil || credential.Credential != coldKey {
+			if credential == nil ||
+				credential.CredType != coldCredential.CredType ||
+				credential.Credential != coldCredential.Credential {
 				continue
 			}
-			return &lcommon.CommitteeMember{
-				ColdKey:     coldKey,
+			member := &lcommon.CommitteeMember{
+				ColdKey:     coldCredential.Credential,
 				ExpiryEpoch: uint64(expiry),
-			}, nil
+			}
+			if err := lv.populateCommitteeMemberStatus(
+				coldCredential,
+				proposal.AddedSlot,
+				member,
+			); err != nil {
+				return nil, err
+			}
+			return member, nil
 		}
 	}
 	return nil, nil
+}
+
+func (lv *LedgerView) committeeSnapshot() (
+	uint64,
+	lcommon.ProtocolParameters,
+) {
+	if lv.committeeStatePinned {
+		return lv.committeeEpoch, lv.committeePParams
+	}
+	state := lv.ls.loadConsensusSnapshot()
+	return state.currentEpoch.EpochId, state.currentPParams
+}
+
+// CommitteeHotCredentialMember resolves an active committee authorization by
+// exact tagged hot credential identity.
+func (lv *LedgerView) CommitteeHotCredentialMember(
+	hotCredential lcommon.Credential,
+) (*lcommon.CommitteeMember, error) {
+	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
+	}
+	var matched *lcommon.CommitteeMember
+	for _, authorization := range authorizations {
+		if authorization.HotCredentialTag != uint8(hotCredential.CredType) ||
+			!bytes.Equal(authorization.HotCredential, hotCredential.Credential[:]) {
+			continue
+		}
+		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   uint(authorization.ColdCredentialTag),
+			Credential: lcommon.NewBlake2b224(authorization.ColdCredential),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if member == nil || member.Resigned {
+			continue
+		}
+		if matched != nil {
+			return nil, nil
+		}
+		matched = member
+	}
+	return matched, nil
 }
 
 // CommitteeMembers returns all seated committee members.
@@ -651,63 +787,30 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get committee members: %w", err)
 	}
-	hotByCold, err := lv.committeeHotCredentialsByCold()
-	if err != nil {
-		return nil, err
-	}
-
-	coldKeysWithoutHot := make([][]byte, 0, len(dbMembers))
+	hashCounts := make(map[string]int, len(dbMembers))
 	for _, m := range dbMembers {
-		if _, ok := hotByCold[string(m.ColdCredHash)]; !ok {
-			coldKeysWithoutHot = append(
-				coldKeysWithoutHot,
-				m.ColdCredHash,
-			)
-		}
-	}
-	resignedByCold, err := lv.ls.db.GetResignedCommitteeMembers(
-		coldKeysWithoutHot,
-		lv.txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"check committee member resignations: %w",
-			err,
-		)
+		hashCounts[string(m.ColdCredHash)]++
 	}
 
 	members := make([]lcommon.CommitteeMember, 0, len(dbMembers))
 	for _, m := range dbMembers {
-		coldKey := lcommon.NewBlake2b224(m.ColdCredHash)
-		member := lcommon.CommitteeMember{
-			ColdKey:     coldKey,
-			ExpiryEpoch: m.ExpiresEpoch,
+		// The legacy list shape cannot carry a credential tag. Omit ambiguous
+		// hashes rather than aliasing key and script members.
+		if hashCounts[string(m.ColdCredHash)] != 1 {
+			continue
 		}
-		if hotKey, ok := hotByCold[string(m.ColdCredHash)]; ok {
-			member.HotKey = &hotKey
-		} else {
-			member.Resigned = resignedByCold[string(m.ColdCredHash)]
+		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   uint(m.ColdCredentialTag),
+			Credential: lcommon.NewBlake2b224(m.ColdCredHash),
+		})
+		if err != nil {
+			return nil, err
 		}
-		members = append(members, member)
+		if member != nil {
+			members = append(members, *member)
+		}
 	}
 	return members, nil
-}
-
-func (lv *LedgerView) committeeHotCredentialsByCold() (
-	map[string]lcommon.Blake2b224,
-	error,
-) {
-	dbMembers, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
-	if err != nil {
-		return nil, fmt.Errorf("get active committee hot keys: %w", err)
-	}
-	hotByCold := make(map[string]lcommon.Blake2b224, len(dbMembers))
-	for _, member := range dbMembers {
-		hotByCold[string(member.ColdCredential)] = lcommon.NewBlake2b224(
-			member.HotCredential,
-		)
-	}
-	return hotByCold, nil
 }
 
 // DRepRegistration returns a DRep registration by credential.

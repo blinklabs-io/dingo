@@ -4462,6 +4462,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			eras.BabbageEraDesc,
 			nil,
 			nil,
+			0,
 		)
 		return err
 	}))
@@ -4520,6 +4521,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			eras.DijkstraEraDesc,
 			nil,
 			nil,
+			0,
 		)
 		return err
 	})
@@ -4604,6 +4606,7 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			eras.DijkstraEraDesc,
 			pparams,
 			nil,
+			0,
 		)
 		return err
 	})

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -286,14 +288,32 @@ func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
 	defer func() { require.NoError(t, m.Close()) }()
 
 	coldKey := testHash28(0x51)
-	m.govState.Proposals["pending-committee-update"] = &conformance.ProposalState{
-		GovActionInfo: conformance.GovActionInfo{
-			ActionType: common.GovActionTypeUpdateCommittee,
-			ProposedMembers: map[common.Blake2b224]uint64{
-				coldKey: 999,
-			},
-		},
+	coldCredential := common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: coldKey,
 	}
+	action, err := common.NewUpdateCommitteeGovAction(
+		nil,
+		nil,
+		map[*common.Credential]uint{&coldCredential: 999},
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	m.protocolParams = &conway.ConwayProtocolParameters{}
+	require.NoError(t, m.db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        testHash32(0x50),
+			ActionType:    uint8(common.GovActionTypeUpdateCommittee),
+			ExpiresEpoch:  1000,
+			GovActionCbor: encoded,
+			AnchorURL:     "https://example.invalid/pending-committee",
+			AnchorHash:    testHash32(0x52),
+			ReturnAddress: bytes.Repeat([]byte{0x53}, 29),
+		},
+		nil,
+	))
 
 	provider := NewDingoStateProvider(m)
 	member, err := provider.CommitteeMember(coldKey)
@@ -311,9 +331,9 @@ func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
 
 // TestCommitteeMemberResignationClearsHotKey proves an authorization that is
 // superseded by a later resignation is not exposed as active by either
-// committee-member provider method. A still-later authorization restores the
-// hot key and clears the resigned state.
-func TestCommitteeMemberResignationClearsHotKey(t *testing.T) {
+// committee-member provider method. A still-later authorization cannot clear
+// the permanent resignation.
+func TestCommitteeMemberResignationPermanentlyClearsHotKey(t *testing.T) {
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -373,7 +393,7 @@ func TestCommitteeMemberResignationClearsHotKey(t *testing.T) {
 	assertState(true, nil)
 
 	applyCert(3, "committee-reauthorize", authorization())
-	assertState(false, &hotKey)
+	assertState(true, nil)
 }
 
 // TestPoolCurrentStatePendingRetirement proves PoolCurrentState's pending

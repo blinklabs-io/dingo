@@ -80,11 +80,13 @@ type CommitTimestamp struct {
 }
 
 type CommitteeMember struct {
-	ID           int64
-	ColdCredHash []byte
-	ExpiresEpoch int64
-	AddedSlot    int64
-	DeletedSlot  sql.NullInt64
+	ID                int64
+	ColdCredentialTag int64
+	ColdCredHash      []byte
+	ExpiresEpoch      int64
+	TermStartSlot     int64
+	AddedSlot         int64
+	DeletedSlot       sql.NullInt64
 }
 
 type CommitteeQuorum struct {

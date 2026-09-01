@@ -16,7 +16,6 @@ package eras
 
 import (
 	"encoding/hex"
-	"fmt"
 	"iter"
 	"math"
 	"math/big"
@@ -29,6 +28,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/data"
@@ -532,6 +532,20 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		conway.UtxoValidatePlutusScripts,
 		"conway.UtxoValidatePlutusScripts",
 	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidateCommitteeCertsRuleIndex,
+		conway.UtxoValidateCommitteeCertificates,
+		"conway.UtxoValidateCommitteeCertificates",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidateUnknownVotersRuleIndex,
+		conway.UtxoValidateUnknownVoters,
+		"conway.UtxoValidateUnknownVoters",
+	)
 	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
 	requireIndexedRulesExcludeFunc(
 		t,
@@ -557,6 +571,188 @@ func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		conway.UtxoValidatePlutusScripts,
 		"Conway validation must use Dingo's local Plutus execution path",
 	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateCommitteeCertificates,
+		"Conway validation must preserve committee cold credential tags",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+		"Conway validation must install Dingo's committee certificate rule",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateUnknownVoters,
+		"Conway validation must preserve committee hot credential tags",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+		"Conway validation must install Dingo's unknown-voter rule",
+	)
+}
+
+func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		gdijkstra.UtxoValidationRules,
+		dijkstraUtxoValidateCommitteeCertsRuleIndex,
+		conway.UtxoValidateCommitteeCertificates,
+		"conway.UtxoValidateCommitteeCertificates",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		gdijkstra.UtxoValidationRules,
+		dijkstraUtxoValidateUnknownVotersRuleIndex,
+		conway.UtxoValidateUnknownVoters,
+		"conway.UtxoValidateUnknownVoters",
+	)
+	require.Len(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		len(gdijkstra.UtxoValidationRules)-1,
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		conway.UtxoValidateCommitteeCertificates,
+		"Dijkstra validation must preserve committee cold credential tags",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		validateCommitteeCertificates,
+		"Dijkstra validation must install Dingo's committee certificate rule",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		conway.UtxoValidateUnknownVoters,
+		"Dijkstra validation must preserve committee hot credential tags",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		validateUnknownVoters,
+		"Dijkstra validation must install Dingo's unknown-voter rule",
+	)
+}
+
+type taggedCommitteeLedgerState struct {
+	*mockLedgerState
+	available bool
+	cold      map[string]*lcommon.CommitteeMember
+	hot       map[string]*lcommon.CommitteeMember
+}
+
+func (s *taggedCommitteeLedgerState) CommitteeStateAvailable() (bool, error) {
+	return s.available, nil
+}
+
+func (s *taggedCommitteeLedgerState) CommitteeCredentialMember(
+	credential lcommon.Credential,
+) (*lcommon.CommitteeMember, error) {
+	return s.cold[taggedCommitteeCredentialKey(credential)], nil
+}
+
+func (s *taggedCommitteeLedgerState) CommitteeHotCredentialMember(
+	credential lcommon.Credential,
+) (*lcommon.CommitteeMember, error) {
+	return s.hot[taggedCommitteeCredentialKey(credential)], nil
+}
+
+func taggedCommitteeCredentialKey(credential lcommon.Credential) string {
+	return string(append(
+		[]byte{byte(credential.CredType)},
+		credential.Credential[:]...,
+	))
+}
+
+func TestConwayCommitteeCertificateRulePreservesCredentialTag(t *testing.T) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xc1
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	scriptCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		cold: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(keyCredential): {ColdKey: hash},
+		},
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{{
+				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+				Certificate: &lcommon.AuthCommitteeHotCertificate{
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					ColdCredential: scriptCredential,
+				},
+			}},
+		},
+	}
+
+	var rule lcommon.UtxoValidationRuleFunc
+	for _, candidate := range conwayUtxoValidationRules {
+		if candidate.index == conwayUtxoValidateCommitteeCertsRuleIndex {
+			rule = candidate.validationFunc
+			break
+		}
+	}
+	require.NotNil(t, rule)
+	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
+	var notMember conway.NotCommitteeMemberError
+	require.ErrorAs(t, err, &notMember)
+}
+
+func TestConwayUnknownVoterRulePreservesCredentialTag(t *testing.T) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xc2
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		hot: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(keyCredential): {ColdKey: hash},
+		},
+	}
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotScriptHash,
+		Hash: [28]byte(hash),
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{
+				voter: {},
+			},
+		},
+	}
+
+	var rule lcommon.UtxoValidationRuleFunc
+	for _, candidate := range conwayUtxoValidationRules {
+		if candidate.index == conwayUtxoValidateUnknownVotersRuleIndex {
+			rule = candidate.validationFunc
+			break
+		}
+	}
+	require.NotNil(t, rule)
+	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
+	var unknown conway.UnknownVoterError
+	require.ErrorAs(t, err, &unknown)
 }
 
 func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
@@ -1196,25 +1392,26 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 	)
 }
 
-func TestBuildIndexedUtxoValidationRulesPanicsForStaleSkipIndex(t *testing.T) {
-	// The message is derived from the constant rather than spelled out, so an
-	// upstream reordering that shifts the index does not also require editing
-	// this expectation.
+func TestBuildIndexedUtxoValidationRulesResolvesStaleSkipIndex(t *testing.T) {
 	staleIndex := alonzoUtxoValidatePlutusScriptsRuleIndex - 1
-	require.PanicsWithValue(
+	resolved := resolveUtxoValidationSkipIndex(
+		alonzo.UtxoValidationRules,
+		staleIndex,
+		alonzo.UtxoValidatePlutusScripts,
+		"test.UtxoValidatePlutusScripts",
+	)
+	require.Equal(t, alonzoUtxoValidatePlutusScriptsRuleIndex, resolved)
+	rules := buildIndexedUtxoValidationRules(
+		alonzo.UtxoValidationRules,
+		staleIndex,
+		alonzo.UtxoValidatePlutusScripts,
+		"test.UtxoValidatePlutusScripts",
+	)
+	requireIndexedRulesExcludeFunc(
 		t,
-		fmt.Sprintf(
-			"test.UtxoValidatePlutusScripts hardcoded rule index %d no longer resolves to the expected function",
-			staleIndex,
-		),
-		func() {
-			buildIndexedUtxoValidationRules(
-				alonzo.UtxoValidationRules,
-				staleIndex,
-				alonzo.UtxoValidatePlutusScripts,
-				"test.UtxoValidatePlutusScripts",
-			)
-		},
+		rules,
+		alonzo.UtxoValidatePlutusScripts,
+		"the resolved upstream rule must be removed",
 	)
 }
 

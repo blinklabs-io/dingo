@@ -278,15 +278,43 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 			validationFunc: conway.UtxoValidatePlutusScripts,
 			name:           "conway.UtxoValidatePlutusScripts",
 		},
+		{
+			index:          conwayUtxoValidateCommitteeCertsRuleIndex,
+			validationFunc: conway.UtxoValidateCommitteeCertificates,
+			name:           "conway.UtxoValidateCommitteeCertificates",
+		},
+		{
+			index:          conwayUtxoValidateUnknownVotersRuleIndex,
+			validationFunc: conway.UtxoValidateUnknownVoters,
+			name:           "conway.UtxoValidateUnknownVoters",
+		},
+	}
+	for i := range skips {
+		skips[i].index = resolveUtxoValidationSkipIndex(
+			conway.UtxoValidationRules,
+			skips[i].index,
+			skips[i].validationFunc,
+			skips[i].name,
+		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
 		conway.UtxoValidationRules,
 		skips,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
-		index:          conwayUtxoValidateConwayFeaturesRuleIndex,
+		index:          skips[0].index,
 		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
 	})
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          skips[3].index,
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          skips[4].index,
+			validationFunc: validateUnknownVoters,
+		},
+	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
 		return a.index - b.index
 	})
