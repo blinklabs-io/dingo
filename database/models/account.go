@@ -23,7 +23,14 @@ import (
 	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
-var ErrAccountNotFound = errors.New("account not found")
+var (
+	ErrAccountNotFound = errors.New("account not found")
+	// ErrRewardWithdrawalExceedsBalance identifies a transaction whose
+	// withdrawal cannot be satisfied by the node's persisted reward account.
+	ErrRewardWithdrawalExceedsBalance = errors.New(
+		"reward withdrawal exceeds account balance",
+	)
+)
 
 // AccountCreatedSlotUnset is the sentinel the account create helpers stamp on a
 // freshly built (not-yet-persisted) account so the save helpers can resolve

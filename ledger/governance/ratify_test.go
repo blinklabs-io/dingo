@@ -71,9 +71,18 @@ func ratifyInputs(
 	majorVersion uint,
 	committeeNoConfidence bool,
 ) RatifyInputs {
+	var govAction lcommon.GovAction
+	if tally != nil && lcommon.GovActionType(tally.ActionType) ==
+		lcommon.GovActionTypeUpdateCommittee {
+		govAction = &lcommon.UpdateCommitteeGovAction{
+			Type:       uint(lcommon.GovActionTypeUpdateCommittee),
+			CredEpochs: map[*lcommon.Credential]uint{},
+		}
+	}
 	return RatifyInputs{
 		Tally:                 tally,
 		PParams:               pparams,
+		GovAction:             govAction,
 		ActiveDRepCount:       activeDReps,
 		ActiveCCCount:         activeCC,
 		CCQuorum:              ccQuorum,
@@ -385,9 +394,17 @@ func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
 				if tc.action == lcommon.GovActionTypeInfo {
 					want = false
 				}
+				var govAction lcommon.GovAction
+				if tc.action == lcommon.GovActionTypeUpdateCommittee {
+					govAction = &lcommon.UpdateCommitteeGovAction{
+						Type:       uint(tc.action),
+						CredEpochs: map[*lcommon.Credential]uint{},
+					}
+				}
 				d := ShouldRatify(RatifyInputs{
 					Tally:         makeTally(tc.action, votes),
 					PParams:       pparams,
+					GovAction:     govAction,
 					ParamUpdate:   tc.param,
 					ActiveCCCount: 3,
 					CCQuorum:      big.NewRat(2, 3),

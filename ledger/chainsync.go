@@ -606,8 +606,31 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
+	if ls.config.GetActiveConnectionFunc != nil {
+		if !ls.isConnectionLive(effectiveConnId) {
+			activeConnId := ls.config.GetActiveConnectionFunc()
+			if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+				ls.chainsyncBlockfetchMutex.Unlock()
+				ls.clearActiveUpstream()
+				ls.config.Logger.Warn(
+					"ignoring chain switch without a live connection",
+					"component", "ledger",
+					"connection_id", e.NewConnectionId.String(),
+				)
+				return
+			}
+			ls.config.Logger.Info(
+				"chain switch target is not live, using live active best peer",
+				"component", "ledger",
+				"requested_connection_id", effectiveConnId.String(),
+				"active_connection_id", activeConnId.String(),
+			)
+			ls.clearQueuedHeaders()
+			effectiveConnId = *activeConnId
+		}
+	}
 	replayConnId, err := ls.handoffPipelineOnSwitchLocked(
-		e.NewConnectionId,
+		effectiveConnId,
 		&pending,
 	)
 	if err != nil {
@@ -616,13 +639,12 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		// before giving up.
 		if ls.config.GetActiveConnectionFunc != nil {
 			if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
-				!sameConnectionId(*activeConnId, e.NewConnectionId) {
+				!sameConnectionId(*activeConnId, effectiveConnId) {
 				ls.config.Logger.Info(
 					"chain switch target unavailable, retrying with active best peer",
 					"component",
 					"ledger",
-					"failed_connection_id",
-					e.NewConnectionId.String(),
+					"failed_connection_id", effectiveConnId.String(),
 					"active_connection_id",
 					activeConnId.String(),
 					"error",
@@ -666,6 +688,13 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	if err != nil {
 		return
 	}
+	if ls.config.GetActiveConnectionFunc != nil {
+		if !ls.isConnectionLive(effectiveConnId) {
+			ls.clearActiveUpstream()
+			return
+		}
+	}
+	ls.publishActiveUpstream(effectiveConnId)
 	if requestFreshCursor {
 		ls.config.Logger.Info(
 			"chain switch selected peer is ahead without queued headers, requesting fresh chainsync cursor",
@@ -730,9 +759,13 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 		activeConnId := ls.config.GetActiveConnectionFunc()
 		if activeConnId == nil ||
 			sameConnectionId(*activeConnId, e.ConnectionId) {
-			ls.syncUpstreamTipSlot.Store(0)
+			ls.clearActiveUpstream()
 		}
 	}
+	// Keep the admitted-header frontier as a monotonic high-water mark across
+	// disconnects. Consumers hide it while no active connection exists, but a
+	// reconnect must not replace it with an older peer's first admitted header
+	// and weaken the forging sync gate.
 }
 
 func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
@@ -869,6 +902,22 @@ func (ls *LedgerState) detectConnectionSwitch(
 		// same peer/session. The detector keys on exact rollback
 		// point + connection, so peer switches do not poison healthy
 		// fork convergence.
+	}
+	// Re-read the authoritative selection after handoff. A close or switch can
+	// occur while the handoff is running; never reactivate the retained frontier
+	// for the connection that was live only at the start of this function.
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId = ls.config.GetActiveConnectionFunc()
+		if activeConnId != nil && !ls.isConnectionLive(*activeConnId) {
+			activeConnId = nil
+		}
+	}
+	if activeConnId != nil {
+		// A new selection starts with an unknown target. Only admitted header
+		// work may publish a peer-advertised target.
+		ls.publishActiveUpstream(*activeConnId)
+	} else {
+		ls.clearActiveUpstream()
 	}
 	return activeConnId, true
 }
@@ -2761,11 +2810,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// still points to the old (dead) connection.
 	ls.detectConnectionSwitch(pending)
 
-	// Track upstream tip for sync progress reporting
-	if e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
-		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
-	}
-
 	// Verify header crypto before accepting it into the header queue.
 	// Skip during historical sync (validationEnabled=false) because
 	// historical blocks were already validated by the network and the
@@ -2774,7 +2818,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
 	headerCryptoVerified := false
-	if ls.shouldVerifyChainsyncHeaderCrypto(e.Point.Slot) {
+	headerValidationRequired, headerTrusted := ls.chainsyncHeaderCryptoPolicy(
+		e.Point.Slot,
+	)
+	if headerValidationRequired {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
 			if errors.Is(err, errHeaderVerificationDeferred) {
 				ls.config.Logger.Debug(
@@ -2816,6 +2863,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			}
 		} else {
 			headerCryptoVerified = true
+			headerTrusted = true
 		}
 	}
 
@@ -2944,6 +2992,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 			if resolved {
+				ls.recordAdmittedHeaderFrontier(
+					e,
+					headerTrusted,
+				)
 				return nil
 			}
 			// Fallback: after several consecutive mismatches where
@@ -2974,6 +3026,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	// Reset mismatch counter on successful header addition
 	ls.headerMismatchCount = 0
+	ls.recordAdmittedHeaderFrontier(
+		e,
+		headerTrusted,
+	)
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
@@ -3164,6 +3220,45 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 		return false, fmt.Errorf("wait for header slot onset: %w", err)
 	}
 	return true, nil
+}
+
+// chainsyncHeaderCryptoPolicy distinguishes headers trusted by an explicitly
+// disabled validation path (historical sync or Mithril coverage) from headers
+// whose crypto check must wait for an epoch nonce. Both skip verification at
+// chainsync time, but only the former may advance shared sync state.
+func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
+	slot uint64,
+) (verifyNow bool, trustedWithoutVerification bool) {
+	validationEnabled, mithrilLedgerSlot := ls.validationStateSnapshot()
+	if !validationEnabled {
+		return false, true
+	}
+	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
+		return false, true
+	}
+	if !ls.hasCachedEpochNonceForSlot(slot) {
+		return false, false
+	}
+	return true, false
+}
+
+// recordAdmittedHeaderFrontier advances shared sync state only when the
+// delivered header is now the locally admitted queue frontier. The peer's
+// advertised tip is a separate, untrusted field in the ChainSync message;
+// validating this header does not authenticate that claim.
+func (ls *LedgerState) recordAdmittedHeaderFrontier(
+	e ChainsyncEvent,
+	headerTrusted bool,
+) {
+	if ls.chain == nil || !headerTrusted {
+		return
+	}
+	admittedPoint := ls.chain.HeaderTip().Point
+	if !pointMatches(admittedPoint, e.Point) {
+		return
+	}
+	ls.advanceUpstreamTipSlot(admittedPoint.Slot)
+	ls.publishAdmittedUpstreamTarget(e)
 }
 
 func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
@@ -6366,15 +6461,15 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 }
 
 // logSyncProgress logs periodic sync progress at INFO level.
-// It reports the current slot, upstream tip slot, percentage complete,
-// and sync rate in slots per second. syncUpstreamTipSlot is read
+// It reports the current slot, admitted upstream header frontier, percentage
+// complete, and sync rate in slots per second. syncUpstreamTipSlot is read
 // atomically since it is written by the chainsync handler goroutine.
 func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 	now := time.Now()
 	if now.Sub(ls.syncProgressLastLog) < syncProgressLogInterval {
 		return
 	}
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip := ls.UpstreamTipSlot()
 	if upstreamTip == 0 {
 		// No upstream tip known yet, skip
 		return
@@ -6417,7 +6512,7 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 // 0.0 (unknown/just started) and 1.0 (fully synced), allowing the peer
 // governor to exit bootstrap mode once sync reaches its threshold.
 func (ls *LedgerState) SyncProgress() float64 {
-	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	upstreamTip := ls.UpstreamTipSlot()
 	if upstreamTip == 0 {
 		return 0
 	}

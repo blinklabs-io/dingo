@@ -280,14 +280,30 @@ func (d *Database) SetTransactionWithOpts(
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
-	if err := d.transactionStore().SetTransaction(
-		tx, point, idx, certDeposits,
-		opts.SkipWithdrawalWitnessWrite,
-		txn.Metadata(),
-	); err != nil {
+	// On the Leios endorser-block closure path (SkipConsumedInputRecovery), a
+	// consumed input already spent by a different certified endorser-block
+	// transaction is a no-op, matching the reference ledger's applyLeiosClosure
+	// (ValidateNone), rather than wedging the pipeline with ErrUtxoConflict on a
+	// legitimate cross-EB double-consume. Ranking-block application keeps the
+	// hard conflict check.
+	setTxErr := error(nil)
+	if opts.SkipConsumedInputRecovery {
+		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite,
+			txn.Metadata(),
+		)
+	} else {
+		setTxErr = d.transactionStore().SetTransaction(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite,
+			txn.Metadata(),
+		)
+	}
+	if setTxErr != nil {
 		return fmt.Errorf(
 			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
-			tx.Hash(), idx, point.Slot, err,
+			tx.Hash(), idx, point.Slot, setTxErr,
 		)
 	}
 

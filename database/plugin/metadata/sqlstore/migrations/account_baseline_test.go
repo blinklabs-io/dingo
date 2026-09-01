@@ -151,7 +151,8 @@ INSERT INTO account (
 	require.NoError(t, err)
 	runTo(registry[:5])
 	require.Equal(t, 1, baselineRowCount(t, db))
-	runTo(registry[:6])
+	// The deposit migration is v7; main's governance history migration took v6.
+	runTo(registry[:7])
 
 	var deposit sql.NullString
 	require.NoError(t, db.QueryRowContext(ctx, `

@@ -2306,6 +2306,14 @@ Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only
 
 When a network config supplies a `CheckpointsFile` (mainnet and preview ship one), `config/cardano` verifies its `CheckpointsFileHash` and loads it into a block-number to block-hash map, exposed via `CardanoNodeConfig.Checkpoints()`. `LedgerState` caches the map at construction, and `ledgerProcessBlock` (`ledger/state.go`) rejects any inbound block whose height matches a checkpoint but whose hash differs, in every validation mode, before header or transaction validation runs. This is an envelope-validity guard against following a chain that diverges from the known-good chain at a checkpointed height; honest chains always agree with the shipped checkpoints, so the rule never rejects a canonical block. Byron epoch boundary blocks share the preceding block's number and are skipped to avoid a false mismatch.
 
+### Genesis Consistency Validation
+
+`config/cardano/genesis_consistency.go` runs at config load, after each genesis file's own hash check, and asserts invariants that hold between or within genesis files but that no single file's hash captures. It fails closed, so a misconfigured network is rejected at startup rather than surfacing later as wrong slot times or frozen epoch nonces.
+
+Two invariants are checked. The Byron `startTime` must equal the Shelley `systemStart`, because every slot-to-time conversion (`ledger/hardfork_summary.go`, `ledger/slot.go`) is anchored on the Shelley `systemStart` and would compute wrong wall-clock times for Byron-era slots if the two disagreed. The Shelley `epochLength` must be strictly greater than the randomness stabilisation window `4k/f`, computed the same way as `ledger.nonceStabilityWindow`. Praos freezes the candidate nonce once a block reaches `firstSlotNextEpoch - 4k/f`; once the window reaches the epoch's own length there is no unfrozen portion left and `computeCandidateNonceAsOf` (`ledger/candidate_nonce.go`) pins the cutoff to the epoch's first slot, so epoch nonces stop tracking the chain. A genesis in that state also runs epoch rollover far more often than the security parameter assumes. The check uses the Conway `4k/f` window rather than the `3k/f` used by earlier eras, so satisfying it satisfies every era.
+
+A genesis missing any input to `4k/f` (zero `securityParam`, zero `epochLength`, or an absent or zero `activeSlotsCoeff`) passes rather than being rejected on a zero value.
+
 ### Block Header Validation
 
 `ledger/verify_header.go` performs cryptographic validation of block headers:
@@ -2322,7 +2330,11 @@ delegation view, validates the signing delegate, and charges the resolved
 genesis issuer against the rolling `k`-signature PBFT window. Each main block's
 delegation payload is signature-checked and scheduled for activation after
 `2k` slots; activation replaces the issuer's delegate, while self-delegation
-revokes the prior delegate. The in-memory delegation and issuer-window states
+revokes the prior delegate. The payload is passed to the delegation state as
+the CBOR it arrived in rather than as decoded certificates, because a
+certificate's signature covers the wire encoding of its epoch field and
+re-encoding a decoded value cannot reproduce a non-canonical encoding the
+issuer signed. The in-memory delegation and issuer-window states
 are updated only after the block transaction commits. On startup or after a
 rollback, the delegation view is reconstructed from the canonical Byron chain
 through the applied tip, while the issuer window retains only its last `k`
@@ -3217,7 +3229,8 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
-- Peer-governance connection-close lookup uses stable endpoint identity so reconnect and eligibility cleanup still run for equivalent connection IDs; when no active chainsync client remains, ledger clears its cached upstream tip so slot-clock epoch work does not run against a disconnected tip
+- Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
+- Peer-governance connection-close lookup uses stable endpoint identity so reconnect and eligibility cleanup still run for equivalent connection IDs. Ledger retains its admitted-header high-water mark across disconnects for admission bookkeeping. Forging and cleanup instead consume the active peer's corroborated sync target, and treat that target as unknown until it is available, so they cannot be driven by a stale replacement peer or a disconnected tip
 
 #### Header-Sync Strategy
 
@@ -3228,6 +3241,17 @@ A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`
 - **round-robin** — a single ingress-driving peer that rotates across the eligible peers; the rotation advances on the stall-check cadence (`AdvanceHeaderSyncRotation`).
 
 Under every strategy, all eligible peers still update tip tracking, observed-header history (for blockfetch peer discovery), and fork detection, so divergent peer headers produce fork/candidate-chain handling rather than silent suppression. The strategy is set via `chainsync.strategy` (YAML), `DINGO_CHAINSYNC_STRATEGY` (env), or `--chainsync-strategy` (CLI).
+
+`LedgerState` advances its shared sync-progress and cleanup frontier to an
+admitted header's own slot only after that header passes the applicable crypto
+checks and enters the local header queue. The peer-advertised tip carried beside
+the header is a separate untrusted claim and is not promoted into that state.
+Rejected, buffered, queue-full, and crypto-deferred headers leave the frontier
+unchanged; a later successful replay or header advances it normally. This
+admitted frontier remains monotonic across reconnects for bookkeeping. Sync
+consumers use a separate active-peer target only after the delivered frontier
+corroborates that peer's advertised tip; they see no target while no client is
+active or while corroboration is incomplete.
 
 #### Header Verification Handoff
 
@@ -5461,20 +5485,61 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   (`blocks_produced` alone, reported as `reward_pool_input_params` when
   absent) via `DingoPoolEpochData.ParamsPresent`, for the same reason: a
   not-yet-captured param-epoch row must not silently compare as zero blocks
-  against Koios's real value. The same split applies a third time to
-  `reward_pool_input`'s stake-epoch fields (`delegated_stake`/
-  `delegator_count`/`fixed_cost`/`margin`, reported together as
-  `reward_pool_input_stake` when absent) via `DingoPoolEpochData.
-  StakePresent` — a pool whose stake-epoch row hasn't landed yet (e.g. a
-  freshly registered pool captured first at the param epoch) must not
-  silently compare as zero stake/delegators/cost/margin against Koios's real
-  values either. `fixed_cost` and `margin` sit on this side of the split, not
-  with `blocks_produced`, because they are read at K-1 (dingo #3484).
+  against Koios's real value. That split has one exception. A pool that was in
+  epoch K's stake basis but is absent from the K+1 pool set did not fail to
+  compute — it left the set, and the K+1 row its epoch-K block count would
+  have been stamped onto is never written. `checkEpoch` reads the K+1 mark
+  `pool_stake_snapshot` membership once per epoch through
+  `RewardParitySource.GetPoolStakeSnapshotMembers` and passes each pool's
+  proven absence to `ComparePoolEpoch`, which then records `pool_departed`
+  instead. That category is informational, like the account lifecycle ones:
+  the uncomparable field is still reported so the coverage gap is visible, but
+  both sides agree the pool departed, so it neither fails nor errors the
+  epoch.
+
+  Membership, not `epoch_summary.SnapshotReady`, is what proves departure.
+  `SnapshotReady` is epoch-level: `saveSnapshotInTxn` writes the epoch summary
+  and the mark `pool_stake_snapshot` on every transition regardless of
+  reward-input availability, so a ready summary is compatible with the whole
+  reward-input bundle having been skipped, and `buildRewardStateInputs` drops
+  a degraded active pool from `reward_pool_input` "without changing
+  `pool_stake_snapshot` or `epoch_summary`" (see DATABASE.md). Both are
+  missing input rather than departure, and both would pass under an
+  epoch-level flag. A pool still listed in the K+1 set therefore keeps the
+  stricter classification.
+
+  Absence only proves departure against a set known to be complete, so the
+  member count is checked against the K+1 `epoch_summary.TotalPoolCount`
+  before it is trusted. `saveSnapshotInTxn` writes that count and those mark
+  rows from the same `StakeDistribution`, so equality between them is what
+  establishes completeness — deliberately the epoch summary's count and not
+  `RewardSnapshot.TotalPoolCount`, which counts the reduced reward
+  distribution with degraded pools already excluded. Without that check a
+  summary declaring two pools with only one readable mark row would make the
+  missing pool look departed and hide a `dingo_db_missing`. Anything short of
+  equality leaves membership unproven and keeps the stricter classification:
+  a read error, an empty set (which cannot distinguish "captured, no pools"
+  from "not captured"), no ready summary, a zero count, or a disagreeing
+  count. Because `pool_stake_snapshot` is windowed while `reward_pool_input`
+  is retained for the life of the database, an epoch older than that window
+  has no membership evidence and keeps the stricter classification too.
+
+  The same split applies a third time to `reward_pool_input`'s stake-epoch
+  fields (`delegated_stake`/`delegator_count`/`fixed_cost`/`margin`, reported
+  together as `reward_pool_input_stake` when absent) via
+  `DingoPoolEpochData.StakePresent` — a pool whose stake-epoch row hasn't
+  landed yet (e.g. a freshly registered pool captured first at the param
+  epoch) must not silently compare as zero stake/delegators/cost/margin
+  against Koios's real values either. `fixed_cost` and `margin` sit on this
+  side of the split, not with `blocks_produced`, because they are read at K-1
+  (dingo #3484).
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
-may be transient), plus #3097's per-account categories: `acct_only_dingo`,
+may be transient), `pool_departed` (informational: the pool left the pool set
+at K+1, so its epoch-K block count has no row to live on), plus #3097's
+per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
 reward_type) row within one side — a data-integrity problem, not a value
 disagreement), and `acct_coverage_incomplete` (the per-account Koios fetch for
@@ -6601,6 +6666,17 @@ make docs-parity
 The package has no build tag, so `go test ./...` runs it on every platform in
 CI as well. Adding a documented value that a file in the tree already owns
 belongs in a rule here, not in a second hard-coded copy.
+
+### DevNet Platform Boundary
+
+`internal/test/devnet/` is a Linux-only integration harness. It requires a
+native Linux Docker engine, Bash, Linux container networking, and Unix
+ownership semantics; emulated or remote Docker clients on macOS and Windows do
+not provide an equivalent test environment. Every Go file in that tree carries
+a `linux` build constraint, so ordinary `go build ./...` and `go test ./...`
+retain their full commands while excluding the harness on unsupported hosts.
+`TestDevnetFilesStayLinuxOnly` enforces the constraint for newly added files.
+Native Linux is the authoritative platform for DevNet validation.
 
 ## Design Patterns
 
@@ -7981,7 +8057,36 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    "CIP-0163 activation" above.
 7. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
    proposal-deposit returns, which observe the post-POOLREAP treasury. The
-   proposal-independent voting denominators — DRep voting power
+   ENACT pass first checks the locally deterministic failure surfaces used by
+   Dingo's RATIFY path: action decoding, proposal-deposit and withdrawal reward
+   addresses, protocol-parameter and hard-fork updates on cloned parameters,
+   positive committee quorum, withdrawal sum overflow, and the running treasury
+   budget. A legacy/already-ratified proposal that positively fails this
+   preflight has its ratification marker cleared and journaled at the boundary,
+   so it remains pending without blocking later proposals or epoch advance.
+   Once preflight succeeds, any error from the actual `EnactProposal` call is a
+   storage or other operational failure and aborts the whole boundary
+   transaction; it is never converted into proposal-local non-enactability.
+   Proposals already durably marked enacted at this exact boundary are replayed
+   fail-closed instead: skipping one after the stake-reward pot reset would keep
+   its enacted marker while losing its effects.
+
+   The subsequent RATIFY pass carries the post-ENACT treasury as a running
+   budget. Each accepted treasury withdrawal consumes that budget; an
+   over-budget withdrawal or a withdrawal whose `uint64` amount sum overflows
+   remains pending, and evaluation continues with later proposals. This is the
+   treasury-capacity portion of Conway RATIFY's running enactment state, not a
+   claim that this preflight implements every formal ENACT predicate. In
+   particular it does not add committee-term validation; committee membership
+   and term state remain part of the actual enactment path. A parameter update
+   is tested against a clone during preflight and that result is discarded;
+   only a successful actual enactment advances `UpdatedPParams`. RATIFY does
+   not thread a prospective parameter-update result into the parameter view of
+   later candidates in the same pass. This is another reason the behavior
+   described here is specifically the running-treasury subset, not the full
+   formal ENACT-state transition.
+
+   The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
    stake snapshot (`LoadSPOVotingState`), and committee state
    (`LoadCommitteeVotingState`) — are computed once per epoch tick and reused
@@ -8005,6 +8110,11 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    used by standalone/test callers. The mid-epoch HardForkInitiation stability
    check snapshots and threads this gate through `StabilityCheckInputs` as well,
    keeping its advertised transition tally aligned with boundary ratification.
+   `TallyContext.MajorVersion` is assigned from the post-ENACT protocol
+   parameters in both paths. SPO tallying first honors an explicit vote, then
+   treats every silent pool as implicit No for HardForkInitiation; during
+   Conway bootstrap, silent pools on other actions are Abstain. Only
+   post-bootstrap non-voters reach the reward-account default-vote rules.
 8. Treasury donations (`applyEpochDonations`), added after withdrawals.
 9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation

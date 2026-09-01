@@ -168,6 +168,16 @@ key registered in the current `pool` row cannot prove which key was effective
 at an older boundary, so the migration never backfills historical rows from
 live pool state.
 
+Migration `v6` (`governance-ratification-history`, integer version 6) adds
+`governance_proposal_ratification_history`. Each row records the exact
+ratification state after a transition, keyed by proposal and transition slot;
+a clear transition stores NULL marker values. The migration backfills every
+existing paired ratification marker at its recorded `ratified_slot`. Runtime
+rollback first removes transitions after the rollback point, then restores the
+proposal from its latest remaining history row (or to pending when none
+remains). The append-only lifecycle sequence makes repeated clear/re-ratify
+cycles rollback-safe and survives restart on all SQL metadata providers.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -389,14 +399,14 @@ flowchart LR
 
 In core mode, consumed UTxO rows are hard-deleted only by the background
 ledger cleanup after they are outside the current era's stability window.
-That cleanup is deferred while the local tip is materially behind a known
-upstream tip and is single-flight across its timer and epoch-boundary
-triggers. The deferral needs a known upstream tip: a node with no connected
-peer has no catch-up distance to measure, so cleanup falls back to running
-off the local tip alone rather than deferring for as long as the node stays
-peerless. Each eligible run deletes at most one bounded batch, so the
-potentially large `utxo`/stake-reference scan cannot hold SQLite's single
-write connection indefinitely; later timer or epoch-boundary runs reclaim the
+That cleanup is deferred while the local tip is materially behind the active
+peer's corroborated upstream target and is single-flight across its timer and
+epoch-boundary triggers. Header admission retains a separate monotonic frontier
+for bookkeeping, but cleanup does not use it as a remote target. While a client
+is active but its target is still unknown, cleanup waits; while the node is
+peerless, it falls back to the local tip. Each eligible run deletes at most one bounded batch, so the
+potentially large `utxo`/stake-reference scan cannot hold SQLite's single write
+connection indefinitely; later timer or epoch-boundary runs reclaim the
 remaining rows once the node is near the upstream tip.
 API mode retains spent UTxO metadata for historical transaction queries.
 
@@ -871,6 +881,7 @@ again.
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
 | `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes only rows without `enacted_epoch` or `expired_epoch` as pending actions, while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. |
+| `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_cred_hash`, `expires_epoch`, `added_slot`, `deleted_slot` | PK `id`; unique `cold_cred_hash`; indexes `added_slot`, `deleted_slot` | Snapshot-imported committee state. |
@@ -2406,6 +2417,23 @@ FROM governance_proposal
 WHERE tx_hash = decode($1, 'hex')
   AND action_index = $2
   AND deleted_slot IS NULL;
+```
+
+`ClearGovernanceProposalRatification` is the explicit lifecycle transition
+used when a legacy ratified proposal positively fails deterministic ENACT
+preflight. It clears only the ratification marker and appends the pending state
+to `governance_proposal_ratification_history` in the same transaction, without
+changing the general `SetGovernanceProposal` upsert contract (whose nil
+lifecycle fields mean "preserve the stored value"):
+
+```sql
+UPDATE governance_proposal
+SET ratified_epoch = NULL, ratified_slot = NULL
+WHERE tx_hash = $1 AND action_index = $2;
+
+INSERT INTO governance_proposal_ratification_history
+  (proposal_id, transition_slot, ratified_epoch, ratified_slot)
+VALUES ($proposal_id, $boundary_slot, NULL, NULL);
 ```
 
 Votes for a proposal:
