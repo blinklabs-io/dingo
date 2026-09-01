@@ -500,7 +500,13 @@ func (ls *LedgerState) queryShelleyCbor(
 		return nil, err
 	}
 	// Inner handlers return the result in the single-element MsgResult wire
-	// form ([]any{value}); GetCBOR serialises just the wrapped value.
+	// form ([]any{value}); GetCBOR serialises just the wrapped value. This
+	// assumes every wrappable query's []any has exactly one element, which no
+	// longer holds for a multi-field StructAsArray result whose handler
+	// destructures its fields into the slice (e.g. queryShelleyPoolDistr2's
+	// []any{result.Pools, result.TotalActiveStake}); no query of that shape is
+	// currently sent through GetCBOR in practice, and this combinator path has
+	// no test coverage of its own, so this is a known gap rather than a fix.
 	values, ok := inner.([]any)
 	if !ok || len(values) != 1 {
 		return nil, fmt.Errorf(

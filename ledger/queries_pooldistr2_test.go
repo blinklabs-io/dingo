@@ -100,6 +100,26 @@ func seedPoolDistr2Fixture(
 	return pkh
 }
 
+// decodePoolDistr2Result round-trips a handler's returned []any through CBOR
+// the way the wire actually does: encoded by the server exactly as
+// protocol/localstatequery/server.go encodes it, then decoded by the real
+// gouroboros client-side type. Client.GetPoolDistr2 decodes straight into a
+// PoolDistr2Result with no wrapping, so asserting against that decoded value
+// (rather than a raw type assertion on the handler's own []any) is what would
+// have caught the handler double-wrapping its result before it shipped.
+func decodePoolDistr2Result(
+	t *testing.T,
+	result any,
+) olocalstatequery.PoolDistr2Result {
+	t.Helper()
+	encoded, err := cbor.Encode(&result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.PoolDistr2Result
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	return decoded
+}
+
 // TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf covers GetPoolDistr2,
 // which cardano-cli sends while computing a leadership schedule.
 //
@@ -137,12 +157,7 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok, "expected the []any result wrapper")
-	require.Len(t, arr, 1)
-
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok, "expected a PoolDistr2Result, got %T", arr[0])
+	distr := decodePoolDistr2Result(t, result)
 
 	assert.Equal(t, uint64(4_000_000), distr.TotalActiveStake,
 		"total active stake is the sum over the snapshot")
@@ -225,11 +240,7 @@ func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2QueryFor(pkhA))
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	require.Len(t, distr.Pools, 1, "only the requested pool is reported")
 	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
@@ -283,14 +294,10 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(t *testing.T) 
 	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh))
 	require.NoError(t, err,
 		"a pool the snapshot does not hold is omitted, not an error")
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	require.Len(t, distr.Pools, 1)
-	_, ok = distr.Pools[lcommon.PoolId(pkhA)]
+	_, ok := distr.Pools[lcommon.PoolId(pkhA)]
 	assert.True(t, ok, "the pool the snapshot holds is still reported")
 	_, ok = distr.Pools[lcommon.PoolId(unknownPkh)]
 	assert.False(t, ok, "a pool absent from the snapshot is not reported")
@@ -306,12 +313,7 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err,
 		"an empty snapshot reports an empty distribution, not an error")
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 	// One, not zero: the ledger types this field as a NonZero Coin, so a zero
 	// total is not decodable by the client at all.
 	assert.Equal(t, uint64(1), distr.TotalActiveStake)
@@ -375,10 +377,7 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 	require.NoError(t, err,
 		"an unregistered pool must not abort the protocol and drop the "+
 			"client's connection")
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	_, present := distr.Pools[lcommon.PoolId(orphanPkh)]
 	assert.False(t, present,
@@ -453,10 +452,7 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
 	require.True(t, ok, "pool missing from the distribution")
@@ -529,10 +525,7 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
 	require.True(t, ok, "pool missing from the distribution")
 
@@ -628,10 +621,7 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
 	require.True(t, ok, "pool missing from the distribution")
@@ -711,10 +701,7 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	assert.Equal(t, uint64(4_000_000), distr.TotalActiveStake,
 		"the total must equal the sum of the snapshot rows the per-pool "+
