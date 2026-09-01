@@ -164,6 +164,29 @@ func TestBackendResetterSkipsTruncateEntirelyWhenClean(t *testing.T) {
 // backend rather than asserting on the generated string. Reintroducing double
 // quotes fails TestNonEmptyTablesPostgres.
 
+// dropAndCloseOnCleanup registers the drop of a test-created schema or database
+// and the close of the admin pool so both actually run, in that order.
+//
+// t.Cleanup is last-in-first-out, and a deferred call in the test body runs
+// before any Cleanup. So `defer db.Close()` closes the pool first and a
+// Cleanup-registered DROP then executes against a closed pool, fails, and --
+// with its error discarded -- silently leaves the schema or database behind
+// after every run. Registering the close first makes it run last, and both
+// errors are reported rather than swallowed so a future leak is visible.
+func dropAndCloseOnCleanup(t *testing.T, db *sql.DB, drop string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close admin pool: %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		if _, err := db.Exec(drop); err != nil {
+			t.Errorf("%s: %v", drop, err)
+		}
+	})
+}
+
 // TestNonEmptyTablesPostgres proves the probe returns exactly the tables
 // holding rows on PostgreSQL.
 func TestNonEmptyTablesPostgres(t *testing.T) {
@@ -171,14 +194,13 @@ func TestNonEmptyTablesPostgres(t *testing.T) {
 
 	db, err := sql.Open("pgx", postgresConformanceDSN())
 	require.NoError(t, err)
-	defer db.Close()
 
 	schema := "probe_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	_, err = db.Exec(`CREATE SCHEMA ` + pgQuoteIdent(schema))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = db.Exec(`DROP SCHEMA ` + pgQuoteIdent(schema) + ` CASCADE`)
-	})
+	dropAndCloseOnCleanup(
+		t, db, `DROP SCHEMA `+pgQuoteIdent(schema)+` CASCADE`,
+	)
 
 	assertProbeFindsOnlyPopulated(t, db, schema, pgQuoteQualified,
 		func(qualified string) string {
@@ -197,18 +219,15 @@ func TestNonEmptyTablesMysql(t *testing.T) {
 	cfg.DBName = ""
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	require.NoError(t, err)
-	defer db.Close()
 
 	database := "probe_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	_, err = db.Exec(
 		"CREATE DATABASE " + mysqlQuoteIdentifier(database),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = db.Exec(
-			"DROP DATABASE " + mysqlQuoteIdentifier(database),
-		)
-	})
+	dropAndCloseOnCleanup(
+		t, db, "DROP DATABASE "+mysqlQuoteIdentifier(database),
+	)
 
 	qualify := func(schema, table string) string {
 		return mysqlQuoteIdentifier(schema) + "." +
@@ -344,14 +363,13 @@ func TestMysqlAdvancedAutoIncrementTablesFiltersToManaged(t *testing.T) {
 	cfg.DBName = ""
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	require.NoError(t, err)
-	defer db.Close()
 
 	database := "aiprobe_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	_, err = db.Exec("CREATE DATABASE " + mysqlQuoteIdentifier(database))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = db.Exec("DROP DATABASE " + mysqlQuoteIdentifier(database))
-	})
+	dropAndCloseOnCleanup(
+		t, db, "DROP DATABASE "+mysqlQuoteIdentifier(database),
+	)
 
 	ctx := context.Background()
 	for _, name := range []string{"managed", "unmanaged"} {
