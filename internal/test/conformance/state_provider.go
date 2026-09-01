@@ -495,12 +495,14 @@ func (p *DingoStateProvider) proposedCommitteeMember(
 		return nil, err
 	}
 	if member != nil {
-		if err := p.populateCommitteeMemberStatus(coldCredential, termStart, member); err != nil {
+		if err := p.populateCommitteeMemberStatus(
+			coldCredential,
+			termStart,
+			member,
+			true,
+		); err != nil {
 			return nil, err
 		}
-		// Pending terms have no certificate history of their own yet. A
-		// resignation from the replaced term must not leak into the successor.
-		member.Resigned = false
 	}
 	return member, nil
 }
@@ -534,6 +536,7 @@ func (p *DingoStateProvider) legacyCommitteeMember(
 			coldCredential,
 			member.TermStartSlot,
 			result,
+			false,
 		); err != nil {
 			return nil, err
 		}
@@ -590,16 +593,23 @@ func (p *DingoStateProvider) realCommitteeMember(
 		coldCredential,
 		termStartSlot,
 		result,
+		false,
 	); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
+// populateCommitteeMemberStatus mirrors ledger.LedgerView's helper, including
+// its pending-term rule: a pending term's start is the proposal's own added
+// slot, so the resignation of the term it replaces sits at or after it. Skip
+// the lookup rather than clearing its result afterwards, which would drop the
+// hot authorization production keeps.
 func (p *DingoStateProvider) populateCommitteeMemberStatus(
 	coldCredential common.Credential,
 	termStartSlot uint64,
 	result *common.CommitteeMember,
+	pending bool,
 ) error {
 	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
 	if err != nil {
@@ -621,6 +631,9 @@ func (p *DingoStateProvider) populateCommitteeMemberStatus(
 		result.HotKey = &hotKey
 	}
 
+	if pending {
+		return nil
+	}
 	resigned, err := withBadConnRetry(func() (bool, error) {
 		return p.manager.db.IsCommitteeMemberResigned(
 			coldTag,

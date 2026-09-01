@@ -43,10 +43,12 @@ func ResolveCommitteeProposal(
 			selected, selectedAction = proposal, update
 		}
 	}
-	if selected == nil {
+	if selected == nil && root == nil {
 		// Some imported histories do not carry a reconstructable enacted root.
 		// Preserve their rootless pending proposals, while still selecting only
 		// the newest proposal rather than the storage order's oldest match.
+		// With a root present, a proposal outside its lineage cannot enact, so
+		// the fallback must not reach for one.
 		for _, proposal := range proposals {
 			if proposal == nil || lcommon.GovActionType(proposal.ActionType) != lcommon.GovActionTypeUpdateCommittee {
 				continue

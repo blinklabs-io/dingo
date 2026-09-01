@@ -589,3 +589,66 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 		)
 	}
 }
+
+// DState and ccHotKeys are both credential-keyed, so picking DState by map size
+// alone claimed the committee map whenever DState was empty or smaller.
+func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
+	hotMap, resignMap := committeeVStateFixture(t)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	drepHash := bytes.Repeat([]byte{0x8a}, 28)
+	drepCredential, err := cbor.Encode([]any{uint64(0), drepHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drepMap := append([]byte{0xa1}, drepCredential...)
+	drepMap = append(drepMap, 0x80)
+
+	smallDState := func(t *testing.T) []byte {
+		t.Helper()
+		delegator, err := cbor.Encode(
+			[]any{uint64(0), bytes.Repeat([]byte{0x8b}, 28)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := append([]byte{0xa1}, delegator...)
+		return append(out, 0x80)
+	}
+
+	for _, test := range []struct {
+		name   string
+		dstate []byte
+	}{
+		{name: "empty DState", dstate: []byte{0xa0}},
+		{name: "DState smaller than the committee map", dstate: smallDState(t)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := parseCertStateConway([][]byte{
+				drepMap,
+				hotMap,
+				resignMap,
+				poolState,
+				test.dstate,
+				{0x00},
+			})
+			if err != nil {
+				t.Logf("parse warnings: %v", err)
+			}
+			if result == nil {
+				t.Fatal("no parsed cert state")
+			}
+			if len(result.CommitteeHotKeys) != 1 {
+				t.Fatalf(
+					"committee authorizations were dropped: %#v",
+					result.CommitteeHotKeys,
+				)
+			}
+			if len(result.CommitteeResignations) != 1 {
+				t.Fatalf(
+					"committee resignations were dropped: %#v",
+					result.CommitteeResignations,
+				)
+			}
+		})
+	}
+}

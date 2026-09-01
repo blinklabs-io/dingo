@@ -167,6 +167,13 @@ func parseCertStateConway(
 		},
 	)
 	for _, mc := range mapCandidates {
+		// ccHotKeys is also credential-keyed, so size alone would pick it when
+		// DState is empty or the smaller of the two. Its values are
+		// credentials, which an account state is not, so skip it here and let
+		// the committee scan below claim it.
+		if looksLikeCommitteeCredentialMap(certState[mc.idx]) {
+			continue
+		}
 		if looksLikeCredentialMap(certState[mc.idx]) {
 			dIdx = mc.idx
 			break
@@ -1539,6 +1546,25 @@ func parseVState(data []byte) (
 	dreps, warning := parseDRepMap(vs[0])
 	hotKeys, resignations := parseCommitteeVState(vs[1:])
 	return dreps, hotKeys, resignations, warning
+}
+
+// looksLikeCommitteeCredentialMap reports whether every entry maps a credential
+// to a credential, which is the committee hot-key shape. DState maps a
+// credential to an account state, so this separates the two regardless of size.
+func looksLikeCommitteeCredentialMap(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	if err != nil || len(entries) == 0 {
+		return false
+	}
+	for _, entry := range entries {
+		if _, err := parseCredential(entry.KeyRaw); err != nil {
+			return false
+		}
+		if _, err := parseCommitteeHotCredential(entry.ValueRaw); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // isCborArray reports whether data begins a definite or indefinite CBOR array.
