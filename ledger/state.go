@@ -1502,9 +1502,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// so the snapshot retention floor covers headers still awaiting apply from
 	// before the restart (issue #3727, finding 3): without this the first
 	// post-restart epoch cleanup could prune a pool-stake snapshot such a
-	// header needs. Best-effort: a load failure only forgoes the pin (the
-	// per-point persisted markers still drive apply-time re-validation).
-	ls.repopulateDeferredHeaderValidation()
+	// header needs. Fail closed: a scan failure that continued would leave the
+	// floor unpinned, and once the apply cursor passes a pre-restart deferred
+	// header its now-pruned snapshot is hard-rejected instead of deferred (the
+	// exact bug this PR fixes). Abort startup so the operator retries rather
+	// than run with an unpinned retention floor.
+	if err := ls.repopulateDeferredHeaderValidation(); err != nil {
+		return fmt.Errorf(
+			"failed to repopulate deferred-header validation set: %w",
+			err,
+		)
+	}
 	// Reconstruct the evolving-nonce fold across Mithril "gap blocks" (blocks
 	// between the ledger-state snapshot slot and the trust boundary) that were
 	// imported without folding their VRF output. Must run after the tip and

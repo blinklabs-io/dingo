@@ -3164,14 +3164,14 @@ func TestPrunePoolSnapshotsWithRetentionFloor_SerializesAdmission(
 			seenBefore = before
 			close(started)
 			// While the guard holds the lock, the concurrent admission must be
-			// blocked: markReturned must not fire.
-			select {
-			case <-markReturned:
-				t.Error(
-					"concurrent admission completed while the retention guard held the lock",
-				)
-			case <-time.After(100 * time.Millisecond):
-			}
+			// blocked: markReturned must not fire. Use the repo's channel
+			// helper for the negative wait rather than a bare time.After poll.
+			testutil.RequireNoReceive(
+				t,
+				markReturned,
+				100*time.Millisecond,
+				"concurrent admission completed while the retention guard held the lock",
+			)
 			return nil
 		},
 	)
@@ -3330,11 +3330,87 @@ func TestRepopulateDeferredHeaderValidation(t *testing.T) {
 	}
 
 	// Repopulate from persisted markers (as LedgerState.Start does).
-	ls.repopulateDeferredHeaderValidation()
+	require.NoError(t, ls.repopulateDeferredHeaderValidation())
 
 	floor, ok := ls.OldestRequiredSnapshotEpoch()
 	require.True(t, ok, "repopulated markers must produce a retention pin")
 	assert.Equal(t, uint64(10), floor, "floor = StakeSnapshotEpoch(11)")
+}
+
+// TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError is the
+// regression guard for the swallowed marker-scan failure (issue #3727, P1
+// re-review). If the persisted-marker scan fails at startup and the error is
+// swallowed, the in-memory deferred set stays empty, the retention floor does
+// not cover pre-restart deferred headers, and the first post-restart cleanup
+// can prune a snapshot one of them needs -- after which stateful verification
+// hard-rejects the missing snapshot instead of deferring. repopulate MUST
+// surface the error so LedgerState.Start aborts rather than run unpinned.
+func TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	// Persist a marker, then close the database so the marker scan errors.
+	require.NoError(t, ls.persistDeferredHeaderValidation(
+		ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}, nil,
+	))
+	dbtest.CloseDatabase(db) //nolint:errcheck
+
+	err := ls.repopulateDeferredHeaderValidation()
+	require.Error(
+		t,
+		err,
+		"a marker-scan failure must be surfaced (fail closed), not swallowed",
+	)
+}
+
+// TestDeletePersistedDeferredMarkers_SkipsReAdmitted is the regression guard
+// for the evicted-marker delete racing a re-defer (issue #3727, P2 re-review).
+// deletePersistedDeferredMarkers runs after eviction released the in-memory
+// pin, so between eviction and the delete the same point can be re-deferred and
+// re-persisted (it is still ahead of the lagging apply cursor). Deleting the
+// marker for a point that is live in the in-memory set again would drop the
+// durable pin, so the delete must skip any key present in the set; only a key
+// that is genuinely absent (still evicted) may have its marker removed.
+func TestDeletePersistedDeferredMarkers_SkipsReAdmitted(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{72}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+
+	reAdmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	staleGone := ocommon.Point{Slot: 1_160, Hash: []byte{0x12}}
+	reAdmittedKey := headerValidationPointKey(reAdmitted)
+	staleKey := headerValidationPointKey(staleGone)
+
+	// Both points have a persisted marker (as any deferred header would).
+	require.NoError(t, ls.persistDeferredHeaderValidation(reAdmitted, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(staleGone, nil))
+
+	// The re-admitted point is back in the in-memory set (re-deferred after the
+	// eviction that produced the delete list); the stale one is not.
+	ls.markDeferredHeaderValidation(reAdmitted)
+
+	// Cleanup runs for BOTH evicted keys.
+	ls.deletePersistedDeferredMarkers([]string{reAdmittedKey, staleKey})
+
+	remaining, err := ls.db.ListSyncStateKeysByPrefix(
+		deferredHeaderValidationSyncStatePrefix, nil,
+	)
+	require.NoError(t, err)
+	// The re-admitted point's marker MUST survive (it now backs a live pin);
+	// the genuinely-stale marker MUST be gone.
+	assert.Contains(
+		t,
+		remaining,
+		deferredHeaderValidationSyncStatePrefix+reAdmittedKey,
+		"re-deferred point's marker must not be deleted",
+	)
+	assert.NotContains(
+		t,
+		remaining,
+		deferredHeaderValidationSyncStatePrefix+staleKey,
+		"genuinely stale marker must be deleted",
+	)
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor is the

@@ -1551,13 +1551,23 @@ func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
 	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
 }
 
-// epochForSlot searches an immutable epoch-cache snapshot for the epoch
-// containing the given slot.
+// epochForSlot searches the currently published epoch-cache snapshot for the
+// epoch containing the given slot.
 //
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
-	cache := ls.loadConsensusSnapshot().epochCache
+	return epochForSlotInCache(ls.loadConsensusSnapshot().epochCache, slot)
+}
 
+// epochForSlotInCache resolves a slot to its epoch against a caller-supplied
+// epoch-cache snapshot. Callers that resolve several slots and must see one
+// coherent view (e.g. computing a single retention floor) capture the cache
+// once and pass it here, so a concurrent epoch-cache publication or rollback
+// cannot interleave a different generation between lookups.
+func epochForSlotInCache(
+	cache []models.Epoch,
+	slot uint64,
+) (models.Epoch, error) {
 	if len(cache) == 0 {
 		return models.Epoch{}, errors.New("epoch cache is empty")
 	}
@@ -1637,6 +1647,13 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 	if len(ls.deferredHeaderValidation) == 0 {
 		return 0, false
 	}
+	// Capture one epoch-cache generation and resolve every deferred slot
+	// against it. loadConsensusSnapshot returns whatever is published at each
+	// call, so calling epochForSlot per key could mix generations across a
+	// concurrent epoch-cache publication/rollback and compute the floor from an
+	// incoherent mapping. One snapshot for the whole loop keeps the decision
+	// coherent (issue #3727, finding: mixed cache generations in floor read).
+	cache := ls.loadConsensusSnapshot().epochCache
 	var floor uint64
 	have := false
 	for key := range ls.deferredHeaderValidation {
@@ -1647,7 +1664,7 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 			// pruning a snapshot it turns out to require.
 			return 0, true
 		}
-		epoch, err := ls.epochForSlot(slot)
+		epoch, err := epochForSlotInCache(cache, slot)
 		if err != nil {
 			// The slot is not yet covered by the published epoch cache, so we
 			// cannot name the snapshot epoch it needs. Retain ALL pool
@@ -1712,10 +1729,11 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 		}
 		return prune(before)
 	}()
-	// Delete the evicted headers' persisted markers outside the lock: they are
-	// abandoned, so losing the pin (already released above) is the only thing
-	// that mattered; this just keeps the sync_state table from accumulating
-	// dead markers across restarts.
+	// Delete the evicted headers' persisted markers after releasing the lock
+	// here; deletePersistedDeferredMarkers re-takes the deferred-header mutex
+	// itself so it can skip any point that was re-deferred (and re-persisted)
+	// since eviction, keeping the sync_state table free of dead markers without
+	// dropping a marker that now backs a live pin.
 	ls.deletePersistedDeferredMarkers(evicted)
 	return err
 }

@@ -217,6 +217,42 @@ func TestGetScriptRejectsNegativeStoredType(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestListSyncStateKeysByPrefixSkipsNullKey covers the regression where a
+// single NULL sync_key row aborts the whole marker scan. SQLite permits NULL in
+// a TEXT PRIMARY KEY column, and scanning a NULL into a plain *string errors --
+// which, before the fix, propagated out and prevented every valid
+// deferred-header marker from being restored at startup, silently disabling the
+// snapshot retention pin. The scan must skip the NULL row and still return the
+// valid keys.
+func TestListSyncStateKeysByPrefixSkipsNullKey(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	// A malformed legacy row with a NULL primary key.
+	_, err := store.writeDB.Exec(
+		"INSERT INTO sync_state (sync_key, value) VALUES (NULL, ?)",
+		"x",
+	)
+	require.NoError(t, err)
+
+	// Two valid deferred-header markers that must still be restored.
+	const prefix = "deferred_header_validation:"
+	require.NoError(t, store.SetSyncState(prefix+"10:aa", "true", nil))
+	require.NoError(t, store.SetSyncState(prefix+"13:bb", "true", nil))
+
+	got, err := store.ListSyncStateKeysByPrefix(prefix, nil)
+	require.NoError(
+		t,
+		err,
+		"a NULL sync_key row must be skipped, not abort the scan",
+	)
+	require.ElementsMatch(
+		t,
+		[]string{prefix + "10:aa", prefix + "13:bb"},
+		got,
+	)
+}
+
 // TestCheckedUint8 unit-tests the helper directly: zero, the maximum
 // in-range value, and both out-of-range directions (negative and > 255).
 func TestCheckedUint8(t *testing.T) {

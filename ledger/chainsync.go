@@ -440,14 +440,33 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked() []string {
 }
 
 // deletePersistedDeferredMarkers removes the sync_state markers for a set of
-// deferred-header map keys. Best effort and lock-free: it is called after the
-// in-memory eviction has already released the retention pin, so a failure only
-// leaves a dead marker row to be re-cleaned on a later pass.
+// evicted deferred-header map keys. It runs after the in-memory eviction has
+// already released the retention pin, so a delete failure only leaves a dead
+// marker row to be re-cleaned on a later pass.
+//
+// It re-checks each key under deferredHeaderValidationMu and skips any that is
+// present in the in-memory set again: between eviction (which happens for a key
+// whose slot is below the chain tip) and this cleanup, that same point can be
+// re-deferred and re-persisted if it is still ahead of the (lagging) apply
+// cursor -- markDeferredHeaderValidation and persistDeferredHeaderValidation run
+// together on the chainsync path. Deleting the marker for a currently-live
+// entry would drop the durable pin for an active deferred header, so on the
+// next restart repopulate would miss it and cleanup could prune the snapshot it
+// needs (issue #3727, finding: evicted-marker delete races a re-defer). Holding
+// the lock across the deletes closes the window entirely; DeleteSyncState is a
+// single indexed delete and the only other holders of this mutex (mark/clear/
+// consume) do no I/O, so there is no deadlock.
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
 		return
 	}
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
 	for _, k := range mapKeys {
+		// Re-admitted since eviction: its marker is now backing a live pin.
+		if _, ok := ls.deferredHeaderValidation[k]; ok {
+			continue
+		}
 		syncKey := deferredHeaderValidationSyncStatePrefix + k
 		if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
 			ls.config.Logger.Warn(
@@ -466,28 +485,34 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 // headers still awaiting apply from before the restart -- otherwise the first
 // post-restart epoch cleanup could prune a pool-stake snapshot such a header
 // needs. Abandoned markers loaded here are harmless: the retention guard evicts
-// any whose slot the apply cursor has already passed on its next run. Best
-// effort: a load error only forgoes the pin, leaving apply-time re-validation
-// (which reads the per-point marker directly) unaffected.
-func (ls *LedgerState) repopulateDeferredHeaderValidation() {
+// any whose slot the apply cursor has already passed on its next run.
+//
+// This MUST fail closed. A scan failure that is swallowed leaves the in-memory
+// set empty, so the retention floor does not cover pre-restart deferred headers
+// and the first post-restart cleanup can prune a snapshot one of them needs.
+// Once the apply cursor then passes that header, stateful verification finds
+// the snapshot gone and hard-rejects it instead of deferring -- the exact
+// misclassification this PR exists to prevent. Apply-time re-validation from
+// the per-point marker cannot save it: the snapshot is already gone. So a load
+// failure is surfaced to LedgerState.Start, which aborts startup; the operator
+// retries rather than running with an unpinned retention floor (issue #3727,
+// finding: swallowed marker-scan failure reopens the pruned-snapshot bug).
+func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 	if ls.db == nil || ls.db.Metadata() == nil {
-		return
+		return nil
 	}
 	keys, err := ls.db.ListSyncStateKeysByPrefix(
 		deferredHeaderValidationSyncStatePrefix,
 		nil,
 	)
 	if err != nil {
-		ls.config.Logger.Warn(
-			"failed to repopulate deferred-header set from persisted markers; "+
-				"snapshot retention pin will not cover pre-restart deferred headers until re-seen",
-			"error", err,
-			"component", "ledger",
+		return fmt.Errorf(
+			"repopulate deferred-header set from persisted markers: %w",
+			err,
 		)
-		return
 	}
 	if len(keys) == 0 {
-		return
+		return nil
 	}
 	ls.deferredHeaderValidationMu.Lock()
 	if ls.deferredHeaderValidation == nil {
@@ -513,6 +538,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() {
 			"component", "ledger",
 		)
 	}
+	return nil
 }
 
 func (ls *LedgerState) persistDeferredHeaderValidation(

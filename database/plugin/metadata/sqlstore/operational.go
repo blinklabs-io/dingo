@@ -252,12 +252,17 @@ func (s *Store) ListSyncStateKeysByPrefix(
 	defer rows.Close()
 	var keys []string
 	for rows.Next() {
-		var key string
+		// Scan into sql.NullString: SQLite permits NULL in a TEXT PRIMARY KEY
+		// column, and scanning a NULL into a plain *string errors out, which
+		// would abort the whole scan and prevent every valid deferred-header
+		// marker from being restored. One malformed legacy row must not disable
+		// retention-pin restoration, so skip NULLs instead of failing.
+		var key sql.NullString
 		if err := rows.Scan(&key); err != nil {
 			return nil, fmt.Errorf("list sync state keys: %w", err)
 		}
-		if strings.HasPrefix(key, prefix) {
-			keys = append(keys, key)
+		if key.Valid && strings.HasPrefix(key.String, prefix) {
+			keys = append(keys, key.String)
 		}
 	}
 	if err := rows.Err(); err != nil {
