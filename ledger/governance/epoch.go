@@ -466,9 +466,14 @@ func ProcessEpoch(
 	// HardForkInitiation), refresh the Conway pparams view so major
 	// version and threshold reads reflect the updated values.
 	if out.PParamsChanged {
-		updatedConwayPParams, err := conwayGovernanceProtocolParameters(out.UpdatedPParams)
+		updatedConwayPParams, err := conwayGovernanceProtocolParameters(
+			out.UpdatedPParams,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("resolve updated governance pparams: %w", err)
+			return nil, fmt.Errorf(
+				"resolve updated governance pparams: %w",
+				err,
+			)
 		}
 		if updatedConwayPParams == nil {
 			return nil, fmt.Errorf(
