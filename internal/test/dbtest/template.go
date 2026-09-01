@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -53,7 +54,9 @@ import (
 //	template write + open              ~5ms + ~250ms
 //
 // The template directory itself is removed as soon as its bytes are read, so
-// nothing is leaked for the life of the process.
+// nothing is normally leaked for the life of the process. A removal that fails
+// anyway is logged rather than returned, because this result is cached (see
+// templateCleanupError).
 var (
 	metadataTemplateOnce sync.Once
 	metadataTemplate     []byte
@@ -73,6 +76,28 @@ func migratedMetadataTemplate() ([]byte, error) {
 	return metadataTemplate, metadataTemplateErr
 }
 
+// templateCleanupError folds a failure to remove the scratch template
+// directory into the result of buildMetadataTemplate.
+//
+// Removal is best-effort once the template bytes are in hand.
+// migratedMetadataTemplate caches buildMetadataTemplate's error under a
+// sync.Once, so promoting a removal failure to a returned error would make one
+// transient cleanup failure fail every later test in the process even though
+// the template was read correctly and is perfectly usable. A removal failure
+// on the success path is therefore logged -- it leaks a directory for the life
+// of the process, which is worth seeing -- rather than returned, and is joined
+// only when the build was already failing.
+func templateCleanupError(err error, dir string, removeErr error) error {
+	if removeErr == nil {
+		return err
+	}
+	if err != nil {
+		return errors.Join(err, removeErr)
+	}
+	log.Printf("dbtest: leaked metadata template dir %s: %v", dir, removeErr)
+	return nil
+}
+
 // buildMetadataTemplate migrates a scratch database and returns its bytes.
 //
 // The provider is stopped before the file is read so SQLite checkpoints and
@@ -88,7 +113,7 @@ func buildMetadataTemplate() (_ []byte, err error) {
 		// the moment it has been read. Removing it here rather than at
 		// process exit keeps this from leaking a directory per test binary,
 		// which matters because package dbtest has no TestMain to hook.
-		err = errors.Join(err, os.RemoveAll(dir))
+		err = templateCleanupError(err, dir, os.RemoveAll(dir))
 	}()
 
 	host := plugin.NewHost()
