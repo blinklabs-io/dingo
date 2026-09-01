@@ -105,8 +105,10 @@ func filesMatching(
 	if err != nil {
 		return filesMatchingWalk(t, root, match)
 	}
-	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Output()
-	if err != nil || !sameDiscoveryRoot(rootAbs, strings.TrimSpace(string(topLevel))) {
+	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").
+		Output()
+	if err != nil ||
+		!sameDiscoveryRoot(rootAbs, strings.TrimSpace(string(topLevel))) {
 		return filesMatchingWalk(t, rootAbs, match)
 	}
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
@@ -169,29 +171,32 @@ func filesMatchingWalk(
 	t.Helper()
 
 	var found []string
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = normalizeDiscoveryPath(rel)
-		if entry.IsDir() {
+	err := filepath.WalkDir(
+		root,
+		func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			rel = normalizeDiscoveryPath(rel)
+			if entry.IsDir() {
+				if isExcludedDiscoveryPath(rel) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if isExcludedDiscoveryPath(rel) {
-				return filepath.SkipDir
+				return nil
+			}
+			if match(rel) {
+				found = append(found, rel)
 			}
 			return nil
-		}
-		if isExcludedDiscoveryPath(rel) {
-			return nil
-		}
-		if match(rel) {
-			found = append(found, rel)
-		}
-		return nil
-	})
+		},
+	)
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
@@ -309,7 +314,12 @@ func TestNormalizeDiscoveryPathIsPlatformIndependent(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			if got := isExcludedDiscoveryPath(tt.input); got != tt.excluded {
-				t.Fatalf("isExcludedDiscoveryPath(%q) = %v, want %v", tt.input, got, tt.excluded)
+				t.Fatalf(
+					"isExcludedDiscoveryPath(%q) = %v, want %v",
+					tt.input,
+					got,
+					tt.excluded,
+				)
 			}
 		})
 	}
@@ -362,7 +372,11 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	writeTestFile(t, nested, ".github/workflows/archive.yml")
 	writeTestFile(t, nested, ".claude/worktrees/scratch/ignored.md")
 	writeTestFile(t, nested, ".claude/worktrees/scratch/Dockerfile")
-	writeTestFile(t, nested, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
+	writeTestFile(
+		t,
+		nested,
+		".codex/worktrees/scratch/.github/workflows/ignored.yml",
+	)
 	got, want = markdownFiles(t, nested), []string{"docs/archive.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("nested markdownFiles() = %v, want %v", got, want)
@@ -371,7 +385,12 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("nested dockerfiles() = %v, want %v", got, want)
 	}
-	got, want = workflowFiles(t, nested), []string{".github/workflows/archive.yml"}
+	got, want = workflowFiles(
+		t,
+		nested,
+	), []string{
+		".github/workflows/archive.yml",
+	}
 	if !slices.Equal(got, want) {
 		t.Errorf("nested workflowFiles() = %v, want %v", got, want)
 	}
@@ -381,7 +400,11 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	writeTestFile(t, archive, ".claude/worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".codex/worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".codex/worktrees/scratch/Dockerfile")
-	writeTestFile(t, archive, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
+	writeTestFile(
+		t,
+		archive,
+		".codex/worktrees/scratch/.github/workflows/ignored.yml",
+	)
 	writeTestFile(t, archive, ".agents/worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".tools/scratch/ignored.md")
@@ -418,21 +441,41 @@ func TestDocumentationDiscoveryRecognizesAliasedRepositoryRoot(t *testing.T) {
 	writeTestFile(t, root, ".codex/worktrees/ignored.md")
 	writeTestFile(t, root, "untracked.md")
 	writeTestFile(t, root, ".github/workflows/untracked.yaml")
-	writeTestFile(t, root, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
-	runGit(t, root, "add", "docs/tracked.md", ".github/workflows/tracked.yml", "Dockerfile")
+	writeTestFile(
+		t,
+		root,
+		".codex/worktrees/scratch/.github/workflows/ignored.yml",
+	)
+	runGit(
+		t,
+		root,
+		"add",
+		"docs/tracked.md",
+		".github/workflows/tracked.yml",
+		"Dockerfile",
+	)
 
 	alias := filepath.Join(t.TempDir(), "repo-alias")
 	if err := os.Symlink(root, alias); err != nil {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 
-	if got, want := markdownFiles(t, alias), []string{"docs/tracked.md"}; !slices.Equal(got, want) {
+	if got, want := markdownFiles(t, alias), []string{"docs/tracked.md"}; !slices.Equal(
+		got,
+		want,
+	) {
 		t.Errorf("aliased markdownFiles() = %v, want %v", got, want)
 	}
-	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(got, want) {
+	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(
+		got,
+		want,
+	) {
 		t.Errorf("aliased dockerfiles() = %v, want %v", got, want)
 	}
-	if got, want := workflowFiles(t, alias), []string{".github/workflows/tracked.yml"}; !slices.Equal(got, want) {
+	if got, want := workflowFiles(t, alias), []string{".github/workflows/tracked.yml"}; !slices.Equal(
+		got,
+		want,
+	) {
 		t.Errorf("aliased workflowFiles() = %v, want %v", got, want)
 	}
 }
@@ -444,20 +487,33 @@ func TestDocumentationDiscoveryFollowsAliasedSourceArchive(t *testing.T) {
 	writeTestFile(t, archive, ".github/workflows/source.yml")
 	writeTestFile(t, archive, ".codex/worktrees/scratch/ignored.md")
 	writeTestFile(t, archive, ".codex/worktrees/scratch/Dockerfile")
-	writeTestFile(t, archive, ".codex/worktrees/scratch/.github/workflows/ignored.yml")
+	writeTestFile(
+		t,
+		archive,
+		".codex/worktrees/scratch/.github/workflows/ignored.yml",
+	)
 
 	alias := filepath.Join(t.TempDir(), "archive-alias")
 	if err := os.Symlink(archive, alias); err != nil {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 
-	if got, want := markdownFiles(t, alias), []string{"docs/source.md"}; !slices.Equal(got, want) {
+	if got, want := markdownFiles(t, alias), []string{"docs/source.md"}; !slices.Equal(
+		got,
+		want,
+	) {
 		t.Errorf("aliased archive markdownFiles() = %v, want %v", got, want)
 	}
-	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(got, want) {
+	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(
+		got,
+		want,
+	) {
 		t.Errorf("aliased archive dockerfiles() = %v, want %v", got, want)
 	}
-	if got, want := workflowFiles(t, alias), []string{".github/workflows/source.yml"}; !slices.Equal(got, want) {
+	if got, want := workflowFiles(t, alias), []string{".github/workflows/source.yml"}; !slices.Equal(
+		got,
+		want,
+	) {
 		t.Errorf("aliased archive workflowFiles() = %v, want %v", got, want)
 	}
 }

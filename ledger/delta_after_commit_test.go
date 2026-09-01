@@ -53,7 +53,11 @@ func (s commitFailingBlobStore) SetTx(
 	txHash []byte,
 	offsetData []byte,
 ) error {
-	return s.BlobStore.SetTx(unwrapCommitFailingBlobTxn(txn), txHash, offsetData)
+	return s.BlobStore.SetTx(
+		unwrapCommitFailingBlobTxn(txn),
+		txHash,
+		offsetData,
+	)
 }
 
 func (s commitFailingBlobStore) SetCommitTimestamp(
@@ -206,8 +210,16 @@ func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 
 		firstEvt := requireTransactionEvent(t, events, 0)
 		secondEvt := requireTransactionEvent(t, events, 1)
-		require.Equal(t, delta.Transactions[0].Tx.Hash(), firstEvt.Transaction.Hash())
-		require.Equal(t, delta.Transactions[1].Tx.Hash(), secondEvt.Transaction.Hash())
+		require.Equal(
+			t,
+			delta.Transactions[0].Tx.Hash(),
+			firstEvt.Transaction.Hash(),
+		)
+		require.Equal(
+			t,
+			delta.Transactions[1].Tx.Hash(),
+			secondEvt.Transaction.Hash(),
+		)
 	})
 
 	t.Run("rollback publishes nothing", func(t *testing.T) {

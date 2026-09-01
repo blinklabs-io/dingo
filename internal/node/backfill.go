@@ -1091,7 +1091,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// repeated indexed UTxO sums during API backfill.
 	if err := b.db.RebuildRewardLiveStake(tipSlot, nil); err != nil {
 		saveCommittedCheckpoint()
-		return fmt.Errorf("rebuilding reward live stake after backfill: %w", err)
+		return fmt.Errorf(
+			"rebuilding reward live stake after backfill: %w",
+			err,
+		)
 	}
 	if err := ctx.Err(); err != nil {
 		saveCommittedCheckpoint()

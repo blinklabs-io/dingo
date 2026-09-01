@@ -305,7 +305,9 @@ func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
 	case err := <-errCh:
 		require.ErrorIs(t, err, ErrEventSubscriberStalled)
 	case <-time.After(time.Second):
-		t.Fatal("PublishBlocking did not return after stalled-subscriber timeout")
+		t.Fatal(
+			"PublishBlocking did not return after stalled-subscriber timeout",
+		)
 	}
 
 	require.Equal(t, "first", (<-stalled).Data)

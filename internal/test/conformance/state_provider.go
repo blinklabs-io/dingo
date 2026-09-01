@@ -261,7 +261,8 @@ func poolIsActive(pool *models.Pool, currentEpoch uint64) bool {
 	if ret == nil {
 		return true
 	}
-	return registrationSupersedesRetirement(reg, ret) || currentEpoch < ret.Epoch
+	return registrationSupersedesRetirement(reg, ret) ||
+		currentEpoch < ret.Epoch
 }
 
 // registrationSupersedesRetirement reports whether reg was added after ret,

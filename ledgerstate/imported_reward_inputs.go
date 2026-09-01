@@ -193,12 +193,14 @@ func deriveRewardInputs(
 					int64(den),            // #nosec G115 -- bounded
 				),
 			},
-			Pledge:                     types.Uint64(pool.Pledge),
-			Cost:                       types.Uint64(pool.Cost),
-			DelegatedStake:             types.Uint64(agg.delegated),
-			OwnerStake:                 types.Uint64(agg.ownerStake),
-			DelegatorCount:             agg.delegators,
-			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			Pledge:         types.Uint64(pool.Pledge),
+			Cost:           types.Uint64(pool.Cost),
+			DelegatedStake: types.Uint64(agg.delegated),
+			OwnerStake:     types.Uint64(agg.ownerStake),
+			DelegatorCount: agg.delegators,
+			RewardAccount: append(
+				[]byte(nil),
+				pool.RewardAccount...),
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			CapturedSlot:               capturedSlot,
 			BoundarySlot:               boundarySlot,
@@ -682,13 +684,17 @@ func rewardPoolParamsFromRegistrations(
 			owners = append(owners, append([]byte(nil), owner.KeyHash...))
 		}
 		params[hex.EncodeToString(pool.PoolKeyHash)] = &ParsedPool{
-			PoolKeyHash:                append([]byte(nil), pool.PoolKeyHash...),
-			VrfKeyHash:                 append([]byte(nil), pool.VrfKeyHash...),
-			Pledge:                     uint64(pool.Pledge),
-			Cost:                       uint64(pool.Cost),
-			MarginNum:                  num,
-			MarginDen:                  den,
-			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			PoolKeyHash: append(
+				[]byte(nil),
+				pool.PoolKeyHash...),
+			VrfKeyHash: append([]byte(nil), pool.VrfKeyHash...),
+			Pledge:     uint64(pool.Pledge),
+			Cost:       uint64(pool.Cost),
+			MarginNum:  num,
+			MarginDen:  den,
+			RewardAccount: append(
+				[]byte(nil),
+				pool.RewardAccount...),
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			Owners:                     owners,
 		}

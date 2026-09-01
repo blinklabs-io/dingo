@@ -84,8 +84,14 @@ func TestLatestPoolOpCertSequenceAfter(t *testing.T) {
 		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xC3}, 28)),
 	)
 	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 1, 100, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 490, 101, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 491, 102, nil))
+	require.NoError(
+		t,
+		store.UpdatePoolOpCertSequence(poolKeyHash, 490, 101, nil),
+	)
+	require.NoError(
+		t,
+		store.UpdatePoolOpCertSequence(poolKeyHash, 491, 102, nil),
+	)
 
 	sequence, found, err := store.LatestPoolOpCertSequenceAfter(
 		poolKeyHash,

@@ -446,7 +446,9 @@ func TestLedgerStateIsMainnet_NamedMainnetStillTrue(t *testing.T) {
 // without the CLI network selector reaching LedgerStateConfig) falls back
 // to the pre-existing genesis-only check rather than failing or silently
 // relaxing the rule.
-func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(t *testing.T) {
+func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(
+	t *testing.T,
+) {
 	ls := newLedgerStateForNetworkNamed(
 		t, "Mainnet", byron.MainnetProtocolMagic, "some-custom-devnet",
 	)
@@ -465,7 +467,9 @@ func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(t *testing.T)
 // relaxed just because "preview" isn't literally "mainnet" — preview's own
 // magic doesn't match real mainnet's, so this is a configuration mismatch,
 // not the known prime-mainnet identity-reuse case.
-func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(t *testing.T) {
+func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(
+	t *testing.T,
+) {
 	ls := newLedgerStateForNetworkNamed(
 		t, "Mainnet", byron.MainnetProtocolMagic, "preview",
 	)
