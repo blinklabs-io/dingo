@@ -182,8 +182,10 @@ func poolDistr2QueryFor(
 	return &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{
 			Query: &olocalstatequery.ShelleyPoolDistr2Query{
-				Type:  olocalstatequery.QueryTypeShelleyPoolDistr2,
-				Pools: []cbor.SetType[lcommon.PoolId]{cbor.NewSetType(ids, false)},
+				Type: olocalstatequery.QueryTypeShelleyPoolDistr2,
+				Pools: []cbor.SetType[lcommon.PoolId]{
+					cbor.NewSetType(ids, false),
+				},
 			},
 		},
 	}
@@ -256,7 +258,9 @@ func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 // it at zero would also route a registered-but-unstaked pool into the
 // unregistered-pool check, turning a routine "not in this snapshot" into a
 // failed query.
-func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(t *testing.T) {
+func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)

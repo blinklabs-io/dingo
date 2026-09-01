@@ -1632,7 +1632,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 // blockfetch event cannot be replayed from the EventBus, so this subscriber
 // remains attached until it drains or normal node lifecycle cancellation closes
 // it rather than taking the ordinary stalled-subscriber detachment path.
-func (ls *LedgerState) subscribeBlockfetchEvents(handler event.EventHandlerFunc) {
+func (ls *LedgerState) subscribeBlockfetchEvents(
+	handler event.EventHandlerFunc,
+) {
 	ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 		BlockfetchEventType,
 		blockfetchCommitBatchSize,
@@ -3631,7 +3633,8 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 		if len(genesisHashBytes) != lcommon.Blake2b256Size {
 			return nil, fmt.Errorf(
 				"seed post-Byron epoch nonce: Shelley genesis hash is %d bytes, expected %d",
-				len(genesisHashBytes), lcommon.Blake2b256Size,
+				len(genesisHashBytes),
+				lcommon.Blake2b256Size,
 			)
 		}
 		newEpoch.Nonce = genesisHashBytes
@@ -4386,7 +4389,11 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"failed to decode block",
 					"error", err,
 				)
-				return nil, fmt.Errorf("decode block at slot %d: %w", raw.Slot, err)
+				return nil, fmt.Errorf(
+					"decode block at slot %d: %w",
+					raw.Slot,
+					err,
+				)
 			}
 			decoded = append(decoded, block)
 		}
@@ -8585,7 +8592,9 @@ func (ls *LedgerState) publishActiveUpstream(connId ouroboros.ConnectionId) {
 	if current != nil && current.connectionKey == connIdKey(connId) {
 		return
 	}
-	ls.syncUpstreamState.Store(&upstreamSyncState{connectionKey: connIdKey(connId)})
+	ls.syncUpstreamState.Store(
+		&upstreamSyncState{connectionKey: connIdKey(connId)},
+	)
 }
 
 func (ls *LedgerState) clearActiveUpstream() {

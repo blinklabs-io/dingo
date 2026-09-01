@@ -115,7 +115,11 @@ func TestPostgresConformanceDSNEscapesSpecialCharacterPassword(t *testing.T) {
 	t.Setenv("POSTGRES_PASSWORD", specialPassword)
 
 	cfg, err := pgx.ParseConfig(postgresConformanceDSN())
-	require.NoError(t, err, "postgresConformanceDSN produced an unparseable DSN")
+	require.NoError(
+		t,
+		err,
+		"postgresConformanceDSN produced an unparseable DSN",
+	)
 	require.Equal(t, specialPassword, cfg.Password)
 }
 

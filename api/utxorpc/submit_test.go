@@ -349,7 +349,12 @@ func TestWaitForTxWithoutLedgerStateUsesCommittedEvents(t *testing.T) {
 			},
 		)
 	}()
-	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+	testutil.RequireReceive(
+		t,
+		eb.subscribed,
+		time.Second,
+		"WaitForTx subscription",
+	)
 
 	eb.Deliver(event.NewEvent(
 		ledger.TransactionEventType,
@@ -405,7 +410,12 @@ func TestWaitForTxBlockedSendDoesNotStallEventDelivery(t *testing.T) {
 			},
 		)
 	}()
-	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+	testutil.RequireReceive(
+		t,
+		eb.subscribed,
+		time.Second,
+		"WaitForTx subscription",
+	)
 
 	delivered := make(chan struct{})
 	go func() {
@@ -519,7 +529,12 @@ func TestWaitForTxSendErrorUnsubscribesAfterOneSend(t *testing.T) {
 			},
 		)
 	}()
-	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+	testutil.RequireReceive(
+		t,
+		eb.subscribed,
+		time.Second,
+		"WaitForTx subscription",
+	)
 
 	eb.Deliver(event.NewEvent(
 		ledger.TransactionEventType,
@@ -534,7 +549,12 @@ func TestWaitForTxSendErrorUnsubscribesAfterOneSend(t *testing.T) {
 
 	require.ErrorIs(
 		t,
-		testutil.RequireReceive(t, resultCh, time.Second, "WaitForTx send error"),
+		testutil.RequireReceive(
+			t,
+			resultCh,
+			time.Second,
+			"WaitForTx send error",
+		),
 		sendErr,
 	)
 	require.Equal(t, int32(1), sendCount.Load())
@@ -590,7 +610,12 @@ func TestWaitForTxUnsubscribeWaitsForInFlightCallback(t *testing.T) {
 			},
 		)
 	}()
-	testutil.RequireReceive(t, eb.subscribed, time.Second, "WaitForTx subscription")
+	testutil.RequireReceive(
+		t,
+		eb.subscribed,
+		time.Second,
+		"WaitForTx subscription",
+	)
 
 	delivered := make(chan struct{})
 	go func() {
@@ -600,7 +625,12 @@ func TestWaitForTxUnsubscribeWaitsForInFlightCallback(t *testing.T) {
 		))
 		close(delivered)
 	}()
-	testutil.RequireReceive(t, hashEntered, time.Second, "transaction hash callback")
+	testutil.RequireReceive(
+		t,
+		hashEntered,
+		time.Second,
+		"transaction hash callback",
+	)
 	cancel()
 	testutil.RequireReceive(
 		t,
@@ -615,7 +645,12 @@ func TestWaitForTxUnsubscribeWaitsForInFlightCallback(t *testing.T) {
 	}
 
 	close(releaseHash)
-	testutil.RequireReceive(t, delivered, time.Second, "in-flight callback completion")
+	testutil.RequireReceive(
+		t,
+		delivered,
+		time.Second,
+		"in-flight callback completion",
+	)
 	testutil.RequireReceive(
 		t,
 		eb.unsubscribeAndWaitCalled,
@@ -624,7 +659,12 @@ func TestWaitForTxUnsubscribeWaitsForInFlightCallback(t *testing.T) {
 	)
 	require.ErrorIs(
 		t,
-		testutil.RequireReceive(t, resultCh, time.Second, "canceled WaitForTx result"),
+		testutil.RequireReceive(
+			t,
+			resultCh,
+			time.Second,
+			"canceled WaitForTx result",
+		),
 		context.Canceled,
 	)
 	require.False(t, sendCalled.Load())

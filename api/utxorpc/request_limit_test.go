@@ -76,10 +76,19 @@ func TestConnectRequestBodyLimitPreservesValidMessages(t *testing.T) {
 	handler := u.newServeMux()
 
 	for _, compressed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "uncompressed", true: "compressed"}[compressed], func(t *testing.T) {
-			resp := sendHealthRequest(t, handler, []byte("{}"), compressed, "")
-			require.Equal(t, http.StatusOK, resp.Code)
-		})
+		t.Run(
+			map[bool]string{false: "uncompressed", true: "compressed"}[compressed],
+			func(t *testing.T) {
+				resp := sendHealthRequest(
+					t,
+					handler,
+					[]byte("{}"),
+					compressed,
+					"",
+				)
+				require.Equal(t, http.StatusOK, resp.Code)
+			},
+		)
 	}
 }
 
@@ -105,7 +114,9 @@ func TestConnectRequestBodyLimitPreservesAuthentication(t *testing.T) {
 	require.Equal(t, http.StatusOK, valid.Code)
 }
 
-func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(t *testing.T) {
+func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
+	t *testing.T,
+) {
 	u := NewUtxorpc(UtxorpcConfig{})
 	verifier, err := apiauth.NewVerifier(apiconfig.EffectiveAuth{
 		Enabled: true,
@@ -122,7 +133,10 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(t *testing.T) 
 	// credential, a size error rather than an authentication error also pins
 	// that ordering down.
 	body := protowire.AppendTag(nil, 100, protowire.BytesType)
-	body = protowire.AppendBytes(body, bytes.Repeat([]byte{'a'}, DefaultMaxRequestBody))
+	body = protowire.AppendBytes(
+		body,
+		bytes.Repeat([]byte{'a'}, DefaultMaxRequestBody),
+	)
 	compressed := gzipRequestBody(t, body)
 	require.Less(t, len(compressed), DefaultMaxRequestBody)
 
@@ -141,7 +155,9 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(t *testing.T) 
 	require.Equal(t, http.StatusTooManyRequests, response.Code)
 }
 
-func TestConnectRequestBodyLimitRejectsOversizedCompressedWireBody(t *testing.T) {
+func TestConnectRequestBodyLimitRejectsOversizedCompressedWireBody(
+	t *testing.T,
+) {
 	u := NewUtxorpc(UtxorpcConfig{})
 	verifier, err := apiauth.NewVerifier(apiconfig.EffectiveAuth{
 		Enabled: true,

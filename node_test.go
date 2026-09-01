@@ -309,7 +309,9 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 	assert.Equal(t, connA, *active)
 }
 
-func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(t *testing.T) {
+func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
+	t *testing.T,
+) {
 	state := chainsync.NewStateWithConfig(
 		nil,
 		nil,
@@ -538,7 +540,9 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 // can time out while a database worker is still using the database; normal
 // shutdown must not close the database or its provider-owned stores in that
 // state.
-func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(t *testing.T) {
+func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
+	t *testing.T,
+) {
 	n, _ := newLiveLifecycleTestNodeWithGenesis(
 		t,
 		1,
@@ -555,15 +559,22 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(t *testing.T) 
 	workerDone := make(chan struct{})
 	defer func() {
 		close(release)
-		testutil.RequireReceive(t, workerDone, time.Second, "database worker drain")
+		testutil.RequireReceive(
+			t,
+			workerDone,
+			time.Second,
+			"database worker drain",
+		)
 	}()
 	go func() {
 		defer close(workerDone)
-		_ = n.ledgerState.SubmitAsyncDBOperation(func(*database.Database) error {
-			close(started)
-			<-release
-			return nil
-		})
+		_ = n.ledgerState.SubmitAsyncDBOperation(
+			func(*database.Database) error {
+				close(started)
+				<-release
+				return nil
+			},
+		)
 	}()
 	<-started
 

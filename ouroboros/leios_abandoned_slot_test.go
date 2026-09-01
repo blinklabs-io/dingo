@@ -126,7 +126,9 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 			},
 		),
 	)
-	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
 	require.True(t, cm.AddConnection(abandonedConn, false, "abandoned"))
 	require.True(t, cm.AddConnection(healthyConn, false, "healthy"))
 	t.Cleanup(func() {
@@ -141,7 +143,10 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 	})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
 	resp, err := abandonedConn.LeiosFetch().Client.BlockTxsRequest(
 		ctx,
 		point,

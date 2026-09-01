@@ -224,7 +224,10 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 		"value-log GC did not start",
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
 	defer cancel()
 	stopDone := make(chan error, 1)
 	go func() {
