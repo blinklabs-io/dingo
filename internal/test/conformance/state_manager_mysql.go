@@ -220,6 +220,15 @@ func newMysqlResetter(rootDSN, database string) (*backendResetter, error) {
 // is what resets that. Skipping the TRUNCATE keeps the advanced counter for the
 // next vector.
 //
+// The result is filtered to the managed set. information_schema reports every
+// table in the database, and truncating one this resetter does not manage would
+// break the extraDirty contract -- most importantly for schema_migrations,
+// which listMysqlConformanceTables excludes deliberately: emptying the
+// migration runner's own bookkeeping desyncs tracked migration state from the
+// physical schema, and the next construction re-applies already-applied DDL and
+// fails on a duplicate column. That table carries no AUTO_INCREMENT today, so
+// the unfiltered form was harmless by coincidence rather than by construction.
+//
 // This is MySQL-only on purpose. PostgreSQL's TRUNCATE here does not carry
 // RESTART IDENTITY, so it never reset sequences either before or after the
 // dirty-table optimization; adding the same probe there would imply a
@@ -246,11 +255,18 @@ func mysqlAdvancedAutoIncrementTables(
 		)
 	}
 	defer rows.Close()
+	managed := make(map[string]struct{}, len(tables))
+	for _, table := range tables {
+		managed[table] = struct{}{}
+	}
 	var advanced []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return nil, fmt.Errorf("scan mysql table name: %w", err)
+		}
+		if _, ok := managed[name]; !ok {
+			continue
 		}
 		advanced = append(advanced, name)
 	}
