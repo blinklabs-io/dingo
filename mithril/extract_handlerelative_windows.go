@@ -253,13 +253,13 @@ func renameRelativeHandle(
 		return err
 	}
 	var iosb windows.IO_STATUS_BLOCK
+	// A rename request buffer never approaches 4GiB.
+	infoLen := uint32(len(info)) //nolint:gosec // G115
 	err = windows.NtSetInformationFile(
 		source,
 		&iosb,
 		&info[0],
-		uint32(
-			len(info),
-		), //nolint:gosec // G115: a rename request buffer never approaches 4GiB
+		infoLen,
 		windows.FileRenameInformation,
 	)
 	if err != nil {

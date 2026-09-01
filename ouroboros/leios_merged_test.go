@@ -860,11 +860,11 @@ func testLeiosManifestTx(
 	require.NotEmpty(t, txElems)
 	wrapped, err := cbor.Encode([]byte(txCbor))
 	require.NoError(t, err)
+	// Test fixture is small, so the length fits in uint16.
+	txSize := uint16(len(txCbor)) //nolint:gosec // G115
 	return cbor.RawMessage(wrapped), lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txElems[0]),
-		TransactionSize: uint16(
-			len(txCbor),
-		), //nolint:gosec // test fixture is small
+		TransactionSize: txSize,
 	}
 }
 

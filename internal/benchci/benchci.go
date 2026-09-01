@@ -144,14 +144,8 @@ func runBenchstat(oldFile, newFile string) (string, error) {
 	// oldFile/newFile are workflow-controlled local file paths (a prior
 	// benchmark-data run file and this run's fresh output), not
 	// attacker-influenced input; benchstatModule is a compile-time constant.
-	cmd := exec.Command(
-		"go",
-		"run",
-		benchstatModule,
-		"-format=csv",
-		oldFile,
-		newFile,
-	) //nolint:gosec // G204: paths are workflow-controlled, not attacker input
+	args := []string{"run", benchstatModule, "-format=csv", oldFile, newFile}
+	cmd := exec.Command("go", args...) //nolint:gosec // G204
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
