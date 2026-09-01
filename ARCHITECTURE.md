@@ -3764,10 +3764,12 @@ them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 selected backend.
 
 Each transaction-submission consumer retains a bounded cache of transaction
-bodies. Retained CBOR is limited both per consumer and in aggregate to the
-configured mempool capacity; a secondary 1,024-entry default bound remains,
-and `MempoolConfig.ConsumerCacheSize` can lower or raise that count for embedded
-users. The bounds are enforced by declining to advertise, not by eviction: a
+bodies. Retained CBOR is limited per consumer to one quarter of the configured
+mempool capacity by default, and in aggregate to the full capacity.
+`MempoolConfig.ConsumerCacheBytes` can override the per-consumer budget for
+embedded users. A secondary 1,024-entry default bound remains, and
+`MempoolConfig.ConsumerCacheSize` can override that count. The bounds are
+enforced by declining to advertise, not by eviction: a
 body is only ever served to the peer from this cache, and
 dropping one already advertised would silently omit a transaction the peer
 legitimately requested. A non-blocking `NextTx` returns nil once the cache is

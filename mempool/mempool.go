@@ -47,6 +47,7 @@ const (
 	DefaultCleanupInterval      = 1 * time.Minute
 	DefaultRevalidationDeltaCap = 64
 	DefaultConsumerCacheSize    = 1024
+	defaultConsumerCacheShare   = 4
 	// defaultRevalidationJournalCap bounds the mutation journal a revalidation
 	// pass may accumulate. A mempoolMutation is 40 bytes, so the backing slice
 	// tops out near 42 MiB, and each entry additionally pins the transaction it
@@ -134,7 +135,10 @@ type MempoolConfig struct {
 	// ConsumerCacheSize bounds the number of transaction bodies retained per
 	// transaction-submission consumer. Zero uses DefaultConsumerCacheSize.
 	ConsumerCacheSize int
-	CurrentSlotFunc   func() uint64 // returns current slot for early TX rejection
+	// ConsumerCacheBytes bounds retained transaction body bytes per consumer.
+	// Zero uses one quarter of MempoolCapacity.
+	ConsumerCacheBytes int64
+	CurrentSlotFunc    func() uint64 // returns current slot for early TX rejection
 }
 
 type Mempool struct {
@@ -703,7 +707,11 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	if consumer := m.consumers[connId]; consumer != nil {
 		return consumer
 	}
-	consumer := newConsumer(m, m.config.ConsumerCacheSize)
+	consumer := newConsumer(
+		m,
+		m.config.ConsumerCacheSize,
+		m.config.ConsumerCacheBytes,
+	)
 	m.consumers[connId] = consumer
 	return consumer
 }
@@ -726,8 +734,8 @@ func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	delete(m.consumers, connId)
 	m.consumersMutex.Unlock()
 	if consumer != nil {
-		consumer.ClearCache()
 		consumer.cancel()
+		consumer.ClearCache()
 	}
 }
 

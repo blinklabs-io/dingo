@@ -40,9 +40,17 @@ type MempoolConsumer struct {
 	onWaitForTx func()
 }
 
-func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
+func newConsumer(
+	mempool *Mempool,
+	cacheLimit int,
+	cacheLimitBytes int64,
+) *MempoolConsumer {
 	if cacheLimit <= 0 {
 		cacheLimit = DefaultConsumerCacheSize
+	}
+	if cacheLimitBytes <= 0 {
+		cacheLimitBytes = mempool.config.MempoolCapacity /
+			defaultConsumerCacheShare
 	}
 	return &MempoolConsumer{
 		mempool:         mempool,
@@ -50,7 +58,7 @@ func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
 		done:            make(chan struct{}),
 		cacheSlot:       make(chan struct{}, 1),
 		cacheLimit:      cacheLimit,
-		cacheLimitBytes: mempool.config.MempoolCapacity,
+		cacheLimitBytes: cacheLimitBytes,
 	}
 }
 
@@ -59,6 +67,8 @@ func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
 // race with other lifecycle paths.
 func (m *MempoolConsumer) cancel() {
 	if m != nil {
+		m.cacheMutex.Lock()
+		defer m.cacheMutex.Unlock()
 		m.doneOnce.Do(func() { close(m.done) })
 	}
 }
@@ -166,6 +176,11 @@ func (m *MempoolConsumer) cacheTransaction(
 	size := int64(len(tx.Cbor))
 	m.cacheMutex.Lock()
 	defer m.cacheMutex.Unlock()
+	select {
+	case <-m.done:
+		return false, nil
+	default:
+	}
 	if _, exists := m.cache[tx.Hash]; exists {
 		return true, nil
 	}

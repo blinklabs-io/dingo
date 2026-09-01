@@ -1275,19 +1275,20 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 
 func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
-		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:          event.NewEventBus(nil, nil),
-		PromRegistry:      prometheus.NewRegistry(),
-		Validator:         newMockValidator(),
-		MempoolCapacity:   10,
-		ConsumerCacheSize: 10,
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           event.NewEventBus(nil, nil),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          newMockValidator(),
+		MempoolCapacity:    10,
+		ConsumerCacheSize:  10,
+		ConsumerCacheBytes: 6,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
 
 	txs := []*MempoolTransaction{
 		{Hash: "small", Cbor: make([]byte, 4)},
-		{Hash: "large", Cbor: make([]byte, 7)},
+		{Hash: "large", Cbor: make([]byte, 3)},
 	}
 	m.transactions = append(m.transactions, txs...)
 	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
@@ -1295,7 +1296,7 @@ func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	first := consumer.NextTx(false)
 	require.NotNil(t, first)
 	require.Equal(t, "small", first.Hash)
-	assert.Nil(t, consumer.NextTx(false), "11 retained bytes exceed the limit")
+	assert.Nil(t, consumer.NextTx(false), "7 retained bytes exceed the per-consumer limit")
 	assert.Equal(t, int64(4), retainedConsumerCacheBytes(consumer))
 	assert.Equal(t, 1, consumer.nextTxIdx, "unadvertised tx stays at the cursor")
 	assert.NotNil(t, consumer.GetTxFromCache("small"))
@@ -1304,18 +1305,19 @@ func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	next := consumer.NextTx(false)
 	require.NotNil(t, next)
 	assert.Equal(t, "large", next.Hash)
-	assert.Equal(t, int64(7), retainedConsumerCacheBytes(consumer))
+	assert.Equal(t, int64(3), retainedConsumerCacheBytes(consumer))
 	assert.NotNil(t, consumer.GetTxFromCache("large"))
 }
 
 func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 	m, err := NewMempool(MempoolConfig{
-		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:          event.NewEventBus(nil, nil),
-		PromRegistry:      prometheus.NewRegistry(),
-		Validator:         newMockValidator(),
-		MempoolCapacity:   10,
-		ConsumerCacheSize: 10,
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           event.NewEventBus(nil, nil),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          newMockValidator(),
+		MempoolCapacity:    10,
+		ConsumerCacheSize:  10,
+		ConsumerCacheBytes: 10,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
@@ -1340,6 +1342,32 @@ func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 
 	m.RemoveConsumer(secondID)
 	assert.Equal(t, int64(0), retainedConsumerCacheBytes(second), "consumer removal releases bytes")
+}
+
+func TestMempoolConsumer_RemovalRejectsLaterCacheWrites(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          newMockValidator(),
+		MempoolCapacity:    10,
+		ConsumerCacheBytes: 10,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
+
+	connID := newTestConnectionId(3)
+	consumer := mustAddConsumer(t, m, connID)
+	m.RemoveConsumer(connID)
+
+	cached, _ := consumer.cacheTransaction(&MempoolTransaction{
+		Hash: "after-removal",
+		Cbor: make([]byte, 6),
+	})
+	assert.False(t, cached, "cancelled consumer must reject cache writes")
+	assert.Equal(t, int64(0), retainedConsumerCacheBytes(consumer))
+	m.relayCacheMutex.Lock()
+	assert.Equal(t, int64(0), m.relayCacheBytes)
+	m.relayCacheMutex.Unlock()
 }
 
 func TestMempoolConsumer_ClearCache(t *testing.T) {
