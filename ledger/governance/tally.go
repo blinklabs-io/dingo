@@ -57,10 +57,14 @@ type ProposalTally struct {
 // distribution — callers should pass currentEpoch-2 so the rotation
 // lines up with the "Go" snapshot used for voting.
 type TallyContext struct {
-	DB             *database.Database
-	Txn            *database.Txn
-	StakeEpoch     uint64
-	CurrentEpoch   uint64
+	DB           *database.Database
+	Txn          *database.Txn
+	StakeEpoch   uint64
+	CurrentEpoch uint64
+	// MajorVersion is the current protocol major version after ENACT.
+	// SPO non-voter semantics use it to distinguish Conway bootstrap
+	// from post-bootstrap ratification.
+	MajorVersion   uint
 	CommitteeState *CommitteeVotingState
 	// DRepState and SPOState carry the proposal-independent voting
 	// denominators (DRep voting power, pool stake snapshot) so they are
@@ -429,10 +433,15 @@ func tallyDRepVotes(
 
 // tallySPOVotes computes SPO yes/no/abstain stake against the pool
 // stake distribution snapshot at StakeEpoch, applying the CIP-1694
-// reward-account delegation rules:
+// non-voter and reward-account delegation rules:
 //
 //   - Pools with an explicit vote in `votes` use that vote.
-//   - Pools without an explicit vote fall back to the auto-vote
+//   - Pools without an explicit vote on HardForkInitiation count as
+//     implicit No, regardless of protocol version or reward-account
+//     delegation.
+//   - During Conway bootstrap, pools without an explicit vote on any
+//     other action count as Abstain.
+//   - After bootstrap, pools without an explicit vote fall back to the auto-vote
 //     pre-computed at snapshot capture time
 //     (PoolStakeSnapshot.RewardAccountAutoVote):
 //     Abstain        → SPOAbstainStake (excluded from the active
@@ -521,7 +530,11 @@ func tallySPOVotes(
 		voteByPool[string(v.VoterCredential)] = v.Vote
 	}
 
-	isNoConfidenceAction := lcommon.GovActionType(tally.ActionType) ==
+	actionType := lcommon.GovActionType(tally.ActionType)
+	isHardForkInitiation := actionType ==
+		lcommon.GovActionTypeHardForkInitiation
+	inBootstrap := ctx.MajorVersion == bootstrapProtocolVersion
+	isNoConfidenceAction := actionType ==
 		lcommon.GovActionTypeNoConfidence
 
 	for _, s := range dist {
@@ -551,12 +564,31 @@ func tallySPOVotes(
 			continue
 		}
 
+		// The reference RATIFY rule applies non-voter semantics before
+		// consulting reward-account defaults. HardForkInitiation always
+		// keeps silent-pool stake in the active denominator as implicit No.
+		if isHardForkInitiation {
+			continue
+		}
+		// During Conway bootstrap, every other silent pool is Abstain and
+		// therefore excluded from the active SPO denominator.
+		if inBootstrap {
+			tally.SPOAbstainStake, err = addUint64(
+				tally.SPOAbstainStake, stake,
+			)
+			if err != nil {
+				return fmt.Errorf("spo abstain stake: %w", err)
+			}
+			continue
+		}
+
 		// Only trust RewardAccountAutoVote when the row is flagged
-		// as resolved. Unresolved rows (Mithril-imported set/go
-		// rotations, or rows written by pre-CIP-1694 code) fall
-		// back to PoolRewardAccountAutoVoteNone — implicit no — so
-		// stale or never-computed values can never silently bucket
-		// stake into Abstain or NoConfidence.
+		// as resolved after the action/version-specific non-voter rules
+		// above. Unresolved rows (Mithril-imported set/go rotations, or
+		// rows written by pre-CIP-1694 code) then fall back to
+		// PoolRewardAccountAutoVoteNone — implicit no — so stale or
+		// never-computed values can never silently bucket stake into
+		// Abstain or NoConfidence.
 		if !s.RewardAccountAutoVoteResolved {
 			continue
 		}

@@ -239,12 +239,9 @@ func applyTreasuryWithdrawal(
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	var total uint64
-	for _, amount := range a.Withdrawals {
-		if total > ^uint64(0)-amount {
-			return errors.New("treasury withdrawal amount overflow")
-		}
-		total += amount
+	total, err := treasuryWithdrawalTotal(a)
+	if err != nil {
+		return err
 	}
 	if !ctx.TreasuryWithdrawalRemainingSet {
 		ctx.TreasuryWithdrawalRemaining = treasury
@@ -304,6 +301,25 @@ func applyTreasuryWithdrawal(
 		ctx.Slot,
 		metaTxn,
 	)
+}
+
+// treasuryWithdrawalTotal returns the amount an ENACT transition would remove
+// from its running treasury budget. Dingo stores lovelace in uint64, so an
+// action whose mathematical sum is outside that range is not enactable.
+func treasuryWithdrawalTotal(
+	a *lcommon.TreasuryWithdrawalGovAction,
+) (uint64, error) {
+	if a == nil {
+		return 0, errors.New("nil treasury withdrawal action")
+	}
+	var total uint64
+	for _, amount := range a.Withdrawals {
+		if total > ^uint64(0)-amount {
+			return 0, errors.New("treasury withdrawal amount overflow")
+		}
+		total += amount
+	}
+	return total, nil
 }
 
 // CreditRegisteredRewardAccountAfterSnapshot credits a reward account for an

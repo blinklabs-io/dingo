@@ -43,12 +43,14 @@ type RatifyDecision struct {
 }
 
 // RatifyInputs is the decoded-action-aware shape callers pass to
-// ShouldRatify. The paramUpdate pointer is consulted for ParameterChange
-// proposals so DRep and SPO thresholds can be selected precisely.
+// ShouldRatify. GovAction carries the proposal body for action-specific
+// predicates, while ParamUpdate selects precise ParameterChange thresholds.
 type RatifyInputs struct {
 	Tally                 *ProposalTally
 	PParams               *conway.ConwayProtocolParameters
+	GovAction             lcommon.GovAction
 	ParamUpdate           *conway.ConwayProtocolParameterUpdate
+	CurrentEpoch          uint64
 	ActiveDRepCount       int // reserved for future min-DRep-count gate
 	ActiveCCCount         int
 	CCQuorum              *big.Rat
@@ -97,6 +99,22 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 			return decision
 		default:
 			decision.FailureReason = "action is not eligible during bootstrap"
+			return decision
+		}
+	}
+
+	if actionType == lcommon.GovActionTypeUpdateCommittee {
+		updateCommittee, ok := in.GovAction.(*lcommon.UpdateCommitteeGovAction)
+		if !ok || updateCommittee == nil {
+			decision.FailureReason = "missing update committee action"
+			return decision
+		}
+		if !committeeTermsWithinLimit(
+			updateCommittee,
+			in.CurrentEpoch,
+			in.PParams.CommitteeTermLimit,
+		) {
+			decision.FailureReason = "committee member term exceeds limit"
 			return decision
 		}
 	}
@@ -166,6 +184,25 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 		decision.FailureReason = "threshold not met"
 	}
 	return decision
+}
+
+// committeeTermsWithinLimit implements Conway RATIFY's
+// validCommitteeTerm predicate. Subtraction after the greater-than check is
+// equivalent to expiry <= currentEpoch + termLimit without overflowing the
+// epoch sum. An empty member map satisfies the universal predicate.
+func committeeTermsWithinLimit(
+	action *lcommon.UpdateCommitteeGovAction,
+	currentEpoch uint64,
+	termLimit uint64,
+) bool {
+	for _, expiry := range action.CredEpochs {
+		expiryEpoch := uint64(expiry)
+		if expiryEpoch > currentEpoch &&
+			expiryEpoch-currentEpoch > termLimit {
+			return false
+		}
+	}
+	return true
 }
 
 // getDRepThreshold returns the DRep yes-ratio threshold for the action

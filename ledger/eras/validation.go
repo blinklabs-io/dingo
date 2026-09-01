@@ -354,6 +354,12 @@ func maxTxSizeUtxoValidationRuleClassifier(
 	)
 }
 
+// unsupportedPlutusUtxoValidationRuleClassifier probes for the rule that
+// rejects phase-2 execution in an era that does not implement it. That rule
+// keys off the presence of a redeemer, so the redeemer alone identifies it. The
+// probe also carries a Plutus script so it stays a representative phase-2
+// witness set: an unmatched replacement panics during package initialisation,
+// so the probe should not depend on the rule ignoring the script.
 func unsupportedPlutusUtxoValidationRuleClassifier(
 	pp lcommon.ProtocolParameters,
 ) utxoValidationRuleClassifier {
@@ -361,7 +367,8 @@ func unsupportedPlutusUtxoValidationRuleClassifier(
 		tx: &utxoValidationRuleProbeTx{
 			isValid: true,
 			witnesses: &utxoValidationRuleProbeWitnesses{
-				redeemers: utxoValidationRuleProbeRedeemers{},
+				redeemers:       utxoValidationRuleProbeRedeemers{},
+				plutusV1Scripts: []lcommon.PlutusV1Script{{0x01}},
 			},
 		},
 		pp: pp,

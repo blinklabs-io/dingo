@@ -732,7 +732,8 @@ func validateConwayRequiredPlutusRedeemers(
 	}
 	withdrawalAddrs := sortedConwayWithdrawalAddresses(tx.Withdrawals())
 	for idx, addr := range withdrawalAddrs {
-		if (addr.Type() & lcommon.AddressTypeScriptBit) == 0 {
+		stakeCredential, ok := addr.StakeCredential()
+		if !ok || stakeCredential.CredType != lcommon.CredentialTypeScriptHash {
 			continue
 		}
 		key := lcommon.RedeemerKey{
@@ -742,10 +743,7 @@ func validateConwayRequiredPlutusRedeemers(
 		if err := checkRequired(
 			key,
 			script.ScriptPurposeRewarding{
-				StakeCredential: lcommon.Credential{
-					CredType:   lcommon.CredentialTypeScriptHash,
-					Credential: addr.StakeKeyHash(),
-				},
+				StakeCredential: stakeCredential,
 			},
 		); err != nil {
 			return err
