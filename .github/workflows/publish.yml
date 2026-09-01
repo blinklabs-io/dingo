@@ -554,7 +554,10 @@ jobs:
           {
             echo "tarball_url=$tarball_url"
             echo "sha256=$sha256"
-            echo "short_commit=${COMMIT_SHA:0:8}"
+            # Match the release build convention (Makefile derives COMMIT_HASH
+            # from `git rev-parse --short HEAD`, i.e. 7 chars) so the Homebrew
+            # build stamps the same version.CommitHash as the released binaries.
+            echo "short_commit=${COMMIT_SHA:0:7}"
           } >> "$GITHUB_OUTPUT"
       - name: Checkout homebrew tap
         if: steps.gate.outputs.enabled == 'true'
@@ -581,6 +584,16 @@ jobs:
             -e "s#^  sha256 \".*\"#  sha256 \"${SHA256}\"#" \
             -e "s#(version\.CommitHash=)[0-9a-f]+#\1${SHORT_COMMIT}#" \
             "$formula"
+          # sed exits 0 even when a pattern matches nothing. If the tap renames
+          # a field or changes its indentation a substitution silently no-ops,
+          # the next step sees a clean tree and ships a stale formula. Assert
+          # each expected value is present so a missed edit fails the job loudly.
+          for expected in "${TARBALL_URL}" "${SHA256}" "version.CommitHash=${SHORT_COMMIT}"; do
+            if ! grep -qF -- "$expected" "$formula"; then
+              echo "::error::formula field not updated: $expected"
+              exit 1
+            fi
+          done
           echo "::group::Updated formula"
           cat "$formula"
           echo "::endgroup::"
