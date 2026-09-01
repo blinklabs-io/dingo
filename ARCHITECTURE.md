@@ -8100,7 +8100,15 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    Shelley's `NEWEPOCH` embeds MIR between `applyRUpd` and `EPOCH`, so it runs
    before both the stake snapshot and POOLREAP: its credits are part of the mark
    snapshot and its pot movements are visible to POOLREAP, governance and the
-   ADA-pot capture.
+   ADA-pot capture. The boundary's certificates are aggregated and checked
+   against pot capacity before any of them is applied, mirroring
+   `mirTransition`: credits are restricted to registered, active reward
+   accounts, pot-to-pot transfers are folded into the available balances, and
+   the boundary is applied only when `totR <= availableReserves && totT <=
+   availableTreasury`. When either pot falls short the whole boundary is a
+   no-op — no credit, debit or transfer is written — and the rollover still
+   succeeds; the certificates are scoped to the ended epoch's slot range, so a
+   discarded MIR is not retried at the next boundary.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two
