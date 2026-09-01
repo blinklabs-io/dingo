@@ -3785,6 +3785,14 @@ clearing transaction and consumer state; later transaction admission returns
 prevents in-flight protocol callbacks from repopulating a pool whose background
 expiry and chain-update workers have already been stopped.
 
+`AddTransaction` reports a missing validator with the package sentinel
+`mempool.ErrNilValidator`, the same one the constructor and the overlay rebuild
+return for that condition. Both sentinels mean the pool cannot accept anything
+right now rather than that it judged a transaction and declined it, so
+`api/blockfrost`'s submit endpoint classifies them as `ErrMempoolUnavailable`
+and answers 503 — the same answer its missing-submitter branch already gave —
+instead of reporting the transaction itself as rejected with a 400.
+
 Ordinary mutations are serialized by a dedicated mutation gate, but chain-update
 revalidation does not hold that gate while it validates the whole pool. Both
 backends briefly snapshot their live state, build a private candidate while

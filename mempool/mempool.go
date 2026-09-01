@@ -1428,7 +1428,12 @@ func (m *Mempool) removeExpiredTransactions() {
 
 func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	if m.validator == nil {
-		return errors.New("mempool: validator is nil in AddTransaction")
+		// Wrap the package sentinel rather than building a fresh error, so
+		// callers can classify this the same way they classify the other
+		// operations that require a validator (newMempool and
+		// rebuildOverlay). It is an infrastructure fault, not a rejected
+		// transaction, and an API surface has to be able to tell them apart.
+		return fmt.Errorf("%w in AddTransaction", ErrNilValidator)
 	}
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := gledger.NewTransactionFromCbor(txType, txBytes)

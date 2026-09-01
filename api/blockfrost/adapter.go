@@ -3792,6 +3792,20 @@ func (a *NodeAdapter) TransactionSubmit(
 				ErrMempoolFull,
 			)
 		}
+		// A stopped mempool and a missing validator are both "the mempool
+		// cannot accept anything right now", the same condition the nil
+		// submitter above reports, so they answer 503 rather than telling the
+		// client its transaction was rejected. Everything remaining from
+		// AddTransaction is a real admission failure -- a validity interval
+		// that has not started, or ledger validation -- and stays a rejection.
+		if errors.Is(err, mempool.ErrMempoolStopped) ||
+			errors.Is(err, mempool.ErrNilValidator) {
+			return "", fmt.Errorf(
+				"%w: %w",
+				ErrMempoolUnavailable,
+				err,
+			)
+		}
 		return "", fmt.Errorf(
 			"%w: %w",
 			ErrTransactionRejected,
