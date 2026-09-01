@@ -555,8 +555,8 @@ jobs:
             echo "tarball_url=$tarball_url"
             echo "sha256=$sha256"
             # Match the release build convention (Makefile derives COMMIT_HASH
-            # from `git rev-parse --short HEAD`, i.e. 7 chars) so the Homebrew
-            # build stamps the same version.CommitHash as the released binaries.
+            # from `git rev-parse --short=7 HEAD`) so the Homebrew build stamps
+            # the same 7-char version.CommitHash as the released binaries.
             echo "short_commit=${COMMIT_SHA:0:7}"
           } >> "$GITHUB_OUTPUT"
       - name: Checkout homebrew tap
