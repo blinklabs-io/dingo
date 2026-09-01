@@ -64,6 +64,11 @@ type backendResetter struct {
 	// guarantee a non-empty slice.
 	truncate func(context.Context, *sql.DB, []string) error
 
+	// extraDirty reports bare table names that must be truncated even when
+	// they hold no rows, because emptiness is not the only state a Reset has
+	// to clear. Optional; nil means rows are the only criterion.
+	extraDirty func(context.Context, *sql.DB, []string) ([]string, error)
+
 	// probeDirty reports which of the given qualified tables hold rows.
 	// Injectable so reset's skip/subset behavior is testable without a
 	// server; nil means nonEmptyTables, which is what both real backends
@@ -101,6 +106,13 @@ func (r *backendResetter) reset(ctx context.Context) error {
 	dirty, err := probe(ctx, r.db, qualified)
 	if err != nil {
 		return err
+	}
+	if r.extraDirty != nil {
+		extra, err := r.extraDirty(ctx, r.db, tables)
+		if err != nil {
+			return err
+		}
+		dirty = mergeQualified(dirty, extra, r.qualify)
 	}
 	if len(dirty) == 0 {
 		// The common case for a vector that wrote nothing, and for the first
@@ -207,4 +219,30 @@ func nonEmptyTables(
 		return nil, fmt.Errorf("probe non-empty tables: %w", err)
 	}
 	return dirty, nil
+}
+
+// mergeQualified adds the qualified form of each extra bare table name to
+// dirty, skipping any already present, so a table reported by both the row
+// probe and an extra criterion is truncated once.
+func mergeQualified(
+	dirty []string,
+	extra []string,
+	qualify func(string) string,
+) []string {
+	if len(extra) == 0 {
+		return dirty
+	}
+	seen := make(map[string]struct{}, len(dirty))
+	for _, table := range dirty {
+		seen[table] = struct{}{}
+	}
+	for _, table := range extra {
+		qualified := qualify(table)
+		if _, ok := seen[qualified]; ok {
+			continue
+		}
+		seen[qualified] = struct{}{}
+		dirty = append(dirty, qualified)
+	}
+	return dirty
 }

@@ -302,17 +302,12 @@ func assertCorpusSetsMatch(
 		if result.Success {
 			continue
 		}
-		passed, ok := sqlitePassed[result.Path]
-		require.Truef(
-			t,
-			ok,
-			"%s backend ran vector %q that sqlite never ran",
-			backend,
-			result.Path,
-		)
+		// No presence guard here: ElementsMatch above FailNows on any path
+		// set difference, so every backend path exists in sqlitePassed by
+		// the time this loop runs.
 		require.Falsef(
 			t,
-			passed,
+			sqlitePassed[result.Path],
 			"%s backend failed a vector sqlite passed (%s at event %d): %v",
 			backend,
 			result.Title,
@@ -368,10 +363,16 @@ func TestAssertCorpusSetsMatchRejectsDifferentPaths(t *testing.T) {
 	)
 }
 
-// TestAssertCorpusSetsMatchRejectsUnknownFailedVector proves a failing vector
-// the sqlite baseline never ran is reported rather than silently accepted by
-// the absent-key-reads-false lookup.
-func TestAssertCorpusSetsMatchRejectsUnknownFailedVector(t *testing.T) {
+// TestAssertCorpusSetsMatchRejectsExtraBackendVector proves a backend vector
+// the sqlite baseline never ran is reported.
+//
+// It is caught by the path set comparison, not by any per-vector presence
+// check. An earlier revision added such a check after ElementsMatch and a test
+// asserting it; both were dead, because ElementsMatch FailNows first on a real
+// *testing.T. The recording asserter used here does not stop on failure, so
+// that test passed on the ElementsMatch failure while claiming to exercise the
+// guard -- it asserted something already true.
+func TestAssertCorpusSetsMatchRejectsExtraBackendVector(t *testing.T) {
 	sqliteResults := []conformance.VectorResult{{Path: "a", Success: true}}
 	backendResults := []conformance.VectorResult{{Path: "z", Success: false}}
 

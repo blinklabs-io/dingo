@@ -201,7 +201,66 @@ func newMysqlResetter(rootDSN, database string) (*backendResetter, error) {
 		) error {
 			return truncateMysqlTables(ctx, db, qualified)
 		},
+		extraDirty: func(
+			ctx context.Context,
+			db *sql.DB,
+			tables []string,
+		) ([]string, error) {
+			return mysqlAdvancedAutoIncrementTables(ctx, db, database, tables)
+		},
 	}, nil
+}
+
+// mysqlAdvancedAutoIncrementTables returns the tables whose AUTO_INCREMENT
+// counter has moved past its initial value.
+//
+// Truncating only tables that currently hold rows would otherwise let a
+// counter survive a Reset: a vector that inserts rows and deletes them again
+// leaves the table empty but its AUTO_INCREMENT advanced, and MySQL's TRUNCATE
+// is what resets that. Skipping the TRUNCATE keeps the advanced counter for the
+// next vector.
+//
+// This is MySQL-only on purpose. PostgreSQL's TRUNCATE here does not carry
+// RESTART IDENTITY, so it never reset sequences either before or after the
+// dirty-table optimization; adding the same probe there would imply a
+// guarantee that side has never provided.
+func mysqlAdvancedAutoIncrementTables(
+	ctx context.Context,
+	db *sql.DB,
+	database string,
+	tables []string,
+) ([]string, error) {
+	if len(tables) == 0 {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		"SELECT table_name FROM information_schema.tables "+
+			"WHERE table_schema = ? AND auto_increment > 1",
+		database,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"list mysql advanced auto_increment tables: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	var advanced []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan mysql table name: %w", err)
+		}
+		advanced = append(advanced, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"list mysql advanced auto_increment tables: %w",
+			err,
+		)
+	}
+	return advanced, nil
 }
 
 // truncateMysqlTables empties exactly the given tables with foreign key

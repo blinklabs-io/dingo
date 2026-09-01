@@ -275,3 +275,53 @@ func assertProbeFindsOnlyPopulated(
 		"probe should report both populated tables",
 	)
 }
+
+// TestBackendResetterTruncatesExtraDirtyTables proves a table reported by
+// extraDirty is truncated even though it holds no rows.
+//
+// MySQL's TRUNCATE is what resets AUTO_INCREMENT, so a vector that inserts and
+// then deletes rows leaves the table empty with its counter advanced. Skipping
+// it because it is empty would carry that counter into the next vector.
+func TestBackendResetterTruncatesExtraDirtyTables(t *testing.T) {
+	f := newFakeResetter(t, []string{"a", "b"})
+	f.dirty = nil
+	f.resetter.extraDirty = func(
+		context.Context,
+		*sql.DB,
+		[]string,
+	) ([]string, error) {
+		return []string{"b"}, nil
+	}
+
+	require.NoError(t, f.resetter.reset(context.Background()))
+
+	require.Equal(
+		t,
+		[][]string{{`"s"."b"`}},
+		f.truncated,
+		"an empty table reported by extraDirty must still be truncated",
+	)
+}
+
+// TestBackendResetterDeduplicatesExtraDirtyTables proves a table reported by
+// both the row probe and extraDirty is truncated once, not twice.
+func TestBackendResetterDeduplicatesExtraDirtyTables(t *testing.T) {
+	f := newFakeResetter(t, []string{"a", "b"})
+	f.dirty = []string{`"s"."b"`}
+	f.resetter.extraDirty = func(
+		context.Context,
+		*sql.DB,
+		[]string,
+	) ([]string, error) {
+		return []string{"b"}, nil
+	}
+
+	require.NoError(t, f.resetter.reset(context.Background()))
+
+	require.Equal(
+		t,
+		[][]string{{`"s"."b"`}},
+		f.truncated,
+		"a table reported by both criteria must be truncated once",
+	)
+}
