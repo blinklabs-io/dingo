@@ -33,7 +33,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 8)
+	require.Len(t, registry, 9)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -172,7 +172,7 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	interrupted := registry[7]
+	interrupted := registry[8]
 	interrupted.BatchSize = 1
 	originalBackfill := interrupted.Backfill
 	backfillCalls := 0
