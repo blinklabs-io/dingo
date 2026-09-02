@@ -1431,6 +1431,18 @@ chainsync-driven caller of this reconciliation runs after `SetLedger`, since
 goroutine with it — only once `SetLedger` has already returned (issue #3516
 review).
 
+A third caller, `ledgerReadChain`'s own retry loop (used when the reader's
+next chain iterator can't find its start point), reaches this same
+reconciliation and can hit the same over-K rejection — a case
+`RewindPrimaryChainToPoint` could never previously produce, since it had no
+bound at all. Unlike `reconcileLivePrimaryChainLedgerDivergence`'s callers,
+this reader has no `ChainsyncEvent`/connection to fall back on, so on an
+over-K rejection it publishes the same `ChainsyncResyncEventType`/
+`ChainsyncResyncReasonRollbackExceedsK` those callers use directly, then
+still stops this reader attempt — `ledgerProcessBlocksWithAttempt`'s own
+restart loop, not this function, decides whether and how to retry (issue
+#3516 review).
+
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
 128MiB memtable, so the durability order inverts on an unclean host shutdown

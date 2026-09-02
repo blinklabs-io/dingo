@@ -382,23 +382,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
-	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
-	subId := bus.SubscribeFunc(
-		event.ChainsyncResyncEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(event.ChainsyncResyncEvent)
-			if !ok {
-				return
-			}
-			select {
-			case resyncCh <- e:
-			default:
-			}
-		},
-	)
-	t.Cleanup(func() {
-		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
-	})
+	resyncCh := subscribeChainsyncResync(t, bus)
 
 	// A subscriber must exist for blocksAboveSlot to read anything at
 	// all; asserting it sees nothing is what proves the declined,
@@ -457,6 +441,59 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 		t, txCh, 250*time.Millisecond,
 		"a declined over-K reconciliation must not publish undo events",
 	)
+}
+
+// TestLedgerReadChainRequestsResyncOnOverKReconcile covers a Cubic finding
+// on PR #3611: unlike handleEventChainsyncRollback/tryResolveFork,
+// ledgerReadChain's own retry loop treated any reconcilePrimaryChainTipWithLedgerTip
+// error identically -- log and stop the reader goroutine -- with no
+// over-K-specific handling. Before #3516 bounded RewindPrimaryChainToPoint,
+// this reader could never observe ErrRollbackExceedsSecurityParam at all;
+// now that it can, it must surface the same ChainsyncResyncEventType/reason
+// the other two call sites use, not just a generic error log, so connection
+// management gets the signal to reconnect and negotiate a fresh
+// intersection.
+func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "ledger-read-chain-resync")
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	// fixture.ls.currentTip (still fixture.currentTip after
+	// putPrimaryChainOnForkBeyondK) is not on the now-diverged primary
+	// chain, so ledgerReadChain's very first iterator creation misses
+	// and immediately drives the retry-reconcile path.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resultCh := make(chan readChainResult, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.ls.ledgerReadChain(ctx, resultCh)
+	}()
+
+	testutil.RequireReceive(
+		t, done, 2*time.Second,
+		"ledgerReadChain should give up and return, not hang, on an "+
+			"unreconcilable over-K divergence",
+	)
+
+	e := testutil.RequireReceive(
+		t, resyncCh, time.Second,
+		"expected an over-K resync event from ledgerReadChain",
+	)
+	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, e.Reason)
+	assert.Equal(t, fixture.currentTip.Point.Slot, e.Point.Slot)
+	assert.Equal(t, fixture.currentTip.Point.Hash, e.Point.Hash)
+
+	// The reader must not have silently rewound the ledger tip past K
+	// either: it declined, exactly as handleEventChainsyncRollback does
+	// for the same divergence.
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
@@ -784,23 +821,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
-	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
-	subId := bus.SubscribeFunc(
-		event.ChainsyncResyncEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(event.ChainsyncResyncEvent)
-			if !ok {
-				return
-			}
-			select {
-			case resyncCh <- e:
-			default:
-			}
-		},
-	)
-	t.Cleanup(func() {
-		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
-	})
+	resyncCh := subscribeChainsyncResync(t, bus)
 
 	localTip := fixture.ls.chain.Tip()
 	forkHash := testHashBytes("over-k-fork-resolution-block")
@@ -2596,6 +2617,36 @@ func putPrimaryChainOnForkBeyondK(
 	require.NoError(t, fixture.ls.chain.AddRawBlocks(blocks))
 	require.NotEqual(t, fixture.currentTip, fixture.ls.chain.Tip())
 	require.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+}
+
+// subscribeChainsyncResync wires a buffered channel to bus's
+// ChainsyncResyncEventType, registering the subscribe/unsubscribe cleanup,
+// for the several over-K-decline tests that assert on the resulting resync
+// event.
+func subscribeChainsyncResync(
+	t *testing.T,
+	bus *event.EventBus,
+) chan event.ChainsyncResyncEvent {
+	t.Helper()
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+	return resyncCh
 }
 
 func testHashBytes(seed string) []byte {

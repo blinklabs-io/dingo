@@ -322,6 +322,20 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 // This is the same best-effort degradation blocksAboveSlot uses for a
 // decode failure: the reconciliation is what keeps the ledger correct, and
 // it must not fail because a notification could not be built.
+//
+// A block_nonce row only exists for a block whose era has a
+// CalculateEtaVFunc (see ledger/eras): Byron's BFT/PoA consensus has no VRF
+// nonce to evolve, so a Byron block is never in this query's result at
+// all, not merely unresolvable -- reconciliationUndoUnresolved cannot even
+// see it to count it. This is not new to this function: durableAppliedFloor
+// and latestLedgerPrimaryChainAncestor already key the same reconciliation's
+// applied-point search on block_nonce rows, so a divergence spanning Byron
+// blocks already has no era-agnostic durable record of applied points to
+// resolve an ancestor from, let alone build undo events for. Closing that
+// would mean adding an era-agnostic applied-block record the rest of the
+// reconciler doesn't have either -- out of scope for issue #3516, which
+// bounds and correctly sources this rewind's data, not the reconciler's
+// pre-existing era coverage.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,

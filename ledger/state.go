@@ -3947,6 +3947,37 @@ func (ls *LedgerState) ledgerReadChain(
 				hex.EncodeToString(startPoint.Hash),
 			)
 			if reconcileErr := ls.reconcilePrimaryChainTipWithLedgerTip(); reconcileErr != nil {
+				if errors.Is(reconcileErr, chain.ErrRollbackExceedsSecurityParam) {
+					// The common ancestor sits more than K blocks
+					// behind the primary chain tip: this reader cannot
+					// safely reconcile locally, the same over-K
+					// boundary a peer-driven rollback is refused for
+					// (chainsync.go). Surface it through the same
+					// ChainsyncResyncEventType/reason those call sites
+					// use rather than only a generic error log, so
+					// connection management gets the same signal to
+					// reconnect and negotiate a fresh intersection.
+					ls.config.Logger.Error(
+						"missing chain iterator start point requires a "+
+							"rewind beyond the security parameter K, "+
+							"requesting a fresh chainsync intersection",
+						"start_slot", startPoint.Slot,
+						"start_hash", hex.EncodeToString(startPoint.Hash),
+					)
+					if ls.config.EventBus != nil {
+						ls.config.EventBus.PublishAsync(
+							event.ChainsyncResyncEventType,
+							event.NewEvent(
+								event.ChainsyncResyncEventType,
+								event.ChainsyncResyncEvent{
+									Reason: event.ChainsyncResyncReasonRollbackExceedsK,
+									Point:  startPoint,
+								},
+							),
+						)
+					}
+					return
+				}
 				ls.config.Logger.Error(
 					"failed to recover missing chain iterator start point",
 					"error", reconcileErr,
