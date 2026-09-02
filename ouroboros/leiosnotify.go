@@ -1103,9 +1103,8 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 // per-attempt deadline. When deadline is non-zero the fetch abandons the attempt
 // and returns the contiguous prefix fetched so far (with a deadline error) once
 // it elapses, instead of continuing to re-request from a slow-but-alive relay
-// that keeps dribbling transactions within the leios-fetch protocol timeout (so
-// that timeout never fires) yet never promptly completes. The check is between
-// request rounds — each individual round is bounded by the request context from
+// that keeps dribbling transactions yet never promptly completes. The check is
+// between request rounds — each individual round is bounded by the request context from
 // leiosFetchRequestContext, not by a protocol state timeout (leios-fetch
 // deliberately has none for Block/BlockTxs) — so an attempt overshoots the
 // deadline by at most one round;

@@ -170,6 +170,6 @@ func TestLeiosFetchUnavailableBlockTxsAnswersNoBlockTxs(t *testing.T) {
 	select {
 	case err := <-peer.errChan:
 		require.NoError(t, err, "unavailable EB txs must not fail the bearer")
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 }
