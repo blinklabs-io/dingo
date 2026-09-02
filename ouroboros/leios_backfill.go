@@ -331,6 +331,10 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		if err != nil {
 			lastErr = err
 			switch classifyLeiosFetchFailure(err) {
+			case leiosFetchFailureNone:
+				// A nil error cannot reach this block; keep the switch
+				// exhaustive if the failure taxonomy gains new callers.
+				continue
 			case leiosFetchFailureBusy:
 				// Not an attempt: the connection was serving another fetch.
 			case leiosFetchFailureDeclined:
