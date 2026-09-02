@@ -556,7 +556,15 @@ func (s *Store) firstMintedBlockSlot(
 		return 0, false, fmt.Errorf("read Mithril trust boundary: %w", err)
 	}
 	if value == "" {
-		return startSlot, true, nil
+		// sqlc's GetSyncState returns sql.ErrNoRows for an absent key, which
+		// the branch above already takes, so an empty string here is a row
+		// that exists and holds nothing. That is a malformed boundary, not
+		// the absence of one, and it gets the same treatment as an
+		// unparseable value rather than silently re-admitting every imported
+		// counter row.
+		return 0, false, fmt.Errorf(
+			"parse Mithril trust boundary %q: empty value", value,
+		)
 	}
 	boundary, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {

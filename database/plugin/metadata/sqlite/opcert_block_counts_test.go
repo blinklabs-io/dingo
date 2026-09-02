@@ -141,3 +141,33 @@ func TestPoolBlockCountsWithoutMithrilBoundaryCountEveryRow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 }
+
+// TestPoolBlockCountsRejectMalformedMithrilBoundary covers a sync_state row
+// that exists and holds nothing. sqlc's GetSyncState reports an absent key as
+// sql.ErrNoRows, so an empty string is a malformed boundary rather than the
+// absence of one; treating it as absent would silently re-admit every imported
+// counter row as a minted block at exactly the moment the boundary could not
+// be trusted.
+func TestPoolBlockCountsRejectMalformedMithrilBoundary(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"", "not-a-slot"} {
+		store, _ := newSharedSQLStore(t)
+		require.NoError(t, store.SetSyncState(
+			mithrilTrustBoundarySyncKey, value, nil,
+		))
+		pkh := lcommon.PoolKeyHash(
+			lcommon.NewBlake2b224(bytes.Repeat([]byte{0xA1}, 28)),
+		)
+		require.NoError(t, store.UpdatePoolOpCertSequence(pkh, 1, 1000, nil))
+
+		_, _, err := store.CountPoolBlocksInSlotRange(
+			[]lcommon.PoolKeyHash{pkh}, 0, 2000, nil,
+		)
+		require.Error(t, err, "boundary %q must not be treated as absent", value)
+		assert.Contains(t, err.Error(), "Mithril trust boundary")
+
+		_, err = store.GetPoolBlockIssuersInSlotRange(0, 2000, nil)
+		require.Error(t, err, "boundary %q must not be treated as absent", value)
+	}
+}
