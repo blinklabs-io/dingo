@@ -1540,6 +1540,42 @@ WHERE u.deleted_slot = 0
   );
 ```
 
+### `GetAccountsByCredential`
+
+Batched account lookup by a list of `(credential_tag, staking_key)` refs —
+the hot path under reward-snapshot construction
+(`ledger.rewardActiveAccounts`), which looks up every pool/delegator
+credential touched by a reward calculation in one call. Unlike
+`GetUtxosByRefs` above, this does *not* use the OR-chain pattern: SQLite's
+query planner cannot use `idx_account_credential` to drive an OR-chain of
+`(credential_tag = ? AND staking_key = ?)` predicates, so it falls back to
+a full table scan per chunk, making the OR-chain form effectively O(n²) in
+the account table's row count — this was the actual root cause of a
+multi-hour mainnet reward-calculation stall (`rewardActiveAccounts` never
+returning, ahead of any reward-calculation metric ever being set). Instead
+the refs are pushed into a `UNION ALL`-of-literal-selects derived table and
+inner-joined against `account`, which SQLite, PostgreSQL, and MySQL all
+plan as an indexed seek per row via `idx_account_credential` — chunked at
+`ParameterLimit()/2` refs to stay within each dialect's bind-variable
+limit:
+
+```sql
+SELECT a.*
+FROM account a
+JOIN (
+  SELECT ? AS credential_tag, ? AS staking_key
+  UNION ALL
+  SELECT ? AS credential_tag, ? AS staking_key
+  -- ... one row per requested ref
+) v ON a.credential_tag = v.credential_tag AND a.staking_key = v.staking_key
+WHERE a.active = TRUE;  -- omitted when includeInactive is true
+```
+
+Measured against a real migrated schema: 50,000 refs went from ~139s to
+~2.8s, and 300,000 refs (a chunked case the OR-chain form never completed
+within 45 minutes) to ~93s. Refs with no matching account row are silently
+absent from the result, matching `GetUtxosByRefs`'s contract above.
+
 ### `GetTransactionsByAddress` and `CountTransactionsByAddress`
 
 Recent transactions for an address key pair:

@@ -1614,7 +1614,7 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 		t.Fatal("timeout waiting for operation result")
 	}
 
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 }
 
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
@@ -1659,7 +1659,7 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	}, 5*time.Second, 5*time.Millisecond, "at least one operation should start")
 
 	// Shutdown the pool - this should wait for all operations to complete
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// Wait for all result handlers
 	wg.Wait()
@@ -1710,7 +1710,7 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 	}
 
 	// Shutdown should wait for all operations to complete
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// Verify all operations completed even with errors
 	assert.Equal(
@@ -1746,7 +1746,7 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	}
 
 	// Shutdown should complete successfully
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 }
 
 // TestDatabaseWorkerPoolSubmitAfterShutdown tests that submitting after shutdown fails
@@ -1758,7 +1758,7 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 
 	// Shutdown the pool
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// Try to submit an operation after shutdown
 	resultChan := make(chan DatabaseResult, 1)
@@ -1820,7 +1820,7 @@ func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 
 	shutdownDone := make(chan struct{})
 	go func() {
-		pool.Shutdown()
+		pool.Shutdown(5 * time.Second)
 		close(shutdownDone)
 	}()
 
@@ -1863,7 +1863,7 @@ func TestDatabaseWorkerPoolConcurrency(t *testing.T) {
 	}
 
 	// Shutdown pool - should wait for all operations
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// All operations should complete
 	assert.Equal(t, int32(numOperations), completedCount.Load())
@@ -1890,9 +1890,63 @@ func TestDatabaseWorkerPoolMultipleShutdowns(t *testing.T) {
 	<-resultChan
 
 	// Call shutdown multiple times - should be safe
-	pool.Shutdown()
-	pool.Shutdown() // Should not panic
-	pool.Shutdown() // Should not panic
+	pool.Shutdown(5 * time.Second)
+	pool.Shutdown(5 * time.Second) // Should not panic
+	pool.Shutdown(5 * time.Second) // Should not panic
+}
+
+// TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation tests that Shutdown
+// returns an error promptly at drainTimeout, rather than blocking
+// indefinitely, when an in-flight operation runs longer than the requested
+// drain timeout.
+func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	started := make(chan struct{})
+	blockUntil := make(chan struct{})
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			close(started)
+			<-blockUntil
+			return nil
+		},
+		ResultChan: resultChan,
+	})
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for operation to start")
+	}
+
+	shutdownStart := time.Now()
+	err := pool.Shutdown(50 * time.Millisecond)
+	elapsed := time.Since(shutdownStart)
+
+	require.Error(
+		t,
+		err,
+		"Shutdown should report an error when the drain timeout elapses before in-flight operations finish",
+	)
+	assert.Less(
+		t,
+		elapsed,
+		2*time.Second,
+		"Shutdown must return promptly at the drain timeout instead of blocking on the stuck operation",
+	)
+
+	// Unblock the stuck operation so it doesn't leak past the test.
+	close(blockUntil)
+	select {
+	case <-resultChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for stuck operation to finally complete")
+	}
 }
 
 // TestDatabaseWorkerPoolResultChannelFull tests handling of full result channels
@@ -1924,7 +1978,7 @@ func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
 	}
 
 	// Shutdown should work
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// All operations should complete
 	assert.Equal(t, int32(3), completedCount.Load())
