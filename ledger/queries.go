@@ -928,6 +928,14 @@ func (ls *LedgerState) queryShelleyDRepState(
 // allDRepDelegators loads active accounts in batches and groups their voting
 // delegations by DRep. This preserves the unrestricted empty GetDRepState form
 // without issuing one database query for every active DRep.
+// allDRepDelegatorsBatchSize bounds how many active account refs are
+// hydrated into full Account rows at once. GetAccountsByCredential's result
+// map retains every hydrated row even though only Drep/DrepType are read
+// here, so folding each batch down before hydrating the next caps retained
+// memory at this batch size instead of growing with the active-account
+// count on every empty GetDRepState request.
+const allDRepDelegatorsBatchSize = 10_000
+
 func (ls *LedgerState) allDRepDelegators() (
 	map[string][]olocalstatequery.StakeCredential,
 	error,
@@ -936,28 +944,32 @@ func (ls *LedgerState) allDRepDelegators() (
 	if err != nil {
 		return nil, err
 	}
-	accounts, err := ls.db.GetAccountsByCredential(refs, false, nil)
-	if err != nil {
-		return nil, err
-	}
 	ret := make(map[string][]olocalstatequery.StakeCredential)
-	for _, ref := range refs {
-		account := accounts[ref.MapKey()]
-		if account == nil || len(account.Drep) == 0 ||
-			account.DrepType > models.DrepTypeScriptHash {
-			continue
+	for start := 0; start < len(refs); start += allDRepDelegatorsBatchSize {
+		end := min(start+allDRepDelegatorsBatchSize, len(refs))
+		batch := refs[start:end]
+		accounts, err := ls.db.GetAccountsByCredential(batch, false, nil)
+		if err != nil {
+			return nil, err
 		}
-		drepKey := models.StakeCredentialRef{
-			Tag: uint8(account.DrepType),
-			Key: account.Drep,
-		}.MapKey()
-		ret[drepKey] = append(
-			ret[drepKey],
-			olocalstatequery.StakeCredential{
-				Tag:   uint64(ref.Tag),
-				Bytes: ledger.NewBlake2b224(ref.Key),
-			},
-		)
+		for _, ref := range batch {
+			account := accounts[ref.MapKey()]
+			if account == nil || len(account.Drep) == 0 ||
+				account.DrepType > models.DrepTypeScriptHash {
+				continue
+			}
+			drepKey := models.StakeCredentialRef{
+				Tag: uint8(account.DrepType),
+				Key: account.Drep,
+			}.MapKey()
+			ret[drepKey] = append(
+				ret[drepKey],
+				olocalstatequery.StakeCredential{
+					Tag:   uint64(ref.Tag),
+					Bytes: ledger.NewBlake2b224(ref.Key),
+				},
+			)
+		}
 	}
 	for key := range ret {
 		slices.SortFunc(

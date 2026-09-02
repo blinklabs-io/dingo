@@ -99,3 +99,42 @@ func TestGetAccountsByCredentialGroupedByTag(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, withInactive, inactiveRef.MapKey())
 }
+
+// TestAccountsByCredentialChunkQueryShape pins the query form
+// GetAccountsByCredential emits: a single-column staking_key IN (...)
+// predicate, never a per-ref (credential_tag = ? AND staking_key = ?)
+// OR ... predicate. This is the regression guard the result-only tests
+// above can't provide — reverting the query to the old per-ref OR form is
+// still correct (same rows come back, just slower), so no assertion on
+// returned data can distinguish the two. An EXPLAIN QUERY PLAN assertion
+// isn't durable here either: the plan SQLite picks depends on table size
+// and whether ANALYZE has run, not on which predicate form generated it.
+// Asserting on the generated SQL text instead pins our intent directly.
+func TestAccountsByCredentialChunkQueryShape(t *testing.T) {
+	keys := [][]byte{
+		{0x01, 0x02},
+		{0x03, 0x04},
+		{0x05, 0x06},
+	}
+
+	query, args := accountsByCredentialChunkQuery(1, keys, false)
+	require.Contains(t, query, "staking_key IN (")
+	require.NotContains(t, query, " OR ")
+	require.Contains(t, query, "credential_tag = ?")
+	require.Contains(t, query, "AND active = TRUE")
+	require.Equal(t, []any{uint8(1), keys[0], keys[1], keys[2]}, args)
+
+	queryInactive, argsInactive := accountsByCredentialChunkQuery(
+		0,
+		keys,
+		true,
+	)
+	require.Contains(t, queryInactive, "staking_key IN (")
+	require.NotContains(t, queryInactive, " OR ")
+	require.NotContains(t, queryInactive, "active = TRUE")
+	require.Equal(
+		t,
+		[]any{uint8(0), keys[0], keys[1], keys[2]},
+		argsInactive,
+	)
+}

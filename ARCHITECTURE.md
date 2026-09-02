@@ -2673,25 +2673,37 @@ Query paths that retain database work per resolved item are bounded by
 rejected before database or consensus-state access. The empty `GetDRepState`
 form remains unrestricted: it loads active DReps once and obtains their
 delegators through chunked account reads instead of one read per DRep.
-Filtered `GetStakeSnapshots` and `GetFilteredVoteDelegatees` likewise use
-existing batch database operations, removing their per-item read amplification
-without a client-visible item limit. Existing result ordering and
-partial-result behavior remain unchanged.
+`allDRepDelegators` (`ledger/queries.go`) additionally hydrates those
+account rows `allDRepDelegatorsBatchSize` (10,000) refs at a time, folding
+each batch's result down before hydrating the next, so retained memory is
+bounded by the batch size rather than by the chain's total active-account
+count. Filtered `GetStakeSnapshots` and `GetFilteredVoteDelegatees` likewise
+use existing batch database operations, removing their per-item read
+amplification without a client-visible item limit. Existing result
+ordering and partial-result behavior remain unchanged.
 
 Both the empty `GetDRepState` form and `GetFilteredVoteDelegatees` batch
 through `MetadataStore.GetAccountsByCredential`, which groups the requested
 refs by `credential_tag` and queries each group as a single-column
 `staking_key IN (...)`, matching the unique index
 `idx_account_credential(credential_tag, staking_key)` so each chunk is one
-index range scan. Filtering per ref with a compound
-`(credential_tag = ? AND staking_key = ?) OR ...` predicate instead defeats
-that index — SQLite cannot drive it from a disjunction of per-row
-equalities — so every chunk degrades to a full table scan and the "batched"
-read becomes slower than the per-item loop it replaced as the account table
-grows. `GetStakeSnapshots`' pool-side primitive
-(`GetPoolStakeSnapshotsForPools`) does not share this hazard: it already
-filters on a single-column `pool_key_hash IN (...)` against a matching
-unique index.
+index range scan. A per-ref `(credential_tag = ? AND staking_key = ?) OR
+...` predicate is drivable from that same index too, through SQLite's
+multi-index OR optimization, but only once `sqlite_stat1` exists. With the
+`AND active = TRUE` conjunct `GetAccountsByCredential` adds for
+`includeInactive = false` and no statistics, the planner instead prefers
+`idx_account_active_pool_staking_key (active=?)` and evaluates the whole OR
+chain per row, so each chunk costs `O(active rows × refs)` and the
+"batched" read becomes slower than the per-item loop it replaced as the
+account table grows. `ANALYZE` only runs via `RunPlannerStats` at Mithril
+sync and before backfill, never as the table grows during a genesis sync,
+so that no-statistics state is what a long-running genesis-synced node is
+actually in — and even with statistics present, the grouped-IN form is
+still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
+(`GetPoolStakeSnapshotsForPools`) does not share this hazard: a
+single-column `pool_key_hash IN (...)` against a matching unique index
+needs no statistics to plan well, which is the real distinction between the
+two primitives.
 
 In-process callers receive a `ledger.LocalStateQueryLimitError` that matches
 `ledger.ErrLocalStateQueryLimitExceeded`. LocalStateQuery has no query-level

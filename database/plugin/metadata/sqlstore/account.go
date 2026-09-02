@@ -349,6 +349,32 @@ func (s *Store) GetAccountByCredential(
 	return accountFromSQLite(row)
 }
 
+// accountsByCredentialChunkQuery builds the SELECT for one credential_tag
+// chunk of GetAccountsByCredential: a single-column staking_key IN (...)
+// predicate against idx_account_credential, never a per-ref
+// (credential_tag = ? AND staking_key = ?) OR ... predicate. Split out so a
+// test can pin the query's shape directly — an EXPLAIN QUERY PLAN assertion
+// is not durable here, since the chosen plan depends on table size and
+// whether ANALYZE has run, not on which of the two predicate forms is used.
+func accountsByCredentialChunkQuery(
+	tag uint8,
+	keys [][]byte,
+	includeInactive bool,
+) (string, []any) {
+	args := make([]any, 0, len(keys)+1)
+	args = append(args, tag)
+	for _, key := range keys {
+		args = append(args, key)
+	}
+	query := "SELECT " + sqliteAccountColumns +
+		" FROM account WHERE credential_tag = ? AND staking_key IN (" +
+		bindPlaceholders(len(keys)) + ")"
+	if !includeInactive {
+		query += " AND active = TRUE"
+	}
+	return query, args
+}
+
 func (s *Store) GetAccountsByCredential(
 	refs []models.StakeCredentialRef,
 	includeInactive bool,
@@ -364,10 +390,15 @@ func (s *Store) GetAccountsByCredential(
 	}
 	// Grouped by credential_tag and queried as a single-column staking_key IN
 	// (...), matching the unique index idx_account_credential(credential_tag,
-	// staking_key) so each chunk is a single index range scan. A per-ref
-	// (credential_tag = ? AND staking_key = ?) OR ... predicate defeats that
-	// index: the planner can't drive a compound index from a disjunction of
-	// per-row equalities, so every chunk degrades to a full table scan.
+	// staking_key) so each chunk is a single index range scan.
+	//
+	// (credential_tag = ? AND staking_key = ?) OR ... per ref is drivable
+	// from the same index via SQLite's multi-index OR optimization, but only
+	// once sqlite_stat1 exists. Without statistics the AND active = TRUE
+	// conjunct leads the planner to idx_account_active_pool_staking_key
+	// (active=?) instead, and the whole OR chain is evaluated per row:
+	// O(active rows x refs) per chunk. ANALYZE only runs at Mithril sync and
+	// before backfill, so a genesis-synced node is in exactly that state.
 	byTag := make(map[uint8][][]byte)
 	for _, ref := range refs {
 		byTag[ref.Tag] = append(byTag[ref.Tag], ref.Key)
@@ -378,18 +409,11 @@ func (s *Store) GetAccountsByCredential(
 	for tag, keys := range byTag {
 		for start := 0; start < len(keys); start += chunkSize {
 			end := min(start+chunkSize, len(keys))
-			chunk := keys[start:end]
-			args := make([]any, 0, len(chunk)+1)
-			args = append(args, tag)
-			for _, key := range chunk {
-				args = append(args, key)
-			}
-			query := "SELECT " + sqliteAccountColumns +
-				" FROM account WHERE credential_tag = ? AND staking_key IN (" +
-				bindPlaceholders(len(chunk)) + ")"
-			if !includeInactive {
-				query += " AND active = TRUE"
-			}
+			query, args := accountsByCredentialChunkQuery(
+				tag,
+				keys[start:end],
+				includeInactive,
+			)
 			rows, err := db.QueryContext(
 				ctx,
 				s.dialect.Rebind(query),

@@ -209,6 +209,57 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 	}
 }
 
+// TestAllDRepDelegatorsCrossesBatchBoundary verifies that allDRepDelegators
+// folds results correctly when the active-account count spans more than one
+// allDRepDelegatorsBatchSize hydration batch, so the batch loop can't
+// silently drop or double-count a delegator at the boundary between batches.
+func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
+	db := newTestDB(t)
+	txn := db.MetadataTxn(true)
+
+	drepCredential := bytes.Repeat([]byte{0xCD}, 28)
+	require.NoError(t, db.CreateDrep(txn, &models.Drep{
+		Credential: drepCredential,
+		Active:     true,
+		AddedSlot:  1,
+	}))
+
+	accountCount := allDRepDelegatorsBatchSize + 1
+	for i := range accountCount {
+		stakingKey := make([]byte, 28)
+		binary.BigEndian.PutUint32(stakingKey[24:], uint32(i))
+		require.NoError(t, db.CreateAccount(txn, &models.Account{
+			StakingKey:    stakingKey,
+			CredentialTag: 0,
+			Drep:          drepCredential,
+			DrepType:      models.DrepTypeAddrKeyHash,
+			Active:        true,
+		}))
+	}
+	require.NoError(t, txn.Commit())
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+	delegators, err := ls.allDRepDelegators()
+	require.NoError(t, err)
+	key := models.StakeCredentialRef{
+		Tag: uint8(models.DrepTypeAddrKeyHash),
+		Key: drepCredential,
+	}.MapKey()
+	require.Len(t, delegators[key], accountCount)
+
+	seen := make(map[string]struct{}, accountCount)
+	for _, cred := range delegators[key] {
+		mapKey := models.StakeCredentialRef{
+			Tag: uint8(cred.Tag),
+			Key: cred.Bytes[:],
+		}.MapKey()
+		_, dup := seen[mapKey]
+		require.False(t, dup, "delegator counted twice across batch boundary")
+		seen[mapKey] = struct{}{}
+	}
+}
+
 // TestLocalStateQueryLargeBatchHandlers verifies that handlers backed by batch
 // database primitives accept collections larger than the per-item work limit,
 // and that the batched reads return the right value for every requested item
