@@ -40,7 +40,7 @@ func depositHeldBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 7)
+	require.Len(t, registry, 8)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -211,13 +211,13 @@ func TestDepositHeldExpandPhaseReplaysAfterInterruptedUpgrade(t *testing.T) {
 	runTo(registry)
 
 	ctx := context.Background()
-	// Rewind version 7 to the durable state such an interruption leaves: the
+	// Rewind version 8 to the durable state such an interruption leaves: the
 	// column exists because its ALTER committed, the phase row still says
 	// expand, and the backfill has not run.
 	_, err = db.ExecContext(ctx, `
 UPDATE schema_migrations
 SET phase = 'expand', dirty = 1, completed_at = NULL
-WHERE version = 7`)
+WHERE version = 8`)
 	require.NoError(t, err)
 	_, err = db.ExecContext(
 		ctx,
@@ -240,7 +240,7 @@ WHERE version = 7`)
 	var dirty bool
 	var completed sql.NullInt64
 	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 7`,
+SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 8`,
 	).Scan(&phase, &dirty, &completed))
 	require.Equal(t, "complete", phase)
 	require.False(t, dirty)
