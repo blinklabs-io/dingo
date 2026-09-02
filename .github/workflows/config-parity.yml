@@ -9,11 +9,6 @@ name: config-parity
 # same network name means the same chain only while the two stay identical.
 on:
   pull_request:
-    paths:
-      - "config/cardano/**"
-      - "Dockerfile"
-      - "bin/config-parity.sh"
-      - ".github/workflows/config-parity.yml"
   schedule:
     - cron: '0 7 * * 1' # Monday 07:00 UTC
   workflow_dispatch: {}

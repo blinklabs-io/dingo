@@ -36,7 +36,7 @@
 #
 # Sources, in precedence order:
 #   CARDANO_CONFIGS_DIR  an existing checkout or extracted config tree
-#   CARDANO_CONFIGS_REF  a branch, tag, or commit ref of the repository
+#   CARDANO_CONFIGS_REF  a branch, tag, or commit SHA of the repository
 #   (default)            the image tag pinned in the Dockerfile
 
 set -euo pipefail
@@ -79,7 +79,8 @@ else
 		echo "cloning ${source_desc}"
 		git clone --quiet --filter=blob:none "${configs_repo}" \
 			"${cleanup_dir}/configs"
-		git -C "${cleanup_dir}/configs" checkout --quiet "${configs_ref}"
+		git -C "${cleanup_dir}/configs" fetch --quiet origin "${configs_ref}"
+		git -C "${cleanup_dir}/configs" checkout --quiet FETCH_HEAD
 		configs_dir="${cleanup_dir}/configs"
 	else
 		tag="$(sed -n "s|^FROM ${configs_image}:\\([^ ]*\\) .*|\\1|p" Dockerfile | head -1)"
@@ -160,7 +161,10 @@ for network in "${networks[@]}"; do
 			echo "DRIFT ${network}/${relative}: missing from dingo"
 			drift=$((drift + 1))
 		fi
-	done < <(find "${upstream}" -type f -printf '%P\n' | sort)
+	done < <(
+		cd "${upstream}"
+		find . -type f -print | sed 's|^./||' | sort
+	)
 done
 
 if [[ ${drift} -ne 0 ]]; then
