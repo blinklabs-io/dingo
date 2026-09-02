@@ -100,6 +100,21 @@ func isRoutableAddr(address string) bool {
 		// Not an IP literal (hostname) — allow it
 		return true
 	}
+	return IsRoutableIP(ip)
+}
+
+// IsRoutableIP reports whether an IP address is usable as a peer candidate
+// learned from the network. It is the single definition of the routability
+// policy applied to gossip, ledger, and peer-sharing candidates, so callers
+// that already hold a net.IP do not restate the address classes.
+//
+// An IP that is neither 4 nor 16 bytes is rejected: the net.IP class
+// predicates all report false for another length, so an unchecked value would
+// otherwise be treated as routable.
+func IsRoutableIP(ip net.IP) bool {
+	if ip == nil || ip.To16() == nil {
+		return false
+	}
 	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
 		ip.IsUnspecified() {
