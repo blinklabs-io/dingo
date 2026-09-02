@@ -411,18 +411,6 @@ func conwayPlutusUtxoValidationRuleClassifier(
 	}
 }
 
-func conwayFeaturesUtxoValidationRuleClassifier() utxoValidationRuleClassifier {
-	return utxoValidationRuleErrorClassifier[conway.CurrentTreasuryValueWithPlutusV1V2Error](utxoValidationRuleProbe{
-		tx: &utxoValidationRuleProbeTx{
-			witnesses: &utxoValidationRuleProbeWitnesses{
-				plutusV1Scripts: []lcommon.PlutusV1Script{{0x01}},
-			},
-			currentTreasuryValue: big.NewInt(1),
-		},
-		pp: &conway.ConwayProtocolParameters{},
-	})
-}
-
 // buildIndexedUtxoValidationRules finds each target by stable validation
 // behavior and preserves the target's original upstream position. A nil
 // replacement removes the target; a non-nil replacement substitutes it in
