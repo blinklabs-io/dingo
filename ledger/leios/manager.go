@@ -321,6 +321,23 @@ type epochEntry struct {
 // waiter re-reading the map could observe a miss where the result it waited
 // for actually succeeded. Exactly one of entry/err is meaningful, matching
 // committeeAndParamsForEpoch's own contract.
+// committeeComputation is one epoch's in-flight committee computation. Waiters park
+// on done and read result once it closes; the close is the happens-before edge
+// that makes result safe to read without the manager lock.
+//
+// One channel per epoch, not one per waiter: a slice of per-waiter channels
+// grows with the number of concurrent callers and keeps every stopped waiter's
+// channel retained until the leader finishes, which is exactly the retention
+// this queue-bounding change exists to avoid.
+type committeeComputation struct {
+	done   chan struct{}
+	result committeeResult
+	// waiters counts callers that have parked on done. Read under the
+	// manager lock; used by tests to observe that a follower joined the
+	// leader's computation rather than starting its own.
+	waiters int
+}
+
 type committeeResult struct {
 	entry *epochEntry
 	err   error
@@ -380,7 +397,7 @@ type VoteManager struct {
 	// caller waiting on it. An entry is deleted, and every channel in it
 	// sent to, by completeCommitteeComputation -- on success, on error, and
 	// on panic unwind alike. Bounded by committeeInFlightMaxEpochs.
-	committeeInFlight map[uint64][]chan committeeResult
+	committeeInFlight map[uint64]*committeeComputation
 	// committeeStopCh releases committeeInFlight waiters at shutdown so one
 	// cannot stay parked on a leader blocked in a provider call. Closed by
 	// stopLocked and recreated by Start, like wakeCh.
@@ -478,7 +495,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		maxVotes:           voteStoreMaxEntries,
 		maxRecords:         voteRecordMaxEntries,
 		committees:         make(map[uint64]*epochEntry),
-		committeeInFlight:  make(map[uint64][]chan committeeResult),
+		committeeInFlight:  make(map[uint64]*committeeComputation),
 		committeeStopCh:    make(chan struct{}),
 		votesById:          make(map[lcommon.LeiosVoteId]*storedVote),
 		voteLog:            make([]*storedVote, 0),
@@ -571,6 +588,12 @@ func (m *VoteManager) stopLocked() {
 	// provider on a read with no deadline, and a waiter must not hold a
 	// protocol worker there past shutdown.
 	close(m.committeeStopCh)
+	// Drop the claims too. A leader blocked in a provider outlives this
+	// Stop, and leaving its claim in the map would let a caller in the NEXT
+	// lifecycle join the previous lifecycle's computation and park on the
+	// fresh stop channel until that leader returned -- or forever, if it
+	// never does. The leader still completes and still closes its own call.
+	m.committeeInFlight = make(map[uint64]*committeeComputation)
 }
 
 // Stop stops the vote manager and unblocks any NextVotes waiters.
@@ -1108,16 +1131,13 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 		m.mu.Unlock()
 		return entry, nil
 	}
-	if waiters, claimed := m.committeeInFlight[epoch]; claimed {
-		// Buffered so completeCommitteeComputation's send never blocks: not
-		// on a waiter that has not reached its receive yet, and not on one
-		// that gave up at the stop signal below and will never receive at all.
-		ch := make(chan committeeResult, 1)
-		m.committeeInFlight[epoch] = append(waiters, ch)
+	if call, claimed := m.committeeInFlight[epoch]; claimed {
+		call.waiters++
 		stopCh := m.committeeStopCh
 		m.mu.Unlock()
 		select {
-		case result := <-ch:
+		case <-call.done:
+			result := call.result
 			// The outcome is delivered inline rather than re-read from
 			// m.committees after waking: handleRollback clears that map
 			// wholesale, and it can do so between the leader's install and a
@@ -1142,8 +1162,9 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 			committeeInFlightMaxEpochs,
 		)
 	}
-	// Claim the epoch: present-but-empty means "claimed, no waiters yet".
-	m.committeeInFlight[epoch] = []chan committeeResult{}
+	// Claim the epoch.
+	call := &committeeComputation{done: make(chan struct{})}
+	m.committeeInFlight[epoch] = call
 	// The generation this computation is derived from. handleRollback bumps
 	// it when it clears the memo, so a computation that started before a
 	// rollback can tell that its inputs may no longer be current.
@@ -1167,6 +1188,7 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 		// laundered into a routine per-epoch error that hides it.
 		m.completeCommitteeComputation(
 			epoch,
+			call,
 			generation,
 			nil,
 			ErrCommitteeComputationAborted,
@@ -1176,6 +1198,7 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 	completed = true
 	result, installed := m.completeCommitteeComputation(
 		epoch,
+		call,
 		generation,
 		entry,
 		err,
@@ -1283,6 +1306,7 @@ func (m *VoteManager) computeCommitteeEntry(
 // next caller instead of pinning the epoch to a keyless committee.
 func (m *VoteManager) completeCommitteeComputation(
 	epoch uint64,
+	call *committeeComputation,
 	generation uint64,
 	entry *epochEntry,
 	err error,
@@ -1304,14 +1328,20 @@ func (m *VoteManager) completeCommitteeComputation(
 		m.committees[epoch] = entry
 		installed = true
 	}
-	waiters := m.committeeInFlight[epoch]
-	delete(m.committeeInFlight, epoch)
-	m.mu.Unlock()
-
-	result := committeeResult{entry: entry, err: err}
-	for _, ch := range waiters {
-		ch <- result
+	// Identity-checked: stopLocked clears the map wholesale, and a later
+	// lifecycle may have claimed this epoch again. Deleting by key alone
+	// would drop the new lifecycle's claim and make the epoch permanently
+	// uncomputable.
+	if m.committeeInFlight[epoch] == call {
+		delete(m.committeeInFlight, epoch)
 	}
+	result := committeeResult{entry: entry, err: err}
+	call.result = result
+	m.mu.Unlock()
+	// Releases every waiter at once, including waiters of a lifecycle that
+	// has already stopped -- they left through committeeStopCh and read
+	// nothing.
+	close(call.done)
 	return result, installed
 }
 

@@ -78,7 +78,10 @@ func leiosPersistTestEntry(
 ) (ocommon.Point, cbor.RawMessage, *leiosEndorserBlockData, int) {
 	t.Helper()
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, idx, txCount)
-	size := len(point.Hash) + len(blockRaw)
+	// Recomputed here rather than read from leiosPersistJobSize, so the
+	// expectation is independent of the code under test. The hash counts
+	// twice: the queue retains it as the map key and again as job.hash.
+	size := 2*len(point.Hash) + len(blockRaw)
 	txsRaw := make([]cbor.RawMessage, 0, txCount)
 	for i := range txCount {
 		body := make([]byte, txBytes)
@@ -299,7 +302,8 @@ func TestLeiosPersistQueueReleasesReservationOnReplace(t *testing.T) {
 	point, blockRaw, data, completeSize := leiosPersistTestEntry(
 		t, 45, 4, 512,
 	)
-	manifestSize := len(point.Hash) + len(blockRaw)
+	// Hash counted twice, as in leiosPersistTestEntry.
+	manifestSize := 2*len(point.Hash) + len(blockRaw)
 	withLowerLeiosPersistQueueBudget(t, manifestSize+completeSize)
 
 	// The backfiller's manifest-only store, then the complete one.

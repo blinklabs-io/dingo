@@ -15,6 +15,7 @@
 package leios
 
 import (
+	"context"
 	"errors"
 	"maps"
 	"math/big"
@@ -158,6 +159,33 @@ func startCommitteeCall(
 	return ch
 }
 
+// committeeEpochClaimed reports whether an in-flight computation is recorded
+// for epoch.
+func committeeEpochClaimed(m *VoteManager, epoch uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.committeeInFlight[epoch]
+	return ok
+}
+
+// committeeWaiterCount reports how many callers have parked on the in-flight
+// committee computation for epoch.
+//
+// This is the deterministic observation that coalescing happened: a caller
+// that started its own computation instead of joining the leader's never
+// registers as a waiter. A timing window alone cannot prove it, because a
+// follower the scheduler delayed past the window looks identical to a
+// follower that coalesced.
+func committeeWaiterCount(m *VoteManager, epoch uint64) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	call, ok := m.committeeInFlight[epoch]
+	if !ok {
+		return 0
+	}
+	return call.waiters
+}
+
 // Concurrent same-epoch cache miss: the callers that arrive while a committee
 // computation is already in flight join it instead of repeating the parameter
 // lookup, the stake-distribution read, the committee sort, and the
@@ -189,6 +217,19 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 	for range callers - 1 {
 		followers = append(followers, startCommitteeCall(fixture.mgr, 5))
 	}
+
+	// Every follower must be parked on the leader's computation. This is the
+	// load-bearing assertion: it cannot pass for a follower that ran its own
+	// computation, whereas the provider-call window below can pass merely
+	// because the scheduler was slow.
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return committeeWaiterCount(fixture.mgr, 5) == callers-1
+		},
+		5*time.Second,
+		"followers did not join the leader's committee computation",
+	)
 
 	// The regression: without coalescing every follower runs its own
 	// computation and calls the params provider again.
@@ -526,4 +567,63 @@ func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 			"in-flight computation completing after it",
 	)
 	require.NotSame(t, leaderResult.committee, recomputed)
+}
+
+// A leader still blocked in a provider when Stop returns must not leave its
+// claim behind for the next lifecycle.
+//
+// Stop closes committeeStopCh, which releases the waiters that exist then, but
+// the leader itself outlives the stop. If its claim stayed in the map, a caller
+// arriving after the next Start would join a computation belonging to the
+// previous lifecycle and park on the fresh stop channel until that leader
+// returned -- or forever, since the provider read it is blocked in carries no
+// deadline of its own.
+func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
+	params := newGatedParamsProvider()
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.ParamsProvider = params
+		},
+	)
+	t.Cleanup(params.releaseAll)
+
+	leader := startCommitteeCall(fixture.mgr, 5)
+	testutil.RequireReceive(
+		t,
+		params.firstCall,
+		5*time.Second,
+		"leader did not reach the committee params provider",
+	)
+
+	// Stop while the leader is still blocked in the provider.
+	require.NoError(t, fixture.mgr.Stop())
+	require.False(
+		t,
+		committeeEpochClaimed(fixture.mgr, 5),
+		"a stopped lifecycle must not retain the epoch's in-flight claim",
+	)
+
+	require.NoError(t, fixture.mgr.Start(context.Background()))
+	t.Cleanup(func() { _ = fixture.mgr.Stop() })
+
+	// The new lifecycle's caller must compute for itself. Joining the stopped
+	// lifecycle's leader would mean no second provider call ever happens.
+	next := startCommitteeCall(fixture.mgr, 5)
+	testutil.RequireReceive(
+		t,
+		params.extraCall,
+		5*time.Second,
+		"the new lifecycle's caller joined the stopped lifecycle's computation instead of computing",
+	)
+
+	params.releaseAll()
+	nextResult := testutil.RequireReceive(
+		t, next, 5*time.Second, "the new lifecycle's caller did not return",
+	)
+	require.NoError(t, nextResult.err)
+	leaderResult := testutil.RequireReceive(
+		t, leader, 5*time.Second, "leader did not return after the stop",
+	)
+	require.NoError(t, leaderResult.err)
 }

@@ -108,7 +108,10 @@ func leiosPersistJobSize(
 	manifestRaw []byte,
 	txsRaw []cbor.RawMessage,
 ) int {
-	size := len(hash) + len(manifestRaw)
+	// The hash is charged twice because the queue retains two copies: the
+	// map key string and the cloned job.hash. Undercharging here would let
+	// the queue hold more than the budget it reports.
+	size := 2*len(hash) + len(manifestRaw)
 	for _, raw := range txsRaw {
 		size += len(raw)
 	}
