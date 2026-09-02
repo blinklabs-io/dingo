@@ -117,7 +117,9 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	// entry is promoted (and published) here, a contradicting one is evicted so
 	// the fetch below replaces it rather than serving a poisoned slot to the
 	// ledger (issue #3513).
-	o.bindLeiosEndorserBlockSlot(ebHash, ebSlot)
+	if publish := o.bindLeiosEndorserBlockSlot(ebHash, ebSlot); publish != nil {
+		publish()
+	}
 	// bindLeiosEndorserBlockSlot's eviction above does not stop a reload of
 	// the same stale blob-store entry a moment later: loadLeiosEBFromDB
 	// reconstructs any reload as verified for whatever occurrence wrote it,
@@ -278,7 +280,9 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		// otherwise return nil on every connection this backfill tries
 		// without any of them ever verifying the entry, since none would
 		// take the !ok branch above (issue #3513 review).
-		o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot)
+		if publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot); publish != nil {
+			publish()
+		}
 		data, ok = o.lookupLeiosEndorserBlock(point.Hash)
 		if !ok || data == nil {
 			return errors.New(

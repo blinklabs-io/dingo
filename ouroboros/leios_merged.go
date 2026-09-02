@@ -680,7 +680,23 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 // authority arrived carries the offering connection's unverified claim, so it is
 // promoted when the slot agrees and evicted when it does not, before anything
 // keyed on the slot is published (issue #3513).
-func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
+//
+// It returns a closure that performs the publication (vote emission, pipeline
+// observation, blob persistence enqueue) when promotion happened, or nil when
+// there is nothing to publish (already verified, evicted, or no matching
+// cache entry). The publish step is returned rather than run inline so a
+// caller that reconciles under an outer lock -- recordLeiosAnnouncement holds
+// leiosAnnouncementsMu across this call for the atomicity reasons on that
+// function -- can run it only after releasing that lock: publishing invokes
+// external vote/pipeline/persistence handlers, and running those under a
+// mutex shared by every concurrent announcement would stall them all for the
+// duration of a slow handler, or deadlock one that re-enters announcement
+// recording (cubic review). Callers with nothing else held (the backfill
+// paths in leios_backfill.go) can just call the closure immediately.
+func (o *Ouroboros) bindLeiosEndorserBlockSlot(
+	ebHash []byte,
+	slot uint64,
+) func() {
 	// lookupLeiosEndorserBlock, not a direct map read: an entry may exist
 	// only in the blob store (evicted from memory by TTL, or never loaded
 	// this run), and loadLeiosEBFromDB reconstructs a reload as already
@@ -688,7 +704,7 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
 	// still contradict (issue #3513 review; see the slot check below).
 	data, ok := o.lookupLeiosEndorserBlock(ebHash)
 	if !ok || data == nil {
-		return
+		return nil
 	}
 	if data.point.Slot != slot {
 		// The cached (or just-reloaded) entry was bound to a slot this
@@ -714,10 +730,10 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
 			"authoritative_slot", slot,
 			"hash", hex.EncodeToString(ebHash),
 		)
-		return
+		return nil
 	}
 	if data.slotVerified {
-		return
+		return nil
 	}
 	o.leiosMu.Lock()
 	cur, ok := o.leiosEndorserBlocks[leiosBlockKey(ebHash)]
@@ -725,7 +741,7 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
 		// Superseded (or evicted) by a concurrent update since the lookup
 		// above; nothing to promote.
 		o.leiosMu.Unlock()
-		return
+		return nil
 	}
 	// Cached entries are replaced, never mutated in place: lookupLeiosEndorserBlock
 	// hands out this pointer and readers use it without leiosMu held, so
@@ -751,12 +767,14 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
 		}
 	}
 	o.leiosMu.Unlock()
-	o.publishLeiosEndorserBlock(
-		verified.point,
-		verified.blockRaw,
-		lcommon.Blake2b256Hash(verified.blockRaw),
-		&verified,
-	)
+	return func() {
+		o.publishLeiosEndorserBlock(
+			verified.point,
+			verified.blockRaw,
+			lcommon.Blake2b256Hash(verified.blockRaw),
+			&verified,
+		)
+	}
 }
 
 // leiosDatabase returns the underlying Database when the LedgerState is wired

@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -88,6 +89,30 @@ func recordTestLeiosAnnouncement(
 			"test",
 			false,
 		),
+	)
+}
+
+// recordTestLeiosAnnouncementNoFail is recordTestLeiosAnnouncement's
+// error-returning twin, for use from a worker goroutine: require's t.FailNow
+// is documented as unsafe to call from any goroutine other than the one
+// running the test function, so a concurrent caller must collect the error
+// and assert on it back on the test goroutine instead (cubic review).
+func recordTestLeiosAnnouncementNoFail(o *Ouroboros, headerRaw []byte) error {
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	if err != nil {
+		return err
+	}
+	ebHash, ebSize, ok := header.LeiosAnnouncement()
+	if !ok {
+		return errors.New("header carries no leios announcement")
+	}
+	return o.recordLeiosAnnouncement(
+		headerRaw,
+		ebHash,
+		ebSize,
+		header,
+		"test",
+		false,
 	)
 }
 
@@ -487,6 +512,11 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 		)
 	}
 
+	// Collected here rather than asserted inside the goroutines below: require
+	// (and t.FailNow, which it calls on failure) is documented as unsafe to
+	// invoke from any goroutine other than the one running the test function
+	// (cubic review).
+	announceErrs := make([]error, n)
 	var wg sync.WaitGroup
 	wg.Add(2 * n)
 	for i := range n {
@@ -501,11 +531,14 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 		}(i)
 		go func(i int) {
 			defer wg.Done()
-			recordTestLeiosAnnouncement(t, o, headers[i])
+			announceErrs[i] = recordTestLeiosAnnouncementNoFail(o, headers[i])
 		}(i)
 	}
 	wg.Wait()
 
+	for i := range n {
+		require.NoError(t, announceErrs[i], "announcement %d", i)
+	}
 	for i := range n {
 		data, ok := o.lookupLeiosEndorserBlock(points[i].Hash)
 		require.True(t, ok)
@@ -560,6 +593,48 @@ func TestLeiosAnnouncedSlotIgnoresExpiredBinding(t *testing.T) {
 		nil,
 		leiosStorePeerOffered,
 	))
+}
+
+// TestRecordLeiosAnnouncementAcceptsNewSlotAfterExpiry is the
+// announcement-recording twin to TestLeiosAnnouncedSlotIgnoresExpiredBinding:
+// recordLeiosAnnouncementLocked's own slot-consistency check read
+// leiosAnnouncementSlots directly instead of going through
+// leiosAnnouncedSlotLocked's expiry-aware lookup, so a genuine new
+// announcement of the same content-addressed hash at a different slot was
+// rejected as "inconsistent" forever, even long after the earlier binding
+// aged out of the acceptance window (cubic review; issue #3513).
+func TestRecordLeiosAnnouncementAcceptsNewSlotAfterExpiry(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 210, 1)
+	ebHash := testEbHash(point)
+	later := point.Slot + 100_000
+
+	ledger := &fakeLeiosAnnouncementLedger{
+		// The first announcement's slot reads as long expired; the second
+		// (later) one reads as fresh -- otherwise both bindings would always
+		// expire together and the test would not distinguish "still rejects
+		// a stale record" from "now genuinely accepts a fresh one".
+		slotTimeFunc: func(slot uint64) time.Time {
+			if slot == later {
+				return time.Now()
+			}
+			return time.Now().Add(-2 * leiosNotifyMaxAnnouncementAge)
+		},
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ledger,
+	})
+
+	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(blockRaw))
+
+	// A second, independent announcement of the same hash at a different
+	// slot must be accepted once the first binding has aged out -- not
+	// rejected as inconsistent with a stale record.
+	announceTestEndorserBlock(t, o, later, ebHash, len(blockRaw))
+
+	slot, ok := o.leiosAnnouncedSlotLocked(point.Hash)
+	require.True(t, ok, "the new announcement must now be the live binding")
+	require.Equal(t, later, slot)
 }
 
 // TestFetchEndorserBlockByPointRejectsStaleReloadedSlot is the P1 regression
@@ -790,4 +865,73 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 			"closure wait to resolve once the slot is verified",
 		),
 	)
+}
+
+// lockProbingVoteHandler's HandleEndorserBlock acquires leiosAnnouncementsMu
+// itself before delegating, the way a real handler could legitimately need
+// to (e.g. to cross-check announcement state). If bindLeiosEndorserBlockSlot's
+// publish step still ran while recordLeiosAnnouncement held that same lock,
+// this self-deadlocks instead of merely looking suspicious.
+type lockProbingVoteHandler struct {
+	*fakeLeiosVoteHandler
+	o *Ouroboros
+}
+
+func (l *lockProbingVoteHandler) HandleEndorserBlock(
+	slot uint64,
+	ebHash lcommon.Blake2b256,
+) {
+	l.o.leiosAnnouncementsMu.Lock()
+	l.o.leiosAnnouncementsMu.Unlock()
+	l.fakeLeiosVoteHandler.HandleEndorserBlock(slot, ebHash)
+}
+
+// TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock is the
+// regression for the cubic P2 finding: bindLeiosEndorserBlockSlot's promotion
+// used to publish (vote emission, pipeline observation, persistence enqueue)
+// while recordLeiosAnnouncement still held leiosAnnouncementsMu, a lock
+// shared by every concurrent announcement. A vote handler that itself needs
+// that lock would then deadlock. The goroutine here is bounded by a timeout
+// so a regression shows up as a clean test failure rather than a hung test
+// binary; recordTestLeiosAnnouncementNoFail (not recordTestLeiosAnnouncement)
+// keeps require calls off that goroutine (cubic review).
+func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
+	t *testing.T,
+) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 250)
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	votes := &lockProbingVoteHandler{
+		fakeLeiosVoteHandler: &fakeLeiosVoteHandler{},
+		o:                    o,
+	}
+	o.leiosVotes = votes
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- recordTestLeiosAnnouncementNoFail(o, headerRaw)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"recordLeiosAnnouncement deadlocked: publish must run after " +
+				"releasing leiosAnnouncementsMu",
+		)
+	}
+	require.Len(t, votes.ebs, 1)
 }

@@ -1633,10 +1633,22 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		source,
 		relay,
 	)
+	// bindLeiosEndorserBlockSlot's reconciliation runs while
+	// leiosAnnouncementsMu is still held, for the atomicity reasons above; its
+	// returned publish step runs only after the unlock below, so vote,
+	// pipeline, and persistence handlers never run under a mutex shared by
+	// every concurrent announcement.
+	var publish func()
 	if err == nil {
-		o.bindLeiosEndorserBlockSlot(ebHash.Bytes(), header.SlotNumber())
+		publish = o.bindLeiosEndorserBlockSlot(
+			ebHash.Bytes(),
+			header.SlotNumber(),
+		)
 	}
 	o.leiosAnnouncementsMu.Unlock()
+	if publish != nil {
+		publish()
+	}
 	return err
 }
 
@@ -1670,8 +1682,16 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 			"announcement size is inconsistent with a previously observed endorser block",
 		)
 	}
+	// leiosAnnouncedSlotLocked, not a raw map read: unlike ebSize (a property
+	// of the content-addressed bytes the hash commits to, so always identical
+	// across every legitimate occurrence), the slot is extrinsic and the same
+	// hash can legitimately recur at a different slot once the earlier
+	// binding has aged out. A raw read here would keep rejecting a genuine
+	// later announcement of the same hash as "inconsistent" forever, the same
+	// bug leiosAnnouncedSlotLocked's expiry check was already added to fix
+	// for the offer/store path (cubic review; issue #3513).
 	slot := header.SlotNumber()
-	if previousSlot, exists := o.leiosAnnouncementSlots[ebKey]; exists &&
+	if previousSlot, exists := o.leiosAnnouncedSlotLocked(ebHash.Bytes()); exists &&
 		previousSlot != slot {
 		return errors.New(
 			"announcement slot is inconsistent with a previously observed endorser block",

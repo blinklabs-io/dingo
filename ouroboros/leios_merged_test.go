@@ -50,16 +50,26 @@ import (
 type fakeLeiosAnnouncementLedger struct {
 	currentSlot uint64
 	slotTime    time.Time
-	staleness   ledger.LeiosAnnouncementOCINStaleness
-	err         error
-	validated   int
+	// slotTimeFunc, when set, overrides slotTime with a per-slot mapping --
+	// e.g. so a test can make one slot's binding read as expired while
+	// another's does not. Every other caller leaves it nil and gets the
+	// single fixed slotTime as before.
+	slotTimeFunc func(uint64) time.Time
+	staleness    ledger.LeiosAnnouncementOCINStaleness
+	err          error
+	validated    int
 }
 
 func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
 	return f.currentSlot, nil
 }
 
-func (f *fakeLeiosAnnouncementLedger) SlotToTime(uint64) (time.Time, error) {
+func (f *fakeLeiosAnnouncementLedger) SlotToTime(
+	slot uint64,
+) (time.Time, error) {
+	if f.slotTimeFunc != nil {
+		return f.slotTimeFunc(slot), nil
+	}
 	return f.slotTime, nil
 }
 
