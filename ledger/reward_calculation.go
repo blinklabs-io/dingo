@@ -2594,10 +2594,9 @@ func (ls *LedgerState) rewardParameters(
 			performanceEpochRow.EraId, performanceEpoch,
 		)
 	}
-	performancePParams, err := ls.db.GetPParams(
+	performancePParams, err := ls.loadPersistedProtocolParameters(
 		performanceEpoch,
-		performanceEraDesc.Id,
-		performanceEraDesc.DecodePParamsFunc,
+		*performanceEraDesc,
 		txn,
 	)
 	if err != nil {

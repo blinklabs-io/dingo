@@ -105,7 +105,11 @@ func TestDeriveRewardInputsReconciles(t *testing.T) {
 	b := byPool[hex28(0xBB)]
 	require.NotNil(t, b)
 	require.Equal(t, uint64(7_000), b.delegated)
-	require.Zero(t, b.owner, "a pool with no owner delegating has no owner stake")
+	require.Zero(
+		t,
+		b.owner,
+		"a pool with no owner delegating has no owner stake",
+	)
 	require.Equal(t, uint64(1), b.delegators)
 }
 

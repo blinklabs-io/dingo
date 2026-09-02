@@ -67,7 +67,10 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 	poolKeyHash := bytes.Repeat([]byte{0x77}, 28)
 	txn := db.MetadataTxn(true)
 	require.NoError(t, importOpCertCounters(
-		db.Metadata(), map[string]uint64{string(poolKeyHash): 490}, 100, txn.Metadata(),
+		db.Metadata(),
+		map[string]uint64{string(poolKeyHash): 490},
+		100,
+		txn.Metadata(),
 	))
 	require.NoError(t, txn.Commit())
 	txn.Release()

@@ -534,8 +534,11 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 				// The misreported era must still decode, otherwise the test
 				// would pass for the wrong reason.
 				_, err = gledger.NewBlockFromCbor(tc.claimedN, raw)
-				require.NoError(t, err,
-					"cross-era decode must succeed for this test to be meaningful")
+				require.NoError(
+					t,
+					err,
+					"cross-era decode must succeed for this test to be meaningful",
+				)
 			}
 
 			db := newTestDB(t)

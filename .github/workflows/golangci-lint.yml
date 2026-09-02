@@ -11,7 +11,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Same grouping as go-test.yml, for the same reason: the github.ref fallback
+  # put every main push in one group, so a merge cancelled the lint run for
+  # the commit before it and that commit went unlinted. Tag pushes were never
+  # affected, since each tag is a distinct ref. Pull-request runs keep
+  # superseding themselves. See the longer explanation in go-test.yml.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:

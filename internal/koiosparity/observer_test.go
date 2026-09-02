@@ -221,8 +221,11 @@ func TestFetchAccountsIfNeededSkipsPreStakingEpoch(t *testing.T) {
 	}
 
 	require.NoError(t, o.fetchAccountsIfNeeded(context.Background(), 0))
-	require.Zero(t, requests.Load(),
-		"pre-staking account parity is empty by construction and must not call Koios")
+	require.Zero(
+		t,
+		requests.Load(),
+		"pre-staking account parity is empty by construction and must not call Koios",
+	)
 }
 
 // seedDingoEpochAggregate writes epoch_summary at koiosEpoch-1 (the "stake

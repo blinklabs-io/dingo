@@ -226,19 +226,21 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
+	var hasReg bool
+	var regLatestSlot uint64
+	var regLatestCertID uint
 	if len(pool.Registration) > 0 {
 		var latestIdx int
-		var latestSlot uint64
-		var latestCertID uint
 		for i, reg := range pool.Registration {
 			// Use CertificateID for deterministic disambiguation when slots are equal
-			if reg.AddedSlot > latestSlot ||
-				(reg.AddedSlot == latestSlot && reg.CertificateID > latestCertID) {
-				latestSlot = reg.AddedSlot
-				latestCertID = reg.CertificateID
+			if reg.AddedSlot > regLatestSlot ||
+				(reg.AddedSlot == regLatestSlot && reg.CertificateID > regLatestCertID) {
+				regLatestSlot = reg.AddedSlot
+				regLatestCertID = reg.CertificateID
 				latestIdx = i
 			}
 		}
+		hasReg = true
 		reg := pool.Registration[latestIdx]
 		tmp := lcommon.PoolRegistrationCertificate{
 			CertType: uint(lcommon.CertificateTypePoolRegistration),
@@ -290,18 +292,37 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		currentReg = &tmp
 	}
+	// pendingEpoch reports the target epoch of the pool's latest retirement
+	// certificate -- the one most recently added by (AddedSlot,
+	// CertificateID), not the maximum epoch value across every retirement
+	// row: a later retirement certificate replaces the prior schedule even
+	// when it moves the target epoch earlier (retire@10 then retire@5 must
+	// report 5, not 10). A later pool registration cancels a pending
+	// retirement -- mirroring poolIsActive's ordering rule
+	// (internal/test/conformance/state_provider.go) -- so pendingEpoch is
+	// nil whenever the latest registration was added after the latest
+	// retirement.
 	var pendingEpoch *uint64
 	if len(pool.Retirement) > 0 {
-		var latestEpoch uint64
-		var found bool
-		for _, r := range pool.Retirement {
-			if !found || r.Epoch > latestEpoch {
-				latestEpoch = r.Epoch
-				found = true
+		var retLatestIdx int
+		var retLatestSlot uint64
+		var retLatestCertID uint
+		var hasRet bool
+		for i, r := range pool.Retirement {
+			if !hasRet || r.AddedSlot > retLatestSlot ||
+				(r.AddedSlot == retLatestSlot && r.CertificateID > retLatestCertID) {
+				retLatestSlot = r.AddedSlot
+				retLatestCertID = r.CertificateID
+				retLatestIdx = i
+				hasRet = true
 			}
 		}
-		if found {
-			pendingEpoch = &latestEpoch
+		registrationSupersedesRetirement := hasReg &&
+			(regLatestSlot > retLatestSlot ||
+				(regLatestSlot == retLatestSlot && regLatestCertID > retLatestCertID))
+		if hasRet && !registrationSupersedesRetirement {
+			epoch := pool.Retirement[retLatestIdx].Epoch
+			pendingEpoch = &epoch
 		}
 	}
 	return currentReg, pendingEpoch, nil
@@ -747,19 +768,20 @@ func (lv *LedgerView) DRepDelegation(
 	}, nil
 }
 
-// Constitution returns the current constitution.
-// Returns nil if no constitution has been established on-chain.
+// Constitution returns the enacted constitution: its anchor URL, anchor
+// hash, and optional guardrails policy hash.
+//
+// Constitution state that is missing or malformed fails closed with
+// governance.ErrConstitutionUnavailable; a constitution store that cannot
+// be read at all returns the wrapped store error. Neither reports an
+// empty-but-valid constitution, which gouroboros' guardrails rule would
+// read as "no guardrails script required".
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 	constitution, err := lv.ls.db.GetConstitution(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get constitution: %w", err)
 	}
-	if constitution == nil {
-		return nil, nil
-	}
-	// Constitution in gouroboros is currently an empty placeholder struct.
-	// Return a non-nil pointer to indicate a constitution exists.
-	return &lcommon.Constitution{}, nil
+	return governance.ConstitutionFromModel(constitution)
 }
 
 // TreasuryValue returns the current treasury value.

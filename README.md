@@ -616,6 +616,17 @@ The API-mode measurement was taken on 2026-08-30/31 against approximately
 4.6M Preview blocks. The backfill processed 6.86M transactions at roughly
 64 blocks per second.
 
+The Preview API path was also measured in a profiled run on 2026-08-31/09-01
+using the SQLite bulk-load pragmas and a temporary Mithril artifact cache. It
+completed in **7h 36m 07s** end-to-end, including the historical metadata
+backfill (24,547s) and deferred index rebuild (16m). The earlier Preview API
+baseline was approximately 20h 53m, so this run used 63.6% less elapsed time.
+The approximately 30 GB Mithril cache is temporary and can be removed after
+the snapshot is imported. Peak bootstrap space was approximately 76 GB while
+the cache was present (46 GB database plus 30 GB cache); after cleanup, the
+database requires approximately 46 GB and a fresh bootstrap needs approximately
+61 GB for the database plus the 15 GB snapshot.
+
 ### Disk Space Requirements
 
 Bootstrapping requires temporary disk space for both the downloaded snapshot and the Dingo database:
@@ -625,6 +636,7 @@ Bootstrapping requires temporary disk space for both the downloaded snapshot and
 | mainnet |      ~180 GB | ~200+ GB |      ~400 GB |
 | preprod |       ~60 GB |   ~80 GB |      ~150 GB |
 | preview |       ~15 GB |   ~25 GB |       ~50 GB |
+| preview (API mode) | ~15 GB | ~46 GB | ~61 GB minimum (~76 GB peak during bootstrap) |
 
 These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
 
@@ -1020,7 +1032,11 @@ container generates fresh pool keys and genesis files for either profile.
 
 ### Running the Automated Tests
 
-The test suite builds the Dingo Docker image, starts all containers, waits for health checks, and runs Go integration tests tagged with `//go:build devnet`:
+The test suite builds the Dingo Docker image, starts all containers, waits for
+health checks, and runs Linux-only Go integration tests tagged with
+`//go:build linux && devnet`. Conformance-only scenarios additionally require
+`devnet_conformance`, while Dingo-only scenarios require
+`!devnet_conformance`:
 
 ```bash
 cd internal/test/devnet/
