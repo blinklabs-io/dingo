@@ -109,16 +109,17 @@ func isRoutableAddr(address string) bool {
 // covers only RFC 1918 and RFC 4193, so each of these otherwise reads as
 // routable.
 //
-// The list is limited to ranges that either reach nothing or reach a host we
-// did not intend. RFC 6598 shared address space is the one that matters: a
-// carrier routes it internally, so dialing an advertised 100.64.0.0/10 address
-// can reach another subscriber's host rather than failing.
+// RFC 6598 shared address space is the one that matters: a carrier routes it
+// internally, so dialing an advertised 100.64.0.0/10 address can reach another
+// subscriber's host rather than failing. The rest reach nothing at all.
 //
-// RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are deliberately absent.
-// They are not routed anywhere, so the worst a peer advertising one costs is a
-// failed dial, and this repository uses them as stand-ins for public addresses
-// in tests — see peergov/ledger_dial_security_test.go. Rejecting them would
-// break that suite without closing a reachable path.
+// RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are absent, tracked in
+// #3792. They are not routed either, so a peer advertising one costs a failed
+// dial and a peer-list slot until the entry is dropped, rather than reaching a
+// host we did not intend. That is a weaker case than the ranges above, and
+// rejecting them requires migrating the ~113 fixtures across 19 files that use
+// them as public stand-ins, some of which depend on subnet distribution. That
+// migration is a decision in its own right, not a detail of this policy.
 var unreachablePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("100.64.0.0/10"), // RFC 6598 shared address space
 	netip.MustParsePrefix("192.0.0.0/24"),  // RFC 6890 IETF protocol assignments

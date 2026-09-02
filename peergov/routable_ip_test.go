@@ -23,9 +23,9 @@ import (
 
 // TestIsRoutableIP pins the routability policy shared by gossip, ledger, and
 // peer-sharing candidates. The accepted cases are as load-bearing as the
-// rejected ones: RFC 5737 and RFC 3849 addresses stay accepted because this
-// package uses them as stand-ins for public addresses, so a future tightening
-// that breaks ledger_dial_security_test.go fails here first with the reason.
+// rejected ones: RFC 5737 and RFC 3849 addresses stay accepted pending #3792,
+// so a tightening that breaks the fixtures in ledger_dial_security_test.go and
+// elsewhere fails here first, with the reason and the tracking issue.
 func TestIsRoutableIP(t *testing.T) {
 	tests := []struct {
 		name string
@@ -66,8 +66,8 @@ func TestIsRoutableIP(t *testing.T) {
 		{"ipv4 below reserved", "239.255.255.255", false}, // multicast
 		{"ipv4 outside protocol assignments", "192.0.1.1", true},
 
-		// Deliberately accepted: not routed anywhere, and used as public
-		// stand-ins by this package's tests.
+		// Accepted pending the decision in #3792: not routed anywhere, and
+		// used as public stand-ins across ~19 files' fixtures.
 		{"ipv4 test-net-1", "192.0.2.1", true},
 		{"ipv4 test-net-2", "198.51.100.1", true},
 		{"ipv4 test-net-3", "203.0.113.1", true},
