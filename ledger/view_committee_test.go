@@ -703,6 +703,10 @@ func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 					cert.ColdCredential = credential.credential
 				}
 				tx := &conway.ConwayTransaction{
+					// Committee certificates are only inspected for a
+					// phase-2-valid transaction, so the fixture must declare
+					// validity or the rule under test never runs.
+					TxIsValid: true,
 					Body: conway.ConwayTransactionBody{
 						TxCertificates: []lcommon.CertificateWrapper{{
 							Type:        certificate.Type(),

@@ -89,7 +89,15 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
-// Compile-time guard for the tag-aware committee validation capability.
+// The Conway committee certificate and voter rules discover this capability
+// with a runtime type assertion and fail closed when it misses, so signature
+// drift would silently reject every transaction whose validation performs a
+// committee credential lookup rather than fail to build.
+//
+// eras.CommitteeCredentialState has the same method set as gouroboros
+// ledger/common.CommitteeCredentialState, so this also proves *LedgerView
+// satisfies the upstream capability. Point it at the upstream type once the
+// gouroboros pin exports it.
 var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
 
 // Keep the optional Conway governance capability wired to the concrete view
@@ -103,10 +111,6 @@ var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 // (DRepDelegationStateUnavailableError), so signature drift here is a
 // consensus-level break. Make it a compile error instead.
 var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
-
-// These methods intentionally compile against the released Gouroboros API as
-// ordinary methods. Once the credential-aware committee capability is
-// released, this assertion can be enabled without changing Dingo's provider.
 
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
