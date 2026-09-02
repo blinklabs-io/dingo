@@ -466,6 +466,23 @@ func TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide(t *testing.T) {
 		Spendable:   false,
 	}).Error)
 
+	// A second pool in the same epoch with no reward_account_output rows of
+	// its own. "Epoch-wide" means it is answerable too, at zero — a per-pool
+	// presence rule would report it as pruned and turn a correct zero into a
+	// dingo_db_missing ERROR.
+	quiet := testPoolKeyHash(t, 0x04)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    quiet,
+		DelegatedStake: types.Uint64(1_000),
+		DelegatorCount: 1,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             stakeEpoch,
+		PoolKeyHash:       quiet,
+		MemberRewardTotal: types.Uint64(0),
+	}).Error)
+
 	m, err := db.GetPoolEpochDataMap(
 		context.Background(), stakeEpoch, paramEpoch,
 	)
@@ -477,6 +494,12 @@ func TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide(t *testing.T) {
 	assert.Equal(t, "0", data.SpendableMemberRewardTotal,
 		"nothing was credited to a member")
 	assert.Equal(t, uint64(77), data.PoolUnspendable)
+
+	quietData := m[hex.EncodeToString(quiet)]
+	require.NotNil(t, quietData)
+	assert.True(t, quietData.SpendableMemberRewardPresent,
+		"presence is a property of the epoch, not of the pool")
+	assert.Equal(t, "0", quietData.SpendableMemberRewardTotal)
 }
 
 // TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned is the other
