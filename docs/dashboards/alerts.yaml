@@ -27,3 +27,51 @@ groups:
         annotations:
           summary: "Dingo has no outgoing peers on {{ $labels.network }}"
           description: "Node {{ $labels.instance }} on {{ $labels.network }}: zero outgoing connections for 5+ minutes. Node cannot sync."
+
+  # node-parity (blinklabs-io/dingo#1900): cross-node ledger-state
+  # comparison against a reference cardano-node. See cmd/node-parity and
+  # docs/dashboards/prometheus.yaml's node-parity/cardano-node-reference jobs.
+  - name: node-parity
+    rules:
+      - alert: NodeParityDivergence
+        # increase(), not the absolute counter value: a metrics-server
+        # restart resets the counter to zero and must not re-fire this on
+        # divergences already reported before the restart.
+        expr: increase(node_parity_divergence_total{network=~".+"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "node-parity found ledger-state divergence on {{ $labels.network }}"
+          description: "node-parity ({{ $labels.instance }}) reported a {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} in the last hour."
+
+      - alert: NodeParityDown
+        expr: up{job="node-parity"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity is not reachable"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} (job node-parity) for 5+ minutes."
+
+      - alert: NodeParityNotChecking
+        # watch is block-triggered (a check fires the moment either node's
+        # tip changes), with --fallback-interval (default 2m) as a backstop
+        # if a watcher's subscription silently stalls -- so real activity
+        # (completed or skipped) is expected roughly every block, and never
+        # less often than the fallback interval. Sums checks_total
+        # (completed) and checks_skipped_total (discarded, e.g. because the
+        # two nodes didn't hold a stable common tip) rather than just
+        # checks_total alone: a run of legitimate skips during a noisy
+        # stretch must not look identical to a dead tool.
+        expr: |
+          (
+            rate(node_parity_checks_total{network=~".+"}[10m])
+            + sum without (reason) (rate(node_parity_checks_skipped_total{network=~".+"}[10m]))
+          ) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity has not attempted a check on {{ $labels.network }}"
+          description: "{{ $labels.instance }} (job node-parity) has recorded neither a completed nor a skipped check in the last 10 minutes, well past its --fallback-interval -- the tool itself is stuck (its watchers are not attempting anything at all), not merely discarding cycles."

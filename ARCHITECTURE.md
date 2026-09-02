@@ -6400,6 +6400,95 @@ every one of #3097's own tests passes unmodified.
   observer. 0 for either (the default) selects the package default —
   existing `--accounts` behavior is unchanged unless explicitly tuned.
 
+### Node Parity (`cmd/node-parity/`, `internal/nodeparity/`)
+
+An operator tool that compares Dingo's and a reference cardano-node's ledger
+state (protocol parameters, stake distribution, whole UTxO set) over their
+node-to-client LocalStateQuery interfaces, on preview or preprod
+(blinklabs-io/dingo#1900). Unlike the Koios Parity Tracker above (which reads
+both sides from a database, after the fact), this tool talks Ouroboros NtC
+directly to two live, independently-running node processes it does not
+start, stop, or otherwise manage.
+
+**Architecture:**
+
+```
+internal/nodeparity/       # shared library, untagged and importable
+  dial.go                  # Dial: NtC connection by address (leading "/" = Unix socket, else TCP)
+  tip.go                   # Tip, ReadTip: one-shot ChainSync GetCurrentTip, not a subscription
+  snapshot.go               # Snapshot, QuerySnapshot, SnapshotAtTip: one LocalStateQuery session's worth of state
+  diff.go                   # Diff, DiffSnapshots: per-field comparison result
+  check.go                  # CheckResult, Check, sandwichOK: the tip-sandwich orchestration
+  watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect
+
+cmd/node-parity/           # thin Cobra CLI wrapper
+  main.go                  # root command (default action: one check, same as 'check')
+  check.go                  # one-shot subcommand
+  watch.go                  # block-triggered subcommand, --fallback-interval as a backstop
+  metrics.go                # Prometheus counters, network-labeled like the real node's own
+```
+
+**Design: on-demand `check`, plus block-triggered `watch`.** `check` runs one
+comparison cycle and exits non-zero on divergence or a discarded cycle. `watch`
+originally polled on a fixed `--interval` matching `cmd/koios-parity`'s own
+shape, but that meant a 15-minute gap left roughly 45 blocks (at ~20s each)
+completely unchecked between cycles — acceptable for koios-parity, whose
+epoch-closed reward data only changes once an epoch, but not for block-level
+ledger state, which changes every block. `watch` now follows both nodes' live
+chains instead (`nodeparity.Watcher`, one persistent ChainSync session per
+node) and runs a `Check` the moment either one's tip changes, so it reacts
+within a fraction of a second of a new block landing rather than missing
+everything produced between clock ticks. `--fallback-interval` (default 2m)
+still runs a check on a fixed schedule regardless, purely as a backstop in
+case a watcher's subscription silently stalls without erroring. Comparing the
+full UTxO set on every block is tractable on preview/preprod's much smaller
+UTxO set than mainnet's (see `ledger/queries_utxowhole.go`'s own doc comment
+on `GetUTxOWhole`'s cost, which is specifically about mainnet scale); this has
+not been measured against a real live node in development, only reasoned from
+that scale difference.
+
+Block-triggering narrows, but does not eliminate, the tip-sandwich's race: a
+check still has to finish before the *next* block lands, it just now starts
+immediately after the previous one instead of at a random point up to an
+interval later. A `Watcher` reconnects on its own (bounded exponential
+backoff, matching `internal/test/devnet/observer.go`'s pattern) if its
+session drops, so a node restart does not require the operator to do
+anything. The only way to remove the race entirely — guaranteeing every
+block gets compared, not just attempted — would be embedding this logic
+inside Dingo itself (reading its own ledger state synchronously as each
+block applies, no network round trip to race) paired with cardano-node's own
+working `Acquire(point)`; that is a materially different architecture (see
+below) and is not what this tool does.
+
+**The tip-sandwich, and why:** Dingo's LocalStateQuery `Acquire`
+(`ouroboros/localstatequery.go`) always answers at its live tip regardless
+of the requested point (blinklabs-io/dingo#382 is still open), so there is
+no way to pin "ledger state as of exactly block N" on the Dingo side today.
+Each `Check` cycle instead reads both nodes' tips (`ReadTip`, a one-shot
+ChainSync `GetCurrentTip`), runs the LocalStateQuery session against both
+only if they agree, and re-reads both tips afterward — discarding
+(`CheckResult.Skipped`, not failing) the cycle if either moved during the
+round trip, since the two halves of a comparison spanning a tip change would
+not describe the same block. `sandwichOK` is this decision as a pure
+function, unit-tested without a live node; `Check` is the I/O around it,
+using one already-dialed connection per node for the whole cycle so the
+ChainSync and LocalStateQuery reads share a single session per node.
+
+**Metrics:** `node_parity_checks_total`, `node_parity_checks_skipped_total{reason}`
+(`reason`: `tip_mismatch`/`tip_advanced`), and
+`node_parity_divergence_total{field}` (`field`: `protocol_params`/
+`stake_distribution`/`utxo`), registered under a registry wrapped with a
+`network` const label the same way the real node's own
+`configWrapPromRegistry` (root `config.go`) labels `cardano_node_metrics_*` —
+see `docs/dashboards/prometheus.yaml`'s `node-parity`/`cardano-node-reference`
+jobs and `docs/dashboards/alerts.yaml`'s `node-parity` rule group. No
+Slack/webhook/PagerDuty integration; Prometheus/Grafana is the alerting
+surface for this tool, matching the rest of this repo's operator tooling.
+Unlike `internal/koiosparity`'s `FatalFunc`/`strict` precedent, there is no
+mode that kills a node on mismatch: live cross-node disagreement is often
+transient (propagation delay, short forks) rather than a confirmed bug, so
+the standalone tool only ever reports and retries on the next cycle.
+
 ### Bark (`bark/`)
 
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive

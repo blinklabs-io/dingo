@@ -1,4 +1,4 @@
-//go:build devnet && devnet_conformance
+//go:build linux && devnet && devnet_conformance
 
 // Copyright 2026 Blink Labs Software
 //
@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/blinklabs-io/dingo/internal/test/devnet"
 	"github.com/stretchr/testify/require"
 )
@@ -88,11 +89,11 @@ func TestLedgerStateConsensus(t *testing.T) {
 			cfg.ExpectedBlockTime(),
 		)
 
-		diffs := devnet.DiffLedgerStates(dingoState, cardanoState)
-		require.Empty(t, diffs,
+		diff := nodeparity.DiffSnapshots(dingoState, cardanoState)
+		require.True(t, diff.Empty(),
 			"ledger state diverged between dingo-producer and"+
 				" cardano-producer at slot %d (block %d):\n%s",
-			tip.SlotNumber, tip.BlockNumber, strings.Join(diffs, "\n"),
+			tip.SlotNumber, tip.BlockNumber, strings.Join(diff.Lines(), "\n"),
 		)
 
 		t.Logf(
@@ -131,7 +132,7 @@ func sampleLedgerStateAtStableTip(
 	dingoNtc, cardanoNtc string,
 	magic uint32,
 	blockTime time.Duration,
-) (dingoState, cardanoState *devnet.LedgerState, tip devnet.ChainTip) {
+) (dingoState, cardanoState *nodeparity.Snapshot, tip devnet.ChainTip) {
 	t.Helper()
 
 	const pollInterval = 2 * time.Second
@@ -139,7 +140,7 @@ func sampleLedgerStateAtStableTip(
 
 	var (
 		attempt                int
-		resultDingo, resultRef *devnet.LedgerState
+		resultDingo, resultRef *nodeparity.Snapshot
 		resultTip              devnet.ChainTip
 	)
 	require.Eventually(t, func() bool {
@@ -170,7 +171,7 @@ func sampleLedgerStateAtStableTip(
 			return false
 		}
 
-		ds, err := devnet.LedgerStateAtTip(dingoNtc, magic)
+		ds, err := nodeparity.SnapshotAtTip(dingoNtc, magic)
 		if err != nil {
 			t.Logf(
 				"sampleLedgerStateAtStableTip: attempt %d: dingo-producer"+
@@ -178,7 +179,7 @@ func sampleLedgerStateAtStableTip(
 			)
 			return false
 		}
-		cs, err := devnet.LedgerStateAtTip(cardanoNtc, magic)
+		cs, err := nodeparity.SnapshotAtTip(cardanoNtc, magic)
 		if err != nil {
 			t.Logf(
 				"sampleLedgerStateAtStableTip: attempt %d: cardano-producer"+

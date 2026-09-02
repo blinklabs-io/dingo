@@ -488,13 +488,14 @@ chain tip/growth) can be compared against the reference implementation
 
 `internal/test/devnet/endpoints_conformance.go`'s `DingoProducerNtcAddr()`
 and `CardanoProducerNtcAddr()` return these host addresses, and
-`internal/test/devnet/ledger_state.go`'s `LedgerStateAtTip(addr, magic)`
-queries one node's current protocol parameters, stake distribution, and
-whole UTxO set (normalized into a comparable form) via a single acquired
-LocalStateQuery session; `DiffLedgerStates(a, b)` reports every divergence
-between two such snapshots.
+`internal/nodeparity`'s `SnapshotAtTip(addr, magic)` (shared with
+`cmd/node-parity`; this scenario is not the only caller) queries one node's
+current protocol parameters, stake distribution, and whole UTxO set
+(normalized into a comparable form) via a single acquired LocalStateQuery
+session; `DiffSnapshots(a, b)` reports every divergence between two such
+snapshots.
 
-`GetStakeDistribution` and `GetUTxOWhole` (the two queries `LedgerStateAtTip`
+`GetStakeDistribution` and `GetUTxOWhole` (the two queries `SnapshotAtTip`
 needs beyond the ones already used elsewhere in this harness) did not have
 server-side support in Dingo before this scenario — they were part of the
 `// TODO (#394)` block in `ledger/queries.go`'s query dispatcher. They are
@@ -507,7 +508,7 @@ Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) does not yet
 implement point-specific ledger views: every `Acquire` — even
 `Acquire(point)` for a specific historical block — is answered against the
 node's live tip (tracked upstream as blinklabs-io/dingo#382). Until that
-lands, `LedgerStateAtTip` only supports "acquire the current volatile tip",
+lands, `SnapshotAtTip` only supports "acquire the current volatile tip",
 and comparing two nodes at the same point requires confirming via NtN
 chain-tip polling that both report an identical tip immediately before and
 after the LocalStateQuery round trip — see `TestLedgerStateConsensus` for
@@ -661,7 +662,6 @@ harness and the compose port mappings always agree.
 | `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |
 | `endpoints_conformance.go`   | Conformance-mode node endpoints, plus `DingoProducerNtcAddr()` / `CardanoProducerNtcAddr()` (`//go:build devnet && devnet_conformance`) |
 | `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (build tag `devnet`) |
-| `ledger_state.go`            | `LedgerStateAtTip` / `DiffLedgerStates`: normalized protocol-params/stake-distribution/whole-UTxO snapshot and diff for cross-node ledger-state comparison (build tag `devnet`) |
 | `credentials.go`             | Loads genesis stake credentials for the CIP-50 scenario (build tag `devnet`) |
 | `harness_test.go`, `credentials_test.go` | Tests for the harness/credential helpers themselves (build tag `devnet`) |
 | `scenarios/`                 | Devnet test scenarios (one or more `Test*` per file, gated per the Test scenarios table above) |
