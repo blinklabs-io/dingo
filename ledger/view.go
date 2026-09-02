@@ -917,8 +917,16 @@ func (lv *LedgerView) committeeSnapshot() (
 	return state.currentEpoch.EpochId, state.currentPParams
 }
 
-// CommitteeHotCredentialMember resolves an active committee authorization by
-// exact tagged hot credential identity.
+// CommitteeHotCredentialMember resolves a committee authorization by exact
+// tagged hot credential identity.
+//
+// Deliberately not filtered by term expiry. The Conway GOV rule resolves a
+// committee voter against the authorization map, which excludes only resigned
+// members, and its protocol-version-11 elected-voter gate intersects committee
+// membership by cold credential alone. Expiry is applied later, in the RATIFY
+// tally and in the committeeMinSize active count, so skipping an expired
+// member here would raise UnknownVoterError on a vote cardano-ledger accepts.
+// A resigned member is excluded, matching the upstream authorization set.
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
@@ -926,7 +934,6 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
 	}
-	currentEpoch, _ := lv.committeeSnapshot()
 	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
@@ -943,8 +950,7 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		if err != nil {
 			return nil, err
 		}
-		if member == nil || member.Resigned ||
-			member.ExpiryEpoch < currentEpoch {
+		if member == nil || member.Resigned {
 			continue
 		}
 		return member, nil

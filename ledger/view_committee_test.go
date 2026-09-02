@@ -304,16 +304,31 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 	tests := []struct {
 		name       string
 		expiries   []uint64
+		resign     bool
 		wantMember bool
 	}{
 		{
-			name:       "shared credential with boundary-active member",
+			name:       "shared credential with seated member",
 			expiries:   []uint64{5, 6},
 			wantMember: true,
 		},
 		{
-			name:       "expired member",
+			// Term expiry is deliberately not applied on this path. The
+			// Conway GOV rule resolves a committee voter against the
+			// authorization map, which excludes only resigned members, and
+			// applies expiry later in the RATIFY tally and the
+			// committeeMinSize active count. Rejecting an expired member's
+			// vote here would diverge from cardano-ledger, which accepts it.
+			name:       "expired member still authorizes and votes",
 			expiries:   []uint64{4},
+			wantMember: true,
+		},
+		{
+			// Resignation is the exclusion the upstream authorization set
+			// does apply.
+			name:       "resigned member does not authorize",
+			expiries:   []uint64{6},
+			resign:     true,
 			wantMember: false,
 		},
 	}
@@ -383,6 +398,15 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 						uint64(i+1),
 						1,
 					)
+					if test.resign {
+						seedCommitteeCredentialResignation(
+							t,
+							db,
+							cold,
+							uint64(100+i),
+							2,
+						)
+					}
 				}
 				require.NoError(t, db.SetCommitteeMembers(members, nil))
 
@@ -392,13 +416,13 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 					require.NotNil(
 						t,
 						member,
-						"at least one active matching member must authorize the hot credential",
+						"a seated matching member must authorize the hot credential",
 					)
 				} else {
 					require.Nil(
 						t,
 						member,
-						"a member expired before the pinned epoch must not authorize the hot credential",
+						"a resigned member must not authorize the hot credential",
 					)
 				}
 

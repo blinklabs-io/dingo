@@ -776,8 +776,10 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		if err != nil {
 			return nil, err
 		}
-		if member == nil || member.Resigned ||
-			member.ExpiryEpoch < p.manager.currentEpoch {
+		// Not filtered by term expiry, matching
+		// LedgerView.CommitteeHotCredentialMember and the Conway GOV rule,
+		// which applies expiry only in the RATIFY tally.
+		if member == nil || member.Resigned {
 			continue
 		}
 		return member, nil

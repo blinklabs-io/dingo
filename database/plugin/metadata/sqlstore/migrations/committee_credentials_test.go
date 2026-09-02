@@ -73,7 +73,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	runTo(registry[:7])
+	runTo(registry[:8])
 	explicitZeroCold := []byte{0x55, 0x66}
 	_, err = db.Exec(
 		"INSERT INTO committee_member "+
@@ -163,7 +163,7 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 		return runner.Run(context.Background())
 	}
 
-	require.NoError(t, run(registry[:7]))
+	require.NoError(t, run(registry[:8]))
 	for slot := int64(1); slot <= 3; slot++ {
 		_, err = db.Exec(
 			"INSERT INTO committee_member (cold_cred_hash, expires_epoch, added_slot) VALUES (?, ?, ?)",
@@ -183,7 +183,7 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 		}
 		return originalBackfill(ctx, batch)
 	}
-	interruptedRegistry := append(append([]migrations.Migration{}, registry[:7]...), interrupted)
+	interruptedRegistry := append(append([]migrations.Migration{}, registry[:8]...), interrupted)
 	require.Error(t, run(interruptedRegistry))
 	require.NoError(t, run(registry))
 
