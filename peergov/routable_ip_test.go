@@ -84,6 +84,32 @@ func TestIsRoutableIP(t *testing.T) {
 		{"ipv4 above benchmarking", "198.20.0.0", true},
 		{"ipv4 below reserved", "239.255.255.255", false}, // multicast
 		{"ipv4 outside protocol assignments", "192.0.1.1", true},
+		{"ipv4 top of this network", "0.255.255.255", false},
+		{"ipv4 above this network", "1.0.0.0", true},
+		{"ipv4 below 6to4 anycast", "192.88.98.255", true},
+		{"ipv4 top of 6to4 anycast", "192.88.99.255", false},
+		{"ipv4 above 6to4 anycast", "192.88.100.0", true},
+		{
+			"ipv6 below benchmarking",
+			"2001:1:ffff:ffff:ffff:ffff:ffff:ffff",
+			true,
+		},
+		{"ipv6 top of benchmarking", "2001:2:0:ffff:ffff:ffff:ffff:ffff", false},
+		{"ipv6 above benchmarking", "2001:2:1::", true},
+		{"ipv6 above local-use translation", "64:ff9b:2::", true},
+		{
+			"ipv6 below orchid",
+			"2001:f:ffff:ffff:ffff:ffff:ffff:ffff",
+			true,
+		},
+		{
+			"ipv6 top of orchid",
+			"2001:1f:ffff:ffff:ffff:ffff:ffff:ffff",
+			false,
+		},
+		// ORCHIDv2 directly abuts the deprecated ORCHID block and IANA marks
+		// it globally reachable, so the /28 must not spill into it.
+		{"ipv6 orchidv2", "2001:20::1", true},
 
 		// Accepted pending the decision in #3792: not routed anywhere, and
 		// used as public stand-ins across ~19 files' fixtures.
