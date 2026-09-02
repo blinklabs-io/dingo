@@ -6050,6 +6050,29 @@ never the reverse.
   `nil` (the standalone CLI's `fetch` invoked without `--metadata-*`
   configured for accounts) — the universe then falls back to Koios's list
   alone.
+
+  The Koios half is cached in `koios_account_universe`, keyed by network, and
+  reused across epochs by `ResolveKoiosAccountUniverseCached`. The crawl is 304
+  sequential `/account_list` requests for Preview's 303k accounts, and the
+  in-process observer resolves the universe once per epoch rather than once per
+  run, so paying it every epoch left the observer falling monotonically behind
+  a node that closes a Preview epoch about every 25 seconds — never recovering,
+  and silent while it happened (issue #3796). A cached crawl is reused only
+  when it was taken no earlier than the end of the epoch being checked: an
+  account that earned a reward in a closed epoch registered before that epoch
+  ended, so a later crawl is complete for it, while an earlier one may be
+  missing an account and a short universe silently skips accounts. An epoch
+  carrying no end time is not reused against at all — there is no bound to
+  measure the crawl by, and a universe short one account skips it silently — so
+  it re-crawls. Whether a crawl is cached at all is recorded in
+  `koios_account_universe_state` rather than inferred from the address rows, so
+  a network whose `/account_list` is legitimately empty still has a reusable
+  crawl. A refresh that
+  fails is an error rather than a fallback to the stale set, for the same
+  reason. `GetAllAccountAddressesWithProgress` logs a line every 50 pages so a
+  long crawl is distinguishable from a stalled one; the logger is a parameter
+  rather than a client field because the same client serves the concurrent
+  chunk fetchers.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`
