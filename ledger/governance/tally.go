@@ -110,27 +110,31 @@ func LoadCommitteeVotingState(
 	// Collect non-expired cold credentials so we can batch-check
 	// resignation status. A member remains active through ExpiresEpoch
 	// (matching Cardano-ledger: currentEpoch <= termEpoch).
-	coldKeys := make([][]byte, 0, len(members))
+	coldCredentials := make([]models.CommitteeCredential, 0, len(members))
 	for _, member := range members {
 		if member.ExpiresEpoch < currentEpoch {
 			continue
 		}
-		coldKeys = append(coldKeys, member.ColdCredHash)
+		coldCredentials = append(coldCredentials, models.CommitteeCredential{
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredHash,
+			TermStartSlot: member.TermStartSlot,
+		})
 	}
 	// Resigned members must be excluded from the CC denominator per
 	// CIP-1694; otherwise they act as implicit No votes because they
 	// cannot cast a vote (no active hot-key authorization) but would
 	// still occupy a slot in ActiveMemberCount.
-	resigned, err := db.GetResignedCommitteeMembers(coldKeys, txn)
+	resigned, err := db.GetResignedCommitteeMembers(coldCredentials, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get resigned committee members: %w", err)
 	}
-	seated := make(map[string]struct{}, len(coldKeys))
-	for _, key := range coldKeys {
-		if resigned[string(key)] {
+	seated := make(map[string]struct{}, len(coldCredentials))
+	for _, credential := range coldCredentials {
+		if resigned[credential.Key()] {
 			continue
 		}
-		seated[string(key)] = struct{}{}
+		seated[credential.Key()] = struct{}{}
 	}
 
 	authorized, err := db.GetActiveCommitteeMembers(txn)
@@ -140,10 +144,17 @@ func LoadCommitteeVotingState(
 	memberHotCredentials := make([]string, 0, len(authorized))
 	hotCredentialPresence := make(map[string]struct{}, len(authorized))
 	for _, member := range authorized {
-		if _, ok := seated[string(member.ColdCredential)]; !ok {
+		coldCredential := models.CommitteeCredential{
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredential,
+		}
+		if _, ok := seated[coldCredential.Key()]; !ok {
 			continue
 		}
-		hotCredential := string(member.HotCredential)
+		hotCredential := models.CommitteeCredential{
+			CredentialTag: member.HotCredentialTag,
+			Credential:    member.HotCredential,
+		}.Key()
 		memberHotCredentials = append(memberHotCredentials, hotCredential)
 		hotCredentialPresence[hotCredential] = struct{}{}
 	}
@@ -642,8 +653,12 @@ func tallyCCVotes(
 
 	votesByHotCredential := make(map[string]uint8, len(votes))
 	for _, vote := range votes {
-		if _, ok := committeeState.HotCredentialPresence[string(vote.VoterCredential)]; ok {
-			votesByHotCredential[string(vote.VoterCredential)] = vote.Vote
+		credentialKey := models.CommitteeCredential{
+			CredentialTag: vote.VoterCredentialTag,
+			Credential:    vote.VoterCredential,
+		}.Key()
+		if _, ok := committeeState.HotCredentialPresence[credentialKey]; ok {
+			votesByHotCredential[credentialKey] = vote.Vote
 		}
 	}
 

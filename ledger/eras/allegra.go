@@ -164,12 +164,10 @@ func buildAllegraValidationRules() []indexedUtxoValidationRule {
 		allegra.UtxoValidationRules,
 		[]utxoValidationRuleSkip{
 			{
-				index:          allegraUtxoValidateFeeTooSmallRuleIndex,
 				validationFunc: allegra.UtxoValidateFeeTooSmallUtxo,
 				name:           "allegra.UtxoValidateFeeTooSmallUtxo",
 			},
 			{
-				index:          allegraUtxoValidateMaxTxSizeRuleIndex,
 				validationFunc: allegra.UtxoValidateMaxTxSizeUtxo,
 				name:           "allegra.UtxoValidateMaxTxSizeUtxo",
 			},
