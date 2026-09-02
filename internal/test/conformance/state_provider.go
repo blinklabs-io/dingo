@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -261,7 +262,8 @@ func poolIsActive(pool *models.Pool, currentEpoch uint64) bool {
 	if ret == nil {
 		return true
 	}
-	return registrationSupersedesRetirement(reg, ret) || currentEpoch < ret.Epoch
+	return registrationSupersedesRetirement(reg, ret) ||
+		currentEpoch < ret.Epoch
 }
 
 // registrationSupersedesRetirement reports whether reg was added after ret,
@@ -627,9 +629,25 @@ func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, err
 	return result, nil
 }
 
-// Constitution returns the current constitution
+// Constitution returns the enacted constitution -- anchor URL, anchor hash,
+// and optional guardrails policy hash -- read from the real backend, in the
+// same shape production's ledger.LedgerView.Constitution reports.
+//
+// It never falls back to the govState mirror: that mirror is seeded from
+// the same vector state LoadInitialState writes to the backend, so falling
+// back to it would let a backend that drops or cannot read a constitution
+// row still report the vector as passing. Missing or malformed
+// constitution state fails closed through
+// governance.ConstitutionFromModel, and a failed read is returned as the
+// wrapped store error.
 func (p *DingoStateProvider) Constitution() (*common.Constitution, error) {
-	return &common.Constitution{}, nil
+	stored, err := withBadConnRetry(func() (*models.Constitution, error) {
+		return p.manager.db.GetConstitution(nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup constitution: %w", err)
+	}
+	return governance.ConstitutionFromModel(stored)
 }
 
 // TreasuryValue returns the current treasury value

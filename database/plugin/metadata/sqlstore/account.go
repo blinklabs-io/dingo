@@ -166,16 +166,22 @@ func writeAccountImportBaseline(
 	if err != nil {
 		return err
 	}
+	var deposit any
+	if account.ImportDeposit != nil {
+		deposit = decimalUint64(*account.ImportDeposit)
+	}
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO account_import_baseline (
-    credential_tag, staking_key, pool, drep, drep_type, active, added_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?)
+    credential_tag, staking_key, pool, drep, drep_type, active, added_slot,
+    deposit_amount
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     pool = excluded.pool,
     drep = excluded.drep,
     drep_type = excluded.drep_type,
     active = excluded.active,
-    added_slot = excluded.added_slot`,
+    added_slot = excluded.added_slot,
+    deposit_amount = excluded.deposit_amount`,
 		account.CredentialTag,
 		account.StakingKey,
 		nullBytes(account.Pool),
@@ -183,10 +189,63 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 		drepType,
 		account.Active,
 		addedSlot,
+		deposit,
 	); err != nil {
 		return fmt.Errorf("write account import baseline: %w", err)
 	}
 	return nil
+}
+
+// GetAccountImportRegistrationByCredential returns the virtual registration
+// established by an import or genesis baseline. A nil Deposit means the
+// baseline predates deposit preservation; callers must not substitute the
+// current protocol-parameter value for an unknown historical deposit.
+func (s *Store) GetAccountImportRegistrationByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (*models.AccountImportRegistration, error) {
+	if len(stakingKey) == 0 {
+		return nil, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		active    bool
+		addedSlot int64
+		raw       sql.NullString
+	)
+	err = db.QueryRowContext(ctx, `
+SELECT active, added_slot, deposit_amount
+FROM account_import_baseline
+WHERE credential_tag = ? AND staking_key = ?`,
+		credentialTag,
+		stakingKey,
+	).Scan(&active, &addedSlot, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read account import registration: %w", err)
+	}
+	if !active {
+		return nil, nil
+	}
+	slot, err := checkedUint64(addedSlot)
+	if err != nil {
+		return nil, fmt.Errorf("read account import registration: %w", err)
+	}
+	ret := &models.AccountImportRegistration{AddedSlot: slot}
+	if raw.Valid {
+		deposit, err := parseUint64("account import deposit", raw.String)
+		if err != nil {
+			return nil, err
+		}
+		ret.Deposit = &deposit
+	}
+	return ret, nil
 }
 
 func readAccountImportBaseline(

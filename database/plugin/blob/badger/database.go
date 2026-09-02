@@ -535,9 +535,28 @@ func (d *BlobStoreBadger) Sync() error {
 	return nil
 }
 
-// NewTransaction creates a new badger transaction
+// NewTransaction creates a new badger transaction. A store that is closed or
+// not yet open yields a transaction reporting types.ErrBlobStoreUnavailable
+// from every operation, rather than one built from a closed *badger.DB.
+//
+// Building one from a closed DB can hang forever. badger.DB.NewTransaction
+// takes a read timestamp through oracle.readTs, which waits on the commit
+// watermark with context.Background(). Close stops that watermark's process
+// goroutine, and a Done mark still queued when the close signal arrives can
+// be dropped, because y/watermark.go selects between the mark channel and the
+// close signal and Go picks randomly when both are ready. doneUntil then
+// stays behind nextTxnTs-1 permanently and the wait has no context to cancel
+// it. See #3609.
+//
+// IsClosed narrows this window rather than eliminating it. A store closed
+// concurrently with this call already breaks the database.New contract, which
+// requires the stores to outlive Database.Close.
 func (d *BlobStoreBadger) NewTransaction(update bool) types.Txn {
-	return newBadgerTxn(d, d.DB().NewTransaction(update))
+	db := d.DB()
+	if db == nil || db.IsClosed() {
+		return newBadgerTxn(d, nil)
+	}
+	return newBadgerTxn(d, db.NewTransaction(update))
 }
 
 // Get retrieves a value from badger within a transaction

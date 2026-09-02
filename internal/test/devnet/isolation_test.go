@@ -1,3 +1,5 @@
+//go:build linux
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -84,14 +86,23 @@ func TestDevNetScriptsSelectComposeProject(t *testing.T) {
 	for _, file := range []string{"run-tests.sh", "start.sh", "stop.sh"} {
 		data, err := os.ReadFile(file)
 		require.NoError(t, err)
-		require.Contains(t, string(data), `source "${SCRIPT_DIR}/compose-project.sh"`)
+		require.Contains(
+			t,
+			string(data),
+			`source "${SCRIPT_DIR}/compose-project.sh"`,
+		)
 		require.Contains(t, string(data), "devnet_compose_project")
 	}
 	for _, file := range []string{"run-tests.sh", "start.sh"} {
 		data, err := os.ReadFile(file)
 		require.NoError(t, err)
-		require.Contains(t, string(data), "devnet_render_topology",
-			"%s must render worktree-specific topology before bringing containers up", file)
+		require.Contains(
+			t,
+			string(data),
+			"devnet_render_topology",
+			"%s must render worktree-specific topology before bringing containers up",
+			file,
+		)
 		require.Contains(t, string(data), "devnet_ports",
 			"%s must derive a worktree-specific host port block, or a second"+
 				" worktree's `docker compose up` fails with"+
@@ -102,8 +113,12 @@ func TestDevNetScriptsSelectComposeProject(t *testing.T) {
 	}
 	data, err := os.ReadFile("stop.sh")
 	require.NoError(t, err)
-	require.Contains(t, string(data), "devnet_topology_dir",
-		"stop.sh must locate this run's rendered topology directory to remove it")
+	require.Contains(
+		t,
+		string(data),
+		"devnet_topology_dir",
+		"stop.sh must locate this run's rendered topology directory to remove it",
+	)
 }
 
 // A distinct Compose project name scopes containers, volumes, and the
@@ -189,9 +204,19 @@ func TestCidrOverlapDetection(t *testing.T) {
 	}{
 		{"identical /24s", "172.20.0.0/24", "172.20.0.0/24", true},
 		{"adjacent /24s", "172.20.0.0/24", "172.21.0.0/24", false},
-		{"candidate inside a wider existing /12", "172.24.5.0/24", "172.16.0.0/12", true},
+		{
+			"candidate inside a wider existing /12",
+			"172.24.5.0/24",
+			"172.16.0.0/12",
+			true,
+		},
 		{"unrelated ranges", "172.24.5.0/24", "10.0.0.0/8", false},
-		{"wider candidate containing a narrower existing block", "172.17.0.0/16", "172.17.5.0/24", true},
+		{
+			"wider candidate containing a narrower existing block",
+			"172.17.0.0/16",
+			"172.17.5.0/24",
+			true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -228,9 +253,13 @@ func TestNetBaseAvoidsSubnetsDockerReports(t *testing.T) {
 	unblocked := deriveNetBase(t, helper, worktree, "")
 
 	fakeBin := t.TempDir()
-	writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerNetworkScript(
-		unblocked+".0/24",
-	))
+	writeExecutable(
+		t,
+		filepath.Join(fakeBin, "docker"),
+		fakeDockerNetworkScript(
+			unblocked+".0/24",
+		),
+	)
 
 	blocked := deriveNetBaseWithPath(t, helper, worktree, fakeBin)
 	require.NotEqual(t, unblocked, blocked,
@@ -251,7 +280,11 @@ func TestNetBaseIgnoresIPv6Subnets(t *testing.T) {
 	))
 
 	fakeBin := t.TempDir()
-	writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerNetworkScript("fd00::/64"))
+	writeExecutable(
+		t,
+		filepath.Join(fakeBin, "docker"),
+		fakeDockerNetworkScript("fd00::/64"),
+	)
 
 	base := deriveNetBaseWithPath(t, helper, worktree, fakeBin)
 	require.Regexp(t, `^172\.(2[4-9]|3[01])\.\d{1,3}$`, base)
@@ -281,8 +314,12 @@ func TestPortsAvoidOccupiedPorts(t *testing.T) {
 			"%s reused the occupied port %d instead of shifting the block",
 			name, occupiedPort)
 	}
-	require.Equal(t, unblocked["DEVNET_DINGO1_PORT"]+len(unblocked), blocked["DEVNET_DINGO1_PORT"],
-		"the whole block should shift forward by its own size, not just skip one port")
+	require.Equal(
+		t,
+		unblocked["DEVNET_DINGO1_PORT"]+len(unblocked),
+		blocked["DEVNET_DINGO1_PORT"],
+		"the whole block should shift forward by its own size, not just skip one port",
+	)
 }
 
 // A caller who has already set even one of the port variables gets full
@@ -317,7 +354,11 @@ func TestComposeUpRetriesOnPoolOverlap(t *testing.T) {
 	tempRoot := t.TempDir()
 	fakeBin := filepath.Join(tempRoot, "bin")
 	require.NoError(t, os.Mkdir(fakeBin, 0o755))
-	writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerFailsOnceWithPoolOverlap)
+	writeExecutable(
+		t,
+		filepath.Join(fakeBin, "docker"),
+		fakeDockerFailsOnceWithPoolOverlap,
+	)
 
 	countFile := filepath.Join(tempRoot, "up-attempts")
 	blockedSubnetFile := filepath.Join(tempRoot, "blocked-subnet")
@@ -332,7 +373,13 @@ printf '%s' "$before" >"${FAKE_BLOCKED_SUBNET_FILE}"
 devnet_compose_up "/fake/compose.yml"
 status=$?
 printf '%s %s %s\n' "$before" "$DEVNET_NET_BASE" "$status"`
-	cmd := exec.Command("bash", "-c", script, "bash", filepath.Join(repoDevnetDir, "compose-project.sh"))
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		script,
+		"bash",
+		filepath.Join(repoDevnetDir, "compose-project.sh"),
+	)
 	cmd.Env = append(os.Environ(),
 		"SCRIPT_DIR="+repoDevnetDir,
 		"TMPDIR="+tempRoot,
@@ -350,18 +397,34 @@ printf '%s %s %s\n' "$before" "$DEVNET_NET_BASE" "$status"`
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	last := lines[len(lines)-1]
 	fields := strings.Fields(last)
-	require.Len(t, fields, 3, "unexpected final line: %q (full stdout: %q, stderr: %q)",
-		last, out, stderr.String())
+	require.Len(
+		t,
+		fields,
+		3,
+		"unexpected final line: %q (full stdout: %q, stderr: %q)",
+		last,
+		out,
+		stderr.String(),
+	)
 	before, after, status := fields[0], fields[1], fields[2]
 
-	require.Equal(t, "0", status, "devnet_compose_up must succeed once the retry lands on a free subnet")
+	require.Equal(
+		t,
+		"0",
+		status,
+		"devnet_compose_up must succeed once the retry lands on a free subnet",
+	)
 	require.NotEqual(t, before, after,
 		"a retry after a pool-overlap failure must pick a different subnet")
 
 	attempts, err := os.ReadFile(countFile)
 	require.NoError(t, err)
-	require.Equal(t, "2", strings.TrimSpace(string(attempts)),
-		"docker compose up should have been tried exactly twice: once to hit the collision, once to succeed")
+	require.Equal(
+		t,
+		"2",
+		strings.TrimSpace(string(attempts)),
+		"docker compose up should have been tried exactly twice: once to hit the collision, once to succeed",
+	)
 }
 
 const fakeDockerFailsOnceWithPoolOverlap = `#!/usr/bin/env bash
@@ -414,7 +477,11 @@ func TestComposeUpRetriesOnPortConflict(t *testing.T) {
 		upCountFile := filepath.Join(tempRoot, "up-attempts")
 		portsCountFile := filepath.Join(tempRoot, "ports-calls")
 		wasUnsetFile := filepath.Join(tempRoot, "was-unset")
-		writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerFailsOnceWithPortConflict)
+		writeExecutable(
+			t,
+			filepath.Join(fakeBin, "docker"),
+			fakeDockerFailsOnceWithPortConflict,
+		)
 
 		script := `source "$1"
 devnet_ports() {
@@ -435,7 +502,13 @@ before="$DEVNET_DINGO1_PORT"
 devnet_compose_up "/fake/compose.yml"
 status=$?
 printf '%s %s %s\n' "$before" "$DEVNET_DINGO1_PORT" "$status"`
-		cmd := exec.Command("bash", "-c", script, "bash", filepath.Join(repoDevnetDir, "compose-project.sh"))
+		cmd := exec.Command(
+			"bash",
+			"-c",
+			script,
+			"bash",
+			filepath.Join(repoDevnetDir, "compose-project.sh"),
+		)
 		cmd.Env = append(os.Environ(),
 			"SCRIPT_DIR="+repoDevnetDir,
 			"COMPOSE_PROJECT_NAME=dingo-devnet-port-retry-test",
@@ -451,24 +524,43 @@ printf '%s %s %s\n' "$before" "$DEVNET_DINGO1_PORT" "$status"`
 		require.NoError(t, err, "stderr: %s", stderr.String())
 
 		fields := strings.Fields(strings.TrimSpace(string(out)))
-		require.Len(t, fields, 3, "unexpected output: %q (stderr: %q)", out, stderr.String())
+		require.Len(
+			t,
+			fields,
+			3,
+			"unexpected output: %q (stderr: %q)",
+			out,
+			stderr.String(),
+		)
 		before, after, status := fields[0], fields[1], fields[2]
 
-		require.Equal(t, "0", status,
-			"devnet_compose_up must succeed once the retry calls devnet_ports again")
+		require.Equal(
+			t,
+			"0",
+			status,
+			"devnet_compose_up must succeed once the retry calls devnet_ports again",
+		)
 		require.NotEqual(t, before, after,
 			"a retry after a port-bind failure must call devnet_ports again")
 
 		portsCalls, err := os.ReadFile(portsCountFile)
 		require.NoError(t, err)
-		require.Equal(t, "2", strings.TrimSpace(string(portsCalls)),
-			"devnet_ports should have been called exactly twice: once to derive, once to retry")
+		require.Equal(
+			t,
+			"2",
+			strings.TrimSpace(string(portsCalls)),
+			"devnet_ports should have been called exactly twice: once to derive, once to retry",
+		)
 
 		wasUnset, err := os.ReadFile(wasUnsetFile)
 		require.NoError(t, err)
-		require.Equal(t, "unset", string(wasUnset),
+		require.Equal(
+			t,
+			"unset",
+			string(wasUnset),
 			"devnet_compose_up must unset the port vars before retrying, or the"+
-				" real devnet_ports would see them still set and silently no-op")
+				" real devnet_ports would see them still set and silently no-op",
+		)
 	})
 
 	t.Run("a caller's port override is never retried away", func(t *testing.T) {
@@ -476,13 +568,23 @@ printf '%s %s %s\n' "$before" "$DEVNET_DINGO1_PORT" "$status"`
 		fakeBin := filepath.Join(tempRoot, "bin")
 		require.NoError(t, os.Mkdir(fakeBin, 0o755))
 		upCountFile := filepath.Join(tempRoot, "up-attempts")
-		writeExecutable(t, filepath.Join(fakeBin, "docker"), fakeDockerFailsOnceWithPortConflict)
+		writeExecutable(
+			t,
+			filepath.Join(fakeBin, "docker"),
+			fakeDockerFailsOnceWithPortConflict,
+		)
 
 		script := `source "$1"
 devnet_ports
 devnet_compose_up "/fake/compose.yml"
 printf '%s\n' "$?"`
-		cmd := exec.Command("bash", "-c", script, "bash", filepath.Join(repoDevnetDir, "compose-project.sh"))
+		cmd := exec.Command(
+			"bash",
+			"-c",
+			script,
+			"bash",
+			filepath.Join(repoDevnetDir, "compose-project.sh"),
+		)
 		cmd.Env = append(os.Environ(),
 			"SCRIPT_DIR="+repoDevnetDir,
 			"COMPOSE_PROJECT_NAME=dingo-devnet-port-retry-test-override",
@@ -495,8 +597,12 @@ printf '%s\n' "$?"`
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
 		require.NoError(t, err, "stderr: %s", stderr.String())
-		require.Equal(t, "1", strings.TrimSpace(string(out)),
-			"devnet_compose_up must not retry away a caller-supplied port override")
+		require.Equal(
+			t,
+			"1",
+			strings.TrimSpace(string(out)),
+			"devnet_compose_up must not retry away a caller-supplied port override",
+		)
 	})
 }
 
@@ -536,9 +642,11 @@ func TestRenderTopologyRewritesAddressesWithoutMutatingSource(t *testing.T) {
 
 	tempRoot := t.TempDir()
 	cmd := exec.Command(
-		"bash", "-c",
+		"bash",
+		"-c",
 		`source "$1"; devnet_render_topology; printf '%s' "$DEVNET_TOPOLOGY_DIR"`,
-		"bash", filepath.Join(repoDevnetDir, "compose-project.sh"),
+		"bash",
+		filepath.Join(repoDevnetDir, "compose-project.sh"),
 	)
 	cmd.Env = append(os.Environ(),
 		"SCRIPT_DIR="+repoDevnetDir,
@@ -696,9 +804,11 @@ func deriveComposeProject(
 	t.Helper()
 	scriptDir := filepath.Join(worktree, "internal", "test", "devnet")
 	cmd := exec.Command(
-		"bash", "-c",
+		"bash",
+		"-c",
 		`source "$1"; devnet_compose_project; printf '%s' "$COMPOSE_PROJECT_NAME"`,
-		"bash", helper,
+		"bash",
+		helper,
 	)
 	cmd.Env = append(os.Environ(), "SCRIPT_DIR="+scriptDir)
 	if override == "" {

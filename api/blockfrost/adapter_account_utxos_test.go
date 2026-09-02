@@ -121,29 +121,39 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 		assert.Equal(t, "241000000", items[len(items)-1].Amount[0].Quantity)
 	})
 
-	t.Run("a page past the end is empty but reports the real total", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
-			stakeAddr,
-			PaginationParams{Count: 100, Page: 4, Order: PaginationOrderAsc},
-		)
-		require.NoError(t, err)
-		assert.Equal(t, total, gotTotal)
-		assert.Empty(t, items)
-	})
+	t.Run(
+		"a page past the end is empty but reports the real total",
+		func(t *testing.T) {
+			items, gotTotal, err := adapter.AccountUTXOs(
+				stakeAddr,
+				PaginationParams{
+					Count: 100,
+					Page:  4,
+					Order: PaginationOrderAsc,
+				},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, total, gotTotal)
+			assert.Empty(t, items)
+		},
+	)
 
-	t.Run("a page far beyond the address history is empty, not an error", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
-			stakeAddr,
-			PaginationParams{
-				Count: MaxPaginationCount,
-				Page:  MaxPaginationPage,
-				Order: PaginationOrderAsc,
-			},
-		)
-		require.NoError(t, err)
-		assert.Equal(t, total, gotTotal)
-		assert.Empty(t, items)
-	})
+	t.Run(
+		"a page far beyond the address history is empty, not an error",
+		func(t *testing.T) {
+			items, gotTotal, err := adapter.AccountUTXOs(
+				stakeAddr,
+				PaginationParams{
+					Count: MaxPaginationCount,
+					Page:  MaxPaginationPage,
+					Order: PaginationOrderAsc,
+				},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, total, gotTotal)
+			assert.Empty(t, items)
+		},
+	)
 }
 
 // TestNodeAdapterAccountUTXOsEmpty proves a registered stake credential with

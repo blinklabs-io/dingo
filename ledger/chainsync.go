@@ -44,6 +44,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -644,7 +645,8 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 					"chain switch target unavailable, retrying with active best peer",
 					"component",
 					"ledger",
-					"failed_connection_id", effectiveConnId.String(),
+					"failed_connection_id",
+					effectiveConnId.String(),
 					"active_connection_id",
 					activeConnId.String(),
 					"error",
@@ -4449,6 +4451,9 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// the database was created with a matching genesis. Older databases
 		// may still be missing the slot-0 network-state baseline.
 		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
+			if err := ls.ensureGenesisConstitution(nil); err != nil {
+				return err
+			}
 			return ls.ensureGenesisNetworkState()
 		}
 		// Check if genesis CBOR exists but with a different hash.
@@ -4656,6 +4661,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 			if err := ls.db.SetGenesisStaking(
 				genesisPools,
 				genesisStake,
+				uint64(shelleyGenesis.ProtocolParameters.KeyDeposit),
 				genesisHash[:],
 				txn,
 			); err != nil {
@@ -4689,9 +4695,54 @@ func (ls *LedgerState) createGenesisBlock() error {
 			}
 		}
 
+		// The Conway genesis constitution is the chain's enacted
+		// constitution until a NewConstitution action replaces it, and
+		// guardrails validation needs it from the first block.
+		if err := ls.ensureGenesisConstitution(txn); err != nil {
+			return err
+		}
+
 		return nil
 	})
 	return err
+}
+
+// ensureGenesisConstitution records the Conway genesis constitution as the
+// chain's slot-0 constitution when the ledger holds no constitution yet.
+//
+// The lookup returns the highest non-deleted added_slot, so a constitution
+// enacted by a later NewConstitution action, or imported from a ledger-state
+// snapshot, is always preferred over this slot-0 row. Re-running against a
+// store that already holds a constitution writes nothing, which keeps
+// restart and genesis replay idempotent.
+func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
+	genesisConstitution, err := governance.ConstitutionFromGenesis(
+		ls.config.CardanoNodeConfig.ConwayGenesis(),
+	)
+	if err != nil {
+		return fmt.Errorf("parse genesis constitution: %w", err)
+	}
+	if genesisConstitution == nil {
+		return nil
+	}
+	existing, err := ls.db.GetConstitution(txn)
+	if err != nil {
+		return fmt.Errorf("get existing constitution: %w", err)
+	}
+	if existing != nil {
+		return nil
+	}
+	if err := ls.db.SetConstitution(genesisConstitution, txn); err != nil {
+		return fmt.Errorf("set genesis constitution: %w", err)
+	}
+	ls.config.Logger.Info(
+		"recorded Conway genesis constitution",
+		"component", "ledger",
+		"anchor_url", genesisConstitution.AnchorURL,
+		"guardrails_script_hash",
+		hex.EncodeToString(genesisConstitution.PolicyHash),
+	)
+	return nil
 }
 
 // ensureGenesisNetworkState initializes the slot-0 treasury/reserves baseline
@@ -5262,6 +5313,38 @@ func cloneProtocolParametersForEra(
 	// carried through a Byron rollover or treated as a Byron-owned snapshot.
 	if era.Id == eras.ByronEraDesc.Id {
 		return nil, nil
+	}
+	if era.Id == eras.ConwayEraDesc.Id {
+		if _, ok := pparams.(*conway.ConwayProtocolParameters); !ok {
+			return nil, fmt.Errorf(
+				"conway era has protocol parameters type %T",
+				pparams,
+			)
+		}
+		ret, err := eras.CloneGovernanceProtocolParameters(pparams)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"clone governance protocol parameters: %w",
+				err,
+			)
+		}
+		return ret, nil
+	}
+	if era.Id == eras.DijkstraEraDesc.Id {
+		if _, ok := pparams.(*dijkstra.DijkstraProtocolParameters); !ok {
+			return nil, fmt.Errorf(
+				"dijkstra era has protocol parameters type %T",
+				pparams,
+			)
+		}
+		ret, err := eras.CloneGovernanceProtocolParameters(pparams)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"clone governance protocol parameters: %w",
+				err,
+			)
+		}
+		return ret, nil
 	}
 	if era.DecodePParamsFunc == nil {
 		return nil, fmt.Errorf(
