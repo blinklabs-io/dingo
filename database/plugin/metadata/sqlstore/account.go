@@ -327,10 +327,24 @@ func (s *Store) GetAccountsByCredential(
 	// this package supports (MySQL requires ROW(...) wrapping).
 	columns := prefixedAccountColumns("a")
 	chunkSize := s.dialect.ParameterLimit() / 2
+	rowSelectTemplate := "SELECT ? AS credential_tag, ? AS staking_key"
+	if s.dialect.Name() == "postgres" {
+		// PostgreSQL resolves an otherwise-untyped derived-table select-list
+		// parameter to text (PG10+; PG<10 errors outright) rather than
+		// inferring it from the account columns it's later compared
+		// against, so an uncast v.staking_key would fail the join with
+		// "operator does not exist: bytea = text" -- account.staking_key
+		// is BYTEA and account.credential_tag is BIGINT after
+		// migrations/registry.go's sqlite blob/integer -> postgres
+		// BYTEA/BIGINT translation for this table. SQLite and MySQL infer
+		// the bound value's type from context instead, so they don't need
+		// this cast.
+		rowSelectTemplate = "SELECT CAST(? AS BIGINT) AS credential_tag, CAST(? AS BYTEA) AS staking_key"
+	}
 	accountsByCredentialQuery := func(n int) string {
 		rowSelects := make([]string, n)
 		for i := range rowSelects {
-			rowSelects[i] = "SELECT ? AS credential_tag, ? AS staking_key"
+			rowSelects[i] = rowSelectTemplate
 		}
 		query := "SELECT " + columns + " FROM account a JOIN (" +
 			strings.Join(rowSelects, " UNION ALL ") +

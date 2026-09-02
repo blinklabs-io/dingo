@@ -1571,6 +1571,15 @@ JOIN (
 WHERE a.active = TRUE;  -- omitted when includeInactive is true
 ```
 
+On PostgreSQL only, each derived-table row select casts its parameters
+(`CAST(? AS BIGINT)`/`CAST(? AS BYTEA)`) instead of leaving them untyped.
+PostgreSQL resolves an otherwise-untyped select-list parameter to `text`
+rather than inferring it from `account.credential_tag`/`account.staking_key`
+(`BIGINT`/`BYTEA` after `migrations/registry.go`'s SQLite `integer`/`blob` →
+Postgres translation), which fails the join with `operator does not exist:
+bytea = text`. SQLite and MySQL infer the bound value's type from the join
+context instead and need no cast.
+
 Measured against a real migrated schema: 50,000 refs went from ~139s to
 ~2.8s, and 300,000 refs (a chunked case the OR-chain form never completed
 within 45 minutes) to ~93s. Refs with no matching account row are silently
