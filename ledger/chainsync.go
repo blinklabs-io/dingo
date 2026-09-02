@@ -4451,6 +4451,9 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// the database was created with a matching genesis. Older databases
 		// may still be missing the slot-0 network-state baseline.
 		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
+			if err := ls.ensureGenesisConstitution(nil); err != nil {
+				return err
+			}
 			return ls.ensureGenesisNetworkState()
 		}
 		// Check if genesis CBOR exists but with a different hash.
@@ -4691,9 +4694,54 @@ func (ls *LedgerState) createGenesisBlock() error {
 			}
 		}
 
+		// The Conway genesis constitution is the chain's enacted
+		// constitution until a NewConstitution action replaces it, and
+		// guardrails validation needs it from the first block.
+		if err := ls.ensureGenesisConstitution(txn); err != nil {
+			return err
+		}
+
 		return nil
 	})
 	return err
+}
+
+// ensureGenesisConstitution records the Conway genesis constitution as the
+// chain's slot-0 constitution when the ledger holds no constitution yet.
+//
+// The lookup returns the highest non-deleted added_slot, so a constitution
+// enacted by a later NewConstitution action, or imported from a ledger-state
+// snapshot, is always preferred over this slot-0 row. Re-running against a
+// store that already holds a constitution writes nothing, which keeps
+// restart and genesis replay idempotent.
+func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
+	genesisConstitution, err := governance.ConstitutionFromGenesis(
+		ls.config.CardanoNodeConfig.ConwayGenesis(),
+	)
+	if err != nil {
+		return fmt.Errorf("parse genesis constitution: %w", err)
+	}
+	if genesisConstitution == nil {
+		return nil
+	}
+	existing, err := ls.db.GetConstitution(txn)
+	if err != nil {
+		return fmt.Errorf("get existing constitution: %w", err)
+	}
+	if existing != nil {
+		return nil
+	}
+	if err := ls.db.SetConstitution(genesisConstitution, txn); err != nil {
+		return fmt.Errorf("set genesis constitution: %w", err)
+	}
+	ls.config.Logger.Info(
+		"recorded Conway genesis constitution",
+		"component", "ledger",
+		"anchor_url", genesisConstitution.AnchorURL,
+		"guardrails_script_hash",
+		hex.EncodeToString(genesisConstitution.PolicyHash),
+	)
+	return nil
 }
 
 // ensureGenesisNetworkState initializes the slot-0 treasury/reserves baseline
