@@ -1043,18 +1043,13 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 }
 
 // loadLeiosEBFromDB loads a Leios endorser block's manifest (and txs, if
-// stored) from the persistent blob store and caches the result in memory,
-// returning it only if its persisted slot matches the requested one. The
-// blob store stays hash-only keyed (one occurrence per hash) even though the
-// in-memory cache now tracks (slot, hash) pairs independently: durable
-// historical re-serving of a second, concurrent occurrence of a recurring
-// hash after its in-memory TTL elapses is a known, narrower limitation, out
-// of scope for issue #3513's in-memory offer/fetch/serving fix (see
-// ARCHITECTURE.md). Whatever is found is still cached in memory under its
-// own (slot, hash) key regardless of whether it satisfies this query, so a
-// later lookup for its actual slot does not re-hit the DB. Returns
-// (nil, false) when the blob store has no manifest for this hash, or the
-// persisted slot does not match the requested one.
+// stored) from the persistent blob store for the exact (slot, hash)
+// occurrence named, and caches the result in memory under the same key. The
+// blob store is itself keyed by (slot, hash) (`types.LeiosEBManifestKey`),
+// so a persisted occurrence for a different slot of the same hash is a
+// distinct blob key and is never returned here (issue #3513 review).
+// Returns (nil, false) when the blob store has no manifest for this exact
+// occurrence.
 func (o *Ouroboros) loadLeiosEBFromDB(
 	slot uint64,
 	hash []byte,
@@ -1063,7 +1058,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	if db == nil {
 		return nil, false
 	}
-	gotSlot, manifestRaw, err := db.GetLeiosEBManifest(hash)
+	manifestRaw, err := db.GetLeiosEBManifest(hash, slot)
 	if err != nil {
 		// ErrBlobKeyNotFound is the normal "not stored" path; anything else
 		// is worth surfacing at Debug for diagnostics.
@@ -1087,7 +1082,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	}
 	// Load txs if they were persisted (best-effort; may not be present for
 	// EBs that completed before tx persistence was added).
-	txsRaw, err := db.GetLeiosEBTxs(hash)
+	txsRaw, err := db.GetLeiosEBTxs(hash, slot)
 	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
 		o.config.Logger.Debug(
 			"failed to load leios EB txs from blob store",
@@ -1112,9 +1107,9 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		}
 	}
 
-	cacheKeys := []string{leiosBlockKey(gotSlot, hash)}
+	cacheKeys := []string{leiosBlockKey(slot, hash)}
 	data := &leiosEndorserBlockData{
-		point:      ocommon.Point{Slot: gotSlot, Hash: slices.Clone(hash)},
+		point:      ocommon.Point{Slot: slot, Hash: slices.Clone(hash)},
 		blockRaw:   slices.Clone(manifestRaw),
 		txsRaw:     cloneRawMessages(txsRaw),
 		txCount:    len(block.TransactionReferences),
@@ -1148,9 +1143,6 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 			"max_size",
 			leiosEndorserBlockCacheMaxEntryBytes,
 		)
-		if gotSlot != slot {
-			return nil, false
-		}
 		return data, true
 	}
 	// Populate the in-memory cache so subsequent lookups skip the DB.
@@ -1176,9 +1168,6 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		data = existing
 	}
 	o.leiosMu.Unlock()
-	if gotSlot != slot {
-		return nil, false
-	}
 	return data, true
 }
 

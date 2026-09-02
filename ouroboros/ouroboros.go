@@ -228,9 +228,11 @@ type Ouroboros struct {
 	// blob store for historical serving. The blob write (CBOR encode + commit)
 	// is moved off the leios-fetch hot path onto a single background writer so
 	// it does not serialize against block application during catch-up. Jobs
-	// coalesce by EB hash — a complete job (with txs) supersedes a
-	// manifest-only one — which also elides the backfiller's duplicate manifest
-	// write. Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
+	// coalesce by (slot, hash), not hash alone — a complete job (with txs)
+	// supersedes a manifest-only one for the same occurrence — which also
+	// elides the backfiller's duplicate manifest write, while two live
+	// occurrences of the same hash at different slots persist independently.
+	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
 	leiosPersistOnce     sync.Once
 	leiosPersistStopOnce sync.Once
 	leiosPersistStarted  atomic.Bool

@@ -136,33 +136,44 @@ func PoolCredentialStakeKey(
 const (
 	// LeiosEBManifestKeyPrefix is the key prefix for storing raw Leios
 	// endorser-block manifest CBOR (the bytes received over leios-fetch
-	// MsgBlock). Key format: "em" + hash(32 bytes). The stored value is
-	// slot(8 bytes big-endian) + manifest CBOR, so the slot can be recovered
-	// on load without a separate index.
+	// MsgBlock). Key format: "em" + hash(32 bytes) + slot(8 bytes
+	// big-endian). The stored value is the manifest CBOR alone. Keyed by
+	// (slot, hash) rather than hash alone: the manifest is content-addressed,
+	// so the same hash can be a live, independently required occurrence at
+	// more than one slot at once, and a hash-only key would let the second
+	// occurrence's persist silently overwrite the first, making it
+	// unavailable for historical re-serving once its in-memory entry expires
+	// (issue #3513 review).
 	LeiosEBManifestKeyPrefix = "em"
 	// LeiosEBTxsKeyPrefix is the key prefix for storing the raw endorser-block
 	// transaction bodies (the CBOR-in-CBOR wrapped tx list from leios-fetch
-	// MsgBlockTxs). Key format: "et" + hash(32 bytes). The value is a
-	// CBOR-encoded []cbor.RawMessage (each element is a CBOR byte string
-	// wrapping a full transaction CBOR, matching the leios-fetch wire format).
-	// Only written when the transaction cache is complete (all txCount txs
-	// fetched), so a missing "et" key means the txs are not available.
+	// MsgBlockTxs). Key format: "et" + hash(32 bytes) + slot(8 bytes
+	// big-endian), for the same (slot, hash) reason as LeiosEBManifestKeyPrefix.
+	// The value is a CBOR-encoded []cbor.RawMessage (each element is a CBOR
+	// byte string wrapping a full transaction CBOR, matching the leios-fetch
+	// wire format). Only written when the transaction cache is complete (all
+	// txCount txs fetched), so a missing "et" key means the txs are not
+	// available.
 	LeiosEBTxsKeyPrefix = "et"
 )
 
-// LeiosEBManifestKey builds the blob key for a Leios endorser-block manifest.
-func LeiosEBManifestKey(hash []byte) []byte {
-	key := make([]byte, 0, len(LeiosEBManifestKeyPrefix)+len(hash))
+// LeiosEBManifestKey builds the blob key for one occurrence of a Leios
+// endorser-block manifest, identified by its slot and hash together.
+func LeiosEBManifestKey(hash []byte, slot uint64) []byte {
+	key := make([]byte, 0, len(LeiosEBManifestKeyPrefix)+len(hash)+8)
 	key = append(key, LeiosEBManifestKeyPrefix...)
 	key = append(key, hash...)
+	key = binary.BigEndian.AppendUint64(key, slot)
 	return key
 }
 
-// LeiosEBTxsKey builds the blob key for the raw transaction bodies of a Leios
-// endorser block.
-func LeiosEBTxsKey(hash []byte) []byte {
-	key := make([]byte, 0, len(LeiosEBTxsKeyPrefix)+len(hash))
+// LeiosEBTxsKey builds the blob key for the raw transaction bodies of one
+// occurrence of a Leios endorser block, identified by its slot and hash
+// together.
+func LeiosEBTxsKey(hash []byte, slot uint64) []byte {
+	key := make([]byte, 0, len(LeiosEBTxsKeyPrefix)+len(hash)+8)
 	key = append(key, LeiosEBTxsKeyPrefix...)
 	key = append(key, hash...)
+	key = binary.BigEndian.AppendUint64(key, slot)
 	return key
 }

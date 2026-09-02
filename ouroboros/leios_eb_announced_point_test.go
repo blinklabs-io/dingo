@@ -261,56 +261,70 @@ func TestStoreLeiosEndorserBlockAcceptsAnnouncedPointAndIsIdempotent(
 // hash: whichever connection's offer is stored first, a later offer for the
 // same hash at a different, independently announced slot is accepted as its
 // own occurrence rather than rejected, and neither disturbs the other
-// (wolf31o2 review; issue #3513).
+// (wolf31o2 review; issue #3513). Table-driven over both arrival orders --
+// cubic's review flagged that only testing point-then-second would leave a
+// regression specific to the reverse order undetected.
 func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOfOrder(
 	t *testing.T,
 ) {
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 13)
-	second := ocommon.Point{Slot: point.Slot + 5, Hash: point.Hash}
+	for _, secondFirst := range []bool{false, true} {
+		name := "first-then-second"
+		if secondFirst {
+			name = "second-then-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			point, blockRaw := testLeiosEndorserBlockRaw(t, 13)
+			second := ocommon.Point{Slot: point.Slot + 5, Hash: point.Hash}
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	announceTestEndorserBlock(
-		t,
-		o,
-		point.Slot,
-		testEbHash(point),
-		len(blockRaw),
-	)
-	announceTestEndorserBlock(
-		t,
-		o,
-		second.Slot,
-		testEbHash(point),
-		len(blockRaw),
-	)
+			o := newOuroboros(OuroborosConfig{EnableLeios: true})
+			announceTestEndorserBlock(
+				t,
+				o,
+				point.Slot,
+				testEbHash(point),
+				len(blockRaw),
+			)
+			announceTestEndorserBlock(
+				t,
+				o,
+				second.Slot,
+				testEbHash(point),
+				len(blockRaw),
+			)
 
-	// Connection A stores the first occurrence.
-	require.NoError(t, o.storeLeiosEndorserBlock(
-		point,
-		blockRaw,
-		nil,
-		leiosStorePeerOffered,
-	))
-	// Connection B later offers the same hash at the second, independently
-	// announced slot. It must be accepted, not rejected as a conflict.
-	require.NoError(t, o.storeLeiosEndorserBlock(
-		second,
-		blockRaw,
-		nil,
-		leiosStorePeerOffered,
-	))
+			store := func(p ocommon.Point) {
+				require.NoError(t, o.storeLeiosEndorserBlock(
+					p,
+					blockRaw,
+					nil,
+					leiosStorePeerOffered,
+				))
+			}
+			if secondFirst {
+				store(second)
+				store(point)
+			} else {
+				store(point)
+				store(second)
+			}
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-	require.True(t, ok)
-	require.Equal(
-		t,
-		point.Slot,
-		data.point.Slot,
-		"the first occurrence must be unharmed by the second's arrival",
-	)
-	secondData, ok := o.lookupLeiosEndorserBlock(second.Slot, second.Hash)
-	require.True(t, ok)
-	require.True(t, secondData.slotVerified)
+			data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+			require.True(t, ok)
+			require.Equal(
+				t,
+				point.Slot,
+				data.point.Slot,
+				"the first occurrence must be unharmed by the second's arrival",
+			)
+			require.True(t, data.slotVerified)
+			secondData, ok := o.lookupLeiosEndorserBlock(
+				second.Slot,
+				second.Hash,
+			)
+			require.True(t, ok)
+			require.True(t, secondData.slotVerified)
+		})
+	}
 }
 
 // TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt is the reverse-order
