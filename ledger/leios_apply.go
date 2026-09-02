@@ -600,6 +600,17 @@ type leiosEbRef struct {
 	hash lcommon.Blake2b256
 }
 
+// leiosEbRefKey returns a stable per-(slot, hash) dedup key for r, not hash
+// alone. The manifest is content-addressed, so the same hash can legitimately
+// be a distinct requirement at two different slots at once (issue #3513
+// review); every dedup/in-flight-tracking map keyed on an endorser-block
+// reference in this file uses this key, so a second, slot-distinct reference
+// to an already-seen hash is never collapsed into (or suppressed by) the
+// first.
+func leiosEbRefKey(r leiosEbRef) string {
+	return fmt.Sprintf("%d:%s", r.slot, r.hash.Bytes())
+}
+
 // endorserBlockAvailableAt reports whether provider already holds the
 // endorser block identified by hash bound to the given slot -- not merely
 // present under some slot. The manifest is content-addressed, so the same
@@ -641,6 +652,10 @@ type leiosBlockInfo struct {
 // path. Current announcements remain best-effort until a later block certifies
 // them. A certifying block whose parent announcement cannot be resolved is
 // rejected: proceeding would commit a ledger state known to be incomplete.
+// Deduped by leiosEbRefKey (slot, hash), not hash alone: two certifying
+// blocks in the same batch can legitimately require the same hash at
+// different slots (issue #3513 review), and a hash-only dedup would drop the
+// second requirement from the result entirely.
 func requiredCertifiedEndorserBlocks(
 	infos []leiosBlockInfo,
 	annByHash map[string]leiosEbRef,
@@ -664,9 +679,7 @@ func requiredCertifiedEndorserBlocks(
 				[]byte(info.prevHash),
 			)
 		}
-		// The same endorser-block hash may be required at distinct slots;
-		// retain each slot-bound reference independently.
-		key := fmt.Sprintf("%d:%s", r.slot, r.hash.String())
+		key := leiosEbRefKey(r)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -731,9 +744,13 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 // reports whether an endorser block is already available *at r's slot*, so a
 // stale occurrence of the hash under a different slot is not mistaken for
 // availability and is fetched like any other missing reference (issue #3513
-// review). When the wall-clock slot is unknown (wallKnown=false) every block
-// is treated as near-head, preserving announcement-driven behavior rather than
-// silently dropping fetches.
+// review). backfillSeen/tipWaitSeen (via appendRef's leiosEbRefKey) dedup by
+// (slot, hash), not hash alone, for the same reason: two blocks in the batch
+// can legitimately require the same hash at different slots, and a
+// hash-only dedup would drop the second requirement's fetch entirely. When
+// the wall-clock slot is unknown (wallKnown=false) every block is treated as
+// near-head, preserving announcement-driven behavior rather than silently
+// dropping fetches.
 func classifyEndorserBlockFetches(
 	infos []leiosBlockInfo,
 	annByHash map[string]leiosEbRef,
@@ -746,7 +763,7 @@ func classifyEndorserBlockFetches(
 	backfillSeen := make(map[string]struct{})
 	tipWaitSeen := make(map[string]struct{})
 	appendRef := func(dst *[]leiosEbRef, seen map[string]struct{}, r leiosEbRef) {
-		key := string(r.hash.Bytes())
+		key := leiosEbRefKey(r)
 		if _, ok := seen[key]; ok || cached(r) {
 			return
 		}
@@ -897,26 +914,18 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 	}
 }
 
-// leiosBackfillInflightKey is the in-flight dedup key for r: the slot and the
-// hash, not the hash alone. The manifest is content-addressed, so the same
-// hash can legitimately be required at two different slots concurrently
-// (issue #3513 review); a hash-only key let the second requirement's spawn
-// find the first already in flight and silently no-op, and then let its
-// awaitFetch's "not in flight" skip-fast fire the moment the *first*
-// requirement's fetch cleared the (shared) key -- even though the second
-// requirement's slot was never fetched at all.
-func leiosBackfillInflightKey(r leiosEbRef) string {
-	return fmt.Sprintf("%d:%s", r.slot, r.hash.Bytes())
-}
-
 // spawn starts a background by-point fetch of the endorser block referenced by
 // r unless it is already cached or a fetch is already in flight. It returns
-// immediately. Deduping by (slot, hash) means the read-batch prefetch and the
-// per-chunk gate never fetch the same endorser-block requirement twice, while
-// two different slots requiring the same hash are still dispatched
-// independently.
+// immediately. Deduping by leiosEbRefKey (slot, hash) means the read-batch
+// prefetch and the per-chunk gate never fetch the same endorser-block
+// requirement twice, while two different slots requiring the same hash are
+// still dispatched independently: a hash-only key would let the second
+// requirement's spawn find the first already in flight and silently no-op,
+// and then let awaitFetch's "not in flight" skip-fast fire the moment the
+// *first* requirement's fetch cleared the (shared) key, even though the
+// second requirement's slot was never fetched at all (issue #3513 review).
 func (b *leiosBackfiller) spawn(r leiosEbRef) {
-	key := leiosBackfillInflightKey(r)
+	key := leiosEbRefKey(r)
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
@@ -1015,7 +1024,7 @@ func (b *leiosBackfiller) awaitFetch(
 	defer cancel()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
-	key := leiosBackfillInflightKey(r)
+	key := leiosEbRefKey(r)
 	for {
 		if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 			return // cached: the referencing block can apply it

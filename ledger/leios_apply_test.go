@@ -742,6 +742,36 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 	}
 }
 
+// TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash is the
+// companion regression to TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots
+// for classifyEndorserBlockFetches: two historical blocks announcing the
+// same hash at different slots must both reach backfill, not collapse to
+// one via the hash-only seen-map dedup (issue #3513 review).
+func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
+	t *testing.T,
+) {
+	sameHash := lcommon.NewBlake2b256(leiosTestHash(0xFE))
+	hashX := leiosTestHash(0x11)
+	hashY := leiosTestHash(0x22)
+	infos := []leiosBlockInfo{
+		{hash: string(hashX), slot: 100, announces: true, ebHash: sameHash},
+		{hash: string(hashY), slot: 200, announces: true, ebHash: sameHash},
+	}
+	neverCached := func(leiosEbRef) bool { return false }
+
+	// wallSlot 100_050 with waitSlots 100 puts both well into settled
+	// backlog; certDrivenHistorical=false (CIP path) fetches every
+	// referenced historical endorser block.
+	backfill, tipWait := classifyEndorserBlockFetches(
+		infos, nil, 100_050, true, 100, false, neverCached,
+	)
+	require.Empty(t, tipWait)
+	require.ElementsMatch(t, []leiosEbRef{
+		{slot: 100, hash: sameHash},
+		{slot: 200, hash: sameHash},
+	}, backfill)
+}
+
 // TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
 // current announcements and certified parent announcements are both fetched;
 // in the settled backlog only certified parent announcements are fetched and
