@@ -26,7 +26,8 @@ import (
 )
 
 // musashiDijkstraBlock returns the Musashi block fixture, which is a verbatim
-// copy of gouroboros v0.202.4's ledger/dijkstra/testdata/musashi_dijkstra_block.hex.
+// copy of gouroboros v0.202.4's
+// ledger/dijkstra/testdata/musashi_dijkstra_block.hex.
 //
 // It is a real block from the Musashi prototype network rather than a
 // constructed one, and its shape matches what the live network serves: fetched
@@ -113,4 +114,64 @@ func TestDecodeConwayBlockRejectsUnrecognizedBlock(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, block)
 	require.Contains(t, err.Error(), "decode Conway block error")
+}
+
+// TestDecodeConwayBlockRejectsTwoComponentNonDijkstra proves the Dijkstra
+// fallback is gated on the Leios-extended signature rather than on "any CBOR
+// array of two things".
+//
+// DecodeConwayBlock is reached from the network-independent storage path
+// (models.Block.Decode) as well as from the Musashi block-fetch path, so an
+// ungated fallback would let a corrupt or foreign stored Conway-tagged block
+// be silently reinterpreted as Dijkstra instead of returning the strict-decode
+// error.
+func TestDecodeConwayBlockRejectsTwoComponentNonDijkstra(t *testing.T) {
+	twoThings, err := cbor.Encode([]any{1, 2})
+	require.NoError(t, err)
+
+	block, err := models.DecodeConwayBlock(twoThings)
+	require.Error(t, err)
+	require.Nil(t, block)
+	require.Contains(
+		t,
+		err.Error(),
+		"decode Conway block error",
+		"a two-component array that is not a Leios-extended Dijkstra block "+
+			"must still report the strict Conway error",
+	)
+}
+
+// TestDecodeConwayBlockRejectsUnextendedDijkstraShape proves the
+// gate checks the header body width too: a two-component block whose header
+// body carries only the ten standard Babbage fields is not the Musashi shape.
+func TestDecodeConwayBlockRejectsUnextendedDijkstraShape(t *testing.T) {
+	raw := musashiDijkstraBlock(t)
+
+	var components []cbor.RawMessage
+	_, err := cbor.Decode(raw, &components)
+	require.NoError(t, err)
+	var headerParts []cbor.RawMessage
+	_, err = cbor.Decode(components[0], &headerParts)
+	require.NoError(t, err)
+	var bodyElems []cbor.RawMessage
+	_, err = cbor.Decode(headerParts[0], &bodyElems)
+	require.NoError(t, err)
+	require.Len(t, bodyElems, 12)
+
+	// Drop the two Leios extension fields, leaving a well-formed two-component
+	// block that is no longer the Musashi shape.
+	truncatedBody, err := cbor.Encode(bodyElems[:10])
+	require.NoError(t, err)
+	truncatedHeader, err := cbor.Encode(
+		[]any{cbor.RawMessage(truncatedBody), headerParts[1]},
+	)
+	require.NoError(t, err)
+	rebuilt, err := cbor.Encode(
+		[]any{cbor.RawMessage(truncatedHeader), components[1]},
+	)
+	require.NoError(t, err)
+
+	block, err := models.DecodeConwayBlock(rebuilt)
+	require.Error(t, err)
+	require.Nil(t, block)
 }
