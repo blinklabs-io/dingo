@@ -5491,7 +5491,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | derived-match | `block_cnt` | Exact value against `reward_pool_input` at parameter epoch K+1. |
   | `/pool_history` | derived-match | `fixed_cost` | Exact value against `reward_pool_input` at stake epoch K-1: a mark snapshot records the pool parameters in force for the epoch it is the basis for. |
   | `/pool_history` | derived-match | `margin` | K-1 values compared as equivalent rational numbers. |
-  | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with aggregated `reward_pool_output.member_reward_total` at K-1. |
+  | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with the sum of K-1 `reward_account_output` member rows the ledger credits (`spendable`, not `guarded`), falling back to `reward_pool_output.member_reward_total` only when that row's `unspendable` is zero. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` row `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
@@ -5635,13 +5635,31 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `pool_fees` from `fixed_cost`+`margin` alone, omitting the pledge/owner-stake
   bonus the Shelley ledger spec folds into the true leader reward, so it
   systematically diverges from Dingo's exact value for any pool with owner
-  stake. `member_rewards` has no such approximation (it's a direct sum of
-  per-delegator reward amounts) and is compared 1:1 against
-  `reward_pool_output.member_reward_total` — but only once
-  `DingoPoolEpochData.MemberRewardPresent` is true. An absent
-  `reward_pool_output` row is never treated as "nothing to compare": within
-  `--grace-hours` of the epoch closing it is `reference_lag` (reward
-  calculation may simply not have finished yet); past that window it is
+  stake. `member_rewards` has no such approximation — it is a direct sum of
+  per-delegator reward amounts — but the Dingo side of it is deliberately not
+  `reward_pool_output.member_reward_total`. `Result.addReward`
+  (`ledger/rewards/rewards.go`) accumulates that column from every member
+  reward the calculation produced, spendable or not, while Koios reports what
+  members actually received, so the two differ by exactly the pool's
+  unspendable member rewards and any pool holding one failed against a node
+  that was right (issue #3797). The row's own `unspendable` column is not a
+  usable correction, since it accumulates unspendable *leader* rewards too.
+
+  The comparable quantity is the sum over the stake epoch's
+  `reward_account_output` member rows that the ledger credits — `spendable`
+  set and `guarded` clear, the same pair `applyStakeRewards` tests before
+  calling `AddAccountRewardByCredential`. `cleanupOldSnapshots` retains
+  `reward_account_output` without bound only in `api` storage mode, so those
+  rows can be absent; the comparison then falls back to
+  `member_reward_total`, but only when `unspendable` is zero, where nothing was
+  withheld and the pool's member total is its spendable member total by
+  construction. With rows absent and something withheld the quantities provably
+  differ, and the field is reported as missing rather than compared on the wrong
+  basis.
+
+  An absent `reward_pool_output` row is never treated as "nothing to compare"
+  either: within `--grace-hours` of the epoch closing it is `reference_lag`
+  (reward calculation may simply not have finished yet); past that window it is
   `dingo_db_missing` (a genuine gap in Dingo's own computation). Both are
   `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
   presence/grace split to `reward_pool_input`'s param-epoch field
