@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"sync"
 	"testing"
@@ -1829,6 +1830,63 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	recovered, err = ls.tryRecoverFromTxValidationError(validation())
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
 	require.False(t, recovered)
+}
+
+// The Shelley-family UTxO rule reports a withdrawal that does not match the
+// local reward balance as shelley.IncorrectWithdrawalAmountError, which is the
+// validation-time sibling of the apply-time
+// models.ErrRewardWithdrawalExceedsBalance covered above. It gets the same
+// disposition, and in particular the same gate: the first rejection is not
+// terminal, because the rule returns this error for any amount the local
+// balance cannot satisfy -- including a wrong amount in a block this node
+// should simply reject -- so one such block must not stop the node for good.
+func TestReplayRecoveryHaltsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("incorrect-withdrawal-amount-tx"),
+			Cause: fmt.Errorf(
+				"shelley UTxO rule: %w",
+				shelley.IncorrectWithdrawalAmountError{
+					Provided: big.NewInt(399009945),
+					Balance:  399088479,
+				},
+			),
+		}
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"the first incorrect withdrawal amount must be rejected, not halted",
+	)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
+	require.False(t, recovered)
+	var withdrawalErr shelley.IncorrectWithdrawalAmountError
+	require.ErrorAs(
+		t,
+		err,
+		&withdrawalErr,
+		"the halt error must carry the mismatched balance",
+	)
+	require.Equal(t, uint64(399088479), withdrawalErr.Balance)
 }
 
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {

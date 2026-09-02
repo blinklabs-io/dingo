@@ -3553,6 +3553,21 @@ verdict can be a local false positive, so the node has to stay able to follow a
 chain a later peer offers. Whether a validation failure ever becomes terminal,
 and what a terminal state must report, is issue #3261.
 
+A reward withdrawal mismatch is the one classified failure that can become
+terminal. `isRewardWithdrawalMismatch` covers both reports of it:
+`models.ErrRewardWithdrawalExceedsBalance` from the withdrawal write, and
+`shelley.IncorrectWithdrawalAmountError` from the Shelley-family UTxO rule,
+which under the pre-Dijkstra exact-drain rule also fires for an amount below
+the recorded balance (issue #3628). A reward balance comes from epoch-boundary
+accounting rather than from the UTxO window replay rebuilds, so no local replay
+can change the verdict. The first occurrence is still only a rejection: the
+branch is rewound and the one fresh intersection is spent, so a block that
+merely carries a wrong withdrawal amount cannot stop the node. A redelivery of
+the same failing block at the same applied tip returns `errHaltLedgerPipeline`
+with the underlying mismatch attached, because chain selection has already had
+its alternate-branch opportunity and the persisted reward state still cannot
+satisfy the transaction.
+
 That false positive is not hypothetical for the Shelley-family rule. The rule
 deduplicates every input set unconditionally, while the CBOR decoder leaves
 untagged (pre-Conway) array fields unchecked so pre-Conway encodings stay

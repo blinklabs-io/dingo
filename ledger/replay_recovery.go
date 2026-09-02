@@ -212,21 +212,6 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if isDeterministicTxValidationError(validationErr.Cause) {
 		return ls.recoverFromDeterministicTxValidationError(validationErr)
 	}
-	// A withdrawal amount mismatch is a ledger-state divergence, not an
-	// unresolved producer that replaying another local UTxO history can repair.
-	// Retrying the same block through the producer-recovery path can repeatedly
-	// rewind a healthy primary chain while hiding the actual reward-state
-	// mismatch. Stop the pipeline and surface the original validation error so
-	// the operator can repair or replace the inconsistent state.
-	if _, ok := errors.AsType[shelley.IncorrectWithdrawalAmountError](
-		validationErr.Cause,
-	); ok {
-		return false, fmt.Errorf(
-			"reward withdrawal state diverged during replay: %w (%w)",
-			errHaltLedgerPipeline,
-			validationErr.Cause,
-		)
-	}
 	if ls.IsAtTip() {
 		return ls.recoverAtTipFromTxValidationError(validationErr)
 	}
@@ -383,8 +368,10 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	return true, nil
 }
 
-// isDeterministicTxValidationError identifies transaction-structure failures
-// that cannot be repaired by replaying a different local UTxO history. A
+// isDeterministicTxValidationError identifies validation failures that cannot
+// be repaired by replaying a different local UTxO history: transaction
+// structure verdicts, and the reward withdrawal mismatch
+// isRewardWithdrawalMismatch classifies below. A
 // duplicate input is invalid regardless of which chain produced the input,
 // so treating it as an unresolved producer sends recovery down the fallback
 // path and can repeatedly rediscover the same rejected block.
@@ -401,7 +388,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // pre-Conway array fields unchecked, so a canonical pre-Conway block can carry
 // a wire-level duplicate cardano-node coalesces and this verdict rejects
 // (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
-// non-terminal for exactly that reason.
+// non-terminal for that duplicate verdict for exactly that reason.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true
@@ -409,10 +396,29 @@ func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
 		return true
 	}
-	if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
 	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
+	return ok
+}
+
+// isRewardWithdrawalMismatch reports whether a validation failure is a
+// disagreement between a block's withdrawal amount and this node's reward
+// account state. Two layers report it. The sqlstore withdrawal write returns
+// models.ErrRewardWithdrawalExceedsBalance when the applied amount is larger
+// than the persisted balance, and the Shelley-family UTxO rule returns
+// shelley.IncorrectWithdrawalAmountError when the amount does not satisfy the
+// era's required relationship to that balance at all -- which under the
+// exact-amount rule includes an amount below the balance, the shape observed
+// on Preprod in issue #3628. Recovery treats them alike: a reward balance is
+// derived from epoch-boundary accounting rather than from the UTxO window the
+// producer-recovery path rebuilds, so no local replay can change the verdict.
+func isRewardWithdrawalMismatch(err error) bool {
+	if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+		return true
+	}
+	_, ok := errors.AsType[shelley.IncorrectWithdrawalAmountError](err)
 	return ok
 }
 
@@ -518,10 +524,7 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		validationErr,
 	)
 	ls.RUnlock()
-	if resyncSpent && errors.Is(
-		validationErr.Cause,
-		models.ErrRewardWithdrawalExceedsBalance,
-	) {
+	if resyncSpent && isRewardWithdrawalMismatch(validationErr.Cause) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Error(
 				"replay recovery found a repeated reward withdrawal mismatch; halting instead of retrying indefinitely",
@@ -536,8 +539,9 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			)
 		}
 		return false, fmt.Errorf(
-			"repeated reward withdrawal mismatch: %w",
+			"repeated reward withdrawal mismatch: %w (%w)",
 			errHaltLedgerPipeline,
+			validationErr.Cause,
 		)
 	}
 	rewindPoint := ledgerTip.Point
