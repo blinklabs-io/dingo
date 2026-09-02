@@ -104,7 +104,9 @@ type Options struct {
 	// that genuinely depends on in-memory semantics rather than on a
 	// file-backed database -- WAL behavior, locking, or the absence of a
 	// data directory. Ignored unless the metadata provider is sqlite and
-	// the caller supplied no Config of its own.
+	// the caller supplied no Metadata.Config of its own. Options.Config
+	// does not disable it: with a DataDir the template is seeded into
+	// that directory instead.
 	InMemoryMetadata bool
 }
 
