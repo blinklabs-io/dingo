@@ -35,8 +35,8 @@
 # this repository builds still shipped the old config.
 #
 # Sources, in precedence order:
-#   CARDANO_CONFIGS_DIR  an existing checkout or extracted /config tree
-#   CARDANO_CONFIGS_REF  a git ref of the repository, cloned here
+#   CARDANO_CONFIGS_DIR  an existing checkout or extracted config tree
+#   CARDANO_CONFIGS_REF  a branch, tag, or commit ref of the repository
 #   (default)            the image tag pinned in the Dockerfile
 
 set -euo pipefail
@@ -65,8 +65,9 @@ else
 	if [[ -n "${configs_ref}" ]]; then
 		source_desc="${configs_repo} at ${configs_ref}"
 		echo "cloning ${source_desc}"
-		git clone --quiet --depth 1 --branch "${configs_ref}" \
-			"${configs_repo}" "${cleanup_dir}/configs"
+		git clone --quiet --filter=blob:none "${configs_repo}" \
+			"${cleanup_dir}/configs"
+		git -C "${cleanup_dir}/configs" checkout --quiet "${configs_ref}"
 		configs_dir="${cleanup_dir}/configs"
 	else
 		tag="$(sed -n "s|^FROM ${configs_image}:\\([^ ]*\\) .*|\\1|p" Dockerfile | head -1)"
@@ -85,24 +86,32 @@ else
 	fi
 fi
 
-if [[ ! -d "${configs_dir}/config" ]]; then
-	echo "error: ${configs_dir} has no config/ directory" >&2
-	exit 1
-fi
-
 # Check exactly the networks config/cardano/embed.go embeds, so adding a
 # network to that directive brings it under this check automatically.
-embed_line="$(grep -m1 '^//go:embed ' config/cardano/embed.go)"
+embed_line="$(grep -m1 '^//go:embed ' config/cardano/embed.go)" || {
+	echo "error: no //go:embed directive found in config/cardano/embed.go" >&2
+	exit 1
+}
 read -r -a networks <<<"${embed_line#//go:embed }"
 if [[ ${#networks[@]} -eq 0 ]]; then
 	echo "error: no networks found in config/cardano/embed.go" >&2
 	exit 1
 fi
 
+if [[ -d "${configs_dir}/config" ]]; then
+	configs_root="${configs_dir}/config"
+else
+	configs_root="${configs_dir}"
+fi
+if [[ ! -d "${configs_root}/${networks[0]}" ]]; then
+	echo "error: ${configs_dir} has no config tree" >&2
+	exit 1
+fi
+
 drift=0
 checked=0
 for network in "${networks[@]}"; do
-	upstream="${configs_dir}/config/${network}"
+	upstream="${configs_root}/${network}"
 	if [[ ! -d "${upstream}" ]]; then
 		echo "DRIFT ${network}: not present in ${source_desc}"
 		drift=$((drift + 1))
@@ -116,7 +125,7 @@ for network in "${networks[@]}"; do
 		done
 		[[ ${skip} -eq 1 ]] && continue
 		checked=$((checked + 1))
-		counterpart="${configs_dir}/config/${relative}"
+		counterpart="${configs_root}/${relative}"
 		if [[ ! -e "${counterpart}" ]]; then
 			echo "DRIFT ${relative}: missing from ${source_desc}"
 			drift=$((drift + 1))
@@ -128,6 +137,18 @@ for network in "${networks[@]}"; do
 			drift=$((drift + 1))
 		fi
 	done < <(git ls-files "config/cardano/${network}")
+	while IFS= read -r relative; do
+		skip=0
+		for allowed in "${dingo_only[@]}"; do
+			[[ "${network}/${relative}" == "${allowed}" ]] && skip=1 && break
+		done
+		[[ ${skip} -eq 1 ]] && continue
+		if ! git ls-files --error-unmatch "config/cardano/${network}/${relative}" \
+			>/dev/null 2>&1; then
+			echo "DRIFT ${network}/${relative}: missing from dingo"
+			drift=$((drift + 1))
+		fi
+	done < <(find "${upstream}" -type f -printf '%P\n' | sort)
 done
 
 if [[ ${drift} -ne 0 ]]; then
