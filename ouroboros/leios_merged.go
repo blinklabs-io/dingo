@@ -286,10 +286,14 @@ func cloneRawMessages(in []cbor.RawMessage) []cbor.RawMessage {
 }
 
 // validateLeiosEndorserBlockTxs binds fetched transaction wire values to the
-// manifest before the complete set is cached or applied. Leios transaction
-// references use the Cardano transaction ID (the hash of the transaction body)
-// and the complete transaction's encoded size, while leios-fetch carries each
-// transaction either directly or in a CBOR byte-string wrapper.
+// manifest before the complete set is cached or applied. Each Leios manifest
+// reference is content-addressed over the FULL serialized transaction: the
+// TransactionHash is Blake2b256 of the complete transaction CBOR (NOT the
+// Cardano tx-id / body hash) and TransactionSize is that CBOR's length. Both
+// the fetch-side validator here and the forge-side reference builder
+// (buildLeiosEB) use this same full-transaction contract, matching Haskell
+// reference nodes. leios-fetch carries each transaction either directly or in
+// a CBOR byte-string wrapper.
 func validateLeiosEndorserBlockTxs(
 	manifestRaw []byte,
 	txsRaw []cbor.RawMessage,
