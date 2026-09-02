@@ -1277,10 +1277,10 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 	assert.Equal(t, uint64(30), uint64(account.Reward))
 }
 
-// TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury checks
+// TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury checks
 // that when an orphaned proposal's return reward account is not registered,
 // its deposit is routed to the treasury rather than credited to the account.
-func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
+func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	t *testing.T,
 ) {
 	db, store := newTallyTestDB(t)
@@ -1351,8 +1351,8 @@ func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
 }
 
 // TestProcessEpochTransitiveOrphanRemoval verifies that orphan sweeps
-// cascade: when the direct child of an enacted proposal is orphaned, its own
-// children are also swept and refunded in the same tick.
+// cascade: when a competing root-level sibling of an enacted proposal is
+// orphaned, its own children are also swept and refunded in the same tick.
 func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 	db, store := newTallyTestDB(t)
 
@@ -1475,10 +1475,10 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 	}
 }
 
-// TestProcessEpochOrphanedChildRestoredOnRollback verifies that rolling
+// TestProcessEpochOrphanedSiblingRestoredOnRollback verifies that rolling
 // back to a slot before the boundary slot restores orphaned proposals
 // (clears their expired_epoch/expired_slot) and reverses the reward credit.
-func TestProcessEpochOrphanedChildRestoredOnRollback(t *testing.T) {
+func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 64)

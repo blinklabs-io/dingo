@@ -84,3 +84,31 @@ func TestBackfillBatchRebindDefaultsToIdentity(t *testing.T) {
 	}
 	require.NoError(t, runner.Run(context.Background()))
 }
+
+// TestBackfillRebindFallsBackToDialectRebinder proves that a Runner built
+// without an explicit Rebind still rewrites placeholders for a dialect that
+// rejects `?`. An identity fallback would hand `?` straight to PostgreSQL and
+// fail the committee term-start backfill.
+func TestBackfillRebindFallsBackToDialectRebinder(t *testing.T) {
+	postgres := Runner{Dialect: "postgres"}
+	require.Equal(
+		t,
+		"SELECT id FROM t WHERE a = $1 AND b = $2",
+		postgres.backfillRebind()("SELECT id FROM t WHERE a = ? AND b = ?"),
+	)
+
+	// A dialect that takes ? directly is unchanged.
+	sqlite := Runner{Dialect: "sqlite"}
+	require.Equal(
+		t,
+		"SELECT id FROM t WHERE a = ?",
+		sqlite.backfillRebind()("SELECT id FROM t WHERE a = ?"),
+	)
+
+	// An explicit override still wins over the dialect rebinder.
+	explicit := Runner{
+		Dialect: "postgres",
+		Rebind:  func(string) string { return "override" },
+	}
+	require.Equal(t, "override", explicit.backfillRebind()("anything"))
+}

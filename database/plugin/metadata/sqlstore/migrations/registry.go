@@ -60,7 +60,11 @@ var schemaVersions = []struct {
 	},
 	{Version: 7, Name: accountDepositSchemaRelease, Dir: "v7"},
 	{Version: 8, Name: committeeCredentialTagsSchemaRelease, Dir: "v8"},
-	{Version: 9, Name: committeeTermStartPresenceSchemaRelease, Dir: "v9"},
+	{
+		Version: 9,
+		Name:    committeeTermStartPresenceSchemaRelease,
+		Dir:     "v9",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -126,7 +130,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 				dialect: sqlForDialect,
 			},
 		}
-		if version.Version == 8 {
+		if version.Name == committeeTermStartPresenceSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeTermStartBackfill
 		}

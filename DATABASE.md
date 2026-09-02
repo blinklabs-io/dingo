@@ -178,7 +178,12 @@ proposal from its latest remaining history row (or to pending when none
 remains). The append-only lifecycle sequence makes repeated clear/re-ratify
 cycles rollback-safe and survives restart on all SQL metadata providers.
 
-Migration `v7` (`committee-credential-tags`, integer version 7) adds the
+Migration `v7` (`account-import-deposit`, integer version 7) adds
+`account_import_baseline.deposit_amount`. Existing baselines stay NULL because
+their imports discarded the value and substituting today's protocol parameter
+would invent history.
+
+Migration `v8` (`committee-credential-tags`, integer version 8) adds the
 key/script credential tag to `committee_member`, `auth_committee_hot`, and
 `resign_committee_cold`, plus the hot-credential tag to
 `auth_committee_hot`. It also records each member's `term_start_slot`,
@@ -188,10 +193,16 @@ to key hashes. The migration replaces hash-only member uniqueness with
 lookup indexes. Key and script credentials with the same hash remain distinct,
 while removal and later re-election create rollback-safe membership history on
 SQLite, PostgreSQL, and MySQL. Authorization and resignation queries are
-bounded by the selected member term, so resignation is permanent within that
-term but does not leak into a later re-election.
+bounded by the selected member term: a resignation recorded at or after the
+term's start slot marks that member resigned. Resignation therefore carries
+forward into a later re-election rather than being cleared by it, matching
+cardano-ledger, where committee state is keyed by cold credential with no term
+component and an enacted `UpdateCommittee` retains the existing entry for a
+re-elected member (`Map.intersection` in the Conway EPOCH rule). A resigned
+member cannot authorize a hot key until it is removed from the committee and
+elected again.
 
-Migration `v8` (`committee-term-start-presence`, integer version 8) adds
+Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present
 without changing `term_start_slot`, including a valid zero. New writes persist
 the presence bit so slot zero remains distinct from a legacy caller that omits

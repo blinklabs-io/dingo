@@ -88,6 +88,9 @@ func TestSQLiteRegistry(t *testing.T) {
 	)
 	require.Equal(t, 7, registry[6].Version)
 	require.Equal(t, "account-import-deposit", registry[6].Name)
+	require.Equal(t, []string{
+		"ALTER TABLE `account_import_baseline` ADD COLUMN `deposit_amount` text",
+	}, registry[6].SQL["sqlite"].Expand)
 	require.Equal(t, 8, registry[7].Version)
 	require.Equal(t, "committee-credential-tags", registry[7].Name)
 	require.Equal(t, 9, registry[8].Version)

@@ -100,11 +100,11 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 8:
+advertising readiness. The current registry has migrations 1 through 9:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
-`governance-ratification-history`, `committee-credential-tags`, and
-`committee-term-start-presence`. `DATABASE.md` is the source of truth for their
+`governance-ratification-history`, `account-import-deposit`,
+`committee-credential-tags`, and `committee-term-start-presence`. `DATABASE.md` is the source of truth for their
 schema changes and upgrade behavior. It then checks the read pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A

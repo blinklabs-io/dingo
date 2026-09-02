@@ -89,7 +89,15 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
-// Compile-time guard for the tag-aware committee validation capability.
+// The Conway committee certificate and voter rules discover this capability
+// with a runtime type assertion and fail closed when it misses, so signature
+// drift would silently reject every transaction whose validation performs a
+// committee credential lookup rather than fail to build.
+//
+// eras.CommitteeCredentialState has the same method set as gouroboros
+// ledger/common.CommitteeCredentialState, so this also proves *LedgerView
+// satisfies the upstream capability. Point it at the upstream type once the
+// gouroboros pin exports it.
 var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
 
 // Keep the optional Conway governance capability wired to the concrete view
@@ -103,10 +111,6 @@ var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 // (DRepDelegationStateUnavailableError), so signature drift here is a
 // consensus-level break. Make it a compile error instead.
 var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
-
-// These methods intentionally compile against the released Gouroboros API as
-// ordinary methods. Once the credential-aware committee capability is
-// released, this assertion can be enabled without changing Dingo's provider.
 
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
@@ -633,10 +637,43 @@ func extractRawCostModels(
 	}
 }
 
-// CommitteeStateAvailable reports that this SQL-backed view is authoritative,
-// including when no committee members are seated.
+// CommitteeStateAvailable reports whether this view can authoritatively answer
+// committee credential queries for its snapshot.
+//
+// Availability is derived from whether any committee member is seated, not
+// from the store being reachable. Only two paths ever write committee_member:
+// UpdateCommittee enactment (ledger/governance/enact.go) and Mithril snapshot
+// import (ledgerstate/import.go). Dingo does not seed the Conway genesis
+// committee -- genesis.Committee.Threshold is read for the CC quorum, but
+// genesis.Committee.Members is never persisted. A node synced from genesis
+// therefore holds no committee rows for the whole Conway era until the first
+// UpdateCommittee enacts, while the real chain has the genesis committee
+// seated from the hard fork.
+//
+// So an empty table is genuinely ambiguous: it means "never populated" on a
+// genesis-synced node and "authoritatively empty" after a NoConfidence
+// enactment, and Dingo cannot currently tell those apart. Reporting the
+// reachable-store answer (true) would resolve that ambiguity the wrong way and
+// reject an authorization from a real genesis committee member, because the
+// lookup returns no member. Reporting false leaves the ambiguity visible to
+// the caller, which declines to reject on committee grounds it cannot
+// establish -- the behavior the upstream len(members) > 0 heuristic had.
+//
+// Seeding the genesis committee is the real fix and is tracked separately;
+// once it lands, an empty table becomes unambiguously authoritative and this
+// should report true so the rules fail closed.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
-	return lv != nil && lv.ls != nil && lv.ls.db != nil, nil
+	if lv == nil || lv.ls == nil || lv.ls.db == nil {
+		return false, nil
+	}
+	// GetCommitteeMembers is the seated-member set. GetCommitteeActiveCount is
+	// not a substitute: it counts hot-key authorizations, so a seated
+	// committee that has authorized no hot keys would report zero.
+	members, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	if err != nil {
+		return false, fmt.Errorf("get committee members: %w", err)
+	}
+	return len(members) > 0, nil
 }
 
 // CommitteeMember preserves the legacy hash-only contract. It returns nil
@@ -834,8 +871,15 @@ func (lv *LedgerView) proposedCommitteeMember(
 	if err != nil {
 		return nil, fmt.Errorf("get active governance proposals: %w", err)
 	}
+	// NoConfidence and UpdateCommittee chain off the same committee root, so
+	// the root must be the latest enacted member of the pair. Querying only
+	// UpdateCommittee returns a stale root once a NoConfidence is enacted,
+	// which drops every pending member chained off it.
 	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(
-		[]uint8{uint8(lcommon.GovActionTypeUpdateCommittee)}, lv.txn,
+		governancePurposeActionTypes(
+			uint8(lcommon.GovActionTypeUpdateCommittee),
+		),
+		lv.txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get committee proposal root: %w", err)
