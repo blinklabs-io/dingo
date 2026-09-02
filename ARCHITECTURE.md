@@ -5683,9 +5683,22 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   equality leaves membership unproven and keeps the stricter classification:
   a read error, an empty set (which cannot distinguish "captured, no pools"
   from "not captured"), no ready summary, a zero count, or a disagreeing
-  count. Because `pool_stake_snapshot` is windowed while `reward_pool_input`
-  is retained for the life of the database, an epoch older than that window
-  has no membership evidence and keeps the stricter classification too.
+  count.
+
+  `pool_stake_snapshot` is windowed — `cleanupOldSnapshots` prunes it to
+  `currentEpoch - 3` — while `epoch_summary` and `reward_pool_input` are
+  retained for the life of the database, so an epoch older than that window
+  used to have no membership evidence at all and every departed pool in it
+  became a `dingo_db_missing`, which in strict mode stops the node. A Preview
+  genesis replay closes an epoch about every 25 seconds, so an observer only
+  has to run roughly 75 seconds behind the node to fall outside the window
+  permanently. `checkEpoch` therefore falls back to the same completeness
+  argument on the retained tables: a K+1 reward-input set whose size equals
+  the K+1 `epoch_summary.TotalPoolCount` accounts for every pool in that pool
+  set, so absence from it is departure. The fallback fails closed exactly like
+  the primary path — a degraded pool omitted from `reward_pool_input` while it
+  stays in the pool set leaves the counts unequal, so membership is unproven
+  and the stricter classification stands (issue #3795).
 
   The same split applies a third time to `reward_pool_input`'s stake-epoch
   fields (`delegated_stake`/`delegator_count`/`fixed_cost`/`margin`, reported
