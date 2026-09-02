@@ -15,13 +15,17 @@
 package governance
 
 import (
+	"math"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -394,6 +398,249 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 	assert.Nil(t, proposal.RatifiedSlot)
 }
 
+func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
+	tests := []struct {
+		name    string
+		pparams func() lcommon.ProtocolParameters
+	}{
+		{
+			name: "Conway",
+			pparams: func() lcommon.ProtocolParameters {
+				return &conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: 10,
+					},
+				}
+			},
+		},
+		{
+			name: "Dijkstra",
+			pparams: func() lcommon.ProtocolParameters {
+				return &gdijkstra.DijkstraProtocolParameters{
+					ConwayProtocolParameters: conway.ConwayProtocolParameters{
+						ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+							Major: gdijkstra.MinProtocolVersionDijkstra,
+						},
+					},
+					MaxRefScriptSizePerBlock: 1_000,
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, _ := newTallyTestDB(t)
+			actionCbor, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+				Type: uint(lcommon.GovActionTypeNoConfidence),
+			})
+			require.NoError(t, err)
+
+			txHash := testBytes(32, 0xA1)
+			require.NoError(t, db.SetGovernanceProposal(
+				&models.GovernanceProposal{
+					TxHash:        txHash,
+					ActionIndex:   0,
+					ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
+					ProposedEpoch: 4,
+					ExpiresEpoch:  10,
+					AnchorURL:     "https://example.invalid/no-confidence",
+					AnchorHash:    testBytes(32, 0xA2),
+					ReturnAddress: testBytes(29, 0xA3),
+					GovActionCbor: actionCbor,
+					AddedSlot:     400,
+				},
+				nil,
+			))
+
+			txn := db.MetadataTxn(true)
+			defer txn.Release()
+			out, err := ProcessEpoch(&EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    4,
+				NewEpoch:     5,
+				BoundarySlot: 500,
+				PParams:      test.pparams(),
+				UpdateFn: func(
+					pparams lcommon.ProtocolParameters,
+					_ any,
+				) (lcommon.ProtocolParameters, error) {
+					return pparams, nil
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+
+			require.Equal(
+				t,
+				1,
+				out.RatifiedCount,
+				"ProcessEpoch must run the governance ratification path",
+			)
+			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, proposal.RatifiedEpoch)
+			assert.Equal(t, uint64(5), *proposal.RatifiedEpoch)
+		})
+	}
+}
+
+func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
+	t *testing.T,
+) {
+	maxBlock := uint32(2_000)
+	maxTx := uint32(1_000)
+	stride := uint32(128)
+	multiplier := &cbor.Rat{Rat: new(big.Rat).SetFrac64(7, 4)}
+	tests := []struct {
+		name   string
+		update gdijkstra.DijkstraProtocolParameterUpdate
+		assert func(*testing.T, *gdijkstra.DijkstraProtocolParameters)
+	}{
+		{
+			name: "key-34-max-ref-script-size-per-block",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerBlock: &maxBlock,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, maxBlock, p.MaxRefScriptSizePerBlock)
+			},
+		},
+		{
+			name: "key-35-max-ref-script-size-per-tx",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerTx: &maxTx,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, maxTx, p.MaxRefScriptSizePerTx)
+			},
+		},
+		{
+			name: "key-36-ref-script-cost-stride",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostStride: &stride,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, stride, p.RefScriptCostStride)
+			},
+		},
+		{
+			name: "key-37-ref-script-cost-multiplier",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostMultiplier: multiplier,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Zero(t, p.RefScriptCostMultiplier.Cmp(multiplier.Rat))
+			},
+		},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, store := newTallyTestDB(t)
+			actionCbor, err := cbor.Encode(
+				&gdijkstra.DijkstraParameterChangeGovAction{
+					Type:        uint(lcommon.GovActionTypeParameterChange),
+					ParamUpdate: test.update,
+				},
+			)
+			require.NoError(t, err)
+
+			txHash := testBytes(32, byte(0xB0+index))
+			require.NoError(t, db.SetGovernanceProposal(
+				&models.GovernanceProposal{
+					TxHash:        txHash,
+					ActionIndex:   0,
+					ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+					ProposedEpoch: stabilityTestEpoch - 1,
+					ExpiresEpoch:  stabilityTestEpoch + 10,
+					AnchorURL:     "https://example.invalid/dijkstra-param",
+					AnchorHash:    testBytes(32, byte(0xC0+index)),
+					ReturnAddress: testBytes(29, byte(0xD0+index)),
+					GovActionCbor: actionCbor,
+					AddedSlot:     400,
+				},
+				nil,
+			))
+			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			drepCred := seedDRepWithStake(t, db, 100)
+			seedDRepYesVote(t, db, proposal.ID, drepCred)
+			seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
+
+			pparams := &gdijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: gdijkstra.MinProtocolVersionDijkstra,
+					},
+					MinCommitteeSize: 1,
+					PoolVotingThresholds: conway.PoolVotingThresholds{
+						PpSecurityGroup: newRat(1, 1),
+					},
+					DRepVotingThresholds: conway.DRepVotingThresholds{
+						PpNetworkGroup: newRat(1, 1),
+						PpGovGroup:     newRat(1, 1),
+					},
+				},
+				MaxRefScriptSizePerBlock: 1_000,
+				MaxRefScriptSizePerTx:    500,
+				RefScriptCostStride:      64,
+				RefScriptCostMultiplier:  testRatPtr(3, 2),
+				CommitteeStakeCoverage:   testRatPtr(2, 3),
+				QuorumStakeThreshold:     testRatPtr(3, 5),
+			}
+
+			runEpoch := func(
+				prevEpoch uint64,
+				newEpoch uint64,
+				activePParams lcommon.ProtocolParameters,
+			) *EpochOutput {
+				t.Helper()
+				txn := db.MetadataTxn(true)
+				defer txn.Release()
+				out, processErr := ProcessEpoch(&EpochInput{
+					DB:           db,
+					Txn:          txn,
+					PrevEpoch:    prevEpoch,
+					NewEpoch:     newEpoch,
+					BoundarySlot: newEpoch * 100,
+					PParams:      activePParams,
+					UpdateFn:     eras.PParamsUpdateDijkstra,
+				})
+				require.NoError(t, processErr)
+				require.NoError(t, txn.Commit())
+				return out
+			}
+
+			ratification := runEpoch(
+				stabilityTestEpoch-1,
+				stabilityTestEpoch,
+				pparams,
+			)
+			require.Equal(t, 1, ratification.RatifiedCount)
+			stored, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, stored.RatifiedEpoch)
+			require.Equal(t, stabilityTestEpoch, *stored.RatifiedEpoch)
+
+			enactment := runEpoch(
+				stabilityTestEpoch,
+				stabilityTestEpoch+1,
+				ratification.UpdatedPParams,
+			)
+			require.Equal(t, 1, enactment.EnactedCount)
+			updated, ok := enactment.UpdatedPParams.(*gdijkstra.DijkstraProtocolParameters)
+			require.True(t, ok)
+			test.assert(t, updated)
+			stored, err = db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, stored.EnactedEpoch)
+			require.Equal(t, stabilityTestEpoch+1, *stored.EnactedEpoch)
+		})
+	}
+}
+
 func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 	t *testing.T,
 ) {
@@ -724,6 +971,158 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 	assert.True(t, committeeNoConfidenceState(&models.GovernanceProposal{
 		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
 	}))
+}
+
+func TestProcessEpochCommitteeTermLimit(t *testing.T) {
+	const currentEpoch = uint64(10)
+	uintPtr := func(value uint) *uint { return &value }
+	tests := []struct {
+		name         string
+		termLimit    uint64
+		memberExpiry *uint
+		actionType   lcommon.GovActionType
+		wantRatified bool
+	}{
+		{
+			name:         "within limit",
+			termLimit:    5,
+			memberExpiry: uintPtr(14),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "exact boundary",
+			termLimit:    5,
+			memberExpiry: uintPtr(15),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "over limit remains pending",
+			termLimit:    5,
+			memberExpiry: uintPtr(16),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: false,
+		},
+		{
+			name:         "overflowing bound",
+			termLimit:    math.MaxUint64,
+			memberExpiry: uintPtr(20),
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "empty members",
+			termLimit:    0,
+			actionType:   lcommon.GovActionTypeUpdateCommittee,
+			wantRatified: true,
+		},
+		{
+			name:         "non committee action",
+			termLimit:    0,
+			actionType:   lcommon.GovActionTypeNoConfidence,
+			wantRatified: true,
+		},
+	}
+
+	for testIndex, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, _ := newTallyTestDB(t)
+			var action lcommon.GovAction
+			switch test.actionType {
+			case lcommon.GovActionTypeUpdateCommittee:
+				members := make(map[*lcommon.Credential]uint)
+				if test.memberExpiry != nil {
+					credential := &lcommon.Credential{
+						CredType: lcommon.CredentialTypeAddrKeyHash,
+					}
+					copy(
+						credential.Credential[:],
+						testBytes(28, byte(testIndex+1)),
+					)
+					members[credential] = *test.memberExpiry
+				}
+				action = &lcommon.UpdateCommitteeGovAction{
+					Type:       uint(test.actionType),
+					CredEpochs: members,
+					Quorum:     newRat(2, 3),
+				}
+			case lcommon.GovActionTypeNoConfidence:
+				action = &lcommon.NoConfidenceGovAction{
+					Type: uint(test.actionType),
+				}
+			default:
+				t.Fatalf("unsupported action type %d", test.actionType)
+			}
+			actionCBOR, err := cbor.Encode(action)
+			require.NoError(t, err)
+
+			txHash := testBytes(32, byte(0x80+testIndex))
+			require.NoError(t, db.SetGovernanceProposal(
+				&models.GovernanceProposal{
+					TxHash:        txHash,
+					ActionIndex:   0,
+					ActionType:    uint8(test.actionType),
+					ProposedEpoch: currentEpoch - 1,
+					ExpiresEpoch:  currentEpoch + 10,
+					AnchorURL:     "https://example.invalid/committee-term",
+					AnchorHash:    testBytes(32, byte(0x90+testIndex)),
+					ReturnAddress: testBytes(29, byte(0xa0+testIndex)),
+					GovActionCbor: actionCBOR,
+					AddedSlot:     100,
+				},
+				nil,
+			))
+
+			pparams := conwayPParamsFixture(10)
+			pparams.CommitteeTermLimit = test.termLimit
+			pparams.DRepVotingThresholds.CommitteeNormal = newRat(0, 1)
+			pparams.PoolVotingThresholds.CommitteeNormal = newRat(0, 1)
+			pparams.DRepVotingThresholds.MotionNoConfidence = newRat(0, 1)
+			pparams.PoolVotingThresholds.MotionNoConfidence = newRat(0, 1)
+
+			txn := db.MetadataTxn(true)
+			defer txn.Release()
+			out, err := ProcessEpoch(&EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    currentEpoch - 1,
+				NewEpoch:     currentEpoch,
+				BoundarySlot: 500,
+				PParams:      pparams,
+				UpdateFn: func(
+					pparams lcommon.ProtocolParameters,
+					_ any,
+				) (lcommon.ProtocolParameters, error) {
+					return pparams, nil
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+
+			if test.wantRatified {
+				assert.Equal(t, 1, out.RatifiedCount)
+			} else {
+				assert.Equal(t, 0, out.RatifiedCount)
+			}
+			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			require.NoError(t, err)
+			if test.wantRatified {
+				require.NotNil(t, proposal.RatifiedEpoch)
+				assert.Equal(t, currentEpoch, *proposal.RatifiedEpoch)
+			} else {
+				assert.Nil(t, proposal.RatifiedEpoch)
+				assert.Nil(t, proposal.RatifiedSlot)
+				assert.Nil(t, proposal.EnactedEpoch)
+				assert.Nil(t, proposal.ExpiredEpoch)
+				assert.Nil(t, proposal.DeletedSlot)
+				active, err := db.GetActiveGovernanceProposals(currentEpoch, nil)
+				require.NoError(t, err)
+				require.Len(t, active, 1)
+				assert.Equal(t, txHash, active[0].TxHash)
+			}
+		})
+	}
 }
 
 // buildInfoProposal is a test helper that creates a GovernanceProposal with

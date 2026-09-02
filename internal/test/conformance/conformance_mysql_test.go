@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,102 +107,53 @@ func newTestMysqlConformanceManager(t *testing.T) *DingoStateManager {
 	return sm
 }
 
-// TestRulesConformanceVectorsMysql is the strict pass/fail gate for the
-// MySQL-backed DingoStateManager: it fails immediately on the first vector
-// mismatch (via harness.RunAllVectors), mirroring TestRulesConformanceVectors
-// in conformance_test.go.
+var (
+	mysqlCorpusOnce sync.Once
+	mysqlCorpusRun  corpusRun
+)
+
+// mysqlCorpusResults returns the MySQL backend's memoized corpus replay.
+// Requires the caller to have already skipped when MySQL is not configured.
+func mysqlCorpusResults(t *testing.T) []conformance.VectorResult {
+	t.Helper()
+	mysqlCorpusOnce.Do(func() {
+		// Construct here rather than through
+		// newTestMysqlConformanceManager: that helper reports a
+		// construction failure with require.NoError on its own
+		// *testing.T, and sync.Once marks itself done even when its
+		// function unwinds through t.FailNow's runtime.Goexit. A later
+		// consumer in the same process would then read a zero-value
+		// corpusRun -- nil results and nil error -- pass its
+		// require.NoError, and fail in assertCorpus with a misleading
+		// "produced no vectors" instead of the construction failure.
+		// Storing the error keeps corpusRun's documented contract, and
+		// matches sqliteCorpusResults.
+		sm, err := NewDingoMysqlStateManager(mysqlConformanceRootDSN())
+		if err != nil {
+			mysqlCorpusRun = corpusRun{
+				err: fmt.Errorf("new mysql state manager: %w", err),
+			}
+			return
+		}
+		defer sm.Close()
+		mysqlCorpusRun = replayCorpus(sm)
+	})
+	require.NoError(t, mysqlCorpusRun.err, "mysql corpus replay")
+	return mysqlCorpusRun.results
+}
+
+// TestRulesConformanceVectorsMysql replays the corpus against a real
+// MySQL-backed state manager, then asserts, reports, and compares against the
+// SQLite baseline in one pass. See TestRulesConformanceVectorsPostgres and
+// corpus_test.go for why a per-dialect replay earns its cost while a repeated
+// one does not.
 func TestRulesConformanceVectorsMysql(t *testing.T) {
 	skipIfMysqlConformanceNotConfigured(t)
 
-	testdataRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
-	require.NoError(t, err, "failed to extract embedded testdata")
-
-	sm := newTestMysqlConformanceManager(t)
-	defer sm.Close()
-
-	harness := conformance.NewHarness(sm, conformance.HarnessConfig{
-		TestdataRoot: testdataRoot,
-		Debug:        testing.Verbose(),
-	})
-
-	harness.RunAllVectors(t)
-}
-
-// TestRulesConformanceVectorsWithResultsMysql runs the harness against both
-// the SQLite-backed and MySQL-backed state managers in the same test and
-// compares them, rather than asserting a hardcoded vector count: the two
-// runs should exercise the identical number of vectors with identical pass
-// counts, and the comparison stays correct even as the embedded
-// ouroboros-mock vector corpus grows or shrinks.
-func TestRulesConformanceVectorsWithResultsMysql(t *testing.T) {
-	skipIfMysqlConformanceNotConfigured(t)
-
-	sqliteRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
-	require.NoError(t, err, "failed to extract embedded testdata")
-
-	sqliteSm, err := NewDingoStateManager()
-	require.NoError(t, err)
-	defer sqliteSm.Close()
-
-	sqliteHarness := conformance.NewHarness(sqliteSm, conformance.HarnessConfig{
-		TestdataRoot: sqliteRoot,
-	})
-	sqliteResults, err := sqliteHarness.RunAllVectorsWithResults()
-	require.NoError(t, err, "failed to run sqlite vectors")
-
-	mysqlRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
-	require.NoError(t, err, "failed to extract embedded testdata")
-
-	mysqlSm := newTestMysqlConformanceManager(t)
-	defer mysqlSm.Close()
-
-	mysqlHarness := conformance.NewHarness(mysqlSm, conformance.HarnessConfig{
-		TestdataRoot: mysqlRoot,
-	})
-	mysqlResults, err := mysqlHarness.RunAllVectorsWithResults()
-	require.NoError(t, err, "failed to run mysql vectors")
-
-	var mysqlPassed, mysqlFailed int
-	for _, result := range mysqlResults {
-		if result.Success {
-			mysqlPassed++
-		} else {
-			mysqlFailed++
-		}
-	}
-
-	t.Logf("Conformance Test Results (MySQL):")
-	t.Logf("  Total vectors: %d", len(mysqlResults))
-	t.Logf("  Passed: %d", mysqlPassed)
-	t.Logf("  Failed: %d", mysqlFailed)
-	if len(mysqlResults) > 0 {
-		t.Logf(
-			"  Pass rate: %.1f%%",
-			float64(mysqlPassed)/float64(len(mysqlResults))*100,
-		)
-	}
-	if mysqlFailed > 0 && testing.Verbose() {
-		t.Log("First failures:")
-		failCount := 0
-		for _, result := range mysqlResults {
-			if !result.Success && failCount < 5 {
-				t.Logf("  %s: %v", result.Title, result.Error)
-				failCount++
-			}
-		}
-		if mysqlFailed > 5 {
-			t.Logf("  ... and %d more failures", mysqlFailed-5)
-		}
-	}
-
-	require.Equal(
-		t,
-		len(sqliteResults),
-		len(mysqlResults),
-		"mysql backend exercised a different number of vectors than "+
-			"sqlite; vector discovery/extraction should be backend-invariant",
-	)
-	require.Zero(t, mysqlFailed, "mysql backend failed vectors sqlite passed")
+	results := mysqlCorpusResults(t)
+	reportCorpus(t, "mysql", results)
+	assertBackendMatchesSqlite(t, "mysql", results)
+	assertCorpus(t, "mysql", results)
 }
 
 // TestNewDingoMysqlStateManagerRestartSurvivesReopen proves state committed

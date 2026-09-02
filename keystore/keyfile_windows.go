@@ -116,7 +116,10 @@ func checkFilePermissions(path string) error {
 // Retained until its cases are migrated to the handle-based path.
 //
 //nolint:unused
-func checkSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) error {
+func checkSecurityDescriptor(
+	path string,
+	sd *windows.SECURITY_DESCRIPTOR,
+) error {
 	sddl := sd.String()
 	if sddl == "" {
 		return fmt.Errorf(
@@ -147,7 +150,10 @@ func checkOpenFilePermissions(f *os.File) error {
 	return checkOpenSecurityDescriptor(f.Name(), sd)
 }
 
-func checkOpenSecurityDescriptor(path string, sd *windows.SECURITY_DESCRIPTOR) error {
+func checkOpenSecurityDescriptor(
+	path string,
+	sd *windows.SECURITY_DESCRIPTOR,
+) error {
 	daclObject, _, err := sd.DACL()
 	if err != nil || daclObject == nil {
 		return fmt.Errorf(

@@ -98,8 +98,11 @@ func EvaluateRatifiableHardForkInitiation(
 	if in.DB == nil {
 		return nil, errors.New("nil database")
 	}
-	conwayPParams, ok := in.PParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	if err != nil {
+		return nil, err
+	}
+	if conwayPParams == nil {
 		// Pre-Conway: no governance state machine exists, so no
 		// HardForkInitiation can be in flight.
 		return nil, nil
@@ -178,27 +181,8 @@ func EvaluateRatifiableHardForkInitiation(
 		if !validateParentChain(proposal, hardForkRoot) {
 			continue
 		}
-		tally, err := TallyProposal(tallyCtx, proposal)
-		if err != nil {
-			return nil, fmt.Errorf("tally proposal: %w", err)
-		}
-		decision := ShouldRatify(RatifyInputs{
-			Tally:                 tally,
-			PParams:               conwayPParams,
-			ParamUpdate:           nil, // not used for HardForkInitiation
-			ActiveDRepCount:       activeDRepCount,
-			ActiveCCCount:         committeeState.ActiveMemberCount,
-			CCQuorum:              ccQuorum,
-			MajorVersion:          conwayPParams.ProtocolVersion.Major,
-			CommitteeNoConfidence: committeeNoConfidence,
-		})
-		if !decision.Ratified {
-			continue
-		}
-		// Decode to extract the target protocol version; an active
-		// HardForkInitiation that fails to decode here is a
-		// data-integrity bug, but the conservative behaviour is to
-		// skip it rather than abort the whole check.
+		// Decode before ratification so the same decoded-action-aware input
+		// shape is used by this mid-epoch check and the boundary RATIFY loop.
 		action, err := decodeGovAction(
 			proposal.GovActionCbor, proposal.ActionType,
 		)
@@ -206,6 +190,24 @@ func EvaluateRatifiableHardForkInitiation(
 			if in.OnProposalDecodeFailure != nil {
 				in.OnProposalDecodeFailure(proposal, err)
 			}
+			continue
+		}
+		tally, err := TallyProposal(tallyCtx, proposal)
+		if err != nil {
+			return nil, fmt.Errorf("tally proposal: %w", err)
+		}
+		decision := ShouldRatify(RatifyInputs{
+			Tally:                 tally,
+			PParams:               conwayPParams,
+			GovAction:             action,
+			CurrentEpoch:          in.CurrentEpoch,
+			ActiveDRepCount:       activeDRepCount,
+			ActiveCCCount:         committeeState.ActiveMemberCount,
+			CCQuorum:              ccQuorum,
+			MajorVersion:          conwayPParams.ProtocolVersion.Major,
+			CommitteeNoConfidence: committeeNoConfidence,
+		})
+		if !decision.Ratified {
 			continue
 		}
 		hf, ok := action.(*lcommon.HardForkInitiationGovAction)

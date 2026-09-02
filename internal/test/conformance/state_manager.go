@@ -150,6 +150,12 @@ type DingoStateManager struct {
 	// dataDir wiping never touches -- see state_manager_postgres.go and
 	// state_manager_mysql.go.
 	wipeMetadata func() error
+
+	// closeExtra, when set, releases backend-scoped resources the manager
+	// owns beyond its database -- currently the long-lived admin connection
+	// backendResetter holds so Reset does not reconnect per vector (see
+	// reset_cost.go). Close joins its error.
+	closeExtra func() error
 }
 
 // newDingoStateManager opens a real backend per opts and wraps it in a
@@ -219,6 +225,9 @@ func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 // finished.
 func (m *DingoStateManager) Close() error {
 	err := closeRealDatabase(m.db, m.host)
+	if m.closeExtra != nil {
+		err = errors.Join(err, m.closeExtra())
+	}
 	if m.ownsDataDir && m.dataDir != "" {
 		if rmErr := os.RemoveAll(m.dataDir); rmErr != nil {
 			err = errors.Join(err, rmErr)
@@ -374,6 +383,30 @@ func (m *DingoStateManager) LoadInitialState(
 
 	if err := m.seedAuthCommitteeHot(txn, state.HotKeyAuthorizations); err != nil {
 		return err
+	}
+
+	// The enacted constitution is real backend state that the read side
+	// (DingoStateProvider.Constitution) reads back through
+	// database.Database.GetConstitution, the same way production does.
+	// Without this seed a vector whose initial state already carries a
+	// constitution -- which is where its guardrails policy hash comes
+	// from -- would leave the backend with no constitution row at all, and
+	// the read side would (correctly) fail closed on every
+	// parameter-change and treasury-withdrawal proposal in the vector.
+	// Slot 0 matches the other seeds here, so a rollback to any vector
+	// slot never prunes it.
+	if state.Constitution != nil {
+		if err := m.db.SetConstitution(
+			&models.Constitution{
+				AnchorURL:  state.Constitution.AnchorURL,
+				AnchorHash: state.Constitution.AnchorHash,
+				PolicyHash: state.Constitution.PolicyHash,
+				AddedSlot:  0,
+			},
+			txn,
+		); err != nil {
+			return fmt.Errorf("seed constitution: %w", err)
+		}
 	}
 
 	for id, proposal := range state.Proposals {
@@ -977,7 +1010,7 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 	}
 
 	// Phase 2: ratify proposals that meet threshold requirements.
-	if err := m.ratifyProposals(txn, newEpoch); err != nil {
+	if err := m.ratifyProposals(txn, newEpoch, boundarySlot); err != nil {
 		return fmt.Errorf("ratify proposals: %w", err)
 	}
 
@@ -1005,6 +1038,7 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 func (m *DingoStateManager) ratifyProposals(
 	txn *database.Txn,
 	currentEpoch uint64,
+	boundarySlot uint64,
 ) error {
 	for id, proposal := range m.govState.Proposals {
 		if proposal.RatifiedEpoch != nil {
@@ -1018,7 +1052,9 @@ func (m *DingoStateManager) ratifyProposals(
 			epoch := currentEpoch
 			proposal.RatifiedEpoch = &epoch
 			m.govState.Proposals[id] = proposal
-			if err := m.persistRatification(txn, id, currentEpoch); err != nil {
+			if err := m.persistRatification(
+				txn, id, currentEpoch, boundarySlot,
+			); err != nil {
 				return err
 			}
 			continue
@@ -1064,28 +1100,34 @@ func (m *DingoStateManager) ratifyProposals(
 		epoch := currentEpoch
 		proposal.RatifiedEpoch = &epoch
 		m.govState.Proposals[id] = proposal
-		if err := m.persistRatification(txn, id, currentEpoch); err != nil {
+		if err := m.persistRatification(
+			txn, id, currentEpoch, boundarySlot,
+		); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// persistRatification sets the real governance_proposal row's
-// ratified_epoch. A proposal id with no matching real row (a synthetic
+// persistRatification sets the real governance_proposal row's ratification
+// epoch and boundary slot as one rollback-safe state transition. A proposal
+// id with no matching real row (a synthetic
 // initial-state seed with no originating transaction) is left as an
 // in-memory-only decision -- there is nothing to persist for it.
 func (m *DingoStateManager) persistRatification(
 	txn *database.Txn,
 	id string,
 	epoch uint64,
+	boundarySlot uint64,
 ) error {
 	proposal, err := m.lookupGovernanceProposal(txn, id)
 	if proposal == nil || err != nil {
 		return err
 	}
 	ratifiedEpoch := epoch
+	ratifiedSlot := boundarySlot
 	proposal.RatifiedEpoch = &ratifiedEpoch
+	proposal.RatifiedSlot = &ratifiedSlot
 	return m.db.SetGovernanceProposal(proposal, txn)
 }
 
@@ -1361,7 +1403,10 @@ func (m *DingoStateManager) proposalToModel(
 	}
 
 	if info.RatifiedEpoch != nil {
-		proposal.RatifiedEpoch = info.RatifiedEpoch
+		ratifiedEpoch := *info.RatifiedEpoch
+		ratifiedSlot := ratifiedEpoch * conformanceSlotsPerEpoch
+		proposal.RatifiedEpoch = &ratifiedEpoch
+		proposal.RatifiedSlot = &ratifiedSlot
 	}
 
 	return proposal

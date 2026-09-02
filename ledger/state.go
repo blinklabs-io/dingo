@@ -60,8 +60,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// cleanupConsumedUtxosInterval is the period between consumed-UTxO cleanup
+// runs. A var, like the Close* drain timeouts below, so lifecycle tests can
+// shrink it instead of waiting on a real multi-minute timer.
+var cleanupConsumedUtxosInterval = 5 * time.Minute
+
 const (
-	cleanupConsumedUtxosInterval = 5 * time.Minute
 	// Keep each cleanup transaction short enough that it cannot monopolize
 	// SQLite while blockfetch handlers persist sync state during shutdown or
 	// catch-up. Later timer or epoch-boundary runs continue the cleanup.
@@ -831,6 +835,14 @@ type LedgerState struct {
 	slotClock                          *SlotClock
 	slotTickChan                       <-chan SlotTick
 	ctx                                context.Context
+	// cleanupMu owns timerCleanupConsumedUtxos and serializes cleanup-run
+	// registration against Close. Deliberately not the LedgerState RWMutex:
+	// Close waits on cleanupWG while an in-flight run still needs RLock to
+	// read the tip, so draining under the ledger lock would deadlock.
+	cleanupMu sync.Mutex
+	// cleanupWG counts consumed-UTxO cleanup runs that have passed the
+	// closed check, so Close can join one already touching the database.
+	cleanupWG sync.WaitGroup
 	// leiosBackfill prefetches historical Leios endorser blocks by point ahead
 	// of the apply cursor (nil when no endorser-block fetcher is configured).
 	leiosBackfill *leiosBackfiller
@@ -1097,6 +1109,14 @@ type LedgerState struct {
 	// Test hook called after Close releases the blockfetch continuation mutex
 	// and before it waits for continuation workers.
 	blockfetchContinuationSchedulingHook func()
+	// Test hook called at the top of the consumed-UTxO cleanup timer
+	// callback, before any shutdown check, so a lifecycle test can observe
+	// whether the timer itself is still armed.
+	cleanupConsumedUtxosTimerFiredHook func()
+	// Test hook called inside a cleanup run that has registered with
+	// cleanupWG, so a lifecycle test can hold a run in flight and assert
+	// that Close drains it.
+	cleanupConsumedUtxosRunHook func()
 }
 
 // upstreamSyncState is one connection-generation snapshot. Consumers must not
@@ -1612,7 +1632,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 // blockfetch event cannot be replayed from the EventBus, so this subscriber
 // remains attached until it drains or normal node lifecycle cancellation closes
 // it rather than taking the ordinary stalled-subscriber detachment path.
-func (ls *LedgerState) subscribeBlockfetchEvents(handler event.EventHandlerFunc) {
+func (ls *LedgerState) subscribeBlockfetchEvents(
+	handler event.EventHandlerFunc,
+) {
 	ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 		BlockfetchEventType,
 		blockfetchCommitBatchSize,
@@ -2004,6 +2026,26 @@ func (ls *LedgerState) Close() error {
 	if ls.Scheduler != nil {
 		ls.Scheduler.Stop()
 	}
+
+	// Stop the periodic consumed-UTxO cleanup timer and drain a run already
+	// under way. Timer.Stop does not wait for an AfterFunc callback that has
+	// already fired, so the Wait is what keeps Close from returning while
+	// cleanup is still issuing deletes. closed was set above, so
+	// beginCleanupConsumedUtxosRun now rejects every new run and the timer
+	// callback cannot re-arm itself.
+	//
+	// Unconditional, like the header-replay and reward-precompute waits
+	// below and unlike this function's bounded ones: returning early here
+	// would reintroduce exactly the use-after-close this is meant to
+	// prevent. A run is bounded by cleanupConsumedUtxoBatchSize -- one short
+	// delete transaction, deliberately sized so it cannot monopolize
+	// SQLite -- so there is no unbounded drain to guard against.
+	ls.cleanupMu.Lock()
+	if ls.timerCleanupConsumedUtxos != nil {
+		ls.timerCleanupConsumedUtxos.Stop()
+	}
+	ls.cleanupMu.Unlock()
+	ls.cleanupWG.Wait()
 
 	// Stop the decode pipeline at the same time as the block-processing
 	// goroutine. decodeReadChainBatch drains the pipeline's Results channel
@@ -2634,14 +2676,25 @@ func nearUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
-	ls.Lock()
-	defer ls.Unlock()
+	ls.cleanupMu.Lock()
+	defer ls.cleanupMu.Unlock()
+	// The timer callback re-arms itself, so a run already in flight when
+	// Close stopped the timer would otherwise install a fresh one behind
+	// Close's back -- leaving a self-perpetuating timer firing every
+	// interval, for the rest of the process, against a database the owner
+	// closes as soon as Close returns.
+	if ls.closed.Load() {
+		return
+	}
 	if ls.timerCleanupConsumedUtxos != nil {
 		ls.timerCleanupConsumedUtxos.Stop()
 	}
 	ls.timerCleanupConsumedUtxos = time.AfterFunc(
 		cleanupConsumedUtxosInterval,
 		func() {
+			if ls.cleanupConsumedUtxosTimerFiredHook != nil {
+				ls.cleanupConsumedUtxosTimerFiredHook()
+			}
 			ls.cleanupConsumedUtxos()
 			// Schedule the next run
 			ls.scheduleCleanupConsumedUtxos()
@@ -2649,7 +2702,35 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 	)
 }
 
+// beginCleanupConsumedUtxosRun registers a consumed-UTxO cleanup run with the
+// shutdown drain, reporting false once Close has begun. Both cleanup triggers
+// go through it: the periodic timer, and the epoch transition's bare
+// `go ls.cleanupConsumedUtxos()`, which stopping the timer does not constrain.
+//
+// closed is set before Close takes cleanupMu, and this re-checks it under that
+// same mutex, so no run can register after Close has started waiting.
+func (ls *LedgerState) beginCleanupConsumedUtxosRun() bool {
+	ls.cleanupMu.Lock()
+	defer ls.cleanupMu.Unlock()
+	if ls.closed.Load() {
+		return false
+	}
+	ls.cleanupWG.Add(1)
+	return true
+}
+
 func (ls *LedgerState) cleanupConsumedUtxos() {
+	// Refuse to begin database work once Close has started, and keep Close
+	// waiting for this run otherwise. LedgerState does not own the database
+	// (see the note at the end of Close); its owner closes it immediately
+	// after Close returns.
+	if !ls.beginCleanupConsumedUtxosRun() {
+		return
+	}
+	defer ls.cleanupWG.Done()
+	if ls.cleanupConsumedUtxosRunHook != nil {
+		ls.cleanupConsumedUtxosRunHook()
+	}
 	// Cleanup is advisory pruning. Never let the periodic timer and the epoch
 	// transition trigger occupy SQLite's single write connection at the same
 	// time. Each invocation handles one bounded batch so cleanup remains
@@ -3552,7 +3633,8 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 		if len(genesisHashBytes) != lcommon.Blake2b256Size {
 			return nil, fmt.Errorf(
 				"seed post-Byron epoch nonce: Shelley genesis hash is %d bytes, expected %d",
-				len(genesisHashBytes), lcommon.Blake2b256Size,
+				len(genesisHashBytes),
+				lcommon.Blake2b256Size,
 			)
 		}
 		newEpoch.Nonce = genesisHashBytes
@@ -4307,7 +4389,11 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"failed to decode block",
 					"error", err,
 				)
-				return nil, fmt.Errorf("decode block at slot %d: %w", raw.Slot, err)
+				return nil, fmt.Errorf(
+					"decode block at slot %d: %w",
+					raw.Slot,
+					err,
+				)
 			}
 			decoded = append(decoded, block)
 		}
@@ -6959,10 +7045,9 @@ func (ls *LedgerState) computePParams(
 	var pparams lcommon.ProtocolParameters
 	if era.DecodePParamsFunc != nil {
 		var err error
-		pparams, err = ls.db.GetPParams(
+		pparams, err = ls.loadPersistedProtocolParameters(
 			epoch.EpochId,
-			era.Id,
-			era.DecodePParamsFunc,
+			era,
 			nil,
 		)
 		if err != nil {
@@ -6997,10 +7082,9 @@ func (ls *LedgerState) computePParams(
 			prevEra, _ := ls.eraById(ep.EraId)
 			if prevEra != nil &&
 				prevEra.DecodePParamsFunc != nil {
-				prevPP, prevErr := ls.db.GetPParams(
+				prevPP, prevErr := ls.loadPersistedProtocolParameters(
 					ep.EpochId,
-					ep.EraId,
-					prevEra.DecodePParamsFunc,
+					*prevEra,
 					nil,
 				)
 				if prevErr != nil {
@@ -7018,6 +7102,61 @@ func (ls *LedgerState) computePParams(
 		}
 	}
 	return pparams, prevEraPParams, nil
+}
+
+// loadPersistedProtocolParameters decodes the era-owned CBOR row and restores
+// Dijkstra's genesis-only stake thresholds, which are intentionally absent
+// from the on-chain protocol-parameter CBOR representation.
+func (ls *LedgerState) loadPersistedProtocolParameters(
+	epoch uint64,
+	era eras.EraDesc,
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
+	if era.DecodePParamsFunc == nil {
+		return nil, nil
+	}
+	pparams, err := ls.db.GetPParams(
+		epoch,
+		era.Id,
+		era.DecodePParamsFunc,
+		txn,
+	)
+	if err != nil || pparams == nil || era.Id != eras.DijkstraEraDesc.Id {
+		return pparams, err
+	}
+	dijkstraPParams, ok := pparams.(*dijkstra.DijkstraProtocolParameters)
+	if !ok || dijkstraPParams == nil {
+		return nil, fmt.Errorf(
+			"persisted Dijkstra pparams decoded as %T",
+			pparams,
+		)
+	}
+	if ls.config.CardanoNodeConfig != nil {
+		genesis := ls.config.CardanoNodeConfig.DijkstraGenesis()
+		if genesis != nil {
+			if dijkstraPParams.CommitteeStakeCoverage == nil {
+				dijkstraPParams.CommitteeStakeCoverage = cloneGenesisRat(
+					genesis.CommitteeStakeCoverage,
+				)
+			}
+			if dijkstraPParams.QuorumStakeThreshold == nil {
+				dijkstraPParams.QuorumStakeThreshold = cloneGenesisRat(
+					genesis.QuorumStakeThreshold,
+				)
+			}
+		}
+	}
+	if err := dijkstraPParams.ValidateLeiosCommitteeParameters(); err != nil {
+		return nil, fmt.Errorf("validate persisted Dijkstra pparams: %w", err)
+	}
+	return dijkstraPParams, nil
+}
+
+func cloneGenesisRat(value *lcommon.GenesisRat) *cbor.Rat {
+	if value == nil || value.Rat == nil {
+		return nil
+	}
+	return &cbor.Rat{Rat: new(big.Rat).Set(value.Rat)}
 }
 
 // computeGenesisProtocolParameters bootstraps protocol parameters
@@ -8453,7 +8592,9 @@ func (ls *LedgerState) publishActiveUpstream(connId ouroboros.ConnectionId) {
 	if current != nil && current.connectionKey == connIdKey(connId) {
 		return
 	}
-	ls.syncUpstreamState.Store(&upstreamSyncState{connectionKey: connIdKey(connId)})
+	ls.syncUpstreamState.Store(
+		&upstreamSyncState{connectionKey: connIdKey(connId)},
+	)
 }
 
 func (ls *LedgerState) clearActiveUpstream() {

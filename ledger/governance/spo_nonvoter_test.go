@@ -93,12 +93,15 @@ func TestProcessEpochSPONonVoterDenominators(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			ratified := runSPONonVoterRatification(t, spoNonVoterRatificationCase{
-				actionType:           testCase.actionType,
-				rewardDefault:        testCase.defaultDRep,
-				thresholdNumerator:   testCase.numerator,
-				thresholdDenominator: testCase.denominator,
-			})
+			ratified := runSPONonVoterRatification(
+				t,
+				spoNonVoterRatificationCase{
+					actionType:           testCase.actionType,
+					rewardDefault:        testCase.defaultDRep,
+					thresholdNumerator:   testCase.numerator,
+					thresholdDenominator: testCase.denominator,
+				},
+			)
 			assert.Equal(t, testCase.wantRatify, ratified)
 		})
 	}
@@ -147,13 +150,16 @@ func TestProcessEpochSPONonVoterRatification(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			ratified := runSPONonVoterRatification(t, spoNonVoterRatificationCase{
-				actionType:           testCase.actionType,
-				rewardDefault:        testCase.defaultDRep,
-				thresholdNumerator:   3,
-				thresholdDenominator: 4,
-				silentVote:           testCase.silentVote,
-			})
+			ratified := runSPONonVoterRatification(
+				t,
+				spoNonVoterRatificationCase{
+					actionType:           testCase.actionType,
+					rewardDefault:        testCase.defaultDRep,
+					thresholdNumerator:   3,
+					thresholdDenominator: 4,
+					silentVote:           testCase.silentVote,
+				},
+			)
 			assert.Equal(t, testCase.wantRatify, ratified)
 		})
 	}
@@ -258,7 +264,11 @@ func runSPONonVoterRatification(
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
 
-	stored, err := db.GetGovernanceProposal(proposal.TxHash, proposal.ActionIndex, nil)
+	stored, err := db.GetGovernanceProposal(
+		proposal.TxHash,
+		proposal.ActionIndex,
+		nil,
+	)
 	require.NoError(t, err)
 	ratified := out.RatifiedCount == 1
 	assert.Equal(t, ratified, stored.RatifiedEpoch != nil)
@@ -317,7 +327,11 @@ func seedSPONonVoterProposal(
 		AddedSlot:     1,
 	}
 	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-	stored, err := db.GetGovernanceProposal(proposal.TxHash, proposal.ActionIndex, nil)
+	stored, err := db.GetGovernanceProposal(
+		proposal.TxHash,
+		proposal.ActionIndex,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	return stored

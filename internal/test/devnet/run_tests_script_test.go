@@ -1,3 +1,5 @@
+//go:build linux
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -141,8 +143,13 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 				"stake-key copy did not use the host uid:gid")
 			assert.Empty(t, result.stakeDirs,
 				"runner left its stake-key temp tree behind\n%s", result.output)
-			assert.Len(t, result.artifactDirs, test.wantArtifactCount,
-				"runner did not apply its artifact retention policy\n%s", result.output)
+			assert.Len(
+				t,
+				result.artifactDirs,
+				test.wantArtifactCount,
+				"runner did not apply its artifact retention policy\n%s",
+				result.output,
+			)
 		})
 	}
 }
@@ -161,7 +168,11 @@ func TestRunTestsPreservesCallerOwnedStakeDirectory(t *testing.T) {
 	})
 	require.Equal(t, 0, result.exitCode, result.output)
 	contents, err := os.ReadFile(marker)
-	require.NoError(t, err, "runner removed a stake directory it did not create")
+	require.NoError(
+		t,
+		err,
+		"runner removed a stake directory it did not create",
+	)
 	assert.Equal(t, "caller-owned", string(contents))
 }
 
@@ -193,12 +204,15 @@ func runFakeDevnetWithEnv(
 	// A fail-before run intentionally leaves a read-only directory behind.
 	// Restore owner permissions before testing.TempDir performs final cleanup.
 	t.Cleanup(func() {
-		_ = filepath.Walk(tempRoot, func(path string, info os.FileInfo, err error) error {
-			if err == nil && info.IsDir() {
-				_ = os.Chmod(path, 0o700)
-			}
-			return nil
-		})
+		_ = filepath.Walk(
+			tempRoot,
+			func(path string, info os.FileInfo, err error) error {
+				if err == nil && info.IsDir() {
+					_ = os.Chmod(path, 0o700)
+				}
+				return nil
+			},
+		)
 	})
 
 	fakeBin := filepath.Join(tempRoot, "bin")
@@ -221,8 +235,12 @@ func runFakeDevnetWithEnv(
 		"FAKE_DOCKER_LOG": filepath.Join(tempRoot, "docker.log"),
 		"FAKE_GO_EXIT":    strconv.Itoa(testExit),
 		"MODE":            "dingo",
-		"PATH":            fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TMPDIR":          tempRoot,
+		"PATH": fakeBin + string(
+			os.PathListSeparator,
+		) + os.Getenv(
+			"PATH",
+		),
+		"TMPDIR": tempRoot,
 	}
 	for key, value := range envOverrides {
 		env[key] = value

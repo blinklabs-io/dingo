@@ -1169,7 +1169,9 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 //
 // Unlike RecentPoints, this performs one indexed lookup regardless of depth,
 // which is important for consensus reads at the security-parameter boundary.
-func (c *Chain) PointAtDepth(depth uint64) (point ocommon.Point, found bool, err error) {
+func (c *Chain) PointAtDepth(
+	depth uint64,
+) (point ocommon.Point, found bool, err error) {
 	if c == nil {
 		return ocommon.Point{}, false, errors.New("chain is nil")
 	}

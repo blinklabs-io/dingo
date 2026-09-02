@@ -163,7 +163,11 @@ func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
 	firstPoint, firstRaw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(
 		t,
-		o.storeLeiosEndorserBlock(firstPoint, firstRaw, []cbor.RawMessage{tx()}),
+		o.storeLeiosEndorserBlock(
+			firstPoint,
+			firstRaw,
+			[]cbor.RawMessage{tx()},
+		),
 	)
 
 	// Simulate the race directly: the entry inserted first (and so holding

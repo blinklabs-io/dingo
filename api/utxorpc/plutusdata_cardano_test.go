@@ -90,7 +90,10 @@ func TestPlutusDataToCardano_Map(t *testing.T) {
 }
 
 func TestPlutusDataToCardano_ConstrLargeTagUsesAnyConstructor(t *testing.T) {
-	pd := pdata.NewConstrFromBigInt(big.NewInt(200), pdata.NewInteger(big.NewInt(0)))
+	pd := pdata.NewConstrFromBigInt(
+		big.NewInt(200),
+		pdata.NewInteger(big.NewInt(0)),
+	)
 	proto, err := plutusDataToCardano(pd)
 	require.NoError(t, err)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
@@ -110,7 +113,9 @@ func TestPlutusDataToCardanoChecked_ConstrTag127UsesTag(t *testing.T) {
 	require.Equal(t, uint64(0), cv.Constr.AnyConstructor)
 }
 
-func TestPlutusDataToCardanoChecked_ConstrTag128UsesAnyConstructor(t *testing.T) {
+func TestPlutusDataToCardanoChecked_ConstrTag128UsesAnyConstructor(
+	t *testing.T,
+) {
 	pd := pdata.NewConstrFromBigInt(big.NewInt(128))
 	proto, err := plutusDataToCardanoChecked(pd)
 	require.NoError(t, err)

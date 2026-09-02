@@ -25,9 +25,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // slowGovernanceTallyThreshold bounds how long the per-epoch governance
@@ -90,8 +91,11 @@ func ProcessEpoch(
 	}
 	out := &EpochOutput{UpdatedPParams: in.PParams}
 
-	conwayPParams, ok := in.PParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	if err != nil {
+		return nil, err
+	}
+	if conwayPParams == nil {
 		// Pre-Conway: nothing to do, governance state machine is
 		// not yet active.
 		return out, nil
@@ -201,11 +205,16 @@ func ProcessEpoch(
 				if in.Logger != nil {
 					in.Logger.Warn(
 						"governance proposal failed deterministic enactment preflight; returned it to pending",
-						"component", "governance",
-						"tx_hash", shortHash(proposal.TxHash),
-						"action_index", proposal.ActionIndex,
-						"error", err,
-						"epoch", in.NewEpoch,
+						"component",
+						"governance",
+						"tx_hash",
+						shortHash(proposal.TxHash),
+						"action_index",
+						proposal.ActionIndex,
+						"error",
+						err,
+						"epoch",
+						in.NewEpoch,
 					)
 				}
 				return false, nil
@@ -457,9 +466,22 @@ func ProcessEpoch(
 	// HardForkInitiation), refresh the Conway pparams view so major
 	// version and threshold reads reflect the updated values.
 	if out.PParamsChanged {
-		if p, ok := out.UpdatedPParams.(*conway.ConwayProtocolParameters); ok {
-			conwayPParams = p
+		updatedConwayPParams, err := conwayGovernanceProtocolParameters(
+			out.UpdatedPParams,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"resolve updated governance pparams: %w",
+				err,
+			)
 		}
+		if updatedConwayPParams == nil {
+			return nil, fmt.Errorf(
+				"governance pparams update returned pre-Conway type %T",
+				out.UpdatedPParams,
+			)
+		}
+		conwayPParams = updatedConwayPParams
 	}
 
 	majorVersion := conwayPParams.ProtocolVersion.Major
@@ -560,40 +582,38 @@ func ProcessEpoch(
 		if err != nil {
 			return nil, fmt.Errorf("tally: %w", err)
 		}
-		// For ParameterChange, decode the action so thresholds can
-		// take the touched parameter groups into account (especially
-		// so SPOs only gate security-group changes, and DReps select
-		// the most restrictive touched group).
-		var paramUpdate *conway.ConwayProtocolParameterUpdate
+		// Decode the action once for every action-specific ratification
+		// predicate. ParameterChange uses the touched parameter groups for
+		// threshold selection in both Conway and Dijkstra, while
+		// UpdateCommittee checks proposed member expiries against the current
+		// epoch and committee term limit.
+		action, decodeErr := decodeGovActionForPParams(
+			proposal.GovActionCbor,
+			proposal.ActionType,
+			out.UpdatedPParams,
+		)
+		if decodeErr != nil {
+			if in.Logger != nil {
+				in.Logger.Error(
+					"skipping proposal: failed to decode governance action",
+					"tx_hash",
+					shortHash(proposal.TxHash),
+					"action_index",
+					proposal.ActionIndex,
+					"action_type",
+					proposal.ActionType,
+					"error",
+					decodeErr,
+					"component",
+					"governance",
+				)
+			}
+			continue
+		}
+		var parameterChange lcommon.ParameterChangeGovAction
 		if lcommon.GovActionType(proposal.ActionType) ==
 			lcommon.GovActionTypeParameterChange {
-			action, decodeErr := decodeGovAction(
-				proposal.GovActionCbor, proposal.ActionType,
-			)
-			if decodeErr != nil {
-				// A decode failure means we cannot tell which
-				// parameter groups are touched; silently falling
-				// through with paramUpdate==nil would let SPO
-				// checks return nil and allow security-group
-				// changes to ratify without SPO approval. Skip
-				// this proposal and surface the error so it is
-				// investigated.
-				if in.Logger != nil {
-					in.Logger.Error(
-						"skipping proposal: failed to decode parameter change action",
-						"tx_hash",
-						shortHash(proposal.TxHash),
-						"action_index",
-						proposal.ActionIndex,
-						"error",
-						decodeErr,
-						"component",
-						"governance",
-					)
-				}
-				continue
-			}
-			a, ok := action.(*conway.ConwayParameterChangeGovAction)
+			a, ok := action.(lcommon.ParameterChangeGovAction)
 			if !ok {
 				if in.Logger != nil {
 					in.Logger.Error(
@@ -610,12 +630,14 @@ func ProcessEpoch(
 				}
 				continue
 			}
-			paramUpdate = &a.ParamUpdate
+			parameterChange = a
 		}
 		decision := ShouldRatify(RatifyInputs{
 			Tally:                 tally,
 			PParams:               conwayPParams,
-			ParamUpdate:           paramUpdate,
+			ParameterChange:       parameterChange,
+			GovAction:             action,
+			CurrentEpoch:          in.NewEpoch,
 			ActiveDRepCount:       activeDRepCount,
 			ActiveCCCount:         activeCCCount,
 			CCQuorum:              ccQuorum,
@@ -695,24 +717,7 @@ func ProcessEpoch(
 func cloneGovernanceProtocolParameters(
 	pparams lcommon.ProtocolParameters,
 ) (lcommon.ProtocolParameters, error) {
-	if pparams == nil {
-		return nil, errors.New("nil governance pparams")
-	}
-	if _, ok := pparams.(*conway.ConwayProtocolParameters); !ok {
-		return nil, fmt.Errorf(
-			"unsupported governance pparams type %T",
-			pparams,
-		)
-	}
-	data, err := cbor.Encode(pparams)
-	if err != nil {
-		return nil, fmt.Errorf("encode governance pparams: %w", err)
-	}
-	var cloned conway.ConwayProtocolParameters
-	if _, err := cbor.Decode(data, &cloned); err != nil {
-		return nil, fmt.Errorf("decode governance pparams: %w", err)
-	}
-	return &cloned, nil
+	return eras.CloneGovernanceProtocolParameters(pparams)
 }
 
 // ratificationEnactmentPrecondition checks the deterministic failure surfaces
@@ -750,6 +755,14 @@ func ratificationEnactmentPrecondition(
 
 	switch a := action.(type) {
 	case *conway.ConwayParameterChangeGovAction:
+		candidate, err := cloneGovernanceProtocolParameters(pparams)
+		if err != nil {
+			return treasuryRemaining, err
+		}
+		if _, err := updateFn(candidate, a.ParamUpdate); err != nil {
+			return treasuryRemaining, fmt.Errorf("apply param update: %w", err)
+		}
+	case *gdijkstra.DijkstraParameterChangeGovAction:
 		candidate, err := cloneGovernanceProtocolParameters(pparams)
 		if err != nil {
 			return treasuryRemaining, err

@@ -853,10 +853,9 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
 	if ls.db != nil {
 		era, ok := ls.eraById(paramsEraID)
 		if ok && era != nil && era.DecodePParamsFunc != nil {
-			if pparams, pparamsErr := ls.db.GetPParams(
+			if pparams, pparamsErr := ls.loadPersistedProtocolParameters(
 				paramsEpoch,
-				paramsEraID,
-				era.DecodePParamsFunc,
+				*era,
 				nil,
 			); pparamsErr == nil && pparams != nil {
 				return pparams

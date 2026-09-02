@@ -23,7 +23,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(t *testing.T) {
+func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(
+	t *testing.T,
+) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -64,7 +66,9 @@ func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(t *testing.T)
 	)
 }
 
-func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(t *testing.T) {
+func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(
+	t *testing.T,
+) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
