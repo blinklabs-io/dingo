@@ -242,3 +242,33 @@ func TestResolveKoiosAccountUniverseCachedRefusesUnboundedReuse(t *testing.T) {
 		time.Now(), time.Now().Add(-time.Minute),
 	))
 }
+
+// TestAccountUniverseStateBackfilledOnUpgrade covers a cache written before
+// koios_account_universe_state existed: the crawl's rows are there but the
+// state row is not, which would read as "never crawled" and pay for a full
+// /account_list walk on first use. The schema migration backfills it.
+func TestAccountUniverseStateBackfilledOnUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(path, nil)
+	require.NoError(t, err)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, cache.SaveAccountUniverse(
+		"preview", []string{"stake_test1a", "stake_test1b"}, fetchedAt,
+	))
+	// Drop the state row to reproduce the older layout, then reopen so the
+	// schema pass runs against it.
+	_, err = cache.db.Exec(`DELETE FROM koios_account_universe_state`)
+	require.NoError(t, err)
+	require.NoError(t, cache.Close())
+
+	reopened, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer reopened.Close() //nolint:errcheck
+
+	addrs, got, cached, err := reopened.GetAccountUniverse("preview")
+	require.NoError(t, err)
+	assert.True(t, cached, "the existing crawl must survive the upgrade")
+	assert.Equal(t, []string{"stake_test1a", "stake_test1b"}, addrs)
+	assert.WithinDuration(t, fetchedAt, got, time.Second)
+}

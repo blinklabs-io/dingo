@@ -1506,6 +1506,19 @@ func createCacheSchema(db *sql.DB) error {
 		}
 	}
 
+	// A cache written before koios_account_universe_state existed carries the
+	// crawl's rows but no state row, which reads as "never crawled" and pays
+	// for a full /account_list walk on first use. Backfill the state from the
+	// rows already there instead.
+	if _, err := db.Exec(`
+INSERT INTO koios_account_universe_state (network, fetched_at, address_count)
+SELECT network, MAX(fetched_at), COUNT(*)
+FROM koios_account_universe
+WHERE network NOT IN (SELECT network FROM koios_account_universe_state)
+GROUP BY network`); err != nil {
+		return fmt.Errorf("migrate koios_account_universe_state: %w", err)
+	}
+
 	// Older cache files created before #3097 have a koios_account_rewards
 	// table missing reward_type/spendable_epoch/pool_id_bech32 (schema-only
 	// era, #1875) — add each column additively rather than dropping and
