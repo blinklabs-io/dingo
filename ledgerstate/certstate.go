@@ -469,7 +469,7 @@ func parseConwayAccountState(
 	}
 
 	acct.Reward = reward
-	acct.Deposit = deposit
+	acct.Deposit = &deposit
 
 	partial := false
 	if len(elem) > 2 {
@@ -509,7 +509,7 @@ func parseShelleyAccountState(
 	}
 
 	acct.Reward = reward
-	acct.Deposit = deposit
+	acct.Deposit = &deposit
 
 	poolHash, ok := parsePoolDelegation(elem[3])
 	if ok {
@@ -535,7 +535,7 @@ func parseLegacyUMElem(
 
 	acct.Reward = rdPair[0]
 	if len(rdPair) > 1 {
-		acct.Deposit = rdPair[1]
+		acct.Deposit = &rdPair[1]
 	}
 
 	partial := false
