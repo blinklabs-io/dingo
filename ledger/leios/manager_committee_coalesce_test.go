@@ -168,6 +168,13 @@ func committeeEpochClaimed(m *VoteManager, epoch uint64) bool {
 	return ok
 }
 
+// committeeMemoEntry reads the memoized entry for epoch, if any.
+func committeeMemoEntry(m *VoteManager, epoch uint64) *epochEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.committees[epoch]
+}
+
 // committeeWaiterCount reports how many callers have parked on the in-flight
 // committee computation for epoch.
 //
@@ -626,4 +633,16 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 		t, leader, 5*time.Second, "leader did not return after the stop",
 	)
 	require.NoError(t, leaderResult.err)
+
+	// The stopped lifecycle's leader must not have installed its result as
+	// the new lifecycle's memo. Clearing the claim stops a new caller
+	// joining it; only the generation bump stops it installing.
+	memo := committeeMemoEntry(fixture.mgr, 5)
+	require.NotNil(t, memo, "the new lifecycle's own computation must be memoized")
+	require.Same(
+		t,
+		nextResult.committee,
+		memo.committee,
+		"the memo must hold the new lifecycle's committee, not the stopped leader's",
+	)
 }

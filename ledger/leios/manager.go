@@ -393,20 +393,24 @@ type VoteManager struct {
 	committees map[uint64]*epochEntry
 	// committeeInFlight coalesces concurrent computation of one epoch's
 	// committee: the presence of an epoch key means some caller has claimed
-	// the computation, and the slice holds one buffered result channel per
-	// caller waiting on it. An entry is deleted, and every channel in it
-	// sent to, by completeCommitteeComputation -- on success, on error, and
-	// on panic unwind alike. Bounded by committeeInFlightMaxEpochs.
+	// the computation, and its committeeComputation carries the one
+	// completion channel every waiter for that epoch parks on. The entry is
+	// deleted and that channel closed by completeCommitteeComputation -- on
+	// success, on error, and on panic unwind alike -- after which each waiter
+	// reads the result inline rather than re-reading the memo. Bounded by
+	// committeeInFlightMaxEpochs.
 	committeeInFlight map[uint64]*committeeComputation
 	// committeeStopCh releases committeeInFlight waiters at shutdown so one
 	// cannot stay parked on a leader blocked in a provider call. Closed by
 	// stopLocked and recreated by Start, like wakeCh.
 	committeeStopCh chan struct{}
 	// committeeGeneration is bumped by handleRollback when it clears the
-	// committee memo. A computation records the generation it started under
-	// and is not installed if the generation has moved on, so a rollback's
-	// invalidation cannot be undone by an in-flight computation derived from
-	// the pre-rollback stake snapshot landing afterwards.
+	// committee memo, and by stopLocked. A computation records the generation
+	// it started under and is not installed if the generation has moved on,
+	// so neither a rollback's invalidation nor a lifecycle boundary can be
+	// undone by an in-flight computation landing afterwards -- the rollback
+	// case derived from a pre-rollback stake snapshot, the stop case from the
+	// stopped lifecycle's providers.
 	committeeGeneration uint64
 	votesById           map[lcommon.LeiosVoteId]*storedVote
 	voteLog             []*storedVote // ascending seq order
@@ -594,6 +598,12 @@ func (m *VoteManager) stopLocked() {
 	// fresh stop channel until that leader returned -- or forever, if it
 	// never does. The leader still completes and still closes its own call.
 	m.committeeInFlight = make(map[uint64]*committeeComputation)
+	// Advance the generation for the same reason the rollback path does:
+	// clearing the claim stops a NEW caller joining the old leader, but not
+	// the old leader from installing. That result was derived under the
+	// stopped lifecycle's providers and configuration, and must not become
+	// the next lifecycle's memoized committee.
+	m.committeeGeneration++
 }
 
 // Stop stops the vote manager and unblocks any NextVotes waiters.
