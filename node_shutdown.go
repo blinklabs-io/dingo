@@ -137,7 +137,10 @@ func (n *Node) shutdown() error {
 
 	if n.peerGov != nil {
 		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("peer governor shutdown: %w", stopErr))
+			err = errors.Join(
+				err,
+				fmt.Errorf("peer governor shutdown: %w", stopErr),
+			)
 		}
 	}
 

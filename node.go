@@ -1031,11 +1031,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// 64-bit platforms.
 		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
 	}
+	// LedgerState.Start above starts its slot-clock goroutine before Run
+	// creates chainsync state. Use the same lock live Restore/Truncate use
+	// for this initial publication so late-bound ledger callbacks cannot
+	// observe the state while its constructor is still writing it.
+	n.liveLifecycleMu.Lock()
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
 		chainsyncCfg,
 	)
+	n.liveLifecycleMu.Unlock()
 	n.eventBus.SubscribeFunc(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
@@ -1087,6 +1093,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			},
 		},
 	)
+	// Seed chain selection from the applied ledger tip before peers connect.
+	// Without this initial observation, the plausibility guard treats the
+	// local tip as block zero until the recycler's first tick, leaving a
+	// startup window in which stale peer references cannot enter catch-up mode.
+	n.chainSelector.SetLocalTip(n.ledgerState.Tip())
 	if genesisSelectionMode {
 		n.config.logger.Info(
 			"Genesis chain selection enabled",
@@ -1214,6 +1225,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
 		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
 		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
+		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
 		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
@@ -1721,7 +1733,8 @@ func (n *Node) resolveRunError(runErr error) error {
 	n.fatalErrMu.Lock()
 	fatalErr := n.fatalErr
 	n.fatalErrMu.Unlock()
-	if fatalErr != nil && (runErr == nil || errors.Is(runErr, context.Canceled)) {
+	if fatalErr != nil &&
+		(runErr == nil || errors.Is(runErr, context.Canceled)) {
 		return fatalErr
 	}
 	return runErr

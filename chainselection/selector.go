@@ -904,6 +904,53 @@ func (cs *ChainSelector) GetPeerTip(
 	return &tipCopy
 }
 
+// GetPeerSyncTarget returns a peer's advertised head only after its delivered
+// frontier is close enough to corroborate that advertisement.
+func (cs *ChainSelector) GetPeerSyncTarget(
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	peerTip := cs.peerTips[connId]
+	if !cs.isPeerSelectableLocked(connId, peerTip, false) {
+		return ochainsync.Tip{}, false
+	}
+	observed := peerTip.SelectionTip()
+	advertised := peerTip.Tip
+	if safeAddUint64(
+		observed.Point.Slot,
+		cs.genesisWindowSlotsLocked(),
+	) < advertised.Point.Slot {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	if advertised.Point.Slot == 0 && advertised.BlockNumber == 0 {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	return advertised, true
+}
+
+// SyncTargetForPeerTipUpdate applies the bounded-target policy to the exact
+// observed/advertised pair carried by one chainsync event. It intentionally
+// does not read the mutable per-peer tip map.
+func (cs *ChainSelector) SyncTargetForPeerTipUpdate(
+	update PeerTipUpdateEvent,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	window := cs.genesisWindowSlotsLocked()
+	cs.mutex.RUnlock()
+	observed := update.ObservedTip
+	if observed.Point.Slot == 0 && observed.BlockNumber == 0 {
+		return ochainsync.Tip{}, false
+	}
+	if safeAddUint64(observed.Point.Slot, window) < update.Tip.Point.Slot {
+		return observed, true
+	}
+	if update.Tip.Point.Slot == 0 && update.Tip.BlockNumber == 0 {
+		return observed, true
+	}
+	return update.Tip, true
+}
+
 // GetAllPeerTips returns a deep copy of all tracked peer tips.
 func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainTip {
 	cs.mutex.RLock()

@@ -234,6 +234,16 @@ type GovernanceStore interface {
 		types.Txn,
 	) error
 
+	// ClearGovernanceProposalRatification moves a proposal back to the active,
+	// pending state at transitionSlot after a deterministic enactment
+	// precondition failure.
+	ClearGovernanceProposalRatification(
+		txHash []byte,
+		actionIndex uint32,
+		transitionSlot uint64,
+		txn types.Txn,
+	) error
+
 	// GetChildGovernanceProposals returns all active proposals whose parent
 	// is the given proposal (matched by txHash + actionIndex). Only returns
 	// proposals not yet enacted, expired, or soft-deleted. Used during
@@ -649,6 +659,16 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.UtxoWithOrdering, error)
 
+	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
+	// matching q's coarse SQL predicate, without materializing rows. It
+	// errors if q's address patterns require CBOR-based exact-address
+	// filtering (see models.RequiresExactAddressFilter), since the coarse
+	// predicate alone would over-count. See models.UtxoWithOrderingQuery.
+	CountUtxosByAddressWithOrdering(
+		*models.UtxoWithOrderingQuery,
+		types.Txn,
+	) (int, error)
+
 	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
 	GetUtxosByAddressAtSlot(
 		models.UtxoAddressPattern,
@@ -882,6 +902,21 @@ type TransactionStore interface {
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
 		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
+		types.Txn,
+	) error
+
+	// SetTransactionLeiosClosure stores a transaction on the Leios
+	// endorser-block closure path. Identical to SetTransaction except a
+	// consumed input already spent by a different transaction is a no-op
+	// instead of ErrUtxoConflict, matching the reference ledger's
+	// applyLeiosClosure (ValidateNone) on a legitimate cross-EB double-consume
+	// (see BatchedTxIngestOpts.SkipConsumedInputRecovery).
+	SetTransactionLeiosClosure(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
+		map[int]uint64, // certDeposits
+		bool, // skipWithdrawalWitness
 		types.Txn,
 	) error
 

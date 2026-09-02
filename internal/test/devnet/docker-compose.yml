@@ -51,7 +51,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.configurator
-    container_name: devnet-configurator
     profiles: ["conformance"]
     environment:
       # Must match the dingo user pinned in the repo root Dockerfile;
@@ -70,7 +69,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.configurator
-    container_name: devnet-configurator-dingo
     profiles: ["dingo"]
     environment:
       DINGO_POOL_IDS: "1 2 3"
@@ -90,7 +88,6 @@ services:
   dingo-1:
     build:
       context: ../../..
-    container_name: dingo-1
     profiles: ["dingo"]
     depends_on:
       configurator-dingo:
@@ -121,7 +118,7 @@ services:
       CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
     volumes:
       - p1-configs:/configs:ro
-      - ./topology/dingo-1.json:/topology/topology.json:ro
+      - ${DEVNET_TOPOLOGY_DIR:-./topology}/dingo-1.json:/topology/topology.json:ro
       - dingo-1-data:/data/db
       - dingo-1-ipc:/ipc
     ports:
@@ -129,7 +126,7 @@ services:
       - "${DEVNET_DINGO1_NTC_PORT:-3020}:3002"
     networks:
       devnet:
-        ipv4_address: 172.20.0.13
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.13
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
       interval: 5s
@@ -140,7 +137,6 @@ services:
   dingo-2:
     build:
       context: ../../..
-    container_name: dingo-2
     profiles: ["dingo"]
     depends_on:
       configurator-dingo:
@@ -149,7 +145,7 @@ services:
       <<: *dingo-node-env
     volumes:
       - p2-configs:/configs:ro
-      - ./topology/dingo-2.json:/topology/topology.json:ro
+      - ${DEVNET_TOPOLOGY_DIR:-./topology}/dingo-2.json:/topology/topology.json:ro
       - dingo-2-data:/data/db
       - dingo-2-ipc:/ipc
     ports:
@@ -157,7 +153,7 @@ services:
       - "${DEVNET_DINGO2_NTC_PORT:-3021}:3002"
     networks:
       devnet:
-        ipv4_address: 172.20.0.14
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.14
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
       interval: 5s
@@ -168,7 +164,6 @@ services:
   dingo-3:
     build:
       context: ../../..
-    container_name: dingo-3
     profiles: ["dingo"]
     depends_on:
       configurator-dingo:
@@ -177,7 +172,7 @@ services:
       <<: *dingo-node-env
     volumes:
       - p3-configs:/configs:ro
-      - ./topology/dingo-3.json:/topology/topology.json:ro
+      - ${DEVNET_TOPOLOGY_DIR:-./topology}/dingo-3.json:/topology/topology.json:ro
       - dingo-3-data:/data/db
       - dingo-3-ipc:/ipc
     ports:
@@ -185,7 +180,7 @@ services:
       - "${DEVNET_DINGO3_NTC_PORT:-3022}:3002"
     networks:
       devnet:
-        ipv4_address: 172.20.0.15
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.15
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
       interval: 5s
@@ -196,7 +191,6 @@ services:
   dingo-relay:
     build:
       context: ../../..
-    container_name: dingo-relay
     profiles: ["dingo"]
     depends_on:
       configurator-dingo:
@@ -206,7 +200,7 @@ services:
       CARDANO_BLOCK_PRODUCER: "false"
     volumes:
       - p1-configs:/configs:ro
-      - ./topology/dingo-relay.json:/topology/topology.json:ro
+      - ${DEVNET_TOPOLOGY_DIR:-./topology}/dingo-relay.json:/topology/topology.json:ro
       - dingo-relay-data:/data/db
       - dingo-relay-ipc:/ipc
     ports:
@@ -214,7 +208,7 @@ services:
       - "${DEVNET_DINGO_RELAY_NTC_PORT:-3023}:3002"
     networks:
       devnet:
-        ipv4_address: 172.20.0.16
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.16
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
       interval: 5s
@@ -226,7 +220,6 @@ services:
     build:
       context: ../../..
       dockerfile: internal/test/antithesis/Dockerfile.txpump
-    container_name: devnet-txpump-dingo
     profiles: ["dingo"]
     init: true
     user: "0:0"
@@ -269,12 +262,11 @@ services:
       - utxo-keys:/utxo-keys:ro
     networks:
       devnet:
-        ipv4_address: 172.20.0.21
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.21
 
   dingo-producer:
     build:
       context: ../../..
-    container_name: dingo-producer
     profiles: ["conformance"]
     depends_on:
       configurator:
@@ -300,14 +292,14 @@ services:
       CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
     volumes:
       - p1-configs:/configs:ro
-      - ./topology/dingo-producer.json:/topology/topology.json:ro
+      - ${DEVNET_TOPOLOGY_DIR:-./topology}/dingo-producer.json:/topology/topology.json:ro
       - dingo-producer-data:/data/db
       - dingo-producer-ipc:/ipc
     ports:
       - "${DEVNET_DINGO_PORT:-3010}:3001"
     networks:
       devnet:
-        ipv4_address: 172.20.0.10
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.10
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
       interval: 5s
@@ -317,7 +309,6 @@ services:
 
   cardano-producer:
     image: ghcr.io/blinklabs-io/cardano-node:11.0.1
-    container_name: cardano-producer
     profiles: ["conformance"]
     depends_on:
       configurator:
@@ -345,14 +336,14 @@ services:
       - "3001"
     volumes:
       - p2-configs:/configs
-      - ./topology/cardano-producer.json:/topology/topology.json:ro
+      - ${DEVNET_TOPOLOGY_DIR:-./topology}/cardano-producer.json:/topology/topology.json:ro
       - cardano-producer-data:/data/db
       - cardano-producer-ipc:/ipc
     ports:
       - "${DEVNET_CARDANO_PORT:-3011}:3001"
     networks:
       devnet:
-        ipv4_address: 172.20.0.11
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.11
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
       interval: 5s
@@ -364,7 +355,6 @@ services:
     build:
       context: ../../..
       dockerfile: internal/test/antithesis/Dockerfile.txpump
-    container_name: devnet-txpump
     profiles: ["conformance"]
     init: true
     # Named Docker volumes are root-owned on first mount; txpump writes
@@ -406,11 +396,10 @@ services:
       - utxo-keys:/utxo-keys:ro
     networks:
       devnet:
-        ipv4_address: 172.20.0.20
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.20
 
   cardano-relay:
     image: ghcr.io/blinklabs-io/cardano-node:11.0.1
-    container_name: cardano-relay
     profiles: ["conformance"]
     depends_on:
       configurator:
@@ -431,14 +420,14 @@ services:
       - "3001"
     volumes:
       - p1-configs:/configs
-      - ./topology/relay.json:/topology/topology.json:ro
+      - ${DEVNET_TOPOLOGY_DIR:-./topology}/relay.json:/topology/topology.json:ro
       - cardano-relay-data:/data/db
       - cardano-relay-ipc:/ipc
     ports:
       - "${DEVNET_RELAY_PORT:-3012}:3001"
     networks:
       devnet:
-        ipv4_address: 172.20.0.12
+        ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.12
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
       interval: 5s
@@ -451,7 +440,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/24
+        - subnet: ${DEVNET_NET_BASE:-172.20.0}.0/24
 
 volumes:
   p1-configs:

@@ -58,11 +58,13 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 	pparams.MaxBlockHeaderSize = 100_000
 	var txHash [32]byte
 	copy(txHash[:], tx.Hash().Bytes())
+	// Fixture CBOR is bounded well below uint32.
+	byteLength := uint32(len(txCbor)) // #nosec G115
 	offsets := &database.BlockIngestionResult{
 		TxOffsets: map[[32]byte]database.CborOffset{
 			txHash: {
 				BlockSlot:  blockSlot,
-				ByteLength: uint32(len(txCbor)), // #nosec G115 -- fixture is bounded
+				ByteLength: byteLength,
 			},
 		},
 	}

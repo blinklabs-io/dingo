@@ -24,6 +24,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
@@ -618,4 +619,197 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 	assert.Equal(t, ccCred, votes[0].VoterCredential)
 	assert.Equal(t, uint8(models.VoteYes), votes[0].Vote)
 	assert.Equal(t, votePoint.Slot, votes[0].AddedSlot)
+}
+
+func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	const (
+		proposalEpoch     = uint64(100)
+		proposalSlot      = uint64(1_000)
+		voteEpoch         = uint64(101)
+		govActionLifetime = uint64(20)
+	)
+	require.NoError(t, db.SetEpoch(
+		proposalSlot,
+		proposalEpoch,
+		nil,
+		nil,
+		nil,
+		nil,
+		gdijkstra.EraIdDijkstra,
+		1,
+		432_000,
+		nil,
+	))
+	pparams := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: *testConwayProtocolParameters(),
+	}
+	pparams.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor,
+		proposalSlot,
+		proposalEpoch,
+		gdijkstra.EraIdDijkstra,
+		nil,
+	))
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, testHash28("dijkstra-proposal-reward")...),
+	)
+	require.NoError(t, err)
+	proposalProcedure := gdijkstra.DijkstraProposalProcedure{
+		PPDeposit:       42,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: gdijkstra.DijkstraGovAction{
+			Type: uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{
+				Type: uint(lcommon.GovActionTypeInfo),
+			},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/dijkstra-proposal",
+			DataHash: [32]byte(testHash32("dijkstra-proposal-anchor")),
+		},
+	}
+	proposalBodyCbor, err := cbor.Encode(
+		&gdijkstra.DijkstraTransactionBody{
+			TxProposalProcedures: []gdijkstra.DijkstraProposalProcedure{
+				proposalProcedure,
+			},
+		},
+	)
+	require.NoError(t, err)
+	proposalTxHash := lcommon.Blake2b256Hash(proposalBodyCbor)
+	proposalTx := mockledger.NewTransactionBuilder()
+	proposalTx.WithId(proposalTxHash.Bytes())
+	proposalTx.WithType(gledger.TxTypeDijkstra)
+	proposalTx.WithProposalProcedures(proposalProcedure)
+	proposalTx.WithValid(true)
+	proposalPoint := ocommon.Point{
+		Slot: proposalSlot,
+		Hash: testHash32("dijkstra-proposal-block"),
+	}
+	blockBytes := append(
+		[]byte("dijkstra-gap-block-prefix-"),
+		proposalBodyCbor...,
+	)
+	bodyByteOffset := uint32(len(blockBytes) - len(proposalBodyCbor))
+	var blockHashArr [32]byte
+	copy(blockHashArr[:], proposalPoint.Hash)
+	var proposalTxHashArr [32]byte
+	copy(proposalTxHashArr[:], proposalTxHash.Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			proposalTxHashArr: {
+				BlockSlot:  proposalSlot,
+				BlockHash:  blockHashArr,
+				ByteOffset: bodyByteOffset,
+				ByteLength: uint32(len(proposalBodyCbor)),
+			},
+		},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	ccCred := testHash28("dijkstra-committee-voter")
+	var voterHash [28]byte
+	copy(voterHash[:], ccCred)
+	var actionTxHash [32]byte
+	copy(actionTxHash[:], proposalTxHash.Bytes())
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: voterHash,
+	}
+	actionID := &lcommon.GovActionId{
+		TransactionId: actionTxHash,
+		GovActionIdx:  0,
+	}
+	var voteTxHash lcommon.Blake2b256
+	copy(voteTxHash[:], testHash32("dijkstra-vote-tx"))
+	voteTx := mockledger.NewTransactionBuilder()
+	voteTx.WithId(voteTxHash.Bytes())
+	voteTx.WithType(gledger.TxTypeDijkstra)
+	voteTx.WithValid(true)
+	voteTx.WithVotingProcedures(lcommon.VotingProcedures{
+		voter: {
+			actionID: {Vote: models.VoteYes},
+		},
+	})
+	votePoint := ocommon.Point{
+		Slot: proposalSlot + 50,
+		Hash: testHash32("dijkstra-vote-block"),
+	}
+
+	_, err = db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := db.Blob().SetBlock(
+			txn.Blob(),
+			proposalSlot,
+			proposalPoint.Hash,
+			blockBytes,
+			0,
+			0,
+			0,
+			nil,
+		); err != nil {
+			return err
+		}
+		if err := db.SetGapBlockTransaction(
+			proposalTx,
+			proposalPoint,
+			0,
+			offsets,
+			txn,
+		); err != nil {
+			return err
+		}
+		return ProcessVotes(voteTx, votePoint, voteEpoch, 20, db, txn)
+	}))
+
+	proposal, err := db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, proposal)
+	assert.Equal(t, proposalTxHash.Bytes(), proposal.TxHash)
+	assert.Equal(t, uint32(0), proposal.ActionIndex)
+	assert.Equal(t, uint8(lcommon.GovActionTypeInfo), proposal.ActionType)
+	assert.Equal(t, proposalEpoch, proposal.ProposedEpoch)
+	assert.Equal(t, proposalEpoch+govActionLifetime, proposal.ExpiresEpoch)
+	assert.Equal(t, proposalProcedure.PPAnchor.Url, proposal.AnchorURL)
+	assert.Equal(t, proposalProcedure.PPAnchor.DataHash[:], proposal.AnchorHash)
+	assert.Equal(t, proposalProcedure.PPDeposit, proposal.Deposit)
+	returnAddress, err := rewardAddress.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, returnAddress, proposal.ReturnAddress)
+	assert.Equal(t, proposalSlot, proposal.AddedSlot)
+	assert.NotEmpty(t, proposal.GovActionCbor)
+
+	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, votes, 1)
+	assert.Equal(t, uint8(models.VoterTypeCC), votes[0].VoterType)
+	assert.Equal(t, ccCred, votes[0].VoterCredential)
+	assert.Equal(t, uint8(models.VoteYes), votes[0].Vote)
+	assert.Equal(t, votePoint.Slot, votes[0].AddedSlot)
+}
+
+func TestProposalRepairRejectsUnknownGovernanceEra(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+	cache := &proposalRepairCache{}
+	_, err := cache.govActionValidityPeriod(
+		models.Epoch{EpochId: 100, EraId: 999},
+		testHash32("future-era-proposal"),
+		db,
+		nil,
+	)
+	require.ErrorContains(t, err, "unexpected governance era 999")
 }

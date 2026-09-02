@@ -176,7 +176,12 @@ func requireWatchTxUndos(
 ) {
 	t.Helper()
 	for range count {
-		require.True(t, stream.Receive(), "WatchTx stream ended: %v", stream.Err())
+		require.True(
+			t,
+			stream.Receive(),
+			"WatchTx stream ended: %v",
+			stream.Err(),
+		)
 		_, ok := stream.Msg().Action.(*watch.WatchTxResponse_Undo)
 		require.True(t, ok, "expected Undo, got %T", stream.Msg().Action)
 	}

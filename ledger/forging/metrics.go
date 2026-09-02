@@ -46,6 +46,12 @@ type forgingMetrics struct {
 	slotClockErrors  prometheus.Counter
 	tipGapSlots      prometheus.Gauge
 
+	// Slots refused by the persisted last-forged-slot fence. Any
+	// increment means the node was asked to forge a slot it had
+	// already committed to, which points at a slot-clock regression
+	// or a rolled-back database rather than normal operation.
+	forgeFenceBlocked prometheus.Counter
+
 	// Self-validation before adoption (optional, nil when disabled)
 	forgeValidationDuration prometheus.Histogram
 	forgeValidationFailed   prometheus.Counter
@@ -137,6 +143,12 @@ func initForgingMetrics(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_slotBattlesTotal_int",
 			Help: "slot battles detected (competing blocks at same slot)",
+		},
+	)
+	m.forgeFenceBlocked = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_forgeFenceBlocked_int",
+			Help: "forge attempts refused by the last-forged-slot fence",
 		},
 	)
 	m.blockSizeBytes = factory.NewHistogram(

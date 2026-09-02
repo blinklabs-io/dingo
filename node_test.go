@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -308,6 +309,32 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 	assert.Equal(t, connA, *active)
 }
 
+func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
+	t *testing.T,
+) {
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connId := newNodeTestConnId(3001)
+	state.SetClientConnId(connId)
+	n := &Node{
+		chainsyncState: state,
+		config:         Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+
+	active := config.GetActiveConnectionFunc()
+	require.NotNil(t, active)
+	assert.Equal(t, connId, *active)
+
+	n.liveLifecycleMu.Lock()
+	active = config.GetActiveConnectionFunc()
+	n.liveLifecycleMu.Unlock()
+	assert.Nil(t, active)
+}
+
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	connId := newNodeTestConnId(3003)
 	n := &Node{}
@@ -513,7 +540,9 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 // can time out while a database worker is still using the database; normal
 // shutdown must not close the database or its provider-owned stores in that
 // state.
-func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(t *testing.T) {
+func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
+	t *testing.T,
+) {
 	n, _ := newLiveLifecycleTestNodeWithGenesis(
 		t,
 		1,
@@ -530,15 +559,22 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(t *testing.T) 
 	workerDone := make(chan struct{})
 	defer func() {
 		close(release)
-		testutil.RequireReceive(t, workerDone, time.Second, "database worker drain")
+		testutil.RequireReceive(
+			t,
+			workerDone,
+			time.Second,
+			"database worker drain",
+		)
 	}()
 	go func() {
 		defer close(workerDone)
-		_ = n.ledgerState.SubmitAsyncDBOperation(func(*database.Database) error {
-			close(started)
-			<-release
-			return nil
-		})
+		_ = n.ledgerState.SubmitAsyncDBOperation(
+			func(*database.Database) error {
+				close(started)
+				<-release
+				return nil
+			},
+		)
 	}()
 	<-started
 

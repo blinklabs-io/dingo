@@ -62,11 +62,12 @@ func (d *Database) CountAccountDelegationHistoryByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.certificateStore().CountAccountDelegationHistoryByCredential(
-		credentialTag,
-		stakeKey,
-		txn.Metadata(),
-	)
+	count, err := d.certificateStore().
+		CountAccountDelegationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			txn.Metadata(),
+		)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account delegation history: %w",
@@ -118,11 +119,12 @@ func (d *Database) CountAccountRegistrationHistoryByCredential(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.certificateStore().CountAccountRegistrationHistoryByCredential(
-		credentialTag,
-		stakeKey,
-		txn.Metadata(),
-	)
+	count, err := d.certificateStore().
+		CountAccountRegistrationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			txn.Metadata(),
+		)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account registration history: %w",

@@ -391,5 +391,10 @@ func TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState(t *testing.T) {
 	treasury, reserves, slot := networkState(t, db)
 	assert.Equal(t, uint64(1_000), treasury, "treasury untouched on overflow")
 	assert.Equal(t, uint64(5_000), reserves, "reserves untouched on overflow")
-	assert.Equal(t, uint64(50), slot, "network state slot untouched on overflow")
+	assert.Equal(
+		t,
+		uint64(50),
+		slot,
+		"network state slot untouched on overflow",
+	)
 }

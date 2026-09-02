@@ -1806,24 +1806,29 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	)
 }
 
-func TestReplayRecoveryHaltsOnWithdrawalStateDivergence(t *testing.T) {
-	validationErr := &txValidationError{
-		BlockPoint: ocommon.NewPoint(160, testHashBytes("withdrawal-block")),
-		TxHash:     testHashBytes("withdrawal-tx"),
-		Cause: shelley.IncorrectWithdrawalAmountError{
-			Balance: 399088479,
-		},
+func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	ls.config.EventBus = bus
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reward-withdrawal-mismatch-tx"),
+			Cause: fmt.Errorf(
+				"amount 78446537 exceeds account balance 78446536: %w",
+				models.ErrRewardWithdrawalExceedsBalance,
+			),
+		}
 	}
 
-	recovered, err := (&LedgerState{}).tryRecoverFromTxValidationError(
-		validationErr,
-	)
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
-	assert.False(t, recovered)
-	assert.ErrorContains(t, err, "reward withdrawal state diverged during replay")
-	var withdrawalErr shelley.IncorrectWithdrawalAmountError
-	require.ErrorAs(t, err, &withdrawalErr)
-	require.Equal(t, uint64(399088479), withdrawalErr.Balance)
+	require.False(t, recovered)
 }
 
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
@@ -1833,13 +1838,18 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
-		BlockPoint: ocommon.NewPoint(160, testHashBytes("plutus-failing-block")),
-		TxHash:     testHashBytes("plutus-failing-tx"),
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("plutus-failing-block"),
+		),
+		TxHash: testHashBytes("plutus-failing-tx"),
 		Cause: conway.PlutusScriptFailedError{
 			ScriptHash: lcommon.Blake2b224Hash([]byte("plutus-script")),
 			Tag:        lcommon.RedeemerTagMint,
 			Index:      0,
-			Err:        errors.New("local evaluator disagrees with declared validity"),
+			Err: errors.New(
+				"local evaluator disagrees with declared validity",
+			),
 		},
 	})
 	require.NoError(t, err)

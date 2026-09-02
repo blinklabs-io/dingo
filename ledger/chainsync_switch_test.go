@@ -157,7 +157,38 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	ls.blockfetchRequestRangeCleanup()
 }
 
-func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
+func TestDetectConnectionSwitchRechecksLivenessBeforeReactivatingFrontier(
+	t *testing.T,
+) {
+	previousConnId := testChainsyncConnId(6000, 3021)
+	activeConnId := testChainsyncConnId(6000, 3022)
+	callbackCalls := 0
+	ls := &LedgerState{
+		lastActiveConnId: &previousConnId,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				callbackCalls++
+				if callbackCalls == 1 {
+					return &activeConnId
+				}
+				return nil
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+
+	var pending pendingPublishes
+	got, configured := ls.detectConnectionSwitch(&pending)
+
+	assert.True(t, configured)
+	assert.Nil(t, got)
+	assert.Zero(t, ls.UpstreamTipSlot())
+	_, active := ls.UpstreamSyncStatus()
+	assert.False(t, active)
+}
+
+func TestHandleConnectionClosedEventRetainsAdmittedUpstreamFrontier(
 	t *testing.T,
 ) {
 	closedConnId := testChainsyncConnId(6000, 3001)
@@ -165,24 +196,24 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 	otherConnId := testChainsyncConnId(6000, 3002)
 
 	tests := []struct {
-		name       string
-		activeConn *ouroboros.ConnectionId
-		wantTip    uint64
+		name        string
+		activeConn  *ouroboros.ConnectionId
+		wantVisible uint64
 	}{
 		{
-			name:       "active connection closed",
-			activeConn: &equivalentClosedConnId,
-			wantTip:    0,
+			name:        "active connection closed",
+			activeConn:  &equivalentClosedConnId,
+			wantVisible: 0,
 		},
 		{
-			name:       "no active connection",
-			activeConn: nil,
-			wantTip:    0,
+			name:        "no active connection",
+			activeConn:  nil,
+			wantVisible: 0,
 		},
 		{
-			name:       "different active connection remains",
-			activeConn: &otherConnId,
-			wantTip:    114220800,
+			name:        "different active connection awaits admitted target",
+			activeConn:  &otherConnId,
+			wantVisible: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -195,6 +226,8 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 				},
 			}
 			ls.syncUpstreamTipSlot.Store(114220800)
+			var pending pendingPublishes
+			ls.detectConnectionSwitch(&pending)
 
 			ls.handleConnectionClosedEvent(event.NewEvent(
 				ConnectionClosedEventType,
@@ -203,9 +236,144 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 				},
 			))
 
-			assert.Equal(t, tc.wantTip, ls.syncUpstreamTipSlot.Load())
+			assert.Equal(t, uint64(114220800), ls.syncUpstreamTipSlot.Load())
+			assert.Equal(t, tc.wantVisible, ls.UpstreamTipSlot())
 		})
 	}
+}
+
+func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
+	t *testing.T,
+) {
+	closedConnId := testChainsyncConnId(6000, 3001)
+	reconnectedConnId := testChainsyncConnId(6000, 3002)
+	activeConnId := &closedConnId
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return activeConnId
+			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return !sameConnectionId(connId, closedConnId)
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+	var pending pendingPublishes
+	ls.detectConnectionSwitch(&pending)
+
+	ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: closedConnId},
+	))
+	activeConnId = nil
+	require.Equal(t, uint64(0), ls.UpstreamTipSlot())
+
+	activeConnId = &reconnectedConnId
+	ls.lastActiveConnId = nil
+	ls.detectConnectionSwitch(&pending)
+	const stalePeerSlot uint64 = 114220700
+	if stalePeerSlot > ls.syncUpstreamTipSlot.Load() {
+		ls.syncUpstreamTipSlot.Store(stalePeerSlot)
+	}
+	assert.Equal(t, uint64(114220800), ls.syncUpstreamTipSlot.Load())
+	assert.Zero(t, ls.UpstreamTipSlot())
+	target, active := ls.UpstreamSyncStatus()
+	assert.True(t, active)
+	assert.Zero(t, target)
+}
+
+func TestAdvanceUpstreamTipSlotDoesNotPublishWithoutAdmittedTarget(
+	t *testing.T,
+) {
+	activeConnID := testChainsyncConnId(6000, 3041)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConnID
+			},
+		},
+	}
+	const admittedSlot uint64 = 114220801
+	ls.advanceUpstreamTipSlot(admittedSlot)
+
+	assert.Equal(t, admittedSlot, ls.syncUpstreamTipSlot.Load())
+	assert.Zero(t, ls.UpstreamTipSlot())
+	_, active := ls.UpstreamSyncStatus()
+	assert.True(t, active)
+}
+
+func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
+	t *testing.T,
+) {
+	closedConnId := testChainsyncConnId(6000, 3011)
+	activeConnId := &closedConnId
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return activeConnId
+			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return !sameConnectionId(connId, closedConnId)
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+	var pending pendingPublishes
+	ls.detectConnectionSwitch(&pending)
+
+	// Model the EventBus ordering: the close is applied before its already
+	// queued chain-switch event, and the connection manager has no live peer.
+	ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: closedConnId},
+	))
+	activeConnId = nil
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{NewConnectionId: closedConnId},
+	))
+
+	assert.Zero(t, ls.UpstreamTipSlot())
+	// A zero upstream frontier is the production forger's peerless state; a
+	// dead queued switch must not re-enable the retained sync gate.
+	_, active := ls.UpstreamSyncStatus()
+	assert.False(t, active)
+}
+
+func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(
+	t *testing.T,
+) {
+	targetConnId := testChainsyncConnId(6000, 3031)
+	activeConnId := testChainsyncConnId(6000, 3032)
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConnId
+			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return sameConnectionId(connId, targetConnId) ||
+					sameConnectionId(connId, activeConnId)
+			},
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(114220800)
+	ls.publishActiveUpstream(activeConnId)
+
+	// A close subscriber can update the active pointer before the queued
+	// chain-switch subscriber runs. The new connection has no admitted event
+	// yet, so it must not inherit the prior connection's frontier.
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{NewConnectionId: targetConnId},
+	))
+
+	assert.Equal(t, targetConnId, ls.selectedBlockfetchConnId)
+	assert.Zero(t, ls.UpstreamTipSlot())
 }
 
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
@@ -743,12 +911,18 @@ func newChainSwitchFallbackFixture(
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &currentConn
 			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return sameConnectionId(connId, connId3)
+			},
 			GetPeerObservedTipFunc: func(
 				connId ouroboros.ConnectionId,
 			) (ochainsync.Tip, bool) {
 				if sameConnectionId(connId, connId3) {
 					return ochainsync.Tip{
-						Point:       ocommon.NewPoint(200, []byte("active-tip")),
+						Point: ocommon.NewPoint(
+							200,
+							[]byte("active-tip"),
+						),
 						BlockNumber: 10,
 					}, true
 				}
@@ -1110,6 +1284,80 @@ func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 	require.Empty(t, ls.bufferedHeaderEvents[connIdKey(connId2)])
 }
 
+func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	// Keep the test at header admission; no blockfetch worker is needed.
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	connID := fixture.connId
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &connID
+	}
+	ls.publishActiveUpstream(connID)
+	assert.Zero(
+		t,
+		ls.UpstreamTipSlot(),
+		"selection alone must not publish a target",
+	)
+
+	// This header is accepted and establishes the initial upstream tip.
+	accepted := mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("accepted-header-2")),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 1,
+	}
+	advertisedSlot := ^uint64(0)
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connID,
+		BlockHeader:  accepted,
+		Point:        ocommon.NewPoint(accepted.slot, accepted.hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advertisedSlot,
+				[]byte("unbound-advertised-tip"),
+			),
+			BlockNumber: advertisedSlot,
+		},
+		SyncTarget: ochainsync.Tip{
+			Point: ocommon.NewPoint(accepted.slot, []byte("accepted-target")),
+		},
+		SyncTargetTrusted: true,
+	}))
+	require.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
+	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot())
+
+	// The next header does not extend the queued chain. Its advertised tip
+	// must not advance shared progress state before fork handling rejects it.
+	rejected := mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("rejected-header")),
+		prevHash:    lcommon.NewBlake2b256([]byte("unknown-parent")),
+		blockNumber: 3,
+		slot:        3,
+	}
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connID,
+		BlockHeader:  rejected,
+		Point:        ocommon.NewPoint(rejected.slot, rejected.hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advertisedSlot-1,
+				[]byte("rejected-tip"),
+			),
+			BlockNumber: advertisedSlot - 1,
+		},
+		SyncTarget: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advertisedSlot-1,
+				[]byte("rejected-target"),
+			),
+		},
+	}))
+	assert.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
+	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot(),
+		"a rejected header must not publish its advertised target")
+}
+
 func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 	t *testing.T,
 ) {
@@ -1152,19 +1400,21 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 		},
 	})
 	require.NoError(t, err)
+	require.Equal(t, header1.slot, ls.syncUpstreamTipSlot.Load())
 
 	err = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connId2,
 		BlockHeader:  header2,
 		Point:        ocommon.NewPoint(header2.slot, header2.hash.Bytes()),
 		Tip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(60002, []byte("tip-2")),
-			BlockNumber: 60002,
+			Point:       ocommon.NewPoint(^uint64(0), []byte("unbound-tip-2")),
+			BlockNumber: ^uint64(0),
 		},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, connId1, ls.headerPipelineConnId)
 	assert.Equal(t, 1, ls.chain.HeaderCount())
+	assert.Equal(t, header1.slot, ls.syncUpstreamTipSlot.Load())
 	events := ls.bufferedHeaderEvents[connIdKey(connId2)]
 	require.Len(t, events, 1)
 	assert.Equal(
@@ -1445,10 +1695,12 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		defer ls.chainsyncMutex.Unlock()
 		return sameConnectionId(ls.headerPipelineConnId, connId2) &&
 			len(ls.bufferedHeaderEvents[connIdKey(connId2)]) == 0 &&
-			ls.chain.HeaderCount() == 1
+			ls.chain.HeaderCount() == 1 &&
+			ls.syncUpstreamTipSlot.Load() == 1
 	}, 2*time.Second, 10*time.Millisecond)
 	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId2))
 	assert.Equal(t, 1, ls.chain.HeaderCount())
+	assert.Equal(t, uint64(1), ls.syncUpstreamTipSlot.Load())
 }
 
 func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {
@@ -2179,14 +2431,17 @@ func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
 		assert.Equal(t, delivered, got)
 	})
 
-	t.Run("zero delivered frontier is not the advertised tip", func(t *testing.T) {
-		got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
-			NewTip:            advertised,
-			NewObservedTipSet: true,
-		})
-		assert.Equal(t, ochainsync.Tip{}, got)
-		assert.NotEqual(t, advertised, got)
-	})
+	t.Run(
+		"zero delivered frontier is not the advertised tip",
+		func(t *testing.T) {
+			got := chainSwitchNewObservedTip(chainselection.ChainSwitchEvent{
+				NewTip:            advertised,
+				NewObservedTipSet: true,
+			})
+			assert.Equal(t, ochainsync.Tip{}, got)
+			assert.NotEqual(t, advertised, got)
+		},
+	)
 
 	t.Run("unset falls back to the advertised tip", func(t *testing.T) {
 		// Older events and direct unit-test or integration constructors.

@@ -221,8 +221,11 @@ func TestFetchAccountsIfNeededSkipsPreStakingEpoch(t *testing.T) {
 	}
 
 	require.NoError(t, o.fetchAccountsIfNeeded(context.Background(), 0))
-	require.Zero(t, requests.Load(),
-		"pre-staking account parity is empty by construction and must not call Koios")
+	require.Zero(
+		t,
+		requests.Load(),
+		"pre-staking account parity is empty by construction and must not call Koios",
+	)
 }
 
 // seedDingoEpochAggregate writes epoch_summary at koiosEpoch-1 (the "stake
@@ -235,13 +238,13 @@ func seedDingoEpochAggregate(
 	koiosEpoch, activeStake, treasury, reserves, fees uint64,
 ) {
 	t.Helper()
-	gormDB := sourceGormDB(t, source.db)
-	require.NoError(t, gormDB.Create(&models.EpochSummary{
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
 		Epoch:            koiosEpoch - 1,
 		TotalActiveStake: types.Uint64(activeStake),
 		SnapshotReady:    true,
 	}).Error)
-	require.NoError(t, gormDB.Create(&models.RewardAdaPots{
+	require.NoError(t, sqlDB.Create(&models.RewardAdaPots{
 		Epoch:    koiosEpoch,
 		Treasury: types.Uint64(treasury),
 		Reserves: types.Uint64(reserves),
@@ -258,8 +261,8 @@ func setDingoActiveStake(
 	koiosEpoch, activeStake uint64,
 ) {
 	t.Helper()
-	gormDB := sourceGormDB(t, source.db)
-	require.NoError(t, gormDB.Exec(
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Exec(
 		`UPDATE epoch_summary SET total_active_stake = ? WHERE epoch = ?`,
 		types.Uint64(activeStake), koiosEpoch-1,
 	).Error)
@@ -766,8 +769,8 @@ func TestObserverStrictModeCancelsOnAccountMismatch(t *testing.T) {
 	)
 
 	seedDingoEpochAggregate(t, source, koiosEpoch, 1_000_000, 10, 20, 30)
-	gormDB := sourceGormDB(t, source.db)
-	require.NoError(t, gormDB.Create(&models.RewardAccountOutput{
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
 		Epoch:       stakeEpoch,
 		StakingKey:  stakingKey,
 		PoolKeyHash: testPoolKeyHash(t, 0x66),
@@ -1072,8 +1075,8 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 	// pass -- proof this is a real re-validation, not merely detecting the
 	// absence of coverage.
 	seedDingoEpochAggregate(t, source, koiosEpoch, 1_000_000, 10, 20, 30)
-	gormDB := sourceGormDB(t, source.db)
-	require.NoError(t, gormDB.Create(&models.RewardAccountOutput{
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
 		Epoch:       stakeEpoch,
 		StakingKey:  stakingKey,
 		PoolKeyHash: testPoolKeyHash(t, 0x88),
@@ -1085,7 +1088,7 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 	// GetLatestEpoch-derived throughEpoch bound (latest-1) includes it.
 	require.NoError(
 		t,
-		gormDB.Create(
+		sqlDB.Create(
 			&models.EpochSummary{Epoch: koiosEpoch + 1, SnapshotReady: true},
 		).Error,
 	)

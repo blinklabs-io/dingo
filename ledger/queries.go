@@ -235,8 +235,8 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 		if eraDesc.DecodePParamsFunc == nil {
 			continue
 		}
-		pp, ppErr := ls.db.GetPParams(
-			lastEp.EpochId, eraDesc.Id, eraDesc.DecodePParamsFunc, nil,
+		pp, ppErr := ls.loadPersistedProtocolParameters(
+			lastEp.EpochId, eraDesc, nil,
 		)
 		if ppErr != nil {
 			return nil, fmt.Errorf(
