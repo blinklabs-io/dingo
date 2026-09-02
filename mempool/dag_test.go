@@ -686,3 +686,40 @@ func TestMempoolProvidersIncludeFIFOAndDAG(t *testing.T) {
 	assert.Equal(t, ImplementationDAG, dagPool.implementation)
 	require.NoError(t, host.Stop(context.Background()))
 }
+
+// TestMempoolProviderConfigWiresConsumerCacheBytes verifies that
+// ConsumerCacheBytes set through the plugin config map (as an operator would
+// via YAML) reaches the constructed Mempool's config, and from there a new
+// consumer's cacheLimitBytes. ProviderConfig previously had no field for it,
+// so a configured consumerCacheBytes key either failed strict decoding or
+// was silently ignored in favor of the derived default.
+func TestMempoolProviderConfigWiresConsumerCacheBytes(t *testing.T) {
+	host := plugin.NewHost()
+	require.NoError(t, RegisterFIFOProvider(host))
+
+	service, err := plugin.Resolve[Service](
+		context.Background(),
+		host,
+		plugin.CapabilityMempool,
+		"fifo",
+		map[string]any{
+			"capacity":           1 << 20,
+			"consumerCacheBytes": 4096,
+		},
+		ProviderDependencies{
+			PromRegistry: prometheus.NewRegistry(),
+			Validator:    newMockValidator(),
+		},
+	)
+	require.NoError(t, err)
+	fifoPool, ok := service.(*FIFO)
+	require.True(t, ok)
+
+	assert.Equal(t, int64(4096), fifoPool.config.ConsumerCacheBytes)
+	relayConsumer := fifoPool.AddConsumer(newTestConnectionId(0))
+	consumer, ok := relayConsumer.(*MempoolConsumer)
+	require.True(t, ok)
+	assert.Equal(t, int64(4096), consumer.cacheLimitBytes)
+
+	require.NoError(t, host.Stop(context.Background()))
+}
