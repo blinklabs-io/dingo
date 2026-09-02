@@ -16,14 +16,19 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -210,4 +215,260 @@ func TestHandleTransactionSubmitRejectionReturns400(t *testing.T) {
 		"Transaction rejected: validate transaction: fee too small",
 		resp.Message,
 	)
+}
+
+// TestTransactionSubmitStorageFailureIsNotARejection carries the same split
+// one level deeper. Mempool admission runs ledger validation, which resolves
+// the transaction's inputs from storage, so a storage fault returns through
+// AddTransaction next to genuine verdicts. Reported as a rejection it becomes
+// a 400 telling the caller to fix a transaction the node never judged.
+func TestTransactionSubmitStorageFailureIsNotARejection(t *testing.T) {
+	for name, cause := range map[string]error{
+		"blob store unavailable": dbtypes.ErrBlobStoreUnavailable,
+		"utxo cbor unavailable":  database.ErrUtxoCborUnavailable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			submitErr := fmt.Errorf(
+				"validate transaction: TX abcd failed validation: %w",
+				cause,
+			)
+			submitter := &stubSubmitter{err: submitErr}
+			adapter := &NodeAdapter{submitter: submitter}
+
+			hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+
+			require.Error(t, err)
+			assert.Empty(t, hash)
+			assert.ErrorIs(
+				t,
+				err,
+				ErrLedgerUnavailable,
+				"storage that cannot answer is a node condition",
+			)
+			assert.NotErrorIs(
+				t,
+				err,
+				ErrTransactionRejected,
+				"the transaction was never judged, so it was not rejected",
+			)
+			assert.ErrorIs(t, err, cause, "the cause is preserved")
+		})
+	}
+}
+
+// TestTransactionSubmitUnresolvableInputStaysARejection is the control for
+// the split above: not every error that reaches the adapter through storage
+// is a node fault. A UTxO the ledger does not hold is the caller's input,
+// and it stays a rejection.
+func TestTransactionSubmitUnresolvableInputStaysARejection(t *testing.T) {
+	submitErr := fmt.Errorf(
+		"validate transaction: bad inputs: %w",
+		database.ErrUtxoNotFound,
+	)
+	submitter := &stubSubmitter{err: submitErr}
+	adapter := &NodeAdapter{submitter: submitter}
+
+	_, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTransactionRejected)
+	assert.NotErrorIs(t, err, ErrLedgerUnavailable)
+}
+
+// TestHandleTransactionSubmitStorageFailureReturns503 carries the deeper
+// classification through the HTTP layer against the real adapter.
+func TestHandleTransactionSubmitStorageFailureReturns503(t *testing.T) {
+	b := newTestBlockfrost(&NodeAdapter{
+		submitter: &stubSubmitter{
+			err: fmt.Errorf(
+				"validate transaction: %w",
+				dbtypes.ErrBlobStoreUnavailable,
+			),
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		bytes.NewReader(submitTestTxCbor(t)),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(
+		t,
+		http.StatusServiceUnavailable,
+		w.Code,
+		"storage the node cannot read is not a bad request",
+	)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Service Unavailable", resp.Error)
+	assert.Equal(t, "ledger state unavailable", resp.Message)
+}
+
+// TestHandleTransactionSubmitReportsWrappedRejectionCause pins that the
+// client-facing reason survives a rejection wrapped with further context.
+// Recovering the cause by trimming the sentinel off the front of the message
+// works only while the sentinel is the outermost prefix; anything wrapped
+// around it leaves "transaction rejected" in the message and buries the
+// reason behind the wrapper's own text.
+func TestHandleTransactionSubmitReportsWrappedRejectionCause(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: fmt.Errorf(
+			"submit transaction to mempool: %w",
+			&TransactionRejectedError{
+				Cause: errors.New("fee too small: supplied 100000"),
+			},
+		),
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		bytes.NewReader(submitTestTxCbor(t)),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(
+		t,
+		"Transaction rejected: fee too small: supplied 100000",
+		resp.Message,
+	)
+}
+
+// recordingHandler collects the level and message of every log record, so a
+// test can assert the level a handler chose for an expected condition.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *recordingHandler) WithGroup(name string) slog.Handler { return h }
+
+// levelFor returns the level the named message was logged at.
+func (h *recordingHandler) levelFor(msg string) (slog.Level, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message == msg {
+			return r.Level, true
+		}
+	}
+	return 0, false
+}
+
+// TestHandleTransactionSubmitLogsRejectionAtDebug pins the level a rejection
+// is logged at. A fee too small or a script that failed is an ordinary
+// client-side condition, and handleEpochParams already documents the
+// convention: expected client-facing answers log at Debug, because at Error
+// level ordinary traffic fills the log with alerts. A caller probing
+// submissions would otherwise raise one alert per attempt.
+func TestHandleTransactionSubmitLogsRejectionAtDebug(t *testing.T) {
+	handler := &recordingHandler{}
+	b := New(
+		BlockfrostConfig{ListenAddress: ":0"},
+		&NodeAdapter{
+			submitter: &stubSubmitter{
+				err: errors.New("validate transaction: fee too small"),
+			},
+		},
+		slog.New(handler),
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		bytes.NewReader(submitTestTxCbor(t)),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	level, ok := handler.levelFor("transaction rejected by the mempool")
+	require.True(t, ok, "the rejection reason is still recorded")
+	assert.Equal(t, slog.LevelDebug, level)
+}
+
+// TestHandleTransactionSubmitLogsStorageFailureAtError is the other side of
+// that convention: a node that cannot read its own storage is the unexpected
+// path Error level is reserved for.
+func TestHandleTransactionSubmitLogsStorageFailureAtError(t *testing.T) {
+	handler := &recordingHandler{}
+	b := New(
+		BlockfrostConfig{ListenAddress: ":0"},
+		&NodeAdapter{
+			submitter: &stubSubmitter{
+				err: fmt.Errorf(
+					"validate transaction: %w",
+					dbtypes.ErrBlobStoreUnavailable,
+				),
+			},
+		},
+		slog.New(handler),
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		bytes.NewReader(submitTestTxCbor(t)),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	level, ok := handler.levelFor(
+		"transaction submit failed on ledger storage",
+	)
+	require.True(t, ok)
+	assert.Equal(t, slog.LevelError, level)
+}
+
+// TestHandleTransactionEvaluateLogsFailureAtDebug applies the same convention
+// to the evaluation endpoints, where a failing script is likewise an ordinary
+// client-facing answer.
+func TestHandleTransactionEvaluateLogsFailureAtDebug(t *testing.T) {
+	handler := &recordingHandler{}
+	b := New(
+		BlockfrostConfig{ListenAddress: ":0"},
+		&mockNode{
+			transactionEvaluationErr: fmt.Errorf(
+				"%w: script failed",
+				ErrTransactionEvaluation,
+			),
+		},
+		slog.New(handler),
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/utils/txs/evaluate",
+		bytes.NewReader(submitTestTxCbor(t)),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionEvaluate(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	level, ok := handler.levelFor("failed to evaluate transaction")
+	require.True(t, ok, "the evaluation failure is still recorded")
+	assert.Equal(t, slog.LevelDebug, level)
 }

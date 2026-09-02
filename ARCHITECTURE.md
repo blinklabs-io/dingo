@@ -3839,6 +3839,16 @@ right now rather than that it judged a transaction and declined it, so
 and answers 503 — the same answer its missing-submitter branch already gave —
 instead of reporting the transaction itself as rejected with a 400.
 
+Admission also runs ledger validation, which resolves the transaction's inputs
+through the database, so a storage fault returns from `AddTransaction` on the
+same path as a rule violation. `api/blockfrost` classifies the sentinels the
+database layer raises for its own faults — `types.ErrBlobStoreUnavailable` and
+`database.ErrUtxoCborUnavailable` — as `ErrLedgerUnavailable` and answers 503
+on both the submit endpoint and the evaluation endpoints, where
+`LedgerState.EvaluateTx` reads the UTxO set the same way. Rule violations are
+an open per-era set of gouroboros types with no shared marker, so the
+complement cannot be enumerated: an unrecognized error stays a rejection.
+
 Ordinary mutations are serialized by a dedicated mutation gate, but chain-update
 revalidation does not hold that gate while it validates the whole pool. Both
 backends briefly snapshot their live state, build a private candidate while
