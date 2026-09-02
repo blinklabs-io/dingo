@@ -1504,15 +1504,22 @@ func buildLeiosEB(
 	// keeping body i aligned with reference i.
 	bodies = make([][]byte, 0, len(txs))
 	for _, tx := range txs {
-		raw, ok := validLeiosTransactionHash(tx.Hash)
-		if !ok || len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
+		// The manifest reference is content-addressed by (hash, size) over
+		// the FULL serialized transaction: TransactionSize is len(tx.Cbor),
+		// so TransactionHash must be the hash of that same full CBOR, not the
+		// Cardano tx-id / body hash. This matches the fetch-side validator
+		// (validateLeiosEndorserBlockTxs) and Haskell reference nodes, so a
+		// peer fetching a locally forged EB validates it instead of rejecting
+		// every tx (blinklabs-io/dingo#3641).
+		if !validLeiosTransactionHash(tx.Hash) ||
+			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
 		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
 		// on one line so the directive stays attached to the conversion.
 		size := uint16(len(tx.Cbor)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
-			TransactionHash: lcommon.NewBlake2b256(raw),
+			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
 			TransactionSize: size,
 		})
 		bodies = append(bodies, tx.Cbor)
@@ -1529,14 +1536,13 @@ func buildLeiosEB(
 	return ebCbor, h.Bytes(), bodies, nil
 }
 
-func validLeiosTransactionHash(hash string) ([]byte, bool) {
+func validLeiosTransactionHash(hash string) bool {
 	raw, err := hex.DecodeString(hash)
-	return raw, err == nil && len(raw) == 32
+	return err == nil && len(raw) == 32
 }
 
 func validLeiosTransactionReference(tx MempoolTransaction) bool {
-	_, hashOK := validLeiosTransactionHash(tx.Hash)
-	return hashOK && len(tx.Cbor) > 0 && len(tx.Cbor) <= math.MaxUint16
+	return validLeiosTransactionHash(tx.Hash) && len(tx.Cbor) > 0 && len(tx.Cbor) <= math.MaxUint16
 }
 
 // modeString returns a string representation of the forging mode.
