@@ -346,19 +346,51 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if err != nil {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
-	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-		// ValidateVotingKey reports whether the PoP-verified on-chain key is
-		// missing or mismatched. Production has no static-key fallback.
+	status, err := n.leiosVoteManager.ConfigureVoting(poolKeyHash, key)
+	if err != nil {
 		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
-	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
-		return fmt.Errorf("enable leios voting: %w", err)
+	switch status {
+	case leios.VotingConfigurationEnabled:
+		n.config.logger.Info(
+			"leios voting enabled",
+			"component", "node",
+			"pool_id", poolID.String(),
+		)
+	case leios.VotingConfigurationAwaitingKey:
+		n.config.logger.Info(
+			"leios voting deferred until the configured key is available in the on-chain snapshot",
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
+		)
+	case leios.VotingConfigurationRetryPending:
+		n.config.logger.Warn(
+			"leios voting activation preparation failed; voting remains disabled until the next epoch-transition retry",
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
+		)
+	case leios.VotingConfigurationSuperseded:
+		n.config.logger.Info(
+			"leios voting configuration was superseded by a newer configuration or retry",
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
+		)
+	case leios.VotingConfigurationFailed:
+		return errors.New(
+			"leios voting configuration failed without an error",
+		)
+	default:
+		return fmt.Errorf(
+			"unexpected leios voting configuration status: %d",
+			status,
+		)
 	}
-	n.config.logger.Info(
-		"leios voting enabled",
-		"component", "node",
-		"pool_id", poolID.String(),
-	)
 	return nil
 }
 

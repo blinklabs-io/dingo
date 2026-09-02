@@ -608,8 +608,16 @@ func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
 	cfg, err := LoadConfig(configFile)
 	require.NoError(t, err)
 	require.False(t, cfg.Midnight.ServerEnabled, "environment overrides YAML")
-	require.False(t, cfg.Midnight.ReflectionEnabled, "environment overrides YAML")
-	require.False(t, cfg.Midnight.AllowInsecureRemote, "environment overrides YAML")
+	require.False(
+		t,
+		cfg.Midnight.ReflectionEnabled,
+		"environment overrides YAML",
+	)
+	require.False(
+		t,
+		cfg.Midnight.AllowInsecureRemote,
+		"environment overrides YAML",
+	)
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -621,7 +629,11 @@ func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.True(t, cfg.Midnight.ServerEnabled, "CLI overrides environment")
 	require.True(t, cfg.Midnight.ReflectionEnabled, "CLI overrides environment")
-	require.True(t, cfg.Midnight.AllowInsecureRemote, "CLI overrides environment")
+	require.True(
+		t,
+		cfg.Midnight.AllowInsecureRemote,
+		"CLI overrides environment",
+	)
 }
 
 func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
@@ -824,7 +836,10 @@ func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("expected empty Midnight host to use loopback default: %v", err)
+		t.Fatalf(
+			"expected empty Midnight host to use loopback default: %v",
+			err,
+		)
 	}
 	wantHost := DefaultMidnightConfig().Host
 	if cfg.Midnight.Host != wantHost {

@@ -78,10 +78,13 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
-		ConnectionId: shadow,
-		BatchDone:    true,
-	}, nil))
+	require.NoError(
+		t,
+		handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
+			ConnectionId: shadow,
+			BatchDone:    true,
+		}, nil),
+	)
 
 	// The shadow's BatchDone is accepted, so the batch advances and a
 	// follow-up RequestRange is dispatched for the still-queued header.
@@ -148,19 +151,25 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 
 	// Primary completes first; cleanup clears the shadow ID and starts the
 	// next batch on the same primary.
-	require.NoError(t, handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
-		ConnectionId: primary,
-		BatchDone:    true,
-	}, nil))
+	require.NoError(
+		t,
+		handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
+			ConnectionId: primary,
+			BatchDone:    true,
+		}, nil),
+	)
 	assert.Equal(t, 1, requestCount)
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.shadowBlockfetchConnId)
 
 	// The shadow's late BatchDone now arrives. It must not complete the new
 	// batch — neither active nor shadow matches it after cleanup.
-	require.NoError(t, handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
-		ConnectionId: shadow,
-		BatchDone:    true,
-	}, nil))
+	require.NoError(
+		t,
+		handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
+			ConnectionId: shadow,
+			BatchDone:    true,
+		}, nil),
+	)
 	assert.Equal(
 		t,
 		1,
@@ -223,7 +232,10 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, restartQueuedBlockfetchAfterForkForTest(ls, primary, nil))
+	require.NoError(
+		t,
+		restartQueuedBlockfetchAfterForkForTest(ls, primary, nil),
+	)
 
 	// Stale per-batch shadow state must be cleared by the restart so that
 	// the new batch starts in a known state.

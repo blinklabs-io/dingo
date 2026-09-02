@@ -476,26 +476,32 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 				"script exceeded declared budget: used (112100 cpu, 800 mem)",
 			)
 
-			t.Run("restrictive evaluation is capped by protocol transaction budget", func(t *testing.T) {
-				err := tc.validate(tx, ls, lcommon.ExUnits{
-					Steps:  1_000,
-					Memory: 100,
-				})
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "out of budget")
-			})
+			t.Run(
+				"restrictive evaluation is capped by protocol transaction budget",
+				func(t *testing.T) {
+					err := tc.validate(tx, ls, lcommon.ExUnits{
+						Steps:  1_000,
+						Memory: 100,
+					})
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "out of budget")
+				},
+			)
 
-			t.Run("valid execution remains accepted within both budgets", func(t *testing.T) {
-				value := lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
-					Steps:  112_100,
-					Memory: 800,
-				}}
-				witnesses.redeemers.(*mockRedeemers).valueOverride = &value
-				require.NoError(t, tc.validate(tx, ls, lcommon.ExUnits{
-					Steps:  1_000_000,
-					Memory: 1_000_000,
-				}))
-			})
+			t.Run(
+				"valid execution remains accepted within both budgets",
+				func(t *testing.T) {
+					value := lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
+						Steps:  112_100,
+						Memory: 800,
+					}}
+					witnesses.redeemers.(*mockRedeemers).valueOverride = &value
+					require.NoError(t, tc.validate(tx, ls, lcommon.ExUnits{
+						Steps:  1_000_000,
+						Memory: 1_000_000,
+					}))
+				},
+			)
 		})
 	}
 }
@@ -756,41 +762,50 @@ func TestValidateTxPlutusConwayWithdrawalRedeemerUsesStakeCredential(
 		)
 	}
 
-	t.Run("script stake credentials require a reward redeemer", func(t *testing.T) {
-		tests := []struct {
-			name string
-			addr *lcommon.Address
-		}{
-			{name: "reward address", addr: rewardScript},
-			{name: "base address", addr: baseKeyScript},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				err := validate(t, map[*lcommon.Address]*big.Int{
-					tt.addr: big.NewInt(1),
+	t.Run(
+		"script stake credentials require a reward redeemer",
+		func(t *testing.T) {
+			tests := []struct {
+				name string
+				addr *lcommon.Address
+			}{
+				{name: "reward address", addr: rewardScript},
+				{name: "base address", addr: baseKeyScript},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					err := validate(t, map[*lcommon.Address]*big.Int{
+						tt.addr: big.NewInt(1),
+					})
+					var missing conway.MissingRedeemerForScriptError
+					require.ErrorAs(t, err, &missing)
+					assert.Equal(t, scriptHash, missing.ScriptHash)
+					assert.Equal(t, lcommon.RedeemerTagReward, missing.Tag)
+					assert.Equal(t, uint32(0), missing.Index)
 				})
-				var missing conway.MissingRedeemerForScriptError
-				require.ErrorAs(t, err, &missing)
-				assert.Equal(t, scriptHash, missing.ScriptHash)
-				assert.Equal(t, lcommon.RedeemerTagReward, missing.Tag)
-				assert.Equal(t, uint32(0), missing.Index)
-			})
-		}
-	})
+			}
+		},
+	)
 
-	t.Run("key and absent stake credentials do not require a redeemer", func(t *testing.T) {
-		for name, addr := range map[string]*lcommon.Address{
-			"script payment and key stake": baseScriptKey,
-			"enterprise address":           enterprise,
-			"malformed address":            malformed,
-		} {
-			t.Run(name, func(t *testing.T) {
-				require.NoError(t, validate(t, map[*lcommon.Address]*big.Int{
-					addr: big.NewInt(1),
-				}))
-			})
-		}
-	})
+	t.Run(
+		"key and absent stake credentials do not require a redeemer",
+		func(t *testing.T) {
+			for name, addr := range map[string]*lcommon.Address{
+				"script payment and key stake": baseScriptKey,
+				"enterprise address":           enterprise,
+				"malformed address":            malformed,
+			} {
+				t.Run(name, func(t *testing.T) {
+					require.NoError(
+						t,
+						validate(t, map[*lcommon.Address]*big.Int{
+							addr: big.NewInt(1),
+						}),
+					)
+				})
+			}
+		},
+	)
 
 	t.Run("redeemer indexes retain withdrawal ordering", func(t *testing.T) {
 		err := validate(t, map[*lcommon.Address]*big.Int{
@@ -1770,7 +1785,9 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	)
 }
 
-func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(t *testing.T) {
+func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(
+	t *testing.T,
+) {
 	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
 	require.NoError(t, err)
 	wireTx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
@@ -3813,7 +3830,9 @@ func TestCheckPoolMarginFloor(t *testing.T) {
 // short and diverged from the node that produced the block. gouroboros v0.192.0
 // removed the gate, so the rendering is now identical in every era, and this
 // test fails if the gate returns.
-func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(t *testing.T) {
+func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(
+	t *testing.T,
+) {
 	input := newTestInput(0x01, 0)
 	tx := &mockConwayFeeTx{
 		mockFeeTx: mockFeeTx{
@@ -3860,7 +3879,11 @@ func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(t *testing.T) 
 				"an empty mint must still carry the zero-lovelace ada entry")
 			policy, ok := m.Pairs[0][0].(*data.ByteString)
 			require.True(t, ok)
-			assert.Empty(t, policy.Inner, "ada policy id is the empty bytestring")
+			assert.Empty(
+				t,
+				policy.Inner,
+				"ada policy id is the empty bytestring",
+			)
 
 			// Assert the amount too. Without it the fee field, which is also a
 			// single-entry map keyed by the empty policy, satisfies the checks
@@ -3870,7 +3893,11 @@ func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(t *testing.T) 
 			require.Len(t, inner.Pairs, 1)
 			name, ok := inner.Pairs[0][0].(*data.ByteString)
 			require.True(t, ok)
-			assert.Empty(t, name.Inner, "ada asset name is the empty bytestring")
+			assert.Empty(
+				t,
+				name.Inner,
+				"ada asset name is the empty bytestring",
+			)
 			amount, ok := inner.Pairs[0][1].(*data.Integer)
 			require.True(t, ok)
 			assert.Zero(t, amount.Inner.Int64(),

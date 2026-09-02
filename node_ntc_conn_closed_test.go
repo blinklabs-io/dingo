@@ -88,7 +88,9 @@ func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
 // NtC connection. Without handleConnManagerClosed wired as the connection
 // manager's ConnClosedFunc, this assertion fails: the client state
 // registered by AddClient is still present after the simulated close.
-func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(t *testing.T) {
+func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
+	t *testing.T,
+) {
 	n := newHandleConnManagerClosedTestNode(t)
 	connId := newNtCTestConnId(1)
 

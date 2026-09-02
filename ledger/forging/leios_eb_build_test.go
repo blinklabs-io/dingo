@@ -114,8 +114,16 @@ func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
 	baseInput := parent.Inputs()[0]
 	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
 	txs := []MempoolTransaction{
-		{Hash: parent.Hash().String(), Cbor: parentCbor, Type: conway.TxTypeConway},
-		{Hash: child.Hash().String(), Cbor: childCbor, Type: conway.TxTypeConway},
+		{
+			Hash: parent.Hash().String(),
+			Cbor: parentCbor,
+			Type: conway.TxTypeConway,
+		},
+		{
+			Hash: child.Hash().String(),
+			Cbor: childCbor,
+			Type: conway.TxTypeConway,
+		},
 	}
 
 	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
@@ -136,8 +144,16 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 	baseInput := parent.Inputs()[0]
 	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
 	txs := []MempoolTransaction{
-		{Hash: parent.Hash().String(), Cbor: parentCbor, Type: conway.TxTypeConway},
-		{Hash: child.Hash().String(), Cbor: childCbor, Type: conway.TxTypeConway},
+		{
+			Hash: parent.Hash().String(),
+			Cbor: parentCbor,
+			Type: conway.TxTypeConway,
+		},
+		{
+			Hash: child.Hash().String(),
+			Cbor: childCbor,
+			Type: conway.TxTypeConway,
+		},
 	}
 
 	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
@@ -150,7 +166,9 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 	require.Empty(t, selected, "a rejected parent must not expose its output")
 }
 
-func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(t *testing.T) {
+func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
+	t *testing.T,
+) {
 	parentCbor := makeMinimalTxCbor(t, 0x43, 29)
 	parent, err := conway.NewConwayTransactionFromCbor(parentCbor)
 	require.NoError(t, err)
@@ -163,7 +181,11 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(t *testing.T) 
 	selected, err := selectValidLeiosTransactions(
 		[]MempoolTransaction{
 			{Hash: "not-hex", Cbor: parentCbor, Type: conway.TxTypeConway},
-			{Hash: child.Hash().String(), Cbor: childCbor, Type: conway.TxTypeConway},
+			{
+				Hash: child.Hash().String(),
+				Cbor: childCbor,
+				Type: conway.TxTypeConway,
+			},
 		},
 		&leiosOverlayValidator{base: map[string]struct{}{baseKey: {}}},
 	)

@@ -499,7 +499,12 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 				)
 				err := test.validate(tx)
 				_, ok := errors.AsType[conway.PlutusScriptFailedError](err)
-				require.True(t, ok, "expected Plutus script failure, got %v", err)
+				require.True(
+					t,
+					ok,
+					"expected Plutus script failure, got %v",
+					err,
+				)
 			})
 
 			t.Run("declared invalid and scripts fail", func(t *testing.T) {

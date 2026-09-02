@@ -370,7 +370,10 @@ func verifyTPraosNonceVrfHex(
 
 	epochNonce, err := hex.DecodeString(epochNonceHex)
 	if err != nil {
-		return fmt.Errorf("decode epoch nonce for nonce VRF verification: %w", err)
+		return fmt.Errorf(
+			"decode epoch nonce for nonce VRF verification: %w",
+			err,
+		)
 	}
 	if len(epochNonce) != 32 {
 		return fmt.Errorf(

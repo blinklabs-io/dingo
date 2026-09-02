@@ -396,7 +396,9 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 					types.ErrUtxoConflict,
 					input.Id().Bytes(),
 					input.Index(),
-					spentBy, deletedSlot, hash,
+					spentBy,
+					deletedSlot,
+					hash,
 				)
 			}
 			if historicalBackfill {

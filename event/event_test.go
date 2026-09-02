@@ -326,7 +326,12 @@ func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
 	)
 	close(release)
 	testutil.RequireReceive(t, closeDone, time.Second, "Close did not finish")
-	require.Equal(t, int32(1), handled.Load(), "queued events were replayed during Close")
+	require.Equal(
+		t,
+		int32(1),
+		handled.Load(),
+		"queued events were replayed during Close",
+	)
 }
 
 func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
@@ -364,8 +369,18 @@ func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
 		"UnsubscribeAndWait should wait for the in-flight handler",
 	)
 	close(release)
-	testutil.RequireReceive(t, unsubscribed, time.Second, "UnsubscribeAndWait did not finish")
-	require.Equal(t, int32(3), handled.Load(), "ordinary unsubscribe discarded queued events")
+	testutil.RequireReceive(
+		t,
+		unsubscribed,
+		time.Second,
+		"UnsubscribeAndWait did not finish",
+	)
+	require.Equal(
+		t,
+		int32(3),
+		handled.Load(),
+		"ordinary unsubscribe discarded queued events",
+	)
 }
 
 func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {

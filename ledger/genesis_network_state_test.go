@@ -250,7 +250,9 @@ func TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots(t *testing.T) {
 // TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots covers the
 // pre-existing-genesis-database path, which reaches ensureGenesisNetworkState
 // instead of the full genesis write.
-func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(t *testing.T) {
+func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(
+	t *testing.T,
+) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})

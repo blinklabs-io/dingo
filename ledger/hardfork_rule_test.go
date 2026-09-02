@@ -353,9 +353,18 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 			lcommon.ByronAddressAttributes{},
 		)
 		require.NoError(t, err)
-		first := seedByronUtxoWithAmount(t, db, 0xAA, redeemAddr, math.MaxUint64)
+		first := seedByronUtxoWithAmount(
+			t,
+			db,
+			0xAA,
+			redeemAddr,
+			math.MaxUint64,
+		)
 		second := seedByronUtxoWithAmount(t, db, 0xBB, redeemAddr, 1)
-		require.NoError(t, db.Metadata().SetNetworkState(7_000, 5_000, 100, nil))
+		require.NoError(
+			t,
+			db.Metadata().SetNetworkState(7_000, 5_000, 100, nil),
+		)
 
 		ls := newTestLSForHardForkRule(t, db)
 		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)
@@ -378,7 +387,10 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		)
 		require.NoError(t, err)
 		txID := seedByronUtxoWithAmount(t, db, 0xCC, redeemAddr, 1)
-		require.NoError(t, db.Metadata().SetNetworkState(7_000, math.MaxUint64, 100, nil))
+		require.NoError(
+			t,
+			db.Metadata().SetNetworkState(7_000, math.MaxUint64, 100, nil),
+		)
 
 		ls := newTestLSForHardForkRule(t, db)
 		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)

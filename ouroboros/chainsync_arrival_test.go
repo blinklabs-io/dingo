@@ -90,7 +90,9 @@ func TestChainsyncClientRollForwardRecordsHeaderArrival(t *testing.T) {
 	require.False(t, data.ArrivalTime.After(after))
 }
 
-func TestChainsyncClientRollForwardCarriesPolicyTargetWithAdmittedEvent(t *testing.T) {
+func TestChainsyncClientRollForwardCarriesPolicyTargetWithAdmittedEvent(
+	t *testing.T,
+) {
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
