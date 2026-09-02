@@ -1059,19 +1059,20 @@ func (lv *LedgerView) DRepDelegation(
 	}, nil
 }
 
-// Constitution returns the current constitution.
-// Returns nil if no constitution has been established on-chain.
+// Constitution returns the enacted constitution: its anchor URL, anchor
+// hash, and optional guardrails policy hash.
+//
+// Constitution state that is missing or malformed fails closed with
+// governance.ErrConstitutionUnavailable; a constitution store that cannot
+// be read at all returns the wrapped store error. Neither reports an
+// empty-but-valid constitution, which gouroboros' guardrails rule would
+// read as "no guardrails script required".
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 	constitution, err := lv.ls.db.GetConstitution(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get constitution: %w", err)
 	}
-	if constitution == nil {
-		return nil, nil
-	}
-	// Constitution in gouroboros is currently an empty placeholder struct.
-	// Return a non-nil pointer to indicate a constitution exists.
-	return &lcommon.Constitution{}, nil
+	return governance.ConstitutionFromModel(constitution)
 }
 
 // TreasuryValue returns the current treasury value.

@@ -386,6 +386,30 @@ func (m *DingoStateManager) LoadInitialState(
 		return err
 	}
 
+	// The enacted constitution is real backend state that the read side
+	// (DingoStateProvider.Constitution) reads back through
+	// database.Database.GetConstitution, the same way production does.
+	// Without this seed a vector whose initial state already carries a
+	// constitution -- which is where its guardrails policy hash comes
+	// from -- would leave the backend with no constitution row at all, and
+	// the read side would (correctly) fail closed on every
+	// parameter-change and treasury-withdrawal proposal in the vector.
+	// Slot 0 matches the other seeds here, so a rollback to any vector
+	// slot never prunes it.
+	if state.Constitution != nil {
+		if err := m.db.SetConstitution(
+			&models.Constitution{
+				AnchorURL:  state.Constitution.AnchorURL,
+				AnchorHash: state.Constitution.AnchorHash,
+				PolicyHash: state.Constitution.PolicyHash,
+				AddedSlot:  0,
+			},
+			txn,
+		); err != nil {
+			return fmt.Errorf("seed constitution: %w", err)
+		}
+	}
+
 	for id, proposal := range state.Proposals {
 		govProposal := m.proposalToModel(id, proposal)
 		if err := m.db.SetGovernanceProposal(&govProposal, txn); err != nil {
