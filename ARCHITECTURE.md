@@ -8217,7 +8217,23 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    deposits are deliberately outside the mark snapshot read at step 3. Active
    pool membership itself is query-derived (`GetActivePoolKeyHashesAtSlot`), so no
    separate pool-state delete is needed; the retirement certificate rows remain
-   for rollback safety.
+   for rollback safety. The delegation half is not query-derived and is written:
+   `ClearDelegationsToRetiredPool` nulls `account.pool` for every account
+   delegated to each reaped pool, stamping `added_slot` with the boundary slot.
+   Deriving pool membership hides a surviving delegation only while the pool
+   stays gone — the moment the same pool re-registers, the stale rows rejoin the
+   pool distribution, the node's total active stake exceeds the network's, and
+   every other pool's VRF leader threshold comes out too small, which rejects
+   canonical blocks and wedges the node (issue #3794). The boundary stamp is
+   what makes the clear rollback-safe: `RestoreAccountStateAtSlot` revisits only
+   accounts whose `added_slot` is past the rollback target and re-derives the
+   delegation from the surviving certificates, so a rollback to before the reap
+   restores it and one to after it leaves the account cleared. The restore also
+   drops a derived delegation whose pool was reaped after the certificate and at
+   or before the rollback slot (`poolReapedAfterDelegation`): the reap writes no
+   certificate, so an account modified again after the reap and then rolled back
+   to a point still past it would otherwise have the pre-reap certificate put it
+   back on the reaped pool.
 6. CIP-0163 one-time activation stamp (`activateDelegatorInactivityIfNeeded`):
    no-op unless the delegator-inactivity gate is on and the durable
    `delegator_inactivity_activated` `sync_state` marker is unset; otherwise
