@@ -19,6 +19,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -103,6 +104,29 @@ func isRoutableAddr(address string) bool {
 	return IsRoutableIP(ip)
 }
 
+// unreachablePrefixes are ranges that net.IP's own class predicates report as
+// global unicast but that cannot be a peer we meant to dial. net.IP.IsPrivate
+// covers only RFC 1918 and RFC 4193, so each of these otherwise reads as
+// routable.
+//
+// The list is limited to ranges that either reach nothing or reach a host we
+// did not intend. RFC 6598 shared address space is the one that matters: a
+// carrier routes it internally, so dialing an advertised 100.64.0.0/10 address
+// can reach another subscriber's host rather than failing.
+//
+// RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are deliberately absent.
+// They are not routed anywhere, so the worst a peer advertising one costs is a
+// failed dial, and this repository uses them as stand-ins for public addresses
+// in tests — see peergov/ledger_dial_security_test.go. Rejecting them would
+// break that suite without closing a reachable path.
+var unreachablePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"), // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.0.0/24"),  // RFC 6890 IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"), // RFC 2544 benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),   // RFC 1112 reserved, incl. broadcast
+	netip.MustParsePrefix("100::/64"),      // RFC 6666 discard-only
+}
+
 // IsRoutableIP reports whether an IP address is usable as a peer candidate
 // learned from the network. It is the single definition of the routability
 // policy applied to gossip, ledger, and peer-sharing candidates, so callers
@@ -119,6 +143,18 @@ func IsRoutableIP(ip net.IP) bool {
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
 		ip.IsUnspecified() {
 		return false
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	// Unmap so an IPv4-mapped IPv6 address is matched against the IPv4
+	// prefixes rather than silently missing every one of them.
+	addr = addr.Unmap()
+	for _, prefix := range unreachablePrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
 	}
 	return true
 }
