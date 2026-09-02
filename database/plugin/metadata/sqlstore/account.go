@@ -301,6 +301,29 @@ func (s *Store) GetAccountByCredential(
 	return accountFromSQLite(row)
 }
 
+// dedupeStakeCredentialRefs drops repeated (credential_tag, staking_key)
+// refs, keeping the first occurrence's order. Extracted as its own function
+// (rather than inlined in GetAccountsByCredential) so a test can assert the
+// deduplication happened directly, instead of only observing it indirectly
+// through GetAccountsByCredential's map-shaped result -- which stays correct
+// with or without deduplication, since a duplicate row there just overwrites
+// the same map key with identical data.
+func dedupeStakeCredentialRefs(
+	refs []models.StakeCredentialRef,
+) []models.StakeCredentialRef {
+	seen := make(map[string]struct{}, len(refs))
+	deduped := refs[:0:0]
+	for _, ref := range refs {
+		key := ref.MapKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, ref)
+	}
+	return deduped
+}
+
 func (s *Store) GetAccountsByCredential(
 	refs []models.StakeCredentialRef,
 	includeInactive bool,
@@ -317,17 +340,7 @@ func (s *Store) GetAccountsByCredential(
 	// map-shaped result (the second assignment just overwrites the first
 	// with identical data) but wasted derived-table rows and chunk capacity
 	// for a caller that passes duplicates.
-	seen := make(map[string]struct{}, len(refs))
-	deduped := refs[:0:0]
-	for _, ref := range refs {
-		key := ref.MapKey()
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		deduped = append(deduped, ref)
-	}
-	refs = deduped
+	refs = dedupeStakeCredentialRefs(refs)
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err

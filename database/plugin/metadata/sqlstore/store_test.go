@@ -238,6 +238,27 @@ func TestGetAccountsByCredentialDeduplicatesRepeatedRefs(t *testing.T) {
 	require.Contains(t, result, ref.MapKey())
 }
 
+// TestDedupeStakeCredentialRefsDropsRepeats asserts the deduplication
+// operation directly: GetAccountsByCredential's map-shaped result stays
+// correct with or without deduplication (a duplicate row just overwrites the
+// same map key with identical data), so a test that only calls
+// GetAccountsByCredential cannot distinguish "deduplicated before querying"
+// from "queried with duplicates, then map assignment hid it" -- see cubic's
+// review on PR #3782 for exactly this gap in an earlier version of this test.
+func TestDedupeStakeCredentialRefsDropsRepeats(t *testing.T) {
+	t.Parallel()
+	keyA := bytes.Repeat([]byte{0x07}, 28)
+	keyB := bytes.Repeat([]byte{0x08}, 28)
+	refA := models.NewStakeCredentialRef(0, keyA)
+	refB := models.NewStakeCredentialRef(1, keyB)
+
+	deduped := dedupeStakeCredentialRefs(
+		[]models.StakeCredentialRef{refA, refB, refA, refA, refB},
+	)
+
+	require.Equal(t, []models.StakeCredentialRef{refA, refB}, deduped)
+}
+
 func TestRebuildRewardLiveStakeBatchesCredentials(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
