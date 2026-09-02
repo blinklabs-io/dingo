@@ -808,3 +808,74 @@ INSERT INTO committee_member (
 	)
 	require.NoError(t, err)
 }
+
+// TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot proves the
+// committee root is the latest enacted NoConfidence *or* UpdateCommittee.
+//
+// NoConfidence and UpdateCommittee chain off the same committee root. Querying
+// only UpdateCommittee returns a stale root once a NoConfidence is enacted
+// after it, and every pending proposal chained off the NoConfidence then falls
+// outside the resolved lineage, so a re-elected member is dropped and its
+// authorization is rejected as a non-member.
+func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
+	t *testing.T,
+) {
+	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	cold := committeeTestCredential(0x81)
+
+	enactedEpoch := uint64(10)
+	// An older enacted UpdateCommittee. Querying UpdateCommittee alone
+	// resolves this as the root.
+	oldSlot := uint64(100)
+	storeGovernanceTestProposal(t, db, &models.GovernanceProposal{
+		TxHash:       governanceTestHash(0x82),
+		ActionIndex:  1,
+		ActionType:   uint8(lcommon.GovActionTypeUpdateCommittee),
+		EnactedEpoch: &enactedEpoch,
+		EnactedSlot:  &oldSlot,
+	}, nil)
+
+	// A NoConfidence enacted afterwards is the true current committee root.
+	rootSlot := uint64(200)
+	rootIdx := uint32(2)
+	storeGovernanceTestProposal(t, db, &models.GovernanceProposal{
+		TxHash:       governanceTestHash(0x83),
+		ActionIndex:  rootIdx,
+		ActionType:   uint8(lcommon.GovActionTypeNoConfidence),
+		EnactedEpoch: &enactedEpoch,
+		EnactedSlot:  &rootSlot,
+	}, nil)
+
+	// A pending UpdateCommittee re-electing the member, chained off the
+	// NoConfidence root.
+	action, err := lcommon.NewUpdateCommitteeGovAction(
+		nil,
+		nil,
+		map[*lcommon.Credential]uint{&cold: uint(90)},
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	storeGovernanceTestProposal(t, db, &models.GovernanceProposal{
+		TxHash:          governanceTestHash(0x84),
+		ActionIndex:     3,
+		ActionType:      uint8(lcommon.GovActionTypeUpdateCommittee),
+		ProposedEpoch:   0,
+		ExpiresEpoch:    100,
+		ParentTxHash:    governanceTestHash(0x83),
+		ParentActionIdx: &rootIdx,
+		AnchorHash:      make([]byte, 32),
+		ReturnAddress:   make([]byte, 29),
+		GovActionCbor:   encoded,
+	}, nil)
+
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		member,
+		"pending member chained off the enacted NoConfidence root must resolve",
+	)
+	require.Equal(t, uint64(90), member.ExpiryEpoch)
+}

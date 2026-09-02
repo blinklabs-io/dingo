@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -191,4 +192,46 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 	)
 	require.NoError(t, err)
 	require.Empty(t, selected)
+}
+
+// TestBuildLeiosEBReferencesUseFullTransactionHash verifies that buildLeiosEB
+// content-addresses each manifest reference by the hash of the FULL transaction
+// CBOR (not the Cardano tx-id / body hash). This is exactly the check the
+// fetch-side validator (ouroboros.validateLeiosEndorserBlockTxs) performs —
+// Blake2b256(txCbor) == ref.TransactionHash — so a peer fetching a locally
+// forged EB validates every tx instead of rejecting it (blinklabs-io/dingo#3641).
+func TestBuildLeiosEBReferencesUseFullTransactionHash(t *testing.T) {
+	txs := []MempoolTransaction{
+		{Hash: strings.Repeat("11", 32), Cbor: []byte{0x01, 0x02, 0x03}},
+		{Hash: strings.Repeat("aa", 32), Cbor: []byte{0xde, 0xad, 0xbe, 0xef}},
+	}
+
+	ebCbor, _, bodies, err := buildLeiosEB(txs)
+	require.NoError(t, err)
+
+	eb, err := lcommon.NewLeiosEndorserBlockFromCbor(ebCbor)
+	require.NoError(t, err)
+	require.Len(t, eb.TransactionReferences, len(bodies))
+	for i, ref := range eb.TransactionReferences {
+		// The same equality validateLeiosEndorserBlockTxs enforces on fetch.
+		require.Equalf(
+			t,
+			lcommon.Blake2b256Hash(bodies[i]),
+			ref.TransactionHash,
+			"reference %d hash must be Blake2b256 of the full tx CBOR",
+			i,
+		)
+	}
+
+	// Regression guard: the old (buggy) contract hashed the decoded tx.Hash
+	// (tx-id / body hash). That value must NOT equal the reference hash now,
+	// or a fetching peer would reject every locally forged tx again.
+	rawHash, err := hex.DecodeString(txs[0].Hash)
+	require.NoError(t, err)
+	require.NotEqual(
+		t,
+		lcommon.NewBlake2b256(rawHash),
+		eb.TransactionReferences[0].TransactionHash,
+		"reference hash must be the full-tx hash, not the tx-id/body hash",
+	)
 }

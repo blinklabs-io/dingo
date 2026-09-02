@@ -357,14 +357,10 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		return false
 	}
 
-	// Track this address as ledger-discovered so peers from other
-	// sources at the same address count toward the ledger target.
-	p.ledgerKnownAddrs[normalized] = struct{}{}
-
 	// Check for existing peer using cached NormalizedAddress. The address
 	// comparison is normalized on both sides, as in AddPeer, so a peer
 	// holding the same hostname under different casing is not duplicated.
-	exists := false
+	var existingPeer *Peer
 	for _, peer := range p.peers {
 		if peer == nil {
 			continue
@@ -372,11 +368,15 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		if peer.NormalizedAddress == normalized ||
 			peer.NormalizedAddress == hostnameNormalized ||
 			p.normalizeAddress(peer.Address) == hostnameNormalized {
-			exists = true
+			existingPeer = peer
 			break
 		}
 	}
-	if exists {
+	if existingPeer != nil {
+		// The candidate is a valid ledger relay backed by a peer we already
+		// retain from another source. Record that retained peer's address so
+		// it counts toward the ledger target without adding a duplicate.
+		p.ledgerKnownAddrs[existingPeer.NormalizedAddress] = struct{}{}
 		p.mu.Unlock()
 		return false
 	}
@@ -392,6 +392,11 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		p.mu.Unlock()
 		return false
 	}
+
+	// Record only admitted ledger addresses. Keeping duplicate or
+	// capacity-rejected candidates would make them count toward the ledger
+	// target even though the governor does not retain them as peers.
+	p.ledgerKnownAddrs[normalized] = struct{}{}
 
 	// Add as new peer
 	newPeer := &Peer{
@@ -462,10 +467,9 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
 			p.normalizeAddress(peer.Address) != hostnameNormalized {
 			continue
 		}
-		// Record the peer's own normalized address rather than a fresh
-		// resolution: countLedgerPeersLocked matches ledgerKnownAddrs
-		// against Peer.NormalizedAddress, so this is what makes a peer
-		// known from another source count toward the ledger target.
+		// This is a valid ledger relay already retained from another source,
+		// not an unusable rejected candidate. Associate the retained peer with
+		// ledger discovery so it contributes to LedgerPeerTarget.
 		p.ledgerKnownAddrs[peer.NormalizedAddress] = struct{}{}
 		return true
 	}

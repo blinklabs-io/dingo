@@ -28,26 +28,56 @@ type MempoolConsumer struct {
 	// blocking: a pending wake-up is all a waiter needs, since it re-checks the
 	// cache after waking. A channel rather than a sync.Cond so the wait can also
 	// select on mempool shutdown.
-	cacheSlot   chan struct{}
-	cacheLimit  int
-	nextTxIdx   int
-	cacheMutex  sync.Mutex
-	nextTxIdxMu sync.Mutex
+	cacheSlot       chan struct{}
+	cacheLimit      int
+	cacheBytes      int64
+	cacheLimitBytes int64
+	nextTxIdx       int
+	cacheMutex      sync.Mutex
+	nextTxIdxMu     sync.Mutex
 	// onWaitForTx is a test-only hook invoked after a blocking NextTx has
 	// subscribed for additions and is ready to be cancelled.
 	onWaitForTx func()
+	// onCacheCleared is a test-only hook invoked after ClearCache releases
+	// the cache lifecycle lock.
+	onCacheCleared func()
 }
 
-func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
+func newConsumer(
+	mempool *Mempool,
+	cacheLimit int,
+	cacheLimitBytes int64,
+) *MempoolConsumer {
 	if cacheLimit <= 0 {
 		cacheLimit = DefaultConsumerCacheSize
 	}
+	if cacheLimitBytes <= 0 {
+		cacheLimitBytes = mempool.config.MempoolCapacity /
+			defaultConsumerCacheShare
+		// A budget this small would permanently exclude ordinary transaction
+		// bodies from relay with no other visible symptom, so the derived
+		// default (unlike an operator's explicit ConsumerCacheBytes) is
+		// floored to a size that comfortably holds one.
+		if cacheLimitBytes < minConsumerCacheBytes {
+			mempool.logger.Warn(
+				"derived default consumer relay cache byte budget is below "+
+					"the floor; raising it to avoid silently excluding "+
+					"ordinary transaction bodies from relay",
+				"component", "mempool",
+				"mempool_capacity", mempool.config.MempoolCapacity,
+				"derived_bytes", cacheLimitBytes,
+				"floor_bytes", int64(minConsumerCacheBytes),
+			)
+			cacheLimitBytes = minConsumerCacheBytes
+		}
+	}
 	return &MempoolConsumer{
-		mempool:    mempool,
-		cache:      make(map[string]*MempoolTransaction),
-		done:       make(chan struct{}),
-		cacheSlot:  make(chan struct{}, 1),
-		cacheLimit: cacheLimit,
+		mempool:         mempool,
+		cache:           make(map[string]*MempoolTransaction),
+		done:            make(chan struct{}),
+		cacheSlot:       make(chan struct{}, 1),
+		cacheLimit:      cacheLimit,
+		cacheLimitBytes: cacheLimitBytes,
 	}
 }
 
@@ -56,6 +86,8 @@ func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
 // race with other lifecycle paths.
 func (m *MempoolConsumer) cancel() {
 	if m != nil {
+		m.cacheMutex.Lock()
+		defer m.cacheMutex.Unlock()
 		m.doneOnce.Do(func() { close(m.done) })
 	}
 }
@@ -72,37 +104,6 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 		default:
 		}
 
-		// Stop handing out transactions once the body cache is full. NextTx is
-		// what puts a tx id on the wire, and the body is served to the peer
-		// later from this cache only. Dropping a cached body to make room would
-		// silently omit a tx the peer legitimately asked for, so bound the
-		// cache by declining to advertise instead. The peer's acknowledgement
-		// clears the cache and reopens the window. The protocol window
-		// (txsubmissionRequestTxIdsCount) is far below the default limit, so
-		// this is a backstop against an aggressive peer, not a normal path.
-		m.cacheMutex.Lock()
-		cacheFull := len(m.cache) >= m.cacheLimit
-		m.cacheMutex.Unlock()
-		if cacheFull {
-			if !blocking {
-				return nil
-			}
-			// A blocking request must wait, not answer empty. Returning nil
-			// here would have the peer immediately re-request -- its pull loop
-			// has no backoff for an empty reply -- producing an unpaced
-			// request/reply spin exactly in the aggressive-peer case this
-			// bound exists to contain. Park until a body is served or the
-			// peer acknowledges ids, which frees a slot.
-			select {
-			case <-m.cacheSlot:
-				continue
-			case <-m.done:
-				return nil
-			case <-m.mempool.done:
-				return nil
-			}
-		}
-
 		m.mempool.RLock()
 		m.nextTxIdxMu.Lock()
 
@@ -110,19 +111,53 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 		if m.nextTxIdx < len(m.mempool.transactions) {
 			poolTx := m.mempool.transactions[m.nextTxIdx]
 			if poolTx != nil {
+				// A body larger than this consumer's total byte budget can never
+				// become cacheable. Skip it so it cannot permanently pin the
+				// cursor and prevent later transactions from being relayed.
+				if int64(len(poolTx.Cbor)) > m.cacheLimitBytes {
+					hash := poolTx.Hash
+					size := len(poolTx.Cbor)
+					limit := m.cacheLimitBytes
+					m.nextTxIdx++
+					m.nextTxIdxMu.Unlock()
+					m.mempool.RUnlock()
+					m.mempool.metrics.consumerCacheBytesSkipped.Inc()
+					m.mempool.logger.Warn(
+						"skipping transaction that exceeds this consumer's "+
+							"relay cache byte budget; it will never be "+
+							"relayed to this consumer",
+						"component", "mempool",
+						"tx_hash", hash,
+						"tx_size_bytes", size,
+						"cache_limit_bytes", limit,
+					)
+					continue
+				}
+				cached, aggregateChanged := m.cacheTransaction(poolTx)
+				if !cached {
+					m.nextTxIdxMu.Unlock()
+					m.mempool.RUnlock()
+					if !blocking {
+						return nil
+					}
+					select {
+					case <-m.cacheSlot:
+						continue
+					case <-aggregateChanged:
+						continue
+					case <-m.done:
+						return nil
+					case <-m.mempool.done:
+						return nil
+					}
+				}
 				// Clone while holding the pool read lock so neither the caller
 				// nor the consumer cache shares mutable CBOR with pool storage.
 				nextTx := cloneMempoolTransaction(poolTx)
-				cachedTx := cloneMempoolTransaction(poolTx)
 				// Increment next TX index atomically with reading it
 				m.nextTxIdx++
 				m.nextTxIdxMu.Unlock()
 				m.mempool.RUnlock()
-
-				// Add transaction to cache (outside of locks)
-				m.cacheMutex.Lock()
-				m.cache[cachedTx.Hash] = cachedTx
-				m.cacheMutex.Unlock()
 
 				return nextTx
 			}
@@ -173,6 +208,37 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 	}
 }
 
+// cacheTransaction reserves both the per-consumer and aggregate retained-byte
+// budgets before storing an advertised body. Permanently oversized bodies are
+// filtered by NextTx; temporary reservation failures keep the cursor on the
+// transaction, preserving later retransmission.
+func (m *MempoolConsumer) cacheTransaction(
+	tx *MempoolTransaction,
+) (bool, <-chan struct{}) {
+	size := int64(len(tx.Cbor))
+	m.cacheMutex.Lock()
+	defer m.cacheMutex.Unlock()
+	select {
+	case <-m.done:
+		return false, nil
+	default:
+	}
+	if _, exists := m.cache[tx.Hash]; exists {
+		return true, nil
+	}
+	if len(m.cache) >= m.cacheLimit ||
+		size > m.cacheLimitBytes-m.cacheBytes {
+		return false, nil
+	}
+	reserved, aggregateChanged := m.mempool.reserveRelayCacheBytes(size)
+	if !reserved {
+		return false, aggregateChanged
+	}
+	m.cache[tx.Hash] = cloneMempoolTransaction(tx)
+	m.cacheBytes += size
+	return true, nil
+}
+
 func (m *MempoolConsumer) GetTxFromCache(hash string) *MempoolTransaction {
 	if m != nil {
 		m.cacheMutex.Lock()
@@ -186,9 +252,15 @@ func (m *MempoolConsumer) GetTxFromCache(hash string) *MempoolTransaction {
 func (m *MempoolConsumer) ClearCache() {
 	if m != nil {
 		m.cacheMutex.Lock()
-		defer m.cacheMutex.Unlock()
+		released := m.cacheBytes
 		m.cache = make(map[string]*MempoolTransaction)
+		m.cacheBytes = 0
+		m.mempool.releaseRelayCacheBytes(released)
 		m.signalCacheSlotLocked()
+		m.cacheMutex.Unlock()
+		if m.onCacheCleared != nil {
+			m.onCacheCleared()
+		}
 	}
 }
 
@@ -196,8 +268,11 @@ func (m *MempoolConsumer) RemoveTxFromCache(hash string) {
 	if m != nil {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
-		if _, existed := m.cache[hash]; existed {
+		if tx, existed := m.cache[hash]; existed {
 			delete(m.cache, hash)
+			size := int64(len(tx.Cbor))
+			m.cacheBytes -= size
+			m.mempool.releaseRelayCacheBytes(size)
 			m.signalCacheSlotLocked()
 		}
 	}

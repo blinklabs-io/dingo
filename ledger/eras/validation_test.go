@@ -3827,3 +3827,229 @@ func TestPreAlonzoCertDepositRejectsNilPparams(t *testing.T) {
 		assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
 	}
 }
+
+// TestConwayCommitteeCertificateRuleFailsClosedWhenStateUnavailable proves the
+// rule rejects rather than accepts when the provider cannot answer. Accepting
+// here would turn a fail-closed rejection into silent wrong validation.
+func TestConwayCommitteeCertificateRuleFailsClosedWhenStateUnavailable(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd1
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       false,
+		cold: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(credential): {ColdKey: hash},
+		},
+	}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{{
+				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+				Certificate: &lcommon.AuthCommitteeHotCertificate{
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					ColdCredential: credential,
+				},
+			}},
+		},
+	}
+
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
+	var lookup conway.CommitteeMemberLookupError
+	require.ErrorAs(t, err, &lookup)
+	require.ErrorIs(t, err, errCommitteeStateUnavailable)
+}
+
+// TestConwayUnknownVoterRuleFailsClosedWhenStateUnavailable is the voter-side
+// counterpart. The member is seated in the harness, so an accepting result
+// would prove the availability gate was skipped rather than honored.
+func TestConwayUnknownVoterRuleFailsClosedWhenStateUnavailable(t *testing.T) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd2
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       false,
+		hot: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(credential): {ColdKey: hash},
+		},
+	}
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hash),
+	}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+	}
+
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+	)
+	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
+	var lookup conway.CommitteeMemberLookupError
+	require.ErrorAs(t, err, &lookup)
+	require.ErrorIs(t, err, errCommitteeStateUnavailable)
+}
+
+// TestConwayCommitteeRulesAcceptAuthoritativeEmptyCommittee is the mandatory
+// counterpart to the two tests above: an authoritative empty committee must
+// report available-and-empty, which for a transaction carrying no committee
+// certificate and no votes means no rejection at all.
+//
+// This test passes both with and without the fail-closed change by design. It
+// exists to pin the other side of the boundary: it fails only if fail-closed
+// is over-applied to a transaction that makes no committee lookup.
+func TestConwayCommitteeRulesAcceptAuthoritativeEmptyCommittee(t *testing.T) {
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+	}
+	tx := &conway.ConwayTransaction{TxIsValid: true}
+
+	certRule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	require.NoError(
+		t,
+		certRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+	)
+
+	voterRule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+	)
+	require.NoError(
+		t,
+		voterRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+	)
+}
+
+// TestConwayCommitteeRulesSkipPhase2InvalidTransaction proves the rules do not
+// inspect committee state for a phase-2-invalid transaction. Such a
+// transaction applies only its collateral effects, so rejecting it here would
+// diverge from the reference implementation and reject a block cardano-node
+// accepts. The provider is deliberately empty and available, which would
+// reject both certificates and votes if the guard were absent.
+func TestConwayCommitteeRulesSkipPhase2InvalidTransaction(t *testing.T) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd3
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+	}
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hash),
+	}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: false,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{{
+				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+				Certificate: &lcommon.AuthCommitteeHotCertificate{
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					ColdCredential: credential,
+				},
+			}},
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+	}
+
+	certRule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	require.NoError(
+		t,
+		certRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+	)
+
+	voterRule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+	)
+	require.NoError(
+		t,
+		voterRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+	)
+}
+
+// TestConwayCommitteeHotVoterTagsDoNotCrossMatch is the mandatory negative
+// case for credential identity: a key-hash and a script-hash credential
+// sharing the same 28 bytes are distinct voters and must not resolve to each
+// other's member.
+//
+// This test passes both with and without the fail-closed change by design; it
+// covers the tag-preservation behavior this PR adds, not the availability
+// gate. It fails if the tag is ever dropped or defaulted in voter resolution.
+func TestConwayCommitteeHotVoterTagsDoNotCrossMatch(t *testing.T) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd4
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	// Only the key-hash identity is seated.
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		hot: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(keyCredential): {ColdKey: hash},
+		},
+	}
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+	)
+	newTx := func(voterType uint8) *conway.ConwayTransaction {
+		voter := &lcommon.Voter{Type: voterType, Hash: [28]byte(hash)}
+		return &conway.ConwayTransaction{
+			TxIsValid: true,
+			Body: conway.ConwayTransactionBody{
+				TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+			},
+		}
+	}
+
+	// The seated key-hash voter is accepted.
+	require.NoError(t, rule(
+		newTx(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash),
+		0, state, &conway.ConwayProtocolParameters{},
+	))
+
+	// The script-hash voter with identical bytes must not borrow it.
+	var unknown conway.UnknownVoterError
+	require.ErrorAs(t, rule(
+		newTx(lcommon.VoterTypeConstitutionalCommitteeHotScriptHash),
+		0, state, &conway.ConwayProtocolParameters{},
+	), &unknown)
+}

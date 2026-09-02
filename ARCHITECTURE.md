@@ -100,11 +100,11 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 8:
+advertising readiness. The current registry has migrations 1 through 9:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
-`governance-ratification-history`, `committee-credential-tags`, and
-`committee-term-start-presence`. `DATABASE.md` is the source of truth for their
+`governance-ratification-history`, `account-import-deposit`,
+`committee-credential-tags`, and `committee-term-start-presence`. `DATABASE.md` is the source of truth for their
 schema changes and upgrade behavior. It then checks the read pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
@@ -2309,13 +2309,19 @@ the ranking block's point so a rollback removes them — but without validation 
 consumed-input recovery (`Database.SetTransactionWithOpts` with
 `SkipConsumedInputRecovery`): the endorser block was admitted by its Leios
 certificate, so its transactions are trusted, and a consumed input not yet
-present is left as a no-op rather than driving blob recovery. Replayed endorser
-transaction hashes are skipped so effects are not applied twice. Applying the
-produced outputs keeps the UTxO set — and the stake distribution derived from it
-— complete, matching the reference; recording metadata only (the prior behavior)
-left endorser-resident outputs missing, which diverged the UTxO and made
-downstream transactions and the leader-election stake snapshot treat inputs the
-endorser block should have produced as absent. Every other network takes the
+present is left as a no-op rather than driving blob recovery. An input that is
+present but already spent by a *different* certified endorser transaction is
+also a no-op (`TransactionStore.SetTransactionLeiosClosure`), matching
+`ValidateNone`'s `Map.delete` on a missing key: two certified endorser blocks
+may legitimately name the same input across blocks, and failing there wedged
+block application (issue #3643). Ranking-block application keeps the hard
+`ErrUtxoConflict` check. Replayed endorser transaction hashes are skipped so
+effects are not applied twice. Applying the produced outputs keeps the UTxO set
+— and the stake distribution derived from it — complete, matching the
+reference; recording metadata only (the prior behavior) left endorser-resident
+outputs missing, which diverged the UTxO and made downstream transactions and
+the leader-election stake snapshot treat inputs the endorser block should have
+produced as absent. Every other network takes the
 CIP-conformant path, where the endorser transactions are applied to the UTxO with
 dingo's normal per-tx validation and consumed-input recovery, as a side delta
 recorded under the ranking block's point (so a rollback removes them). dingo no longer carries the
@@ -2659,6 +2665,13 @@ The `LedgerView` interface provides query access to ledger state:
   capability used by transaction validation to enforce exact withdrawals
   before Dijkstra and Dijkstra's script-sensitive partial-withdrawal rule,
   while always rejecting amounts above the balance before storage ingestion.
+- `StakeCredentialDeposit` returns the deposit currently locked by an active
+  key- or script-hash stake credential. Certificate-created accounts use the
+  latest registration history entry, while Mithril-imported and Shelley-genesis
+  accounts fall back to the deposit captured in their rollback baseline because
+  no registration certificate exists in local history. Unknown legacy baseline
+  deposits remain nil; the current protocol parameter is never substituted for
+  an unavailable historical value.
 
 ### Local State Query
 
@@ -3862,11 +3875,18 @@ them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 selected backend.
 
 Each transaction-submission consumer retains a bounded cache of transaction
-bodies (1,024 entries by default; `MempoolConfig.ConsumerCacheSize` can lower or
-raise it for embedded users). The bound is enforced by declining to advertise,
-not by eviction: a body is only ever served to the peer from this cache, and
+bodies. Retained CBOR is limited per consumer to one quarter of the configured
+mempool capacity by default, and in aggregate to the full capacity.
+`MempoolConfig.ConsumerCacheBytes` can override the per-consumer budget for
+embedded users. A secondary 1,024-entry default bound remains, and
+`MempoolConfig.ConsumerCacheSize` can override that count. The bounds are
+enforced by declining to advertise, not by eviction: a
+body is only ever served to the peer from this cache, and
 dropping one already advertised would silently omit a transaction the peer
-legitimately requested. A non-blocking `NextTx` returns nil once the cache is
+legitimately requested. A body larger than the consumer's entire byte budget
+is skipped for that consumer because it can never become cacheable; this keeps
+it from permanently blocking the cursor and prevents it from starving later,
+relayable transactions. A non-blocking `NextTx` returns nil once the cache is
 full; a blocking one parks until a slot frees rather than answering empty, since
 the peer's pull loop has no backoff for an empty reply and would spin
 request/reply without pacing. Shutdown or connection cleanup releases a parked
