@@ -113,7 +113,7 @@ func TestGetLeiosEBTxsFallsBackToLegacyKey(t *testing.T) {
 // ordinary ErrBlobKeyNotFound and look like the manifest was simply never
 // persisted.
 func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
-	d := openTestDB(t)
+	d := newTestDB(t)
 	hash := []byte("0123456789abcdef0123456789abcdef")[:32]
 	slot := uint64(111)
 	readErr := errors.New("legacy read: storage unavailable")
@@ -132,7 +132,7 @@ func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
 // TestGetLeiosEBTxsPropagatesRealLegacyReadError is the transaction-body
 // half of the same regression.
 func TestGetLeiosEBTxsPropagatesRealLegacyReadError(t *testing.T) {
-	d := openTestDB(t)
+	d := newTestDB(t)
 	hash := []byte("fedcba9876543210fedcba9876543210")[:32]
 	slot := uint64(222)
 	readErr := errors.New("legacy read: storage unavailable")
