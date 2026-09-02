@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // babbageHeaderBodyFieldCount is the number of fields in a standard Babbage
@@ -47,13 +48,32 @@ func DecodeConwayBlock(raw []byte) (ledger.Block, error) {
 	if err == nil {
 		return block, nil
 	}
-	extBlock, extErr := decodeLeiosExtendedConwayBlock(raw)
-	if extErr != nil {
-		// Not a recognizable Leios-extended Conway block either; surface the
-		// strict-decode error, which is the meaningful one for real networks.
-		return nil, err
+	if extBlock, extErr := decodeLeiosExtendedConwayBlock(raw); extErr == nil {
+		return extBlock, nil
 	}
-	return extBlock, nil
+	// The respun Musashi chain carries the Dijkstra two-component block layout
+	// -- block = [header, block_body] -- while still tagging blocks as Conway
+	// (NtN block type 7) on the wire, so neither the strict Conway decoder nor
+	// the five-component Leios-extended reconstruct above recognizes them and a
+	// from-genesis sync never advances past origin (issue #3761).
+	//
+	// Verified against the live network: a block fetched from
+	// leios-node.play.dev.cardano.org:3001 (magic 164) decodes as two top-level
+	// components with a twelve-field header body, and gouroboros'
+	// NewDijkstraBlockFromCbor accepts it while DecodeConwayBlock did not.
+	//
+	// This is reached only after both Conway paths have failed, so a real
+	// Conway network never gets here and the five-component form above keeps
+	// its precedence for peers and stored history still serving it.
+	if dijkstraBlock, dijkstraErr := dijkstra.NewDijkstraBlockFromCbor(
+		raw,
+	); dijkstraErr == nil {
+		return dijkstraBlock, nil
+	}
+	// Not a recognizable Leios-extended Conway block or Dijkstra-layout block;
+	// surface the strict-decode error, which is the meaningful one for real
+	// networks.
+	return nil, err
 }
 
 // decodeLeiosExtendedConwayBlock reconstructs a Conway block whose header body
