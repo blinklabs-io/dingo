@@ -496,6 +496,96 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
+// TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile is the
+// pipeline-level regression a wolf31o2 review on PR #3611 required.
+// TestLedgerReadChainRequestsResyncOnOverKReconcile above only proves
+// ledgerReadChain itself returns and publishes a resync event; it says
+// nothing about what happens to block processing afterward. Before this
+// fix, this over-K branch returned without ever sending a readChainResult
+// on resultCh, which ledgerProcessBlocksFromSource's closed-channel case
+// turned into a nil error -- ledgerProcessBlocksWithAttempt's err == nil
+// branch then exited its restart loop for good, permanently and silently
+// halting all ledger block processing with nothing to resume it short of a
+// full LedgerState restart. That the K-bounded rewind added by #3516 is
+// what made this branch reachable at all (RewindPrimaryChainToPoint had no
+// bound before) is what makes this a merge blocker for this PR rather than
+// a candidate for the general, already-deferred pattern tracked in issue
+// #3776.
+//
+// This wires the real ledgerReadChain/ledgerProcessBlocksFromSource pair
+// through ledgerProcessBlocksWithAttempt exactly as production
+// ledgerProcessBlocks does, and proves the pipeline keeps restarting (with
+// backoff) rather than exiting cleanly after the first over-K rejection --
+// confirmed by seeing a second, independent resync event, which can only
+// fire if ledgerReadChain ran again from a fresh attempt.
+func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "pipeline-retry-over-k")
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	attempt := func(attemptCtx context.Context) error {
+		return fixture.ls.runLedgerReadChainAttempt(
+			attemptCtx,
+			fixture.ls.ledgerReadChain,
+			fixture.ls.ledgerProcessBlocksFromSource,
+		)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.ls.ledgerProcessBlocksWithAttempt(ctx, attempt)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		testutil.RequireReceive(
+			t, done, 5*time.Second,
+			"ledgerProcessBlocksWithAttempt must exit once its context "+
+				"is canceled",
+		)
+	})
+
+	first := testutil.RequireReceive(
+		t, resyncCh, 2*time.Second,
+		"expected the first over-K resync event",
+	)
+	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, first.Reason)
+
+	// A single rejection followed by silence is exactly the bug this
+	// covers -- a second, independent rejection proves the pipeline
+	// restarted a fresh ledgerReadChain attempt rather than exiting for
+	// good after the first one returned.
+	second := testutil.RequireReceive(
+		t, resyncCh, 2*time.Second,
+		"the pipeline must retry and reach the over-K branch again "+
+			"instead of halting after the first rejection",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		second.Reason,
+	)
+
+	select {
+	case <-done:
+		t.Fatal(
+			"ledgerProcessBlocksWithAttempt must keep retrying, not " +
+				"exit, after an over-K rejection",
+		)
+	default:
+	}
+
+	// None of these retries may have silently rewound the ledger tip past
+	// K either.
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+}
+
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 

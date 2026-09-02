@@ -3958,16 +3958,18 @@ func (ls *LedgerState) ledgerReadChain(
 					// connection management gets the same signal to
 					// reconnect and negotiate a fresh intersection.
 					//
-					// This return still joins every other give-up path
-					// in this function in never sending a
-					// readChainResult on resultCh, which
-					// ledgerProcessBlocksFromSource's closed-channel
-					// case turns into a nil error --
-					// ledgerProcessBlocksWithAttempt's retry loop exits
-					// for good on a nil error, and nothing restarts
-					// ledgerProcessBlocks afterward. The resync-event
-					// publish here is an improvement over that
-					// silence, not a fix for it; see issue #3776.
+					// Every other give-up path in this function still
+					// returns without ever sending a readChainResult,
+					// which ledgerProcessBlocksFromSource's
+					// closed-channel case turns into a nil error that
+					// permanently stops ledgerProcessBlocksWithAttempt's
+					// retry loop -- tracked as that general,
+					// pre-existing pattern in issue #3776. This branch
+					// is different: this PR is what makes it reachable
+					// at all (RewindPrimaryChainToPoint had no bound
+					// before), so it is fixed directly below instead of
+					// deferred, by sending a non-nil readChainResult
+					// before returning.
 					ls.config.Logger.Error(
 						"missing chain iterator start point requires a "+
 							"rewind beyond the security parameter K, "+
@@ -3986,6 +3988,30 @@ func (ls *LedgerState) ledgerReadChain(
 								},
 							),
 						)
+					}
+					// Report the failure through the channel rather
+					// than just closing it, so
+					// ledgerProcessBlocksFromSource sees a real error
+					// (recovered=false from
+					// tryRecoverFromHeaderValidationError, since this
+					// isn't a *headerValidationError) and returns it;
+					// ledgerProcessBlocksWithAttempt then treats this
+					// like any other recoverable read-chain failure --
+					// back off and start a fresh reader attempt --
+					// instead of exiting for good. The next attempt
+					// re-reconciles from the (possibly by-then
+					// advanced) tip; until connection management acts
+					// on the resync event above, it fails the same way
+					// and backs off further, exactly like any other
+					// deterministic no-progress restart.
+					select {
+					case resultCh <- readChainResult{
+						err: fmt.Errorf(
+							"reconcile primary chain tip with ledger tip: %w",
+							reconcileErr,
+						),
+					}:
+					case <-ctx.Done():
 					}
 					return
 				}

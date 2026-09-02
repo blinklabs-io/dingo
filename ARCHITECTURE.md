@@ -1438,22 +1438,30 @@ reconciliation and can hit the same over-K rejection — a case
 bound at all. Unlike `reconcileLivePrimaryChainLedgerDivergence`'s callers,
 this reader has no `ChainsyncEvent`/connection to fall back on, so on an
 over-K rejection it publishes the same `ChainsyncResyncEventType`/
-`ChainsyncResyncReasonRollbackExceedsK` those callers use directly, then
-still stops this reader attempt (issue #3516 review) the same way every
-other give-up path in `ledgerReadChain`/`ledgerReadChainIterator` already
-does: it returns without ever sending a `readChainResult` on `resultCh`.
-That is not a retry with a delay — `ledgerProcessBlocksFromSource`'s
-closed-channel-with-nothing-sent case returns a nil error, and
-`ledgerProcessBlocksWithAttempt`'s `err == nil` branch exits its retry loop
-for good. `ledgerProcessBlocks` is started once, from `Start`, with no
-supervisor restarting it, so this permanently and silently stops all ledger
-block processing; nothing (a peer reconnect, a fresh chainsync
-intersection, or chain growth via blockfetch) resumes it short of a full
-`LedgerState` restart. This is a pre-existing characteristic of every
-give-up path in this pair of functions, not introduced by this reconciler
-call, and is tracked separately in issue #3776 rather than fixed here: the
-resync-event publish above is this call site's only improvement over its
-siblings, not a fix for the underlying silent halt.
+`ChainsyncResyncReasonRollbackExceedsK` those callers use directly.
+
+Every other give-up path in `ledgerReadChain`/`ledgerReadChainIterator`
+returns without ever sending a `readChainResult` on `resultCh`, which
+`ledgerProcessBlocksFromSource`'s closed-channel-with-nothing-sent case
+turns into a nil error — `ledgerProcessBlocksWithAttempt`'s `err == nil`
+branch then exits its retry loop for good, and since `ledgerProcessBlocks`
+is started once, from `Start`, with no supervisor restarting it, this
+permanently and silently stops all ledger block processing. That is a
+pre-existing pattern spanning multiple give-up paths, tracked separately in
+issue #3776 rather than fixed here. This over-K branch is different: this
+PR is what makes it reachable at all, so it does not join that deferred
+list. Instead it sends a non-nil `readChainResult` (wrapping
+`ErrRollbackExceedsSecurityParam`) on `resultCh` before returning.
+`tryRecoverFromHeaderValidationError` declines it (it isn't a
+`*headerValidationError`), so `ledgerProcessBlocksFromSource` returns it as
+a real error, and `ledgerProcessBlocksWithAttempt` treats it like any other
+recoverable read-chain failure: back off (`ledgerPipelineBackoff`) and start
+a fresh reader attempt, rather than exiting for good. Each retry
+re-reconciles from the (possibly by-then-advanced) tip; until connection
+management acts on the resync event and the primary chain is rewound within
+K, every retry fails the same way and backs off further like any other
+deterministic no-progress restart, surfacing the existing stuck-pipeline
+signal instead of a silent halt.
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
