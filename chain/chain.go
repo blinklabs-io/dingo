@@ -59,6 +59,33 @@ type Chain struct {
 	mutex                sync.RWMutex
 	waitingChanMutex     sync.Mutex
 	persistent           bool
+
+	// pendingUpdates is the chain-level sequencer for deferred chain.update
+	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
+	// add under chainsyncBlockfetchMutex, rollback under chainsyncMutex) must
+	// not publish inline -- a back-pressured Publish there deadlocks the node
+	// (see ledger.pendingPublishes). They instead enqueue the event onto this
+	// single shared queue *atomically with the chain mutation, under c.mutex*
+	// (queueDeferredEventLocked), and drain it after releasing their outer
+	// mutex (PublishPendingChainUpdates).
+	//
+	// Because enqueue happens under c.mutex -- the same lock that serializes
+	// every chain mutation -- enqueue order equals mutation order, and a
+	// single FIFO drain therefore publishes in mutation order across BOTH
+	// handlers. A blockfetch add and a chainsync rollback can no longer invert
+	// (add queued, rollback published first) the way two independent
+	// per-handler queues could, which would have driven the chain.update
+	// subscriber's block apply/undo notifications out of order.
+	//
+	// pendingUpdatesMutex guards the slice for the brief enqueue/dequeue; it
+	// is never held across a Publish. publishMutex serializes drains so that,
+	// when two goroutines flush concurrently, their Publish calls stay in
+	// pop (FIFO) order rather than interleaving. Neither is a ledger mutex, so
+	// draining -- which only ever runs after the caller has released its outer
+	// ledger mutex -- cannot reintroduce the drain deadlock.
+	pendingUpdates      []event.Event
+	pendingUpdatesMutex sync.Mutex
+	publishMutex        sync.Mutex
 }
 
 type queuedHeader struct {
@@ -205,7 +232,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false)
 	if err != nil {
 		return err
 	}
@@ -231,6 +258,7 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 		ocommon.Point{},
 		nil,
 		false,
+		false,
 	)
 	if err != nil {
 		return err
@@ -249,7 +277,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true)
+	evt, err := c.addBlockInternal(block, point, txn, true, false)
 	if err != nil {
 		return err
 	}
@@ -259,23 +287,71 @@ func (c *Chain) AddBlockWithPoint(
 	return nil
 }
 
-// AddBlockWithPointDeferred adds a block exactly like AddBlockWithPoint but
-// returns the resulting chain.update event instead of publishing it, leaving
-// publication to the caller. The ledger's chainsync/blockfetch drain calls
-// this while holding chainsyncBlockfetchMutex and queues the event on its
-// pendingPublishes, so the (potentially backpressured) delivery runs only
-// after the mutex is released. Publishing inline under that mutex is what
-// deadlocked the node: a terminal chain.update subscriber that stopped
-// draining parked the publish with the mutex held, handleEventChainsync then
-// blocked on the same mutex, and the ledger.chainsync buffer filled
-// (blinklabs-io/dingo preview freeze). A returned event with an empty Type
-// means there is nothing to publish.
+// AddBlockWithPointDeferred adds a block exactly like AddBlockWithPoint but,
+// instead of publishing the resulting chain.update inline, enqueues it on the
+// chain-level sequencer under c.mutex and returns it (the return value is
+// retained for callers/tests that inspect it; publication happens only through
+// the sequencer). The ledger's chainsync/blockfetch drain calls this while
+// holding chainsyncBlockfetchMutex and then drains the sequencer after the
+// mutex is released, so the (potentially backpressured) delivery never runs
+// under the lock. Publishing inline under that mutex is what deadlocked the
+// node: a terminal chain.update subscriber that stopped draining parked the
+// publish with the mutex held, handleEventChainsync then blocked on the same
+// mutex, and the ledger.chainsync buffer filled (blinklabs-io/dingo preview
+// freeze). Enqueuing under c.mutex also keeps this add ordered against a
+// concurrent chainsync rollback in true chain-mutation order; see the
+// pendingUpdates field and PublishPendingChainUpdates. A returned event with an
+// empty Type means there is nothing to publish.
 func (c *Chain) AddBlockWithPointDeferred(
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
 ) (event.Event, error) {
-	return c.addBlockInternal(block, point, txn, true)
+	return c.addBlockInternal(block, point, txn, true, true)
+}
+
+// queueDeferredEventLocked appends evt to the chain-level sequencer. The caller
+// must hold c.mutex, so the enqueue is atomic with the chain mutation that
+// produced evt: no other mutation can interleave between updating the tip and
+// recording its event, which is what makes enqueue order equal mutation order.
+// See the pendingUpdates field.
+func (c *Chain) queueDeferredEventLocked(evt event.Event) {
+	if c == nil || c.eventBus == nil || evt.Type == "" {
+		return
+	}
+	c.pendingUpdatesMutex.Lock()
+	c.pendingUpdates = append(c.pendingUpdates, evt)
+	c.pendingUpdatesMutex.Unlock()
+}
+
+// PublishPendingChainUpdates drains the chain-level sequencer, publishing every
+// queued deferred event strictly FIFO -- i.e. in chain-mutation order. It is
+// safe to call from any goroutine and must be called only after the caller has
+// released its outer ledger mutex (chainsyncMutex / chainsyncBlockfetchMutex);
+// a drain may publish an event another handler enqueued, so publishing under a
+// ledger mutex would reintroduce the drain deadlock.
+//
+// publishMutex serializes concurrent drains so their Publish calls preserve pop
+// order; pendingUpdatesMutex is dropped before each (potentially
+// back-pressured) Publish so an enqueue never blocks behind delivery.
+func (c *Chain) PublishPendingChainUpdates() {
+	if c == nil || c.eventBus == nil {
+		return
+	}
+	c.publishMutex.Lock()
+	defer c.publishMutex.Unlock()
+	for {
+		c.pendingUpdatesMutex.Lock()
+		if len(c.pendingUpdates) == 0 {
+			c.pendingUpdates = nil
+			c.pendingUpdatesMutex.Unlock()
+			return
+		}
+		evt := c.pendingUpdates[0]
+		c.pendingUpdates = c.pendingUpdates[1:]
+		c.pendingUpdatesMutex.Unlock()
+		c.eventBus.Publish(evt.Type, evt)
+	}
 }
 
 // addBlockInternal performs all block-adding logic but returns the event
@@ -287,6 +363,7 @@ func (c *Chain) addBlockInternal(
 	point ocommon.Point,
 	txn *database.Txn,
 	matchPendingHeader bool,
+	deferred bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
@@ -300,13 +377,25 @@ func (c *Chain) addBlockInternal(
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
-	return c.addBlockLocked(
+	evt, err := c.addBlockLocked(
 		block,
 		point,
 		txn,
 		true,
 		matchPendingHeader,
 	)
+	if err != nil {
+		return event.Event{}, err
+	}
+	// Deferred callers (the mutex-holding blockfetch drain) publish through the
+	// chain-level sequencer rather than inline. Enqueue while c.mutex is still
+	// held so this add is sequenced ahead of any mutation that acquires the
+	// lock after it; the caller drains after releasing its outer ledger mutex.
+	// See the pendingUpdates field and PublishPendingChainUpdates.
+	if deferred {
+		c.queueDeferredEventLocked(evt)
+	}
+	return evt, nil
 }
 
 func (c *Chain) addBlockLocked(
@@ -718,7 +807,7 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	pendingEvents, err := c.rollbackLocked(point)
+	pendingEvents, err := c.rollbackLocked(point, false)
 	if err != nil {
 		return err
 	}
@@ -735,24 +824,29 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	return nil
 }
 
-// RollbackDeferred rewinds the chain exactly like Rollback but returns the
-// resulting chain.update events instead of publishing them, leaving
-// publication to the caller. The ledger's rollbackChainAndState calls this
-// while holding chainsyncMutex and queues the events on its pendingPublishes,
-// so delivery (which can backpressure on a full subscriber buffer) runs only
-// after the mutex is released. Publishing inline under chainsyncMutex risks
-// the same drain deadlock described on AddBlockWithPointDeferred. The events
-// are returned in rollback order; a caller that queues them on one
-// pendingPublishes keeps this rollback's chain.update ahead of the block-add
-// chain.update events that follow it, which is the ordering rollbacks depend
-// on.
+// RollbackDeferred rewinds the chain exactly like Rollback but, instead of
+// publishing the resulting chain.update / chain.fork events inline, enqueues
+// them on the chain-level sequencer under c.mutex and returns them (the return
+// value is retained for callers/tests that inspect it; publication happens only
+// through the sequencer). The ledger's rollbackChainAndStateDeferred calls this
+// while holding chainsyncMutex and then drains the sequencer after the mutex is
+// released, so delivery (which can backpressure on a full subscriber buffer)
+// never runs under the lock. Publishing inline under chainsyncMutex risks the
+// same drain deadlock described on AddBlockWithPointDeferred.
+//
+// Enqueuing under c.mutex is what keeps this rollback's chain.update correctly
+// ordered against a concurrent blockfetch add: the two run under different
+// ledger mutexes and once flushed independent per-handler queues, so a rollback
+// that mutated the chain after an add could otherwise be published before it.
+// The shared sequencer preserves true chain-mutation order across both. See the
+// pendingUpdates field and PublishPendingChainUpdates.
 func (c *Chain) RollbackDeferred(
 	point ocommon.Point,
 ) ([]event.Event, error) {
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
-	return c.rollbackLocked(point)
+	return c.rollbackLocked(point, true)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to
@@ -955,6 +1049,7 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 // events to be published by the caller after locks are released.
 func (c *Chain) rollbackLocked(
 	point ocommon.Point,
+	deferred bool,
 ) ([]event.Event, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -1151,6 +1246,19 @@ func (c *Chain) rollbackLocked(
 					},
 				),
 			)
+		}
+	}
+	// Deferred callers (the mutex-holding chainsync rollback path) publish
+	// through the chain-level sequencer rather than inline. Enqueue while
+	// c.mutex is still held so this rollback is sequenced against concurrent
+	// blockfetch adds in true mutation order -- the rollback's chain.update
+	// then cannot be published ahead of an add that mutated the chain before
+	// it, or behind one that mutated after. The caller drains after releasing
+	// chainsyncMutex. See the pendingUpdates field and
+	// PublishPendingChainUpdates.
+	if deferred {
+		for _, evt := range pendingEvents {
+			c.queueDeferredEventLocked(evt)
 		}
 	}
 	return pendingEvents, nil

@@ -147,7 +147,7 @@ func callGraphInlineChainPublishers(files []*ast.File) map[string]bool {
 // knownNilQueuePublishersUnderLock is intentionally empty. A guarded caller
 // must always pass its pending queue; a nil queue would publish inline.
 //
-// The ledger.tx undo emit reached from rollbackChainAndState is covered by
+// The ledger.tx undo emit reached from rollbackChainAndStateDeferred is covered by
 // neither test, and deliberately so. This scan is intra-procedural and that
 // path holds the lock and the publish in different functions, so it does not
 // match here; TestChainsyncResyncPublishPathsUnderLock does not match it

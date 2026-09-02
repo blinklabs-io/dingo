@@ -189,13 +189,25 @@ func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
 		)
 	}
 
-	// The chain.update was deferred onto the caller's queue, not published:
-	// nothing reached the saturated bus under the lock.
-	require.Len(t, pubs.events, 1)
+	// The chain.update was deferred, not published: nothing reached the
+	// saturated bus under the lock. It is no longer requeued onto pubs.events;
+	// AddBlockWithPointDeferred enqueued it on the chain's shared sequencer
+	// under c.mutex, and the drain registered the chain on pubs.chainDrains so
+	// pubs.flush() publishes it (in chain-mutation order) after the mutex is
+	// released. That the chain is registered but not yet drained here is the
+	// deadlock-avoidance property: publication is deferred past the lock.
+	require.Empty(
+		t,
+		pubs.events,
+		"chain.update must not be requeued on the generic pending queue; it "+
+			"lives on the chain's shared sequencer",
+	)
 	require.Equal(
 		t,
-		event.EventType(chain.ChainUpdateEventType),
-		pubs.events[0].evt.Type,
+		[]*chain.Chain{c},
+		pubs.chainDrains,
+		"the drain must register the chain so its sequencer is flushed after "+
+			"the mutex is released",
 	)
 	// The block really was added to the chain (the drain did its job, it just
 	// did not publish).
