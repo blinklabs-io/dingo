@@ -15,11 +15,13 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -92,7 +94,11 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			require.True(t, errors.As(err, &limitErr))
 			require.Equal(t, test.query, limitErr.QueryName)
 			require.Equal(t, itemCount, limitErr.SubmittedItemCount)
-			require.Equal(t, MaxLocalStateQueryItems, limitErr.MaximumAllowedItemCount)
+			require.Equal(
+				t,
+				MaxLocalStateQueryItems,
+				limitErr.MaximumAllowedItemCount,
+			)
 		})
 	}
 }
@@ -128,8 +134,88 @@ func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 	require.Len(t, dreps, itemCount)
 }
 
+// TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators verifies that the
+// batched empty-filter form (allDRepDelegators) returns the same delegator
+// list, in the same order, as the per-DRep read (drepDelegators) it replaced.
+// Both a DRep with several delegators and a table with more than one DRep are
+// needed to exercise the grouping this form does that the per-DRep loop
+// never had to: an assertion built from a single DRep or delegator can't tell
+// a correct group-by from one that drops or misattributes a row.
+func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
+	db := newTestDB(t)
+	txn := db.MetadataTxn(true)
+	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
+
+	const numDreps = 5
+	const delegatorsPerDrep = 4
+	drepCredentials := make([][]byte, numDreps)
+	for d := range numDreps {
+		credential := make([]byte, 28)
+		binary.BigEndian.PutUint64(credential[20:], uint64(d))
+		drepCredentials[d] = credential
+		require.NoError(t, db.CreateDrep(txn, &models.Drep{
+			Credential: credential,
+			Active:     true,
+			AddedSlot:  1,
+		}))
+	}
+	require.NoError(t, txn.Commit())
+
+	for d := range numDreps {
+		for k := range delegatorsPerDrep {
+			stakingKey := make([]byte, 28)
+			binary.BigEndian.PutUint32(stakingKey[16:], uint32(d))
+			binary.BigEndian.PutUint32(stakingKey[24:], uint32(k))
+			require.NoError(t, db.CreateAccount(nil, &models.Account{
+				StakingKey:    stakingKey,
+				CredentialTag: 0,
+				Drep:          drepCredentials[d],
+				DrepType:      models.DrepTypeAddrKeyHash,
+				Active:        true,
+			}))
+		}
+	}
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+	result, err := ls.queryShelleyDRepState(nil)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	emptyForm, ok := outer[0].(olocalstatequery.DRepStateResult)
+	require.True(t, ok)
+	require.Len(t, emptyForm, numDreps)
+
+	dreps, err := db.GetActiveDreps(nil)
+	require.NoError(t, err)
+	require.Len(t, dreps, numDreps)
+	for _, drep := range dreps {
+		want, err := ls.drepDelegators(drep)
+		require.NoError(t, err)
+		require.Len(t, want, delegatorsPerDrep)
+		key := olocalstatequery.StakeCredential{
+			Tag:   uint64(drep.CredentialTag),
+			Bytes: gledger.NewBlake2b224(drep.Credential),
+		}
+		entry, ok := emptyForm[key]
+		require.True(
+			t,
+			ok,
+			"drep %x missing from empty-form result",
+			drep.Credential,
+		)
+		require.Equal(t, want, entry.Delegators)
+	}
+}
+
 // TestLocalStateQueryLargeBatchHandlers verifies that handlers backed by batch
-// database primitives accept collections larger than the per-item work limit.
+// database primitives accept collections larger than the per-item work limit,
+// and that the batched reads return the right value for every requested item
+// rather than merely succeeding. Delegated/seeded indices straddle the
+// chunk boundaries GetAccountsByCredential and GetPoolStakeSnapshotsForPools
+// use internally, so a chunk that drops, duplicates, or cross-contaminates
+// results would fail these assertions.
 func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	db := newTestDB(t)
 	itemCount := MaxLocalStateQueryItems + 1
@@ -141,15 +227,57 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 			uint64(i),
 		)
 	}
+	delegatedIdx := []int{0, 997, 998, 999, itemCount - 1}
+	drepCredential := bytes.Repeat([]byte{0xAB}, 28)
+	for _, idx := range delegatedIdx {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey:    credentials[idx].Credential[:],
+			CredentialTag: 0,
+			Drep:          drepCredential,
+			DrepType:      models.DrepTypeAddrKeyHash,
+			Active:        true,
+		}))
+	}
 	result, err := (&LedgerState{db: db}).
 		queryShelleyFilteredVoteDelegatees(credentials)
 	require.NoError(t, err)
-	require.NotNil(t, result)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	delegatees, ok := outer[0].(olocalstatequery.FilteredVoteDelegateesResult)
+	require.True(t, ok)
+	require.Len(t, delegatees, len(delegatedIdx))
+	for _, idx := range delegatedIdx {
+		key := olocalstatequery.StakeCredential{
+			Tag:   0,
+			Bytes: gledger.NewBlake2b224(credentials[idx].Credential[:]),
+		}
+		drep, ok := delegatees[key]
+		require.True(t, ok, "credential %d missing a delegation", idx)
+		require.Equal(t, drepCredential, []byte(drep.Credential))
+	}
 
 	poolIds := make([]gledger.PoolId, itemCount)
 	for i := range poolIds {
 		binary.BigEndian.PutUint64(poolIds[i][20:], uint64(i))
 	}
+	snapshotIdx := []int{0, 996, 997, 998, itemCount - 1}
+	snapshotStake := make(map[int]uint64, len(snapshotIdx))
+	snapshots := make([]*models.PoolStakeSnapshot, 0, len(snapshotIdx))
+	for n, idx := range snapshotIdx {
+		stake := uint64(n+1) * 1_000_000
+		snapshotStake[idx] = stake
+		snapshots = append(snapshots, &models.PoolStakeSnapshot{
+			Epoch:          2,
+			SnapshotType:   "mark",
+			PoolKeyHash:    poolIds[idx][:],
+			TotalStake:     types.Uint64(stake),
+			DelegatorCount: 1,
+			CapturedSlot:   200,
+		})
+	}
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(snapshots, nil))
+
 	query := &olocalstatequery.ShelleyStakeSnapshotsQuery{
 		Pools: []cbor.SetType[gledger.PoolId]{
 			cbor.NewSetType(poolIds, true),
@@ -161,7 +289,25 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	)
 	result, err = ls.queryShelleyStakeSnapshots(query)
 	require.NoError(t, err)
-	require.NotNil(t, result)
+	outer, ok = result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	snapshotResult, ok := outer[0].(olocalstatequery.StakeSnapshotsResult)
+	require.True(t, ok)
+	// The below-PV11 explicit-filter form always returns every requested
+	// pool, seeded or not.
+	require.Len(t, snapshotResult.PoolSnapshots, itemCount)
+	for i, poolId := range poolIds {
+		snapshot, ok := snapshotResult.PoolSnapshots[gledger.NewBlake2b224(poolId[:])]
+		require.True(t, ok, "pool %d missing from result", i)
+		require.Equal(
+			t,
+			snapshotStake[i],
+			snapshot.StakeMark,
+			"pool %d has the wrong mark stake",
+			i,
+		)
+	}
 }
 
 // TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded verifies that

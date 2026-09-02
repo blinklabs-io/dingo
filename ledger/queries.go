@@ -1210,12 +1210,16 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 ) (any, error) {
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
 	refs := make([]models.StakeCredentialRef, 0, len(creds))
+	// Carried alongside creds so the second loop can reuse the tag each
+	// credential decoded to here, instead of decoding it again.
+	tags := make([]uint8, len(creds))
 	seen := make(map[string]struct{}, len(creds))
-	for _, cred := range creds {
+	for i, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 		if err != nil {
 			return nil, err
 		}
+		tags[i] = credentialTag
 		ref := models.StakeCredentialRef{
 			Tag: credentialTag,
 			Key: cred.Credential[:],
@@ -1231,11 +1235,8 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	if err != nil {
 		return nil, err
 	}
-	for _, cred := range creds {
-		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
-		if err != nil {
-			return nil, err
-		}
+	for i, cred := range creds {
+		credentialTag := tags[i]
 		account, ok := accounts[models.StakeCredentialRef{
 			Tag: credentialTag,
 			Key: cred.Credential[:],

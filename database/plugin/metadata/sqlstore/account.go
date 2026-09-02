@@ -303,54 +303,65 @@ func (s *Store) GetAccountsByCredential(
 	if err != nil {
 		return nil, err
 	}
-	chunkSize := s.dialect.ParameterLimit() / 2
-	for start := 0; start < len(refs); start += chunkSize {
-		end := min(start+chunkSize, len(refs))
-		chunk := refs[start:end]
-		predicates := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk)*2)
-		for _, ref := range chunk {
-			predicates = append(
-				predicates,
-				"(credential_tag = ? AND staking_key = ?)",
+	// Grouped by credential_tag and queried as a single-column staking_key IN
+	// (...), matching the unique index idx_account_credential(credential_tag,
+	// staking_key) so each chunk is a single index range scan. A per-ref
+	// (credential_tag = ? AND staking_key = ?) OR ... predicate defeats that
+	// index: the planner can't drive a compound index from a disjunction of
+	// per-row equalities, so every chunk degrades to a full table scan.
+	byTag := make(map[uint8][][]byte)
+	for _, ref := range refs {
+		byTag[ref.Tag] = append(byTag[ref.Tag], ref.Key)
+	}
+	// One bound parameter is reserved for credential_tag; the rest of the
+	// chunk is the staking_key IN list.
+	chunkSize := max(1, s.dialect.ParameterLimit()-1)
+	for tag, keys := range byTag {
+		for start := 0; start < len(keys); start += chunkSize {
+			end := min(start+chunkSize, len(keys))
+			chunk := keys[start:end]
+			args := make([]any, 0, len(chunk)+1)
+			args = append(args, tag)
+			for _, key := range chunk {
+				args = append(args, key)
+			}
+			query := "SELECT " + sqliteAccountColumns +
+				" FROM account WHERE credential_tag = ? AND staking_key IN (" +
+				bindPlaceholders(len(chunk)) + ")"
+			if !includeInactive {
+				query += " AND active = TRUE"
+			}
+			rows, err := db.QueryContext(
+				ctx,
+				s.dialect.Rebind(query),
+				args...,
 			)
-			args = append(args, ref.Tag, ref.Key)
-		}
-		query := "SELECT " + sqliteAccountColumns + " FROM account WHERE (" +
-			strings.Join(predicates, " OR ") + ")"
-		if !includeInactive {
-			query += " AND active = TRUE"
-		}
-		rows, err := db.QueryContext(
-			ctx,
-			s.dialect.Rebind(query),
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			row, err := scanSQLiteAccount(rows)
 			if err != nil {
-				rows.Close()
 				return nil, err
 			}
-			account, err := accountFromSQLite(row)
-			if err != nil {
-				rows.Close()
+			for rows.Next() {
+				row, err := scanSQLiteAccount(rows)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				account, err := accountFromSQLite(row)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				key := models.NewStakeCredentialRef(
+					account.CredentialTag,
+					account.StakingKey,
+				).MapKey()
+				ret[key] = account
+			}
+			if err := rows.Close(); err != nil {
 				return nil, err
 			}
-			key := models.NewStakeCredentialRef(
-				account.CredentialTag,
-				account.StakingKey,
-			).MapKey()
-			ret[key] = account
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return ret, nil

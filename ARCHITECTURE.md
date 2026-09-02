@@ -2595,6 +2595,21 @@ existing batch database operations, removing their per-item read amplification
 without a client-visible item limit. Existing result ordering and
 partial-result behavior remain unchanged.
 
+Both the empty `GetDRepState` form and `GetFilteredVoteDelegatees` batch
+through `MetadataStore.GetAccountsByCredential`, which groups the requested
+refs by `credential_tag` and queries each group as a single-column
+`staking_key IN (...)`, matching the unique index
+`idx_account_credential(credential_tag, staking_key)` so each chunk is one
+index range scan. Filtering per ref with a compound
+`(credential_tag = ? AND staking_key = ?) OR ...` predicate instead defeats
+that index — SQLite cannot drive it from a disjunction of per-row
+equalities — so every chunk degrades to a full table scan and the "batched"
+read becomes slower than the per-item loop it replaced as the account table
+grows. `GetStakeSnapshots`' pool-side primitive
+(`GetPoolStakeSnapshotsForPools`) does not share this hazard: it already
+filters on a single-column `pool_key_hash IN (...)` against a matching
+unique index.
+
 In-process callers receive a `ledger.LocalStateQueryLimitError` that matches
 `ledger.ErrLocalStateQueryLimitExceeded`. LocalStateQuery has no query-level
 error response on the wire: as with other handler errors, gouroboros stops the
