@@ -324,14 +324,13 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		// The recycle request is published here, with the connection's fetch
 		// guard already released, so no lock is held across an event-bus
 		// publish.
-		if classifyLeiosFetchFailure(err) == leiosFetchFailureDead {
+		if classifyLeiosFetchFailure(err) == leiosFetchFailureDead &&
+			o.leiosFetchGuardFor(connId).takeRecycleEvent() {
 			o.requestLeiosFetchConnRecycle(connId, point, err)
 		}
 		if err != nil {
 			lastErr = err
 			switch classifyLeiosFetchFailure(err) {
-			case leiosFetchFailureNone:
-				continue
 			case leiosFetchFailureBusy:
 				// Not an attempt: the connection was serving another fetch.
 			case leiosFetchFailureDeclined:
@@ -372,17 +371,13 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 // connmanager) keeps this consistent with the chainsync verification-failure
 // path. Exactly one request is published per connection.
 //
-// Called with no fetch guard held: the guard is released by
-// fetchEndorserBlockOnConn before this runs, so no lock spans the event-bus
-// publish.
+// Called with no fetch guard held: fetchEndorserBlockOnConn reserves the event
+// while holding the guard and this function publishes it after unlock.
 func (o *Ouroboros) requestLeiosFetchConnRecycle(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	cause error,
 ) {
-	if !o.leiosFetchGuardFor(connId).markProtocolDead() {
-		return
-	}
 	if o.config.Logger != nil {
 		o.config.Logger.Warn(
 			"recycling connection with an unusable leios-fetch protocol",
@@ -466,6 +461,9 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				time.Now(),
 				leiosBackfillConnCooldownMax,
 			)
+			if g.markProtocolDead() {
+				g.recycleEventPending.Store(true)
+			}
 		case leiosFetchFailureBusy, leiosFetchFailureTransient:
 			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
 		}
