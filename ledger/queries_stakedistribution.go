@@ -59,5 +59,11 @@ func (ls *LedgerState) queryShelleyStakeDistribution() (any, error) {
 			VrfHash:       pool.VrfKeyHash,
 		}
 	}
-	return []any{result}, nil
+	// Client.GetStakeDistribution decodes the wire reply directly into a
+	// StakeDistributionResult (client.go's runQuery does a plain cbor.Decode
+	// with no extra wrapping), so the one field must be the top-level array
+	// element here. Returning the struct itself would let its own
+	// StructAsArray encoding nest inside this slice's, producing a spurious
+	// extra array layer that no real NtC client can decode.
+	return []any{result.Results}, nil
 }

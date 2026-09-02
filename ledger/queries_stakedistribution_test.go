@@ -17,11 +17,33 @@ package ledger
 import (
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// decodeStakeDistributionResult round-trips a handler's returned []any
+// through CBOR the way the wire actually does: encoded by the server exactly
+// as protocol/localstatequery/server.go encodes it, then decoded by the real
+// gouroboros client-side type. Client.GetStakeDistribution decodes straight
+// into a StakeDistributionResult with no wrapping, so asserting against that
+// decoded value (rather than a raw type assertion on the handler's own
+// []any) is what would have caught the handler double-wrapping its result
+// before it shipped.
+func decodeStakeDistributionResult(
+	t *testing.T,
+	result any,
+) olocalstatequery.StakeDistributionResult {
+	t.Helper()
+	encoded, err := cbor.Encode(&result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.StakeDistributionResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	return decoded
+}
 
 // stakeDistributionQuery wraps the leaf query the way the wire delivers
 // it. GetStakeDistribution has no pool filter on the wire, unlike
@@ -70,12 +92,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 
 	result, err := ls.Query(stakeDistributionQuery())
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok, "expected the []any result wrapper")
-	require.Len(t, arr, 1)
-
-	dist, ok := arr[0].(olocalstatequery.StakeDistributionResult)
-	require.True(t, ok, "expected a StakeDistributionResult, got %T", arr[0])
+	dist := decodeStakeDistributionResult(t, result)
 	require.Len(t, dist.Results, 2)
 
 	entryA, ok := dist.Results[lcommon.PoolId(pkhA)]
@@ -103,11 +120,6 @@ func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
 
 	result, err := ls.queryShelleyStakeDistribution()
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-
-	dist, ok := arr[0].(olocalstatequery.StakeDistributionResult)
-	require.True(t, ok)
+	dist := decodeStakeDistributionResult(t, result)
 	assert.Empty(t, dist.Results)
 }
