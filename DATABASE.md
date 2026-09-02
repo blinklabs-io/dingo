@@ -1265,12 +1265,22 @@ matching the reference ledger's `applyLeiosClosure` (prototype-2026w29,
 `ruleApplyTxValidation` `ValidateNone`): produced outputs and input spends are
 written, and a consumed input absent from the store is left as a no-op instead
 of driving blob recovery (`Database.SetTransactionWithOpts` with
-`SkipConsumedInputRecovery`). Applying the outputs keeps the UTxO set — and the
-stake distribution derived from it — complete, matching the reference; the prior
-metadata-only behavior omitted the produced outputs, which diverged the UTxO and
-made downstream transactions and the leader-election stake snapshot treat inputs
-the endorser block should have produced as missing (the `utxo not found` repair
-loop and the `pool has no stake in epoch snapshot` header rejection). Positive
+`SkipConsumedInputRecovery`). A consumed input that is present but already
+spent by a *different* certified endorser transaction is likewise a no-op:
+`SkipConsumedInputRecovery` routes the metadata write through
+`TransactionStore.SetTransactionLeiosClosure`, which skips only that input and
+still writes the transaction's produced outputs and its remaining spends. Two
+certified endorser blocks can name the same input across blocks, and
+`ValidateNone` treats the second consume as `Map.delete` on a missing key;
+returning `ErrUtxoConflict` there wedged block application instead (issue
+#3643). Ranking-block application and the CIP-conformant endorser apply keep
+the hard `ErrUtxoConflict` check, so a real double-spend is still rejected.
+Applying the outputs keeps the UTxO set — and the stake distribution derived
+from it — complete, matching the reference; the prior metadata-only behavior
+omitted the produced outputs, which diverged the UTxO and made downstream
+transactions and the leader-election stake snapshot treat inputs the endorser
+block should have produced as missing (the `utxo not found` repair loop and the
+`pool has no stake in epoch snapshot` header rejection). Positive
 donations from valid endorser transactions are accumulated in `network_donation`
 under the ranking block's slot/epoch so the treasury update at the epoch boundary
 matches the CIP path. Replayed endorser transactions (hashes already present) are
