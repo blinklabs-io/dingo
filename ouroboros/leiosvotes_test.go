@@ -274,7 +274,15 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 	require.Len(t, handler.ebs, 1)
 	assert.Equal(t, uint64(10), handler.ebs[0].slot)
 	assert.Equal(t, point.Hash, handler.ebs[0].ebHash.Bytes())
@@ -286,7 +294,14 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 // -- covered separately in leios_eb_announced_point_test.go -- since the
 // manifest is content-addressed and the same hash can legitimately recur at
 // a different slot; this guards the peer-offered side of that distinction.
-func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
+// TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
+// is the multi-slot-aware successor to the old
+// "...RejectsSlotMismatchBeforeVote" test: a peer-offered store for the same
+// hash at a different, unannounced slot is no longer rejected -- the
+// manifest is content-addressed, so that occurrence can be independently
+// legitimate (issue #3513 review) -- but it must stay unverified and must
+// not trigger a second vote for a slot nothing has corroborated.
+func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote(
 	t *testing.T,
 ) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
@@ -294,24 +309,58 @@ func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
-
-	mismatchedPoint := point
-	mismatchedPoint.Slot++
-	err := o.storeLeiosEndorserBlock(mismatchedPoint, blockRaw, nil, leiosStorePeerOffered)
-	require.ErrorContains(
+	require.NoError(
 		t,
-		err,
-		"leios endorser block cache: point slot mismatch",
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
 	)
-	require.Len(t, handler.ebs, 1)
+
+	otherSlotPoint := point
+	otherSlotPoint.Slot++
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			otherSlotPoint,
+			blockRaw,
+			nil,
+			leiosStorePeerOffered,
+		),
+	)
+	data, ok := o.lookupLeiosEndorserBlock(
+		otherSlotPoint.Slot,
+		otherSlotPoint.Hash,
+	)
+	require.True(t, ok)
+	require.False(
+		t,
+		data.slotVerified,
+		"an unannounced occurrence at a different slot must not be trusted",
+	)
+	require.Len(
+		t,
+		handler.ebs,
+		1,
+		"the unverified second occurrence must not trigger a second vote",
+	)
 	assert.Equal(t, uint64(10), handler.ebs[0].slot)
 }
 
 func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 }
 
 func TestLeiosVotesClientRequestSizeIsIncremental(t *testing.T) {

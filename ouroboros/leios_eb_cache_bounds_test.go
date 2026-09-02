@@ -111,7 +111,7 @@ func TestStoreLeiosEndorserBlockRejectsOversizedEntry(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "exceeds max")
 
-	_, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	_, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.False(t, ok)
 }
 
@@ -150,9 +150,12 @@ func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 	require.LessOrEqual(t, totalBytes, 1500)
 
 	// The oldest entries were evicted; the most recently stored one survives.
-	_, ok := o.lookupLeiosEndorserBlock(points[0].Hash)
+	_, ok := o.lookupLeiosEndorserBlock(points[0].Slot, points[0].Hash)
 	require.False(t, ok)
-	_, ok = o.lookupLeiosEndorserBlock(points[entries-1].Hash)
+	_, ok = o.lookupLeiosEndorserBlock(
+		points[entries-1].Slot,
+		points[entries-1].Hash,
+	)
 	require.True(t, ok)
 }
 
@@ -181,7 +184,7 @@ func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
 	// the lower seq) is given a later wall-clock insertedAt than the entry
 	// about to be inserted second.
 	o.leiosMu.Lock()
-	first := o.leiosEndorserBlocks[leiosBlockKey(firstPoint.Hash)]
+	first := o.leiosEndorserBlocks[leiosBlockKey(firstPoint.Slot, firstPoint.Hash)]
 	require.NotNil(t, first)
 	first.insertedAt = time.Now().Add(time.Hour)
 	o.leiosMu.Unlock()
@@ -200,8 +203,14 @@ func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
 	// Both entries together exceed the 300-byte aggregate budget, forcing one
 	// eviction. Despite "first" appearing newest by insertedAt, it holds the
 	// lower seq (it was actually inserted first) and must be the one evicted.
-	_, firstStillCached := o.lookupLeiosEndorserBlock(firstPoint.Hash)
-	_, secondStillCached := o.lookupLeiosEndorserBlock(secondPoint.Hash)
+	_, firstStillCached := o.lookupLeiosEndorserBlock(
+		firstPoint.Slot,
+		firstPoint.Hash,
+	)
+	_, secondStillCached := o.lookupLeiosEndorserBlock(
+		secondPoint.Slot,
+		secondPoint.Hash,
+	)
 	require.False(t, firstStillCached)
 	require.True(t, secondStillCached)
 }
@@ -218,14 +227,19 @@ func TestRetainLeiosPartialTxsRejectsMergeOverEntryByteBudget(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
-		o.storeLeiosEndorserBlock(point, blockRaw, nil, leiosStoreAuthoritative),
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
 	)
 
 	// A first partial, well under the budget, is retained normally.
 	small := make([]cbor.RawMessage, txCount)
 	small[0] = cbor.RawMessage(make([]byte, 500))
-	o.retainLeiosPartialTxs(point.Hash, small, nil)
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	o.retainLeiosPartialTxs(point.Slot, point.Hash, small, nil)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 1, data.partialTxCount())
 
@@ -233,9 +247,9 @@ func TestRetainLeiosPartialTxsRejectsMergeOverEntryByteBudget(t *testing.T) {
 	// byte budget is rejected -- the existing (smaller) partial survives.
 	big := make([]cbor.RawMessage, txCount)
 	big[1] = cbor.RawMessage(make([]byte, 5000))
-	o.retainLeiosPartialTxs(point.Hash, big, nil)
+	o.retainLeiosPartialTxs(point.Slot, point.Hash, big, nil)
 
-	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 1, data.partialTxCount())
 	require.LessOrEqual(t, data.approxBytes(), 1500)
@@ -286,7 +300,7 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 	)
 
 	// The reload still succeeds and returns the complete set to the caller...
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.completeTxCache())
 	require.Greater(t, data.approxBytes(), 200)
@@ -294,7 +308,7 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 	// ...but the oversized entry must not have been admitted into the
 	// in-memory cache.
 	o.leiosMu.RLock()
-	_, cached := o.leiosEndorserBlocks[leiosBlockKey(point.Hash)]
+	_, cached := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
 	o.leiosMu.RUnlock()
 	require.False(t, cached)
 }
@@ -317,11 +331,11 @@ func TestLoadLeiosEBFromDBPrunesAggregateBudgetAfterReload(t *testing.T) {
 	require.NoError(t, db.SetLeiosEB(point1.Slot, point1.Hash, manifest1, txs1))
 	require.NoError(t, db.SetLeiosEB(point2.Slot, point2.Hash, manifest2, txs2))
 
-	data1, ok := o.lookupLeiosEndorserBlock(point1.Hash)
+	data1, ok := o.lookupLeiosEndorserBlock(point1.Slot, point1.Hash)
 	require.True(t, ok)
 	require.LessOrEqual(t, data1.approxBytes(), 1500)
 
-	data2, ok := o.lookupLeiosEndorserBlock(point2.Hash)
+	data2, ok := o.lookupLeiosEndorserBlock(point2.Slot, point2.Hash)
 	require.True(t, ok)
 	require.LessOrEqual(t, data2.approxBytes(), 1500)
 	require.Greater(t, data1.approxBytes()+data2.approxBytes(), 1500)
@@ -330,8 +344,8 @@ func TestLoadLeiosEBFromDBPrunesAggregateBudgetAfterReload(t *testing.T) {
 	// (point1) reload must have been evicted by the post-insert prune when
 	// point2 was admitted, and total retained bytes stay within budget.
 	o.leiosMu.RLock()
-	_, point1Cached := o.leiosEndorserBlocks[leiosBlockKey(point1.Hash)]
-	_, point2Cached := o.leiosEndorserBlocks[leiosBlockKey(point2.Hash)]
+	_, point1Cached := o.leiosEndorserBlocks[leiosBlockKey(point1.Slot, point1.Hash)]
+	_, point2Cached := o.leiosEndorserBlocks[leiosBlockKey(point2.Slot, point2.Hash)]
 	totalBytes := 0
 	for _, d := range o.leiosEndorserBlocks {
 		totalBytes += d.approxBytes()

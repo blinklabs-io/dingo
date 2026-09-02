@@ -120,16 +120,12 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if publish := o.bindLeiosEndorserBlockSlot(ebHash, ebSlot); publish != nil {
 		publish()
 	}
-	// bindLeiosEndorserBlockSlot's eviction above does not stop a reload of
-	// the same stale blob-store entry a moment later: loadLeiosEBFromDB
-	// reconstructs any reload as verified for whatever occurrence wrote it,
-	// which need not be this one -- the manifest is content-addressed, so
-	// the same hash can legitimately recur at a different slot. Requiring
-	// the point to actually match ebSlot here (not just completeness and
-	// verified) is what stops that stale reload from satisfying this check
-	// (issue #3513 review).
-	if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-		data.completeTxCache() && data.slotVerified && data.point.Slot == ebSlot {
+	// The lookup is keyed by (slot, hash): loadLeiosEBFromDB's blob reload
+	// only satisfies this specific occurrence when its persisted slot
+	// actually matches ebSlot, so a stale reload of a different occurrence
+	// cannot satisfy this check (issue #3513 review).
+	if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
+		data.completeTxCache() && data.slotVerified {
 		return nil
 	}
 	if o.connManager == nil {
@@ -175,9 +171,8 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			lastErr = err
 			continue
 		}
-		if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-			data.completeTxCache() && data.slotVerified &&
-			data.point.Slot == ebSlot {
+		if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
+			data.completeTxCache() && data.slotVerified {
 			return nil
 		}
 		lastErr = errors.New(
@@ -230,19 +225,12 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			g.markFetchOK()
 		}
 	}()
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	// Keyed by (slot, hash): a cached or blob-reloaded entry for a different
+	// occurrence of this hash lives under its own key and is simply not
+	// found here, so it cannot be mistaken for this attempt's authoritative
+	// point (issue #3513 review).
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	if !ok {
-		data = nil
-	} else if data.point.Slot != point.Slot {
-		// Stale relative to this attempt's authoritative point: the manifest
-		// is content-addressed, so the same hash can legitimately recur at a
-		// different slot, and whatever is cached (in memory, or reloaded
-		// from the blob store) for that other occurrence must not be
-		// trusted for this one. Treat it exactly like a cache miss so the
-		// fetch below re-populates -- and, via storeLeiosEndorserBlock's
-		// authoritative-origin override, re-persists -- under the correct
-		// slot instead of leaving the stale entry (and blob) in place
-		// (issue #3513 review).
 		data = nil
 	}
 	if data == nil {
@@ -267,7 +255,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
-		data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+		data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		if !ok || data == nil {
 			return errors.New("manifest stored but not found in cache")
 		}
@@ -283,7 +271,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		if publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot); publish != nil {
 			publish()
 		}
-		data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+		data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		if !ok || data == nil {
 			return errors.New(
 				"manifest evicted while binding to authoritative point",

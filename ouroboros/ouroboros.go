@@ -190,7 +190,7 @@ type Ouroboros struct {
 	// alone, so an in-flight fetch for one occurrence does not suppress a
 	// legitimate offer of the same content-addressed hash recurring at a
 	// different slot (issue #3513).
-	leiosFetchInProgress sync.Map // leiosFetchClaimKey(point) → struct{}
+	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -206,11 +206,18 @@ type Ouroboros struct {
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64
-	// leiosAnnouncementSlots records the slot each announced endorser-block
-	// hash was declared at, so a later leios-fetch offer or store can be
-	// bound to the point its announcement actually vouched for instead of
-	// trusting whatever point the offering connection supplies (issue #3513).
-	leiosAnnouncementSlots map[string]uint64
+	// leiosAnnouncementSlots records, for each announced endorser-block hash,
+	// the set of slots a live (unexpired) announcement has declared it at, so
+	// a later leios-fetch offer or store can be bound to a point its own
+	// announcement actually vouched for instead of trusting whatever point
+	// the offering connection supplies (issue #3513). It is a set rather than
+	// a single scalar because the manifest is content-addressed: the same
+	// hash can be a live, independently required occurrence at more than one
+	// slot at once (two elections producing an identical transaction-
+	// reference set), and a scalar would let a second live, legitimate
+	// announcement be rejected as "inconsistent" with the first (issue #3513
+	// review).
+	leiosAnnouncementSlots map[string]map[uint64]struct{}
 	// LeiosNotify permits at most two distinct announcements for one election
 	// (slot plus issuer) from each peer. Keep that bound per source so one
 	// equivocating peer cannot inject an unbounded stream without suppressing
@@ -459,7 +466,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
-		leiosAnnouncementSlots:     make(map[string]uint64),
+		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	if o.ledgerState != nil {

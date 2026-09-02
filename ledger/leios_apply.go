@@ -612,15 +612,17 @@ func leiosEbRefKey(r leiosEbRef) string {
 }
 
 // endorserBlockAvailableAt reports whether provider already holds the
-// endorser block identified by hash bound to the given slot -- not merely
-// present under some slot. The manifest is content-addressed, so the same
-// hash can legitimately recur at a different slot (issue #3513); every call
-// site here already knows the slot its own reference requires (leiosEbRef
-// pairs them), so a provider result for a different slot is treated as
-// unavailable rather than trusted. Without this, a stale cached or persisted
-// occurrence of the hash could silently satisfy a reference for a different
-// one, and the caller would go on to apply its closure under the wrong slot
-// instead of triggering the authoritative fetch.
+// endorser block identified by hash bound to exactly the given slot -- not
+// merely present under some slot. The manifest is content-addressed, so the
+// same hash can be a live, independently required occurrence at more than
+// one slot at once (issue #3513); every call site here already knows the
+// slot its own reference requires (leiosEbRef pairs them), and the provider
+// itself resolves exactly that (slot, hash) occurrence rather than
+// whichever one happens to be cached for the hash. Without this, a stale
+// cached or persisted occurrence of the hash could silently satisfy a
+// reference for a different one, and the caller would go on to apply its
+// closure under the wrong slot instead of triggering the authoritative
+// fetch.
 func endorserBlockAvailableAt(
 	provider EndorserBlockProviderFunc,
 	hash []byte,
@@ -629,8 +631,8 @@ func endorserBlockAvailableAt(
 	if provider == nil {
 		return false
 	}
-	gotSlot, _, ok := provider(hash)
-	return ok && gotSlot == slot
+	_, ok := provider(hash, slot)
+	return ok
 }
 
 // leiosBlockInfo is the subset of a ranking block the endorser-block fetch

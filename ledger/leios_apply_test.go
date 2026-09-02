@@ -490,9 +490,9 @@ func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 		config: LedgerStateConfig{
 			EndorserBlockProvider: func(
 				hash []byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				return parent.SlotNumber(), nil,
-					available && bytes.Equal(hash, ebHash.Bytes())
+				_ uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, available && bytes.Equal(hash, ebHash.Bytes())
 			},
 			// A zero wait disables best-effort announcement waiting. It must
 			// not disable the certified-closure consistency check.
@@ -523,13 +523,15 @@ func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 }
 
 // TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot is the
-// P1 regression from review: ensureReferencedEndorserBlocks (via
-// endorserBlockAvailableAt) discarded the provider's returned slot and
-// treated ok=true alone as availability. The manifest is content-addressed,
-// so the same hash can legitimately be cached or persisted under a different,
-// stale slot; a provider result for a hash the certified reference requires
-// at slot 100, bound instead to slot 101, must be treated as unavailable
-// the same as ok=false, not accepted as satisfying the certified closure.
+// P1 regression from review, adapted for EndorserBlockProviderFunc's slot
+// parameter: ensureReferencedEndorserBlocks (via endorserBlockAvailableAt)
+// must pass the certified reference's own required slot to the provider, not
+// some other slot, so the provider resolves exactly the (slot, hash)
+// occurrence the reference needs rather than whichever one happens to be
+// cached for the hash. The manifest is content-addressed, so the same hash
+// can legitimately be a distinct occurrence at another slot; a provider that
+// only holds that other occurrence must correctly report unavailable when
+// asked about this one.
 func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
 	t *testing.T,
 ) {
@@ -538,13 +540,16 @@ func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
 		config: LedgerStateConfig{
 			EndorserBlockProvider: func(
 				hash []byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				if !bytes.Equal(hash, ebHash.Bytes()) {
-					return 0, nil, false
-				}
-				// Bound to a slot other than the one the certified reference
+				slot uint64,
+			) ([]cbor.RawMessage, bool) {
+				// Only holds a different occurrence of this hash, at a slot
+				// other than the one the certified reference
 				// (parent.SlotNumber(), 100) actually requires.
-				return parent.SlotNumber() + 1, nil, true
+				if !bytes.Equal(hash, ebHash.Bytes()) ||
+					slot != parent.SlotNumber()+1 {
+					return nil, false
+				}
+				return nil, true
 			},
 			EndorserBlockWaitSlots: 0,
 		},
@@ -565,8 +570,9 @@ func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
 		config: LedgerStateConfig{
 			EndorserBlockProvider: func(
 				[]byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				return 0, nil, false
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
 			},
 			EndorserBlockWaitSlots:     0,
 			LeiosApplyEndorserBlockTxs: true,
@@ -587,8 +593,9 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 		config: LedgerStateConfig{
 			EndorserBlockProvider: func(
 				[]byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				return 0, nil, false
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
 			},
 		},
 	}
@@ -624,8 +631,8 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 			<-release
 			return nil
 		},
-		provider: func([]byte) (uint64, []cbor.RawMessage, bool) {
-			return 0, nil, false
+		provider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
 		},
 		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		sem:    make(chan struct{}, leiosBackfillConcurrency),
@@ -691,13 +698,13 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 			mu.Unlock()
 			return nil
 		},
-		provider: func([]byte) (uint64, []cbor.RawMessage, bool) {
+		provider: func(_ []byte, slot uint64) ([]cbor.RawMessage, bool) {
 			mu.Lock()
 			defer mu.Unlock()
-			if completed[200] {
-				return 200, nil, true
+			if completed[slot] {
+				return nil, true
 			}
-			return 0, nil, false
+			return nil, false
 		},
 		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		sem:    make(chan struct{}, leiosBackfillConcurrency),

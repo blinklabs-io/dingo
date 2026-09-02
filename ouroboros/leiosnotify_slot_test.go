@@ -29,18 +29,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLeiosFetchClaimKeyDistinguishesSlots guards the composite dedup key
-// leiosFetchInProgress relies on: an in-flight claim for one occurrence of a
-// hash must not collide with -- and so must not suppress -- a legitimate
-// offer of the same content-addressed hash recurring at a different slot
-// (issue #3513).
-func TestLeiosFetchClaimKeyDistinguishesSlots(t *testing.T) {
+// TestLeiosBlockKeyDistinguishesSlots guards the composite cache/dedup key
+// leiosEndorserBlocks and leiosFetchInProgress rely on: an entry (or an
+// in-flight claim) for one occurrence of a hash must not collide with -- and
+// so must not suppress or mask -- a legitimate, independent occurrence of the
+// same content-addressed hash at a different slot (issue #3513).
+func TestLeiosBlockKeyDistinguishesSlots(t *testing.T) {
 	hash := []byte{0xaa, 0xbb}
-	a := leiosFetchClaimKey(ocommon.Point{Slot: 10, Hash: hash})
-	b := leiosFetchClaimKey(ocommon.Point{Slot: 11, Hash: hash})
+	a := leiosBlockKey(10, hash)
+	b := leiosBlockKey(11, hash)
 	require.NotEqual(t, a, b)
 
-	same := leiosFetchClaimKey(ocommon.Point{Slot: 10, Hash: hash})
+	same := leiosBlockKey(10, hash)
 	require.Equal(t, a, same)
 }
 

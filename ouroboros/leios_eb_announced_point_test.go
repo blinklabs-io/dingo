@@ -138,14 +138,21 @@ func testEbHash(point ocommon.Point) lcommon.Blake2b256 {
 	return ebHash
 }
 
-// TestStoreLeiosEndorserBlockRejectsPointConflictingWithAnnouncement covers
-// issue #3513: an endorser-block entry must be bound to the point its
-// announcement vouched for, not accepted on a first-writer-wins basis from
-// whichever connection offers it first.
-func TestStoreLeiosEndorserBlockRejectsPointConflictingWithAnnouncement(
+// TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive
+// is the wolf31o2 regression: the manifest is content-addressed, so the same
+// hash can be a live, independently required occurrence at more than one
+// slot at once (two elections producing an identical transaction-reference
+// set), and both must be independently storable and verifiable through
+// their own announcements. Rejecting the second occurrence just because a
+// live announcement already exists for the hash at a different slot would
+// drop that occurrence's offer/fetch and endorser data for whichever ranking
+// block referenced it (wolf31o2 review; issue #3513).
+func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 	t *testing.T,
 ) {
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 7)
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, 1)
+	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
+	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	announceTestEndorserBlock(
@@ -155,21 +162,59 @@ func TestStoreLeiosEndorserBlockRejectsPointConflictingWithAnnouncement(
 		testEbHash(point),
 		len(blockRaw),
 	)
-
-	// A connection offering the real, correctly-hashed body for this
-	// endorser-block hash, but at a slot other than the one its announcement
-	// declared, must be rejected -- this is the very first store attempted
-	// for the hash, so nothing but the announcement can catch the conflict.
-	conflicting := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
-	err := o.storeLeiosEndorserBlock(
-		conflicting,
-		blockRaw,
-		nil,
-		leiosStorePeerOffered,
+	// A second, independent announcement of the same hash at a different
+	// slot, while the first is still live (no expiry involved at all).
+	announceTestEndorserBlock(
+		t,
+		o,
+		second.Slot,
+		testEbHash(point),
+		len(blockRaw),
 	)
-	require.ErrorContains(t, err, "does not match announced point")
-	_, ok := o.lookupLeiosEndorserBlock(point.Hash)
-	require.False(t, ok, "a rejected store must not poison the cache")
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		txsRaw,
+		leiosStorePeerOffered,
+	))
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		second,
+		blockRaw,
+		txsRaw,
+		leiosStorePeerOffered,
+	))
+
+	firstData, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(
+		t,
+		firstData.slotVerified,
+		"the first occurrence must bind to its own announcement",
+	)
+
+	secondData, ok := o.lookupLeiosEndorserBlock(second.Slot, second.Hash)
+	require.True(t, ok)
+	require.True(
+		t,
+		secondData.slotVerified,
+		"the second occurrence must independently bind to its own announcement",
+	)
+
+	require.NotSame(
+		t,
+		firstData,
+		secondData,
+		"the two live occurrences must be tracked independently, not collapsed into one",
+	)
+
+	// Both occurrences must be independently available to the ledger
+	// provider at once -- the concrete "offer/fetch and endorser data become
+	// available" property wolf31o2's review asked for.
+	_, ok = o.EndorserBlockTxsByHash(point.Hash, point.Slot)
+	require.True(t, ok, "the first occurrence must reach the ledger")
+	_, ok = o.EndorserBlockTxsByHash(second.Hash, second.Slot)
+	require.True(t, ok, "the second occurrence must reach the ledger too")
 }
 
 // TestStoreLeiosEndorserBlockAcceptsAnnouncedPointAndIsIdempotent covers the
@@ -205,21 +250,23 @@ func TestStoreLeiosEndorserBlockAcceptsAnnouncedPointAndIsIdempotent(
 		leiosStorePeerOffered,
 	))
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, point.Slot, data.point.Slot)
 	require.True(t, data.slotVerified)
 }
 
-// TestStoreLeiosEndorserBlockCrossConnectionConflictIsRejectedRegardlessOfOrder
-// covers cross-connection conflicts: whichever connection's offer is stored
-// first, a later offer for the same hash at a different slot is rejected,
-// and the originally-bound entry is unharmed.
-func TestStoreLeiosEndorserBlockCrossConnectionConflictIsRejectedRegardlessOfOrder(
+// TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOfOrder
+// covers cross-connection arrival order for two live occurrences of the same
+// hash: whichever connection's offer is stored first, a later offer for the
+// same hash at a different, independently announced slot is accepted as its
+// own occurrence rather than rejected, and neither disturbs the other
+// (wolf31o2 review; issue #3513).
+func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOfOrder(
 	t *testing.T,
 ) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 13)
-	conflicting := ocommon.Point{Slot: point.Slot + 5, Hash: point.Hash}
+	second := ocommon.Point{Slot: point.Slot + 5, Hash: point.Hash}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	announceTestEndorserBlock(
@@ -229,31 +276,41 @@ func TestStoreLeiosEndorserBlockCrossConnectionConflictIsRejectedRegardlessOfOrd
 		testEbHash(point),
 		len(blockRaw),
 	)
+	announceTestEndorserBlock(
+		t,
+		o,
+		second.Slot,
+		testEbHash(point),
+		len(blockRaw),
+	)
 
-	// Connection A stores the correctly-bound entry first.
+	// Connection A stores the first occurrence.
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
 		nil,
 		leiosStorePeerOffered,
 	))
-	// Connection B later offers the same hash at a conflicting slot.
-	err := o.storeLeiosEndorserBlock(
-		conflicting,
+	// Connection B later offers the same hash at the second, independently
+	// announced slot. It must be accepted, not rejected as a conflict.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		second,
 		blockRaw,
 		nil,
 		leiosStorePeerOffered,
-	)
-	require.Error(t, err)
+	))
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(
 		t,
 		point.Slot,
 		data.point.Slot,
-		"the conflicting later offer must not overwrite the bound entry",
+		"the first occurrence must be unharmed by the second's arrival",
 	)
+	secondData, ok := o.lookupLeiosEndorserBlock(second.Slot, second.Hash)
+	require.True(t, ok)
+	require.True(t, secondData.slotVerified)
 }
 
 // TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt is the reverse-order
@@ -280,7 +337,7 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 		votes.ebs,
 		"an unverified peer-supplied slot must not drive vote emission",
 	)
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok, "the block is still cached so its txs can be fetched")
 	require.False(t, data.slotVerified)
 
@@ -292,19 +349,24 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 		testEbHash(point),
 		len(blockRaw),
 	)
-	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.slotVerified)
 	require.Len(t, votes.ebs, 1)
 	require.Equal(t, point.Slot, votes.ebs[0].slot)
 }
 
-// TestPeerOfferedStoreUnderFabricatedSlotIsEvictedByAnnouncement is the core
-// issue #3513 attack in its store-first ordering: a peer offers an authentic,
-// correctly-hashed manifest under a slot of its choosing before the genuine
-// announcement arrives. The fabricated slot must never be voted on, and the
-// poisoned entry must not survive the announcement that contradicts it.
-func TestPeerOfferedStoreUnderFabricatedSlotIsEvictedByAnnouncement(
+// TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified is the
+// core issue #3513 attack in its store-first ordering: a peer offers an
+// authentic, correctly-hashed manifest under a slot of its choosing before
+// the genuine announcement arrives. The fabricated slot must never be voted
+// on or reach the ledger. Unlike the pre-composite-key design, the genuine
+// announcement for the real slot does not evict the fabricated entry -- they
+// are now independent (slot, hash) occurrences -- so the fabricated entry
+// simply sits cached but permanently unverified (until its own TTL prunes
+// it), which is exactly as inert as if it had been evicted: nothing keyed on
+// its slot is ever published.
+func TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified(
 	t *testing.T,
 ) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 41)
@@ -326,7 +388,8 @@ func TestPeerOfferedStoreUnderFabricatedSlotIsEvictedByAnnouncement(
 		"a fabricated slot must not reach the vote handler",
 	)
 
-	// The genuine announcement for slot 41 contradicts the cached entry.
+	// The genuine announcement is for a different slot; it has nothing to do
+	// with the fabricated occurrence's own (slot, hash) key.
 	announceTestEndorserBlock(
 		t,
 		o,
@@ -335,18 +398,24 @@ func TestPeerOfferedStoreUnderFabricatedSlotIsEvictedByAnnouncement(
 		len(blockRaw),
 	)
 
-	if data, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
-		require.NotEqual(
-			t,
-			fabricated.Slot,
-			data.point.Slot,
-			"the entry bound to the fabricated slot must not survive",
-		)
-	}
+	fabricatedData, ok := o.lookupLeiosEndorserBlock(
+		fabricated.Slot,
+		fabricated.Hash,
+	)
+	require.True(
+		t,
+		ok,
+		"the fabricated entry is not evicted by an unrelated announcement",
+	)
+	require.False(
+		t,
+		fabricatedData.slotVerified,
+		"the fabricated slot must never become verified",
+	)
 	require.Empty(t, votes.ebs)
 
 	// The ledger must not be handed the fabricated slot either.
-	_, _, provOk := o.EndorserBlockTxsByHash(point.Hash)
+	_, provOk := o.EndorserBlockTxsByHash(fabricated.Hash, fabricated.Slot)
 	require.False(t, provOk)
 }
 
@@ -367,14 +436,14 @@ func TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger(
 		leiosStorePeerOffered,
 	))
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(
 		t,
 		data.completeTxCache(),
 		"the transaction set is whole; only the slot binding is missing",
 	)
-	_, _, provOk := o.EndorserBlockTxsByHash(point.Hash)
+	_, provOk := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.False(
 		t,
 		provOk,
@@ -388,9 +457,8 @@ func TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger(
 		testEbHash(point),
 		len(blockRaw),
 	)
-	slot, _, provOk := o.EndorserBlockTxsByHash(point.Hash)
+	_, provOk = o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, provOk)
-	require.Equal(t, point.Slot, slot)
 }
 
 // TestEndorserBlockTxsByHashAvailableAfterDBReload is the store -> drain ->
@@ -424,13 +492,12 @@ func TestEndorserBlockTxsByHashAvailableAfterDBReload(t *testing.T) {
 	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	o.leiosMu.Unlock()
 
-	slot, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(
 		t,
 		ok,
 		"a reloaded, previously-verified entry must be immediately available",
 	)
-	require.Equal(t, point.Slot, slot)
 	require.Equal(t, txsRaw, gotTxs)
 }
 
@@ -452,7 +519,7 @@ func TestBindLeiosEndorserBlockSlotDoesNotMutateSharedEntry(t *testing.T) {
 		leiosStorePeerOffered,
 	))
 
-	held, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	held, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.False(t, held.slotVerified)
 
@@ -475,7 +542,7 @@ func TestBindLeiosEndorserBlockSlotDoesNotMutateSharedEntry(t *testing.T) {
 		held.slotVerified,
 		"the pointer a caller already held must never be mutated",
 	)
-	fresh, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	fresh, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(
 		t,
@@ -540,7 +607,7 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 		require.NoError(t, announceErrs[i], "announcement %d", i)
 	}
 	for i := range n {
-		data, ok := o.lookupLeiosEndorserBlock(points[i].Hash)
+		data, ok := o.lookupLeiosEndorserBlock(points[i].Slot, points[i].Hash)
 		require.True(t, ok)
 		require.True(
 			t,
@@ -551,16 +618,15 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 	}
 }
 
-// TestLeiosAnnouncedSlotIgnoresExpiredBinding is the idle-expiry regression
-// from review: leiosAnnouncementSlots is only actively pruned as a side
-// effect of a *new* announcement being accepted (pruneLeiosAnnouncements), so
-// on an otherwise-idle node a binding can sit long past the acceptance window
-// pruneLeiosAnnouncements itself enforces. A lookup that does not also check
-// that age would treat a stale, long-expired binding as still authoritative
-// -- rejecting a legitimate later offer or announcement for the same hash as
-// a conflict instead of leaving it merely unverified, the same as a hash
-// with no binding at all.
-func TestLeiosAnnouncedSlotIgnoresExpiredBinding(t *testing.T) {
+// TestLeiosAnnouncementBindsSlotIgnoresExpiredBinding is the idle-expiry
+// regression from review: leiosAnnouncementSlots is only actively pruned as a
+// side effect of a *new* announcement being accepted (pruneLeiosAnnouncements),
+// so on an otherwise-idle node a binding can sit long past the acceptance
+// window pruneLeiosAnnouncements itself enforces.
+// leiosAnnouncementBindsSlotLocked must not treat a stale, long-expired
+// binding as still live -- a peer-offered store for that same slot must be
+// left merely unverified, the same as a hash with no binding at all.
+func TestLeiosAnnouncementBindsSlotIgnoresExpiredBinding(t *testing.T) {
 	ledger := &fakeLeiosAnnouncementLedger{
 		// SlotToTime always answers as if the binding's slot occurred long
 		// enough ago to have aged out of leiosNotifyMaxAnnouncementAge.
@@ -575,66 +641,24 @@ func TestLeiosAnnouncedSlotIgnoresExpiredBinding(t *testing.T) {
 	ebHash := testEbHash(point)
 	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(blockRaw))
 
-	slot, ok := o.leiosAnnouncedSlotLocked(point.Hash)
 	require.False(
 		t,
-		ok,
-		"an expired binding must read as unknown, not as a live conflict",
+		o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot),
+		"an expired binding must not verify a store for the same slot",
 	)
-	require.Zero(t, slot)
 
-	// A later offer for the same hash at an unrelated slot must be accepted
-	// (left unverified, pending its own announcement) rather than rejected
-	// against the stale binding.
-	later := ocommon.Point{Slot: point.Slot + 100_000, Hash: point.Hash}
+	// A peer-offered store for that same, now-expired slot must be accepted
+	// but left unverified rather than rejected -- the expired binding reads
+	// as unknown, not as a live conflict.
 	require.NoError(t, o.storeLeiosEndorserBlock(
-		later,
+		point,
 		blockRaw,
 		nil,
 		leiosStorePeerOffered,
 	))
-}
-
-// TestRecordLeiosAnnouncementAcceptsNewSlotAfterExpiry is the
-// announcement-recording twin to TestLeiosAnnouncedSlotIgnoresExpiredBinding:
-// recordLeiosAnnouncementLocked's own slot-consistency check read
-// leiosAnnouncementSlots directly instead of going through
-// leiosAnnouncedSlotLocked's expiry-aware lookup, so a genuine new
-// announcement of the same content-addressed hash at a different slot was
-// rejected as "inconsistent" forever, even long after the earlier binding
-// aged out of the acceptance window (cubic review; issue #3513).
-func TestRecordLeiosAnnouncementAcceptsNewSlotAfterExpiry(t *testing.T) {
-	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 210, 1)
-	ebHash := testEbHash(point)
-	later := point.Slot + 100_000
-
-	ledger := &fakeLeiosAnnouncementLedger{
-		// The first announcement's slot reads as long expired; the second
-		// (later) one reads as fresh -- otherwise both bindings would always
-		// expire together and the test would not distinguish "still rejects
-		// a stale record" from "now genuinely accepts a fresh one".
-		slotTimeFunc: func(slot uint64) time.Time {
-			if slot == later {
-				return time.Now()
-			}
-			return time.Now().Add(-2 * leiosNotifyMaxAnnouncementAge)
-		},
-	}
-	o := newOuroboros(OuroborosConfig{
-		EnableLeios:             true,
-		LeiosAnnouncementLedger: ledger,
-	})
-
-	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(blockRaw))
-
-	// A second, independent announcement of the same hash at a different
-	// slot must be accepted once the first binding has aged out -- not
-	// rejected as inconsistent with a stale record.
-	announceTestEndorserBlock(t, o, later, ebHash, len(blockRaw))
-
-	slot, ok := o.leiosAnnouncedSlotLocked(point.Hash)
-	require.True(t, ok, "the new announcement must now be the live binding")
-	require.Equal(t, later, slot)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.False(t, data.slotVerified)
 }
 
 // TestFetchEndorserBlockByPointRejectsStaleReloadedSlot is the P1 regression
@@ -698,30 +722,32 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 		[]cbor.RawMessage{tx0},
 		leiosStoreAuthoritative,
 	))
-	slot, _, ok := o.EndorserBlockTxsByHash(hash)
+	_, ok := o.EndorserBlockTxsByHash(hash, authoritativeSlot)
 	require.True(t, ok)
-	require.Equal(t, authoritativeSlot, slot)
 }
 
-// TestStoreLeiosEndorserBlockAuthoritativeOverridesStaleAnnouncement covers a
-// gap symmetric to the stale-cache-entry override above: a live (unexpired)
-// announcement record for a hash, at a slot an authoritative source now
-// contradicts, must not block that authoritative store either. Without this,
-// an authoritative fetch for a genuine new occurrence of a recurring hash
-// could be rejected by a stale peer-supplied announcement record for up to
-// the full ten-minute acceptance window.
-func TestStoreLeiosEndorserBlockAuthoritativeOverridesStaleAnnouncement(
+// TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist
+// covers a gap symmetric to the stale-cache-entry cases above: an
+// authoritative occurrence of a hash at one slot, and a live announcement
+// for the same hash at a different slot, are two independent, equally valid
+// occurrences (the manifest is content-addressed) and neither blocks the
+// other. A peer-offered store matching its own live announcement must
+// succeed and coexist with the authoritative entry, not be rejected as if
+// the authoritative source's slot were the hash's only valid one (issue
+// #3513 review; wolf31o2 review).
+func TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist(
 	t *testing.T,
 ) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 300)
 	ebHash := testEbHash(point)
+	announced := ocommon.Point{Slot: point.Slot - 50, Hash: point.Hash}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	// A live announcement binds this hash to an older, unrelated slot.
-	announceTestEndorserBlock(t, o, point.Slot-50, ebHash, len(blockRaw))
+	announceTestEndorserBlock(t, o, announced.Slot, ebHash, len(blockRaw))
 
-	// The ledger (or the local forge path) now authoritatively establishes
-	// the hash at a different slot; it must not be rejected by the stale
+	// The ledger (or the local forge path) authoritatively establishes the
+	// hash at a different slot; it is unaffected by the unrelated
 	// announcement.
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
@@ -730,21 +756,26 @@ func TestStoreLeiosEndorserBlockAuthoritativeOverridesStaleAnnouncement(
 		leiosStoreAuthoritative,
 	))
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, point.Slot, data.point.Slot)
 	require.True(t, data.slotVerified)
 
-	// A peer-offered store still must not override the live announcement --
-	// only an authoritative source does.
-	peerConflict := ocommon.Point{Slot: point.Slot - 50, Hash: point.Hash}
-	err := o.storeLeiosEndorserBlock(
-		peerConflict,
+	// A peer-offered store matching its own live announcement must succeed
+	// and become independently verified, coexisting with the authoritative
+	// entry above rather than being rejected by it.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		announced,
 		blockRaw,
 		nil,
 		leiosStorePeerOffered,
+	))
+	announcedData, ok := o.lookupLeiosEndorserBlock(
+		announced.Slot,
+		announced.Hash,
 	)
-	require.Error(t, err)
+	require.True(t, ok)
+	require.True(t, announcedData.slotVerified)
 }
 
 // TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot is the second review
@@ -765,10 +796,10 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 		leiosStorePeerOffered,
 	))
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.completeTxCache())
-	_, ok = o.EndorserBlockTxHashesByHash(point.Hash)
+	_, ok = o.EndorserBlockTxHashesByHash(point.Hash, point.Slot)
 	require.False(
 		t,
 		ok,
@@ -782,7 +813,7 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 		testEbHash(point),
 		len(blockRaw),
 	)
-	hashes, ok := o.EndorserBlockTxHashesByHash(point.Hash)
+	hashes, ok := o.EndorserBlockTxHashesByHash(point.Hash, point.Slot)
 	require.True(t, ok)
 	require.Len(t, hashes, 1)
 }
@@ -805,7 +836,7 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 		[]cbor.RawMessage{mustCbor(t, "tx0")},
 		leiosStorePeerOffered,
 	))
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.completeTxCache())
 	require.False(t, data.slotVerified)
@@ -817,7 +848,10 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 		200*time.Millisecond,
 	)
 	defer quickCancel()
-	require.False(t, o.waitForLeiosEndorserClosure(quickCtx, point.Hash))
+	require.False(
+		t,
+		o.waitForLeiosEndorserClosure(quickCtx, point.Slot, point.Hash),
+	)
 
 	// A waiter registered while the entry is complete-but-unverified must
 	// stay parked -- nothing signals it at store time -- until the slot is
@@ -833,14 +867,16 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 			10*time.Second,
 		)
 		defer cancel()
-		result <- o.waitForLeiosEndorserClosure(ctx, point.Hash)
+		result <- o.waitForLeiosEndorserClosure(ctx, point.Slot, point.Hash)
 	}()
 	testutil.WaitForCondition(
 		t,
 		func() bool {
 			o.leiosMu.RLock()
 			defer o.leiosMu.RUnlock()
-			return len(o.leiosClosureWaiters[leiosBlockKey(point.Hash)]) > 0
+			return len(
+				o.leiosClosureWaiters[leiosBlockKey(point.Slot, point.Hash)],
+			) > 0
 		},
 		2*time.Second,
 		"closure waiter to register",

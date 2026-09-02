@@ -127,7 +127,7 @@ func (o *Ouroboros) leiosfetchServerBlockRequest(
 	ctx oleiosfetch.CallbackContext,
 	point ocommon.Point,
 ) (protocol.Message, error) {
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	if !ok {
 		return nil, fmt.Errorf(
 			"leios endorser block not found: %d.%x: %w",
@@ -144,7 +144,7 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	point ocommon.Point,
 	txBitmap map[uint16]uint64,
 ) (protocol.Message, error) {
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	if !ok {
 		return nil, fmt.Errorf(
 			"leios endorser block not available: %d.%x: %w",

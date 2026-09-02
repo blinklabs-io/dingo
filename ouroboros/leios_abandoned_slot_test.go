@@ -193,9 +193,8 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 		"healthy peer was not recorded as successful",
 	)
 
-	slot, ledgerTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	ledgerTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok, "ledger provider still reports EB unavailable")
-	require.Equal(t, point.Slot, slot)
 	require.Equal(t, []cbor.RawMessage{tx}, ledgerTxs)
 
 	served, err := o.leiosfetchServerBlockTxsRequest(
