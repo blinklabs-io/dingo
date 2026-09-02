@@ -47,7 +47,10 @@ func TestFailedEnactmentClearRestoresRatificationOnRollback(t *testing.T) {
 
 	rollbackPoint := result.NewCurrentEpoch.StartSlot - 1
 	require.GreaterOrEqual(t, rollbackPoint, originalRatifiedSlot)
-	require.NoError(t, f.db.DeleteGovernanceProposalsAfterSlot(rollbackPoint, nil))
+	require.NoError(
+		t,
+		f.db.DeleteGovernanceProposalsAfterSlot(rollbackPoint, nil),
+	)
 
 	restored := f.proposal(t, proposal)
 	require.NotNil(

@@ -45,15 +45,24 @@ func (v *forgerTestValidator) ValidateForgedBlock(ledger.Block, []byte) error {
 	return v.err
 }
 
+// newForgerWithValidator returns the forger and its slot clock. The clock
+// is mutable so a test that runs more than one forge cycle can advance the
+// slot: the duplicate-slot fence refuses a slot the forger already used,
+// as the real slot-aligned loop never revisits one.
 func newForgerWithValidator(
 	t *testing.T,
 	block ledger.Block,
 	blockCbor []byte,
 	broadcaster *forgerTestBroadcaster,
 	validator *forgerTestValidator,
-) *BlockForger {
+) (*BlockForger, *forgerTestSlotClock) {
 	t.Helper()
 	creds := setupTestCredentials(t)
+	clock := &forgerTestSlotClock{
+		currentSlot:       10,
+		chainTipSlot:      9,
+		slotsPerKESPeriod: 100,
+	}
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -62,15 +71,11 @@ func newForgerWithValidator(
 		BlockBuilder:     &forgerTestBuilder{block: block, cbor: blockCbor},
 		BlockBroadcaster: broadcaster,
 		BlockValidator:   validator,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
+		SlotClock:        clock,
+		PromRegistry:     prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
-	return forger
+	return forger, clock
 }
 
 // TestBlockValidatorPassesAllowsAdoption verifies that a passing validator
@@ -80,7 +85,7 @@ func TestBlockValidatorPassesAllowsAdoption(t *testing.T) {
 	broadcaster := &forgerTestBroadcaster{}
 	validator := &forgerTestValidator{err: nil}
 
-	forger := newForgerWithValidator(t, block, nil, broadcaster, validator)
+	forger, _ := newForgerWithValidator(t, block, nil, broadcaster, validator)
 	err := forger.checkAndForgeProduction(context.Background())
 
 	require.NoError(t, err)
@@ -108,7 +113,7 @@ func TestBlockValidatorFailureDropsBlock(t *testing.T) {
 		err: errors.New("header crypto: invalid KES signature"),
 	}
 
-	forger := newForgerWithValidator(t, block, nil, broadcaster, validator)
+	forger, _ := newForgerWithValidator(t, block, nil, broadcaster, validator)
 	err := forger.checkAndForgeProduction(context.Background())
 
 	require.Error(t, err)

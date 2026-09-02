@@ -1,9 +1,13 @@
 name: Docker CI
 
+# No paths filter. The previous one listed Dockerfile, cmd, docs, internal and
+# go.*, which excluded most of the tree the image actually compiles -- ledger,
+# database, api, chain, mempool and the rest -- so a change confined to those
+# never built an image until publish.yml did it on main, after merge. The job
+# is ~3 minutes (run 33526005799), which is not worth a filter to maintain.
 on:
   pull_request:
     branches: ['main']
-    paths: ['Dockerfile','cmd/**','docs/**','internal/**','go.*','.github/workflows/ci-docker.yml']
 
 env:
   GHCR_IMAGE_NAME: ghcr.io/blinklabs-io/dingo

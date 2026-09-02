@@ -1838,13 +1838,18 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
-		BlockPoint: ocommon.NewPoint(160, testHashBytes("plutus-failing-block")),
-		TxHash:     testHashBytes("plutus-failing-tx"),
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("plutus-failing-block"),
+		),
+		TxHash: testHashBytes("plutus-failing-tx"),
 		Cause: conway.PlutusScriptFailedError{
 			ScriptHash: lcommon.Blake2b224Hash([]byte("plutus-script")),
 			Tag:        lcommon.RedeemerTagMint,
 			Index:      0,
-			Err:        errors.New("local evaluator disagrees with declared validity"),
+			Err: errors.New(
+				"local evaluator disagrees with declared validity",
+			),
 		},
 	})
 	require.NoError(t, err)

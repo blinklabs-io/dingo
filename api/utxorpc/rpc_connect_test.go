@@ -1233,10 +1233,18 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 	committedHash := committedTx.Hash().Bytes()
 	committedRecord, err := h.LS.TransactionByHash(committedHash)
 	require.NoError(t, err)
-	require.NotNil(t, committedRecord, "committed fixture transaction must be indexed")
+	require.NotNil(
+		t,
+		committedRecord,
+		"committed fixture transaction must be indexed",
+	)
 	pendingRecord, err := h.LS.TransactionByHash(pendingTx.Hash().Bytes())
 	require.NoError(t, err)
-	require.Nil(t, pendingRecord, "pending fixture transaction must not be indexed")
+	require.Nil(
+		t,
+		pendingRecord,
+		"pending fixture transaction must not be indexed",
+	)
 	blk, err := gledger.NewBlockFromCbor(eventBlock.Type, eventBlock.Cbor)
 	require.NoError(t, err)
 	requestedInBlock := false
@@ -1246,7 +1254,11 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 			break
 		}
 	}
-	require.True(t, requestedInBlock, "raw blockfetch must contain the pending transaction")
+	require.True(
+		t,
+		requestedInBlock,
+		"raw blockfetch must contain the pending transaction",
+	)
 
 	cli := submitconnect.NewSubmitServiceClient(
 		h.Client,
@@ -1399,7 +1411,11 @@ func TestConnect_WaitForTx_AlreadyCommittedTransaction(t *testing.T) {
 	require.NotNil(t, resp)
 	require.Equal(t, submit.Stage_STAGE_CONFIRMED, resp.GetStage())
 	require.Equal(t, txHash, resp.GetRef())
-	require.False(t, stream.Receive(), "handler returns after confirming all refs")
+	require.False(
+		t,
+		stream.Receive(),
+		"handler returns after confirming all refs",
+	)
 	require.NoError(t, stream.Err())
 }
 

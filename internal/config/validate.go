@@ -449,7 +449,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 	for idx, fingerprint := range c.BarkOperatorCertificateFingerprints {
-		normalized := strings.ReplaceAll(strings.TrimSpace(fingerprint), ":", "")
+		normalized := strings.ReplaceAll(
+			strings.TrimSpace(fingerprint),
+			":",
+			"",
+		)
 		decoded, err := hex.DecodeString(normalized)
 		if err != nil || len(decoded) != sha256.Size {
 			errs = append(errs, fmt.Errorf(

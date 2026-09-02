@@ -54,7 +54,10 @@ func loadTestChainBlocksWithPeriodicTransactions(
 	n int,
 ) []models.Block {
 	t.Helper()
-	blocks, err := testfixtures.GenerateConwayChainWithPeriodicTransactions(n, 4)
+	blocks, err := testfixtures.GenerateConwayChainWithPeriodicTransactions(
+		n,
+		4,
+	)
 	require.NoError(t, err)
 	return modelBlocksFromLedgerBlocks(blocks)
 }

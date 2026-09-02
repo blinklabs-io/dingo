@@ -109,8 +109,11 @@ func TestPaginationOffset(t *testing.T) {
 			wantOK:     true,
 		},
 		{
-			name:       "max page and count does not overflow",
-			params:     PaginationParams{Page: MaxPaginationPage, Count: MaxPaginationCount},
+			name: "max page and count does not overflow",
+			params: PaginationParams{
+				Page:  MaxPaginationPage,
+				Count: MaxPaginationCount,
+			},
 			wantOffset: (MaxPaginationPage - 1) * MaxPaginationCount,
 			wantOK:     true,
 		},

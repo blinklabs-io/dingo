@@ -256,10 +256,14 @@ func (i *operatorAuthInterceptor) authorize(
 	if _, ok := i.operatorFingerprints[id.Fingerprint]; !ok {
 		i.logger.Warn(
 			"rejected destructive DatabaseService RPC from non-operator identity",
-			"component", "bark",
-			"procedure", procedure,
-			"client_cn", id.CommonName,
-			"client_cert_fingerprint", id.Fingerprint,
+			"component",
+			"bark",
+			"procedure",
+			procedure,
+			"client_cn",
+			id.CommonName,
+			"client_cert_fingerprint",
+			id.Fingerprint,
 		)
 		return connect.NewError(
 			connect.CodePermissionDenied,
