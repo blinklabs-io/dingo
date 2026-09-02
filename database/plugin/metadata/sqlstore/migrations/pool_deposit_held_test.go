@@ -28,7 +28,7 @@ import (
 
 // depositHeldBackfillDB returns a database migrated to the version before the
 // pool deposit-held column exists, so a test can seed the legacy registration
-// rows the v7 backfill reads.
+// rows the v8 backfill reads.
 func depositHeldBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func(versions []migrations.Migration)) {
@@ -167,7 +167,7 @@ WHERE pool_key_hash = ?`,
 
 // depositHeldBackfillStatement resolves the deposit-held backfill by migration
 // name and statement content rather than by position, so adding or reordering a
-// statement in v7/sqlite/expand.sql fails this lookup instead of silently
+// statement in v8/sqlite/expand.sql fails this lookup instead of silently
 // pointing the test at a different statement.
 func depositHeldBackfillStatement(
 	t *testing.T,

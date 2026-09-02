@@ -239,7 +239,7 @@ LIMIT 1`,
 		)
 	}
 	// A row written before the deposit_held column existed falls back to its
-	// own deposit_amount, the same rule the v7 backfill applies, so an
+	// own deposit_amount, the same rule the v8 backfill applies, so an
 	// interrupted or skipped backfill still reproduces the pre-change refund
 	// instead of collapsing the held amount to zero.
 	source := held

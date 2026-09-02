@@ -54,7 +54,7 @@ var schemaVersions = []struct {
 		Name:    governanceRatificationHistorySchemaRelease,
 		Dir:     "v6",
 	},
-	{Version: 7, Name: poolDepositHeldSchemaRelease, Dir: "v7"},
+	{Version: 8, Name: poolDepositHeldSchemaRelease, Dir: "v8"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
