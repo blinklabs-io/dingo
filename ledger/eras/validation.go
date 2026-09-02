@@ -210,7 +210,8 @@ func validateCommitteeCertificates(
 				// Dingo holds no committee state for this snapshot, so
 				// non-membership cannot be established. Rejecting here would
 				// reject a real genesis committee member, because Dingo does
-				// not seed the Conway genesis committee. See
+				// not seed the Conway genesis committee
+				// (blinklabs-io/dingo#3785). See
 				// LedgerView.CommitteeStateAvailable.
 				continue
 			}
@@ -310,7 +311,8 @@ func validateUnknownVoters(
 				}
 			}
 			// An unauthoritative nil member cannot establish an unknown
-			// voter. See LedgerView.CommitteeStateAvailable.
+			// voter (blinklabs-io/dingo#3785). See
+			// LedgerView.CommitteeStateAvailable.
 			if (member == nil && authoritative) ||
 				(member != nil && member.Resigned) {
 				return conway.UnknownVoterError{Voter: *voter}

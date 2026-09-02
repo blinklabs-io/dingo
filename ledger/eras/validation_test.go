@@ -3833,9 +3833,9 @@ func TestPreAlonzoCertDepositRejectsNilPparams(t *testing.T) {
 // TestConwayCommitteeCertificateRuleDoesNotRejectWhenStateUnavailable proves
 // the rule declines to reject on committee grounds it cannot establish.
 //
-// Dingo does not seed the Conway genesis committee, so a genesis-synced node
-// holds no committee rows for the whole Conway era and CommitteeStateAvailable
-// reports false. Rejecting here would reject an authorization from a real
+// Dingo does not seed the Conway genesis committee
+// (blinklabs-io/dingo#3785), so a genesis-synced node holds no committee rows
+// for the whole Conway era and CommitteeStateAvailable reports false. Rejecting here would reject an authorization from a real
 // genesis committee member that cardano-node accepts. The member is seated in
 // the harness while availability is false, so a rejection would prove the
 // authority result was ignored.

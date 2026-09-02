@@ -659,9 +659,12 @@ func extractRawCostModels(
 // the caller, which declines to reject on committee grounds it cannot
 // establish -- the behavior the upstream len(members) > 0 heuristic had.
 //
-// Seeding the genesis committee is the real fix and is tracked separately;
-// once it lands, an empty table becomes unambiguously authoritative and this
-// should report true so the rules fail closed.
+// Seeding the genesis committee is the real fix and is tracked in
+// blinklabs-io/dingo#3785; once it lands, an empty table becomes
+// unambiguously authoritative and this should report true so the rules fail
+// closed on it. The conformance provider already reports true, because a
+// vector declares its complete committee and so an empty one is
+// authoritatively empty there.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if lv == nil || lv.ls == nil || lv.ls.db == nil {
 		return false, nil

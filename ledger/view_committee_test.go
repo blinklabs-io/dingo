@@ -889,10 +889,11 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 // reachable.
 //
 // A view with a live database but no committee rows cannot answer committee
-// queries: Dingo does not seed the Conway genesis committee, so that state
-// means "never populated" on a genesis-synced node, not "authoritatively
-// empty". Reporting true there makes the validation rules reject an
-// authorization from a real genesis committee member.
+// queries: Dingo does not seed the Conway genesis committee
+// (blinklabs-io/dingo#3785), so that state means "never populated" on a
+// genesis-synced node, not "authoritatively empty". Reporting true there makes
+// the validation rules reject an authorization from a real genesis committee
+// member.
 func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 

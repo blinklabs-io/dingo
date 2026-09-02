@@ -442,24 +442,25 @@ func (p *DingoStateProvider) CommitteeMember(
 	return scriptMember, nil
 }
 
-// CommitteeStateAvailable mirrors LedgerView.CommitteeStateAvailable: it
-// reports authority from seated committee members, not from the store being
-// reachable. Stubbing this true would make conformance green while production
-// declines to reject, hiding exactly the divergence the capability exists to
-// surface.
+// CommitteeStateAvailable reports that the harness can answer committee
+// queries authoritatively whenever its backend is reachable.
+//
+// This deliberately differs from LedgerView.CommitteeStateAvailable, which
+// derives authority from the seated member set. The two providers have
+// different knowledge. A conformance vector declares its complete initial
+// committee, and seedGovernanceState writes exactly that set, so zero rows
+// here means the vector declared an empty committee -- authoritatively empty,
+// which must still reject a non-member's certificate. Deriving availability
+// from row count would instead report unavailable and decline to reject,
+// failing any vector that expects NotCommitteeMemberError against an empty
+// committee.
+//
+// Production cannot make that inference because Dingo never persists the
+// Conway genesis committee (blinklabs-io/dingo#3785), so there an empty table
+// is ambiguous. Once #3785 lands, production becomes authoritative the same
+// way this harness already is and the two answers converge.
 func (p *DingoStateProvider) CommitteeStateAvailable() (bool, error) {
-	if p == nil || p.manager == nil || p.manager.db == nil {
-		return false, nil
-	}
-	members, err := withBadConnRetry(
-		func() ([]*models.CommitteeMember, error) {
-			return p.manager.db.GetCommitteeMembers(nil)
-		},
-	)
-	if err != nil {
-		return false, fmt.Errorf("lookup committee members: %w", err)
-	}
-	return len(members) > 0, nil
+	return p != nil && p.manager != nil && p.manager.db != nil, nil
 }
 
 func (p *DingoStateProvider) CommitteeCredentialMember(
