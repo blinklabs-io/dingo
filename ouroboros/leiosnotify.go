@@ -1105,8 +1105,10 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 // it elapses, instead of continuing to re-request from a slow-but-alive relay
 // that keeps dribbling transactions within the leios-fetch protocol timeout (so
 // that timeout never fires) yet never promptly completes. The check is between
-// request rounds — each individual round is still bounded by the underlying
-// protocol timeout — so an attempt overshoots the deadline by at most one round;
+// request rounds — each individual round is bounded by the request context from
+// leiosFetchRequestContext, not by a protocol state timeout (leios-fetch
+// deliberately has none for Block/BlockTxs) — so an attempt overshoots the
+// deadline by at most one round;
 // this lets the by-point backfill fail over to another connection rather than
 // parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
 // disables the bound, preserving the tip-path behavior.

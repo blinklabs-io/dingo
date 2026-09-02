@@ -46,17 +46,22 @@ func (o *Ouroboros) leiosfetchServerConnOpts() []oleiosfetch.LeiosFetchOptionFun
 }
 
 // leiosFetchResponseTimeout bounds how long the leios-fetch client waits for a
-// server response (a Block or BlockTxs message). The protocol default is 5s,
+// server response (a Block or BlockTxs message) when the caller has no attempt
+// deadline of its own, i.e. the tip-driven fetches. The protocol default is 5s,
 // which is too short during a from-scratch catch-up: the connection's muxer is
 // saturated by blockfetch pulling ranking blocks, so the relay's endorser-block
-// response routinely arrives later than 5s and the 5s timeout would tear the
-// connection down and fail the historical backfill. leios-notify is already set
-// to no timeout for the same reason (it long-polls for offers); leios-fetch
-// gets a generous but finite bound so a genuinely unresponsive request still
-// fails instead of hanging a fetch goroutine forever. Keep this no greater than
-// the by-point backfill attempt budget: that path checks its deadline between
-// requests, so the protocol timeout is what bounds a request that receives no
-// response at all.
+// response routinely arrives later than 5s. leios-notify is set to no timeout
+// for the same reason (it long-polls for offers); leios-fetch gets a generous
+// but finite bound so a genuinely unresponsive request still fails instead of
+// hanging a fetch goroutine forever.
+//
+// NOTE: WithTimeout below does NOT reach the Block / BlockTxs states.
+// gouroboros deliberately leaves those two out of the leios-fetch StateMap
+// timeouts, because a state timeout there fires SendError and tears down every
+// mini-protocol on the shared bearer. leiosFetchRequestContext is therefore the
+// only thing bounding a request that receives no response at all, so every
+// leios-fetch client call must pass a bounded context. Keep this no greater
+// than the by-point backfill attempt budget.
 const leiosFetchResponseTimeout = leiosBackfillPerAttemptTimeout
 
 func (o *Ouroboros) leiosfetchClientConnOpts() []oleiosfetch.LeiosFetchOptionFunc {
@@ -186,11 +191,34 @@ func (o *Ouroboros) leiosfetchServerVotesRequest(
 	return oleiosfetch.NewMsgVotes(o.leiosVotes.VotesByIds(voteIds)), nil
 }
 
+// leiosfetchServerBlockRangeRequest declines a leios-fetch block-range
+// request, which dingo does not serve.
+//
+// NOTE: this MUST NOT return nil. gouroboros reads a nil return from
+// BlockRangeRequestFunc as "the callback started an async process that will
+// send NextBlockAndTxsInRange / LastBlockAndTxsInRange", so returning nil
+// without sending anything leaves this server holding leios-fetch agency in
+// StateBlockRange forever. The requesting peer's client can then never issue
+// another leios-fetch request on that connection -- its protocol send loop
+// waits for agency that only the missing response returns -- and it has no way
+// to detect the condition. That is the same permanent desynchronisation that
+// stalled dingo's own endorser-block backfill in issue #3623, with dingo on
+// the serving side of it.
+//
+// There is no absence reply for a range request (LastBlockAndTxsInRange
+// carries a mandatory block), so declining necessarily fails the leios-fetch
+// connection. An observable connection error is recoverable by the peer's
+// governance; a silent hang is not.
 func (o *Ouroboros) leiosfetchServerBlockRangeRequest(
 	ctx oleiosfetch.CallbackContext,
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	// TODO
-	return nil
+	return fmt.Errorf(
+		"leios-fetch block range requests are not served: %d.%x-%d.%x",
+		start.Slot,
+		start.Hash,
+		end.Slot,
+		end.Hash,
+	)
 }
