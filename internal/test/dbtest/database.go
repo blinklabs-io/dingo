@@ -96,6 +96,18 @@ type Options struct {
 	Metadata       StorageProvider
 	RunMode        string
 	MaxConnections int
+
+	// InMemoryMetadata opts out of the migrated SQLite template (see
+	// template.go) and builds the metadata store the old way: a fresh
+	// shared-cache in-memory database with the full migration run against
+	// it. That costs ~1.7s per call under -race, so use it only for a test
+	// that genuinely depends on in-memory semantics rather than on a
+	// file-backed database -- WAL behavior, locking, or the absence of a
+	// data directory. Ignored unless the metadata provider is sqlite and
+	// the caller supplied no Metadata.Config of its own. Options.Config
+	// does not disable it: with a DataDir the template is seeded into
+	// that directory instead.
+	InMemoryMetadata bool
 }
 
 // NewDatabase composes Badger and SQLite for a test. The database is closed
@@ -158,9 +170,42 @@ func NewDatabaseWithOptions(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
+	metadataConfig := opts.Metadata.Config
+	if metadataConfig == nil &&
+		metadataName == "sqlite" &&
+		!opts.InMemoryMetadata {
+		// Seed a copy of the process's migrated template so the provider's
+		// migration runner finds an already-migrated database instead of
+		// recreating 84 tables (see template.go).
+		//
+		// Where it is seeded matters. When the caller supplied a DataDir,
+		// the template goes *into that directory* and the provider config
+		// is left alone, because callers rely on the metadata file living
+		// at db.DataDir()/metadata.sqlite -- RawSQLiteMetadata opens
+		// exactly that path, and several ledger helpers seed fixtures
+		// through it. Redirecting the provider elsewhere in that case
+		// leaves the raw handle pointing at a different file that SQLite
+		// creates empty on open, which fails as "no such table".
+		//
+		// Only when the caller supplied no DataDir (previously an
+		// in-memory store, which RawSQLiteMetadata already refuses) is the
+		// provider pointed at a directory of our own.
+		if config.DataDir != "" {
+			if err := seedMetadataTemplate(config.DataDir); err != nil {
+				_ = host.Stop(context.Background())
+				return nil, err
+			}
+		} else {
+			metadataConfig, err = writeMetadataTemplate(tb.TempDir())
+			if err != nil {
+				_ = host.Stop(context.Background())
+				return nil, err
+			}
+		}
+	}
 	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
 		context.Background(), host,
-		plugin.CapabilityStorageMetadata, metadataName, opts.Metadata.Config,
+		plugin.CapabilityStorageMetadata, metadataName, metadataConfig,
 		metadata.ProviderDependencies{
 			DataDir: config.DataDir, StorageMode: config.StorageMode,
 			MaxConnections: opts.MaxConnections,
