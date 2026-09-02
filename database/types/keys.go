@@ -177,3 +177,29 @@ func LeiosEBTxsKey(hash []byte, slot uint64) []byte {
 	key = binary.BigEndian.AppendUint64(key, slot)
 	return key
 }
+
+// LegacyLeiosEBManifestKey builds the pre-issue-#3513 blob key for a Leios
+// endorser-block manifest: "em" + hash(32), with no slot. That format could
+// only ever hold one occurrence per hash, so its value carried the slot
+// itself as an 8-byte big-endian prefix ahead of the manifest CBOR (unlike
+// LeiosEBManifestKey's value, which is the manifest alone since the slot is
+// now part of the key). Superseded by LeiosEBManifestKey; kept only so a
+// node upgrading from before the key format changed can still read data
+// persisted under the old format instead of it becoming silently
+// unreachable (cubic review).
+func LegacyLeiosEBManifestKey(hash []byte) []byte {
+	key := make([]byte, 0, len(LeiosEBManifestKeyPrefix)+len(hash))
+	key = append(key, LeiosEBManifestKeyPrefix...)
+	key = append(key, hash...)
+	return key
+}
+
+// LegacyLeiosEBTxsKey builds the pre-issue-#3513 blob key for the raw
+// transaction bodies of a Leios endorser block: "et" + hash(32), with no
+// slot. Superseded by LeiosEBTxsKey; see LegacyLeiosEBManifestKey.
+func LegacyLeiosEBTxsKey(hash []byte) []byte {
+	key := make([]byte, 0, len(LeiosEBTxsKeyPrefix)+len(hash))
+	key = append(key, LeiosEBTxsKeyPrefix...)
+	key = append(key, hash...)
+	return key
+}

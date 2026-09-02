@@ -15,6 +15,8 @@
 package database
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -54,6 +56,13 @@ func (d *Database) SetLeiosEBManifest(
 // manifest has been stored for that occurrence -- including when a manifest
 // exists for the same hash under a different slot, since the manifest is
 // content-addressed and that is a distinct occurrence (issue #3513 review).
+//
+// On a miss it also tries the pre-issue-#3513 legacy key (hash only), so
+// data persisted by a node running before the key format changed does not
+// become silently unreachable after an upgrade: that format could only ever
+// hold one occurrence per hash, and its value carries that occurrence's slot
+// as an 8-byte big-endian prefix, which must match the requested slot before
+// the legacy record is trusted (cubic review).
 func (d *Database) GetLeiosEBManifest(
 	hash []byte,
 	slot uint64,
@@ -69,10 +78,23 @@ func (d *Database) GetLeiosEBManifest(
 		return nil, types.ErrNilTxn
 	}
 	val, err := blob.Get(blobTxn, types.LeiosEBManifestKey(hash, slot))
-	if err != nil {
+	if err == nil {
+		return val, nil
+	}
+	if !errors.Is(err, types.ErrBlobKeyNotFound) {
 		return nil, err
 	}
-	return val, nil
+	legacyVal, legacyErr := blob.Get(
+		blobTxn,
+		types.LegacyLeiosEBManifestKey(hash),
+	)
+	if legacyErr != nil || len(legacyVal) < 8 {
+		return nil, err
+	}
+	if binary.BigEndian.Uint64(legacyVal[:8]) != slot {
+		return nil, err
+	}
+	return legacyVal[8:], nil
 }
 
 // SetLeiosEBTxs persists the complete raw transaction bodies of a Leios
@@ -116,6 +138,13 @@ func (d *Database) SetLeiosEBTxs(
 // hash) occurrence named. Returns ErrBlobKeyNotFound when no txs have been
 // stored for that occurrence. The returned slice is in the same CBOR-in-CBOR
 // wrapped format used by the leios-fetch MsgBlockTxs wire message.
+//
+// On a miss it also tries the pre-issue-#3513 legacy key (hash only, see
+// GetLeiosEBManifest), gated on the legacy "em" record's embedded slot
+// matching: the legacy format paired one "em" and one "et" record per hash
+// (only one occurrence was ever trackable), so once that pairing is
+// confirmed to be this occurrence, its "et" value is safe to use too (cubic
+// review).
 func (d *Database) GetLeiosEBTxs(
 	hash []byte,
 	slot uint64,
@@ -132,7 +161,21 @@ func (d *Database) GetLeiosEBTxs(
 	}
 	val, err := blob.Get(blobTxn, types.LeiosEBTxsKey(hash, slot))
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, types.ErrBlobKeyNotFound) {
+			return nil, err
+		}
+		legacyManifest, legacyErr := blob.Get(
+			blobTxn,
+			types.LegacyLeiosEBManifestKey(hash),
+		)
+		if legacyErr != nil || len(legacyManifest) < 8 ||
+			binary.BigEndian.Uint64(legacyManifest[:8]) != slot {
+			return nil, err
+		}
+		val, err = blob.Get(blobTxn, types.LegacyLeiosEBTxsKey(hash))
+		if err != nil {
+			return nil, err
+		}
 	}
 	var txsRaw []cbor.RawMessage
 	if _, err := cbor.Decode(val, &txsRaw); err != nil {
