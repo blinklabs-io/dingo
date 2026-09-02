@@ -335,7 +335,7 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 // would mean adding an era-agnostic applied-block record the rest of the
 // reconciler doesn't have either -- out of scope for issue #3516, which
 // bounds and correctly sources this rewind's data, not the reconciler's
-// pre-existing era coverage.
+// pre-existing era coverage. Tracked separately as issue #3778.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,

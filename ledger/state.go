@@ -7679,7 +7679,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	}
 	if chainTip.Point.Slot < ledgerTip.Point.Slot {
 		ls.config.Logger.Warn(
-			"ledger tip ahead of primary chain tip at startup, rolling back metadata to chain tip",
+			"ledger tip ahead of primary chain tip, rolling back metadata to chain tip",
 			"component",
 			"ledger",
 			"chain_tip_slot",
@@ -7691,6 +7691,48 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			"ledger_tip_hash",
 			hex.EncodeToString(ledgerTip.Point.Hash),
 		)
+		// This branch is not only the ordinary "primary chain got
+		// shortened out from under an ahead ledger tip" case -- it is
+		// also exactly what a *second* run of this reconciler lands in
+		// after a crash between the common-ancestor branch's
+		// RewindPrimaryChainToPoint succeeding (primary chain already
+		// truncated, durable) and its emitRollbackTransactionEvents
+		// running (in-memory only, lost on crash): ls.currentTip is
+		// still the stale pre-crash value, chain.Tip() already reports
+		// the truncated point, so chainTip.Point.Slot < ledgerTip.Point.Slot
+		// here and undo events for that already-truncated range would
+		// otherwise never be attempted at all (wolf31o2 review, PR
+		// #3611). Reusing reconciliationUndoBlocks/
+		// emitRollbackTransactionEvents here, under the same
+		// gather-exclude/drain/transactionEventMutex sequencing the
+		// common-ancestor branch below uses, makes that recovery
+		// attempt happen instead of being silently skipped -- subject
+		// to the same, already-documented restart/cache-eviction
+		// resolution gap reconciliationUndoBlocks accepts and counts
+		// via reconciliationUndoUnresolved. This branch is also
+		// reachable live (not just at startup), from the same three
+		// callers as the common-ancestor branch, so the same
+		// protection against a concurrent apply or in-flight gathered
+		// block applies here too.
+		ls.blockPipelineGatherMutex.Lock()
+		defer ls.blockPipelineGatherMutex.Unlock()
+		//nolint:contextcheck // no ctx threaded through this call chain, same as rollbackChainAndState
+		ls.drainBlockPipelineBeforeRollback(
+			context.Background(),
+			"primary-chain/ledger reconciliation",
+		)
+		func() {
+			ls.transactionEventMutex.Lock()
+			defer ls.transactionEventMutex.Unlock()
+			ls.RLock()
+			currentLedgerTipSlot := ls.currentTip.Point.Slot
+			ls.RUnlock()
+			undoBlocks := ls.reconciliationUndoBlocks(
+				chainTip.Point,
+				currentLedgerTipSlot,
+			)
+			ls.emitRollbackTransactionEvents(undoBlocks)
+		}()
 		if err := ls.rollback(chainTip.Point); err != nil {
 			return fmt.Errorf(
 				"rollback ledger tip to primary chain tip: %w",

@@ -8543,6 +8543,30 @@ this section releases it, so the fresh read stays valid through the
 snapshot, that lets a test force this interleaving deterministically rather
 than relying on goroutine scheduling.
 
+A crash between `RewindPrimaryChainToPoint` returning success (primary
+chain truncated, durable) and `emitRollbackTransactionEvents` completing
+(an in-memory `EventBus` publish, not durable on its own) loses that undo
+notification for good if nothing else attempts it again (wolf31o2 review,
+PR #3611). Recovery does not happen by re-entering this same branch: after
+such a crash, `ls.currentTip` is still the stale pre-crash value (this
+closure's caller only calls `ls.rollback(ancestor)`, which updates it,
+after the closure returns), while `ls.chain.Tip()` already reports the
+truncated point, so the next reconciliation attempt instead takes the
+earlier `chainTip.Point.Slot < ledgerTip.Point.Slot` branch ("ledger tip
+ahead of primary chain tip"). That branch now runs the same
+`reconciliationUndoBlocks`/`emitRollbackTransactionEvents` sequence, under
+the same `blockPipelineGatherMutex`/drain/`transactionEventMutex`
+protections, before calling `ls.rollback`, so a crash-interrupted attempt's
+undo notification is retried on the very next reconciliation attempt
+(startup or live — this branch is reachable from all three callers, the
+same as the common-ancestor branch), subject to the same block-cache-
+eviction resolution limits `reconciliationUndoBlocks` already documents and
+counts via `reconciliationUndoUnresolved`, rather than being silently and
+permanently lost. This also fixes that branch's ordinary, non-crash case:
+it previously called `ls.rollback` directly with no undo emission at all,
+live or at startup, whenever the primary chain was simply behind the
+ledger tip for any reason.
+
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts
 for work already *submitted* to `blockPipeline` (`PendingCount`) — raw

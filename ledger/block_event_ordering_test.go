@@ -885,6 +885,89 @@ func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 	)
 }
 
+// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit
+// covers wolf31o2's P1 finding on PR #3611: the common-ancestor branch
+// truncates the primary chain (RewindPrimaryChainToPoint) before
+// publishing ledger.tx undo events (emitRollbackTransactionEvents). A
+// crash between those two steps leaves the primary chain already
+// truncated -- durable -- while ls.currentTip (also durable, updated only
+// by the caller's own ls.rollback(ancestor) after this closure returns)
+// still names the stale, now-discarded blocks, and the undo events for
+// them were never published.
+//
+// The next reconciliation attempt after such a crash does not land back
+// in the common-ancestor branch: chain.Tip() is now behind the stale
+// ls.currentTip, so it lands in the "ledger tip ahead of primary chain
+// tip" branch instead. That branch must still attempt the same
+// reconciliationUndoBlocks/emitRollbackTransactionEvents delivery, or the
+// notification is lost for good rather than merely delayed to the next
+// reconciliation attempt.
+func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as the sibling tests above: the
+	// ledger tip (fixture.currentTip) is no longer on the primary chain,
+	// but the common ancestor (fixture.ancestorTip) still is.
+	forkHash := testHashBytes("reconcile-undo-crash-recovery-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Simulate the crash itself: truncate the primary chain to the
+	// ancestor directly, the same call RewindPrimaryChainToPoint makes
+	// internally, but stop there -- without ever reaching
+	// emitRollbackTransactionEvents and without updating ls.currentTip.
+	// This is exactly the durable state a process is left in immediately
+	// after that call succeeds but before the event publish that follows
+	// it runs.
+	require.NoError(
+		t,
+		ls.config.ChainManager.RewindPrimaryChainToPoint(
+			fixture.ancestorTip.Point,
+		),
+	)
+	require.Equal(
+		t, fixture.currentTip, ls.currentTip,
+		"ls.currentTip must still be the stale, pre-crash value, exactly "+
+			"as it would be immediately after a crash",
+	)
+
+	// The "restarted" reconciliation attempt.
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	evt := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"the recovery attempt must still try to deliver an undo "+
+			"notification for the block truncated before the crash",
+	)
+	le, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
+
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+}
+
 // TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger covers a
 // startup regression: NewLedgerState calls reconcilePrimaryChainTipWithLedgerTip
 // before node.go's ChainManager.SetLedger has configured the security
