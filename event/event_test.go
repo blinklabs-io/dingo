@@ -493,6 +493,66 @@ func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	)
 }
 
+// TestSubscribeFuncStrictPanicRecovery verifies that, unlike SubscribeFunc,
+// a SubscribeFuncStrict handler panic is recovered but not silently followed
+// by continued delivery: onPanic is invoked with the failing event and the
+// recovered value, and the subscription is torn down so a later publish is
+// not delivered to it.
+func TestSubscribeFuncStrictPanicRecovery(t *testing.T) {
+	var testEvtType event.EventType = "test.strict.panic"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	var received atomic.Int32
+	var panicEvt atomic.Value
+	var panicVal atomic.Value
+
+	subId := eb.SubscribeFuncStrict(
+		testEvtType,
+		0,
+		func(evt event.Event) {
+			received.Add(1)
+			panic("intentional strict test panic")
+		},
+		func(evt event.Event, r any) {
+			panicEvt.Store(evt)
+			panicVal.Store(r)
+		},
+	)
+	require.NotZero(t, subId)
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "boom"))
+
+	require.Eventually(t, func() bool {
+		return panicVal.Load() != nil
+	}, 10*time.Second, 10*time.Millisecond,
+		"onPanic should be invoked after the handler panics",
+	)
+	require.Equal(t, "intentional strict test panic", panicVal.Load())
+	require.Equal(
+		t,
+		testEvtType,
+		panicEvt.Load().(event.Event).Type,
+		"onPanic should receive the event that was being processed",
+	)
+
+	require.Eventually(t, func() bool {
+		return !eb.HasSubscribers(testEvtType)
+	}, 10*time.Second, 10*time.Millisecond,
+		"the subscription must be torn down after the handler panics",
+	)
+
+	// A later publish must not reach the (now unsubscribed) handler.
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-panic"))
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(
+		t,
+		int32(1),
+		received.Load(),
+		"no further event should be delivered after the handler panicked",
+	)
+}
+
 // TestPublishNoGoroutineLeak verifies that publishing far more events than a
 // subscriber's buffer can hold does not leak goroutines. This is a regression
 // test for MEM-06 where publishWithTimeout spawned goroutines that could never

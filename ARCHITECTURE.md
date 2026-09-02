@@ -1225,6 +1225,8 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainselection.genesis_corroboration_failed` | ChainSelector | Densest Genesis fast source lacked corroboration and was denied selection |
 | `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos after catching up to the best known tip |
 | `chainselection.selected_none` | ChainSelector | Best-peer selection transitioned to none (selection stalled) |
+| `chainselection.peer_rollback_handler_panic` | ChainSelector | The PeerRollbackEvent handler panicked; its subscription was torn down |
+| `chainselection.evaluation_panic` | ChainSelector | A background evaluation tick or triggered evaluation panicked; the transition it would have produced was dropped |
 | `chainsync.client_added` | ChainsyncState | Client tracking added |
 | `chainsync.client_removed` | ChainsyncState | Client tracking removed |
 | `chainsync.client_synced` | ChainsyncState | Client caught up |
@@ -1366,6 +1368,22 @@ All event types follow the `subsystem.snake_case_name` convention.
   closure reads without its own synchronization (see the live restore/
   truncate section below for the concrete case this exists for). Never call
   it from within the subscriber's own handler.
+- `SubscribeFuncStrict` is `SubscribeFuncWithBuffer` for handlers implementing
+  state-machine logic where continuing past a failed event is unsafe (e.g. a
+  handler mutating state derived from a monotonic chain-event stream). A
+  handler panic is still recovered and logged so it cannot crash the node,
+  but unlike a plain `SubscribeFunc` handler it is not silently followed by
+  continued delivery: the caller's `onPanic` hook (if any) runs with the
+  failing event and the recovered value, and the subscription is torn down
+  immediately afterward. `chainselection.NewChainSelector` uses this for its
+  `chainselection.peer_rollback` subscription, publishing
+  `chainselection.peer_rollback_handler_panic` from its `onPanic` hook so a
+  lost subscription has a durable signal beyond a log line. Plain
+  `SubscribeFunc`/`SubscribeFuncWithBuffer` remain the right choice for
+  handlers that are safe to keep retrying on the next event —
+  `internal/dblifecycle.Manager`'s automatic-snapshot handler is the
+  concrete case this distinction exists for: a panic in one epoch's snapshot
+  attempt must not stop automatic snapshots for every later epoch.
 
 ## Storage Architecture
 
