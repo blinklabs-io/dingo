@@ -2307,13 +2307,19 @@ the ranking block's point so a rollback removes them — but without validation 
 consumed-input recovery (`Database.SetTransactionWithOpts` with
 `SkipConsumedInputRecovery`): the endorser block was admitted by its Leios
 certificate, so its transactions are trusted, and a consumed input not yet
-present is left as a no-op rather than driving blob recovery. Replayed endorser
-transaction hashes are skipped so effects are not applied twice. Applying the
-produced outputs keeps the UTxO set — and the stake distribution derived from it
-— complete, matching the reference; recording metadata only (the prior behavior)
-left endorser-resident outputs missing, which diverged the UTxO and made
-downstream transactions and the leader-election stake snapshot treat inputs the
-endorser block should have produced as absent. Every other network takes the
+present is left as a no-op rather than driving blob recovery. An input that is
+present but already spent by a *different* certified endorser transaction is
+also a no-op (`TransactionStore.SetTransactionLeiosClosure`), matching
+`ValidateNone`'s `Map.delete` on a missing key: two certified endorser blocks
+may legitimately name the same input across blocks, and failing there wedged
+block application (issue #3643). Ranking-block application keeps the hard
+`ErrUtxoConflict` check. Replayed endorser transaction hashes are skipped so
+effects are not applied twice. Applying the produced outputs keeps the UTxO set
+— and the stake distribution derived from it — complete, matching the
+reference; recording metadata only (the prior behavior) left endorser-resident
+outputs missing, which diverged the UTxO and made downstream transactions and
+the leader-election stake snapshot treat inputs the endorser block should have
+produced as absent. Every other network takes the
 CIP-conformant path, where the endorser transactions are applied to the UTxO with
 dingo's normal per-tx validation and consumed-input recovery, as a side delta
 recorded under the ranking block's point (so a rollback removes them). dingo no longer carries the
