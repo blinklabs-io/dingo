@@ -330,12 +330,14 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		if err != nil {
 			lastErr = err
 			switch classifyLeiosFetchFailure(err) {
+			case leiosFetchFailureNone:
+				continue
 			case leiosFetchFailureBusy:
 				// Not an attempt: the connection was serving another fetch.
 			case leiosFetchFailureDeclined:
 				attempted++
 				declined++
-			default:
+			case leiosFetchFailureDead, leiosFetchFailureTransient:
 				attempted++
 			}
 			continue
@@ -464,7 +466,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				time.Now(),
 				leiosBackfillConnCooldownMax,
 			)
-		default:
+		case leiosFetchFailureBusy, leiosFetchFailureTransient:
 			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
 		}
 	}()
