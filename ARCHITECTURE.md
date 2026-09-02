@@ -1439,9 +1439,21 @@ bound at all. Unlike `reconcileLivePrimaryChainLedgerDivergence`'s callers,
 this reader has no `ChainsyncEvent`/connection to fall back on, so on an
 over-K rejection it publishes the same `ChainsyncResyncEventType`/
 `ChainsyncResyncReasonRollbackExceedsK` those callers use directly, then
-still stops this reader attempt — `ledgerProcessBlocksWithAttempt`'s own
-restart loop, not this function, decides whether and how to retry (issue
-#3516 review).
+still stops this reader attempt (issue #3516 review) the same way every
+other give-up path in `ledgerReadChain`/`ledgerReadChainIterator` already
+does: it returns without ever sending a `readChainResult` on `resultCh`.
+That is not a retry with a delay — `ledgerProcessBlocksFromSource`'s
+closed-channel-with-nothing-sent case returns a nil error, and
+`ledgerProcessBlocksWithAttempt`'s `err == nil` branch exits its retry loop
+for good. `ledgerProcessBlocks` is started once, from `Start`, with no
+supervisor restarting it, so this permanently and silently stops all ledger
+block processing; nothing (a peer reconnect, a fresh chainsync
+intersection, or chain growth via blockfetch) resumes it short of a full
+`LedgerState` restart. This is a pre-existing characteristic of every
+give-up path in this pair of functions, not introduced by this reconciler
+call, and is tracked separately in issue #3776 rather than fixed here: the
+resync-event publish above is this call site's only improvement over its
+siblings, not a fix for the underlying silent halt.
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a

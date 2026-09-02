@@ -3957,6 +3957,17 @@ func (ls *LedgerState) ledgerReadChain(
 					// use rather than only a generic error log, so
 					// connection management gets the same signal to
 					// reconnect and negotiate a fresh intersection.
+					//
+					// This return still joins every other give-up path
+					// in this function in never sending a
+					// readChainResult on resultCh, which
+					// ledgerProcessBlocksFromSource's closed-channel
+					// case turns into a nil error --
+					// ledgerProcessBlocksWithAttempt's retry loop exits
+					// for good on a nil error, and nothing restarts
+					// ledgerProcessBlocks afterward. The resync-event
+					// publish here is an improvement over that
+					// silence, not a fix for it; see issue #3776.
 					ls.config.Logger.Error(
 						"missing chain iterator start point requires a "+
 							"rewind beyond the security parameter K, "+
