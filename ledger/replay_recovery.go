@@ -411,15 +411,49 @@ func isDeterministicTxValidationError(err error) bool {
 // shelley.IncorrectWithdrawalAmountError when the amount does not satisfy the
 // era's required relationship to that balance at all -- which under the
 // exact-amount rule includes an amount below the balance, the shape observed
-// on Preprod in issue #3628. Recovery treats them alike: a reward balance is
-// derived from epoch-boundary accounting rather than from the UTxO window the
-// producer-recovery path rebuilds, so no local replay can change the verdict.
+// on Preprod in issue #3628. Both are classified here because a reward balance
+// is derived from epoch-boundary accounting rather than from the UTxO window
+// the producer-recovery path rebuilds, so no local replay can change either
+// verdict. Classification is all they share: only the narrower
+// isRewardWithdrawalStateDivergence may become terminal.
 func isRewardWithdrawalMismatch(err error) bool {
-	if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+	if isRewardWithdrawalStateDivergence(err) {
 		return true
 	}
 	_, ok := errors.AsType[shelley.IncorrectWithdrawalAmountError](err)
 	return ok
+}
+
+// isRewardWithdrawalStateDivergence reports whether a reward withdrawal
+// mismatch came from this node's own persisted state rather than from a
+// verdict about a peer's block, which is the only form that may halt the
+// pipeline.
+//
+// The two sources are not distinguishable by comparing amounts, only by where
+// they are raised. shelley.UtxoValidateWithdrawals reads the same persisted
+// balance the withdrawal write later reads (LedgerView.RewardAccountBalance
+// selects account.reward, as does applyTransactionWithdrawals) and returns
+// shelley.IncorrectWithdrawalAmountError for every amount that fails the era's
+// relationship to it. A block whose withdrawal amount is simply wrong is
+// therefore reported exactly like a correct block this node's reward
+// accounting disagrees with, so that error cannot prove divergence: a peer
+// redelivering one crafted block would otherwise reach errHaltLedgerPipeline,
+// which no retry clears. It gets the ordinary deterministic disposition
+// instead -- rewind, one fresh intersection, then repeat rejection without
+// further peer rotation -- and the resulting lack of tip progress is what
+// trackPipelineProgress escalates.
+//
+// models.ErrRewardWithdrawalExceedsBalance is raised by the withdrawal write
+// itself, after validation has already accepted the amount against that same
+// row (or with validation disabled, on blocks this node has already accepted
+// as trusted). The two layers disagreeing about one balance is a property of
+// local state, not of the block, so it is the state-specific source. Note that
+// it reaches the pipeline as a plain apply error from LedgerDelta.apply
+// ("record transaction"), not as a *txValidationError, so today only the
+// generic restart path observes it; the classification here is what a future
+// wrapping of apply errors would need.
+func isRewardWithdrawalStateDivergence(err error) bool {
+	return errors.Is(err, models.ErrRewardWithdrawalExceedsBalance)
 }
 
 // deterministicTxRecoveryLatch records the single fresh-intersection request
@@ -507,9 +541,14 @@ func (ls *LedgerState) markDeterministicTxRecoveryResync(
 // no-progress accounting (trackPipelineProgress / ledgerPipelineBackoff)
 // escalates and exports as dingo_ledger_pipeline_stuck. Whether a validation
 // failure should ever become terminal, and what terminal must report, is
-// issue #3261 rather than this path. A repeated reward withdrawal mismatch is
-// the exception: it proves the persisted reward state cannot satisfy the
-// chain's transaction, so retrying the same state would wedge the pipeline.
+// issue #3261 rather than this path. A repeated reward withdrawal mismatch
+// that this node's own state reported (isRewardWithdrawalStateDivergence) is
+// the exception: the withdrawal write refusing an amount validation already
+// accepted against the same balance is a fact about local state, not about the
+// block, so retrying that state would wedge the pipeline. The validation-rule
+// sibling, shelley.IncorrectWithdrawalAmountError, is a verdict about a peer's
+// block and stays non-terminal for the same reason the duplicate-input verdict
+// does.
 func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 	validationErr *txValidationError,
 ) (bool, error) {
@@ -524,7 +563,7 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		validationErr,
 	)
 	ls.RUnlock()
-	if resyncSpent && isRewardWithdrawalMismatch(validationErr.Cause) {
+	if resyncSpent && isRewardWithdrawalStateDivergence(validationErr.Cause) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Error(
 				"replay recovery found a repeated reward withdrawal mismatch; halting instead of retrying indefinitely",
