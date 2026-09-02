@@ -7353,17 +7353,25 @@ it is the leader-eligibility basis a queued/deferred header validates against.
 `cleanupOldSnapshots` prunes `PoolStakeSnapshot` through a retention guard
 (`Manager.SetPoolSnapshotRetentionGuard`, wired to
 `LedgerState.PrunePoolSnapshotsWithRetentionFloor`) that, under one dedicated
-lock held across the whole decision and the pool-snapshot delete+commit: (1)
+lock (`deferredHeaderValidationMu`) held across the eviction and floor read but
+released before the pool-snapshot delete: (1)
 evicts deferred headers the apply cursor has already passed — abandoned, since a
 canonical one is consumed at apply — so they stop pinning their snapshots and
 their persisted markers are deleted; (2) lowers the delete boundary to the floor
 (oldest `StakeSnapshotEpoch(epochOf(slot))` over the survivors) when it is below
 `current-3`, or to 0 while any deferred slot is not yet epoch-mappable; and (3)
 clamps that boundary up to a hard depth cap (`current - 24`) so a stuck header
-can never pin snapshots without bound. Holding the lock across floor read and
-delete+commit means admission cannot interleave between them (the race
-CodeRabbit flagged; `markDeferredHeaderValidation` takes the same lock and does
-no I/O, so no deadlock). The pin moves only `PoolStakeSnapshot` — the reward
+can never pin snapshots without bound. The eviction+floor read is atomic (one
+lock hold), so the boundary is a coherent read of the deferred set. The lock is
+released before `prune` (and before each `DeleteSyncState` in the evicted-marker
+cleanup): `prune` opens the single SQLite write connection, and block apply holds
+that connection before taking this same mutex via `consumeDeferredHeaderValidation`,
+so holding the mutex across `prune` inverts the lock order and deadlocks the node
+on the single write connection (issue #3717). The hazard is not this lock's own
+I/O — it has none — but the apply path holding the write connection while waiting
+for this mutex; a header admitted after the lock is released is handled by the
+next pass, since the floor is a lower-watermark recomputed each cleanup. The pin
+moves only `PoolStakeSnapshot` — the reward
 window stays at `current-3` — never prunes more than the default, releases as
 headers resolve or are evicted, and is rebuilt from the persisted markers at
 startup (`repopulateDeferredHeaderValidation`) so it survives a restart. The pin

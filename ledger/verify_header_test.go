@@ -3125,7 +3125,18 @@ func TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection
 // the prune and have its still-needed snapshot deleted under a stale boundary.
 // The prune sees a floor computed from the set as it was when the guard took
 // the lock, and a concurrent markDeferredHeaderValidation blocks until release.
-func TestPrunePoolSnapshotsWithRetentionFloor_SerializesAdmission(
+// TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic replaces the former
+// _SerializesAdmission test, whose contract (hold deferredHeaderValidationMu
+// across prune) is exactly the lock-order inversion that deadlocks the node
+// (issue #3717). The invariant that survives the fix is narrower but sufficient:
+// the eviction + floor read happen under ONE lock hold, so the boundary handed
+// to prune is a coherent read of the deferred set as it stood when the guard
+// took the lock -- never a mix. prune then runs with the lock RELEASED. A header
+// admitted during prune is NOT pinned by this pass; it is picked up by the next
+// cleanup pass, because the retention floor is a lower-watermark recomputed every
+// pass. That next-pass recovery is the deliberate trade for never inverting the
+// lock order.
+func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{63}, 0, tamperNone)
@@ -3143,17 +3154,18 @@ func TestPrunePoolSnapshotsWithRetentionFloor_SerializesAdmission(
 		ocommon.Point{Slot: 1_450, Hash: []byte{0x14}},
 	)
 
-	started := make(chan struct{})
-	markReturned := make(chan struct{})
-	// Concurrent admission of an epoch-11 header (needs snapshot 10). It must
-	// block until the guard releases the lock, so it cannot lower the floor
-	// this guard invocation prunes to.
+	pruneStarted := make(chan struct{})
+	admitted := make(chan struct{})
+	// Admit an epoch-11 header (needs snapshot 10) DURING prune. Because the
+	// guard has already released the lock before calling prune, this admission
+	// proceeds concurrently -- it does not (and must not) deadlock against the
+	// guard, and it does not retroactively lower this pass's boundary.
 	go func() {
-		<-started
+		<-pruneStarted
 		ls.markDeferredHeaderValidation(
 			ocommon.Point{Slot: 1_150, Hash: []byte{0x11}},
 		)
-		close(markReturned)
+		close(admitted)
 	}()
 
 	var seenBefore uint64
@@ -3162,15 +3174,15 @@ func TestPrunePoolSnapshotsWithRetentionFloor_SerializesAdmission(
 		0,
 		func(before uint64) error {
 			seenBefore = before
-			close(started)
-			// While the guard holds the lock, the concurrent admission must be
-			// blocked: markReturned must not fire. Use the repo's channel
-			// helper for the negative wait rather than a bare time.After poll.
-			testutil.RequireNoReceive(
+			close(pruneStarted)
+			// Let the concurrent admission land while prune runs. On the old
+			// (buggy) code the admission would block on the still-held mutex and
+			// this receive would deadlock; on the fixed code it completes.
+			testutil.RequireReceive(
 				t,
-				markReturned,
-				100*time.Millisecond,
-				"concurrent admission completed while the retention guard held the lock",
+				admitted,
+				15*time.Second,
+				"concurrent admission blocked while the guard was pruning (lock-order inversion, issue #3717)",
 			)
 			return nil
 		},
@@ -3179,16 +3191,123 @@ func TestPrunePoolSnapshotsWithRetentionFloor_SerializesAdmission(
 
 	// The floor this invocation pruned to reflects only the epoch-14 header
 	// present when the guard took the lock (snapshot 13), NOT the epoch-11
-	// header admitted concurrently (snapshot 10): no snapshot the concurrent
-	// header needs was deleted under a stale floor.
+	// header admitted during prune: the boundary is a coherent read, never a
+	// mix of pre- and post-lock state.
 	assert.Equal(t, uint64(13), seenBefore)
 
-	// After the guard releases, the concurrent admission completes and is now
-	// visible to the next floor computation.
-	<-markReturned
+	// The concurrently-admitted header is now visible; the next cleanup pass
+	// pins the lower floor (snapshot 10), so no needed snapshot is lost for good.
 	floor, ok := ls.OldestRequiredSnapshotEpoch()
 	require.True(t, ok)
 	assert.Equal(t, uint64(10), floor)
+
+	var nextBefore uint64
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25,
+		0,
+		func(before uint64) error {
+			nextBefore = before
+			return nil
+		},
+	))
+	assert.Equal(
+		t,
+		uint64(10),
+		nextBefore,
+		"next pass pins the floor of the concurrently-admitted header",
+	)
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock is the lock-order
+// inversion regression guard for wolf31o2's blocking review on PR #3717. Unlike
+// the other guard tests -- which pass a stub prune that opens no transaction and
+// so cannot catch the bug -- this passes a REAL prune that opens the single
+// sqlite write connection via db.Transaction(true), exactly as
+// cleanupOldSnapshots' prunePoolSnapshots does. A second goroutine reproduces
+// the block-apply order: hold that write connection, THEN take
+// deferredHeaderValidationMu (as ledgerProcessBlock -> verifyDeferredBlockHeaderState
+// -> consumeDeferredHeaderValidation does inside its write txn).
+//
+// The two lock orders:
+//   - guard:  deferredHeaderValidationMu  THEN  write connection (prune)
+//   - apply:  write connection            THEN  deferredHeaderValidationMu
+//
+// If the guard holds the mutex across prune (the pre-fix code), prune blocks
+// acquiring the single write connection the apply goroutine holds, while the
+// apply goroutine blocks acquiring the mutex the guard holds: deadlock. WITHOUT
+// the fix this test times out (go test -timeout dumps the two inverted stacks);
+// WITH the fix the guard releases the mutex before prune, the apply goroutine
+// takes the mutex and releases the connection, and prune completes.
+func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.publishSnapshotsLocked()
+
+	// A deferred header so the guard does a real floor computation under the
+	// lock, and so consume has a marker to clear on the apply side.
+	deferred := ocommon.Point{Slot: 1_450, Hash: []byte{0x14}}
+	ls.markDeferredHeaderValidation(deferred)
+	require.NoError(t, ls.persistDeferredHeaderValidation(deferred, nil))
+
+	connHeld := make(chan struct{})
+	pruneReached := make(chan struct{})
+	applyDone := make(chan struct{})
+
+	// Apply-side order: hold the single write connection, THEN take the
+	// deferred-header mutex via consumeDeferredHeaderValidation.
+	go func() {
+		applyTxn := ls.db.Transaction(true) // acquires the single write conn
+		close(connHeld)
+		// Wait until the guard is inside prune (mutex-then-conn on the buggy
+		// path) before contending for the mutex, so the inversion is forced.
+		<-pruneReached
+		ls.consumeDeferredHeaderValidation(deferred) // needs the mutex
+		_ = applyTxn.Rollback()                      // release the write conn
+		close(applyDone)
+	}()
+
+	<-connHeld // apply goroutine now holds the single write connection
+
+	guardDone := make(chan error, 1)
+	go func() {
+		guardDone <- ls.PrunePoolSnapshotsWithRetentionFloor(
+			25,
+			0,
+			func(before uint64) error {
+				// REAL prune: open the single write connection like production
+				// (cleanupOldSnapshots' prunePoolSnapshots).
+				close(pruneReached)
+				poolTxn := ls.db.Transaction(true) // blocks until apply releases it
+				defer func() { _ = poolTxn.Rollback() }()
+				return db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
+					before,
+					poolTxn.Metadata(),
+				)
+			},
+		)
+	}()
+
+	// With the fix both goroutines complete promptly; without it they deadlock
+	// on the single write connection and these receives time out.
+	testutil.RequireReceive(
+		t,
+		applyDone,
+		15*time.Second,
+		"apply goroutine blocked taking the mutex while holding the write connection (lock-order inversion, issue #3717)",
+	)
+	err := testutil.RequireReceive(
+		t,
+		guardDone,
+		15*time.Second,
+		"retention guard blocked opening the write connection while holding the mutex (lock-order inversion, issue #3717)",
+	)
+	require.NoError(t, err)
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll is the

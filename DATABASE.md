@@ -971,8 +971,9 @@ pruned out from under it, `leaderEligibilityStake` (`ledger/verify_header.go`)
 would read the missing rows back as a zero-stake answer. `cleanupOldSnapshots`
 therefore prunes `pool_stake_snapshot` *through a retention guard*
 (`Manager.SetPoolSnapshotRetentionGuard`, wired at node start to
-`LedgerState.PrunePoolSnapshotsWithRetentionFloor`). Under one dedicated lock,
-held across the whole decision and the pool-snapshot delete+commit, the guard:
+`LedgerState.PrunePoolSnapshotsWithRetentionFloor`). Under one dedicated lock
+(`deferredHeaderValidationMu`), held across the eviction and the floor read but
+**not** across the pool-snapshot delete, the guard:
 
 1. **Evicts abandoned headers.** A deferred header the apply cursor has already
    passed is abandoned — a canonical one is consumed at apply — so it is dropped
@@ -990,16 +991,34 @@ held across the whole decision and the pool-snapshot delete+commit, the guard:
    snapshots (~1.3M rows/epoch on mainnet). It never rises above the default
    window.
 
-Because the guard holds the lock across both the floor read and the
-delete+commit, a header admitted concurrently cannot slip in between them and
-lose its snapshot (admission — `markDeferredHeaderValidation` — takes the same
-lock and does no I/O, so it cannot deadlock). The pin is a *lower-watermark
-only*: it never prunes more than the default window, releases as headers
-resolve (the set shrinks) or are evicted, and with no guard set is
-byte-identical to the original behavior. Across a restart the in-memory set is
-rebuilt from the persisted markers (`repopulateDeferredHeaderValidation`, via
-`ListSyncStateKeysByPrefix`) before the first cleanup, so the pin covers
-headers still awaiting apply from before the restart.
+The eviction and the floor read happen under one lock hold, so the boundary
+handed to `prune` is a coherent read of the deferred set — never a mix of pre-
+and post-eviction state. The lock is then **released before `prune` runs**, and
+this is a correctness requirement, not just an optimization: `prune` opens the
+single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(true)`,
+and block apply holds that connection *before* taking `deferredHeaderValidationMu`
+(`ledgerProcessBlock` → `verifyDeferredBlockHeaderState` →
+`consumeDeferredHeaderValidation`, all inside its write txn). Holding the mutex
+across `prune` would invert the lock order — `mutex → write-conn` in the guard
+vs. `write-conn → mutex` on apply — and **deadlock the node on the single write
+connection** (issue #3717). The same applies to the evicted-marker cleanup
+(`deletePersistedDeferredMarkers`), which takes the lock only to test membership
+per key and releases it before each `DeleteSyncState` (also a write-connection
+op). The earlier claim that this lock "does no I/O, so it cannot deadlock" was
+wrong: the hazard is never the mutex holder's own I/O, it is the *caller on the
+other path* holding the single write connection while it waits for this mutex.
+
+Releasing the lock before `prune` means a header admitted after the release is
+not pinned by the pass in flight. This is safe because the retention floor is a
+*lower-watermark recomputed every cleanup pass*: such a header needs a
+below-`current-3` snapshot only if it is deeply lagged, and the next pass pins
+the lower floor and the header resolves then. The pin never prunes more than the
+default window, releases as headers resolve (the set shrinks) or are evicted, and
+with no guard set is byte-identical to the original behavior. Across a restart the
+in-memory set is rebuilt from the persisted markers
+(`repopulateDeferredHeaderValidation`, via `ListSyncStateKeysByPrefix`) before the
+first cleanup, so the pin covers headers still awaiting apply from before the
+restart.
 
 The pin is what makes a deferred header *resolve* (its snapshot is retained
 until the cursor reaches it). The classification in `verifyBlockHeaderState` is

@@ -879,11 +879,15 @@ type LedgerState struct {
 	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
 	// (NOT the main RWMutex) so the snapshot retention guard
 	// (PrunePoolSnapshotsWithRetentionFloor) can hold the set stable across the
-	// floor computation AND the pool-snapshot prune without contending the hot
-	// header-validation read path on the main lock (issue #3727). Admission
-	// (markDeferredHeaderValidation) and the retention floor/prune are mutually
-	// exclusive under this mutex, so no deferred header can be admitted between
-	// the floor read and the prune and have its required snapshot deleted.
+	// eviction and floor computation without contending the hot header-validation
+	// read path on the main lock (issue #3727). The guard must NOT hold this mutex
+	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
+	// DeleteSyncState): those open the single SQLite write connection, and block
+	// apply holds that connection before taking this mutex via
+	// consumeDeferredHeaderValidation, so holding it across that write inverts the
+	// lock order and deadlocks the node (issue #3717). The eviction+floor read is
+	// atomic; a header admitted after the lock is released is handled by the next
+	// cleanup pass (the floor is a lower-watermark recomputed each pass).
 	deferredHeaderValidation   map[string]struct{}
 	deferredHeaderValidationMu sync.Mutex
 	checkpointWrittenForEpoch  bool

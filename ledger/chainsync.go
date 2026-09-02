@@ -452,32 +452,34 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked() []string {
 // together on the chainsync path. Deleting the marker for a currently-live
 // entry would drop the durable pin for an active deferred header, so on the
 // next restart repopulate would miss it and cleanup could prune the snapshot it
-// needs (issue #3727, finding: evicted-marker delete races a re-defer). Holding
-// the lock across the deletes closes the window entirely; DeleteSyncState is a
-// single indexed delete and the only other holders of this mutex (mark/clear/
-// consume) do no I/O, so there is no deadlock.
+// needs (issue #3727, finding: evicted-marker delete races a re-defer).
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
 		return
 	}
-	// Lock and recheck PER KEY rather than across the whole loop: a large
-	// eviction must not hold deferredHeaderValidationMu across one DB
-	// transaction per marker, which would block header apply and new deferrals
-	// for the full cleanup. The recheck and the delete stay together under the
-	// per-key lock so a point re-deferred (and re-persisted) between them can't
-	// have its fresh marker dropped; the lock is released between keys so apply
-	// can interleave.
+	// The membership test is taken under the lock, but the lock is RELEASED
+	// before DeleteSyncState: that delete opens the single sqlite write
+	// connection (nil txn -> Transaction(true)), and block apply holds that
+	// connection before taking this mutex via consumeDeferredHeaderValidation.
+	// Holding the mutex across the delete inverts the lock order (mutex->write-
+	// conn here vs. write-conn->mutex on apply) and deadlocks the node on the
+	// single write connection -- the same inversion as the prune path (issue
+	// #3717). A point re-deferred (and re-persisted) between the membership test
+	// and the delete keeps its live pin in the in-memory set for the running
+	// process, so the retention floor still covers it; only its durable marker
+	// could be dropped, and solely if the re-defer lands in that narrow window
+	// AND the node then restarts before the next cleanup re-persists it. That
+	// residual is accepted in exchange for never inverting the lock order.
 	for _, k := range mapKeys {
 		ls.deferredHeaderValidationMu.Lock()
-		if _, ok := ls.deferredHeaderValidation[k]; ok {
+		_, live := ls.deferredHeaderValidation[k]
+		ls.deferredHeaderValidationMu.Unlock()
+		if live {
 			// Re-admitted since eviction: its marker is now backing a live pin.
-			ls.deferredHeaderValidationMu.Unlock()
 			continue
 		}
 		syncKey := deferredHeaderValidationSyncStatePrefix + k
-		err := ls.db.DeleteSyncState(syncKey, nil)
-		ls.deferredHeaderValidationMu.Unlock()
-		if err != nil {
+		if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
 			ls.config.Logger.Warn(
 				"failed to delete stale deferred-header marker",
 				"key", syncKey,

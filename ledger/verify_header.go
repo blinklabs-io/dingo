@@ -1683,11 +1683,16 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 }
 
 // PrunePoolSnapshotsWithRetentionFloor is the snapshot manager's retention
-// guard (wired via Manager.SetPoolSnapshotRetentionGuard). It holds the
-// deferred-header lock across the whole retention decision AND the caller's
-// pool-snapshot prune, so a deferred header cannot be admitted between the
-// floor read and the prune and have its still-needed snapshot deleted (issue
-// #3727 race). Under the lock it, in order:
+// guard (wired via Manager.SetPoolSnapshotRetentionGuard). Under the
+// deferred-header lock it evicts abandoned headers and computes the retention
+// floor as ONE atomic decision, RELEASES the lock, and only then runs the
+// caller's pool-snapshot prune. The prune must NOT run under the lock: it opens
+// the single sqlite write connection (SetMaxOpenConns(1)) via Transaction(true),
+// and block apply holds that connection before taking this same mutex through
+// consumeDeferredHeaderValidation. Holding the mutex across prune therefore
+// inverts the lock order (mutex→write-conn here vs. write-conn→mutex on apply)
+// and deadlocks the node on the single write connection (issue #3717). Under
+// the lock it, in order:
 //
 //  1. Evicts abandoned deferred headers whose slot the apply cursor has already
 //     passed. A canonical deferred header is consumed when the cursor applies
@@ -1704,22 +1709,31 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 //     historical epochs the pin can ever hold, so a stuck header cannot pin
 //     pool snapshots without limit (finding 5).
 //
-// prune must perform and COMMIT the pool-snapshot delete before returning, so
-// the rows are gone under the lock; it must not touch ledger locks or the
-// deferred set. The lock scope covers only the pool-snapshot delete (a single
-// indexed DELETE in its own transaction), not the reward-state prune; the only
-// other holders of this mutex (mark/clear/consume) do no I/O, so no deadlock.
+// The eviction+floor read is atomic (one lock hold), so `before` reflects a
+// coherent view of the deferred set; a header admitted after the lock is
+// released — during or after prune — cannot corrupt this invocation's boundary.
+// A header admitted in that window that needs a below-floor snapshot is a
+// deeply lagged header (its need is < defaultBefore = currentEpoch-3); this
+// invocation may prune a snapshot it wants, but the retention floor is a
+// lower-watermark that is RE-COMPUTED every cleanup pass, so the next pass pins
+// at the lower floor and the header resolves then. This narrow re-admit window
+// is accepted in exchange for never inverting the lock order (issue #3717); it
+// replaces the prior design that held the lock across prune and deadlocked.
+//
+// prune must perform and COMMIT the pool-snapshot delete before returning; it
+// must not touch ledger locks or the deferred set.
 func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	defaultBefore uint64,
 	minBefore uint64,
 	prune func(before uint64) error,
 ) error {
 	var evicted []string
-	err := func() error {
+	var before uint64
+	func() {
 		ls.deferredHeaderValidationMu.Lock()
 		defer ls.deferredHeaderValidationMu.Unlock()
 		evicted = ls.evictStaleDeferredHeadersLocked()
-		before := defaultBefore
+		before = defaultBefore
 		if floor, ok := ls.oldestRequiredSnapshotEpochLocked(); ok &&
 			floor < before {
 			before = floor
@@ -1727,13 +1741,17 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 		if before < minBefore {
 			before = minBefore
 		}
-		return prune(before)
 	}()
-	// Delete the evicted headers' persisted markers after releasing the lock
-	// here; deletePersistedDeferredMarkers re-takes the deferred-header mutex
-	// itself so it can skip any point that was re-deferred (and re-persisted)
-	// since eviction, keeping the sync_state table free of dead markers without
-	// dropping a marker that now backs a live pin.
+	// Prune runs with the mutex RELEASED: it opens the single sqlite write
+	// connection, which block apply holds before taking this mutex, so running
+	// it under the lock deadlocks (issue #3717). See the doc comment.
+	err := prune(before)
+	// Delete the evicted headers' persisted markers; deletePersistedDeferredMarkers
+	// takes the deferred-header mutex only to test membership per key (releasing
+	// it before each DB delete, for the same lock-order reason) so it can skip
+	// any point re-deferred (and re-persisted) since eviction, keeping the
+	// sync_state table free of dead markers without dropping a marker that now
+	// backs a live pin.
 	ls.deletePersistedDeferredMarkers(evicted)
 	return err
 }
