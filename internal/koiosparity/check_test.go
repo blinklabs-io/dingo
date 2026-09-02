@@ -1560,4 +1560,22 @@ INSERT INTO reward_pool_input (
 		100,
 	)
 	require.NoError(t, err)
+	// The remaining reward_pool_input columns are NOT NULL with defaults, so
+	// the partial insert above is a complete row. Asserted rather than assumed
+	// — a fixture that silently wrote nothing would make the departure tests
+	// pass for the wrong reason.
+	var rows, params int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*), COUNT(blocks_produced) FROM reward_pool_input
+		 WHERE epoch = ?`,
+		paramEpoch,
+	).Scan(&rows, &params))
+	require.Equal(t, 1, rows, "the param-epoch reward input must exist")
+	require.Equal(t, 1, params, "with its block count populated")
+	var snapshots int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM pool_stake_snapshot WHERE epoch = ?`,
+		paramEpoch,
+	).Scan(&snapshots))
+	require.Zero(t, snapshots, "the mark rows must be gone")
 }
