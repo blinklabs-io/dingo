@@ -1560,10 +1560,13 @@ INSERT INTO reward_pool_input (
 		100,
 	)
 	require.NoError(t, err)
-	// The remaining reward_pool_input columns are NOT NULL with defaults, so
-	// the partial insert above is a complete row. Asserted rather than assumed
-	// — a fixture that silently wrote nothing would make the departure tests
-	// pass for the wrong reason.
+	// The omitted columns are either nullable (margin, reward_account),
+	// auto-generated (id), or NOT NULL with a default (pledge,
+	// delegated_stake, owner_stake, cost, delegator_count,
+	// reward_account_credential_tag, captured_slot, boundary_slot), so the
+	// partial insert above is a complete row. Asserted rather than assumed — a
+	// fixture that silently wrote nothing would make the departure tests pass
+	// for the wrong reason.
 	var rows, params int
 	require.NoError(t, db.QueryRow(
 		`SELECT COUNT(*), COUNT(blocks_produced) FROM reward_pool_input
