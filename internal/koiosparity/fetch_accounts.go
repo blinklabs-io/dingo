@@ -68,11 +68,14 @@ func ResolveKoiosAccountUniverse(
 // registered before that epoch ended, so a crawl taken after it is complete
 // for that epoch no matter how much later the check runs. A crawl taken before
 // it may be missing an account that registered in between, so it is refused
-// and re-crawled. A zero notBefore (an epoch whose end time the cache does not
-// carry) falls back to accountUniverseMaxAge.
+// and re-crawled.
 //
-// A refresh that fails does not fall back to the stale set: an incomplete
-// universe silently skips accounts, which reads as a pass.
+// A zero notBefore — an epoch whose end time the cache does not carry, which
+// old cache rows do not — is not a licence to reuse whatever is cached. There
+// is then no bound to measure the crawl against, so it re-crawls: a universe
+// short by one account silently skips it, and a skipped account reads as a
+// pass. For the same reason a refresh that fails is an error rather than a
+// fallback to the stale set.
 func ResolveKoiosAccountUniverseCached(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -124,18 +127,11 @@ func ResolveKoiosAccountUniverseCached(
 	return addrs, nil
 }
 
-// accountUniverseMaxAge bounds how stale a cached crawl may be when the epoch
-// being checked carries no end time to measure against.
-const accountUniverseMaxAge = time.Hour
-
 // accountUniverseFresh reports whether a crawl taken at fetchedAt covers an
 // epoch that ended at notBefore. See ResolveKoiosAccountUniverseCached.
 func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
-	if fetchedAt.IsZero() {
+	if fetchedAt.IsZero() || notBefore.IsZero() {
 		return false
-	}
-	if notBefore.IsZero() {
-		return time.Since(fetchedAt) < accountUniverseMaxAge
 	}
 	return !fetchedAt.Before(notBefore)
 }

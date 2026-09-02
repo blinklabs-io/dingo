@@ -6003,10 +6003,12 @@ never the reverse.
   account that earned a reward in a closed epoch registered before that epoch
   ended, so a later crawl is complete for it, while an earlier one may be
   missing an account and a short universe silently skips accounts. An epoch
-  carrying no end time falls back to `accountUniverseMaxAge`. Whether a crawl is
-  cached at all is recorded in `koios_account_universe_state` rather than
-  inferred from the address rows, so a network whose `/account_list` is
-  legitimately empty still has a reusable crawl. A refresh that
+  carrying no end time is not reused against at all — there is no bound to
+  measure the crawl by, and a universe short one account skips it silently — so
+  it re-crawls. Whether a crawl is cached at all is recorded in
+  `koios_account_universe_state` rather than inferred from the address rows, so
+  a network whose `/account_list` is legitimately empty still has a reusable
+  crawl. A refresh that
   fails is an error rather than a fallback to the stale set, for the same
   reason. `GetAllAccountAddressesWithProgress` logs a line every 50 pages so a
   long crawl is distinguishable from a stalled one; the logger is a parameter

@@ -187,20 +187,6 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 		"networks are stored independently")
 }
 
-// TestAccountUniverseFreshFallsBackToMaxAge covers an epoch whose end time the
-// cache does not carry — old rows predate the column — where the only
-// available bound is the crawl's own age.
-func TestAccountUniverseFreshFallsBackToMaxAge(t *testing.T) {
-	assert.False(t, accountUniverseFresh(time.Time{}, time.Time{}),
-		"no crawl is never fresh")
-	assert.True(t, accountUniverseFresh(
-		time.Now().Add(-time.Minute), time.Time{},
-	))
-	assert.False(t, accountUniverseFresh(
-		time.Now().Add(-2*accountUniverseMaxAge), time.Time{},
-	))
-}
-
 // TestResolveKoiosAccountUniverseCachedWithEmptyCrawl covers a network whose
 // /account_list is legitimately empty. Presence is recorded separately from the
 // address rows, so an empty crawl is still a cached crawl and a later epoch it
@@ -226,10 +212,11 @@ func TestResolveKoiosAccountUniverseCachedWithEmptyCrawl(t *testing.T) {
 		"an empty crawl is still a cached crawl")
 }
 
-// TestResolveKoiosAccountUniverseCachedMaxAgeFallback exercises the resolver
-// end to end for an epoch carrying no end time, where the crawl's own age is
-// the only available bound.
-func TestResolveKoiosAccountUniverseCachedMaxAgeFallback(t *testing.T) {
+// TestResolveKoiosAccountUniverseCachedRefusesUnboundedReuse covers an epoch
+// whose end time the cache does not carry. There is then nothing to measure the
+// crawl against, and reusing it anyway could skip an account that registered
+// between the crawl and the epoch's close — a short universe reads as a pass.
+func TestResolveKoiosAccountUniverseCachedRefusesUnboundedReuse(t *testing.T) {
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls, "stake_test1a")
 	koios := newUniverseTestClient(srv)
@@ -238,29 +225,20 @@ func TestResolveKoiosAccountUniverseCachedMaxAgeFallback(t *testing.T) {
 	defer cache.Close() //nolint:errcheck
 	logger := slog.New(slog.DiscardHandler)
 
-	_, err = ResolveKoiosAccountUniverseCached(
-		context.Background(), koios, cache, "preview", time.Time{}, logger,
-	)
-	require.NoError(t, err)
-	require.Equal(t, int32(1), calls.Load())
-
-	// A fresh crawl inside the window is reused.
-	_, err = ResolveKoiosAccountUniverseCached(
-		context.Background(), koios, cache, "preview", time.Time{}, logger,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, int32(1), calls.Load())
-
-	// Age it past the window and the resolver crawls again.
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preview",
-		[]string{"stake_test1a"},
-		time.Now().Add(-2*accountUniverseMaxAge),
-	))
-	_, err = ResolveKoiosAccountUniverseCached(
-		context.Background(), koios, cache, "preview", time.Time{}, logger,
-	)
-	require.NoError(t, err)
+	for range 2 {
+		_, err = ResolveKoiosAccountUniverseCached(
+			context.Background(), koios, cache, "preview", time.Time{}, logger,
+		)
+		require.NoError(t, err)
+	}
 	assert.Equal(t, int32(2), calls.Load(),
-		"a crawl older than the max age must be refreshed")
+		"with no bound to measure against, the crawl is not reused")
+
+	assert.False(t, accountUniverseFresh(time.Time{}, time.Now()),
+		"no crawl is never fresh")
+	assert.False(t, accountUniverseFresh(time.Now(), time.Time{}),
+		"no bound is never fresh")
+	assert.True(t, accountUniverseFresh(
+		time.Now(), time.Now().Add(-time.Minute),
+	))
 }
