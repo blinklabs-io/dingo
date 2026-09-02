@@ -1972,7 +1972,21 @@ as a function-literal argument rather than closing over the package
 variable, since the goroutine argument is evaluated synchronously in the
 calling goroutine before the new one starts — closing over the variable
 instead raced a test's `t.Cleanup` restoring it after the goroutine read
-it. `handleChainSwitchEvent` is one of the
+it. `Run()`'s own LIFO `started` stop for `n.ledgerState.Close()` used to
+discard this return value entirely, unlike its neighboring stops (e.g. the
+koios parity observer's), so a `Shutdown` timeout on the startup-failure
+rollback path (`cleanupFailedStartup`, reached when a later component --
+e.g. `dbLifecycleMgr.Start` -- fails to start) let the LIFO `n.db.Close()`
+and `n.pluginHost.Stop()` stops registered earlier (so run later) close
+storage a still-running background goroutine might be using, silently.
+This path can't refuse to run those later stops the way
+`closeStorageForLiveLifecycleOp` does on the live-restore/truncate path
+(nothing keeps running afterward there to protect), but it now mirrors
+`node_shutdown.go`'s `shutdown()` `ledgerStateDrainConfirmed` guard instead
+of skipping the fix entirely: a `Run()`-scoped `ledgerStateDrainConfirmed`
+flag, set false by the `ledgerState.Close` stop on a non-nil error, makes
+the `db.Close`/`pluginHost.Stop` stops log and skip rather than run.
+`handleChainSwitchEvent` is one of the
 "closure over `n` itself, self-healing" handlers `Run()`'s subscriber-ID
 doc comment describes as needing no tracked subscription — correct, since
 it reads `n.chainsyncState` fresh each call rather than a bound method
