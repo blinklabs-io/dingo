@@ -455,10 +455,12 @@ func (p *DingoStateProvider) CommitteeMember(
 // failing any vector that expects NotCommitteeMemberError against an empty
 // committee.
 //
-// Production cannot make that inference because Dingo never persists the
-// Conway genesis committee (blinklabs-io/dingo#3785), so there an empty table
-// is ambiguous. Once #3785 lands, production becomes authoritative the same
-// way this harness already is and the two answers converge.
+// Production instead derives authority from the include-deleted member set,
+// which distinguishes a committee emptied by NoConfidence (soft-deleted rows,
+// authoritative) from one never populated (no rows, ambiguous because Dingo
+// never persists the Conway genesis committee, blinklabs-io/dingo#3785). The
+// harness needs no such inference: it has no genesis-sync path, so reachable
+// already implies complete. Once #3785 lands the two answers converge.
 func (p *DingoStateProvider) CommitteeStateAvailable() (bool, error) {
 	return p != nil && p.manager != nil && p.manager.db != nil, nil
 }

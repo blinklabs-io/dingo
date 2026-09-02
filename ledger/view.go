@@ -640,39 +640,40 @@ func extractRawCostModels(
 // CommitteeStateAvailable reports whether this view can authoritatively answer
 // committee credential queries for its snapshot.
 //
-// Availability is derived from whether any committee member is seated, not
-// from the store being reachable. Only two paths ever write committee_member:
-// UpdateCommittee enactment (ledger/governance/enact.go) and Mithril snapshot
-// import (ledgerstate/import.go). Dingo does not seed the Conway genesis
-// committee -- genesis.Committee.Threshold is read for the CC quorum, but
-// genesis.Committee.Members is never persisted. A node synced from genesis
-// therefore holds no committee rows for the whole Conway era until the first
-// UpdateCommittee enacts, while the real chain has the genesis committee
-// seated from the hard fork.
+// Availability is derived from whether a committee was ever seated, not from
+// the store being reachable and not from the currently seated set. Only two
+// paths ever write committee_member: UpdateCommittee enactment
+// (ledger/governance/enact.go) and Mithril snapshot import
+// (ledgerstate/import.go). Dingo does not seed the Conway genesis committee --
+// genesis.Committee.Threshold is read for the CC quorum, but
+// genesis.Committee.Members is never persisted (blinklabs-io/dingo#3785). A
+// node synced from genesis therefore holds no committee rows at all for the
+// whole Conway era until the first UpdateCommittee enacts, while the real
+// chain has the genesis committee seated from the hard fork. Claiming
+// authority there would reject an authorization from a real committee member,
+// because the lookup returns no member.
 //
-// So an empty table is genuinely ambiguous: it means "never populated" on a
-// genesis-synced node and "authoritatively empty" after a NoConfidence
-// enactment, and Dingo cannot currently tell those apart. Reporting the
-// reachable-store answer (true) would resolve that ambiguity the wrong way and
-// reject an authorization from a real genesis committee member, because the
-// lookup returns no member. Reporting false leaves the ambiguity visible to
-// the caller, which declines to reject on committee grounds it cannot
-// establish -- the behavior the upstream len(members) > 0 heuristic had.
+// Removal is a soft delete: both SoftDeleteAllCommitteeMembers on NoConfidence
+// and SoftDeleteCommitteeMembers on UpdateCommittee removal set deleted_slot
+// and leave the row. So the include-deleted set separates the two empty
+// states exactly. No rows at all means never populated, which is the
+// genesis-synced ambiguity and reports false. Rows that are all soft-deleted
+// mean the committee was seated and is now authoritatively empty, which
+// reports true so a former member's authorization or resignation fails closed,
+// as the real chain rejects it.
 //
-// Seeding the genesis committee is the real fix and is tracked in
-// blinklabs-io/dingo#3785; once it lands, an empty table becomes
-// unambiguously authoritative and this should report true so the rules fail
-// closed on it. The conformance provider already reports true, because a
-// vector declares its complete committee and so an empty one is
-// authoritatively empty there.
+// Once #3785 lands, the no-rows case becomes unambiguously authoritative too
+// and this can report true unconditionally.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if lv == nil || lv.ls == nil || lv.ls.db == nil {
 		return false, nil
 	}
-	// GetCommitteeMembers is the seated-member set. GetCommitteeActiveCount is
-	// not a substitute: it counts hot-key authorizations, so a seated
-	// committee that has authorized no hot keys would report zero.
-	members, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	// Include-deleted rather than the seated set, so an authoritatively empty
+	// committee after a NoConfidence enactment still reports available.
+	// GetCommitteeActiveCount is not a substitute for either: it counts
+	// hot-key authorizations, so a seated committee that has authorized no hot
+	// keys would report zero.
+	members, err := lv.ls.db.GetCommitteeMembersIncludeDeleted(lv.txn)
 	if err != nil {
 		return false, fmt.Errorf("get committee members: %w", err)
 	}

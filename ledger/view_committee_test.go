@@ -909,19 +909,19 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 }
 
 // TestLedgerViewCommitteeStateAvailableTracksSeatedMembers proves availability
-// is derived from seated committee members, not from the store being
-// reachable.
+// separates the two empty committee states, which decides whether committee
+// validation rejects.
 //
-// A view with a live database but no committee rows cannot answer committee
-// queries: Dingo does not seed the Conway genesis committee
-// (blinklabs-io/dingo#3785), so that state means "never populated" on a
-// genesis-synced node, not "authoritatively empty". Reporting true there makes
-// the validation rules reject an authorization from a real genesis committee
-// member.
+// No rows at all means never populated. Dingo does not seed the Conway genesis
+// committee (blinklabs-io/dingo#3785), so on a genesis-synced node that state
+// is ambiguous, and claiming authority would reject an authorization from a
+// real genesis committee member. Rows that are all soft-deleted mean the
+// committee was seated and is now authoritatively empty, as after a
+// NoConfidence enactment, which must still reject a former member.
 func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 
-	// A reachable store with no seated member is not authoritative.
+	// A reachable store with no committee rows at all is not authoritative.
 	available, err := lv.CommitteeStateAvailable()
 	require.NoError(t, err)
 	require.False(
@@ -946,5 +946,20 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 		t,
 		available,
 		"a seated committee member makes committee state authoritative",
+	)
+
+	// NoConfidence soft-deletes every member. The committee is now
+	// authoritatively empty, not unknown, so authority must survive.
+	require.NoError(t, db.SoftDeleteAllCommitteeMembers(10, nil))
+	seatedNow, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Empty(t, seatedNow, "no member may remain seated")
+
+	available, err = lv.CommitteeStateAvailable()
+	require.NoError(t, err)
+	require.True(
+		t,
+		available,
+		"an authoritatively empty committee after NoConfidence must stay authoritative",
 	)
 }

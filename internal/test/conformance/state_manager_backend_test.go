@@ -403,14 +403,22 @@ func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
 		wantMember bool
 	}{
 		{
-			name:       "shared credential with boundary-active member",
+			name:       "shared credential with seated member",
 			expiries:   []uint64{5, 6},
 			wantMember: true,
 		},
 		{
-			name:       "expired member",
+			// Term expiry is deliberately not applied on this path, matching
+			// LedgerView.CommitteeHotCredentialMember. The Conway GOV rule
+			// resolves a committee voter against the authorization map, which
+			// excludes only resigned members, and applies expiry later in the
+			// RATIFY tally and the committeeMinSize active count. Resigned
+			// exclusion is covered by
+			// TestLedgerViewCommitteeHotCredentialSelection, since
+			// ParsedInitialState cannot express a resignation.
+			name:       "expired member still authorizes",
 			expiries:   []uint64{4},
-			wantMember: false,
+			wantMember: true,
 		},
 	}
 	for _, test := range tests {
@@ -446,13 +454,13 @@ func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
 				require.NotNil(
 					t,
 					member,
-					"at least one active matching member must authorize the hot credential",
+					"a seated matching member must authorize the hot credential",
 				)
 			} else {
 				require.Nil(
 					t,
 					member,
-					"a member expired before the current epoch must not authorize the hot credential",
+					"a non-authorizing member must not resolve",
 				)
 			}
 		})

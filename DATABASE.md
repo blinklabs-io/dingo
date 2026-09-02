@@ -202,15 +202,17 @@ re-elected member (`Map.intersection` in the Conway EPOCH rule). A resigned
 member cannot authorize a hot key until it is removed from the committee and
 elected again.
 
-Committee validation treats the seated member set as the authority signal: an
-empty `committee_member` is reported as unanswerable rather than as an
-authoritative empty committee, because only `UpdateCommittee` enactment and
-Mithril snapshot import write the table and the Conway genesis committee is
-never persisted (blinklabs-io/dingo#3785). A node synced from genesis
-therefore holds no rows for the whole Conway era, so claiming authority would
-reject an authorization from a real committee member. Certificate and voter
-validation decline to reject on committee grounds they cannot establish, and
-still fail closed when a lookup errors.
+Committee validation derives its authority signal from the include-deleted
+member set, which separates the two empty states. Removal is a soft delete, so
+a committee emptied by a NoConfidence enactment still has rows carrying
+`deleted_slot`: that is an authoritative empty committee, and a former
+member's authorization or resignation is rejected. No rows at all means the
+table was never populated, which happens for the whole Conway era on a
+genesis-synced node because only `UpdateCommittee` enactment and Mithril
+snapshot import write it and the Conway genesis committee is never persisted
+(blinklabs-io/dingo#3785). That state is ambiguous, so certificate and voter
+validation decline to reject on committee grounds they cannot establish. A
+failed lookup still fails closed in both cases.
 
 Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present
