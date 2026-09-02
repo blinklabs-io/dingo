@@ -518,6 +518,55 @@ func buildIndexedUtxoValidationRules(
 	return ret
 }
 
+// buildIndexedUtxoValidationRuleDescriptors preserves the upstream rule IDs
+// while allowing Dingo to replace selected validators. The descriptor API is
+// authoritative; matching by validator behavior is only needed for older
+// gouroboros releases.
+func buildIndexedUtxoValidationRuleDescriptors(
+	descriptors []lcommon.UtxoValidationRuleDescriptor,
+	replacements ...utxoValidationRuleReplacement,
+) []indexedUtxoValidationRule {
+	matched := make(map[utxoValidationRuleId]bool, len(replacements))
+	ret := make([]indexedUtxoValidationRule, 0, len(descriptors))
+	for idx, descriptor := range descriptors {
+		if descriptor.Validator == nil {
+			panic(fmt.Sprintf("UTxO validation rule at index %d is nil", idx))
+		}
+		ruleID := utxoValidationRuleId(descriptor.Id)
+		validationFunc := descriptor.Validator
+		for _, replacement := range replacements {
+			replacementRuleID := replacement.id
+			if replacementRuleID == utxoValidationRuleMaxTxSize {
+				// The shared descriptor uses the canonical name introduced
+				// with the descriptor API; retain Dingo's internal ID.
+				replacementRuleID = utxoValidationRuleId("max-transaction-size")
+			}
+			if replacementRuleID != ruleID {
+				continue
+			}
+			if matched[replacement.id] {
+				panic(fmt.Sprintf("UTxO validation rule replacement ID %q matches multiple upstream rules", replacement.id))
+			}
+			matched[replacement.id] = true
+			validationFunc = replacement.replacementFunc
+			break
+		}
+		if validationFunc != nil {
+			ret = append(ret, indexedUtxoValidationRule{
+				index:          idx,
+				id:             ruleID,
+				validationFunc: validationFunc,
+			})
+		}
+	}
+	for _, replacement := range replacements {
+		if !matched[replacement.id] {
+			panic(fmt.Sprintf("UTxO validation rule replacement ID %q was not found in upstream descriptors", replacement.id))
+		}
+	}
+	return ret
+}
+
 // SafeAddExUnits adds two ExUnits values with
 // overflow detection. Returns an error if either
 // the Memory or Steps sum would exceed
