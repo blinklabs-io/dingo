@@ -621,3 +621,76 @@ INSERT INTO stake_delegation (
 	)
 	require.NoError(t, err)
 }
+
+// TestRestoreAccountStateHonoursSupersedingRetirement covers a pool whose
+// retirement certificate was replaced by a later one for a further-out epoch.
+// cardano-ledger keeps only the latest retirement, so the earlier epoch's
+// boundary reaps nothing — GetPoolsRetiringAtEpoch encodes exactly that by
+// selecting the latest retirement per pool and requiring its epoch to match the
+// boundary. The rollback derivation has to agree, or it clears a delegation the
+// forward path never cleared.
+func TestRestoreAccountStateHonoursSupersedingRetirement(t *testing.T) {
+	ls, db, gdb := newPoolreapTestLedger(t)
+
+	const (
+		deposit        = uint64(500)
+		firstEpoch     = uint64(5)
+		firstBoundary  = uint64(1_000)
+		secondEpoch    = uint64(9)
+		secondBoundary = uint64(5_000)
+		rollbackSlot   = uint64(1_200)
+	)
+	pool := reapCred28(0xAA)
+	seedRetiringPool(
+		t, gdb, pool, reapCred28(0x11), deposit, 100, firstEpoch, 200,
+	)
+	// A later certificate moves the retirement out to a further epoch.
+	poolID := poolIDForKeyHash(t, gdb, pool)
+	_, err := gdb.Exec(`
+INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
+VALUES (?, ?, ?, ?)`,
+		poolID, pool, secondEpoch, 300,
+	)
+	require.NoError(t, err)
+	seedReapTestEpoch(t, gdb, firstEpoch, firstBoundary)
+	seedReapTestEpoch(t, gdb, secondEpoch, secondBoundary)
+
+	delegator := reapCred28(0x21)
+	seedDelegatedAccount(t, db, gdb, delegator, pool, 400)
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+
+	// The forward path agrees the first boundary reaps nothing.
+	runApplyPoolRetirements(t, ls, db, firstEpoch, firstBoundary)
+	account, err := db.GetAccountByCredential(0, delegator, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, pool, account.Pool,
+		"a superseded retirement must not reap the pool")
+
+	// Force the rollback to revisit the account, then confirm the derivation
+	// reaches the same conclusion.
+	_, err = gdb.Exec(
+		`UPDATE account SET added_slot = ? WHERE staking_key = ?`,
+		rollbackSlot+500, delegator,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.Metadata().RestoreAccountStateAtSlot(
+		rollbackSlot, nil,
+	))
+
+	account, err = db.GetAccountByCredential(0, delegator, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, pool, account.Pool,
+		"the rollback must not clear a delegation the reap never cleared")
+}
+
+// poolIDForKeyHash returns the pool row id seedRetiringPool created.
+func poolIDForKeyHash(t *testing.T, raw *sql.DB, keyHash []byte) int64 {
+	t.Helper()
+	var id int64
+	require.NoError(t, raw.QueryRow(
+		`SELECT id FROM pool WHERE pool_key_hash = ?`, keyHash,
+	).Scan(&id))
+	return id
+}

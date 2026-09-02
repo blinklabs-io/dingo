@@ -1127,11 +1127,14 @@ type accountRestoreEvent struct {
 // put the account straight back on the reaped pool, returning the stake the
 // reap removed to the pool distribution.
 //
-// The reap boundary is the first slot of the retirement certificate's epoch.
-// The certificate only takes effect there if no pool registration outranks it
-// before that boundary, which is the same supersede rule
-// GetActivePoolKeyHashesAtSlot and GetPoolsRetiringAtEpoch encode: later
-// added_slot wins, then later block index, then later certificate index.
+// The reap boundary is the first slot of the retirement certificate's epoch,
+// and the certificate only takes effect there if it is the pool's latest
+// certificate before that boundary. Both a later retirement (which moves the
+// retirement out to its own epoch) and a later registration (which cancels it)
+// supersede it. That is the same rule GetPoolsRetiringAtEpoch encodes by
+// selecting the latest retirement and registration before the boundary and
+// requiring the retirement to win and to name that epoch: later added_slot
+// wins, then later block index, then later certificate index.
 //
 // Rows above the rollback slot are excluded, so this sees exactly the
 // certificate history that survives the rollback.
@@ -1172,6 +1175,23 @@ SELECT EXISTS (
                 OR (pr.added_slot = rt.added_slot
                     AND COALESCE(t2.block_index, 0) = COALESCE(t.block_index, 0)
                     AND COALESCE(c2.cert_index, 0) > COALESCE(c.cert_index, 0))
+            )
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM pool_retirement rt2
+          LEFT JOIN certs c3 ON c3.id = rt2.certificate_id
+          LEFT JOIN "transaction" t3 ON t3.id = c3.transaction_id
+          WHERE rt2.pool_id = rt.pool_id
+            AND rt2.id <> rt.id
+            AND rt2.added_slot < e.start_slot
+            AND (
+                rt2.added_slot > rt.added_slot
+                OR (rt2.added_slot = rt.added_slot
+                    AND COALESCE(t3.block_index, 0) > COALESCE(t.block_index, 0))
+                OR (rt2.added_slot = rt.added_slot
+                    AND COALESCE(t3.block_index, 0) = COALESCE(t.block_index, 0)
+                    AND COALESCE(c3.cert_index, 0) > COALESCE(c.cert_index, 0))
             )
       )
 )`,
