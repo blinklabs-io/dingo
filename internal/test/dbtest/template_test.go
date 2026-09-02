@@ -161,10 +161,16 @@ func materializeTemplate(tb testing.TB, raw []byte) string {
 
 // scratchTemplateDirs lists the scratch directories buildMetadataTemplate
 // creates, by the prefix it passes to os.MkdirTemp.
+//
+// That prefix carries the process ID, which is what keeps this bounded to the
+// build under test. The directories live in the shared temp directory, so an
+// unscoped pattern would also match every other test binary that imports
+// dbtest -- under `go test ./...` a sibling's build in flight would read as a
+// directory this build leaked.
 func scratchTemplateDirs(tb testing.TB) []string {
 	tb.Helper()
 	dirs, err := filepath.Glob(
-		filepath.Join(os.TempDir(), "dingo-dbtest-metadata-template-*"),
+		filepath.Join(os.TempDir(), metadataTemplateDirPrefix()+"*"),
 	)
 	if err != nil {
 		tb.Fatalf("glob scratch template dirs: %v", err)
@@ -275,14 +281,14 @@ func writeSentinel(tb testing.TB, path string) {
 			tb.Errorf("close %s: %v", path, err)
 		}
 		// A surviving log would put the sentinel back after an overwrite.
-		if _, err := os.Stat(path + "-wal"); !errors.Is(
-			err,
-			os.ErrNotExist,
-		) {
-			tb.Errorf(
-				"write-ahead log still present after close: %v",
-				err,
-			)
+		// A present log is a nil stat error, so the file's presence is
+		// what gets reported; only an unexpected stat failure carries one.
+		wal := path + "-wal"
+		switch _, err := os.Stat(wal); {
+		case err == nil:
+			tb.Errorf("write-ahead log %s still present after close", wal)
+		case !errors.Is(err, os.ErrNotExist):
+			tb.Errorf("stat write-ahead log %s: %v", wal, err)
 		}
 	}()
 	if _, err := raw.Exec(

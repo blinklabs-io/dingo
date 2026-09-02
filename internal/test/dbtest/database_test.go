@@ -18,17 +18,50 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 )
 
-// metadataFilesUnderTempRoot lists every metadata file below the root that
-// testing.TB.TempDir allocates for a single test. NewDatabaseWithOptions calls
-// tb.TempDir() with the test's own tb when it points the provider at a
-// directory of its own, so anything it writes lands under that same root and
-// its presence or absence distinguishes a file-backed metadata store from an
-// in-memory one.
+// tempDirTB hands NewDatabaseWithOptions a scratch root the test owns, so what
+// the fixture writes through tb.TempDir() can be observed exactly.
+//
+// Deriving that root from filepath.Dir(t.TempDir()) would instead depend on
+// where testing.TB.TempDir happens to place a test's directories: today it
+// allocates one parent per test and numbers the calls beneath it, so the
+// parent is per-test, but that layout is not part of TempDir's contract. One
+// MkdirTemp per call would make the parent os.TempDir() itself and silently
+// widen every walk below to the shared temp directory, where a stray
+// metadata.sqlite -- a crashed run's leftover, or another package's file under
+// `go test ./...` -- would decide the assertions.
+//
+// Everything else, including Cleanup and Errorf, reaches the embedded TB, so
+// the database is still closed by the real test's cleanup.
+type tempDirTB struct {
+	testing.TB
+	root string
+	seq  int
+}
+
+// TempDir allocates a numbered directory under the root, matching
+// testing.TB.TempDir's guarantee that separate calls get separate
+// directories. Removal comes with the root, which the real test owns.
+func (tb *tempDirTB) TempDir() string {
+	tb.Helper()
+	tb.seq++
+	dir := filepath.Join(tb.root, strconv.Itoa(tb.seq))
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		tb.Fatalf("allocate temp dir under %s: %v", tb.root, err)
+	}
+	return dir
+}
+
+// metadataFilesUnderTempRoot lists every metadata file below root.
+// NewDatabaseWithOptions calls tb.TempDir() when it points the provider at a
+// directory of its own, so with a tempDirTB anything it writes lands under
+// that root and its presence or absence distinguishes a file-backed metadata
+// store from an in-memory one.
 func metadataFilesUnderTempRoot(tb testing.TB, root string) []string {
 	tb.Helper()
 	var found []string
@@ -96,8 +129,8 @@ func TestNewDatabaseWithOptionsSeedsCallerDataDir(t *testing.T) {
 // is still a file-backed database rather than the in-memory store the
 // provider would build from an empty data directory.
 func TestNewDatabaseWithOptionsWithoutDataDir(t *testing.T) {
-	root := filepath.Dir(t.TempDir())
-	db, err := NewDatabaseWithOptions(t, Options{
+	root := t.TempDir()
+	db, err := NewDatabaseWithOptions(&tempDirTB{TB: t, root: root}, Options{
 		Config: &database.Config{DataDir: ""},
 	})
 	if err != nil {
@@ -120,8 +153,8 @@ func TestNewDatabaseWithOptionsWithoutDataDir(t *testing.T) {
 // not written anywhere and the provider falls back to the in-memory
 // shared-cache store it builds from an empty data directory.
 func TestNewDatabaseWithOptionsInMemoryMetadata(t *testing.T) {
-	root := filepath.Dir(t.TempDir())
-	db, err := NewDatabaseWithOptions(t, Options{
+	root := t.TempDir()
+	db, err := NewDatabaseWithOptions(&tempDirTB{TB: t, root: root}, Options{
 		Config:           &database.Config{DataDir: ""},
 		InMemoryMetadata: true,
 	})
