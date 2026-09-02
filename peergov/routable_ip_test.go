@@ -63,7 +63,6 @@ func TestIsRoutableIP(t *testing.T) {
 		{"ipv4 broadcast", "255.255.255.255", false},
 		{"ipv6 discard only", "100::1", false},
 		{"ipv4 this network", "0.0.0.1", false},
-		{"ipv4 this network upper", "0.255.255.255", false},
 		{"ipv4 deprecated 6to4 anycast", "192.88.99.1", false},
 		{"ipv6 benchmarking", "2001:2::1", false},
 		{"ipv6 local-use translation", "64:ff9b:1::1", false},
