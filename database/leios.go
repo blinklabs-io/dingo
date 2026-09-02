@@ -88,10 +88,17 @@ func (d *Database) GetLeiosEBManifest(
 		blobTxn,
 		types.LegacyLeiosEBManifestKey(hash),
 	)
-	if legacyErr != nil || len(legacyVal) < 8 {
+	if legacyErr != nil {
+		// A real failure reading the legacy record (storage, network,
+		// auth) must not be hidden behind the exact-key not-found error;
+		// only "the legacy record doesn't exist either" collapses to that
+		// (cubic review).
+		if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
+			return nil, legacyErr
+		}
 		return nil, err
 	}
-	if binary.BigEndian.Uint64(legacyVal[:8]) != slot {
+	if len(legacyVal) < 8 || binary.BigEndian.Uint64(legacyVal[:8]) != slot {
 		return nil, err
 	}
 	return legacyVal[8:], nil
@@ -168,7 +175,16 @@ func (d *Database) GetLeiosEBTxs(
 			blobTxn,
 			types.LegacyLeiosEBManifestKey(hash),
 		)
-		if legacyErr != nil || len(legacyManifest) < 8 ||
+		if legacyErr != nil {
+			// See GetLeiosEBManifest: a real failure reading the legacy
+			// manifest must not be hidden behind the exact-key not-found
+			// error (cubic review).
+			if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
+				return nil, legacyErr
+			}
+			return nil, err
+		}
+		if len(legacyManifest) < 8 ||
 			binary.BigEndian.Uint64(legacyManifest[:8]) != slot {
 			return nil, err
 		}

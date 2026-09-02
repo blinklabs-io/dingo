@@ -16,6 +16,7 @@ package database
 
 import (
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -104,6 +105,47 @@ func TestGetLeiosEBTxsFallsBackToLegacyKey(t *testing.T) {
 	// A different slot must not pick up the legacy txs either.
 	_, err = d.GetLeiosEBTxs(hash, slot+1)
 	require.Error(t, err)
+}
+
+// TestGetLeiosEBManifestPropagatesRealLegacyReadError is the cubic
+// regression: a genuine failure reading the legacy fallback key (storage,
+// network, auth) must surface as-is, not collapse into the exact-key's
+// ordinary ErrBlobKeyNotFound and look like the manifest was simply never
+// persisted.
+func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
+	d := openTestDB(t)
+	hash := []byte("0123456789abcdef0123456789abcdef")[:32]
+	slot := uint64(111)
+	readErr := errors.New("legacy read: storage unavailable")
+
+	d.blob = &mockBlobStore{
+		getErrs: map[string]error{
+			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
+		},
+	}
+
+	_, err := d.GetLeiosEBManifest(hash, slot)
+	require.ErrorIs(t, err, readErr)
+	require.NotErrorIs(t, err, types.ErrBlobKeyNotFound)
+}
+
+// TestGetLeiosEBTxsPropagatesRealLegacyReadError is the transaction-body
+// half of the same regression.
+func TestGetLeiosEBTxsPropagatesRealLegacyReadError(t *testing.T) {
+	d := openTestDB(t)
+	hash := []byte("fedcba9876543210fedcba9876543210")[:32]
+	slot := uint64(222)
+	readErr := errors.New("legacy read: storage unavailable")
+
+	d.blob = &mockBlobStore{
+		getErrs: map[string]error{
+			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
+		},
+	}
+
+	_, err := d.GetLeiosEBTxs(hash, slot)
+	require.ErrorIs(t, err, readErr)
+	require.NotErrorIs(t, err, types.ErrBlobKeyNotFound)
 }
 
 func mustCborForLeiosTest(t *testing.T, value any) cbor.RawMessage {
