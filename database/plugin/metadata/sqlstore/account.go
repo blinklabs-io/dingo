@@ -32,6 +32,17 @@ const sqliteAccountColumns = "staking_key, credential_tag, pool, drep, id, " +
 	"added_slot, created_slot, certificate_id, reward, drep_type, active, " +
 	"expiration_epoch"
 
+// prefixedAccountColumns qualifies each column in sqliteAccountColumns with
+// the given table alias, for a query that joins account against a derived
+// table sharing some of the same column names (credential_tag, staking_key).
+func prefixedAccountColumns(alias string) string {
+	cols := strings.Split(sqliteAccountColumns, ", ")
+	for i, col := range cols {
+		cols[i] = alias + "." + col
+	}
+	return strings.Join(cols, ", ")
+}
+
 func (s *Store) CreateAccount(
 	txn types.Txn,
 	account *models.Account,
@@ -303,29 +314,65 @@ func (s *Store) GetAccountsByCredential(
 	if err != nil {
 		return nil, err
 	}
+	// Look refs up via a join against a derived table of literal
+	// (credential_tag, staking_key) rows, not an OR-chain of equality
+	// pairs. A long OR-chain over account's composite unique index
+	// (idx_account_credential) is not reliably turned into per-term index
+	// probes by every planner; at mainnet's ~1.5M-account scale the
+	// OR-chain form measured O(n^2/chunkSize) -- a full table scan per
+	// chunk -- rather than the O(n log n) an indexed join gives. The
+	// derived table uses a UNION ALL of single-row SELECTs rather than a
+	// VALUES(...) table-value constructor because VALUES-as-derived-table
+	// syntax is not portable across the sqlite/postgres/mysql dialects
+	// this package supports (MySQL requires ROW(...) wrapping).
+	columns := prefixedAccountColumns("a")
 	chunkSize := s.dialect.ParameterLimit() / 2
+	accountsByCredentialQuery := func(n int) string {
+		rowSelects := make([]string, n)
+		for i := range rowSelects {
+			rowSelects[i] = "SELECT ? AS credential_tag, ? AS staking_key"
+		}
+		query := "SELECT " + columns + " FROM account a JOIN (" +
+			strings.Join(rowSelects, " UNION ALL ") +
+			") v ON a.credential_tag = v.credential_tag AND a.staking_key = v.staking_key"
+		if !includeInactive {
+			query += " WHERE a.active = TRUE"
+		}
+		return s.dialect.Rebind(query)
+	}
+	// Every chunk but a possibly-short final one shares identical query
+	// text (only the bound args differ), so prepare it once: re-parsing a
+	// chunkSize-way UNION ALL on every one of up to ~3,000 chunks at
+	// mainnet scale is itself a measurable cost next to the indexed join
+	// it now compiles down to.
+	var fullChunkStmt *sql.Stmt
+	if len(refs) > chunkSize {
+		fullChunkStmt, err = db.PrepareContext(
+			ctx,
+			accountsByCredentialQuery(chunkSize),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer fullChunkStmt.Close()
+	}
 	for start := 0; start < len(refs); start += chunkSize {
 		end := min(start+chunkSize, len(refs))
 		chunk := refs[start:end]
-		predicates := make([]string, 0, len(chunk))
 		args := make([]any, 0, len(chunk)*2)
 		for _, ref := range chunk {
-			predicates = append(
-				predicates,
-				"(credential_tag = ? AND staking_key = ?)",
-			)
 			args = append(args, ref.Tag, ref.Key)
 		}
-		query := "SELECT " + sqliteAccountColumns + " FROM account WHERE (" +
-			strings.Join(predicates, " OR ") + ")"
-		if !includeInactive {
-			query += " AND active = TRUE"
+		var rows *sql.Rows
+		if len(chunk) == chunkSize && fullChunkStmt != nil {
+			rows, err = fullChunkStmt.QueryContext(ctx, args...)
+		} else {
+			rows, err = db.QueryContext(
+				ctx,
+				accountsByCredentialQuery(len(chunk)),
+				args...,
+			)
 		}
-		rows, err := db.QueryContext(
-			ctx,
-			s.dialect.Rebind(query),
-			args...,
-		)
 		if err != nil {
 			return nil, err
 		}
