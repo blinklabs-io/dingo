@@ -64,6 +64,86 @@ var inlinePublishingChainMethods = []string{
 	"Rollback",
 }
 
+// callGraphInlineChainPublishers returns the set of functions that reach an
+// inline-publishing chain method (inlinePublishingChainMethods) either by
+// calling it directly as ls.chain.<method> or through any chain of ls.<helper>
+// calls. It is the transitive closure the intra-procedural ls.chain.<method>
+// guard in violations cannot see on its own: a lock holder that reaches
+// ls.chain.Rollback through a helper -- rollbackPrimaryChainInSecurityParamWindows
+// in replay_recovery.go, say -- is just as deadlock-prone as one that calls it
+// directly, since the helper runs inside the caller's held lock.
+//
+// It mirrors the ChainsyncResyncEventType closure in
+// TestChainsyncResyncPublishPathsUnderLock, but ranges over the whole package
+// rather than chainsync.go alone, because the chain-method publishers and the
+// recovery helpers that reach them are spread across several files. The call
+// graph follows ls.<method> receivers only, matching the rest of this file;
+// a publish reached through a stored func value or a non-ls receiver is
+// outside its fidelity, exactly as it is for the resync scan.
+func callGraphInlineChainPublishers(files []*ast.File) map[string]bool {
+	directPublisher := map[string]bool{}
+	callees := map[string]map[string]bool{}
+	var order []string
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			name := fn.Name.Name
+			if _, seen := callees[name]; !seen {
+				order = append(order, name)
+				callees[name] = map[string]bool{}
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				// ls.chain.<inlineMethod>(...): a direct inline publish.
+				if inner, ok := sel.X.(*ast.SelectorExpr); ok {
+					if id, ok := inner.X.(*ast.Ident); ok &&
+						id.Name == "ls" && inner.Sel.Name == "chain" &&
+						slices.Contains(
+							inlinePublishingChainMethods, sel.Sel.Name,
+						) {
+						directPublisher[name] = true
+					}
+				}
+				// ls.<method>(...): an intra-package call edge.
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "ls" {
+					callees[name][sel.Sel.Name] = true
+				}
+				return true
+			})
+		}
+	}
+
+	reaches := map[string]bool{}
+	for name := range directPublisher {
+		reaches[name] = true
+	}
+	// Fixed point: |order| passes suffice, one edge relaxed per pass.
+	for range order {
+		for name, cs := range callees {
+			if reaches[name] {
+				continue
+			}
+			for c := range cs {
+				if reaches[c] {
+					reaches[name] = true
+					break
+				}
+			}
+		}
+	}
+	return reaches
+}
+
 // knownNilQueuePublishersUnderLock is intentionally empty. A guarded caller
 // must always pass its pending queue; a nil queue would publish inline.
 //
@@ -106,10 +186,18 @@ var knownNilQueuePublishersUnderLock []string
 // Queue the event with pendingPublishes and flush it after the unlock
 // instead.
 //
-// The check is intra-procedural, which is not the whole story: a lock
-// holder can also reach a publish through a helper. Those paths are
-// enumerated by TestChainsyncResyncPublishPathsUnderLock rather than left
-// to be assumed safe.
+// The direct EventBus.Publish check is intra-procedural, which is not the
+// whole story: a lock holder can also reach such a publish through a helper.
+// Those paths are enumerated by TestChainsyncResyncPublishPathsUnderLock
+// rather than left to be assumed safe.
+//
+// The ls.chain.<method> check gets the same transitive treatment here, and
+// for the same reason: a lock holder that never names an inline-publishing
+// chain method itself but reaches one through a helper (e.g. ls.chain.Rollback
+// via rollbackPrimaryChainInSecurityParamWindows) is still holding the lock
+// across the publish. callGraphInlineChainPublishers computes that closure and
+// violations treats a call to any member as a publish, so source order still
+// decides whether the lock is actually held at the call site.
 func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -138,6 +226,11 @@ func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
 		"no *pendingPublishes parameter found anywhere in the package;"+
 			" the nil-queue check would silently pass on everything")
 
+	transitivePublishers := callGraphInlineChainPublishers(files)
+	require.NotEmpty(t, transitivePublishers,
+		"no function reaches an inline-publishing chain method; the"+
+			" transitive ls.chain.<method> guard would pass on everything")
+
 	checked := 0
 	seenKnown := map[string]bool{}
 	for _, file := range files {
@@ -147,7 +240,7 @@ func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
 				return true
 			}
 			checked++
-			for _, v := range violations(fn, queueParam) {
+			for _, v := range violations(fn, queueParam, transitivePublishers) {
 				if slices.Contains(
 					knownNilQueuePublishersUnderLock, fn.Name.Name,
 				) {
@@ -255,7 +348,11 @@ type lockEvent struct {
 // release it around a specific region. A deferred unlock keeps the mutex
 // held to the end of the function, which is what makes a publish anywhere
 // after the Lock unsafe.
-func violations(fn *ast.FuncDecl, queueParam map[string]int) []violation {
+func violations(
+	fn *ast.FuncDecl,
+	queueParam map[string]int,
+	transitivePublishers map[string]bool,
+) []violation {
 	deferred := map[token.Pos]bool{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if d, ok := n.(*ast.DeferStmt); ok && d.Call != nil {
@@ -278,6 +375,24 @@ func violations(fn *ast.FuncDecl, queueParam map[string]int) []violation {
 		// is ls.method(...), whose receiver is a plain identifier, not a
 		// selector like ls.config.EventBus.
 		if nilQueueCall(call, sel, queueParam) {
+			events = append(events, lockEvent{
+				pos: call.Pos(), kind: "publish",
+			})
+			return true
+		}
+		// ls.<helper>(...) where the helper reaches an inline-publishing
+		// chain method directly or transitively (see
+		// callGraphInlineChainPublishers). This is the transitive extension of
+		// the ls.chain.<method> case below: a direct ls.chain.Rollback is
+		// caught there, a call that only reaches the publish through a helper
+		// is caught here. It is emitted at the call site, so the same source
+		// order tracking decides whether a guarded mutex is actually held --
+		// a helper call made before the Lock, like
+		// rejectRecoveryAtMithrilBoundary's rollback, is correctly not a
+		// violation. The receiver is a plain ls identifier, so this is
+		// checked before the ls.<x>.<y> assertion below, like nilQueueCall.
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "ls" &&
+			transitivePublishers[sel.Sel.Name] {
 			events = append(events, lockEvent{
 				pos: call.Pos(), kind: "publish",
 			})
