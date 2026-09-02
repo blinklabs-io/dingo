@@ -111,7 +111,15 @@ func isRoutableAddr(address string) bool {
 //
 // RFC 6598 shared address space is the one that matters: a carrier routes it
 // internally, so dialing an advertised 100.64.0.0/10 address can reach another
-// subscriber's host rather than failing. The rest reach nothing at all.
+// subscriber's host rather than failing.
+//
+// The others are rejected as whole blocks. That is deliberate rather than an
+// assumption that every address in them is dark: IANA marks two /32s inside
+// 192.0.0.0/24 as globally reachable — 192.0.0.9 (Port Control Protocol
+// anycast, RFC 7723) and 192.0.0.10 (TURN anycast, RFC 8155). Neither is a
+// Cardano relay, so a peer offering one is misconfigured or probing, and the
+// block is rejected whole rather than carved up for two anycast services we
+// would never dial.
 //
 // RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are absent, tracked in
 // #3792. They are not routed either, so a peer advertising one costs a failed

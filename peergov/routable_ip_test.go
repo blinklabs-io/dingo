@@ -53,6 +53,11 @@ func TestIsRoutableIP(t *testing.T) {
 		{"ipv4 cgnat shared space", "100.64.0.1", false},
 		{"ipv4 cgnat upper bound", "100.127.255.255", false},
 		{"ipv4 ietf protocol assignments", "192.0.0.1", false},
+		// Rejected with the rest of the block although IANA marks these two
+		// as globally reachable: PCP anycast (RFC 7723) and TURN anycast
+		// (RFC 8155) are never Cardano relays.
+		{"ipv4 pcp anycast", "192.0.0.9", false},
+		{"ipv4 turn anycast", "192.0.0.10", false},
 		{"ipv4 benchmarking", "198.18.0.1", false},
 		{"ipv4 reserved future use", "240.0.0.1", false},
 		{"ipv4 broadcast", "255.255.255.255", false},
