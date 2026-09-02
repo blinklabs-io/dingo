@@ -1590,6 +1590,23 @@ otherwise join against the same account twice -- harmless for this
 map-keyed result on its own, but wasted derived-table rows and chunk
 capacity for a caller that passes duplicates.
 
+### `SaveRewardAccountOutputs` ID resolution
+
+Resolving the generated IDs after a multi-row upsert into
+`reward_account_output` (multi-row upserts do not expose all generated IDs
+portably) uses the same derived-table join as `GetAccountsByCredential`
+above, not an OR-chain of five-way
+`(epoch = ? AND credential_tag = ? AND staking_key = ? AND pool_key_hash = ?
+AND reward_type = ?)` predicates: `idx_reward_account_output_epoch_cred_pool_type`
+exists on exactly these five columns, but the same SQLite planner limitation
+applies -- a long OR-chain over it is not reliably compiled into per-term
+index seeks, and this runs on every epoch boundary for every account earning
+a reward. On PostgreSQL the derived-table row selects cast `epoch`/
+`credential_tag` to `BIGINT` and `staking_key`/`pool_key_hash` to `BYTEA`
+for the same reason as `GetAccountsByCredential`'s cast; `reward_type`
+(`VARCHAR`) needs none, since Postgres's untyped-parameter default of
+`text` already matches it.
+
 ### `GetTransactionsByAddress` and `CountTransactionsByAddress`
 
 Recent transactions for an address key pair:
