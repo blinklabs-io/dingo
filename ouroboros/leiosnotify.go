@@ -616,7 +616,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// txs-offer below. Failures are best-effort: a transient manifest fetch
 		// error must not tear down the shared connection.
 		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
-			reqCtx, cancel := leiosFetchRequestContext(time.Time{})
+			reqCtx, cancel := leiosFetchRequestContext(
+				context.Background(),
+				time.Time{},
+			)
 			blockRaw, err := fetchAndValidateLeiosEbManifest(
 				reqCtx,
 				client,
@@ -705,7 +708,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			if !ok {
 				// Manifest not cached yet (txs offered before/without a block
 				// offer): fetch the manifest first to learn the tx count.
-				reqCtx, cancel := leiosFetchRequestContext(time.Time{})
+				reqCtx, cancel := leiosFetchRequestContext(
+					context.Background(),
+					time.Time{},
+				)
 				resp, err := client.BlockRequest(reqCtx, point)
 				cancel()
 				if err != nil {
@@ -952,6 +958,33 @@ type leiosFetchGuard struct {
 	// block over never-tried ones (see recentlySucceeded). markFetchOK sets it;
 	// markFetchFailed clears it so a now-flaky connection loses the preference.
 	lastOKNano atomic.Int64
+	// protocolDead records that this connection's leios-fetch mini-protocol can
+	// no longer complete a request for the rest of the connection's life. The
+	// gouroboros client's request slot stays busy-and-abandoned once a request's
+	// context expires before the peer answers, and only the late response (or
+	// protocol shutdown) can drain it, so every later request on the same bearer
+	// returns ErrRequestSlotAbandoned after its grace period. A cooldown cannot
+	// repair that -- the connection has to be replaced -- so a dead connection is
+	// ordered last and recycled (dingo #3552).
+	protocolDead atomic.Bool
+	// recycleRequested records that a recycle has already been published for this
+	// connection, so a burst of failing fetches raises one request rather than one
+	// per fetch.
+	recycleRequested atomic.Bool
+}
+
+// markProtocolDead records that this connection's leios-fetch protocol can no
+// longer complete a request. It returns true the first time it is called for a
+// connection, so the caller publishes exactly one recycle request.
+func (g *leiosFetchGuard) markProtocolDead() bool {
+	g.protocolDead.Store(true)
+	return g.recycleRequested.CompareAndSwap(false, true)
+}
+
+// isProtocolDead reports whether this connection's leios-fetch protocol has
+// been diagnosed as unable to complete any further request.
+func (g *leiosFetchGuard) isProtocolDead() bool {
+	return g.protocolDead.Load()
 }
 
 // markFetchFailed puts this connection on a cooldown after a failed or
@@ -1091,6 +1124,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 		}
 	}
 	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		context.Background(),
 		client,
 		point,
 		txCount,
@@ -1111,6 +1145,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 // parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
 // disables the bound, preserving the tip-path behavior.
 func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
+	ctx context.Context,
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
@@ -1126,6 +1161,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 		}
 	}
 	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		ctx,
 		client,
 		point,
 		txCount,
@@ -1135,12 +1171,16 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 }
 
 func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
+	ctx context.Context,
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
 	deadline time.Time,
 	validate func(int, cbor.RawMessage) error,
 ) ([]cbor.RawMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if client == nil {
 		return nil, errors.New("leios-fetch client unavailable")
 	}
@@ -1190,6 +1230,15 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 		if len(needed) == 0 {
 			break // every transaction fetched
 		}
+		if err := ctx.Err(); err != nil {
+			got := leiosCollectTxs(result)
+			return got, fmt.Errorf(
+				"leios-fetch attempt cancelled after %d/%d transactions: %w",
+				len(got),
+				txCount,
+				err,
+			)
+		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			got := leiosCollectTxs(result)
 			return got, fmt.Errorf(
@@ -1205,7 +1254,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				round,
 			)
 		}
-		reqCtx, cancel := leiosFetchRequestContext(deadline)
+		reqCtx, cancel := leiosFetchRequestContext(ctx, deadline)
 		resp, err := client.BlockTxsRequest(reqCtx, point, needed)
 		cancel()
 		if err != nil {
@@ -1259,7 +1308,12 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 					"leios-fetch served no new transactions within tail budget",
 				)
 			}
-			time.Sleep(leiosTxFetchTailPoll)
+			timer := time.NewTimer(leiosTxFetchTailPoll)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+			}
 			continue
 		}
 		tailStall = time.Time{}

@@ -481,12 +481,27 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			errCertifiedEndorserBlockUnavailable,
 		)
 	}
+	// fetchErrs carries the last by-point fetch error per endorser block so an
+	// unavailable certified closure reports WHY it is unavailable. Without it the
+	// only field evidence for a wedged pipeline was the bare
+	// "certified Leios endorser block unavailable" line -- the fetch failures
+	// were logged at Debug and dropped in production (dingo #3552).
+	fetchErrs := make(map[string]error, len(required))
 	ensureRequiredAvailable := func() error {
 		for _, r := range required {
 			if _, _, ok := ls.config.EndorserBlockProvider(
 				r.hash.Bytes(),
 			); ok {
 				continue
+			}
+			if fetchErr := fetchErrs[string(r.hash.Bytes())]; fetchErr != nil {
+				return fmt.Errorf(
+					"%w: slot %d, EB %s: last fetch attempt: %w",
+					errCertifiedEndorserBlockUnavailable,
+					r.slot,
+					r.hash.String(),
+					fetchErr,
+				)
 			}
 			return fmt.Errorf(
 				"%w: slot %d, EB %s",
@@ -498,10 +513,35 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		return nil
 	}
 
+	// fetchMissingRequired makes a bounded, retried by-point fetch of every
+	// mandatory certified endorser block that is still unavailable. It is the
+	// last-resort recovery step on every path that can reach
+	// ensureRequiredAvailable, including the two early returns below: a
+	// certified closure is mandatory whether or not the best-effort
+	// announcement window is configured, and returning "unavailable" without
+	// having tried to fetch it is what left the pipeline restarting on an
+	// endorser block nobody had asked any peer for (dingo #3552).
+	fetchMissingRequired := func(poll time.Duration) {
+		if !certDrivenHistorical || ls.leiosBackfill == nil {
+			return
+		}
+		for _, r := range required {
+			if _, _, ok := ls.config.EndorserBlockProvider(
+				r.hash.Bytes(),
+			); ok {
+				continue
+			}
+			if err := ls.leiosBackfill.fetchRequired(ctx, r, poll); err != nil {
+				fetchErrs[string(r.hash.Bytes())] = err
+			}
+		}
+	}
+
 	// A zero wait disables best-effort announcement waiting, but a certified
 	// Musashi closure remains mandatory: committing its CertRB without the
 	// closure would permanently omit transaction and certificate effects.
 	if ls.config.EndorserBlockWaitSlots == 0 {
+		fetchMissingRequired(leiosCertifiedFetchPoll)
 		return ensureRequiredAvailable()
 	}
 	slotLen := ls.shelleySlotLength()
@@ -509,6 +549,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		// Without a known slot length the slot-denominated diffusion window
 		// cannot be converted to wall-clock. Best-effort announcements may
 		// still be skipped, but a certified closure must not be.
+		fetchMissingRequired(leiosCertifiedFetchPoll)
 		return ensureRequiredAvailable()
 	}
 	//nolint:gosec // EndorserBlockWaitSlots is a small protocol window
@@ -533,21 +574,25 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		certDrivenHistorical,
 		cached,
 	)
-	// Historical backlog: ensure a by-point fetch is in flight for each
-	// referenced endorser block (prefetchBatchEndorserBlocks has usually already
-	// started them for the whole read batch), then wait for it to land in the
-	// cache. The fetches run concurrently in the background pool; the waits below
-	// are mostly cache hits, so this does not serialize catch-up on fetch latency
-	// the way a per-chunk barrier did.
+	// Historical backlog: start a by-point fetch for each referenced endorser
+	// block, then wait for it to land in the cache. The fetches run concurrently
+	// in the background pool, so this does not serialize catch-up on fetch
+	// latency the way a per-chunk barrier did.
 	if len(backfill) > 0 && ls.leiosBackfill != nil {
 		for _, r := range backfill {
-			ls.leiosBackfill.spawn(r)
+			ls.leiosBackfill.spawn(ctx, r)
 		}
-		for _, r := range backfill {
-			if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); ok {
-				continue
+		if !certDrivenHistorical {
+			// CIP path: every referenced endorser block is best-effort, so wait
+			// for whatever the spawned fetches land and move on.
+			for _, r := range backfill {
+				if _, _, ok := ls.config.EndorserBlockProvider(
+					r.hash.Bytes(),
+				); ok {
+					continue
+				}
+				ls.leiosBackfill.awaitFetch(ctx, r, poll)
 			}
-			ls.leiosBackfill.awaitFetch(ctx, r, poll)
 		}
 	}
 	for _, r := range tipWait {
@@ -560,6 +605,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		}
 		if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); !ok {
 			if err := ls.config.EndorserBlockFetcher(
+				ctx,
 				r.slot,
 				r.hash.Bytes(),
 			); err != nil {
@@ -573,6 +619,15 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			}
 		}
 	}
+	// Musashi path: a certified closure is mandatory, so each required endorser
+	// block still missing after the diffusion waits gets a bounded retry across
+	// the connected peers rather than the single attempt per pipeline restart it
+	// used to get. awaitFetch returns as soon as the in-flight marker clears,
+	// which a fetch skipped as "connection busy" does within microseconds -- so
+	// before this the pipeline aborted the chunk, restarted, re-read and
+	// re-decoded the batch, and made at most one endorser block of progress per
+	// restart, or none at all when every connection was unusable (dingo #3552).
+	fetchMissingRequired(poll)
 	return ensureRequiredAvailable()
 }
 
@@ -846,9 +901,13 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 
 // spawn starts a background by-point fetch of the endorser block referenced by
 // r unless it is already cached or a fetch is already in flight. It returns
-// immediately. Deduping by hash means the read-batch prefetch and the per-chunk
-// gate never fetch the same endorser block twice.
-func (b *leiosBackfiller) spawn(r leiosEbRef) {
+// immediately. Deduping by hash means overlapping callers never fetch the same
+// endorser block twice.
+//
+// ctx bounds the spawned fetch: it is the block-processing context, so a
+// shutdown or a pipeline restart stops the fetch instead of leaving it running
+// against a connection the node is tearing down.
+func (b *leiosBackfiller) spawn(ctx context.Context, r leiosEbRef) {
 	key := string(r.hash.Bytes())
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		return
@@ -858,7 +917,12 @@ func (b *leiosBackfiller) spawn(r leiosEbRef) {
 		return
 	}
 	go func() {
-		b.sem <- struct{}{}
+		select {
+		case b.sem <- struct{}{}:
+		case <-ctx.Done():
+			b.inflight.Delete(key)
+			return
+		}
 		defer func() {
 			<-b.sem
 			b.inflight.Delete(key)
@@ -866,7 +930,9 @@ func (b *leiosBackfiller) spawn(r leiosEbRef) {
 		if _, _, ok := b.provider(r.hash.Bytes()); ok {
 			return
 		}
-		if err := b.fetch(r.slot, r.hash.Bytes()); err != nil {
+		fetchCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
+		defer cancel()
+		if err := b.fetch(fetchCtx, r.slot, r.hash.Bytes()); err != nil {
 			b.logger.Debug(
 				"leios endorser block backfill failed",
 				"component", "ledger",
@@ -876,6 +942,138 @@ func (b *leiosBackfiller) spawn(r leiosEbRef) {
 			)
 		}
 	}()
+}
+
+// leiosCertifiedFetchAttempts bounds how many by-point fetch attempts one
+// block-processing pass spends on a single mandatory certified endorser block
+// before it gives up and fails the chunk. Each attempt is itself a failover
+// sweep across every leios-fetch connection, so this bounds retries of the whole
+// peer set, not retries of one peer. It is small because the attempts share one
+// leiosBackfillMaxWait budget: the point is to survive a connection that was
+// momentarily busy or has just been recycled, not to grind on peers that do not
+// hold the block.
+const leiosCertifiedFetchAttempts = 4
+
+// leiosCertifiedFetchRetryBase and leiosCertifiedFetchRetryMax bound the gap
+// between those attempts. The gap escalates so a fetch that fails instantly
+// (every connection busy, or no connection at all) does not spin, while a
+// recycled connection has time to be redialled before the next sweep.
+const (
+	leiosCertifiedFetchRetryBase = 250 * time.Millisecond
+	leiosCertifiedFetchRetryMax  = 4 * time.Second
+)
+
+// leiosCertifiedFetchPoll is the cache re-check cadence used when no
+// slot-derived polling granularity is available (the best-effort announcement
+// window is disabled, or the Shelley slot length is unknown). It only affects
+// how quickly a fetch already in flight for the same endorser block is noticed
+// to have landed.
+const leiosCertifiedFetchPoll = 10 * time.Millisecond
+
+// fetchRequired obtains a mandatory certified endorser block, retrying the
+// by-point fetch a bounded number of times within one leiosBackfillMaxWait
+// budget. It returns nil as soon as the endorser block is available to the
+// provider, and otherwise the last fetch error so the caller can report why the
+// certified closure could not be completed.
+//
+// This is the ledger-side half of the recovery path: FetchEndorserBlockByPoint
+// fails over across peers within one attempt (and recycles a connection whose
+// leios-fetch protocol is dead), while this retries that sweep so a transient
+// outcome -- every connection busy serving another endorser block, or a
+// replacement connection still being dialled -- does not abort the chunk and
+// force a whole pipeline restart to make one endorser block of progress.
+//
+// It holds no lock and opens no database transaction, so it cannot invert with
+// the block-apply write path it runs ahead of.
+func (b *leiosBackfiller) fetchRequired(
+	ctx context.Context,
+	r leiosEbRef,
+	poll time.Duration,
+) error {
+	budgetCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
+	defer cancel()
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		if _, _, ok := b.provider(r.hash.Bytes()); ok {
+			return nil
+		}
+		if err := b.fetchOnce(budgetCtx, r, poll); err != nil {
+			lastErr = err
+		}
+		if _, _, ok := b.provider(r.hash.Bytes()); ok {
+			return nil
+		}
+		if attempt >= leiosCertifiedFetchAttempts {
+			break
+		}
+		//nolint:gosec // attempt is bounded by leiosCertifiedFetchAttempts
+		delay := min(
+			leiosCertifiedFetchRetryBase<<uint(attempt-1),
+			leiosCertifiedFetchRetryMax,
+		)
+		timer := time.NewTimer(delay)
+		select {
+		case <-budgetCtx.Done():
+			timer.Stop()
+			if lastErr == nil {
+				lastErr = budgetCtx.Err()
+			}
+			b.logger.Warn(
+				"certified leios endorser block fetch budget elapsed",
+				"component", "ledger",
+				"slot", r.slot,
+				"eb_hash", r.hash.String(),
+				"attempts", attempt,
+				"error", lastErr,
+			)
+			return lastErr
+		case <-timer.C:
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("certified endorser block fetch made no progress")
+	}
+	// Warn, not Debug: this is the evidence an operator needs to tell a peer
+	// that does not hold the endorser block from one whose leios-fetch protocol
+	// is broken, and it was previously logged at Debug and lost.
+	b.logger.Warn(
+		"certified leios endorser block still unavailable after bounded retry",
+		"component", "ledger",
+		"slot", r.slot,
+		"eb_hash", r.hash.String(),
+		"attempts", leiosCertifiedFetchAttempts,
+		"error", lastErr,
+	)
+	return lastErr
+}
+
+// fetchOnce runs one by-point fetch attempt for r, or waits for an equivalent
+// fetch another caller already has in flight. Deduping by hash keeps a single
+// fetch per endorser block; the waiting branch is why a required endorser block
+// already being fetched by the best-effort spawn above is not fetched twice.
+func (b *leiosBackfiller) fetchOnce(
+	ctx context.Context,
+	r leiosEbRef,
+	poll time.Duration,
+) error {
+	key := string(r.hash.Bytes())
+	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
+		// Another fetch for this endorser block is in flight; wait for it
+		// rather than starting a second one on the same connections.
+		b.awaitFetch(ctx, r, poll)
+		return nil
+	}
+	defer b.inflight.Delete(key)
+	select {
+	case b.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-b.sem }()
+	if _, _, ok := b.provider(r.hash.Bytes()); ok {
+		return nil
+	}
+	return b.fetch(ctx, r.slot, r.hash.Bytes())
 }
 
 // waitForEndorserBlock polls the EndorserBlockProvider until the endorser block

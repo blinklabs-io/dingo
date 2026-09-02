@@ -21,28 +21,43 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 )
 
 // leiosFetchRequestContext returns a context bounding a single leios-fetch
-// client request. gouroboros no longer applies a protocol-level timeout to the
-// block and block-txs states, because a timeout there fires SendError and
-// tears down the whole multiplexed connection (killing the chainsync/blockfetch
-// on the same bearer). Each request must therefore carry its own deadline. When
-// an attempt deadline is set (the by-point backfill path) the request is bounded
+// client request, derived from parent so a cancelled caller (shutdown, or a
+// backfill whose ledger-side budget has elapsed) does not leave a request
+// parked. gouroboros no longer applies a protocol-level timeout to the block
+// and block-txs states, because a timeout there fires SendError and tears down
+// the whole multiplexed connection (killing the chainsync/blockfetch on the
+// same bearer). Each request must therefore carry its own deadline. When an
+// attempt deadline is set (the by-point backfill path) the request is bounded
 // by it; otherwise (tip-driven fetches) it falls back to
 // leiosFetchResponseTimeout. On expiry the request returns a normal error and
 // the caller fails over to another peer, leaving the shared connection intact.
+//
+// Expiry is not free: the gouroboros client abandons its request slot, which
+// stays busy until the peer's late response drains it, so every later request
+// on that connection reports ErrRequestSlotAbandoned. That is why the backfill
+// classifies an abandoned slot as a dead connection rather than a cooldown
+// (see classifyLeiosFetchFailure).
 func leiosFetchRequestContext(
+	parent context.Context,
 	deadline time.Time,
 ) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	if !deadline.IsZero() {
-		return context.WithDeadline(context.Background(), deadline)
+		return context.WithDeadline(parent, deadline)
 	}
 	return context.WithTimeout(
-		context.Background(),
+		parent,
 		leiosFetchResponseTimeout,
 	)
 }
@@ -83,9 +98,108 @@ const leiosBackfillConnCooldownMaxShift = 5
 // cut short.
 const leiosBackfillPerAttemptTimeout = 30 * time.Second
 
+// leiosBackfillTotalBudget bounds one FetchEndorserBlockByPoint call when the
+// caller supplies no deadline of its own. It matches the ledger-side
+// leiosBackfillMaxWait so a caller that waits for this fetch and a caller that
+// bounds it agree on how long a single by-point fetch may run.
+const leiosBackfillTotalBudget = 2 * time.Minute
+
+// leiosBackfillConnDeclineCooldown is the cooldown for a peer that answered a
+// by-point request promptly and correctly with a typed decline (MsgNoBlock /
+// MsgNoBlockTxs). Such a peer is healthy, it simply does not hold this endorser
+// block, so it is only briefly deprioritized -- it must stay a candidate for
+// every other endorser block. Contrast leiosBackfillConnCooldown, which is for a
+// peer that stalled or served wrong bytes.
+const leiosBackfillConnDeclineCooldown = 2 * time.Second
+
 var errLeiosBackfillConnBusy = errors.New(
 	"leios backfill: connection fetch already in progress",
 )
+
+// errLeiosEndorserBlockDeclinedByAllPeers wraps the failure of a by-point fetch
+// in which every attempted leios-fetch peer answered with a typed decline. It
+// distinguishes "no connected peer holds this endorser block" (the network has
+// the data or it is genuinely gone; retrying sooner will not help) from "our
+// connections are stalling or broken", which is what the ledger's certified
+// closure error otherwise looks like in a field log.
+var errLeiosEndorserBlockDeclinedByAllPeers = errors.New(
+	"leios backfill: endorser block declined by every leios-fetch peer",
+)
+
+// leiosFetchFailureClass is how a failed by-point fetch attempt on one
+// connection is classified. dingo previously folded every outcome into one
+// undifferentiated error with one cooldown, which meant a momentarily busy
+// connection, a peer that does not hold the block, and a connection whose
+// leios-fetch protocol can never answer again were all treated identically --
+// so the one case that needs the connection replaced instead got a cooldown and
+// was retried forever (dingo #3552).
+type leiosFetchFailureClass int
+
+const (
+	// leiosFetchFailureNone is a successful attempt.
+	leiosFetchFailureNone leiosFetchFailureClass = iota
+	// leiosFetchFailureBusy means another fetch held this connection's guard.
+	// Not a peer fault and not even an attempt: no cooldown, no failover
+	// weight, and the connection stays a first-class candidate.
+	leiosFetchFailureBusy
+	// leiosFetchFailureDeclined means the peer answered promptly with a typed
+	// decline: it does not hold this endorser block. The peer is healthy.
+	leiosFetchFailureDeclined
+	// leiosFetchFailureDead means this connection's leios-fetch protocol cannot
+	// complete any further request. The gouroboros client's request slot is
+	// left busy-and-abandoned when a request's context expires before the peer
+	// answers, and only that late response can drain it, so every subsequent
+	// request returns ErrRequestSlotAbandoned. No cooldown can repair it: the
+	// connection must be replaced.
+	leiosFetchFailureDead
+	// leiosFetchFailureTransient is everything else -- a stalled peer, a
+	// deadline overrun, wrong or incomplete bytes. Escalating cooldown, retry
+	// later.
+	leiosFetchFailureTransient
+)
+
+// classifyLeiosFetchFailure maps a by-point fetch attempt's error to the
+// failover weight it deserves.
+func classifyLeiosFetchFailure(err error) leiosFetchFailureClass {
+	switch {
+	case err == nil:
+		return leiosFetchFailureNone
+	case errors.Is(err, errLeiosBackfillConnBusy):
+		return leiosFetchFailureBusy
+	case errors.Is(err, oleiosfetch.ErrRequestSlotAbandoned),
+		errors.Is(err, protocol.ErrProtocolShuttingDown):
+		return leiosFetchFailureDead
+	case errors.Is(err, oleiosfetch.ErrBlockNotFound),
+		errors.Is(err, oleiosfetch.ErrBlockTxsNotFound):
+		return leiosFetchFailureDeclined
+	default:
+		return leiosFetchFailureTransient
+	}
+}
+
+// leiosBackfillAttemptBudget divides the remaining fetch budget across the
+// connections still to be tried. Splitting it means a multi-peer failover still
+// bounds each peer at leiosBackfillPerAttemptTimeout (issue #2819), while the
+// last remaining candidate -- the normal case on a topology with a single Leios
+// relay -- gets the whole remainder instead of having its only attempt truncated
+// at 30s with nothing to fail over to, which is what turned a slow relay into a
+// permanent wedge (dingo #3552).
+func leiosBackfillAttemptBudget(
+	remaining time.Duration,
+	candidatesLeft int,
+) time.Duration {
+	if remaining <= 0 {
+		return 0
+	}
+	if candidatesLeft < 1 {
+		candidatesLeft = 1
+	}
+	share := remaining / time.Duration(candidatesLeft)
+	if share < leiosBackfillPerAttemptTimeout {
+		share = leiosBackfillPerAttemptTimeout
+	}
+	return min(share, remaining)
+}
 
 // leiosBackfillAffinityWindow is how recently a connection must have served a
 // backfill fetch to be preferred (positive peer affinity) over never-tried
@@ -107,10 +221,35 @@ const leiosBackfillAffinityWindow = 2 * time.Minute
 // the endorser-resident outputs of older ranking blocks during catch-up rather
 // than leaving the UTxO set incomplete and trusting the chain. It satisfies
 // ledger.EndorserBlockFetcherFunc.
+//
+// ctx bounds the whole call: every connection attempt, and the gap between
+// them, come out of one budget (the caller's deadline, or
+// leiosBackfillTotalBudget when it has none), so a caller that also waits for
+// the result cannot be outlived by the fetch it started.
+//
+// Each attempt's outcome is classified (classifyLeiosFetchFailure) rather than
+// folded into one cooldown:
+//
+//   - busy: another fetch holds this connection's guard. Not an attempt; the
+//     connection keeps its place and its budget share is not consumed.
+//   - declined: the peer answered with MsgNoBlock/MsgNoBlockTxs. Healthy peer,
+//     brief cooldown. If every attempted peer declines, the returned error
+//     wraps errLeiosEndorserBlockDeclinedByAllPeers so the ledger can say "no
+//     connected peer holds this endorser block" instead of reporting an
+//     undiagnosed unavailability.
+//   - dead: this connection's leios-fetch request slot is permanently
+//     abandoned. A cooldown cannot repair it, so the connection is recycled
+//     (one request per connection) and ordered last; the replacement dialled by
+//     peer governance is what makes failover real (dingo #3552).
+//   - transient: escalating per-connection cooldown, as before.
 func (o *Ouroboros) FetchEndorserBlockByPoint(
+	ctx context.Context,
 	ebSlot uint64,
 	ebHash []byte,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
 		data.completeTxCache() {
 		return nil
@@ -122,14 +261,19 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if len(connIds) == 0 {
 		return errors.New("leios backfill: no leios-fetch connection available")
 	}
+	overall, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		overall = time.Now().Add(leiosBackfillTotalBudget)
+	}
 	point := ocommon.Point{Slot: ebSlot, Hash: ebHash}
 	//nolint:gosec // bounded by len(connIds), so it fits in int
 	start := int(leiosBackfillConnCursor.Add(1) % uint64(len(connIds)))
 	// Order the connections for this attempt: recently-successful ones first
 	// (positive affinity), then other healthy ones, then ones cooling down from a
-	// recent failed fetch, each partition kept in round-robin order so concurrent
-	// backfills still spread. A cooled connection is still eventually tried, so a
-	// transiently-flaky one is skipped, not starved.
+	// recent failed fetch, then ones whose leios-fetch protocol is dead, each
+	// partition kept in round-robin order so concurrent backfills still spread. A
+	// cooled or dead connection is still eventually tried, so a transiently-flaky
+	// one is skipped, not starved.
 	order := leiosBackfillConnOrder(
 		connIds,
 		start,
@@ -138,11 +282,31 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		o.leiosFetchGuardFor,
 	)
 	var lastErr error
+	attempted := 0
+	declined := 0
+	remainingCandidates := len(order)
 	for _, connId := range order {
+		remainingCandidates--
+		if err := ctx.Err(); err != nil {
+			if lastErr == nil {
+				lastErr = err
+			}
+			break
+		}
 		conn := o.connManager.GetConnectionById(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
+		}
+		budget := leiosBackfillAttemptBudget(
+			time.Until(overall),
+			remainingCandidates+1,
+		)
+		if budget <= 0 {
+			if lastErr == nil {
+				lastErr = errors.New("leios backfill: fetch budget exhausted")
+			}
+			break
 		}
 		// fetchEndorserBlockOnConn records the cooldown outcome
 		// (markFetchFailed/markFetchOK) itself, under the connection's fetch
@@ -150,18 +314,37 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		// their cooldown state in fetch-completion order. Doing it here, after
 		// the guard is released, would let a slow failure's mark land after a
 		// newer success's mark and wrongly cool down a healthy connection.
-		if err := o.fetchEndorserBlockOnConn(
+		err := o.fetchEndorserBlockOnConn(
+			ctx,
 			connId,
 			conn.LeiosFetch().Client,
 			point,
-		); err != nil {
+			budget,
+		)
+		// The recycle request is published here, with the connection's fetch
+		// guard already released, so no lock is held across an event-bus
+		// publish.
+		if classifyLeiosFetchFailure(err) == leiosFetchFailureDead {
+			o.requestLeiosFetchConnRecycle(connId, point, err)
+		}
+		if err != nil {
 			lastErr = err
+			switch classifyLeiosFetchFailure(err) {
+			case leiosFetchFailureBusy:
+				// Not an attempt: the connection was serving another fetch.
+			case leiosFetchFailureDeclined:
+				attempted++
+				declined++
+			default:
+				attempted++
+			}
 			continue
 		}
 		if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
 			data.completeTxCache() {
 			return nil
 		}
+		attempted++
 		lastErr = errors.New(
 			"leios backfill: fetch completed but cache incomplete",
 		)
@@ -169,7 +352,58 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if lastErr == nil {
 		lastErr = errors.New("leios backfill: fetch failed")
 	}
+	if attempted > 0 && declined == attempted {
+		return fmt.Errorf(
+			"%w: %d peer(s): %w",
+			errLeiosEndorserBlockDeclinedByAllPeers,
+			declined,
+			lastErr,
+		)
+	}
 	return lastErr
+}
+
+// requestLeiosFetchConnRecycle asks the connection manager to close a
+// connection whose leios-fetch protocol can no longer answer, so peer
+// governance dials a replacement and the next by-point fetch has a usable
+// bearer. Publishing the ledger-owned recycle event (the node translates it for
+// connmanager) keeps this consistent with the chainsync verification-failure
+// path. Exactly one request is published per connection.
+//
+// Called with no fetch guard held: the guard is released by
+// fetchEndorserBlockOnConn before this runs, so no lock spans the event-bus
+// publish.
+func (o *Ouroboros) requestLeiosFetchConnRecycle(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	cause error,
+) {
+	if !o.leiosFetchGuardFor(connId).markProtocolDead() {
+		return
+	}
+	if o.config.Logger != nil {
+		o.config.Logger.Warn(
+			"recycling connection with an unusable leios-fetch protocol",
+			"component", "network",
+			"protocol", "leios-fetch",
+			"connection_id", connId.String(),
+			"slot", point.Slot,
+			"error", cause,
+		)
+	}
+	if o.eventBus == nil {
+		return
+	}
+	o.eventBus.Publish(
+		ledger.ConnectionRecycleRequestedEventType,
+		event.NewEvent(
+			ledger.ConnectionRecycleRequestedEventType,
+			ledger.ConnectionRecycleRequestedEvent{
+				ConnectionId: connId,
+				Reason:       "leios_fetch_request_slot_abandoned",
+			},
+		),
+	)
 }
 
 // fetchEndorserBlockOnConn fetches the manifest (if not already cached) and all
@@ -178,13 +412,20 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 // never used concurrently with a tip-driven fetch. A connection whose guard is
 // already held is skipped so time queued behind that fetch cannot consume an
 // unbounded amount of the caller's failover window. It records the connection's
-// cooldown outcome (markFetchFailed on error, markFetchOK on success) while the
-// guard is still held, so backfill fetches on the same connection publish their
-// cooldown state in fetch-completion order rather than racing.
+// cooldown outcome while the guard is still held, so backfill fetches on the
+// same connection publish their cooldown state in fetch-completion order rather
+// than racing; which cooldown depends on the failure class
+// (classifyLeiosFetchFailure), so a peer that merely does not hold the block is
+// not penalized like one that stalled.
+//
+// budget bounds this one connection's attempt; the caller allocates it from the
+// whole call's remaining budget.
 func (o *Ouroboros) fetchEndorserBlockOnConn(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	client *oleiosfetch.Client,
 	point ocommon.Point,
+	budget time.Duration,
 ) (err error) {
 	g := o.leiosFetchGuardFor(connId)
 	// The strict leios-fetch client cannot accept a second request while a
@@ -202,19 +443,34 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	// moves on to the next connection. Busy connections are skipped above, so the
 	// deadline can cover only serving time without leaving lock acquisition
 	// unbounded.
-	deadline := time.Now().Add(leiosBackfillPerAttemptTimeout)
+	deadline := time.Now().Add(budget)
 	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
 	// published while the guard is still held and stays ordered with the fetch.
 	defer func() {
-		if err != nil {
-			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
-		} else {
+		switch classifyLeiosFetchFailure(err) {
+		case leiosFetchFailureNone:
 			g.markFetchOK()
+		case leiosFetchFailureDeclined:
+			// The peer answered correctly and simply does not hold this block;
+			// keep it a candidate for every other endorser block.
+			g.markFetchFailed(
+				time.Now(),
+				leiosBackfillConnDeclineCooldown,
+			)
+		case leiosFetchFailureDead:
+			// The cooldown is immaterial (the connection is being recycled) but
+			// it keeps this connection last in the ordering until it is gone.
+			g.markFetchFailed(
+				time.Now(),
+				leiosBackfillConnCooldownMax,
+			)
+		default:
+			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
 		}
 	}()
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
-		reqCtx, cancel := leiosFetchRequestContext(deadline)
+		reqCtx, cancel := leiosFetchRequestContext(ctx, deadline)
 		resp, err := client.BlockRequest(reqCtx, point)
 		cancel()
 		if err != nil {
@@ -242,6 +498,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		return nil
 	}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
+		ctx,
 		client,
 		point,
 		data.txCount,
@@ -268,7 +525,11 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 // leiosBackfillConnOrder orders connIds for a by-point backfill attempt.
 // Connections that recently served an endorser block (positive affinity) come
 // first, then other healthy connections, then connections cooling down from a
-// recent failed fetch. Each partition preserves the round-robin order starting
+// recent failed fetch, then connections whose leios-fetch protocol has been
+// diagnosed dead (their request slot is permanently abandoned, so an attempt can
+// only burn the caller's grace period; they are still last-resort candidates
+// rather than excluded, so a misdiagnosis cannot black out the backfill).
+// Each partition preserves the round-robin order starting
 // at start, so concurrent backfills still spread across proven peers rather than
 // all hammering the single most-recent one (the prototype relay returns empty
 // manifests / resets when hammered). Because a connection becomes "proven" after
@@ -290,10 +551,13 @@ func leiosBackfillConnOrder(
 	proven := make([]ouroboros.ConnectionId, 0, n)
 	fresh := make([]ouroboros.ConnectionId, 0, n)
 	cooled := make([]ouroboros.ConnectionId, 0, n)
+	dead := make([]ouroboros.ConnectionId, 0, n)
 	for off := range connIds {
 		connId := connIds[(start+off)%n]
 		g := guardFor(connId)
 		switch {
+		case g.isProtocolDead():
+			dead = append(dead, connId)
 		case g.inCooldown(now):
 			cooled = append(cooled, connId)
 		case g.recentlySucceeded(now, affinityWindow):
@@ -306,5 +570,6 @@ func leiosBackfillConnOrder(
 	order = append(order, proven...)
 	order = append(order, fresh...)
 	order = append(order, cooled...)
+	order = append(order, dead...)
 	return order
 }

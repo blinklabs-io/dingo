@@ -158,6 +158,7 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
+		context.Background(),
 		abandonedConn.LeiosFetch().Client,
 		point,
 		1,
@@ -170,7 +171,14 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 	// Make the poisoned connection the first backfill candidate. Its bounded
 	// abandoned-slot error must cool it down and let the healthy peer complete.
 	o.leiosFetchGuardFor(abandonedConn.Id()).markFetchOK()
-	require.NoError(t, o.FetchEndorserBlockByPoint(point.Slot, point.Hash))
+	require.NoError(
+		t,
+		o.FetchEndorserBlockByPoint(
+			context.Background(),
+			point.Slot,
+			point.Hash,
+		),
+	)
 	require.True(
 		t,
 		o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
