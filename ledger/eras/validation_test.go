@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"errors"
 	"iter"
 	"math"
 	"math/big"
@@ -642,13 +643,14 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 
 type taggedCommitteeLedgerState struct {
 	*mockLedgerState
-	available bool
-	cold      map[string]*lcommon.CommitteeMember
-	hot       map[string]*lcommon.CommitteeMember
+	available    bool
+	availableErr error
+	cold         map[string]*lcommon.CommitteeMember
+	hot          map[string]*lcommon.CommitteeMember
 }
 
 func (s *taggedCommitteeLedgerState) CommitteeStateAvailable() (bool, error) {
-	return s.available, nil
+	return s.available, s.availableErr
 }
 
 func (s *taggedCommitteeLedgerState) CommitteeCredentialMember(
@@ -3828,10 +3830,16 @@ func TestPreAlonzoCertDepositRejectsNilPparams(t *testing.T) {
 	}
 }
 
-// TestConwayCommitteeCertificateRuleFailsClosedWhenStateUnavailable proves the
-// rule rejects rather than accepts when the provider cannot answer. Accepting
-// here would turn a fail-closed rejection into silent wrong validation.
-func TestConwayCommitteeCertificateRuleFailsClosedWhenStateUnavailable(
+// TestConwayCommitteeCertificateRuleDoesNotRejectWhenStateUnavailable proves
+// the rule declines to reject on committee grounds it cannot establish.
+//
+// Dingo does not seed the Conway genesis committee, so a genesis-synced node
+// holds no committee rows for the whole Conway era and CommitteeStateAvailable
+// reports false. Rejecting here would reject an authorization from a real
+// genesis committee member that cardano-node accepts. The member is seated in
+// the harness while availability is false, so a rejection would prove the
+// authority result was ignored.
+func TestConwayCommitteeCertificateRuleDoesNotRejectWhenStateUnavailable(
 	t *testing.T,
 ) {
 	var hash lcommon.Blake2b224
@@ -3865,16 +3873,12 @@ func TestConwayCommitteeCertificateRuleFailsClosedWhenStateUnavailable(
 		conwayUtxoValidationRules,
 		validateCommitteeCertificates,
 	)
-	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
-	var lookup conway.CommitteeMemberLookupError
-	require.ErrorAs(t, err, &lookup)
-	require.ErrorIs(t, err, errCommitteeStateUnavailable)
+	require.NoError(t, rule(tx, 0, state, &conway.ConwayProtocolParameters{}))
 }
 
-// TestConwayUnknownVoterRuleFailsClosedWhenStateUnavailable is the voter-side
-// counterpart. The member is seated in the harness, so an accepting result
-// would prove the availability gate was skipped rather than honored.
-func TestConwayUnknownVoterRuleFailsClosedWhenStateUnavailable(t *testing.T) {
+// TestConwayUnknownVoterRuleDoesNotRejectWhenStateUnavailable is the
+// voter-side counterpart, for the same reason.
+func TestConwayUnknownVoterRuleDoesNotRejectWhenStateUnavailable(t *testing.T) {
 	var hash lcommon.Blake2b224
 	hash[0] = 0xd2
 	credential := lcommon.Credential{
@@ -3904,10 +3908,7 @@ func TestConwayUnknownVoterRuleFailsClosedWhenStateUnavailable(t *testing.T) {
 		conwayUtxoValidationRules,
 		validateUnknownVoters,
 	)
-	err := rule(tx, 0, state, &conway.ConwayProtocolParameters{})
-	var lookup conway.CommitteeMemberLookupError
-	require.ErrorAs(t, err, &lookup)
-	require.ErrorIs(t, err, errCommitteeStateUnavailable)
+	require.NoError(t, rule(tx, 0, state, &conway.ConwayProtocolParameters{}))
 }
 
 // TestConwayCommitteeRulesAcceptAuthoritativeEmptyCommittee is the mandatory
@@ -4052,4 +4053,65 @@ func TestConwayCommitteeHotVoterTagsDoNotCrossMatch(t *testing.T) {
 		newTx(lcommon.VoterTypeConstitutionalCommitteeHotScriptHash),
 		0, state, &conway.ConwayProtocolParameters{},
 	), &unknown)
+}
+
+// TestConwayCommitteeRulesFailClosedOnLookupError proves a failed committee
+// lookup is never treated as authorization. This is the fail-closed half of
+// the contract: an availability *error* is a real failure and must reject,
+// unlike an authoritative "cannot answer", which must not.
+func TestConwayCommitteeRulesFailClosedOnLookupError(t *testing.T) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd5
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		availableErr:    errors.New("committee snapshot read failed"),
+		cold: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(credential): {ColdKey: hash},
+		},
+	}
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hash),
+	}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{{
+				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+				Certificate: &lcommon.AuthCommitteeHotCertificate{
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					ColdCredential: credential,
+				},
+			}},
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+	}
+
+	var lookup conway.CommitteeMemberLookupError
+	certRule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	require.ErrorAs(
+		t,
+		certRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+		&lookup,
+	)
+
+	voterRule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+	)
+	require.ErrorAs(
+		t,
+		voterRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+		&lookup,
+	)
 }

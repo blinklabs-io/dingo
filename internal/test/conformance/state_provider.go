@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
-	dingogov "github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -443,8 +442,24 @@ func (p *DingoStateProvider) CommitteeMember(
 	return scriptMember, nil
 }
 
+// CommitteeStateAvailable mirrors LedgerView.CommitteeStateAvailable: it
+// reports authority from seated committee members, not from the store being
+// reachable. Stubbing this true would make conformance green while production
+// declines to reject, hiding exactly the divergence the capability exists to
+// surface.
 func (p *DingoStateProvider) CommitteeStateAvailable() (bool, error) {
-	return p != nil && p.manager != nil && p.manager.db != nil, nil
+	if p == nil || p.manager == nil || p.manager.db == nil {
+		return false, nil
+	}
+	members, err := withBadConnRetry(
+		func() ([]*models.CommitteeMember, error) {
+			return p.manager.db.GetCommitteeMembers(nil)
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("lookup committee members: %w", err)
+	}
+	return len(members) > 0, nil
 }
 
 func (p *DingoStateProvider) CommitteeCredentialMember(
@@ -496,7 +511,7 @@ func (p *DingoStateProvider) proposedCommitteeMember(
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee proposal root: %w", err)
 	}
-	member, termStart, err := dingogov.ResolveCommitteeProposal(
+	member, termStart, err := governance.ResolveCommitteeProposal(
 		proposals, root, coldCredential, p.manager.protocolParams,
 	)
 	if err != nil {

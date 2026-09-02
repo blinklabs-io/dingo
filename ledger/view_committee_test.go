@@ -883,3 +883,43 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 	)
 	require.Equal(t, uint64(90), member.ExpiryEpoch)
 }
+
+// TestLedgerViewCommitteeStateAvailableTracksSeatedMembers proves availability
+// is derived from seated committee members, not from the store being
+// reachable.
+//
+// A view with a live database but no committee rows cannot answer committee
+// queries: Dingo does not seed the Conway genesis committee, so that state
+// means "never populated" on a genesis-synced node, not "authoritatively
+// empty". Reporting true there makes the validation rules reject an
+// authorization from a real genesis committee member.
+func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
+	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+
+	// A reachable store with no seated member is not authoritative.
+	available, err := lv.CommitteeStateAvailable()
+	require.NoError(t, err)
+	require.False(
+		t,
+		available,
+		"a reachable store with no committee rows must not claim authority",
+	)
+
+	seated := committeeTestCredential(0x91)
+	require.NoError(t, db.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(seated.CredType),
+			ColdCredHash:      seated.Credential[:],
+			ExpiresEpoch:      60,
+		}},
+		nil,
+	))
+
+	available, err = lv.CommitteeStateAvailable()
+	require.NoError(t, err)
+	require.True(
+		t,
+		available,
+		"a seated committee member makes committee state authoritative",
+	)
+}

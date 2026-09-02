@@ -637,10 +637,43 @@ func extractRawCostModels(
 	}
 }
 
-// CommitteeStateAvailable reports that this SQL-backed view is authoritative,
-// including when no committee members are seated.
+// CommitteeStateAvailable reports whether this view can authoritatively answer
+// committee credential queries for its snapshot.
+//
+// Availability is derived from whether any committee member is seated, not
+// from the store being reachable. Only two paths ever write committee_member:
+// UpdateCommittee enactment (ledger/governance/enact.go) and Mithril snapshot
+// import (ledgerstate/import.go). Dingo does not seed the Conway genesis
+// committee -- genesis.Committee.Threshold is read for the CC quorum, but
+// genesis.Committee.Members is never persisted. A node synced from genesis
+// therefore holds no committee rows for the whole Conway era until the first
+// UpdateCommittee enacts, while the real chain has the genesis committee
+// seated from the hard fork.
+//
+// So an empty table is genuinely ambiguous: it means "never populated" on a
+// genesis-synced node and "authoritatively empty" after a NoConfidence
+// enactment, and Dingo cannot currently tell those apart. Reporting the
+// reachable-store answer (true) would resolve that ambiguity the wrong way and
+// reject an authorization from a real genesis committee member, because the
+// lookup returns no member. Reporting false leaves the ambiguity visible to
+// the caller, which declines to reject on committee grounds it cannot
+// establish -- the behavior the upstream len(members) > 0 heuristic had.
+//
+// Seeding the genesis committee is the real fix and is tracked separately;
+// once it lands, an empty table becomes unambiguously authoritative and this
+// should report true so the rules fail closed.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
-	return lv != nil && lv.ls != nil && lv.ls.db != nil, nil
+	if lv == nil || lv.ls == nil || lv.ls.db == nil {
+		return false, nil
+	}
+	// GetCommitteeMembers is the seated-member set. GetCommitteeActiveCount is
+	// not a substitute: it counts hot-key authorizations, so a seated
+	// committee that has authorized no hot keys would report zero.
+	members, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	if err != nil {
+		return false, fmt.Errorf("get committee members: %w", err)
+	}
+	return len(members) > 0, nil
 }
 
 // CommitteeMember preserves the legacy hash-only contract. It returns nil

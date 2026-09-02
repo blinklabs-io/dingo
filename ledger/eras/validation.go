@@ -49,16 +49,6 @@ type MinPoolMarginProvider interface {
 	MinPoolMargin() *big.Rat
 }
 
-// errCommitteeStateUnavailable reports that the ledger state cannot
-// authoritatively answer committee queries for the validation snapshot, as
-// distinct from authoritatively reporting no such member. Committee validation
-// fails closed on it: an unanswerable lookup must reject rather than accept.
-//
-// This mirrors gouroboros conway.CommitteeStateUnavailableError, which the
-// pinned release does not yet export. Replace it with the upstream error when
-// the pin advances past that release.
-var errCommitteeStateUnavailable = errors.New("committee state unavailable")
-
 // CommitteeCredentialState is the optional ledger-state capability used by
 // Dingo's Conway and Dijkstra validation compositions to preserve key/script
 // credential tags. The legacy hash-only LedgerState committee methods cannot
@@ -170,23 +160,25 @@ func validateCommitteeCertificates(
 		return conway.UtxoValidateCommitteeCertificates(tx, slot, ls, pp)
 	}
 	// Availability is resolved on the first lookup rather than up front, so a
-	// transaction carrying no committee certificate is never rejected for
-	// unavailable committee state.
-	availabilityChecked := false
+	// transaction carrying no committee certificate never pays for the query.
+	// The second result reports whether the answer is authoritative; a nil
+	// member is only non-membership when it is.
+	var availabilityKnown, available bool
 	committeeMember := func(
 		coldCredential lcommon.Credential,
-	) (*lcommon.CommitteeMember, error) {
-		if !availabilityChecked {
-			available, err := state.CommitteeStateAvailable()
+	) (*lcommon.CommitteeMember, bool, error) {
+		if !availabilityKnown {
+			resolved, err := state.CommitteeStateAvailable()
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
-			if !available {
-				return nil, errCommitteeStateUnavailable
-			}
-			availabilityChecked = true
+			available, availabilityKnown = resolved, true
 		}
-		return state.CommitteeCredentialMember(coldCredential)
+		if !available {
+			return nil, false, nil
+		}
+		member, err := state.CommitteeCredentialMember(coldCredential)
+		return member, true, err
 	}
 	for _, cert := range tx.Certificates() {
 		var (
@@ -205,16 +197,23 @@ func validateCommitteeCertificates(
 		default:
 			continue
 		}
-		member, err := committeeMember(credential)
+		member, authoritative, err := committeeMember(credential)
 		if err != nil {
+			// A failed lookup is never authorization: fail closed.
 			return conway.CommitteeMemberLookupError{
 				Credential: credential.Credential,
 				Err:        err,
 			}
 		}
-		// Fails closed: past the lookup, committee state is authoritative, so
-		// an absent member means the credential is genuinely not a member.
 		if member == nil {
+			if !authoritative {
+				// Dingo holds no committee state for this snapshot, so
+				// non-membership cannot be established. Rejecting here would
+				// reject a real genesis committee member, because Dingo does
+				// not seed the Conway genesis committee. See
+				// LedgerView.CommitteeStateAvailable.
+				continue
+			}
 			return conway.NotCommitteeMemberError{
 				Credential: credential.Credential,
 				Operation:  operation,
@@ -252,23 +251,24 @@ func validateUnknownVoters(
 		return nil
 	}
 	// Resolved on the first committee voter rather than up front, so a
-	// transaction with only DRep or pool votes is never rejected for
-	// unavailable committee state.
-	availabilityChecked := false
+	// transaction with only DRep or pool votes never pays for the query. The
+	// second result reports whether the answer is authoritative.
+	var availabilityKnown, available bool
 	committeeHotMember := func(
 		hotCredential lcommon.Credential,
-	) (*lcommon.CommitteeMember, error) {
-		if !availabilityChecked {
-			available, err := state.CommitteeStateAvailable()
+	) (*lcommon.CommitteeMember, bool, error) {
+		if !availabilityKnown {
+			resolved, err := state.CommitteeStateAvailable()
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
-			if !available {
-				return nil, errCommitteeStateUnavailable
-			}
-			availabilityChecked = true
+			available, availabilityKnown = resolved, true
 		}
-		return state.CommitteeHotCredentialMember(hotCredential)
+		if !available {
+			return nil, false, nil
+		}
+		member, err := state.CommitteeHotCredentialMember(hotCredential)
+		return member, true, err
 	}
 	for voter := range votes {
 		if voter == nil {
@@ -301,16 +301,18 @@ func validateUnknownVoters(
 				CredType:   credentialType,
 				Credential: lcommon.Blake2b224(voter.Hash),
 			}
-			member, err := committeeHotMember(hotCredential)
+			member, authoritative, err := committeeHotMember(hotCredential)
 			if err != nil {
+				// A failed lookup is never a known voter: fail closed.
 				return conway.CommitteeMemberLookupError{
 					Credential: hotCredential.Credential,
 					Err:        err,
 				}
 			}
-			// Fails closed: past the lookup, committee state is
-			// authoritative, so an absent member is genuinely unknown.
-			if member == nil || member.Resigned {
+			// An unauthoritative nil member cannot establish an unknown
+			// voter. See LedgerView.CommitteeStateAvailable.
+			if (member == nil && authoritative) ||
+				(member != nil && member.Resigned) {
 				return conway.UnknownVoterError{Voter: *voter}
 			}
 		default:
