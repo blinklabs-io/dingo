@@ -134,6 +134,28 @@ func (d *Database) CountAccountRegistrationHistoryByCredential(
 	return count, nil
 }
 
+// GetAccountImportRegistrationByCredential returns the virtual registration
+// stored with a snapshot-imported account baseline.
+func (d *Database) GetAccountImportRegistrationByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (*models.AccountImportRegistration, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	registration, err := d.metadata.GetAccountImportRegistrationByCredential(
+		credentialTag,
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get account import registration: %w", err)
+	}
+	return registration, nil
+}
+
 // GetAccountWithdrawalHistoryByCredential returns withdrawal history rows for
 // a stake credential.
 func (d *Database) GetAccountWithdrawalHistoryByCredential(

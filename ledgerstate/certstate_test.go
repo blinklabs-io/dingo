@@ -68,8 +68,8 @@ func TestParseCredentialMapConwayAccountState(t *testing.T) {
 	if acct.Reward != 101 {
 		t.Fatalf("expected reward 101, got %d", acct.Reward)
 	}
-	if acct.Deposit != 202 {
-		t.Fatalf("expected deposit 202, got %d", acct.Deposit)
+	if acct.Deposit == nil || *acct.Deposit != 202 {
+		t.Fatalf("expected deposit 202, got %v", acct.Deposit)
 	}
 	if !bytes.Equal(acct.PoolKeyHash, poolHash) {
 		t.Fatalf("pool hash mismatch: %x", acct.PoolKeyHash)
@@ -112,8 +112,8 @@ func TestParseCredentialMapShelleyAccountState(t *testing.T) {
 	if acct.Reward != 303 {
 		t.Fatalf("expected reward 303, got %d", acct.Reward)
 	}
-	if acct.Deposit != 404 {
-		t.Fatalf("expected deposit 404, got %d", acct.Deposit)
+	if acct.Deposit == nil || *acct.Deposit != 404 {
+		t.Fatalf("expected deposit 404, got %v", acct.Deposit)
 	}
 	if !bytes.Equal(acct.PoolKeyHash, poolHash) {
 		t.Fatalf("pool hash mismatch: %x", acct.PoolKeyHash)
@@ -149,14 +149,54 @@ func TestParseCredentialMapLegacyUMElem(t *testing.T) {
 	if acct.Reward != 505 {
 		t.Fatalf("expected reward 505, got %d", acct.Reward)
 	}
-	if acct.Deposit != 606 {
-		t.Fatalf("expected deposit 606, got %d", acct.Deposit)
+	if acct.Deposit == nil || *acct.Deposit != 606 {
+		t.Fatalf("expected deposit 606, got %v", acct.Deposit)
 	}
 	if !bytes.Equal(acct.PoolKeyHash, poolHash) {
 		t.Fatalf("pool hash mismatch: %x", acct.PoolKeyHash)
 	}
 	if acct.DRepCred.Type != CredentialTypeAbstain {
 		t.Fatalf("expected abstain drep, got type %d", acct.DRepCred.Type)
+	}
+}
+
+func TestParseCredentialMapLegacyRewardOnlyDepositIsUnknown(t *testing.T) {
+	stakingKey := bytes.Repeat([]byte{0x78}, 28)
+	data := encodeCredentialMapEntry(
+		t,
+		testCredentialKey{Type: 0, Hash: toFixed28(stakingKey)},
+		[]any{[]uint64{707}},
+	)
+
+	accounts, err := parseCredentialMap(data)
+	if err != nil {
+		t.Fatalf("parseCredentialMap failed: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accounts))
+	}
+	if accounts[0].Deposit != nil {
+		t.Fatalf("expected unknown deposit, got %d", *accounts[0].Deposit)
+	}
+}
+
+func TestParseCredentialMapPresentZeroDeposit(t *testing.T) {
+	stakingKey := bytes.Repeat([]byte{0x79}, 28)
+	data := encodeCredentialMapEntry(
+		t,
+		testCredentialKey{Type: 0, Hash: toFixed28(stakingKey)},
+		[]any{uint64(808), uint64(0)},
+	)
+
+	accounts, err := parseCredentialMap(data)
+	if err != nil {
+		t.Fatalf("parseCredentialMap failed: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accounts))
+	}
+	if accounts[0].Deposit == nil || *accounts[0].Deposit != 0 {
+		t.Fatalf("expected present zero deposit, got %v", accounts[0].Deposit)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 func (s *Store) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
+	keyDeposit uint64,
 	_ []byte,
 	txn types.Txn,
 ) error {
@@ -78,6 +79,7 @@ func (s *Store) SetGenesisStaking(
 		}
 	}
 	refs := []models.StakeCredentialRef{}
+	importDeposit := types.Uint64(keyDeposit)
 	for stakerHex, poolHex := range stakeDelegations {
 		staker, err := hex.DecodeString(stakerHex)
 		if err != nil {
@@ -94,6 +96,7 @@ func (s *Store) SetGenesisStaking(
 			Active:        true,
 			AddedSlot:     0,
 			CreatedSlot:   0,
+			ImportDeposit: &importDeposit,
 		}, txn); err != nil {
 			return fmt.Errorf("create genesis account: %w", err)
 		}

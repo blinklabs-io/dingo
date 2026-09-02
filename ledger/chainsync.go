@@ -4661,6 +4661,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 			if err := ls.db.SetGenesisStaking(
 				genesisPools,
 				genesisStake,
+				uint64(shelleyGenesis.ProtocolParameters.KeyDeposit),
 				genesisHash[:],
 				txn,
 			); err != nil {
