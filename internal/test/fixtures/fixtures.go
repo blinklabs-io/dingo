@@ -64,7 +64,11 @@ func GenerateConwayChainWithPeriodicTransactions(
 		var err error
 		if withTransactions {
 			generated, generateErr := mockfixtures.GenerateConwayChainWithTransactions(
-				uint64(i+1), previous, uint64(2+i*20), 20, 1,
+				uint64(i+1),
+				previous,
+				uint64(2+i*20),
+				20,
+				1,
 			)
 			err = generateErr
 			if len(generated) > 0 {

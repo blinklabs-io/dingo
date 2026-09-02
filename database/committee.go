@@ -62,7 +62,8 @@ func (d *Database) IsCommitteeMemberResigned(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.governanceStore().IsCommitteeMemberResigned(coldKey, txn.Metadata())
+	return d.governanceStore().
+		IsCommitteeMemberResigned(coldKey, txn.Metadata())
 }
 
 // GetResignedCommitteeMembers returns cold credentials whose latest

@@ -314,10 +314,14 @@ func cloneRawMessages(in []cbor.RawMessage) []cbor.RawMessage {
 }
 
 // validateLeiosEndorserBlockTxs binds fetched transaction wire values to the
-// manifest before the complete set is cached or applied. Leios transaction
-// references use the Cardano transaction ID (the hash of the transaction body)
-// and the complete transaction's encoded size, while leios-fetch carries each
-// transaction either directly or in a CBOR byte-string wrapper.
+// manifest before the complete set is cached or applied. Each Leios manifest
+// reference is content-addressed over the FULL serialized transaction: the
+// TransactionHash is Blake2b256 of the complete transaction CBOR (NOT the
+// Cardano tx-id / body hash) and TransactionSize is that CBOR's length. Both
+// the fetch-side validator here and the forge-side reference builder
+// (buildLeiosEB) use this same full-transaction contract, matching Haskell
+// reference nodes. leios-fetch carries each transaction either directly or in
+// a CBOR byte-string wrapper.
 func validateLeiosEndorserBlockTxs(
 	manifestRaw []byte,
 	txsRaw []cbor.RawMessage,
@@ -361,7 +365,10 @@ func validateLeiosEndorserBlockTx(
 			return fmt.Errorf("unwrap endorser tx %d: %w", index, err)
 		}
 		if bytesRead != len(txCbor) {
-			return fmt.Errorf("endorser tx %d has trailing wrapper bytes", index)
+			return fmt.Errorf(
+				"endorser tx %d has trailing wrapper bytes",
+				index,
+			)
 		}
 		txCbor = inner
 	}
@@ -384,8 +391,8 @@ func validateLeiosEndorserBlockTx(
 			ref.TransactionSize,
 		)
 	}
-	if bodyHash := lcommon.Blake2b256Hash(txElems[0]); bodyHash != ref.TransactionHash {
-		return fmt.Errorf("endorser tx %d body hash mismatch", index)
+	if txHash := lcommon.Blake2b256Hash(txCbor); txHash != ref.TransactionHash {
+		return fmt.Errorf("endorser tx %d hash mismatch", index)
 	}
 	return nil
 }
@@ -399,7 +406,10 @@ func leiosEndorserBlockTxValidator(
 		return nil, fmt.Errorf("decode leios endorser block: %w", err)
 	}
 	if err := block.Validate(); err != nil {
-		return nil, fmt.Errorf("validate leios endorser block references: %w", err)
+		return nil, fmt.Errorf(
+			"validate leios endorser block references: %w",
+			err,
+		)
 	}
 	if len(block.TransactionReferences) != txCount {
 		return nil, fmt.Errorf(
@@ -1137,10 +1147,14 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
 		o.config.Logger.Debug(
 			"leios EB reloaded from blob store exceeds max entry size; serving uncached",
-			"component", "network",
-			"hash", hex.EncodeToString(hash),
-			"size", n,
-			"max_size", leiosEndorserBlockCacheMaxEntryBytes,
+			"component",
+			"network",
+			"hash",
+			hex.EncodeToString(hash),
+			"size",
+			n,
+			"max_size",
+			leiosEndorserBlockCacheMaxEntryBytes,
 		)
 		return data, true
 	}

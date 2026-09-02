@@ -1025,20 +1025,13 @@ func (s *Store) GetUtxosByAddress(
 	return ret, nil
 }
 
-func (s *Store) GetUtxosByAddressWithOrdering(
+// utxoOrderingPredicate builds the WHERE predicate shared by
+// GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
+// returned predicate excludes any keyset (query.After) bound, which only
+// GetUtxosByAddressWithOrdering applies.
+func utxoOrderingPredicate(
 	query *models.UtxoWithOrderingQuery,
-	txn types.Txn,
-) ([]models.UtxoWithOrdering, error) {
-	if query == nil {
-		return nil, fmt.Errorf(
-			"GetUtxosByAddressWithOrdering: %w",
-			models.ErrNilUtxoWithOrderingQuery,
-		)
-	}
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
+) (string, []any, error) {
 	predicate := "utxo.deleted_slot = 0"
 	args := []any{}
 	switch {
@@ -1053,10 +1046,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 				&args,
 				pattern,
 			); err != nil {
-				return nil, fmt.Errorf(
-					"GetUtxosByAddressWithOrdering: %w",
-					err,
-				)
+				return "", nil, err
 			}
 		}
 		if len(branches) == 0 {
@@ -1067,11 +1057,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	}
 	if query.FilterByAsset {
 		if len(query.AssetPolicyID) == 0 {
-			return nil, fmt.Errorf(
-				"GetUtxosByAddressWithOrdering: "+
-					"asset filter requires non-empty policy id: %w",
-				models.ErrEmptyAssetPolicyID,
-			)
+			return "", nil, models.ErrEmptyAssetPolicyID
 		}
 		predicate += `
  AND EXISTS (
@@ -1083,6 +1069,46 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			args = append(args, query.AssetName)
 		}
 		predicate += ")"
+	}
+	return predicate, args, nil
+}
+
+func (s *Store) GetUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) ([]models.UtxoWithOrdering, error) {
+	if query == nil {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if query.After != nil && query.Descending {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrDescendingKeysetUnsupported,
+		)
+	}
+	if query.After != nil && query.Offset > 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetKeysetUnsupported,
+		)
+	}
+	if query.Offset > 0 &&
+		models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetRequiresCoarseMatch,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
 	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
 	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
@@ -1110,18 +1136,19 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			query.After.TxId,
 		)
 	}
+	orderDir := "ASC"
+	if query.Descending {
+		orderDir = "DESC"
+	}
 	statement := `
 SELECT ` + qualifiedSQLiteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
 FROM utxo
 LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
 WHERE ` + predicate + `
-ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
-         utxo.output_idx ASC, utxo.tx_id ASC`
-	if query.Limit > 0 {
-		statement += " LIMIT ?"
-		args = append(args, query.Limit)
-	}
+ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
+         utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir
+	statement, args = addLimitOffset(statement, args, query.Limit, query.Offset)
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(statement),
@@ -1143,6 +1170,9 @@ ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if query.SkipAssets {
+		return ret, nil
+	}
 	for i := range ret {
 		pointers = append(pointers, &ret[i].Utxo)
 	}
@@ -1150,6 +1180,51 @@ ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
 		return nil, err
 	}
 	return ret, nil
+}
+
+// CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
+// query's coarse SQL predicate (address patterns and asset filter), without
+// materializing rows. It rejects a query whose address patterns require
+// CBOR-based exact-address filtering (see RequiresExactAddressFilter):
+// the coarse predicate alone over-matches address forms that share a
+// payment/delegation credential (for example pointer addresses), so a count
+// against it would not equal the exact-match total.
+func (s *Store) CountUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) (int, error) {
+	if query == nil {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrExactAddressRequiresCbor,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
+	}
+	var count int
+	err = db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(
+			"SELECT COUNT(*) FROM utxo WHERE "+predicate,
+		),
+		args...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count utxos by address: %w", err)
+	}
+	return count, nil
 }
 
 func (s *Store) GetUtxosByAddressAtSlot(

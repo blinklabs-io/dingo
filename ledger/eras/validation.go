@@ -108,21 +108,21 @@ type utxoValidationRuleSkip struct {
 const (
 	noUtxoValidationRuleIndex = -1
 
-	// Positions in gouroboros v0.201.1
+	// Positions in gouroboros v0.202.4
 	// UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// their runtime function names before filtering by index.
 	shelleyUtxoValidateFeeTooSmallRuleIndex    = 6
-	shelleyUtxoValidateMaxTxSizeRuleIndex      = 13
+	shelleyUtxoValidateMaxTxSizeRuleIndex      = 15
 	allegraUtxoValidateFeeTooSmallRuleIndex    = 6
-	allegraUtxoValidateMaxTxSizeRuleIndex      = 13
+	allegraUtxoValidateMaxTxSizeRuleIndex      = 14
 	alonzoUtxoValidatePlutusScriptsRuleIndex   = 27
-	babbageUtxoValidatePlutusScriptsRuleIndex  = 31
+	babbageUtxoValidatePlutusScriptsRuleIndex  = 32
 	conwayUtxoValidateConwayFeaturesRuleIndex  = 19
 	conwayUtxoValidateFeeTooSmallRuleIndex     = 24
 	conwayUtxoValidateExUnitsTooBigRuleIndex   = 39
-	conwayUtxoValidatePlutusScriptsRuleIndex   = 43
-	dijkstraUtxoValidatePlutusScriptsRuleIndex = 43
+	conwayUtxoValidatePlutusScriptsRuleIndex   = 44
+	dijkstraUtxoValidatePlutusScriptsRuleIndex = 44
 
 	conwayRefScriptCostStride = 25_600
 )
@@ -132,6 +132,26 @@ func shouldSkipPhase2Validation(
 ) bool {
 	skipper, ok := ls.(phase2ValidationSkipper)
 	return ok && skipper.SkipPhase2Validation()
+}
+
+// validatePlutusOutcome requires the locally evaluated phase-2 result to
+// match the transaction's declared validity flag. A failed script is the
+// expected outcome for an invalid transaction; every other validation error
+// remains a hard failure because it does not establish that script execution
+// itself failed.
+func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
+	if tx.IsValid() {
+		return phase2Err
+	}
+	if phase2Err == nil {
+		return errors.New(
+			"transaction declared invalid but Plutus scripts succeeded",
+		)
+	}
+	if _, ok := errors.AsType[conway.PlutusScriptFailedError](phase2Err); ok {
+		return nil
+	}
+	return phase2Err
 }
 
 // txHasRedeemers reports whether the transaction carries at least one redeemer.

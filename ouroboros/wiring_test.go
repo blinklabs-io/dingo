@@ -129,7 +129,10 @@ func newWiringTestOuroboros(t *testing.T) *Ouroboros {
 // so its dispatch goroutines do not outlive the test.
 func newWiringTestEventBus(t *testing.T) *event.EventBus {
 	t.Helper()
-	bus := event.NewEventBus(nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	bus := event.NewEventBus(
+		nil,
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	)
 	t.Cleanup(bus.Close)
 	return bus
 }

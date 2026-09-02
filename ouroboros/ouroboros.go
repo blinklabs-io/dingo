@@ -127,7 +127,16 @@ type Ouroboros struct {
 	// the connection; one earliest-onset timer is retained per connection.
 	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
 	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
-	chainsyncScheduleAt      chainsyncScheduleAtFunc
+	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
+	// gate whether a peer-reported header may influence Genesis chain-selection
+	// density or corroboration before its VRF/KES cryptography (and, once local
+	// state has caught up, leader eligibility) has been checked (dingo #3517).
+	// Derived from ledgerState the same way chainsyncHeaderAdmission is, so
+	// tests exercising a single protocol handler can override either seam
+	// directly instead of standing up a full LedgerState.
+	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
+	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) error
+	chainsyncScheduleAt                    chainsyncScheduleAtFunc
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -279,6 +288,10 @@ type OuroborosConfig struct {
 	// revokes corroboration is not yet processed). Returning false (or nil hook)
 	// falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
+	// peer-tip event. Its result is carried with that event into ledger
+	// admission; ledger must not reread mutable selector state.
+	ChainsyncSyncTarget func(chainselection.PeerTipUpdateEvent) (ochainsync.Tip, bool)
 	// ChainsyncObservePeerRollback observes a peer rollback. It returns true if it
 	// handled the observation synchronously, in which case the caller MUST NOT
 	// also publish the async PeerRollbackEvent (avoids a double update). It
@@ -448,6 +461,8 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if o.ledgerState != nil {
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
+		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond

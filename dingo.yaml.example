@@ -475,17 +475,13 @@ startEra: ""
 # stake-truncated voting committee, the node signs and emits one Leios
 # vote per observed endorser block.
 #
-# leiosVoterPublicKeys maps hex pool key hashes to hex-encoded 96-byte
-# compressed BLS12-381 public keys. It stands in for CIP-0164 key
-# registration (not yet specified) so vote signatures can be verified on
-# test networks. Votes from voters without a registered key still count
-# toward observed stake but cannot contribute to certificates.
+# The signing key must match the pool's proof-of-possession-verified on-chain
+# registration. A pool without a usable on-chain key is keyless and cannot emit
+# a vote or contribute verified stake to a certificate. Static voter-key
+# overrides are intentionally unsupported in reference-compatible mode.
 #
-# Can be overridden with the DINGO_LEIOS_VOTE_SIGNING_KEY_FILE and
-# DINGO_LEIOS_VOTER_PUBLIC_KEYS environment variables
+# Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
-# leiosVoterPublicKeys:
-#   "<pool key hash hex>": "<compressed G2 public key hex>"
 
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command

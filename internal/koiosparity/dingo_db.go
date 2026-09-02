@@ -51,7 +51,15 @@ type DingoDBConfig struct {
 // DingoEpochData holds epoch-level aggregates read directly from Dingo's database.
 type DingoEpochData struct {
 	TotalActiveStake string // lovelace decimal string (matches Koios format)
-	Fees             string // lovelace decimal string; empty when reward_ada_pots row absent
+	// TotalPoolCount is epoch_summary.total_pool_count: the number of pools
+	// in the distribution the mark pool_stake_snapshot rows for this epoch
+	// were written from (rotation.go sets both from the same
+	// StakeDistribution), so it is how many of those rows must be readable
+	// for the set to be complete. Deliberately not RewardSnapshot's
+	// TotalPoolCount, which counts the reduced reward distribution with
+	// degraded pools already excluded.
+	TotalPoolCount uint64
+	Fees           string // lovelace decimal string; empty when reward_ada_pots row absent
 	// TotalRewards is reward_ada_pots.rewards for this epoch alone: a fresh
 	// per-epoch FLOW value (rewards.Result.TotalRewardPot, overwritten every
 	// epoch — see ledger/reward_calculation.go:389,1955 and
@@ -242,6 +250,7 @@ func (d *DingoDB) GetEpochData(
 			uint64(summary.TotalActiveStake),
 			10,
 		),
+		TotalPoolCount: summary.TotalPoolCount,
 	}
 
 	var pots models.RewardAdaPots
@@ -295,6 +304,39 @@ func (d *DingoDB) GetEpochData(
 // "compared and equal". One bulk query per table per epoch (three total),
 // independent of pool count. ctx is forwarded to the DB driver so that a
 // cancelled context aborts the query.
+// GetPoolStakeSnapshotMembers implements RewardParitySource by reading the
+// mark pool_stake_snapshot rows for epoch. See the interface doc comment for
+// why this, and not epoch_summary.SnapshotReady, is the per-pool evidence of
+// pool-set membership.
+func (d *DingoDB) GetPoolStakeSnapshotMembers(
+	ctx context.Context,
+	epoch uint64,
+) (map[string]struct{}, error) {
+	rows, err := d.query(
+		ctx,
+		`SELECT pool_key_hash FROM pool_stake_snapshot WHERE epoch = ? AND snapshot_type = ?`,
+		epoch,
+		snapshotTypeMark,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pool_stake_snapshot epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	defer rows.Close()
+	members := make(map[string]struct{})
+	for rows.Next() {
+		var poolHash []byte
+		if err := rows.Scan(&poolHash); err != nil {
+			return nil, err
+		}
+		members[hex.EncodeToString(poolHash)] = struct{}{}
+	}
+	return members, rows.Err()
+}
+
 func (d *DingoDB) GetPoolEpochDataMap(
 	ctx context.Context,
 	stakeEpoch, paramEpoch uint64,

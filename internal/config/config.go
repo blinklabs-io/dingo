@@ -479,13 +479,13 @@ type MidnightConfig struct {
 	// Enabled opts into running the Midnight indexer. Default false: an
 	// api-mode deployment that wants Midnight indexing must set this
 	// explicitly.
-	Enabled bool `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	Enabled bool `yaml:"enabled"             envconfig:"DINGO_MIDNIGHT_ENABLED"`
 	// ServerEnabled independently opts into the Midnight gRPC listener.
 	// Indexing and serving persisted Midnight rows are separate operations.
-	ServerEnabled bool `yaml:"serverEnabled" envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
+	ServerEnabled bool `yaml:"serverEnabled"       envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
 	// ReflectionEnabled exposes gRPC service discovery when the server is
 	// enabled. It defaults off because reflection broadens the public surface.
-	ReflectionEnabled bool `yaml:"reflectionEnabled" envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	ReflectionEnabled bool `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
 	// AllowInsecureRemote permits a plaintext listener on a non-loopback
 	// address. It is an explicit escape hatch for deployments that provide
 	// transport security outside Dingo.
@@ -519,30 +519,30 @@ type Config struct {
 	// API holds shared TLS/auth policy defaults for every selected
 	// plugins.api.* provider. See APIConfig's own doc comment.
 	API                    APIConfig `yaml:"api"`
-	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"               envconfig:"TLS_KEY_FILE_PATH"`
+	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
 	Topology               string    `yaml:"topology"`
-	CardanoConfig          string    `yaml:"cardanoConfig"                envconfig:"config"`
-	DatabasePath           string    `yaml:"databasePath"                                                                   split_words:"true"`
-	SocketPath             string    `yaml:"socketPath"                                                                     split_words:"true"`
-	TlsCertFilePath        string    `yaml:"tlsCertFilePath"              envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr               string    `yaml:"bindAddr"                                                                       split_words:"true"`
-	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                split_words:"true"`
-	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                                split_words:"true"`
-	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"         envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
+	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
+	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
+	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
+	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                                              split_words:"true"`
+	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"                envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
 	Network                string    `yaml:"network"`
-	NetworkMagic           uint32    `yaml:"networkMagic"                                                                   split_words:"true"`
-	PrivatePort            uint      `yaml:"privatePort"                                                                    split_words:"true"`
-	RelayPort              uint      `yaml:"relayPort"                    envconfig:"port"`
-	BarkBaseUrl            string    `yaml:"barkBaseUrl"                  envconfig:"DINGO_BARK_BASE_URL"`
-	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"       envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint      `yaml:"barkPort"                     envconfig:"DINGO_BARK_PORT"`
+	NetworkMagic           uint32    `yaml:"networkMagic"                                                                                 split_words:"true"`
+	PrivatePort            uint      `yaml:"privatePort"                                                                                  split_words:"true"`
+	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
+	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
 	// see its own doc comment) is mounted, rather than bark's own
 	// all-interfaces "0.0.0.0" default; set explicitly to widen that on
 	// purpose.
-	BarkHost string `yaml:"barkHost"                     envconfig:"DINGO_BARK_HOST"`
+	BarkHost string `yaml:"barkHost"                            envconfig:"DINGO_BARK_HOST"`
 	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
 	// certificates (mTLS) against. Required whenever the database lifecycle
 	// service is mounted (databaseLifecycle.snapshotDir set alongside
@@ -550,60 +550,60 @@ type Config struct {
 	// against this CA. Destructive methods additionally require an explicit
 	// BarkOperatorCertificateFingerprints match. Also requires
 	// TlsCertFilePath/TlsKeyFilePath to be set.
-	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"         envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
 	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
 	// for destructive DatabaseService RPCs. Every DatabaseService caller must
 	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate
 	// fingerprints may invoke destructive methods.
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints" envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
-	CORSAllowedOrigins                  []string `yaml:"corsAllowedOrigins"                    envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort                         uint     `yaml:"metricsPort"                                                                    split_words:"true"`
+	CORSAllowedOrigins                  []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort                         uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
 	// pprof on a wildcard or management-network address.
-	DebugBindAddr string `yaml:"debugBindAddr" envconfig:"DINGO_DEBUG_BIND_ADDR"`
-	DebugPort     uint   `yaml:"debugPort"                    envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip  bool   `yaml:"intersectTip"                                                                   split_words:"true"`
+	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
+	DebugPort     uint   `yaml:"debugPort"                           envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip  bool   `yaml:"intersectTip"                                                                                 split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.
-	ValidateHistorical bool `yaml:"validateHistorical"                                                             split_words:"true"`
+	ValidateHistorical bool `yaml:"validateHistorical"                                                                           split_words:"true"`
 	// StrictUtxoValidation errors out (instead of silently skipping) when a
 	// consumed UTxO cannot be found or recovered for a block past the
 	// recorded Mithril sync boundary. A non-genesis intersect without a
 	// Mithril snapshot should explicitly opt out when pre-intersect UTxOs are
 	// intentionally unavailable.
-	StrictUtxoValidation bool `yaml:"strictUtxoValidation"                                                           split_words:"true"`
+	StrictUtxoValidation bool `yaml:"strictUtxoValidation"                                                                         split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
 	// Spans are sent via OTLP HTTP; configure the destination with the
 	// standard OTEL_EXPORTER_OTLP_* env vars.
-	Tracing bool `yaml:"tracing"                      envconfig:"DINGO_TRACING_ENABLED"`
+	Tracing bool `yaml:"tracing"                             envconfig:"DINGO_TRACING_ENABLED"`
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
-	TracingStdout   bool     `yaml:"tracingStdout"                envconfig:"DINGO_TRACING_STDOUT"`
-	RunMode         RunMode  `yaml:"runMode"                      envconfig:"DINGO_RUN_MODE"`
-	StartEra        StartEra `yaml:"startEra"                     envconfig:"DINGO_START_ERA"`
-	ImmutableDbPath string   `yaml:"immutableDbPath"              envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
+	RunMode         RunMode  `yaml:"runMode"                             envconfig:"DINGO_RUN_MODE"`
+	StartEra        StartEra `yaml:"startEra"                            envconfig:"DINGO_START_ERA"`
+	ImmutableDbPath string   `yaml:"immutableDbPath"                     envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
-	DatabaseWorkers   int `yaml:"databaseWorkers"              envconfig:"DINGO_DATABASE_WORKERS"`
-	DatabaseQueueSize int `yaml:"databaseQueueSize"            envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
-	BackfillBatchSize int `yaml:"backfillBatchSize"            envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
+	DatabaseWorkers   int `yaml:"databaseWorkers"                     envconfig:"DINGO_DATABASE_WORKERS"`
+	DatabaseQueueSize int `yaml:"databaseQueueSize"                   envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+	BackfillBatchSize int `yaml:"backfillBatchSize"                   envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop that reads blocks back from the primary chain and applies
 	// them to the ledger. Not consensus-affecting -- it only changes how
 	// CBOR decode work is scheduled, not validation or apply behavior -- but
 	// defaults off until throughput and stability are proven (issue #1894
 	// phase 1). See ARCHITECTURE.md ("Block Processing Pipeline").
-	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"         envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
+	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"                envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 	// BlockPipelineValidateEnabled adds parallel VRF/KES and OpCert checks to
 	// block-pipeline replay (issue #1894 phase 3). It requires
 	// BlockPipelineEnabled. Admission-time header validation remains the
 	// authoritative gate because ls.chain is visible to downstream readers
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
-	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled" envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
+	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled"        envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
@@ -715,11 +715,6 @@ type Config struct {
 	// a block producer whose pool is a committee member, the node emits
 	// Leios votes for endorser blocks.
 	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
-	// LeiosVoterPublicKeys maps hex pool key hashes to hex-encoded
-	// BLS12-381 voter public keys for vote signature verification.
-	// CIP-0164 key registration is not yet specified, so this static
-	// registry stands in for it (devnet-style).
-	LeiosVoterPublicKeys map[string]string `yaml:"leiosVoterPublicKeys"    envconfig:"DINGO_LEIOS_VOTER_PUBLIC_KEYS"`
 
 	// PeerSharing enables the peer sharing protocol, allowing this node
 	// to advertise known peers to other nodes on request. Pointer
@@ -1221,13 +1216,6 @@ func cloneConfig(cfg *Config) *Config {
 	}
 	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
 	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
-	if cfg.LeiosVoterPublicKeys != nil {
-		clone.LeiosVoterPublicKeys = make(
-			map[string]string,
-			len(cfg.LeiosVoterPublicKeys),
-		)
-		maps.Copy(clone.LeiosVoterPublicKeys, cfg.LeiosVoterPublicKeys)
-	}
 	clone.Plugins.Storage.Blob = clonePluginSelection(
 		cfg.Plugins.Storage.Blob,
 	)
@@ -1276,6 +1264,11 @@ func LoadConfig(configFile string) (*Config, error) {
 	cfg := cloneConfig(globalConfig)
 	midnightYAMLFields = nil
 	configFile = resolveConfigFile(configFile)
+	if value := os.Getenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS"); value != "" {
+		return nil, errors.New(
+			"DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported; reference-compatible Leios voting requires a proof-verified on-chain key registration",
+		)
+	}
 
 	if configFile != "" {
 		buf, err := os.ReadFile(configFile)

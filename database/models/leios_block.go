@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // babbageHeaderBodyFieldCount is the number of fields in a standard Babbage
@@ -33,6 +34,16 @@ const babbageHeaderBodyFieldCount = 10
 // block: [header, transaction_bodies, transaction_witness_sets,
 // transaction_metadata, invalid_transactions].
 const conwayBlockComponentCount = 5
+
+// dijkstraBlockComponentCount is the number of top-level components in a
+// Dijkstra block: [header, block_body]. The pre-Dijkstra layout instead spread
+// the body's components across additional top-level elements.
+const dijkstraBlockComponentCount = 2
+
+// leiosHeaderExtraFields is the number of fields the Musashi/Leios header
+// extension adds after the standard Babbage header body: leios_certified and
+// leios_announcement.
+const leiosHeaderExtraFields = 2
 
 // DecodeConwayBlock decodes a Conway block, transparently accepting the
 // Musashi/Leios prototype header extension. The respun Musashi network
@@ -47,13 +58,38 @@ func DecodeConwayBlock(raw []byte) (ledger.Block, error) {
 	if err == nil {
 		return block, nil
 	}
-	extBlock, extErr := decodeLeiosExtendedConwayBlock(raw)
-	if extErr != nil {
-		// Not a recognizable Leios-extended Conway block either; surface the
-		// strict-decode error, which is the meaningful one for real networks.
-		return nil, err
+	if extBlock, extErr := decodeLeiosExtendedConwayBlock(raw); extErr == nil {
+		return extBlock, nil
 	}
-	return extBlock, nil
+	// The respun Musashi chain carries the Dijkstra two-component block layout
+	// -- block = [header, block_body] -- while still tagging blocks as Conway
+	// (NtN block type 7) on the wire, so neither the strict Conway decoder nor
+	// the five-component Leios-extended reconstruct above recognizes them and a
+	// from-genesis sync never advances past origin (issue #3761).
+	//
+	// Verified against the live network: a block fetched from
+	// leios-node.play.dev.cardano.org:3001 (magic 164) decodes as two top-level
+	// components with a twelve-field header body, and gouroboros'
+	// NewDijkstraBlockFromCbor accepts it while DecodeConwayBlock did not.
+	//
+	// This is reached only after both Conway paths have failed, and then only
+	// for input carrying the Leios-extended Dijkstra signature, so the
+	// five-component form above keeps its precedence and a corrupt or foreign
+	// stored block is not silently reinterpreted. DecodeConwayBlock is also
+	// reached from the network-independent storage path (models.Block.Decode),
+	// which is why the gate is structural rather than a network check: that
+	// caller has no network magic to test.
+	if hasDijkstraLeiosShape(raw) {
+		if dijkstraBlock, dijkstraErr := dijkstra.NewDijkstraBlockFromCbor(
+			raw,
+		); dijkstraErr == nil {
+			return dijkstraBlock, nil
+		}
+	}
+	// Not a recognizable Leios-extended Conway block or Dijkstra-layout block;
+	// surface the strict-decode error, which is the meaningful one for real
+	// networks.
+	return nil, err
 }
 
 // decodeLeiosExtendedConwayBlock reconstructs a Conway block whose header body
@@ -140,4 +176,34 @@ func decodeLeiosExtendedConwayBlock(raw []byte) (*conway.ConwayBlock, error) {
 	block.BlockHeader.Body.SetCbor([]byte(headerParts[0]))
 	block.SetCbor(raw)
 	return block, nil
+}
+
+// hasDijkstraLeiosShape reports whether raw carries the Musashi Dijkstra block
+// signature: two top-level components, a two-element header, and a header body
+// of the ten standard Babbage fields plus the two Leios extension fields.
+//
+// Requiring all three is what keeps the Dijkstra attempt from being "any CBOR
+// array of two things". A Conway block has five top-level components and a
+// ten-field header body, so it cannot match, and neither can a truncated or
+// foreign block that merely happens to decode as a two-element array.
+func hasDijkstraLeiosShape(raw []byte) bool {
+	var components []cbor.RawMessage
+	if _, err := cbor.Decode(raw, &components); err != nil {
+		return false
+	}
+	if len(components) != dijkstraBlockComponentCount {
+		return false
+	}
+	var headerParts []cbor.RawMessage
+	if _, err := cbor.Decode(components[0], &headerParts); err != nil {
+		return false
+	}
+	if len(headerParts) != 2 {
+		return false
+	}
+	var bodyElems []cbor.RawMessage
+	if _, err := cbor.Decode(headerParts[0], &bodyElems); err != nil {
+		return false
+	}
+	return len(bodyElems) == babbageHeaderBodyFieldCount+leiosHeaderExtraFields
 }

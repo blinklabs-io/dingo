@@ -45,7 +45,11 @@ func TestConwayWithdrawalDRepGateCredentialBoundary(t *testing.T) {
 	require.NoError(t, err)
 	scriptCredential, ok := scriptRewardAddr.StakeCredential()
 	require.True(t, ok)
-	require.Equal(t, uint(lcommon.CredentialTypeScriptHash), scriptCredential.CredType)
+	require.Equal(
+		t,
+		uint(lcommon.CredentialTypeScriptHash),
+		scriptCredential.CredType,
+	)
 
 	for _, account := range []*models.Account{
 		{
