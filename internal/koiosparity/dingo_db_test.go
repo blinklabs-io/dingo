@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -418,4 +419,93 @@ func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
 		data.BlocksProduced,
 		"blocks_produced still comes from the param epoch",
 	)
+}
+
+// TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide pins what
+// SpendableMemberRewardPresent means, which the two RewardParitySource
+// implementations must not be able to disagree about. It reports whether the
+// epoch's reward_account_output rows survive at all — cleanupOldSnapshots
+// retains them without bound only in api storage mode — not whether any of
+// them is a credited member reward. An epoch holding only a leader reward and a
+// withheld member reward is a populated epoch whose spendable member total is
+// genuinely zero, and reporting that as a pruned epoch would turn a correct
+// zero into a dingo_db_missing ERROR.
+func TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide(t *testing.T) {
+	const stakeEpoch, paramEpoch = uint64(9), uint64(11)
+	db, gdb := openTestDingoDB(t)
+	pool := testPoolKeyHash(t, 0x01)
+
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    pool,
+		DelegatedStake: types.Uint64(1_000),
+		DelegatorCount: 1,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             stakeEpoch,
+		PoolKeyHash:       pool,
+		MemberRewardTotal: types.Uint64(77),
+		Unspendable:       types.Uint64(77),
+	}).Error)
+	// A leader reward and a withheld member reward: rows exist, nothing was
+	// credited to a member.
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		PoolKeyHash: pool,
+		StakingKey:  testPoolKeyHash(t, 0x02),
+		RewardType:  "leader",
+		Amount:      types.Uint64(500),
+		Spendable:   true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		PoolKeyHash: pool,
+		StakingKey:  testPoolKeyHash(t, 0x03),
+		RewardType:  "member",
+		Amount:      types.Uint64(77),
+		Spendable:   false,
+	}).Error)
+
+	m, err := db.GetPoolEpochDataMap(
+		context.Background(), stakeEpoch, paramEpoch,
+	)
+	require.NoError(t, err)
+	data := m[hex.EncodeToString(pool)]
+	require.NotNil(t, data)
+	assert.True(t, data.SpendableMemberRewardPresent,
+		"rows exist for the epoch, so the sum is answerable")
+	assert.Equal(t, "0", data.SpendableMemberRewardTotal,
+		"nothing was credited to a member")
+	assert.Equal(t, uint64(77), data.PoolUnspendable)
+}
+
+// TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned is the other
+// side: with no reward_account_output rows for the epoch at all, the sum cannot
+// be formed and presence must stay false so ComparePoolEpoch falls back to the
+// pool total only where that is provably equal.
+func TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned(t *testing.T) {
+	const stakeEpoch, paramEpoch = uint64(9), uint64(11)
+	db, gdb := openTestDingoDB(t)
+	pool := testPoolKeyHash(t, 0x01)
+
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    pool,
+		DelegatedStake: types.Uint64(1_000),
+		DelegatorCount: 1,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             stakeEpoch,
+		PoolKeyHash:       pool,
+		MemberRewardTotal: types.Uint64(500),
+	}).Error)
+
+	m, err := db.GetPoolEpochDataMap(
+		context.Background(), stakeEpoch, paramEpoch,
+	)
+	require.NoError(t, err)
+	data := m[hex.EncodeToString(pool)]
+	require.NotNil(t, data)
+	assert.False(t, data.SpendableMemberRewardPresent)
+	assert.Equal(t, "500", data.MemberRewardTotal)
 }

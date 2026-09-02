@@ -516,7 +516,8 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // The predicate matches what the ledger actually credits: applyStakeRewards
 // (ledger/reward_calculation.go) skips a reward that is not spendable and one
 // whose reward account is guarded by CIP-0163 expiry, so both are excluded
-// here.
+// from the sum — but not from the presence test, which asks only whether the
+// epoch's rows survive at all.
 //
 // The rows are summed in Go rather than by the database: amount is a decimal
 // TEXT column, and the cast a portable SUM would need differs across the three
@@ -533,12 +534,17 @@ func (d *DingoDB) addSpendableMemberRewards(
 	m map[string]*DingoPoolEpochData,
 	stakeEpoch uint64,
 ) error {
+	// Every row for the epoch is read and filtered here rather than in the
+	// WHERE clause, so presence means "the epoch's per-account rows exist"
+	// exactly as it does in DatabaseSource.GetPoolEpochDataMap. Filtering in
+	// SQL would make an epoch holding only leader or only withheld rows look
+	// like a pruned epoch in one implementation and a populated one in the
+	// other, and the two must not be able to disagree.
 	rows, err := d.query(
 		ctx,
-		`SELECT pool_key_hash, amount FROM reward_account_output
-WHERE epoch = ? AND reward_type = ? AND spendable = TRUE AND guarded = FALSE`,
+		`SELECT pool_key_hash, reward_type, amount, spendable, guarded
+FROM reward_account_output WHERE epoch = ?`,
 		stakeEpoch,
-		rewardTypeMember,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -552,11 +558,18 @@ WHERE epoch = ? AND reward_type = ? AND spendable = TRUE AND guarded = FALSE`,
 	any := false
 	for rows.Next() {
 		var poolHash []byte
+		var rewardType string
 		var amount types.Uint64
-		if err := rows.Scan(&poolHash, &amount); err != nil {
+		var spendable, guarded bool
+		if err := rows.Scan(
+			&poolHash, &rewardType, &amount, &spendable, &guarded,
+		); err != nil {
 			return err
 		}
 		any = true
+		if rewardType != rewardTypeMember || !spendable || guarded {
+			continue
+		}
 		totals[hex.EncodeToString(poolHash)] += uint64(amount)
 	}
 	if err := rows.Err(); err != nil {
