@@ -15,10 +15,12 @@
 package ouroboros
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -450,7 +452,11 @@ func TestBindLeiosEndorserBlockSlotDoesNotMutateSharedEntry(t *testing.T) {
 	)
 	fresh, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
-	require.True(t, fresh.slotVerified, "a fresh lookup sees the published copy")
+	require.True(
+		t,
+		fresh.slotVerified,
+		"a fresh lookup sees the published copy",
+	)
 }
 
 // TestStoreAndAnnouncementRaceAlwaysEndsVerified is the coordinated store /
@@ -664,4 +670,124 @@ func TestStoreLeiosEndorserBlockAuthoritativeOverridesStaleAnnouncement(
 		leiosStorePeerOffered,
 	)
 	require.Error(t, err)
+}
+
+// TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot is the second review
+// round's comment 2 companion to
+// TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger:
+// EndorserBlockTxHashesByHash feeds the forge loop's post-certificate mempool
+// exclusion list, so a complete-but-unbound entry must read as unavailable
+// there too, not just from the tx-body provider.
+func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 22, 1)
+	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		txsRaw,
+		leiosStorePeerOffered,
+	))
+
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.True(t, data.completeTxCache())
+	_, ok = o.EndorserBlockTxHashesByHash(point.Hash)
+	require.False(
+		t,
+		ok,
+		"a complete but unverified entry must not reach the forge loop",
+	)
+
+	announceTestEndorserBlock(
+		t,
+		o,
+		point.Slot,
+		testEbHash(point),
+		len(blockRaw),
+	)
+	hashes, ok := o.EndorserBlockTxHashesByHash(point.Hash)
+	require.True(t, ok)
+	require.Len(t, hashes, 1)
+}
+
+// TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry is the closure-wait
+// half of the second review round's comment 2: a closure that is complete but
+// not yet slot-verified must not report ready via
+// leiosClosureCompleteLocked/waitForLeiosEndorserClosure, and a waiter
+// registered on it must stay parked until bindLeiosEndorserBlockSlot
+// corroborates the slot -- otherwise the node-to-client merge path (which
+// waits on this same closure) could consume an unverified slot the same way
+// EndorserBlockTxsByHash could before issue #3513.
+func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 71)
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		leiosStorePeerOffered,
+	))
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.True(t, data.completeTxCache())
+	require.False(t, data.slotVerified)
+
+	// The already-cached fast path must not report a complete-but-unverified
+	// closure as ready.
+	quickCtx, quickCancel := context.WithTimeout(
+		context.Background(),
+		200*time.Millisecond,
+	)
+	defer quickCancel()
+	require.False(t, o.waitForLeiosEndorserClosure(quickCtx, point.Hash))
+
+	// A waiter registered while the entry is complete-but-unverified must
+	// stay parked -- nothing signals it at store time -- until the slot is
+	// corroborated.
+	// The wait context is intentionally much longer than every assertion
+	// below: a passing RequireReceive must be caused by the promotion's
+	// explicit wakeup, not by this context happening to expire around the
+	// same time.
+	result := make(chan bool, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer cancel()
+		result <- o.waitForLeiosEndorserClosure(ctx, point.Hash)
+	}()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			o.leiosMu.RLock()
+			defer o.leiosMu.RUnlock()
+			return len(o.leiosClosureWaiters[leiosBlockKey(point.Hash)]) > 0
+		},
+		2*time.Second,
+		"closure waiter to register",
+	)
+	testutil.RequireNoReceive(
+		t,
+		result,
+		300*time.Millisecond,
+		"a complete but unverified closure must not wake a waiter",
+	)
+
+	// bindLeiosEndorserBlockSlot corroborating the slot must wake the parked
+	// waiter itself -- the store above never will, since the entry was
+	// already complete before the binding arrived.
+	o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot)
+	require.True(
+		t,
+		testutil.RequireReceive(
+			t,
+			result,
+			500*time.Millisecond,
+			"closure wait to resolve once the slot is verified",
+		),
+	)
 }

@@ -302,6 +302,15 @@ func leiosBlockKey(hash []byte) string {
 	return string(hash)
 }
 
+// leiosFetchClaimKey returns the leiosFetchInProgress dedup key for a
+// leios-notify offer at a point. It composes slot and hash so an in-flight
+// fetch claimed for one occurrence of a hash does not suppress a legitimate
+// offer of the same content-addressed hash recurring at a different slot
+// (issue #3513).
+func leiosFetchClaimKey(point ocommon.Point) string {
+	return fmt.Sprintf("%d:%s", point.Slot, leiosBlockKey(point.Hash))
+}
+
 func cloneRawMessages(in []cbor.RawMessage) []cbor.RawMessage {
 	if len(in) == 0 {
 		return nil
@@ -613,10 +622,12 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.leiosEndorserBlocks[key] = data
 	}
 	// Wake any NtC serving path waiting on this closure once its transaction
-	// set is complete. Completeness (txsRaw count == reference count) is the
-	// same readiness predicate the resolver uses, so a waiter is only woken
-	// when a subsequent merge would succeed.
-	if data.completeTxCache() {
+	// set is complete and slot-verified. Both are the same readiness predicate
+	// the resolver (and leiosClosureCompleteLocked) use, so a waiter is only
+	// woken when a subsequent merge would actually succeed; an unverified
+	// completion is left unsignaled and is instead woken by
+	// bindLeiosEndorserBlockSlot once the slot is corroborated (issue #3513).
+	if data.completeTxCache() && data.slotVerified {
 		for _, key := range cacheKeys {
 			o.signalLeiosClosureWaitersLocked(key)
 		}
@@ -726,6 +737,17 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(ebHash []byte, slot uint64) {
 	for _, key := range data.cacheKeys {
 		if o.leiosEndorserBlocks[key] == data {
 			o.leiosEndorserBlocks[key] = &verified
+		}
+	}
+	// A closure that was already complete when it was stored was left
+	// unsignaled (storeLeiosEndorserBlock withholds the wakeup until
+	// slotVerified) -- signal it now that this authority has corroborated the
+	// slot, or a waiter parked on it would otherwise sit until its wait
+	// window times out instead of waking on the closure it is already
+	// holding (issue #3513).
+	if verified.completeTxCache() {
+		for _, key := range data.cacheKeys {
+			o.signalLeiosClosureWaitersLocked(key)
 		}
 	}
 	o.leiosMu.Unlock()
@@ -1258,7 +1280,7 @@ func (o *Ouroboros) EndorserBlockTxHashesByHash(
 	ebHash []byte,
 ) ([]string, bool) {
 	data, ok := o.lookupLeiosEndorserBlock(ebHash)
-	if !ok || !data.completeTxCache() {
+	if !ok || !data.completeTxCache() || !data.slotVerified {
 		return nil, false
 	}
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(data.blockRaw)
@@ -1355,18 +1377,22 @@ func (o *Ouroboros) resolveCertifiedEndorserTxs(
 		return nil, false
 	}
 	data, found := o.lookupLeiosEndorserBlock(ebHash.Bytes())
-	if !found || !data.completeTxCache() {
+	if !found || !data.completeTxCache() || !data.slotVerified {
 		return nil, false
 	}
 	return cloneRawMessages(data.txsRaw), true
 }
 
-// leiosClosureCompleteLocked reports whether a complete transaction closure is
-// cached in memory for the given cache key, using the same readiness predicate
-// (completeTxCache) as the resolver. The caller must hold leiosMu.
+// leiosClosureCompleteLocked reports whether a complete, slot-verified
+// transaction closure is cached in memory for the given cache key, using the
+// same readiness predicate (completeTxCache and slotVerified) as the
+// resolver. Gating on slotVerified here matters as much as it does in the
+// resolver: without it, a waiter could be woken (or return immediately) on a
+// closure that is complete but still carries an offering connection's
+// unverified slot claim (issue #3513). The caller must hold leiosMu.
 func (o *Ouroboros) leiosClosureCompleteLocked(key string) bool {
 	data, ok := o.leiosEndorserBlocks[key]
-	return ok && data.completeTxCache()
+	return ok && data != nil && data.completeTxCache() && data.slotVerified
 }
 
 // signalLeiosClosureWaitersLocked wakes and clears every waiter registered for

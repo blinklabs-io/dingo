@@ -590,11 +590,15 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		point := m.Point
 		declaredSize := m.Size
 		// The relay offers each endorser block on every connection. The
-		// manifest is content-addressed, so once any peer's copy is cached a
-		// refetch returns identical bytes: skip it instead of spending a fetch
-		// slot and the manifest's bandwidth once per connected peer. Mirrors
-		// the same guard on the txs offer below.
-		if _, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
+		// manifest is content-addressed, so once any peer's copy is cached
+		// under this offer's point a refetch returns identical bytes: skip it
+		// instead of spending a fetch slot and the manifest's bandwidth once
+		// per connected peer. Mirrors the same guard on the txs offer below.
+		// The slot must match too: the same hash can legitimately recur at a
+		// different slot (issue #3513), and a hash-only hit would silently
+		// drop this offer's point instead of fetching and verifying it.
+		if data, ok := o.lookupLeiosEndorserBlock(point.Hash); ok &&
+			data.point.Slot == point.Slot {
 			return nil
 		}
 		// Reject an offer that already declares more than the cache's
@@ -692,15 +696,22 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		client := conn.LeiosFetch().Client
 		point := m.Point
 		// Common case: a repeated offer for an EB already fully fetched (or
-		// empty). Skip without spawning a fetch.
+		// empty) at this offer's point. Skip without spawning a fetch. The slot
+		// check matters here too: a hash-only hit would report a different
+		// slot's cached entry as satisfying this offer and never fetch (or
+		// verify) the txs for this point (issue #3513).
 		if data, ok := o.lookupLeiosEndorserBlock(point.Hash); ok &&
+			data.point.Slot == point.Slot &&
 			(data.txCount == 0 || data.completeTxCache()) {
 			return nil
 		}
 		// The relay offers each EB on every connection; claim it so it is
-		// fetched once. The claim is released when the fetch finishes (or below
-		// if the per-connection bound is reached).
-		hashKey := string(point.Hash)
+		// fetched once. The claim is keyed by slot and hash, not hash alone, so
+		// an in-flight fetch for one occurrence of a hash does not suppress a
+		// legitimate offer of the same content-addressed hash recurring at a
+		// different slot. The claim is released when the fetch finishes (or
+		// below if the per-connection bound is reached).
+		hashKey := leiosFetchClaimKey(point)
 		if _, loaded := o.leiosFetchInProgress.LoadOrStore(
 			hashKey,
 			struct{}{},
@@ -710,6 +721,19 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		if !o.dispatchLeiosFetch(ctx.ConnectionId, func() {
 			defer o.leiosFetchInProgress.Delete(hashKey)
 			data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+			if ok && data.point.Slot != point.Slot {
+				// Same content-addressed-hash-recurs-at-a-different-slot
+				// situation as fetchEndorserBlockOnConn in leios_backfill.go:
+				// what is cached for this hash belongs to a different
+				// occurrence than the one this offer's point names. Treat it
+				// exactly like a cache miss so the manifest is re-fetched (and
+				// re-stored, subject to storeLeiosEndorserBlock's own
+				// conflict check) under this offer's point instead of this
+				// offer being silently swallowed by an unrelated occurrence's
+				// completeness (issue #3513).
+				data = nil
+				ok = false
+			}
 			if !ok {
 				// Manifest not cached yet (txs offered before/without a block
 				// offer): fetch the manifest first to learn the tx count.
