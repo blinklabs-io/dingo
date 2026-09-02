@@ -8511,6 +8511,26 @@ commit, which is what keeps the undo ahead of any forward `ledger.tx` event
 on the same ordered lane, regardless of this internal before/after
 ordering relative to the truncation itself.
 
+The emit still runs before `ls.rollback` — the separate call, made outside
+this closure, that durably updates `ls.currentTip` and the ledger's own
+metadata — so a failure in that later call leaves a narrow inconsistency:
+subscribers already believe these blocks are undone while durable ledger
+metadata still shows them applied (Cubic review, PR #3611). Neither
+alternative ordering is free of its own hazard: running `ls.rollback`
+inside this closure, before the emit, would risk the same reentrancy the
+placement above already avoids, since `ls.rollback` can itself publish
+`ChainsyncResyncEventType` synchronously via `EventBus.Publish`; deferring
+the emit until after `ls.rollback` returns (outside `transactionEventMutex`)
+would let a concurrent forward apply's `ledger.tx` event land first on the
+same ordered lane, reopening exactly what holding `transactionEventMutex`
+across the emit prevents. The window is bounded, not permanent: `ls.rollback`
+fails only on a genuine DB error, logged at ERROR with this exact
+inconsistency called out, and the next reconciliation attempt lands in the
+"ledger tip ahead of primary chain tip" branch below (see its own doc
+comment), which retries both the (idempotent) undo notification and this
+same rollback — the same self-healing property that branch's own identical
+emit-then-`ls.rollback` ordering relies on.
+
 That resolution is also where the reconciler's undo events diverge from
 `blocksAboveSlot`'s: by the time this rewind runs, chain selection has
 already replaced the primary chain's content between the ancestor and the

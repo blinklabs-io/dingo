@@ -7731,9 +7731,29 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				chainTip.Point,
 				currentLedgerTipSlot,
 			)
+			// See the matching comment on the common-ancestor branch's
+			// own emit below for why this runs before ls.rollback
+			// rather than after or from inside it (Cubic review, PR
+			// #3611): the inconsistency window a failing ls.rollback
+			// would leave here is bounded the same way -- the next
+			// reconciliation attempt lands right back in this same
+			// branch and retries both.
 			ls.emitRollbackTransactionEvents(undoBlocks)
 		}()
 		if err := ls.rollback(chainTip.Point); err != nil {
+			ls.config.Logger.Error(
+				"failed to roll back ledger metadata to primary chain "+
+					"tip after already publishing its undo events; "+
+					"ledger.tx subscribers now see these blocks as "+
+					"undone while durable ledger metadata still shows "+
+					"them applied -- self-healing, the next "+
+					"reconciliation attempt will retry both the undo "+
+					"notification and this rollback",
+				"component", "ledger",
+				"error", err,
+				"chain_tip_slot", chainTip.Point.Slot,
+				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			)
 			return fmt.Errorf(
 				"rollback ledger tip to primary chain tip: %w",
 				err,
@@ -7910,6 +7930,25 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		if rewindErr != nil {
 			return rewindErr
 		}
+		// Publishing here, before ls.rollback below runs, leaves a
+		// narrow inconsistency window if that separate call then fails:
+		// subscribers have already been told these blocks are undone,
+		// while ls.currentTip -- updated only by ls.rollback -- still
+		// durably shows them applied (Cubic review, PR #3611). Closing
+		// that outright would mean either running ls.rollback here,
+		// still holding transactionEventMutex -- risking the same
+		// reentrancy emitRollbackTransactionEvents's own placement
+		// above already avoids, since ls.rollback can itself publish
+		// ChainsyncResyncEventType synchronously via EventBus.Publish
+		// -- or deferring this emit until after ls.rollback returns,
+		// which would let a concurrent forward apply's ledger.tx event
+		// land first on the same ordered lane, reopening exactly what
+		// holding transactionEventMutex across this emit prevents. The
+		// window is bounded rather than permanent: ls.rollback failing
+		// only on a genuine DB error, and the next reconciliation
+		// attempt lands in the "ledger tip ahead of primary chain tip"
+		// branch below, which retries both the (idempotent) undo
+		// notification and this same rollback.
 		ls.emitRollbackTransactionEvents(undoBlocks)
 		return nil
 	}(); err != nil {
@@ -7919,6 +7958,18 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		)
 	}
 	if err := ls.rollback(ancestor); err != nil {
+		ls.config.Logger.Error(
+			"failed to roll back ledger metadata to common ancestor "+
+				"after already publishing its undo events; ledger.tx "+
+				"subscribers now see these blocks as undone while "+
+				"durable ledger metadata still shows them applied -- "+
+				"self-healing, the next reconciliation attempt will "+
+				"retry both the undo notification and this rollback",
+			"component", "ledger",
+			"error", err,
+			"ancestor_slot", ancestor.Slot,
+			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+		)
 		return fmt.Errorf(
 			"rollback ledger tip to common primary-chain ancestor: %w",
 			err,
