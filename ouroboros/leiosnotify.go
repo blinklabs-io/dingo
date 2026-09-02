@@ -970,7 +970,8 @@ type leiosFetchGuard struct {
 	// recycleRequested records that a recycle has already been published for this
 	// connection, so a burst of failing fetches raises one request rather than one
 	// per fetch.
-	recycleRequested atomic.Bool
+	recycleRequested    atomic.Bool
+	recycleEventPending atomic.Bool
 }
 
 // markProtocolDead records that this connection's leios-fetch protocol can no
@@ -979,6 +980,10 @@ type leiosFetchGuard struct {
 func (g *leiosFetchGuard) markProtocolDead() bool {
 	g.protocolDead.Store(true)
 	return g.recycleRequested.CompareAndSwap(false, true)
+}
+
+func (g *leiosFetchGuard) takeRecycleEvent() bool {
+	return g.recycleEventPending.CompareAndSwap(true, false)
 }
 
 // isProtocolDead reports whether this connection's leios-fetch protocol has

@@ -525,14 +525,17 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		if !certDrivenHistorical || ls.leiosBackfill == nil {
 			return
 		}
+		batchCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
+		defer cancel()
 		for _, r := range required {
 			if _, _, ok := ls.config.EndorserBlockProvider(
 				r.hash.Bytes(),
 			); ok {
 				continue
 			}
-			if err := ls.leiosBackfill.fetchRequired(ctx, r, poll); err != nil {
+			if err := ls.leiosBackfill.fetchRequired(batchCtx, r, poll); err != nil {
 				fetchErrs[string(r.hash.Bytes())] = err
+				return
 			}
 		}
 	}

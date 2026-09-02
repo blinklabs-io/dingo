@@ -364,12 +364,17 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		// The recycle request is published here, with the connection's fetch
 		// guard already released, so no lock is held across an event-bus
 		// publish.
-		if classifyLeiosFetchFailure(err) == leiosFetchFailureDead {
+		if classifyLeiosFetchFailure(err) == leiosFetchFailureDead &&
+			o.leiosFetchGuardFor(connId).takeRecycleEvent() {
 			o.requestLeiosFetchConnRecycle(connId, point, err)
 		}
 		if err != nil {
 			lastErr = err
 			switch classifyLeiosFetchFailure(err) {
+			case leiosFetchFailureNone:
+				// A nil error cannot reach this block; keep the switch
+				// exhaustive if the failure taxonomy gains new callers.
+				continue
 			case leiosFetchFailureBusy:
 				// Not an attempt: the connection was serving another fetch, so
 				// this peer never answered the query for this endorser block.
@@ -382,16 +387,13 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 				// peer lacks the block.
 				attempted++
 				unresolved = true
-			case leiosFetchFailureNone,
-				leiosFetchFailureDead,
-				leiosFetchFailureTransient:
+			case leiosFetchFailureDead, leiosFetchFailureTransient:
 				// A dead or transient failure is a real attempt that said
-				// nothing about what this peer holds. leiosFetchFailureNone
-				// cannot occur here (this block runs only for err != nil) and
-				// has no behavior of its own; it is named rather than folded
-				// into a default so the exhaustive linter reports any class
-				// added to the taxonomy later at this site instead of letting
-				// it fall silently into the attempted-but-uninformative bucket.
+				// nothing about what this peer holds. Named rather than
+				// folded into a default so the exhaustive linter reports any
+				// class added to the taxonomy later at this site instead of
+				// letting it fall silently into the
+				// attempted-but-uninformative bucket.
 				attempted++
 			}
 			continue
@@ -426,17 +428,13 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 // connmanager) keeps this consistent with the chainsync verification-failure
 // path. Exactly one request is published per connection.
 //
-// Called with no fetch guard held: the guard is released by
-// fetchEndorserBlockOnConn before this runs, so no lock spans the event-bus
-// publish.
+// Called with no fetch guard held: fetchEndorserBlockOnConn reserves the event
+// while holding the guard and this function publishes it after unlock.
 func (o *Ouroboros) requestLeiosFetchConnRecycle(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	cause error,
 ) {
-	if !o.leiosFetchGuardFor(connId).markProtocolDead() {
-		return
-	}
 	if o.config.Logger != nil {
 		o.config.Logger.Warn(
 			"recycling connection with an unusable leios-fetch protocol",
@@ -524,6 +522,9 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				time.Now(),
 				leiosBackfillConnCooldownMax,
 			)
+			if g.markProtocolDead() {
+				g.recycleEventPending.Store(true)
+			}
 		case leiosFetchFailureBusy, leiosFetchFailureTransient:
 			// A stalled peer, a deadline overrun, wrong or incomplete bytes.
 			// leiosFetchFailureBusy cannot occur here (the TryLock guard above

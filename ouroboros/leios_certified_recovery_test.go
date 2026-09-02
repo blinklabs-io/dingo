@@ -766,7 +766,7 @@ func TestFetchEndorserBlockByPointDeclineDoesNotEscalateCooldown(
 	require.False(
 		t,
 		g.inCooldown(
-			time.Now().Add(leiosBackfillConnDeclineCooldown + time.Second),
+			time.Now().Add(leiosBackfillConnDeclineCooldown+time.Second),
 		),
 		"repeated typed declines escalated a healthy peer's cooldown",
 	)
