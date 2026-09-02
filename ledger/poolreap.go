@@ -40,8 +40,9 @@ import (
 // would charge. cardano-ledger charges a pool deposit only for a registration
 // of a pool that is not already registered, so a re-registration carries the
 // earlier registration's held amount forward and a poolDeposit parameter change
-// between a pool's first and last registration neither mints nor burns the
-// difference at this boundary.
+// after the registration that paid neither mints nor burns the difference at
+// this boundary. A registration made after the pool's retirement was reaped is
+// a first registration again and pays the deposit in force at its own slot.
 //
 // Removal from active pool state is not a separate write: dingo derives the
 // active pool set from the latest registration/retirement certificates

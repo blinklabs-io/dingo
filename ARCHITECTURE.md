@@ -8152,9 +8152,11 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    whose retirement epoch is the new epoch. The refunded amount is the deposit
    the pool's effective registration retains
    (`pool_registration.deposit_held`), not what the current protocol parameters
-   would charge: a re-registration pays no new pool deposit, so a `poolDeposit`
-   change between a pool's first and last registration neither mints nor burns
-   the difference here. Each deposit is credited to the
+   would charge: a re-registration of a pool that is still registered pays no
+   new pool deposit, so a `poolDeposit` change after the registration that paid
+   neither mints nor burns the difference here. A registration made after the
+   pool's retirement was reaped is a first registration again and pays the
+   deposit in force at its own slot. Each deposit is credited to the
    pool's registered, active reward account, or added to the treasury when that
    account is missing or inactive. The `EPOCH` rule runs it after SNAP, so these
    deposits are deliberately outside the mark snapshot read at step 3. Active

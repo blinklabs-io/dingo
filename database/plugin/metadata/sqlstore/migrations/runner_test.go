@@ -403,6 +403,61 @@ func TestRunnerReportsAddColumnFailureOnMissingTable(t *testing.T) {
 	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
 }
 
+// An already-present column is an applied replay only when its type is the one
+// the statement declares. A same-named column of another type is a schema the
+// migration never produced, so the ALTER still fails instead of being skipped
+// and leaving the rest of the phase to run against the wrong column.
+func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	runner := &Runner{
+		DB:      db,
+		Dialect: "sqlite",
+		Registry: []Migration{
+			{
+				Version:          1,
+				Name:             "create_item",
+				BackfillRevision: "1",
+				SQL: map[string]SQL{
+					"sqlite": {
+						Expand: []string{
+							"CREATE TABLE IF NOT EXISTS item " +
+								"(id INTEGER PRIMARY KEY, note blob)",
+						},
+					},
+				},
+			},
+			{
+				Version:          2,
+				Name:             "add_column_other_type",
+				BackfillRevision: "1",
+				SQL: map[string]SQL{
+					"sqlite": {
+						Expand: []string{
+							"ALTER TABLE `item` ADD COLUMN `note` text",
+							"INSERT INTO item (id, note) VALUES (1, 'seeded') " +
+								"ON CONFLICT (id) DO NOTHING",
+						},
+					},
+				},
+			},
+		},
+		Locker: NewProcessLocker(),
+	}
+
+	err := runner.Run(context.Background())
+	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+	require.ErrorContains(t, err, "statement 1")
+
+	// The statements after the failed ALTER must not have run.
+	var rows int
+	require.NoError(
+		t,
+		db.QueryRow("SELECT COUNT(*) FROM item").Scan(&rows),
+	)
+	require.Zero(t, rows)
+}
+
 // Every ALTER TABLE ADD COLUMN the shipped registries produce has to be
 // recognizable to the replay guard in each dialect's quoting, or an upgrade
 // interrupted between the committed DDL and its phase advance would still fail
@@ -412,6 +467,17 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
 	// v2 adds four columns, v5 two, and v7 one.
 	const shippedAddColumns = 7
+	// The replay guard compares the type the statement declares with the type
+	// the live schema reports, so every shipped ADD COLUMN has to declare a
+	// type whose two spellings are already known to agree after
+	// normalizeColumnType. A migration that adds a column of another type must
+	// confirm what information_schema and pragma_table_info report for it and
+	// extend columnTypeAliases when the two differ.
+	verifiedColumnTypes := map[string]struct{}{
+		"blob":  {},
+		"bytea": {},
+		"text":  {},
+	}
 	for _, dialect := range []struct {
 		name string
 		load func() ([]Migration, error)
@@ -439,13 +505,23 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 				require.Len(
 					t,
 					match,
-					3,
+					4,
 					"%s: unrecognized ADD COLUMN: %s",
 					dialect.name,
 					statement,
 				)
 				require.NotEmpty(t, match[1], dialect.name)
 				require.NotEmpty(t, match[2], dialect.name)
+				declared := normalizeColumnType(declaredColumnType(match[3]))
+				require.Contains(
+					t,
+					verifiedColumnTypes,
+					declared,
+					"%s: ADD COLUMN declares an unverified type %q: %s",
+					dialect.name,
+					declared,
+					statement,
+				)
 				matched++
 			}
 		}
@@ -466,9 +542,36 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 		require.Len(
 			t,
 			addColumnPattern.FindStringSubmatch(statement),
-			3,
+			4,
 			"must recognize: %s",
 			statement,
+		)
+	}
+
+	// The declared type is everything between the column name and the first
+	// column constraint, and it is compared without case, length or precision
+	// arguments, or the spellings information_schema substitutes.
+	for _, expected := range []struct {
+		definition string
+		typeName   string
+	}{
+		{definition: "text", typeName: "text"},
+		{definition: "BYTEA", typeName: "bytea"},
+		{definition: "text NOT NULL DEFAULT '0'", typeName: "text"},
+		{definition: "VARCHAR(255) NOT NULL", typeName: "varchar"},
+		{definition: "double precision", typeName: "double precision"},
+		{definition: "timestamp with time zone", typeName: "timestamptz"},
+		{definition: "character varying(64)", typeName: "varchar"},
+		// SQLite allows a column with no declared type, and reports the empty
+		// string for it.
+		{definition: "", typeName: ""},
+	} {
+		require.Equal(
+			t,
+			expected.typeName,
+			normalizeColumnType(declaredColumnType(expected.definition)),
+			"definition: %q",
+			expected.definition,
 		)
 	}
 

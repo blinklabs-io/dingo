@@ -622,16 +622,81 @@ func execDDL(
 // addColumnPattern matches the ALTER TABLE ... ADD COLUMN form the migration
 // resources use, in any of the three dialects' quoting styles. Migrations are
 // authored in SQLite syntax and the registry rewrites only identifier quoting
-// and column types, so the shape is the same on every backend.
+// and column types, so the shape is the same on every backend. The third group
+// is the rest of the column definition, which declaredColumnType reduces to the
+// declared type.
 var addColumnPattern = regexp.MustCompile(
-	"(?i)^ALTER\\s+TABLE\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?\\s+" +
-		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s|$)",
+	"(?is)^ALTER\\s+TABLE\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?\\s+" +
+		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s+(.*))?$",
 )
+
+// columnConstraintKeywords are the words that can follow a column type in a
+// column definition. They end the type, which is otherwise allowed to span
+// several words ("double precision").
+var columnConstraintKeywords = map[string]struct{}{
+	"as":             {},
+	"auto_increment": {},
+	"check":          {},
+	"collate":        {},
+	"comment":        {},
+	"constraint":     {},
+	"default":        {},
+	"generated":      {},
+	"not":            {},
+	"null":           {},
+	"primary":        {},
+	"references":     {},
+	"unique":         {},
+}
+
+// columnTypeAliases maps a type name as the live schema reports it to the
+// spelling the migration statement declares, for the renderings where the two
+// differ. Everything else is compared as written, case-insensitively and
+// without length or precision arguments.
+var columnTypeAliases = map[string]string{
+	"character varying":           "varchar",
+	"timestamp with time zone":    "timestamptz",
+	"timestamp without time zone": "timestamp",
+}
+
+var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
+
+// declaredColumnType returns the type an ADD COLUMN declares, given everything
+// the statement places after the column name. A SQLite column may declare no
+// type at all, which yields the empty string and matches the empty type
+// pragma_table_info reports for such a column.
+func declaredColumnType(definition string) string {
+	fields := strings.Fields(definition)
+	end := len(fields)
+	for index, field := range fields {
+		name, _, _ := strings.Cut(field, "(")
+		if _, stop := columnConstraintKeywords[strings.ToLower(name)]; stop {
+			end = index
+			break
+		}
+	}
+	return strings.Join(fields[:end], " ")
+}
+
+// normalizeColumnType reduces a declared or reported type to the form the two
+// can be compared in: lower case, no length or precision arguments, single
+// spaces, and aliases resolved.
+func normalizeColumnType(value string) string {
+	normalized := columnTypeArgsPattern.ReplaceAllString(
+		strings.ToLower(value),
+		"",
+	)
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if alias, ok := columnTypeAliases[normalized]; ok {
+		return alias
+	}
+	return normalized
+}
 
 // isAddColumnAlreadyApplied reports whether a failed statement is an
 // ALTER TABLE ... ADD COLUMN whose column is already present in the live
-// schema, which is exactly the state an upgrade interrupted between the
-// committed DDL and its phase advance leaves behind.
+// schema with the declared type, which is exactly the state an upgrade
+// interrupted between the committed DDL and its phase advance leaves behind.
 //
 // execDDL runs each statement on its own in autocommit, and the runner records
 // the phase advance in a separate statement afterwards, so a process that stops
@@ -647,11 +712,19 @@ var addColumnPattern = regexp.MustCompile(
 // query, so no other failing DDL is skipped because the named column happens to
 // exist.
 //
-// Existence is checked, not the declared type: an operator who hand-added a
-// same-named column of another type would have it accepted here. A transient
-// fault on an already-added column is also skipped, but that cannot complete a
-// broken upgrade, because the remaining statements and the phase-advance and
-// contract writes run unguarded on the same connection.
+// The reported type has to match the declared one, so a same-named column of
+// another type -- hand-added, or left behind by a foreign schema -- fails the
+// migration instead of being accepted as an already-applied replay. This holds
+// the same line as isMySQLDDLAlreadyAppliedOnConn, which compares an existing
+// index's columns and uniqueness rather than trusting its name. Types are
+// compared through normalizeColumnType, and
+// TestAddColumnPatternMatchesShippedMigrations pins every shipped ADD COLUMN to
+// a type whose declared spelling and reported spelling already agree.
+//
+// A transient fault on an already-present column of the declared type is still
+// skipped, but that cannot complete a broken upgrade, because the remaining
+// statements and the phase-advance and contract writes run unguarded on the
+// same connection.
 func isAddColumnAlreadyApplied(
 	ctx context.Context,
 	conn *sql.Conn,
@@ -659,25 +732,25 @@ func isAddColumnAlreadyApplied(
 	statement string,
 ) bool {
 	match := addColumnPattern.FindStringSubmatch(strings.TrimSpace(statement))
-	if len(match) != 3 {
+	if len(match) != 4 {
 		return false
 	}
 	var query string
 	switch dialect {
 	case "sqlite":
-		query = "SELECT 1 FROM pragma_table_info(?) WHERE name = ?"
+		query = "SELECT type FROM pragma_table_info(?) WHERE name = ?"
 	case "postgres":
-		query = "SELECT 1 FROM information_schema.columns " +
+		query = "SELECT data_type FROM information_schema.columns " +
 			"WHERE table_schema = current_schema() " +
 			"AND table_name = $1 AND column_name = $2"
 	case "mysql":
-		query = "SELECT 1 FROM information_schema.columns " +
+		query = "SELECT data_type FROM information_schema.columns " +
 			"WHERE table_schema = DATABASE() " +
 			"AND table_name = ? AND column_name = ?"
 	default:
 		return false
 	}
-	var found int
+	var found sql.NullString
 	if err := conn.QueryRowContext(
 		ctx,
 		query,
@@ -686,7 +759,8 @@ func isAddColumnAlreadyApplied(
 	).Scan(&found); err != nil {
 		return false
 	}
-	return found != 0
+	return normalizeColumnType(found.String) ==
+		normalizeColumnType(declaredColumnType(match[3]))
 }
 
 func boundedCursor(cursor string) string {

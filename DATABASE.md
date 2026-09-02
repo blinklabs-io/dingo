@@ -184,20 +184,21 @@ pool deposit that registration retains, as distinct from `deposit_amount`, which
 is what the block era's certificate deposit function computed from the protocol
 parameters in force at that registration's slot. cardano-ledger charges a pool
 deposit only for a registration of a pool that is not already registered, so a
-re-registration leaves the deposit map alone and the pool keeps holding what its
-first registration paid; POOLREAP refunds that held amount. The backfill credits
-each legacy registration with its own `COALESCE(deposit_amount, '0')`, which is
-exactly the value the pre-change refund path read from the latest registration,
-so the migration reproduces the refund the node would already have applied and
-neither creates nor destroys value on existing data. Carry-forward applies from
-this migration forward; a network that changed `poolDeposit` before the upgrade
-would need a resync from genesis to agree byte-for-byte with a genesis-synced
-node, which no live Cardano network requires because `poolDeposit` has never
-changed on one. The backfill is restricted to NULL so an interrupted upgrade can
-replay it without overwriting a carried-forward amount, the `ALTER TABLE` is
-replay-safe through the runner rather than through the statement (see below),
-and `GetPoolsRetiringAtEpoch` reads `COALESCE(deposit_held, deposit_amount)` so
-a database whose backfill has not run still yields the pre-change refund.
+re-registration leaves the deposit map alone and the pool keeps holding what the
+first registration since its most recent completed reap paid; POOLREAP refunds
+that held amount. The backfill credits each legacy registration with its own
+`COALESCE(deposit_amount, '0')`, which is exactly the value the pre-change
+refund path read from the latest registration, so the migration reproduces the
+refund the node would already have applied and neither creates nor destroys
+value on existing data. Carry-forward applies from this migration forward; a
+network that changed `poolDeposit` before the upgrade would need a resync from
+genesis to agree byte-for-byte with a genesis-synced node, which no live
+Cardano network requires because `poolDeposit` has never changed on one. The
+backfill is restricted to NULL so an interrupted upgrade can replay it without
+overwriting a carried-forward amount, the `ALTER TABLE` is replay-safe through
+the runner rather than through the statement (see below), and
+`GetPoolsRetiringAtEpoch` reads `COALESCE(deposit_held, deposit_amount)` so a
+database whose backfill has not run still yields the pre-change refund.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -217,12 +218,15 @@ authored once in SQLite syntax and translated per dialect, and SQLite has no
 `ADD COLUMN IF NOT EXISTS`. The runner supplies it instead. When an
 `ALTER TABLE ... ADD COLUMN` fails, it queries the live schema for that column
 (`pragma_table_info` on SQLite, `information_schema.columns` on PostgreSQL and
-MySQL) and skips the statement only when the column is already present, so an
-interrupted upgrade resumes into the backfill rather than failing forever on a
-duplicate column, and an `ALTER` that failed for any other reason still fails
-the migration. This is why an operator sees no duplicate-column error after a
-crash mid-upgrade on versions `v2`, `v5`, and `v7`; the same run tolerates a
-duplicate index or foreign-key name on MySQL.
+MySQL) and skips the statement only when the column is already present with the
+type the statement declares, so an interrupted upgrade resumes into the backfill
+rather than failing forever on a duplicate column, while an `ALTER` that failed
+for any other reason, and one whose column exists with a different type, still
+fail the migration. An operator who hand-added a same-named column of another
+type therefore gets an upgrade failure naming the statement rather than a
+silently accepted schema. This is why an operator sees no duplicate-column
+error after a crash mid-upgrade on versions `v2`, `v5`, and `v7`; the same run
+tolerates a duplicate index or foreign-key name on MySQL.
 
 Completed checksum drift, registry gaps, unknown phases, inconsistent
 completion state, and a database newer than the binary are hard startup errors.
@@ -2412,13 +2416,15 @@ The `reward_account` is the 28-byte stake credential stored on the registration,
 and `reward_account_credential_tag` distinguishes key-hash vs script-hash reward
 credentials when looking up the reward account. The refunded amount is the
 registration's held deposit, not what the current protocol parameters would
-charge, so a `poolDeposit` change between a pool's first and last registration
-neither mints nor burns the difference at this boundary. Deposit
-refunds are applied in `applyPoolRetirements` (ledger): the deposit is credited
-to the registered, active reward account, or added to `network_state.treasury`
-when that account is missing or inactive. Both writes are slot-keyed (the
-`account_reward_delta` journal and the boundary `network_state` row), so a
-rollback past the boundary reverts them and re-application is deterministic.
+charge, so a `poolDeposit` change after the registration that paid neither mints
+nor burns the difference at this boundary. A registration made after the pool's
+retirement was reaped is a first registration again and pays the deposit in
+force at its own slot. Deposit refunds are applied in `applyPoolRetirements`
+(ledger): the deposit is credited to the registered, active reward account, or
+added to `network_state.treasury` when that account is missing or inactive.
+Both writes are slot-keyed (the `account_reward_delta` journal and the boundary
+`network_state` row), so a rollback past the boundary reverts them and
+re-application is deterministic.
 
 ### `GetMIRCertsInSlotRange`
 

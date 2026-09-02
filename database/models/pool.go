@@ -150,8 +150,9 @@ type PoolRetirement struct {
 //
 // DepositHeld is the amount the pool's effective registration retains
 // (`pool_registration.deposit_held`), not the deposit the current protocol
-// parameters would charge: a re-registration pays no new pool deposit, so the
-// refundable amount is the one the pool's first registration paid.
+// parameters would charge: a re-registration of a pool that is still
+// registered pays no new pool deposit, so the refundable amount is the one
+// paid by the first registration since the pool's most recent completed reap.
 type PoolRetirementRefund struct {
 	PoolKeyHash                []byte
 	RewardAccount              []byte
