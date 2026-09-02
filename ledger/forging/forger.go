@@ -1511,7 +1511,7 @@ func buildLeiosEB(
 		// (validateLeiosEndorserBlockTxs) and Haskell reference nodes, so a
 		// peer fetching a locally forged EB validates it instead of rejecting
 		// every tx (blinklabs-io/dingo#3641).
-		if _, ok := validLeiosTransactionHash(tx.Hash); !ok ||
+		if !validLeiosTransactionHash(tx.Hash) ||
 			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
@@ -1536,14 +1536,13 @@ func buildLeiosEB(
 	return ebCbor, h.Bytes(), bodies, nil
 }
 
-func validLeiosTransactionHash(hash string) ([]byte, bool) {
+func validLeiosTransactionHash(hash string) bool {
 	raw, err := hex.DecodeString(hash)
-	return raw, err == nil && len(raw) == 32
+	return err == nil && len(raw) == 32
 }
 
 func validLeiosTransactionReference(tx MempoolTransaction) bool {
-	_, hashOK := validLeiosTransactionHash(tx.Hash)
-	return hashOK && len(tx.Cbor) > 0 && len(tx.Cbor) <= math.MaxUint16
+	return validLeiosTransactionHash(tx.Hash) && len(tx.Cbor) > 0 && len(tx.Cbor) <= math.MaxUint16
 }
 
 // modeString returns a string representation of the forging mode.

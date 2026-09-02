@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -225,8 +226,8 @@ func TestBuildLeiosEBReferencesUseFullTransactionHash(t *testing.T) {
 	// Regression guard: the old (buggy) contract hashed the decoded tx.Hash
 	// (tx-id / body hash). That value must NOT equal the reference hash now,
 	// or a fetching peer would reject every locally forged tx again.
-	rawHash, ok := validLeiosTransactionHash(txs[0].Hash)
-	require.True(t, ok)
+	rawHash, err := hex.DecodeString(txs[0].Hash)
+	require.NoError(t, err)
 	require.NotEqual(
 		t,
 		lcommon.NewBlake2b256(rawHash),
