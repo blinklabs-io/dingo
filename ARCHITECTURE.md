@@ -2231,8 +2231,9 @@ its pool metadata schema (`leios_key_public`/`leios_key_possession_proof` on
 `pool`/`pool_registration`, migration `v2`) from live registration certs,
 genesis import, and ledger-state snapshot restore alike, and resolves it
 automatically per epoch for committee/vote verification (see "Leios Voting")
--- an operator only needs `leiosVoterPublicKeys` as a local override, not as
-the required mechanism. The ledger-state snapshot importer recognizes the
+-- an operator supplies only the matching local vote signing key; the
+PoP-verified on-chain registration remains the authorization source. The
+ledger-state snapshot importer recognizes the
 matching Dijkstra `StakePoolState` field
 (both a valid key and explicit null) so it locates pledge and all later pool
 fields correctly, and carries the key itself through to the same columns;
@@ -2306,13 +2307,19 @@ the ranking block's point so a rollback removes them — but without validation 
 consumed-input recovery (`Database.SetTransactionWithOpts` with
 `SkipConsumedInputRecovery`): the endorser block was admitted by its Leios
 certificate, so its transactions are trusted, and a consumed input not yet
-present is left as a no-op rather than driving blob recovery. Replayed endorser
-transaction hashes are skipped so effects are not applied twice. Applying the
-produced outputs keeps the UTxO set — and the stake distribution derived from it
-— complete, matching the reference; recording metadata only (the prior behavior)
-left endorser-resident outputs missing, which diverged the UTxO and made
-downstream transactions and the leader-election stake snapshot treat inputs the
-endorser block should have produced as absent. Every other network takes the
+present is left as a no-op rather than driving blob recovery. An input that is
+present but already spent by a *different* certified endorser transaction is
+also a no-op (`TransactionStore.SetTransactionLeiosClosure`), matching
+`ValidateNone`'s `Map.delete` on a missing key: two certified endorser blocks
+may legitimately name the same input across blocks, and failing there wedged
+block application (issue #3643). Ranking-block application keeps the hard
+`ErrUtxoConflict` check. Replayed endorser transaction hashes are skipped so
+effects are not applied twice. Applying the produced outputs keeps the UTxO set
+— and the stake distribution derived from it — complete, matching the
+reference; recording metadata only (the prior behavior) left endorser-resident
+outputs missing, which diverged the UTxO and made downstream transactions and
+the leader-election stake snapshot treat inputs the endorser block should have
+produced as absent. Every other network takes the
 CIP-conformant path, where the endorser transactions are applied to the UTxO with
 dingo's normal per-tx validation and consumed-input recovery, as a side delta
 recorded under the ranking block's point (so a rollback removes them). dingo no longer carries the
@@ -2601,12 +2608,42 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
+- `Constitution` exposes the enacted constitution — anchor URL, anchor hash,
+  and the optional guardrails policy hash — mapped from the stored
+  `constitution` row by `ledger/governance`'s `ConstitutionFromModel`, which
+  the conformance state provider in `internal/test/conformance` reuses so
+  both report the same shape. gouroboros' guardrails rule reads a nil
+  constitution as "this chain has no guardrails script" and reads the policy
+  hash by nil-ness as well as by value, so a stored zero-length policy hash
+  is normalized to nil. Constitution state that is missing or malformed
+  fails closed with `governance.ErrConstitutionUnavailable`, and a
+  constitution store that cannot be read at all fails closed with the
+  wrapped store error; neither reports an empty-but-valid constitution.
+  Guardrails validation then rejects the transaction with
+  `conway.ConstitutionLookupError` rather than accepting a parameter-change
+  or treasury-withdrawal proposal that carries no policy hash. A non-nil
+  guardrails policy hash of the wrong length is left to gouroboros, which
+  reports it as `conway.MalformedConstitutionError`.
+- Genesis initialization records the Conway genesis constitution at slot 0
+  through `governance.ConstitutionFromGenesis`, so a chain started from
+  Conway genesis has the enacted constitution its genesis file declares
+  rather than none. The seed is written only when the store holds no
+  constitution, and the lookup takes the highest non-deleted `added_slot`,
+  so an enacted `NewConstitution` action or an imported ledger-state
+  snapshot always wins over it and replay or restart re-seeds nothing.
 - `RewardAccountBalance` lookup for a full, tag-aware stake credential. It
   returns the active account's current reward balance, including zero, or nil
   for an absent or inactive account. This implements the ledger-state
   capability used by transaction validation to enforce exact withdrawals
   before Dijkstra and Dijkstra's script-sensitive partial-withdrawal rule,
   while always rejecting amounts above the balance before storage ingestion.
+- `StakeCredentialDeposit` returns the deposit currently locked by an active
+  key- or script-hash stake credential. Certificate-created accounts use the
+  latest registration history entry, while Mithril-imported and Shelley-genesis
+  accounts fall back to the deposit captured in their rollback baseline because
+  no registration certificate exists in local history. Unknown legacy baseline
+  deposits remain nil; the current protocol parameter is never substituted for
+  an unavailable historical value.
 
 ### Local State Query
 
@@ -3810,11 +3847,18 @@ them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 selected backend.
 
 Each transaction-submission consumer retains a bounded cache of transaction
-bodies (1,024 entries by default; `MempoolConfig.ConsumerCacheSize` can lower or
-raise it for embedded users). The bound is enforced by declining to advertise,
-not by eviction: a body is only ever served to the peer from this cache, and
+bodies. Retained CBOR is limited per consumer to one quarter of the configured
+mempool capacity by default, and in aggregate to the full capacity.
+`MempoolConfig.ConsumerCacheBytes` can override the per-consumer budget for
+embedded users. A secondary 1,024-entry default bound remains, and
+`MempoolConfig.ConsumerCacheSize` can override that count. The bounds are
+enforced by declining to advertise, not by eviction: a
+body is only ever served to the peer from this cache, and
 dropping one already advertised would silently omit a transaction the peer
-legitimately requested. A non-blocking `NextTx` returns nil once the cache is
+legitimately requested. A body larger than the consumer's entire byte budget
+is skipped for that consumer because it can never become cacheable; this keeps
+it from permanently blocking the cursor and prevents it from starving later,
+relayable transactions. A non-blocking `NextTx` returns nil once the cache is
 full; a blocking one parks until a slot frees rather than answering empty, since
 the peer's pull loop has no backoff for an empty reply and would spin
 request/reply without pacing. Shutdown or connection cleanup releases a parked
@@ -4020,7 +4064,7 @@ Experimental CIP-0164 stake-truncated committee voting, active only under the Di
 - **Committee selection**: the voting committee for an epoch is a pure function of the Praos stake snapshot: `ComputeCommittee` selects a stake-coverage prefix ordered by stake descending (pool key hash ascending on ties) until cumulative stake crosses `CommitteeStakeCoverage` (sigma_c), and the 0-based position in that order is `voter_id`. This matches upstream `prototype-2026w32`'s `selectCommitteeByStake`/`mkLeiosCommittee` and replaced the earlier "every pool votes" prototype committee (issue #3148) — there is no mode switch, sigma_c=1 simply selects every pool. Committees are memoized in memory and recomputed on demand — there is no database table.
 - **Vote validation**: current prototype votes identify the announcing ranking block. The selected-chain block event maps that hash to the announcement slot and EB after adoption, before window, committee, membership, deduplication, and BLS checks run; early votes wait in a bounded TTL queue instead of being rejected with a synthetic slot zero. The queue retains bounded alternate candidates per voter and verifies them on resolution, preventing a forged first signature from occupying that voter's deduplication slot. Exact per-connection accounting makes its global capacity fair: when full, an underrepresented connection replaces the oldest candidate from the most represented connection, while a lone healthy relay may still use the entire queue. A committee member's voting key resolves from the same historical Mark snapshot that supplied its stake: `LeiosKeyProvider` calls `ledger.LedgerView.GetLeiosKeys(snapshotEpoch, ...)`, then excludes any captured key whose proof fails `VerifyLeiosKeyProofOfPossession`. A post-SNAP registration or rotation therefore cannot change an already-selected committee. A member without a captured usable key is a keyless committee seat: membership and stake still count, but its vote can never be verified or aggregated into a certificate. There is no more derivation fallback — that insecure shortcut (deriving a key from the pool's cold-key hash) was removed upstream in `prototype-2026w32` and here in the same change (issue #3148).
 - **Stake quorum and certificates**: per endorser block and signing context, the manager tracks observed stake (all membership-valid votes) and verified stake (signature-verified votes). When verified stake reaches the `QuorumStakeThreshold` (tau) fraction of *total active stake* (exact rational arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers bitfield over the committee plus one aggregated BLS12-381 MinSig signature — from verified votes only, and publishes `leios.eb_quorum` with the announcing ranking-block hash that every prototype vote signed. The tau < sigma_c invariant is revalidated whenever parameters are read, and a violation disables committee computation. The Dijkstra genesis is immutable and the current cardano-ledger DijkstraGenesis carries no Leios committee fields (Musashi's genesis defines only the refScript parameters), so when `CommitteeStakeCoverage` (sigma_c) and/or `QuorumStakeThreshold` (tau) are absent the node falls back to the CIP-0164 defaults (sigma_c = 0.99, tau = 0.75), mirroring the reference implementation, so committee formation and certification proceed without modifying the hash-pinned genesis; the tau < sigma_c invariant is re-checked after defaulting (issue #2836). Legacy certificate validation uses the slot-plus-EB message; both it and `ValidatePrototypeEbCertificate` (prototype RB-hash message) report `sigChecked bool` — false in the lenient case where one or more signers have no resolvable key, rather than synthesizing one. The pipeline preserves signing context, and the forge loop only adapts the certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when its announcing RB is the actual parent CertRB.
-- **Vote emission**: after an acquired EB is announced by a selected ranking block, a block producer signs that announcing ranking-block hash once with the prototype BLS POP domain and publishes `leios.vote_emitted`. The signed preimage is the hash's CBOR byte-string encoding (34 bytes: `0x58 0x20` then the 32 hash bytes), matching the reference's `SignableRepresentation` for `RbHash`; signing the bare 32 bytes hashes a different preimage to the curve and every pairing check fails (issue #3034). Before committing either a local or resolved peer vote, the manager revalidates the exact announcement under its state lock; local commit and publication are additionally serialized with rollback, so an in-flight signature cannot resurrect a rolled-back announcement. Node composition enqueues the three-field vote on LeiosNotify. When `leiosVoteSigningKeyFile` is configured, Dingo loads the Cardano text-envelope BLS12-381 signing key and uses it for vote signatures; legacy raw hex scalar files remain accepted. **A pool started without one runs as a non-voting relay** (issue #3148): the insecure pool cold-key-hash derivation that previously stood in for a real key (matching the reference's `rawDeserialiseSignKeyDSIGN`) was removed upstream in `prototype-2026w32`, and dingo removed its own copy in the same change — there is no fallback that lets a pool vote without a real registered key. The strict `ParseVoteSigningKey` path used for operator-supplied key files rejects out-of-range scalars.
+- **Vote emission**: after an acquired EB is announced by a selected ranking block, a block producer signs that announcing ranking-block hash once with the prototype BLS POP domain and publishes `leios.vote_emitted`. The signed preimage is the hash's CBOR byte-string encoding (34 bytes: `0x58 0x20` then the 32 hash bytes), matching the reference's `SignableRepresentation` for `RbHash`; signing the bare 32 bytes hashes a different preimage to the curve and every pairing check fails (issue #3034). Before committing either a local or resolved peer vote, the manager revalidates the exact announcement under its state lock; local commit and publication are additionally serialized with rollback, so an in-flight signature cannot resurrect a rolled-back announcement. Local signing also snapshots the active configuration's generation, pool, and key, then revalidates all three under the state lock before inserting or publishing the result; a signature completed after reconfiguration is discarded without changing vote state or emitting an event. Node composition enqueues the three-field vote on LeiosNotify. When `leiosVoteSigningKeyFile` is configured, Dingo loads the Cardano text-envelope BLS12-381 signing key and uses it for vote signatures; legacy raw hex scalar files remain accepted. A node whose local historical snapshot has not reached the key's on-chain registration starts with voting disabled and retries the deferred configuration after epoch transitions. The initial provider lookup distinguishes absence from failure: an absent usable registration creates deferred configuration, while a provider error is fatal to startup and clears that configuration; an already-visible mismatch is likewise a hard configuration error. Every initial or retry lookup takes a monotonically increasing configuration generation before reading the provider; only the newest generation may activate voting, clear deferred state, or report a fatal startup result. Every completion also revalidates that generation together with the requested pool and key before interpreting Enabled, AwaitingKey, or RetryPending as its own result; a stale request returns Superseded, which node startup reports as a distinct nonfatal diagnostic. Starting a newer retry also disables an older activation that has not finalized, so a blocked lookup cannot replace the enabled, deferred, or diagnostic outcome established by a newer attempt. Once configuration has been deferred, a provider error during an epoch-transition retry is nonfatal: voting stays disabled and the pool and signing key remain retained for the next retry. Invalid proofs and mismatches during deferred retries have the same disabled-and-retained behavior. A PoP-verified matching snapshot key enters a single serialized activation flow: if ready current-epoch announcements exist, committee, parameter, and provider resolution must succeed before the signing key is exposed; the flow then replays them in deterministic slot and ranking-block-hash order and clears deferred state only after replay processing. A transient replay-preparation failure therefore leaves voting disabled and the configuration retryable. **A pool started without a signing key runs as a non-voting relay** (issue #3148): the insecure pool cold-key-hash derivation that previously stood in for a real key (matching the reference's `rawDeserialiseSignKeyDSIGN`) was removed upstream in `prototype-2026w32`, and dingo removed its own copy in the same change — there is no fallback that lets a pool vote without a real registered key. The strict `ParseVoteSigningKey` path used for operator-supplied key files rejects out-of-range scalars.
 - **Vote relay**: a prototype vote accepted from a peer (via `HandlePrototypeVote`, either immediately or once its queued announcement resolves) publishes `leios.vote_received` exactly once with the connection key that delivered it, gated by the same `insertVote` dedup/equivocation check that gates `leios.vote_emitted` for a local vote — a resubmission or an equivocating vote is not re-published. Node composition enqueues it on LeiosNotify for every peer except that origin connection; locally emitted votes still go to every peer. The shared append log advances the excluded origin cursor without creating a delivery reservation or retry, including while the origin is caught up and idle, so exclusion does not pin pruning. Without peer re-diffusion, a relay tallied a vote for its own view but never forwarded it, so a block producer whose only path to the network is that relay never observed quorum and built no certificates (issue #3288).
 - **On-chain key registration and persistence**: a pool's optional `leios_key` pool-cert field (96-byte BLS public key + 48-byte proof of possession) is persisted verbatim in the `pool`/`pool_registration` tables' `leios_key_public`/`leios_key_possession_proof` columns (`database/plugin/metadata/sqlstore/transaction_certificates.go`'s `applyPoolRegistrationCertificate`, mirroring how `vrf_key_hash` is stored), with no proof check at write time — `database` may not depend on `ledger/leios`'s BLS code (`internal/architecture/import_boundary_test.go`). At SNAP, the registration effective during the ended epoch is copied into the Mark `pool_stake_snapshot` row (`leios_key_public`/`leios_key_possession_proof`, migration `v5`); legacy rows stay keyless rather than being reconstructed from mutable pool state. The ledger-state importer preserves the corresponding key from both `StakePoolSnapShot` pool parameters and `IndividualPoolStake` active-distribution entries. `ledger.LedgerView.GetLeiosKeys` reads the requested epoch's Mark rows for `node_leios.go`'s `leiosKeyProviderAdapter`, which `VoteManager` calls once per epoch and caches in `epochEntry.onChainKeys`; `VerifyLeiosKeyProofOfPossession` there is the only place the proof is checked, so an invalid captured key is excluded from that epoch's resolvable keys, matching upstream's "invalid proofs are treated as absent."
 - **State lifecycle**: all state is in-memory, split across two stores. Raw votes live in a TTL- and size-bounded *serving store* (10 minutes, 8192 entries, oldest evicted) used only for relaying to peers. Dedup and tally accounting live in a separate *record ledger* (one record per accepted `(slot, voter_id)`, including the vote's signing-context reference, admission-capped at 4x the serving store with reject-new semantics — the cap gates only unverified peer votes; verified and locally emitted votes bypass it, being unforgeable and dedup-bounded to one record per slot and registered voter) that is never size-evicted: records are pruned only in lockstep with their endorser-block/signing-context tally, so a vote whose tally is still accumulating can never be re-counted after its serving entry is evicted, and first-wins equivocation detection stays durable. The record cap also transitively bounds the tally map. Acquired EBs retain their slot and epoch, and epoch transitions or chain rollbacks prune stale acquisitions, announcements, corresponding pending candidates, and their exact global/per-connection counts together; rollbacks also drop votes, tallies, and records past the rollback point and clear the committee memo.

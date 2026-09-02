@@ -35,6 +35,7 @@ const (
 	accountBaselineSchemaRelease               = "account-import-baseline"
 	leiosSnapshotKeySchemaRelease              = "leios-snapshot-keys"
 	governanceRatificationHistorySchemaRelease = "governance-ratification-history"
+	accountDepositSchemaRelease                = "account-import-deposit"
 	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
 )
 
@@ -54,6 +55,7 @@ var schemaVersions = []struct {
 		Name:    governanceRatificationHistorySchemaRelease,
 		Dir:     "v6",
 	},
+	{Version: 7, Name: accountDepositSchemaRelease, Dir: "v7"},
 	{Version: 8, Name: poolDepositHeldSchemaRelease, Dir: "v8"},
 }
 

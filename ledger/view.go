@@ -212,6 +212,66 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 	return account != nil && account.Active
 }
 
+// StakeCredentialDeposit returns the registration deposit currently held for
+// a registered stake credential. The account lookup preserves the live
+// registration semantics used by IsStakeCredentialRegistered, while the
+// registration history carries the deposit actually paid rather than the
+// current protocol-parameter value.
+func (lv *LedgerView) StakeCredentialDeposit(
+	cred lcommon.Credential,
+) (*uint64, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if account == nil || !account.Active {
+		return nil, nil
+	}
+	history, err := lv.ls.db.GetAccountRegistrationHistoryByCredential(
+		credentialTag,
+		cred.Credential[:],
+		1,
+		0,
+		"desc",
+		lv.txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	importRegistration, err := lv.ls.db.GetAccountImportRegistrationByCredential(
+		credentialTag,
+		cred.Credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// The import baseline represents state after the snapshot point. Treat it
+	// as the latest registration when no certificate history is newer, without
+	// exposing a fabricated transaction through the public history API.
+	if importRegistration != nil &&
+		(len(history) == 0 || importRegistration.AddedSlot >= history[0].AddedSlot) {
+		return importRegistration.Deposit, nil
+	}
+	if len(history) == 0 || history[0].Action != "registered" {
+		return nil, nil
+	}
+	deposit := history[0].Deposit
+	return &deposit, nil
+}
+
 // It returns the most recent active pool registration certificate
 // and the epoch of any pending retirement for the given pool key hash.
 func (lv *LedgerView) PoolCurrentState(
@@ -768,19 +828,20 @@ func (lv *LedgerView) DRepDelegation(
 	}, nil
 }
 
-// Constitution returns the current constitution.
-// Returns nil if no constitution has been established on-chain.
+// Constitution returns the enacted constitution: its anchor URL, anchor
+// hash, and optional guardrails policy hash.
+//
+// Constitution state that is missing or malformed fails closed with
+// governance.ErrConstitutionUnavailable; a constitution store that cannot
+// be read at all returns the wrapped store error. Neither reports an
+// empty-but-valid constitution, which gouroboros' guardrails rule would
+// read as "no guardrails script required".
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 	constitution, err := lv.ls.db.GetConstitution(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get constitution: %w", err)
 	}
-	if constitution == nil {
-		return nil, nil
-	}
-	// Constitution in gouroboros is currently an empty placeholder struct.
-	// Return a non-nil pointer to indicate a constitution exists.
-	return &lcommon.Constitution{}, nil
+	return governance.ConstitutionFromModel(constitution)
 }
 
 // TreasuryValue returns the current treasury value.

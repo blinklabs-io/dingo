@@ -17,125 +17,92 @@
 package conformance
 
 import (
-	"log"
+	"errors"
+	"fmt"
 	"os"
-	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
-// TestMain drops this process's Postgres schema and MySQL database, and
-// removes their paired local blob directories, once after every test in
-// this process has finished -- see postgresProcessSchema's doc comment in
-// state_manager_postgres.go and mysqlProcessDatabase's doc comment in
-// state_manager_mysql.go for why those are shared across every
-// NewDingoPostgresStateManager/NewDingoMysqlStateManager call in this
-// process (so cleanup belongs here, once, rather than in an individual
-// manager's Close).
+// init registers this build configuration's process teardown: the Postgres
+// schema, the MySQL database, and their paired local blob directories. See
+// postgresProcessSchema's doc comment in state_manager_postgres.go and
+// mysqlProcessDatabase's in state_manager_mysql.go for why those are shared
+// across every NewDingoPostgresStateManager/NewDingoMysqlStateManager call in
+// the process, so cleanup belongs here once rather than in an individual
+// manager's Close.
 //
-// A non-empty postgresProcessBlobDir/mysqlProcessBlobDir is this process's
-// own signal that a manager actually used that backend: neither is set
-// until ensurePostgresProcessBlobDir/ensureMysqlProcessBlobDir runs, which
-// only happens from inside NewDingoPostgresStateManager/
-// NewDingoMysqlStateManager. A `go test` invocation that never configured
-// or exercised one of the two backends leaves that backend's directory
-// empty and skips cleanup for it, rather than connecting to a DSN nothing
-// in this run ever validated.
-func TestMain(m *testing.M) {
-	code := m.Run()
+// Registering rather than defining a second TestMain is what keeps the two
+// build configurations from drifting; see process_cleanup_test.go.
+func init() {
+	registerProcessCleanup(cleanupPostgresProcessResources)
+	registerProcessCleanup(cleanupMysqlProcessResources)
+}
 
-	// cleanupFailed tracks whether any step below failed, without letting a
-	// failure skip the steps after it: every cleanup path below always
-	// runs, and only the final exit code reflects a failure, so one failed
-	// drop/removal never leaves a sibling resource (e.g. the blob directory
-	// paired with a schema that failed to drop) uncleaned as a side effect
-	// of returning early.
-	cleanupFailed := false
-
-	if err := cleanupCorpusTestdata(); err != nil {
-		log.Printf("conformance: remove shared vector extraction: %v", err)
-		cleanupFailed = true
+// cleanupPostgresProcessResources drops this process's Postgres schema and
+// removes its paired blob directory.
+//
+// A non-empty postgresProcessBlobDir is this process's own signal that a
+// manager actually used the backend: it is not set until
+// ensurePostgresProcessBlobDir runs, which only happens from inside
+// NewDingoPostgresStateManager. A `go test` invocation that never configured or
+// exercised Postgres skips cleanup rather than connecting to a DSN nothing in
+// this run ever validated.
+//
+// Both steps always run: the schema drop failing must not skip removal of the
+// directory paired with it.
+func cleanupPostgresProcessResources() error {
+	if postgresProcessBlobDir == "" {
+		return nil
 	}
-
-	if postgresProcessBlobDir != "" {
-		if isPostgresConformanceConfigured() {
-			if err := dropPostgresSchema(
-				postgresConformanceDSN(),
+	var errs []error
+	if isPostgresConformanceConfigured() {
+		if err := dropPostgresSchema(
+			postgresConformanceDSN(),
+			postgresProcessSchema,
+		); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"cleanup postgres process schema %q: %w",
 				postgresProcessSchema,
-			); err != nil {
-				log.Printf(
-					"conformance: cleanup postgres process schema %q: %v",
-					postgresProcessSchema,
-					err,
-				)
-				cleanupFailed = true
-			}
-		}
-		if err := os.RemoveAll(postgresProcessBlobDir); err != nil {
-			log.Printf(
-				"conformance: remove postgres process blob dir %q: %v",
-				postgresProcessBlobDir,
 				err,
-			)
-			cleanupFailed = true
+			))
 		}
 	}
+	if err := os.RemoveAll(postgresProcessBlobDir); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"remove postgres process blob dir %q: %w",
+			postgresProcessBlobDir,
+			err,
+		))
+	}
+	return errors.Join(errs...)
+}
 
-	if mysqlProcessBlobDir != "" {
-		if isMysqlConformanceConfigured() {
-			if err := dropMysqlDatabase(
-				mysqlConformanceRootDSN(),
+// cleanupMysqlProcessResources drops this process's MySQL database and removes
+// its paired blob directory. See cleanupPostgresProcessResources for why an
+// empty mysqlProcessBlobDir means this backend was never exercised, and why
+// both steps always run.
+func cleanupMysqlProcessResources() error {
+	if mysqlProcessBlobDir == "" {
+		return nil
+	}
+	var errs []error
+	if isMysqlConformanceConfigured() {
+		if err := dropMysqlDatabase(
+			mysqlConformanceRootDSN(),
+			mysqlProcessDatabase,
+		); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"cleanup mysql process database %q: %w",
 				mysqlProcessDatabase,
-			); err != nil {
-				log.Printf(
-					"conformance: cleanup mysql process database %q: %v",
-					mysqlProcessDatabase,
-					err,
-				)
-				cleanupFailed = true
-			}
-		}
-		if err := os.RemoveAll(mysqlProcessBlobDir); err != nil {
-			log.Printf(
-				"conformance: remove mysql process blob dir %q: %v",
-				mysqlProcessBlobDir,
 				err,
-			)
-			cleanupFailed = true
+			))
 		}
 	}
-
-	os.Exit(processCleanupExitCode(code, cleanupFailed))
-}
-
-// processCleanupExitCode folds a process-cleanup failure into the test run's
-// own exit code. A cleanup failure must fail the run even when every test
-// passed -- otherwise the leaked schema/database/directory this exists to
-// catch is invisible to anything that only checks the exit code (CI, a
-// local `go test && echo ok`). A real test failure's exit code is never
-// downgraded, only upgraded from 0.
-func processCleanupExitCode(testExitCode int, cleanupFailed bool) int {
-	if cleanupFailed && testExitCode == 0 {
-		return 1
+	if err := os.RemoveAll(mysqlProcessBlobDir); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"remove mysql process blob dir %q: %w",
+			mysqlProcessBlobDir,
+			err,
+		))
 	}
-	return testExitCode
-}
-
-// TestProcessCleanupExitCodeFailsOnCleanupFailure proves a process-cleanup
-// failure (a schema/database drop or blob directory removal error) makes
-// TestMain report a nonzero exit code even when every test in the process
-// passed -- a reviewer's forced RemoveAll permission failure otherwise
-// logged "permission denied" but left `go test` exiting 0, silently
-// leaking the per-run schema/database/directory this cleanup exists to
-// remove.
-func TestProcessCleanupExitCodeFailsOnCleanupFailure(t *testing.T) {
-	require.Equal(t, 0, processCleanupExitCode(0, false))
-	require.Equal(t, 1, processCleanupExitCode(0, true))
-	require.Equal(
-		t,
-		2,
-		processCleanupExitCode(2, true),
-		"a genuine test failure's exit code must never be downgraded",
-	)
-	require.Equal(t, 2, processCleanupExitCode(2, false))
+	return errors.Join(errs...)
 }

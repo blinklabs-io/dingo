@@ -111,6 +111,17 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 		},
 	}
 	require.NoError(t, ls.createGenesisBlock())
+	expectedDeposit := uint64(
+		nodeCfg.ShelleyGenesis().ProtocolParameters.KeyDeposit,
+	)
+	view := &LedgerView{ls: ls}
+	deposit, err := view.StakeCredentialDeposit(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: delegatorHash,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deposit)
+	require.Equal(t, expectedDeposit, *deposit)
 
 	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
 	require.NoError(t, err)

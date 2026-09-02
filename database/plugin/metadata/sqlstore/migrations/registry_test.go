@@ -86,6 +86,11 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[5].SQL["sqlite"].Expand[3],
 		"INSERT INTO `governance_proposal_ratification_history`",
 	)
+	require.Equal(t, 7, registry[6].Version)
+	require.Equal(t, "account-import-deposit", registry[6].Name)
+	require.Equal(t, []string{
+		"ALTER TABLE `account_import_baseline` ADD COLUMN `deposit_amount` text",
+	}, registry[6].SQL["sqlite"].Expand)
 	require.Equal(t, 8, registry[7].Version)
 	require.Equal(t, "pool-registration-deposit-held", registry[7].Name)
 	require.Len(t, registry[7].SQL["sqlite"].Expand, 2)
@@ -111,7 +116,7 @@ func TestDepositHeldMigrationTranslatesForProviders(t *testing.T) {
 
 	postgres, err := PostgresRegistry()
 	require.NoError(t, err)
-	postgresSQL := strings.Join(postgres[6].SQL["postgres"].Expand, "\n")
+	postgresSQL := strings.Join(postgres[7].SQL["postgres"].Expand, "\n")
 	require.Contains(
 		t,
 		postgresSQL,
@@ -122,7 +127,7 @@ func TestDepositHeldMigrationTranslatesForProviders(t *testing.T) {
 
 	mysql, err := MySQLRegistry()
 	require.NoError(t, err)
-	mysqlSQL := strings.Join(mysql[6].SQL["mysql"].Expand, "\n")
+	mysqlSQL := strings.Join(mysql[7].SQL["mysql"].Expand, "\n")
 	require.Contains(
 		t,
 		mysqlSQL,

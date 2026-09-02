@@ -100,6 +100,26 @@ func seedPoolDistr2Fixture(
 	return pkh
 }
 
+// decodePoolDistr2Result round-trips a handler's returned []any through CBOR
+// the way the wire actually does: encoded by the server exactly as
+// protocol/localstatequery/server.go encodes it, then decoded by the real
+// gouroboros client-side type. Client.GetPoolDistr2 decodes straight into a
+// PoolDistr2Result with no wrapping, so asserting against that decoded value
+// (rather than a raw type assertion on the handler's own []any) is what would
+// have caught the handler double-wrapping its result before it shipped.
+func decodePoolDistr2Result(
+	t *testing.T,
+	result any,
+) olocalstatequery.PoolDistr2Result {
+	t.Helper()
+	encoded, err := cbor.Encode(&result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.PoolDistr2Result
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	return decoded
+}
+
 // TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf covers GetPoolDistr2,
 // which cardano-cli sends while computing a leadership schedule.
 //
@@ -137,12 +157,7 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok, "expected the []any result wrapper")
-	require.Len(t, arr, 1)
-
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok, "expected a PoolDistr2Result, got %T", arr[0])
+	distr := decodePoolDistr2Result(t, result)
 
 	assert.Equal(t, uint64(4_000_000), distr.TotalActiveStake,
 		"total active stake is the sum over the snapshot")
@@ -227,11 +242,7 @@ func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2QueryFor(pkhA))
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	require.Len(t, distr.Pools, 1, "only the requested pool is reported")
 	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
@@ -287,14 +298,10 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(
 	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh))
 	require.NoError(t, err,
 		"a pool the snapshot does not hold is omitted, not an error")
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	require.Len(t, distr.Pools, 1)
-	_, ok = distr.Pools[lcommon.PoolId(pkhA)]
+	_, ok := distr.Pools[lcommon.PoolId(pkhA)]
 	assert.True(t, ok, "the pool the snapshot holds is still reported")
 	_, ok = distr.Pools[lcommon.PoolId(unknownPkh)]
 	assert.False(t, ok, "a pool absent from the snapshot is not reported")
@@ -310,12 +317,7 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err,
 		"an empty snapshot reports an empty distribution, not an error")
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 	// One, not zero: the ledger types this field as a NonZero Coin, so a zero
 	// total is not decodable by the client at all.
 	assert.Equal(t, uint64(1), distr.TotalActiveStake)
@@ -379,10 +381,7 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 	require.NoError(t, err,
 		"an unregistered pool must not abort the protocol and drop the "+
 			"client's connection")
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	_, present := distr.Pools[lcommon.PoolId(orphanPkh)]
 	assert.False(t, present,
@@ -457,10 +456,7 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
 	require.True(t, ok, "pool missing from the distribution")
@@ -533,10 +529,7 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
 	require.True(t, ok, "pool missing from the distribution")
 
@@ -632,10 +625,7 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
 	require.True(t, ok, "pool missing from the distribution")
@@ -715,10 +705,7 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
-	arr, _ := result.([]any)
-	require.Len(t, arr, 1)
-	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
-	require.True(t, ok)
+	distr := decodePoolDistr2Result(t, result)
 
 	assert.Equal(t, uint64(4_000_000), distr.TotalActiveStake,
 		"the total must equal the sum of the snapshot rows the per-pool "+
@@ -737,4 +724,72 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 	assert.Equal(t, 0, sum.Cmp(big.NewRat(1, 1)),
 		"fractions taken over the summary's total must still sum to one, "+
 			"got %s", sum)
+}
+
+// poolDistr2CborQuery wraps the leaf query in GetCBOR (Shelley sub-query 9,
+// ShelleyCborQuery), the shape cardano-cli uses for several queries (e.g.
+// `query stake-snapshot`) to get a query's result back as CBOR-in-CBOR
+// (tag 24) rather than as a directly-typed reply.
+func poolDistr2CborQuery() *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCborQuery{
+				Query: &olocalstatequery.ShelleyPoolDistr2Query{
+					Type: olocalstatequery.QueryTypeShelleyPoolDistr2,
+				},
+			},
+		},
+	}
+}
+
+// TestQueryShelleyPoolDistr2_ViaGetCBOR covers GetPoolDistr2 wrapped in the
+// GetCBOR combinator (queryShelleyCbor), a path distinct from the direct
+// query the rest of this file exercises.
+//
+// queryShelleyPoolDistr2's fix -- returning the result's two fields
+// destructured into a []any instead of the whole PoolDistr2Result struct --
+// changed the shape queryShelleyCbor sees from its wrapped inner query: one
+// element (the struct) before the fix, two (the fields) after. Before
+// queryShelleyCbor was updated to match, that regressed a case that used to
+// work by accident: the CBOR round trip below is what would have caught it.
+func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
+	db := newTestDB(t)
+
+	vrfA := make([]byte, 32)
+	for i := range vrfA {
+		vrfA[i] = 0xAA
+	}
+	poolA := make([]byte, 28)
+	for i := range poolA {
+		poolA[i] = 0x11
+	}
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	result, err := ls.Query(poolDistr2CborQuery())
+	require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr2 must not error")
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected the []any result wrapper")
+	require.Len(t, arr, 1)
+	tag, ok := arr[0].(cbor.Tag)
+	require.True(t, ok, "expected a tag-24 CBOR.Tag, got %T", arr[0])
+	assert.EqualValues(t, cbor.CborTagCbor, tag.Number)
+
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok, "tag content must be raw CBOR bytes, got %T", tag.Content)
+
+	// The tag-24 content must decode via the same real client-side type a
+	// direct (non-GetCBOR) GetPoolDistr2 reply does: proof that GetCBOR
+	// carries the identical value, just CBOR-in-CBOR encoded.
+	var distr olocalstatequery.PoolDistr2Result
+	_, err = cbor.Decode(content, &distr)
+	require.NoError(t, err, "tag-24 content must decode as a PoolDistr2Result")
+
+	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
+	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
+	assert.Equal(t, uint64(3_000_000), entryA.TotalPoolStake)
+	assert.Equal(t, uint64(3_000_000), distr.TotalActiveStake)
 }
