@@ -967,6 +967,7 @@ func (k *KoiosClient) getAllAccountAddresses(
 	seen := make(map[string]bool)
 	var addrs []string
 	total := 0
+	pages := 0
 	for start := 0; ; start += koiosPageSize {
 		end := start + koiosPageSize - 1
 		resp, err := k.get(
@@ -978,17 +979,7 @@ func (k *KoiosClient) getAllAccountAddresses(
 		if err != nil {
 			return nil, err
 		}
-		// Preview answers 303k accounts in 304 sequential pages. Without a
-		// progress line the whole walk is silent, which is indistinguishable
-		// from a stalled fetch (dingo #3796).
-		if logger != nil && start > 0 &&
-			start%(koiosPageSize*accountListLogEveryPages) == 0 {
-			logger.Info(
-				"koiosparity: crawling Koios account list",
-				"fetched", len(addrs),
-				"total", total,
-			)
-		}
+
 		if resp.StatusCode != http.StatusOK &&
 			resp.StatusCode != http.StatusPartialContent {
 			return nil, fmt.Errorf(
@@ -1009,6 +1000,20 @@ func (k *KoiosClient) getAllAccountAddresses(
 				seen[item.StakeAddress] = true
 				addrs = append(addrs, item.StakeAddress)
 			}
+		}
+		// Preview answers 303k accounts in 304 sequential pages. Without a
+		// progress line the whole walk is silent, which is indistinguishable
+		// from a stalled fetch (dingo #3796). Emitted after the page is
+		// folded in, so a crawl ending on exactly a milestone page still
+		// reports it before the loop breaks below.
+		pages++
+		if logger != nil && pages%accountListLogEveryPages == 0 {
+			logger.Info(
+				"koiosparity: crawling Koios account list",
+				"pages", pages,
+				"fetched", len(addrs),
+				"total", total,
+			)
 		}
 		if len(page) < koiosPageSize {
 			break

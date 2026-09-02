@@ -149,10 +149,11 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
-	addrs, fetchedAt, err := cache.GetAccountUniverse("preview")
+	addrs, fetchedAt, cached, err := cache.GetAccountUniverse("preview")
 	require.NoError(t, err)
 	assert.Empty(t, addrs)
-	assert.True(t, fetchedAt.IsZero(), "nothing cached yet")
+	assert.False(t, cached, "nothing cached yet")
+	assert.True(t, fetchedAt.IsZero())
 
 	first := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 	require.NoError(t, cache.SaveAccountUniverse(
@@ -162,8 +163,9 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 		"preprod", []string{"stake_test1z"}, first,
 	))
 
-	addrs, fetchedAt, err = cache.GetAccountUniverse("preview")
+	addrs, fetchedAt, cached, err = cache.GetAccountUniverse("preview")
 	require.NoError(t, err)
+	assert.True(t, cached)
 	assert.Equal(t, []string{"stake_test1a", "stake_test1b"}, addrs)
 	assert.WithinDuration(t, first, fetchedAt, time.Second)
 
@@ -171,14 +173,16 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 	require.NoError(t, cache.SaveAccountUniverse(
 		"preview", []string{"stake_test1b"}, second,
 	))
-	addrs, fetchedAt, err = cache.GetAccountUniverse("preview")
+	addrs, fetchedAt, cached, err = cache.GetAccountUniverse("preview")
 	require.NoError(t, err)
+	assert.True(t, cached)
 	assert.Equal(t, []string{"stake_test1b"}, addrs,
 		"a save replaces the set rather than merging into it")
 	assert.WithinDuration(t, second, fetchedAt, time.Second)
 
-	other, _, err := cache.GetAccountUniverse("preprod")
+	other, _, cached, err := cache.GetAccountUniverse("preprod")
 	require.NoError(t, err)
+	assert.True(t, cached)
 	assert.Equal(t, []string{"stake_test1z"}, other,
 		"networks are stored independently")
 }
@@ -195,4 +199,68 @@ func TestAccountUniverseFreshFallsBackToMaxAge(t *testing.T) {
 	assert.False(t, accountUniverseFresh(
 		time.Now().Add(-2*accountUniverseMaxAge), time.Time{},
 	))
+}
+
+// TestResolveKoiosAccountUniverseCachedWithEmptyCrawl covers a network whose
+// /account_list is legitimately empty. Presence is recorded separately from the
+// address rows, so an empty crawl is still a cached crawl and a later epoch it
+// covers does not pay for it again.
+func TestResolveKoiosAccountUniverseCachedWithEmptyCrawl(t *testing.T) {
+	var calls atomic.Int32
+	srv := newAccountListServer(t, &calls)
+	koios := newUniverseTestClient(srv)
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	epochEnd := time.Now().Add(-time.Hour)
+	logger := slog.New(slog.DiscardHandler)
+	for range 2 {
+		addrs, err := ResolveKoiosAccountUniverseCached(
+			context.Background(), koios, cache, "preview", epochEnd, logger,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, addrs)
+	}
+	assert.Equal(t, int32(1), calls.Load(),
+		"an empty crawl is still a cached crawl")
+}
+
+// TestResolveKoiosAccountUniverseCachedMaxAgeFallback exercises the resolver
+// end to end for an epoch carrying no end time, where the crawl's own age is
+// the only available bound.
+func TestResolveKoiosAccountUniverseCachedMaxAgeFallback(t *testing.T) {
+	var calls atomic.Int32
+	srv := newAccountListServer(t, &calls, "stake_test1a")
+	koios := newUniverseTestClient(srv)
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	logger := slog.New(slog.DiscardHandler)
+
+	_, err = ResolveKoiosAccountUniverseCached(
+		context.Background(), koios, cache, "preview", time.Time{}, logger,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), calls.Load())
+
+	// A fresh crawl inside the window is reused.
+	_, err = ResolveKoiosAccountUniverseCached(
+		context.Background(), koios, cache, "preview", time.Time{}, logger,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), calls.Load())
+
+	// Age it past the window and the resolver crawls again.
+	require.NoError(t, cache.SaveAccountUniverse(
+		"preview",
+		[]string{"stake_test1a"},
+		time.Now().Add(-2*accountUniverseMaxAge),
+	))
+	_, err = ResolveKoiosAccountUniverseCached(
+		context.Background(), koios, cache, "preview", time.Time{}, logger,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(),
+		"a crawl older than the max age must be refreshed")
 }

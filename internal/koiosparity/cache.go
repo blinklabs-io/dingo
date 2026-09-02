@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1297,6 +1298,7 @@ ON CONFLICT (network, stake_address) DO UPDATE SET fetched_at = excluded.fetched
 		return fmt.Errorf("save account universe: prepare: %w", err)
 	}
 	defer stmt.Close() //nolint:errcheck
+	saved := 0
 	for _, addr := range addrs {
 		if addr == "" {
 			continue
@@ -1304,6 +1306,17 @@ ON CONFLICT (network, stake_address) DO UPDATE SET fetched_at = excluded.fetched
 		if _, err := stmt.Exec(network, addr, fetchedAt.UTC()); err != nil {
 			return fmt.Errorf("save account universe: insert: %w", err)
 		}
+		saved++
+	}
+	if _, err := tx.Exec(`
+INSERT INTO koios_account_universe_state (network, fetched_at, address_count)
+VALUES (?, ?, ?)
+ON CONFLICT (network) DO UPDATE SET
+    fetched_at = excluded.fetched_at,
+    address_count = excluded.address_count`,
+		network, fetchedAt.UTC(), saved,
+	); err != nil {
+		return fmt.Errorf("save account universe: state: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("save account universe: commit: %w", err)
@@ -1311,40 +1324,54 @@ ON CONFLICT (network, stake_address) DO UPDATE SET fetched_at = excluded.fetched
 	return nil
 }
 
-// GetAccountUniverse returns the cached crawl for network and the time it was
-// taken. A zero time with no addresses means nothing is cached; the caller
-// decides whether what is cached is fresh enough for the epoch it is checking.
+// GetAccountUniverse returns the cached crawl for network, the time it was
+// taken, and whether a crawl is cached at all. The last is read from
+// koios_account_universe_state rather than inferred from the address count, so
+// a crawl that returned nothing is still a crawl; the caller decides whether
+// what is cached is fresh enough for the epoch it is checking.
 func (c *Cache) GetAccountUniverse(
 	network string,
-) ([]string, time.Time, error) {
+) ([]string, time.Time, bool, error) {
+	var fetchedAt time.Time
+	err := c.db.QueryRow(
+		`SELECT fetched_at FROM koios_account_universe_state WHERE network = ?`,
+		network,
+	).Scan(&fetchedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, time.Time{}, false, nil
+	}
+	if err != nil {
+		return nil, time.Time{}, false, fmt.Errorf(
+			"get account universe state: %w", err,
+		)
+	}
 	rows, err := c.db.Query(
-		`SELECT stake_address, fetched_at FROM koios_account_universe
+		`SELECT stake_address FROM koios_account_universe
 		WHERE network = ? ORDER BY stake_address`,
 		network,
 	)
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("get account universe: %w", err)
+		return nil, time.Time{}, false, fmt.Errorf(
+			"get account universe: %w", err,
+		)
 	}
 	defer rows.Close()
 	var addrs []string
-	var newest time.Time
 	for rows.Next() {
 		var addr string
-		var fetchedAt time.Time
-		if err := rows.Scan(&addr, &fetchedAt); err != nil {
-			return nil, time.Time{}, fmt.Errorf(
+		if err := rows.Scan(&addr); err != nil {
+			return nil, time.Time{}, false, fmt.Errorf(
 				"get account universe: %w", err,
 			)
 		}
 		addrs = append(addrs, addr)
-		if fetchedAt.After(newest) {
-			newest = fetchedAt
-		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, time.Time{}, fmt.Errorf("get account universe: %w", err)
+		return nil, time.Time{}, false, fmt.Errorf(
+			"get account universe: %w", err,
+		)
 	}
-	return addrs, newest, nil
+	return addrs, fetchedAt, true, nil
 }
 
 func createCacheSchema(db *sql.DB) error {
@@ -1447,6 +1474,12 @@ func createCacheSchema(db *sql.DB) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
 			stake_address TEXT NOT NULL, fetched_at DATETIME NOT NULL)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kau_net_addr ON koios_account_universe(network, stake_address)`,
+		// Presence of a crawl is recorded separately from its rows, so a crawl
+		// that legitimately returned no addresses is still a cached crawl
+		// rather than indistinguishable from never having run.
+		`CREATE TABLE IF NOT EXISTS koios_account_universe_state (
+			network TEXT PRIMARY KEY, fetched_at DATETIME NOT NULL,
+			address_count INTEGER NOT NULL)`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {

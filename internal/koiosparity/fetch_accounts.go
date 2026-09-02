@@ -85,11 +85,11 @@ func ResolveKoiosAccountUniverseCached(
 		logger = slog.New(slog.DiscardHandler)
 	}
 	if cache != nil {
-		addrs, fetchedAt, err := cache.GetAccountUniverse(network)
+		addrs, fetchedAt, cached, err := cache.GetAccountUniverse(network)
 		if err != nil {
 			return nil, err
 		}
-		if len(addrs) > 0 && accountUniverseFresh(fetchedAt, notBefore) {
+		if cached && accountUniverseFresh(fetchedAt, notBefore) {
 			logger.Debug(
 				"koiosparity: reusing cached Koios account universe",
 				"network", network,
