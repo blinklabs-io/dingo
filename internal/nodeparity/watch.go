@@ -131,6 +131,15 @@ func followBlocks(
 		if runCtx.Err() != nil {
 			return
 		}
+		// Reset before the wait, not after: a session that got as far as
+		// established and then dropped should reconnect quickly, using
+		// watcherMinBackoff for *this* wait. Resetting only after waiting
+		// would still wait out whatever backoff had grown to from earlier
+		// failures before applying the reset, delaying recovery by up to
+		// watcherMaxBackoff instead of the intended minimum.
+		if established {
+			backoff = nextBackoff(backoff, true)
+		}
 		logf(
 			"nodeparity: watcher %s: session ended (%v); reconnecting in %s",
 			addr, err, backoff,
@@ -140,7 +149,9 @@ func followBlocks(
 			return
 		case <-time.After(backoff):
 		}
-		backoff = nextBackoff(backoff, established)
+		// Grow for next time on the assumption the upcoming attempt might
+		// also fail; a subsequent established=true resets it again above.
+		backoff = nextBackoff(backoff, false)
 	}
 }
 

@@ -26,7 +26,12 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9464']
 
+  # The reference cardano-node runs on a separate host from the dingo node
+  # scraped above -- both nodes default to the same port (12798), so
+  # 'localhost:12798' here would silently re-scrape the dingo job instead
+  # of the reference node if the two were colocated. Point this at your
+  # actual reference cardano-node's host.
   - job_name: cardano-node-reference
     scrape_interval: 15s
     static_configs:
-      - targets: ['localhost:12798']
+      - targets: ['cardano-node-reference-host:12798']

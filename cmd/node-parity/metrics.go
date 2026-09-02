@@ -68,19 +68,38 @@ func newParityMetricsIn(
 		base,
 	)
 	factory := promauto.With(registry)
+	checksSkippedTotal := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "node_parity_checks_skipped_total",
+		Help: "Check cycles discarded because the two nodes did not hold a stable common tip, by reason.",
+	}, []string{"reason"})
+	divergenceTotal := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "node_parity_divergence_total",
+		Help: "Ledger-state divergences found between dingo and cardano-node, by field.",
+	}, []string{"field"})
+	// A CounterVec exposes no series at all for a label value until
+	// something increments it. NodeParityNotChecking's alert expression
+	// sums rate(checks_skipped_total) into rate(checks_total): if no skip
+	// has ever happened, that side of the sum is missing data rather than
+	// zero, and a binary PromQL operator between vectors drops any series
+	// missing from either side -- so the whole expression would evaluate to
+	// no data instead of a genuine 0, and the alert could never fire even
+	// while the tool is dead. Pre-materializing every reason (and, for
+	// dashboard consistency, every divergence field) at construction time
+	// gives them a real 0 sample from process start, the same way the bare
+	// checksTotal Counter already behaves.
+	for _, reason := range []string{nodeparity.SkipTipMismatch, nodeparity.SkipTipAdvanced} {
+		checksSkippedTotal.WithLabelValues(reason)
+	}
+	for _, field := range []string{"protocol_params", "stake_distribution", "utxo"} {
+		divergenceTotal.WithLabelValues(field)
+	}
 	return &parityMetrics{
 		checksTotal: factory.NewCounter(prometheus.CounterOpts{
 			Name: "node_parity_checks_total",
 			Help: "Completed node-parity check cycles (matched or diverged; excludes skipped cycles).",
 		}),
-		checksSkippedTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Name: "node_parity_checks_skipped_total",
-			Help: "Check cycles discarded because the two nodes did not hold a stable common tip, by reason.",
-		}, []string{"reason"}),
-		divergenceTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Name: "node_parity_divergence_total",
-			Help: "Ledger-state divergences found between dingo and cardano-node, by field.",
-		}, []string{"field"}),
+		checksSkippedTotal: checksSkippedTotal,
+		divergenceTotal:    divergenceTotal,
 	}
 }
 
@@ -118,8 +137,14 @@ func serveMetrics(addr string, logger *slog.Logger) *http.Server {
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// ReadTimeout bounds the whole request, not just headers:
+		// ReadHeaderTimeout alone still lets a client complete the headers
+		// and then drip the body indefinitely, holding the connection open.
+		// /metrics is a GET with no body, but net/http does not reject an
+		// unbounded body on its own.
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	go func() {
 		logger.Info("serving prometheus metrics", "addr", addr)

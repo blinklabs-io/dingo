@@ -34,9 +34,14 @@ groups:
   - name: node-parity
     rules:
       - alert: NodeParityDivergence
-        # increase(), not the absolute counter value: a metrics-server
-        # restart resets the counter to zero and must not re-fire this on
-        # divergences already reported before the restart.
+        # increase(), not the absolute counter value: the raw counter would
+        # stay "> 0" forever after a single divergence, since a Counter
+        # never decreases on its own -- increase() bounds that to roughly
+        # the [1h] window instead. This does not fully insulate against a
+        # metrics-server restart: Prometheus's counter-reset handling
+        # extrapolates through a reset rather than discarding what came
+        # before it, so a divergence recorded shortly before a restart can
+        # still contribute to increase() for up to an hour afterwards.
         expr: increase(node_parity_divergence_total{network=~".+"}[1h]) > 0
         for: 0m
         labels:

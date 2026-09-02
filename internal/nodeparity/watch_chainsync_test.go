@@ -27,7 +27,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	csmock "github.com/blinklabs-io/ouroboros-mock/chainsync"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // testChainSyncServer is a small, real ChainSync server -- the same shape
@@ -52,10 +55,37 @@ type testChainSyncServer struct {
 	chain      csmock.Chain
 	cursor     int
 	rolledBack bool
+	// accepted, if non-nil, receives each accepted connection so a test
+	// can force a specific session to drop (by closing it) rather than
+	// waiting for one to end on its own.
+	accepted chan *ouroboros.Connection
+	// release, if non-nil, gates every RequestNext reply: requestNext
+	// blocks on it before replying. Watcher.Events coalesces (holds at
+	// most one pending event), so a server free to answer every
+	// RequestNext as fast as the client asks could send several replies
+	// before a test drains the first resulting event, silently merging
+	// what should be separate events. A test that cares about an exact
+	// event count sends on release once per expected event, keeping
+	// exactly one reply in flight at a time.
+	release chan struct{}
+}
+
+// allowNext permits testChainSyncServer's next RequestNext reply to
+// proceed. Only meaningful when the server was built with a release gate.
+func (s *testChainSyncServer) allowNext(t *testing.T) {
+	t.Helper()
+	select {
+	case s.release <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not consume the release signal in time")
+	}
 }
 
 // newTestChainSyncServer builds a synthetic chain of blockCount Conway
-// blocks via ouroboros-mock's BuildChain.
+// blocks via ouroboros-mock's BuildChain. The server always gates its
+// replies (see release): every test below calls allowNext once per event
+// it expects, so event delivery is deterministic rather than relying on
+// the client and test happening to be fast enough to avoid coalescing.
 func newTestChainSyncServer(
 	t *testing.T,
 	blockCount int,
@@ -63,7 +93,7 @@ func newTestChainSyncServer(
 	t.Helper()
 	chain, err := csmock.BuildChain(1, common.Blake2b256{}, 0, 20, blockCount)
 	require.NoError(t, err)
-	return &testChainSyncServer{chain: chain}
+	return &testChainSyncServer{chain: chain, release: make(chan struct{})}
 }
 
 // findIntersect always intersects at origin and serves the whole chain from
@@ -89,6 +119,7 @@ func (s *testChainSyncServer) findIntersect(
 func (s *testChainSyncServer) requestNext(
 	ctx chainsync.CallbackContext,
 ) error {
+	<-s.release
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.rolledBack {
@@ -130,6 +161,9 @@ func (s *testChainSyncServer) serve(listener net.Listener, magic uint32) {
 					return
 				}
 				defer oconn.Close() //nolint:errcheck
+				if s.accepted != nil {
+					s.accepted <- oconn
+				}
 				<-oconn.ErrorChan()
 			}()
 		}
@@ -138,13 +172,14 @@ func (s *testChainSyncServer) serve(listener net.Listener, magic uint32) {
 
 // newConnectedTestWatcher starts a test ChainSync server serving blockCount
 // real blocks and a real WatchBlocks pointed at it, both cleaned up
-// automatically. Every test below drains the first event before asserting
-// anything further: the server's first reply to any client is always the
-// RollBackward-to-intersection-point every real node sends before rolling
-// forward, so that event is expected noise, not the thing under test.
+// automatically. Every test below calls server.allowNext(t) once per event
+// it expects, then drains that event: the server's first reply to any
+// client is always the RollBackward-to-intersection-point every real node
+// sends before rolling forward, so that first event is expected noise, not
+// the thing under test.
 func newConnectedTestWatcher(
 	t *testing.T, blockCount int,
-) *Watcher {
+) (*Watcher, *testChainSyncServer) {
 	t.Helper()
 	const magic = 42
 
@@ -158,7 +193,7 @@ func newConnectedTestWatcher(
 	t.Cleanup(cancel)
 	w := WatchBlocks(ctx, listener.Addr().String(), magic, nil)
 	t.Cleanup(w.Close)
-	return w
+	return w, server
 }
 
 // requireEvent drains one event from w.Events within timeout, failing the
@@ -170,6 +205,22 @@ func requireEvent(t *testing.T, w *Watcher, timeout time.Duration, msg string) {
 	case <-time.After(timeout):
 		t.Fatal(msg)
 	}
+}
+
+// requireNextEvent releases exactly one gated server reply and then drains
+// the resulting event, so a test asserting on a precise sequence or count
+// of events keeps only one reply in flight at a time -- see
+// testChainSyncServer.release.
+func requireNextEvent(
+	t *testing.T,
+	w *Watcher,
+	server *testChainSyncServer,
+	timeout time.Duration,
+	msg string,
+) {
+	t.Helper()
+	server.allowNext(t)
+	requireEvent(t, w, timeout, msg)
 }
 
 // TestWatchBlocks_ConnectsAndReceivesInitialEvent is the end-to-end
@@ -187,9 +238,9 @@ func requireEvent(t *testing.T, w *Watcher, timeout time.Duration, msg string) {
 // tests below, which drain events in order rather than accepting the
 // first one that arrives.
 func TestWatchBlocks_ConnectsAndReceivesAnEvent(t *testing.T) {
-	w := newConnectedTestWatcher(t, 5)
-	requireEvent(
-		t, w, 5*time.Second,
+	w, server := newConnectedTestWatcher(t, 5)
+	requireNextEvent(
+		t, w, server, 5*time.Second,
 		"WatchBlocks must deliver at least one BlockEvent after connecting",
 	)
 }
@@ -206,15 +257,13 @@ func TestWatchBlocks_ConnectsAndReceivesAnEvent(t *testing.T) {
 // sync loop advances past a broken callback into later real
 // RollForwards on its own).
 func TestWatchBlocks_ReceivesRealRollForwardEvents(t *testing.T) {
-	w := newConnectedTestWatcher(t, 5)
-	requireEvent(
-		t,
-		w,
-		5*time.Second,
+	w, server := newConnectedTestWatcher(t, 5)
+	requireNextEvent(
+		t, w, server, 5*time.Second,
 		"must receive the initial RollBackward event",
 	)
-	requireEvent(
-		t, w, 5*time.Second,
+	requireNextEvent(
+		t, w, server, 5*time.Second,
 		"WatchBlocks must deliver a BlockEvent for a real RollForward",
 	)
 }
@@ -224,12 +273,104 @@ func TestWatchBlocks_ReceivesRealRollForwardEvents(t *testing.T) {
 // between each, WatchBlocks must keep delivering fresh events for every
 // new block rather than the channel latching stuck after the first one.
 func TestWatchBlocks_ReceivesMultipleRealEvents(t *testing.T) {
-	w := newConnectedTestWatcher(t, 5)
+	w, server := newConnectedTestWatcher(t, 5)
 	// 1 initial RollBackward + 3 real RollForwards.
 	for i := range 4 {
-		requireEvent(
-			t, w, 5*time.Second,
+		requireNextEvent(
+			t, w, server, 5*time.Second,
 			fmt.Sprintf("only received %d/4 events before timing out", i),
 		)
 	}
+}
+
+// TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops is an
+// end-to-end regression test for a backoff-ordering bug: followBlocks used
+// to reset the backoff to watcherMinBackoff only *after* waiting out
+// whatever it had already grown to from earlier failures, so a session
+// that established and then dropped still waited out a stale, grown delay
+// once before the reset took effect. It should instead reconnect quickly,
+// using watcherMinBackoff for that one wait.
+//
+// This is verified by parsing the logged "reconnecting in %s" duration
+// directly, rather than measuring real elapsed time: the log line is
+// written with the exact backoff value about to be used, so this is a
+// deterministic check of the same property, not a timing-sensitive one.
+func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(t *testing.T) {
+	const magic = 42
+
+	// Reserve an address nothing is listening on yet (see unreachableAddr):
+	// a listener that exists but never calls Accept would still complete
+	// the TCP handshake via the kernel's backlog and then hang waiting for
+	// the Ouroboros handshake response that never comes, which fails slow
+	// rather than fast. Closing the listener first guarantees a real,
+	// fast ECONNREFUSED for every attempt until the address is rebound
+	// below.
+	addr := unreachableAddr(t)
+
+	var mu sync.Mutex
+	var logs []string
+	logf := func(format string, args ...any) {
+		mu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+	logCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(logs)
+	}
+	lastLog := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return logs[len(logs)-1]
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := WatchBlocks(ctx, addr, magic, logf)
+	t.Cleanup(w.Close)
+
+	// Let several dial attempts fail first (nobody is accepting yet), so
+	// the watcher's backoff grows well past watcherMinBackoff before the
+	// server ever answers.
+	testutil.WaitForCondition(t, func() bool {
+		return logCount() >= 4
+	}, 5*time.Second, "watcher must log several failed attempts before the server starts accepting")
+	require.NotContains(
+		t, lastLog(), watcherMinBackoff.String(),
+		"precondition: backoff must have grown past the minimum by now",
+	)
+
+	// Now bind the same address for real and let the watcher establish.
+	listener, err := net.Listen("tcp", addr)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server := newTestChainSyncServer(t, 5)
+	server.accepted = make(chan *ouroboros.Connection, 1)
+	server.serve(listener, magic)
+
+	requireNextEvent(
+		t, w, server, 10*time.Second,
+		"watcher must eventually connect once the server accepts",
+	)
+
+	// Force this specific session to end, and capture the log count so we
+	// can identify the *next* one below.
+	before := logCount()
+	select {
+	case conn := <-server.accepted:
+		require.NoError(t, conn.Close())
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never observed the accepted connection")
+	}
+
+	testutil.WaitForCondition(t, func() bool {
+		return logCount() > before
+	}, 5*time.Second, "watcher must log the dropped, established session")
+
+	assert.Contains(
+		t, lastLog(), watcherMinBackoff.String(),
+		"an established session that drops must reconnect using "+
+			"watcherMinBackoff, not a backoff grown from earlier failures",
+	)
 }

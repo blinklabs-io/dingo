@@ -305,7 +305,7 @@ services:
       - dingo-producer-ipc:/ipc
     ports:
       - "${DEVNET_DINGO_PORT:-3010}:3001"
-      - "${DEVNET_DINGO_NTC_PORT:-3030}:3002"
+      - "127.0.0.1:${DEVNET_DINGO_NTC_PORT:-3030}:3002"
     networks:
       devnet:
         ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.10
@@ -359,7 +359,7 @@ services:
       - cardano-producer-ipc:/ipc
     ports:
       - "${DEVNET_CARDANO_PORT:-3011}:3001"
-      - "${DEVNET_CARDANO_NTC_PORT:-3031}:3002"
+      - "127.0.0.1:${DEVNET_CARDANO_NTC_PORT:-3031}:3002"
     networks:
       devnet:
         ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.11

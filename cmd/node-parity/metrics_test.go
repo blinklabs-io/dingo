@@ -20,6 +20,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -134,6 +135,80 @@ func TestParityMetrics_RecordCheck_DivergenceIncrementsOnlyAffectedFields(
 		t, float64(1),
 		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
 	)
+}
+
+// TestNewParityMetricsIn_PreMaterializesZeroSeries covers the fix for
+// NodeParityNotChecking's original blind spot: a CounterVec exposes no
+// series at all for a label value until something touches it (increments
+// it, or even just looks it up via WithLabelValues) -- so before this fix,
+// a network that had never skipped a check reported no
+// checks_skipped_total series whatsoever, not a zero one. The alert
+// expression sums rate(checks_total) with
+// sum(rate(checks_skipped_total)), and a binary operator between two
+// instant vectors drops any series missing from either side, so a
+// completely healthy run (zero skips, ever) made the whole expression
+// return no data instead of a real 0, and the alert could never fire even
+// while the tool was dead. newParityMetricsIn must pre-materialize every
+// known reason (and, for dashboard consistency, every divergence field) at
+// construction time so each one already has a real 0 sample from process
+// start, before recordSkip/recordCheck or a test's own WithLabelValues
+// call is ever made -- this reads back via registry.Gather() rather than
+// metrics.checksSkippedTotal.WithLabelValues(...), since calling
+// WithLabelValues from the test would itself lazily create the series and
+// mask exactly the bug this test exists to catch (verified: an untouched
+// CounterVec's family is absent from Gather() entirely, not merely empty).
+func TestNewParityMetricsIn_PreMaterializesZeroSeries(t *testing.T) {
+	_, registry := newTestParityMetrics(t)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	byName := make(map[string]*dto.MetricFamily, len(families))
+	for _, fam := range families {
+		byName[fam.GetName()] = fam
+	}
+
+	skipped := byName["node_parity_checks_skipped_total"]
+	require.NotNil(
+		t, skipped,
+		"node_parity_checks_skipped_total must already be exposed before any skip is recorded",
+	)
+	gotReasons := make(map[string]float64, len(skipped.GetMetric()))
+	for _, m := range skipped.GetMetric() {
+		for _, label := range m.GetLabel() {
+			if label.GetName() == "reason" {
+				gotReasons[label.GetValue()] = m.GetCounter().GetValue()
+			}
+		}
+	}
+	for _, reason := range []string{
+		nodeparity.SkipTipMismatch, nodeparity.SkipTipAdvanced,
+	} {
+		value, ok := gotReasons[reason]
+		assert.True(t, ok, "reason %q must already be exposed", reason)
+		assert.Equal(t, float64(0), value, "reason %q must start at 0", reason)
+	}
+
+	divergence := byName["node_parity_divergence_total"]
+	require.NotNil(
+		t, divergence,
+		"node_parity_divergence_total must already be exposed before any divergence is recorded",
+	)
+	gotFields := make(map[string]float64, len(divergence.GetMetric()))
+	for _, m := range divergence.GetMetric() {
+		for _, label := range m.GetLabel() {
+			if label.GetName() == "field" {
+				gotFields[label.GetValue()] = m.GetCounter().GetValue()
+			}
+		}
+	}
+	for _, field := range []string{
+		"protocol_params", "stake_distribution", "utxo",
+	} {
+		value, ok := gotFields[field]
+		assert.True(t, ok, "field %q must already be exposed", field)
+		assert.Equal(t, float64(0), value, "field %q must start at 0", field)
+	}
 }
 
 // TestParityMetrics_RecordSkip_IncrementsByReason covers that skipped

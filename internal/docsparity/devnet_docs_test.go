@@ -59,8 +59,12 @@ type portMapping struct {
 }
 
 var (
+	// portRe matches compose's [HOST_IP:]HOST_PORT:CONTAINER_PORT syntax. The
+	// optional HOST_IP prefix (e.g. "127.0.0.1:") is skipped, not captured,
+	// so group numbering stays the same whether or not a mapping binds to a
+	// specific interface.
 	portRe = regexp.MustCompile(
-		`^(?:\$\{([A-Za-z0-9_]+):-(\d+)\}|(\d+)):(\d+)$`,
+		`^(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:)?(?:\$\{([A-Za-z0-9_]+):-(\d+)\}|(\d+)):(\d+)$`,
 	)
 	composeProfilesRe = regexp.MustCompile(
 		`(?m)^COMPOSE_PROFILES=(\S+)`,

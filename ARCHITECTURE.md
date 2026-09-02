@@ -6412,7 +6412,7 @@ start, stop, or otherwise manage.
 
 **Architecture:**
 
-```
+```text
 internal/nodeparity/       # shared library, untagged and importable
   dial.go                  # Dial: NtC connection by address (leading "/" = Unix socket, else TCP)
   tip.go                   # Tip, ReadTip: one-shot ChainSync GetCurrentTip, not a subscription
