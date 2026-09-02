@@ -6468,6 +6468,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if shouldValidate {
 			if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
 				delta.Release()
+				if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+					return nil, &txValidationError{
+						BlockPoint: point,
+						TxHash: append(
+							[]byte(nil),
+							tx.Hash().Bytes()...,
+						),
+						Inputs: collectReferencedInputs(tx),
+						Cause:  err,
+					}
+				}
 				return nil, err
 			}
 			var err error
