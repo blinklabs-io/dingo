@@ -1284,7 +1284,13 @@ All event types follow the `subsystem.snake_case_name` convention.
   a parent still holds either mutex. The invariant is checked by
   `TestNoEventBusPublishWhileHoldingChainsyncMutex` and
   `TestChainsyncResyncPublishPathsUnderLock` in
-  `ledger/publish_under_lock_test.go`. Register the flush with `defer`
+  `ledger/publish_under_lock_test.go`. The first test also treats a call to an
+  inline-publishing `chain.Chain` method as a publish
+  (`inlinePublishingChainMethods`: `AddBlock`, `AddLocalBlock`,
+  `AddBlockWithPoint` and siblings, plus `Rollback`), because those publish
+  `ChainUpdateEventType` / rollback events to the same bus from inside the
+  chain package — an `ls.chain.*` call under a guarded mutex is the same
+  deadlock as a direct `EventBus.Publish`. Register the flush with `defer`
   *before* taking the lock so LIFO order runs it last.
 - `ledger` also must not invoke an external `BlockfetchRequestRangeFunc` while
   holding `chainsyncBlockfetchMutex`. The blockfetch client can wait in

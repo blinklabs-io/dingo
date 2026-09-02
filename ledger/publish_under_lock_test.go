@@ -42,6 +42,28 @@ var guardedMutexes = []string{
 	"chainsyncBlockfetchMutex",
 }
 
+// inlinePublishingChainMethods are the exported chain.Chain methods that
+// publish to the EventBus inline (chain/chain.go): the Add* paths emit
+// ChainUpdateEventType and Rollback emits the rollback/fork events. Calling
+// one of these as ls.chain.<method> while holding a guarded mutex is the same
+// deadlock as publishing directly -- the event's subscriber can need the
+// mutex -- so this scan treats an ls.chain.<method> call as a publish.
+//
+// AddBlockWithPoint is on the list even though no lock holder calls it today
+// (its one production caller, flushPendingBlockfetchBlocks, runs unlocked):
+// it still publishes inline, so guarding it now stops a future lock holder
+// from silently reopening the cycle. Keep this in sync with the
+// c.eventBus.Publish call sites in chain/chain.go.
+var inlinePublishingChainMethods = []string{
+	"AddBlock",
+	"AddLocalBlock",
+	"AddBlockWithPoint",
+	"AddBlocks",
+	"AddRawBlocks",
+	"AddRawBlocksWithCallback",
+	"Rollback",
+}
+
 // knownNilQueuePublishersUnderLock is intentionally empty. A guarded caller
 // must always pass its pending queue; a nil queue would publish inline.
 //
@@ -293,6 +315,27 @@ func violations(fn *ast.FuncDecl, queueParam map[string]int) []violation {
 			// included for the same reason against their per-event-type
 			// lane.
 			if inner.Sel.Name != "EventBus" {
+				return true
+			}
+			events = append(events, lockEvent{
+				pos: call.Pos(), kind: "publish",
+			})
+		default:
+			// A publish reached indirectly through the chain layer is just as
+			// unsafe as a direct EventBus.Publish. ls.chain.AddBlockWithPoint
+			// and its siblings call c.eventBus.Publish inline from inside the
+			// chain package (see inlinePublishingChainMethods), so holding a
+			// guarded mutex across one closes the same cycle -- a subscriber
+			// to ChainUpdateEventType or the rollback events that needs the
+			// mutex parks, the buffer fills, the publisher never returns. The
+			// direct-EventBus scan above cannot see these because the receiver
+			// is ls.chain, not ...EventBus. Match only ls.chain.* so an
+			// unrelated type's same-named method (a db txn's Rollback, say) is
+			// left alone.
+			if inner.Sel.Name != "chain" ||
+				!slices.Contains(
+					inlinePublishingChainMethods, sel.Sel.Name,
+				) {
 				return true
 			}
 			events = append(events, lockEvent{
