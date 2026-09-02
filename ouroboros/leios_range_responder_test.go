@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gconnection "github.com/blinklabs-io/gouroboros/connection"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -167,9 +168,10 @@ func TestLeiosFetchUnavailableBlockTxsAnswersNoBlockTxs(t *testing.T) {
 		[]byte{0x81, oleiosfetch.MessageTypeNoBlockTxs},
 		segment.Payload,
 	)
-	select {
-	case err := <-peer.errChan:
-		require.NoError(t, err, "unavailable EB txs must not fail the bearer")
-	case <-time.After(100 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		peer.errChan,
+		100*time.Millisecond,
+		"unavailable EB txs must not fail the bearer",
+	)
 }
