@@ -62,6 +62,20 @@ func TestIsRoutableIP(t *testing.T) {
 		{"ipv4 reserved future use", "240.0.0.1", false},
 		{"ipv4 broadcast", "255.255.255.255", false},
 		{"ipv6 discard only", "100::1", false},
+		{"ipv4 this network", "0.0.0.1", false},
+		{"ipv4 this network upper", "0.255.255.255", false},
+		{"ipv4 deprecated 6to4 anycast", "192.88.99.1", false},
+		{"ipv6 benchmarking", "2001:2::1", false},
+		{"ipv6 local-use translation", "64:ff9b:1::1", false},
+		{"ipv6 orchid deprecated", "2001:10::1", false},
+
+		// IANA marks these Globally Reachable, so they must stay accepted.
+		// They sit next to rejected ranges and would be easy to sweep up.
+		{"ipv4 as112", "192.31.196.1", true},
+		{"ipv4 amt", "192.52.193.1", true},
+		{"ipv6 as112", "2001:4:112::1", true},
+		{"ipv6 amt", "2001:3::1", true},
+		{"ipv4 translation nat64", "64:ff9b::1", true},
 
 		// Just outside the rejected ranges, to prove the bounds.
 		{"ipv4 below cgnat", "100.63.255.255", true},

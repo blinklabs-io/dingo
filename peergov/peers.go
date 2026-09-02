@@ -107,7 +107,18 @@ func isRoutableAddr(address string) bool {
 // unreachablePrefixes are ranges that net.IP's own class predicates report as
 // global unicast but that cannot be a peer we meant to dial. net.IP.IsPrivate
 // covers only RFC 1918 and RFC 4193, so each of these otherwise reads as
-// routable.
+// routable. Every entry is marked "Globally Reachable: False" in the IANA
+// special-purpose address registries.
+//
+// Note that IsUnspecified matches only 0.0.0.0 itself, so the rest of
+// 0.0.0.0/8 needs the prefix.
+//
+// Neighbouring ranges that IANA marks globally reachable are deliberately
+// absent and pinned as accepted in TestIsRoutableIP: AS112 (192.31.196.0/24,
+// 2001:4:112::/48), AMT (192.52.193.0/24, 2001:3::/32), and NAT64
+// (64:ff9b::/96). This list has grown twice under review, which is the
+// argument in #3792 for expressing the policy as an allowlist of globally
+// routable space instead of a denylist of reserved ranges.
 //
 // RFC 6598 shared address space is the one that matters: a carrier routes it
 // internally, so dialing an advertised 100.64.0.0/10 address can reach another
@@ -129,11 +140,16 @@ func isRoutableAddr(address string) bool {
 // them as public stand-ins, some of which depend on subnet distribution. That
 // migration is a decision in its own right, not a detail of this policy.
 var unreachablePrefixes = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"), // RFC 6598 shared address space
-	netip.MustParsePrefix("192.0.0.0/24"),  // RFC 6890 IETF protocol assignments
-	netip.MustParsePrefix("198.18.0.0/15"), // RFC 2544 benchmarking
-	netip.MustParsePrefix("240.0.0.0/4"),   // RFC 1112 reserved, incl. broadcast
-	netip.MustParsePrefix("100::/64"),      // RFC 6666 discard-only
+	netip.MustParsePrefix("0.0.0.0/8"),      // RFC 1122 "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),  // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.0.0/24"),   // RFC 6890 IETF protocol assignments
+	netip.MustParsePrefix("192.88.99.0/24"), // RFC 7526 deprecated 6to4 anycast
+	netip.MustParsePrefix("198.18.0.0/15"),  // RFC 2544 benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),    // RFC 1112 reserved, incl. broadcast
+	netip.MustParsePrefix("64:ff9b:1::/48"), // RFC 8215 local-use translation
+	netip.MustParsePrefix("100::/64"),       // RFC 6666 discard-only
+	netip.MustParsePrefix("2001:2::/48"),    // RFC 5180 benchmarking
+	netip.MustParsePrefix("2001:10::/28"),   // RFC 4843 ORCHID, deprecated
 }
 
 // IsRoutableIP reports whether an IP address is usable as a peer candidate
