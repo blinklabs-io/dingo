@@ -908,7 +908,10 @@ func (e *EventBus) reportHandlerPanic(
 			if r2 := recover(); r2 != nil {
 				// The configured Logger just proved unusable; fall back to
 				// the stdlib default rather than risk calling it again.
-				slog.Default().Error(
+				// safeLog, not a direct call: the fallback itself must not
+				// be the thing that finally lets a panic escape.
+				safeLog(
+					slog.Default(),
 					"panic while logging a SubscribeFunc handler panic",
 					"event_type", evt.Type,
 					"original_panic", r,
@@ -932,7 +935,8 @@ func (e *EventBus) reportHandlerPanic(
 	func() {
 		defer func() {
 			if r2 := recover(); r2 != nil {
-				slog.Default().Error(
+				safeLog(
+					slog.Default(),
 					"panic in SubscribeFuncStrict onPanic hook",
 					"event_type", evt.Type,
 					"original_panic", r,
@@ -942,6 +946,18 @@ func (e *EventBus) reportHandlerPanic(
 		}()
 		onPanic(evt, r)
 	}()
+}
+
+// safeLog calls logger.Error, discarding any panic instead of letting it
+// propagate. Used only as the last-resort step inside a panic-recovery path
+// that has nothing left above it to catch a further panic -- e.g. reporting
+// that the configured Logger itself panicked, via slog.Default() instead.
+// Even that fallback must not be the thing that finally lets a panic escape,
+// so this is the floor: it stops here, silently, rather than one level
+// deeper.
+func safeLog(logger *slog.Logger, msg string, args ...any) {
+	defer func() { _ = recover() }()
+	logger.Error(msg, args...)
 }
 
 // Unsubscribe stops delivery of events for a particular type for an existing subscriber

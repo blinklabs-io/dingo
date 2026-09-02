@@ -574,6 +574,8 @@ func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
+	var onPanicCalled atomic.Bool
+
 	eb.SubscribeFuncStrict(
 		testEvtType,
 		0,
@@ -582,12 +584,22 @@ func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
 			panic("intentional handler panic")
 		},
 		func(evt event.Event, r any) {
+			// Set before panicking: this is what proves the panic below
+			// actually happened inside onPanic (the path under test) rather
+			// than the test passing on handler-panic teardown alone with
+			// onPanic silently never having run at all.
+			onPanicCalled.Store(true)
 			panic("intentional onPanic hook panic")
 		},
 	)
 
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "boom"))
 
+	require.Eventually(t, func() bool {
+		return onPanicCalled.Load()
+	}, 10*time.Second, 10*time.Millisecond,
+		"onPanic must have been invoked",
+	)
 	require.Eventually(t, func() bool {
 		return !eb.HasSubscribers(testEvtType)
 	}, 10*time.Second, 10*time.Millisecond,
