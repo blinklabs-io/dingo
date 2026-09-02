@@ -263,30 +263,51 @@ func conwayValidationRules(
 func buildConwayValidationRules() []indexedUtxoValidationRule {
 	skips := []utxoValidationRuleSkip{
 		{
-			index: conwayUtxoValidateConwayFeaturesRuleIndex,
 			validationFunc: conway.
 				UtxoValidateConwayFeaturesWithPlutusV1V2,
 			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
 		},
 		{
-			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
 			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
 			name:           "conway.UtxoValidateFeeTooSmallUtxo",
 		},
 		{
-			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
 			validationFunc: conway.UtxoValidatePlutusScripts,
 			name:           "conway.UtxoValidatePlutusScripts",
 		},
+		{
+			validationFunc: conway.UtxoValidateCommitteeCertificates,
+			name:           "conway.UtxoValidateCommitteeCertificates",
+		},
+		{
+			validationFunc: conway.UtxoValidateUnknownVoters,
+			name:           "conway.UtxoValidateUnknownVoters",
+		},
+	}
+	indexes := make([]int, len(skips))
+	for i := range skips {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			conway.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
+		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
 		conway.UtxoValidationRules,
 		skips,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
-		index:          conwayUtxoValidateConwayFeaturesRuleIndex,
+		index:          indexes[0],
 		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
 	})
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[3],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[4],
+			validationFunc: validateUnknownVoters,
+		},
+	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
 		return a.index - b.index
 	})

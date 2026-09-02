@@ -178,6 +178,50 @@ proposal from its latest remaining history row (or to pending when none
 remains). The append-only lifecycle sequence makes repeated clear/re-ratify
 cycles rollback-safe and survives restart on all SQL metadata providers.
 
+Migration `v7` (`account-import-deposit`, integer version 7) adds
+`account_import_baseline.deposit_amount`. Existing baselines stay NULL because
+their imports discarded the value and substituting today's protocol parameter
+would invent history.
+
+Migration `v8` (`committee-credential-tags`, integer version 8) adds the
+key/script credential tag to `committee_member`, `auth_committee_hot`, and
+`resign_committee_cold`, plus the hot-credential tag to
+`auth_committee_hot`. It also records each member's `term_start_slot`,
+backfilled from `added_slot` for existing rows. Existing credentials default
+to key hashes. The migration replaces hash-only member uniqueness with
+`(cold_credential_tag, cold_cred_hash, added_slot)` and adds tagged cold/hot
+lookup indexes. Key and script credentials with the same hash remain distinct,
+while removal and later re-election create rollback-safe membership history on
+SQLite, PostgreSQL, and MySQL. Authorization and resignation queries are
+bounded by the selected member term: a resignation recorded at or after the
+term's start slot marks that member resigned. Resignation therefore carries
+forward into a later re-election rather than being cleared by it, matching
+cardano-ledger, where committee state is keyed by cold credential with no term
+component and an enacted `UpdateCommittee` retains the existing entry for a
+re-elected member (`Map.intersection` in the Conway EPOCH rule). A resigned
+member cannot authorize a hot key until it is removed from the committee and
+elected again.
+
+Committee validation derives its authority signal from the include-deleted
+member set, which separates the two empty states. Removal is a soft delete, so
+a committee emptied by a NoConfidence enactment still has rows carrying
+`deleted_slot`: that is an authoritative empty committee, and a former
+member's authorization or resignation is rejected. No rows at all means no
+committee history is currently persisted, which is not proof that none ever
+was: it is the whole Conway era on a genesis-synced node, because only
+`UpdateCommittee` enactment and Mithril snapshot import write the table and the
+Conway genesis committee is never persisted (blinklabs-io/dingo#3785), but a
+rollback to before the first enactment also returns the table to no rows. That
+state is ambiguous either way, so certificate and voter validation decline to
+reject on committee grounds they cannot establish. A failed lookup still fails
+closed in both cases.
+
+Migration `v9` (`committee-term-start-presence`, integer version 9) adds
+`committee_member.term_start_slot_set`. Existing rows are marked present
+without changing `term_start_slot`, including a valid zero. New writes persist
+the presence bit so slot zero remains distinct from a legacy caller that omits
+the term start and falls back to `added_slot`.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -884,10 +928,10 @@ again.
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
-| `committee_member` | `id`, `cold_cred_hash`, `expires_epoch`, `added_slot`, `deleted_slot` | PK `id`; unique `cold_cred_hash`; indexes `added_slot`, `deleted_slot` | Snapshot-imported committee state. |
+| `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
-| `auth_committee_hot` | `id`, `cold_credential`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes `cold_credential`, `host_credential`, `certificate_id`, `added_slot` | Committee hot-key authorization certificate. The SQL column is `host_credential` for backward compatibility. |
-| `resign_committee_cold` | `id`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `cold_credential`, `certificate_id`, `added_slot` | Committee cold-key resignation certificate. |
+| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. |
+| `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 
 ### Off-chain Metadata Cache
 

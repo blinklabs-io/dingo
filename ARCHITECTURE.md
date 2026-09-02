@@ -100,9 +100,11 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 4:
-`v1alpha1`, `leios-key-registration`, `token-registry-metadata`, and
-`account-import-baseline`. `DATABASE.md` is the source of truth for their
+advertising readiness. The current registry has migrations 1 through 9:
+`v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
+`account-import-baseline`, `leios-snapshot-keys`,
+`governance-ratification-history`, `account-import-deposit`,
+`committee-credential-tags`, and `committee-term-start-presence`. `DATABASE.md` is the source of truth for their
 schema changes and upgrade behavior. It then checks the read pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
@@ -2626,6 +2628,32 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
+- The credential-aware committee capability reports separately whether its
+  SQL view is authoritative, resolves cold and hot credentials with their
+  key/script tags intact, and treats an authoritative empty committee as real
+  state rather than an omitted provider. `CommitteeCredentialMember` resolves
+  both seated members and members proposed by active `UpdateCommittee`
+  actions. Proposed members retain the latest persisted authorization or
+  term-scoped permanent resignation, including a resignation with no earlier
+  authorization. Each membership carries a `term_start_slot`; explicit removal
+  followed by re-election creates a fresh term without discarding the prior
+  term's rollback history, and an explicit presence bit preserves a valid
+  slot-zero term start. Hot-voter resolution accepts any matching exact tagged
+  authorization whose member is active at the pinned epoch; expiry is
+  inclusive. The legacy hash-only `CommitteeMember` and
+  `CommitteeMembers` methods omit ambiguous same-hash key/script identities
+  instead of selecting one by map iteration.
+- The Conway and Dijkstra validation compositions replace the pinned
+  hash-only committee certificate and voter rules when that capability is
+  present. Cold authorization/resignation certificates and hot committee votes
+  therefore match the complete tagged credential; other ledger-state
+  implementations retain the upstream compatibility path.
+- Every transaction-validation composition pins committee proposal resolution
+  to the same epoch, protocol parameters, consensus generation, and SQL
+  transaction used by the rest of that validation. This includes direct and
+  overlay validation, mempool/forging validation sessions, block validation,
+  and evaluation. A rollback or publication can make the session stale, but it
+  cannot change which pending committee action an already-created view sees.
 - `Constitution` exposes the enacted constitution — anchor URL, anchor hash,
   and the optional guardrails policy hash — mapped from the stored
   `constitution` row by `ledger/governance`'s `ConstitutionFromModel`, which
@@ -8259,6 +8287,16 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    Proposals already durably marked enacted at this exact boundary are replayed
    fail-closed instead: skipping one after the stake-reward pot reset would keep
    its enacted marker while losing its effects.
+
+   Persisted governance actions are decoded only after the stored
+   `action_type` is cross-checked against the CBOR discriminator. Empty,
+   truncated, trailing, unsupported, or mismatched action data fails before
+   enactment, tally, or ledger-view use. After enactment, descendants of the
+   winning purpose-chain action remain active; competing siblings and their
+   descendant subtrees are expired and refunded. Natural expiry instead
+   removes the expired action's descendant subtree. These lifecycle writes use
+   `expired_slot` and reward journals so slot rollback restores both proposal
+   availability and deposits.
 
    The governance adapter resolves both Conway and Dijkstra protocol-parameter
    types. Action decoding follows the active parameter type, so a Dijkstra

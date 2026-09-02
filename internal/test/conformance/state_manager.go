@@ -372,8 +372,9 @@ func (m *DingoStateManager) LoadInitialState(
 		)
 		for coldKey, expiry := range state.CommitteeMembers {
 			members = append(members, &models.CommitteeMember{
-				ColdCredHash: coldKey[:],
-				ExpiresEpoch: expiry,
+				ColdCredHash:     coldKey[:],
+				ExpiresEpoch:     expiry,
+				TermStartSlotSet: true,
 			})
 		}
 		if err := m.db.SetCommitteeMembers(members, txn); err != nil {
