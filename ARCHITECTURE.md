@@ -1965,14 +1965,23 @@ background — observed in production as an hours-long abandoned goroutine
 downstream of a slow query in `rewardActiveAccounts` (see
 `GetAccountsByCredential` in DATABASE.md), well after `Close` itself had
 already returned. `Shutdown` now takes a `drainTimeout time.Duration` and
-bounds its own wait on in-flight operations with the same
-select-plus-`time.After` pattern, returning an error rather than blocking
-past it; `Close`'s launching goroutine passes `CloseDBWorkerPoolShutdownTimeout`
-as a function-literal argument rather than closing over the package
-variable, since the goroutine argument is evaluated synchronously in the
-calling goroutine before the new one starts — closing over the variable
-instead raced a test's `t.Cleanup` restoring it after the goroutine read
-it. `Run()`'s own LIFO `started` stop for `n.ledgerState.Close()` used to
+bounds its own wait on in-flight operations, returning an error rather than
+blocking past it; `Close`'s launching goroutine passes
+`CloseDBWorkerPoolShutdownTimeout` as a function-literal argument rather
+than closing over the package variable, since the goroutine argument is
+evaluated synchronously in the calling goroutine before the new one starts —
+closing over the variable instead raced a test's `t.Cleanup` restoring it
+after the goroutine read it. The bound itself doesn't spawn a goroutine to
+bridge a `sync.WaitGroup` to a timeout-selectable channel (that goroutine
+would just relocate the same leak: `WaitGroup.Wait` can't be interrupted, so
+it would keep blocking, with the worker still running the slow operation
+under it, for the operation's full remaining duration after `Shutdown`
+itself had already timed out and returned). Instead `DatabaseWorkerPool`
+tracks in-flight operations as a mutex-guarded counter plus a `drained`
+channel that whichever of `Shutdown` or the last operation to finish closes,
+so `Shutdown` selects it directly with no goroutine of its own — timing out
+leaves nothing extra running beyond the worker still executing the slow
+operation, which was already going to keep running regardless. `Run()`'s own LIFO `started` stop for `n.ledgerState.Close()` used to
 discard this return value entirely, unlike its neighboring stops (e.g. the
 koios parity observer's), so a `Shutdown` timeout on the startup-failure
 rollback path (`cleanupFailedStartup`, reached when a later component --

@@ -596,6 +596,24 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
 // timeout Run() registers, and the earlier-registered (so later-run) db.Close
 // and pluginHost.Stop LIFO stops must skip closing storage a still-running
 // background goroutine may be using, not silently discard the drain failure.
+//
+// Unlike that shutdown() test, this one hand-builds the rollback slice
+// rather than driving Run() to a real startup failure: shutdown()'s phase
+// ordering is hard-coded directly in that function, so calling it exercises
+// the real order; cleanupFailedStartup's ordering is purely a property of
+// which `started = append(started, ...)` calls Run() happens to reach before
+// failing, assembled across ~30 such calls interleaved through Run()'s
+// startup sequence, each registered immediately after the resource it tears
+// down becomes available -- so driving the real path here would mean
+// injecting a failure at a specific point inside that sequence rather than
+// calling one self-contained function. This test therefore only proves the
+// guard logic is correct given the order Run() is documented (here and in
+// ARCHITECTURE.md) to register it in; it cannot catch a future edit to Run()
+// that reorders the db.Close/pluginHost.Stop/ledgerState.Close registrations
+// relative to each other. Matches this file's existing convention for
+// exercising cleanupFailedStartup with a hand-built `started` (see the
+// startup-lifecycle-gate test above) and newLiveLifecycleTestNode's own
+// documented pattern of wiring a real Node without going through Run().
 func TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed(
 	t *testing.T,
 ) {

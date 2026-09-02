@@ -122,12 +122,13 @@ func DefaultDatabaseWorkerPoolConfig() DatabaseWorkerPoolConfig {
 
 // DatabaseWorkerPool manages a pool of workers for async database operations
 type DatabaseWorkerPool struct {
-	db          *database.Database
-	taskQueue   chan DatabaseOperation
-	workerWg    sync.WaitGroup // worker goroutine lifecycle
-	operationWg sync.WaitGroup // accepted operations until result is delivered
-	closed      atomic.Bool    // thread-safe without mutex in hot path
-	mu          sync.Mutex
+	db        *database.Database
+	taskQueue chan DatabaseOperation
+	workerWg  sync.WaitGroup // worker goroutine lifecycle
+	closed    atomic.Bool    // thread-safe without mutex in hot path
+	mu        sync.Mutex
+	opCount   int           // accepted operations until result is delivered, guarded by mu
+	drained   chan struct{} // closed exactly once, when closed is true and opCount reaches 0
 }
 
 // NewDatabaseWorkerPool creates a new database worker pool
@@ -146,6 +147,7 @@ func NewDatabaseWorkerPool(
 	pool := &DatabaseWorkerPool{
 		db:        db,
 		taskQueue: taskQ,
+		drained:   make(chan struct{}),
 		// closed is zero-valued (false) by default for atomic.Bool
 	}
 
@@ -168,7 +170,7 @@ func (p *DatabaseWorkerPool) worker() {
 }
 
 func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
-	defer p.operationWg.Done()
+	defer p.operationDone()
 
 	result := DatabaseResult{}
 	defer func() {
@@ -208,19 +210,35 @@ func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
 		return
 	}
 
-	p.operationWg.Add(1)
+	p.opCount++
 	select {
 	case p.taskQueue <- op:
 		p.mu.Unlock()
 		return
 	default:
-		p.operationWg.Done()
+		p.opCount--
 	}
 	p.mu.Unlock()
 	p.sendResult(
 		op,
 		DatabaseResult{Error: errors.New("database worker pool queue full")},
 	)
+}
+
+// operationDone records that an accepted operation has finished and, if the
+// pool is closed and this was the last outstanding one, closes drained so a
+// blocked Shutdown call's select wakes immediately. Guarding opCount and the
+// closed check with the same mutex Shutdown uses to flip closed makes the
+// zero-crossing observed here race-free against a concurrent Shutdown call,
+// so drained is closed exactly once.
+func (p *DatabaseWorkerPool) operationDone() {
+	p.mu.Lock()
+	p.opCount--
+	drained := p.closed.Load() && p.opCount == 0
+	p.mu.Unlock()
+	if drained {
+		close(p.drained)
+	}
 }
 
 // SubmitAsyncDBOperation submits a database operation for execution on the worker pool.
@@ -390,20 +408,28 @@ func (ls *LedgerState) SubmitAsyncDBReadTxn(
 // The drain wait is bounded by drainTimeout -- callers pass
 // CloseDBWorkerPoolShutdownTimeout, the same budget LedgerState.Close's own
 // outer wait around the goroutine that calls Shutdown already uses. Close's
-// outer wait keeps Close itself from blocking past that budget regardless
-// of what Shutdown does, but without a bound here Shutdown's own
-// operationWg.Wait keeps that now-abandoned goroutine (and the worker still
-// running the slow operation under it) alive for as long as the operation
-// takes -- observed in production as hours, once for an O(n^2) query bug
-// (see the account-lookup fix this guards against regressing) and
-// generally for any future operation that turns out to be slower than
-// expected. Bounding it here means the goroutine gives up on its own soon
-// after Close does, rather than leaking for the slow operation's full
-// duration. drainTimeout is a parameter rather than a direct read of
+// outer wait keeps Close itself from blocking past that budget regardless of
+// what Shutdown does, but a bound is still needed here: without one, a
+// caller of Shutdown that gives up (like that outer wait) leaves nothing
+// waiting on the drain at all, so a still-running worker's operation (and
+// the resources it holds, e.g. this pool's db) would never be observed
+// finishing -- and the fix could recur for any future operation slower than
+// expected, not just the O(n^2) query bug this once surfaced as (see the
+// account-lookup fix this guards against regressing).
+//
+// The wait itself selects the drained channel directly rather than spawning
+// a goroutine to block on a sync.WaitGroup: WaitGroup.Wait cannot be
+// selected against a timeout, so a wrapper goroutine bridging it to a
+// channel would still block for the slow operation's full remaining
+// duration after Shutdown times out and returns -- trading the caller's
+// leak for an internal one instead of removing it. drained is closed by
+// whichever of Shutdown or operationDone observes the closed-and-drained
+// transition first, so no goroutine is ever spawned here.
+//
+// drainTimeout is a parameter rather than a direct read of
 // CloseDBWorkerPoolShutdownTimeout so a test that mutates that var for
-// isolation (see state_test.go) cannot race this abandoned goroutine's
-// read of it: Close evaluates the argument once, synchronously, before the
-// goroutine starts.
+// isolation (see state_test.go) cannot race this call: Close evaluates the
+// argument once, synchronously, before calling Shutdown.
 func (p *DatabaseWorkerPool) Shutdown(drainTimeout time.Duration) error {
 	p.mu.Lock()
 	if p.closed.Load() {
@@ -412,15 +438,14 @@ func (p *DatabaseWorkerPool) Shutdown(drainTimeout time.Duration) error {
 	}
 	p.closed.Store(true)
 	close(p.taskQueue)
+	alreadyDrained := p.opCount == 0
 	p.mu.Unlock()
+	if alreadyDrained {
+		close(p.drained)
+	}
 
-	done := make(chan struct{})
-	go func() {
-		p.operationWg.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case <-p.drained:
 	case <-time.After(drainTimeout):
 		return fmt.Errorf(
 			"database worker pool: operation(s) still running after %s",

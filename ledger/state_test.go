@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1938,6 +1939,68 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 		elapsed,
 		2*time.Second,
 		"Shutdown must return promptly at the drain timeout instead of blocking on the stuck operation",
+	)
+
+	// Unblock the stuck operation so it doesn't leak past the test.
+	close(blockUntil)
+	select {
+	case <-resultChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for stuck operation to finally complete")
+	}
+}
+
+// TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine guards against
+// Shutdown's drain-timeout bound being reimplemented as a goroutine bridging
+// a sync.WaitGroup to a timeout-selectable channel: WaitGroup.Wait can't be
+// interrupted, so that goroutine (and the worker still running the stuck
+// operation under it) would keep running for the operation's full remaining
+// duration after Shutdown times out and returns, merely relocating the
+// leaked goroutine cubic-dev-ai flagged on PR #3782 rather than removing it.
+// The current implementation tracks in-flight operations with a
+// mutex-guarded counter and a drained channel Shutdown selects directly, so
+// no goroutine is ever spawned by the timeout path.
+func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
+	t *testing.T,
+) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	started := make(chan struct{})
+	blockUntil := make(chan struct{})
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			close(started)
+			<-blockUntil
+			return nil
+		},
+		ResultChan: resultChan,
+	})
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for operation to start")
+	}
+
+	// The stuck worker goroutine is already running at this point, so it's
+	// part of the baseline count -- only a goroutine spawned by Shutdown
+	// itself would show up as growth below.
+	baseline := runtime.NumGoroutine()
+
+	err := pool.Shutdown(50 * time.Millisecond)
+	require.Error(t, err)
+
+	after := runtime.NumGoroutine()
+	assert.LessOrEqual(
+		t,
+		after,
+		baseline,
+		"Shutdown's timeout path must not leave behind a goroutine of its own",
 	)
 
 	// Unblock the stuck operation so it doesn't leak past the test.
