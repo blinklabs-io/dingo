@@ -336,9 +336,26 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 // reconciler doesn't have either -- out of scope for issue #3516, which
 // bounds and correctly sources this rewind's data, not the reconciler's
 // pre-existing era coverage. Tracked separately as issue #3778.
+//
+// Because such a block has no row to iterate over at all, this cannot name
+// it the way an unresolvable block is named -- but it can detect that one
+// is missing: the block-number gap between ancestor and ledgerTipBlockNumber
+// is independent of block_nonce entirely, so comparing it against how many
+// nonce rows accounted for that gap reveals a block-number's worth of
+// applied history this function had no record of, without guessing at
+// which block or reading it from the primary chain's current index (which
+// would risk resolving the wrong branch's block for that slot -- the exact
+// failure mode this function exists to avoid, see above). Logged and
+// counted via reconciliationUndoMissingRecord, distinctly from
+// reconciliationUndoUnresolved, so an operator can tell "we know what's
+// missing but can't reach it" apart from "we don't even have a record of
+// it existing" (wolf31o2 review, PR #3611). Skipped when ancestor's own
+// block cannot be resolved (e.g., after a restart) rather than reporting a
+// false gap from a missing baseline.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,
+	ledgerTipBlockNumber uint64,
 ) []models.Block {
 	if ls.config.EventBus == nil || ls.db == nil ||
 		ls.config.ChainManager == nil {
@@ -367,11 +384,13 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 		return nil
 	}
 	blocks := make([]models.Block, 0, len(nonceRows))
+	accountedRows := 0
 	for _, row := range slices.Backward(nonceRows) {
 		if row.Slot <= ancestor.Slot {
 			// The ancestor's own row: it is being kept, not undone.
 			continue
 		}
+		accountedRows++
 		block, err := ls.config.ChainManager.BlockByPoint(
 			ocommon.NewPoint(row.Slot, row.Hash),
 			nil,
@@ -394,6 +413,28 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 			continue
 		}
 		blocks = append(blocks, block)
+	}
+	if ancestorBlock, err := ls.config.ChainManager.BlockByPoint(ancestor, nil); err == nil &&
+		ledgerTipBlockNumber > ancestorBlock.Number {
+		expectedRows := ledgerTipBlockNumber - ancestorBlock.Number
+		if expectedRows > uint64(accountedRows) {
+			missing := expectedRows - uint64(accountedRows)
+			ls.config.Logger.Error(
+				"reconciliation undo range contains applied blocks with no "+
+					"block_nonce row at all (not merely unresolvable) -- "+
+					"likely Byron-era blocks, whose ledger.tx undo events "+
+					"cannot be built at all (issue #3778)",
+				"component", "ledger",
+				"ancestor_slot", ancestor.Slot,
+				"ledger_tip_slot", ledgerTipSlot,
+				"missing_records", missing,
+			)
+			if ls.metrics.reconciliationUndoMissingRecord != nil {
+				ls.metrics.reconciliationUndoMissingRecord.Add(
+					float64(missing),
+				)
+			}
+		}
 	}
 	return blocks
 }

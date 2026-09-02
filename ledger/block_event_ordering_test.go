@@ -968,6 +968,166 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	require.Equal(t, fixture.ancestorTip, ls.currentTip)
 }
 
+// TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure
+// covers wolf31o2's escalation on PR #3611: a comment describing the
+// emit-before-ls.rollback window as self-healing on the next
+// reconciliation attempt is an assertion, not proof -- this exercises a
+// real ls.rollback failure (ErrRollbackExceedsMithrilBoundary, a genuine,
+// deterministic failure path, not a fault-injection double) and confirms
+// the very next reconciliation attempt actually completes the rollback
+// and redelivers the undo notification, rather than merely claiming it
+// would.
+func TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as the sibling tests above.
+	forkHash := testHashBytes("reconcile-undo-rollback-failure-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Force ls.rollback to fail on this attempt: the ancestor sits below
+	// this Mithril boundary, so RewindPrimaryChainToPoint (the primary
+	// chain truncation) still succeeds, but ls.rollback (the ledger's own
+	// metadata truncation, called afterward) returns
+	// ErrRollbackExceedsMithrilBoundary before ever updating ls.currentTip.
+	ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
+
+	err := ls.reconcilePrimaryChainTipWithLedgerTip()
+	require.ErrorIs(t, err, ErrRollbackExceedsMithrilBoundary)
+
+	// The undo notification was already published even though the
+	// metadata rollback that should have followed it failed -- this is
+	// the exact inconsistency window the review flagged.
+	evt := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"the undo notification must have been published before the "+
+			"ls.rollback failure",
+	)
+	le, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
+
+	require.Equal(
+		t, fixture.currentTip, ls.currentTip,
+		"a failed ls.rollback must not have moved ls.currentTip",
+	)
+	require.Equal(
+		t, fixture.ancestorTip.Point, ls.chain.Tip().Point,
+		"the primary chain truncation must still have succeeded",
+	)
+
+	// Resolve whatever made ls.rollback fail, exactly as a real Mithril
+	// config update or restart onto a differently configured node would,
+	// and let the next reconciliation attempt run -- the same call every
+	// caller already makes on its own retry schedule (ledgerReadChain's
+	// loop, the live divergence reconciler, or the next process startup).
+	ls.mithrilLedgerSlot = 0
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	evt = testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"the retry must redeliver the undo notification, not skip it "+
+			"because it believes this was already handled",
+	)
+	le, ok = evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
+
+	require.Equal(
+		t, fixture.ancestorTip, ls.currentTip,
+		"the retry must actually complete the metadata rollback this time",
+	)
+}
+
+// TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords covers
+// wolf31o2's review on PR #3611: reconciliationUndoBlocks cannot even name
+// an applied block with no block_nonce row at all -- the shape of a
+// Byron-era block, since Byron's BFT/PoA consensus writes no VRF nonce --
+// so unlike an unresolvable block (reconciliationUndoUnresolved), such a
+// gap was previously invisible to both the log and the metrics. This
+// proves the block-number-delta check catches it: an applied block
+// between the ancestor and the ledger tip with no nonce row at all must
+// still be resolved and counted separately via
+// reconciliationUndoMissingRecord, without guessing at its content (which
+// would risk resolving the wrong branch's block for that slot).
+func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	// Extend the still-intact primary chain (no divergence here -- this
+	// test calls reconciliationUndoBlocks directly, not the full
+	// reconciler) with one more applied block that gets no block_nonce
+	// row at all, exactly as a Byron block never would.
+	byronLikeHash := testHashBytes("byron-like-no-nonce-row")
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        byronLikeHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	blocks := ls.reconciliationUndoBlocks(
+		fixture.ancestorTip.Point,
+		fixture.currentTip.Point.Slot+5,
+		fixture.currentTip.BlockNumber+1,
+	)
+
+	// Only fixture.currentTip resolves through a block_nonce row; the
+	// Byron-like block is not merely unresolvable, it was never a
+	// candidate at all, so it must not appear here either.
+	require.Len(t, blocks, 1)
+	require.Equal(t, fixture.currentTip.Point.Hash, blocks[0].Hash)
+
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoMissingRecord),
+		"reconciliationUndoMissingRecord must count the block with no "+
+			"block_nonce row at all",
+	)
+	require.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved),
+		"a missing record is a different gap from an unresolvable one and "+
+			"must not double-count into it",
+	)
+}
+
 // TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger covers a
 // startup regression: NewLedgerState calls reconcilePrimaryChainTipWithLedgerTip
 // before node.go's ChainManager.SetLedger has configured the security

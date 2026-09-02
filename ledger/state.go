@@ -7725,11 +7725,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			ls.transactionEventMutex.Lock()
 			defer ls.transactionEventMutex.Unlock()
 			ls.RLock()
-			currentLedgerTipSlot := ls.currentTip.Point.Slot
+			currentLedgerTip := ls.currentTip
 			ls.RUnlock()
 			undoBlocks := ls.reconciliationUndoBlocks(
 				chainTip.Point,
-				currentLedgerTipSlot,
+				currentLedgerTip.Point.Slot,
+				currentLedgerTip.BlockNumber,
 			)
 			// See the matching comment on the common-ancestor branch's
 			// own emit below for why this runs before ls.rollback
@@ -7873,11 +7874,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// so calling it here is not the reentrancy
 		// emitRollbackTransactionEvents must still avoid (see below).
 		ls.RLock()
-		currentLedgerTipSlot := ls.currentTip.Point.Slot
+		currentLedgerTip := ls.currentTip
 		ls.RUnlock()
 		undoBlocks := ls.reconciliationUndoBlocks(
 			ancestor,
-			currentLedgerTipSlot,
+			currentLedgerTip.Point.Slot,
+			currentLedgerTip.BlockNumber,
 		)
 		// RewindPrimaryChainToPoint's own K-check and truncation run
 		// under one continuous hold of the chain's own locks (see

@@ -8587,6 +8587,22 @@ it previously called `ls.rollback` directly with no undo emission at all,
 live or at startup, whenever the primary chain was simply behind the
 ledger tip for any reason.
 
+`reconciliationUndoBlocks` also detects, and counts separately via
+`reconciliationUndoMissingRecord`, an applied block with no `block_nonce`
+row at all in its undo range — the shape of a Byron-era block, since
+Byron's BFT/PoA consensus writes no VRF nonce — distinct from
+`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap
+(issue #3778, wolf31o2 review). It cannot name or resolve that block (there
+is no row to read a hash from, and falling back to whatever the primary
+chain's blob store currently holds at that slot would risk resolving the
+wrong branch's block, the exact failure mode this function exists to
+avoid), but it can detect that one is missing: it resolves the ancestor's
+own block for its `BlockNumber` and compares the resulting
+`ledgerTipBlockNumber - ancestorBlockNumber` delta — independent of
+`block_nonce` entirely — against how many nonce rows accounted for it. A
+shortfall means the reconciler had no durable record of that many applied
+blocks' existence at all, not merely of their content.
+
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts
 for work already *submitted* to `blockPipeline` (`PendingCount`) — raw
