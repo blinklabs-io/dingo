@@ -27,62 +27,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests are the follower-safety regression coverage for
-// blinklabs-io/dingo#3627. They drive the REAL production phase-2 path
-// (ValidateTxConway -> validateTxPlutusConwayWithContext ->
-// evaluateConwayPlutusScript) with a REAL Plutus V1 script, so the error under
-// test is the genuine
+// Regression coverage for the Conway phase-2 declared-budget check
+// (blinklabs-io/dingo#3627, #3735).
 //
-//	fmt.Errorf("script exceeded declared budget: used (...), declared (...)")
+// A follower briefly wedged when its locally metered ex-units for a
+// producer-valid transaction came out marginally above the redeemer's declared
+// budget, so restrictive phase-2 re-rejected a block the honest network had
+// accepted. The fix is NOT to trust an over-budget block: cardano-ledger uses
+// the declared per-redeemer ExUnits as the CEK budget on the apply path, so a
+// genuinely over-budget block is an EvaluationError -> ValidationTagMismatch
+// and MUST be rejected. Accepting it would make dingo follow a chain the
+// reference node rejects and under-charge the min fee.
 //
-// that conway.go produces — not a synthetic error object. A block on the chain
-// we follow can carry a transaction whose script our local cost meter charges
-// marginally over its declared ex-units even though the producer/Haskell node
-// accepted it; rejecting it deterministically re-rejects the block forever and
-// wedges the follower off canonical. The fix makes ONLY the followed-chain
-// apply path defer to the producer (exact/non-restrictive evaluation); mempool
-// admission and forging stay strict.
-
-// overageEvent records a ReportProducerPlutusBudgetOverage callback.
-type overageEvent struct {
-	scriptHash lcommon.ScriptHash
-	tag        lcommon.RedeemerTag
-	index      uint32
-	used       lcommon.ExUnits
-	declared   lcommon.ExUnits
-}
-
-// applyPathLedgerState models the followed-chain block-apply LedgerView: it
-// implements the same TrustProducerPlutusBudget()/ReportProducerPlutusBudgetOverage()
-// capabilities *ledger.LedgerView exposes there, on top of the shared test
-// double. newMockLedgerState() (no trust) models the strict mempool/forging
-// paths.
-type applyPathLedgerState struct {
-	*mockLedgerState
-	reported []overageEvent
-}
-
-func newApplyPathLedgerState() *applyPathLedgerState {
-	return &applyPathLedgerState{mockLedgerState: newMockLedgerState()}
-}
-
-func (s *applyPathLedgerState) TrustProducerPlutusBudget() bool { return true }
-
-func (s *applyPathLedgerState) ReportProducerPlutusBudgetOverage(
-	scriptHash lcommon.ScriptHash,
-	tag lcommon.RedeemerTag,
-	index uint32,
-	used lcommon.ExUnits,
-	declared lcommon.ExUnits,
-) {
-	s.reported = append(s.reported, overageEvent{
-		scriptHash: scriptHash,
-		tag:        tag,
-		index:      index,
-		used:       used,
-		declared:   declared,
-	})
-}
+// The real defect was upstream in gouroboros: the Conway ScriptContext encoded
+// a *closed* validity-interval upper bound for a TTL-only transaction where
+// Conway uses strictUpperBound (gouroboros#2171), so the script datum -- and
+// therefore the metered cost -- differed from the network's. gouroboros#2170
+// era-gates that closure. With the corrected ScriptContext the locally metered
+// cost matches the producer's, the declared budget is no longer exceeded, and
+// strict phase-2 accepts the block with no producer-trust path.
+//
+// These tests assert the strict invariant that holds on every path (apply,
+// mempool, forging, replay): a script whose true cost exceeds its declared
+// budget is rejected, and a script whose declared budget covers its
+// (correctly metered) cost is accepted -- both through the REAL production
+// phase-2 path (ValidateTxConway -> validateTxPlutusConwayWithContext ->
+// evaluateConwayPlutusScript) with a REAL Plutus V1 script.
 
 // encodeV1Script flat+cbor encodes a V1 program the way a script witness holds
 // it.
@@ -165,56 +135,29 @@ func pparamsWithMax(max lcommon.ExUnits) *conway.ConwayProtocolParameters {
 
 // The V1 minting script "(redeemer, ctx) -> Unit" costs a Haskell-pinned
 // 112100 cpu / 800 mem (see TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch).
-// With a declared budget of zero it is a genuine over-declared-budget case.
 var (
 	successBody = syn.Term[syn.DeBruijn](&syn.Constant{Con: &syn.Unit{}})
 	usedCpu     = int64(112100)
 	usedMem     = int64(800)
 )
 
-// (a) Followed-chain apply path TRUSTS a budget overage: the block is accepted
-//
-//	and the overage is reported (observable "trusting producer" log).
-func TestProducerTrust_ApplyPathAcceptsBudgetOverage(t *testing.T) {
+// A transaction whose script actually costs more than its redeemer declares is
+// REJECTED with the real production error on every path -- apply included.
+// cardano-ledger meters the same overage as an EvaluationError and rejects the
+// block (ValidationTagMismatch), so dingo must too; accepting it would follow a
+// chain the reference node rejects. (This is the case #3735 originally proposed
+// to accept; it must fail instead.)
+func TestConwayPhase2RejectsBudgetOverage(t *testing.T) {
 	clearPhase1Rules(t)
 	script := encodeV1Script(t, successBody)
 	tx, scriptHash := buildMintTx(script, lcommon.ExUnits{}) // declared 0/0
-	ls := newApplyPathLedgerState()
+	ls := newMockLedgerState()
 
 	err := ValidateTxConway(tx, 0, ls, pparamsWithMax(lcommon.ExUnits{
 		Steps:  1_000_000,
 		Memory: 1_000_000,
 	}))
-	require.NoError(
-		t,
-		err,
-		"apply path must ACCEPT a producer-valid over-declared-budget script (#3627)",
-	)
-	require.Len(t, ls.reported, 1, "the tolerated overage must be reported")
-	ev := ls.reported[0]
-	assert.Equal(t, scriptHash, ev.scriptHash)
-	assert.Equal(t, lcommon.RedeemerTagMint, ev.tag)
-	assert.Equal(t, usedCpu, ev.used.Steps)
-	assert.Equal(t, usedMem, ev.used.Memory)
-	assert.Equal(t, int64(0), ev.declared.Steps)
-	assert.Equal(t, int64(0), ev.declared.Memory)
-}
-
-// (b) The strict paths (mempool admission / forging), modeled by a ledger state
-//
-//	WITHOUT the trust capability, still REJECT the same overage with the real
-//	production error. We must never produce or relay-admit an over-budget tx.
-func TestProducerTrust_StrictPathRejectsBudgetOverage(t *testing.T) {
-	clearPhase1Rules(t)
-	script := encodeV1Script(t, successBody)
-	tx, scriptHash := buildMintTx(script, lcommon.ExUnits{}) // declared 0/0
-	ls := newMockLedgerState()                               // no trust capability
-
-	err := ValidateTxConway(tx, 0, ls, pparamsWithMax(lcommon.ExUnits{
-		Steps:  1_000_000,
-		Memory: 1_000_000,
-	}))
-	require.Error(t, err, "strict path must REJECT an over-budget script")
+	require.Error(t, err, "an over-declared-budget script must be rejected")
 	var plutusErr conway.PlutusScriptFailedError
 	require.ErrorAs(t, err, &plutusErr)
 	assert.Equal(t, scriptHash, plutusErr.ScriptHash)
@@ -226,12 +169,38 @@ func TestProducerTrust_StrictPathRejectsBudgetOverage(t *testing.T) {
 	)
 }
 
-// (c) Even on the trusting apply path, a GENUINE script failure (the script
-//
-//	evaluates to error/False) still REJECTS and is NOT reported as an
-//	overage. Exact mode drops only the used>declared post-check, never the
-//	script's own evaluation error.
-func TestProducerTrust_ApplyPathRejectsGenuineFailure(t *testing.T) {
+// When the redeemer's declared budget covers the script's correctly metered
+// cost -- as it does on canonical blocks once the ScriptContext is computed
+// correctly (gouroboros#2170 era-gates the TTL-only validity-interval upper
+// bound) -- strict phase-2 ACCEPTS the transaction with no producer-trust path.
+// This is the honest post-fix shape of the block that formerly wedged the
+// follower: the metered cost equals what the producer declared.
+func TestConwayPhase2AcceptsDeclaredBudgetCoveringMeteredCost(t *testing.T) {
+	clearPhase1Rules(t)
+	script := encodeV1Script(t, successBody)
+	// Declare exactly the pinned metered cost: used == declared, so the strict
+	// used>declared post-check does not fire.
+	tx, _ := buildMintTx(script, lcommon.ExUnits{
+		Steps:  usedCpu,
+		Memory: usedMem,
+	})
+	ls := newMockLedgerState()
+
+	err := ValidateTxConway(tx, 0, ls, pparamsWithMax(lcommon.ExUnits{
+		Steps:  1_000_000,
+		Memory: 1_000_000,
+	}))
+	require.NoError(
+		t,
+		err,
+		"a script whose declared budget covers its metered cost must be accepted strictly, with no trust path",
+	)
+}
+
+// A GENUINE script failure (the script evaluates to error/False) is rejected
+// even when its declared budget is generous, and it is reported as a plutus
+// script failure -- never confused with a budget overage.
+func TestConwayPhase2RejectsGenuineScriptFailure(t *testing.T) {
 	clearPhase1Rules(t)
 	// (redeemer, ctx) -> Error: fully evaluates then fails, like a script that
 	// returns False / calls error.
@@ -240,17 +209,13 @@ func TestProducerTrust_ApplyPathRejectsGenuineFailure(t *testing.T) {
 		Steps:  1_000_000,
 		Memory: 1_000_000,
 	})
-	ls := newApplyPathLedgerState()
+	ls := newMockLedgerState()
 
 	err := ValidateTxConway(tx, 0, ls, pparamsWithMax(lcommon.ExUnits{
 		Steps:  1_000_000,
 		Memory: 1_000_000,
 	}))
-	require.Error(
-		t,
-		err,
-		"a genuine Plutus failure must still be rejected even when the producer is trusted",
-	)
+	require.Error(t, err, "a genuine Plutus failure must be rejected")
 	var plutusErr conway.PlutusScriptFailedError
 	require.ErrorAs(t, err, &plutusErr)
 	assert.Equal(t, scriptHash, plutusErr.ScriptHash)
@@ -259,10 +224,5 @@ func TestProducerTrust_ApplyPathRejectsGenuineFailure(t *testing.T) {
 		plutusErr.Err.Error(),
 		"script exceeded declared budget",
 		"genuine failure must not be misclassified as a budget overage",
-	)
-	assert.Empty(
-		t,
-		ls.reported,
-		"a genuine failure must never be reported as a tolerated overage",
 	)
 }

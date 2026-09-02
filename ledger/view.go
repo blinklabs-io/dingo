@@ -55,53 +55,10 @@ type LedgerView struct {
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	skipPhase2Validation bool
-	// trustProducerPlutusBudget is set ONLY on the followed-chain block-apply
-	// path (LedgerState.ledgerProcessBlock). When set, Conway phase-2 evaluation
-	// runs in exact (non-restrictive) mode: a script that evaluates successfully
-	// but whose locally metered ex-units slightly exceed the transaction's
-	// declared budget is accepted rather than rejected, deferring to the block
-	// producer the honest network already accepted (blinklabs-io/dingo#3627).
-	// It is left false for mempool admission and block forging, which must stay
-	// strict so we never produce or relay-admit an over-budget transaction.
-	trustProducerPlutusBudget bool
 }
 
 func (lv *LedgerView) SkipPhase2Validation() bool {
 	return lv.skipPhase2Validation
-}
-
-// TrustProducerPlutusBudget reports whether phase-2 Plutus evaluation should
-// defer to the block producer on the declared-budget check (see the struct
-// field). Only the followed-chain apply path sets this; every other caller
-// (mempool, forging, queries) leaves it false and stays strict.
-func (lv *LedgerView) TrustProducerPlutusBudget() bool {
-	return lv.trustProducerPlutusBudget
-}
-
-// ReportProducerPlutusBudgetOverage emits an observable warning each time the
-// apply path actually tolerated an over-declared-budget script, so operators
-// can see the #3627 trust firing (and how often) on a live node.
-func (lv *LedgerView) ReportProducerPlutusBudgetOverage(
-	scriptHash lcommon.ScriptHash,
-	tag lcommon.RedeemerTag,
-	index uint32,
-	used lcommon.ExUnits,
-	declared lcommon.ExUnits,
-) {
-	if lv.ls == nil || lv.ls.config.Logger == nil {
-		return
-	}
-	lv.ls.config.Logger.Warn(
-		"Plutus budget overage on producer-valid block (trusting producer)",
-		"component", "ledger",
-		"script_hash", hex.EncodeToString(scriptHash[:]),
-		"redeemer_tag", tag,
-		"redeemer_index", index,
-		"used_cpu", used.Steps,
-		"used_mem", used.Memory,
-		"declared_cpu", declared.Steps,
-		"declared_mem", declared.Memory,
-	)
 }
 
 // MinPoolMargin forwards the CIP-23 minimum pool margin from the underlying
@@ -116,15 +73,6 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // in the MinPoolMarginProvider method signature a compile error instead of a
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
-
-// Compile-time guards that the followed-chain apply path's producer-budget trust
-// (blinklabs-io/dingo#3627) stays wired: eras phase-2 validation discovers these
-// via runtime type assertions on the *LedgerView, so signature drift here would
-// silently revert to strict rejection and re-wedge the follower.
-var (
-	_ eras.PlutusBudgetOverageTruster  = (*LedgerView)(nil)
-	_ eras.PlutusBudgetOverageReporter = (*LedgerView)(nil)
-)
 
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
