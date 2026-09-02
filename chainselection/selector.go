@@ -221,9 +221,19 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		// not be absorbed and silently followed by the next rollback as if
 		// this one had actually been applied -- see onPeerRollbackPanic and
 		// event.EventBus.SubscribeFuncStrict.
+		//
+		// SubscriberBackpressureBlock, not the default Detach: this stream is
+		// ordering-critical, since a dropped rollback leaves a peer's tracked
+		// tip stale relative to its actual (rolled-back) chain, feeding
+		// selection from data the peer itself has already disavowed. Nothing
+		// here re-subscribes, so Detach would let ordinary backpressure alone
+		// (with no panic at all) silently and permanently stop rollback
+		// processing -- the same durable loss a panic causes, but far easier
+		// to trigger.
 		cfg.EventBus.SubscribeFuncStrict(
 			PeerRollbackEventType,
 			event.DefaultSubscriberBuffer,
+			event.SubscriberBackpressureBlock,
 			cs.HandlePeerRollbackEvent,
 			cs.onPeerRollbackPanic,
 		)
@@ -1798,17 +1808,56 @@ func (cs *ChainSelector) runTriggeredEvaluation() {
 // evaluation panicked would be a worse outcome than the missed transition:
 // the periodic ticker is itself the recovery path, giving the selector
 // another chance on fresh peer/local-tip state a moment later.
+//
+// The logging and publish calls below run after this function's own
+// recover() has already consumed the evaluation panic, so nothing further up
+// the stack can catch a second one. Each is wrapped in its own nested
+// recovery: a misbehaving Logger or EventBus.Publish panicking here would
+// otherwise propagate out of this deferred call as a fresh, unrecovered
+// panic, which would stop runEvaluationTick/runTriggeredEvaluation from
+// returning at all and crash the entire process once it unwinds past
+// evaluationLoop's for/select with nothing left to catch it -- taking down
+// chain selection (and the node) over what should have been one dropped
+// transition.
 func (cs *ChainSelector) recoverEvaluationPanic(triggered bool) {
 	r := recover()
 	if r == nil {
 		return
 	}
-	cs.config.Logger.Error(
-		"panic in chain selection evaluation; transition dropped",
-		"panic", r,
-		"triggered", triggered,
-	)
-	if cs.config.EventBus != nil {
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				// The configured Logger just proved unusable; fall back to
+				// the stdlib default rather than risk calling it again.
+				slog.Default().Error(
+					"panic while logging a chain selection evaluation panic",
+					"triggered", triggered,
+					"original_panic", r,
+					"logging_panic", r2,
+				)
+			}
+		}()
+		cs.config.Logger.Error(
+			"panic in chain selection evaluation; transition dropped",
+			"panic", r,
+			"triggered", triggered,
+		)
+	}()
+	if cs.config.EventBus == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				slog.Default().Error(
+					"panic while publishing a chain selection evaluation "+
+						"panic event",
+					"triggered", triggered,
+					"original_panic", r,
+					"publish_panic", r2,
+				)
+			}
+		}()
 		cs.config.EventBus.Publish(
 			EvaluationPanicEventType,
 			event.NewEvent(
@@ -1816,7 +1865,7 @@ func (cs *ChainSelector) recoverEvaluationPanic(triggered bool) {
 				EvaluationPanicEvent{Panic: r, Triggered: triggered},
 			),
 		)
-	}
+	}()
 }
 
 func (cs *ChainSelector) cleanupStalePeers() {

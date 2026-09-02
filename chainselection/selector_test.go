@@ -2723,3 +2723,33 @@ func TestChainSelectorEvaluationPanicSurfacedAndLoopContinues(t *testing.T) {
 	})
 	require.NotNil(t, cs.GetBestPeer())
 }
+
+// TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger is a
+// regression test for a bug where recoverEvaluationPanic's own logging call
+// was not panic-safe: it runs after this function's own recover() has
+// already consumed the evaluation panic, so nothing further up the stack
+// could catch a second one. A misbehaving Logger panicking there would
+// propagate out of the deferred call as a fresh, unrecovered panic --
+// runTriggeredEvaluation/runEvaluationTick would never return, crashing the
+// whole process once it unwound past evaluationLoop's for/select with
+// nothing left to catch it, over what should have been one dropped
+// transition. This drives a real evaluation panic with a Logger that panics
+// on every Handle call and verifies the panic is fully contained.
+func TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	cs := NewChainSelector(ChainSelectorConfig{EventBus: bus})
+	cs.mutex.Lock()
+	cs.config.Logger = slog.New(
+		&panicLogHandler{inner: slog.NewTextHandler(io.Discard, nil)},
+	)
+	cs.mutex.Unlock()
+
+	require.NotPanics(t, func() {
+		func() {
+			defer cs.recoverEvaluationPanic(true)
+			panic("evaluation boom")
+		}()
+	}, "a panicking Logger must not escape recoverEvaluationPanic")
+}
