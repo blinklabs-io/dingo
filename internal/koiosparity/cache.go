@@ -1269,6 +1269,84 @@ func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 	return ret, rows.Err()
 }
 
+// SaveAccountUniverse replaces the cached Koios /account_list crawl for
+// network with addrs, stamped fetchedAt. Written in one transaction so a
+// failure part-way cannot leave a half-replaced set that a later read would
+// treat as a complete universe.
+func (c *Cache) SaveAccountUniverse(
+	network string,
+	addrs []string,
+	fetchedAt time.Time,
+) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return fmt.Errorf("save account universe: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(
+		`DELETE FROM koios_account_universe WHERE network = ?`,
+		network,
+	); err != nil {
+		return fmt.Errorf("save account universe: clear: %w", err)
+	}
+	stmt, err := tx.Prepare(`
+INSERT INTO koios_account_universe (network, stake_address, fetched_at)
+VALUES (?, ?, ?)
+ON CONFLICT (network, stake_address) DO UPDATE SET fetched_at = excluded.fetched_at`)
+	if err != nil {
+		return fmt.Errorf("save account universe: prepare: %w", err)
+	}
+	defer stmt.Close() //nolint:errcheck
+	for _, addr := range addrs {
+		if addr == "" {
+			continue
+		}
+		if _, err := stmt.Exec(network, addr, fetchedAt.UTC()); err != nil {
+			return fmt.Errorf("save account universe: insert: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save account universe: commit: %w", err)
+	}
+	return nil
+}
+
+// GetAccountUniverse returns the cached crawl for network and the time it was
+// taken. A zero time with no addresses means nothing is cached; the caller
+// decides whether what is cached is fresh enough for the epoch it is checking.
+func (c *Cache) GetAccountUniverse(
+	network string,
+) ([]string, time.Time, error) {
+	rows, err := c.db.Query(
+		`SELECT stake_address, fetched_at FROM koios_account_universe
+		WHERE network = ? ORDER BY stake_address`,
+		network,
+	)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("get account universe: %w", err)
+	}
+	defer rows.Close()
+	var addrs []string
+	var newest time.Time
+	for rows.Next() {
+		var addr string
+		var fetchedAt time.Time
+		if err := rows.Scan(&addr, &fetchedAt); err != nil {
+			return nil, time.Time{}, fmt.Errorf(
+				"get account universe: %w", err,
+			)
+		}
+		addrs = append(addrs, addr)
+		if fetchedAt.After(newest) {
+			newest = fetchedAt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, time.Time{}, fmt.Errorf("get account universe: %w", err)
+	}
+	return addrs, newest, nil
+}
+
 func createCacheSchema(db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS koios_epoch_info (
@@ -1359,6 +1437,16 @@ func createCacheSchema(db *sql.DB) error {
 			pool_bech32 TEXT NOT NULL, stake_address TEXT NOT NULL, field TEXT NOT NULL, dingo_value TEXT NOT NULL,
 			koios_value TEXT NOT NULL, category TEXT NOT NULL, checked_at DATETIME NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_cm_net_epoch ON check_mismatches(network, epoch)`,
+		// The Koios /account_list crawl, cached across epochs. Without it the
+		// per-account fetch re-walked the whole list once per epoch — 304
+		// sequential requests for Preview's 303k accounts — which is why the
+		// in-process observer could not keep pace with a syncing node
+		// (dingo #3796). fetched_at is per row so a refresh can replace the set
+		// wholesale and the newest value still dates the crawl.
+		`CREATE TABLE IF NOT EXISTS koios_account_universe (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
+			stake_address TEXT NOT NULL, fetched_at DATETIME NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kau_net_addr ON koios_account_universe(network, stake_address)`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
