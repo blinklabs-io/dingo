@@ -1013,6 +1013,28 @@ func (g *leiosFetchGuard) markFetchFailed(now time.Time, base time.Duration) {
 	g.cooledUntilNano.Store(now.Add(d).UnixNano())
 }
 
+// markFetchDeclined records a prompt, well-formed typed decline
+// (MsgNoBlock/MsgNoBlockTxs) on this connection: the peer is healthy, it just
+// does not hold the requested endorser block, or not yet all of its
+// transactions. It installs a fixed cooldown and clears the consecutive-failure
+// escalation, because a completed protocol round trip is evidence the
+// connection works -- routing it through markFetchFailed instead would grow a
+// healthy peer's cooldown to leiosBackfillConnCooldownMax after a handful of
+// honest declines and sideline it for every other endorser block. The
+// positive-affinity timestamp is deliberately left alone for the same reason: a
+// connection that already served an endorser block stays proven.
+func (g *leiosFetchGuard) markFetchDeclined(
+	now time.Time,
+	cooldown time.Duration,
+) {
+	g.consecutiveFailures.Store(0)
+	if cooldown <= 0 {
+		g.cooledUntilNano.Store(0)
+		return
+	}
+	g.cooledUntilNano.Store(now.Add(cooldown).UnixNano())
+}
+
 // markFetchOK clears any cooldown, resets the failure escalation, and records
 // the success time (for positive peer affinity) after a successful fetch on this
 // connection.

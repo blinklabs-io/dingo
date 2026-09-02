@@ -107,9 +107,17 @@ const leiosBackfillTotalBudget = 2 * time.Minute
 // leiosBackfillConnDeclineCooldown is the cooldown for a peer that answered a
 // by-point request promptly and correctly with a typed decline (MsgNoBlock /
 // MsgNoBlockTxs). Such a peer is healthy, it simply does not hold this endorser
-// block, so it is only briefly deprioritized -- it must stay a candidate for
-// every other endorser block. Contrast leiosBackfillConnCooldown, which is for a
-// peer that stalled or served wrong bytes.
+// block (or not yet all of its transactions), so it is only briefly
+// deprioritized -- it must stay a candidate for every other endorser block.
+// Contrast leiosBackfillConnCooldown, which is for a peer that stalled or
+// served wrong bytes.
+//
+// It is applied through markFetchDeclined, not markFetchFailed: a full,
+// well-formed protocol round trip is evidence that the connection works, so it
+// must not feed the consecutive-failure escalation that grows the cooldown to
+// leiosBackfillConnCooldownMax. Repeatedly asking a small peer set for endorser
+// blocks it does not hold would otherwise sideline every honest peer for five
+// minutes.
 const leiosBackfillConnDeclineCooldown = 2 * time.Second
 
 var errLeiosBackfillConnBusy = errors.New(
@@ -142,9 +150,20 @@ const (
 	// Not a peer fault and not even an attempt: no cooldown, no failover
 	// weight, and the connection stays a first-class candidate.
 	leiosFetchFailureBusy
-	// leiosFetchFailureDeclined means the peer answered promptly with a typed
-	// decline: it does not hold this endorser block. The peer is healthy.
+	// leiosFetchFailureDeclined means the peer answered the manifest request
+	// promptly with MsgNoBlock: it does not hold this endorser block at all.
+	// The peer is healthy, and this is a definitive answer about the block.
 	leiosFetchFailureDeclined
+	// leiosFetchFailureTxsUnavailable means the peer answered the transaction
+	// request with MsgNoBlockTxs. The peer is healthy, but unlike MsgNoBlock
+	// this is NOT a definitive answer about whether it holds the endorser
+	// block: dingo's own leios-fetch server sends MsgNoBlockTxs both when it
+	// has no manifest for the point and when it holds the manifest with a
+	// still-incomplete transaction cache (leiosfetchServerBlockTxsRequest in
+	// ouroboros/leiosfetch.go), and the wire message carries no reason. Ordinary
+	// in-progress diffusion is therefore indistinguishable from absence, so this
+	// is retryable and is never counted as "no peer holds this endorser block".
+	leiosFetchFailureTxsUnavailable
 	// leiosFetchFailureDead means this connection's leios-fetch protocol cannot
 	// complete any further request. The gouroboros client's request slot is
 	// left busy-and-abandoned when a request's context expires before the peer
@@ -169,9 +188,10 @@ func classifyLeiosFetchFailure(err error) leiosFetchFailureClass {
 	case errors.Is(err, oleiosfetch.ErrRequestSlotAbandoned),
 		errors.Is(err, protocol.ErrProtocolShuttingDown):
 		return leiosFetchFailureDead
-	case errors.Is(err, oleiosfetch.ErrBlockNotFound),
-		errors.Is(err, oleiosfetch.ErrBlockTxsNotFound):
+	case errors.Is(err, oleiosfetch.ErrBlockNotFound):
 		return leiosFetchFailureDeclined
+	case errors.Is(err, oleiosfetch.ErrBlockTxsNotFound):
+		return leiosFetchFailureTxsUnavailable
 	default:
 		return leiosFetchFailureTransient
 	}
@@ -232,11 +252,16 @@ const leiosBackfillAffinityWindow = 2 * time.Minute
 //
 //   - busy: another fetch holds this connection's guard. Not an attempt; the
 //     connection keeps its place and its budget share is not consumed.
-//   - declined: the peer answered with MsgNoBlock/MsgNoBlockTxs. Healthy peer,
-//     brief cooldown. If every attempted peer declines, the returned error
-//     wraps errLeiosEndorserBlockDeclinedByAllPeers so the ledger can say "no
+//   - declined: the peer answered the manifest request with MsgNoBlock.
+//     Healthy peer, brief fixed cooldown. If every candidate resolved and every
+//     attempted peer declined, the returned error wraps
+//     errLeiosEndorserBlockDeclinedByAllPeers so the ledger can say "no
 //     connected peer holds this endorser block" instead of reporting an
 //     undiagnosed unavailability.
+//   - txs unavailable: the peer answered the transaction request with
+//     MsgNoBlockTxs, which does not distinguish absence from in-progress
+//     diffusion. Healthy peer, same brief fixed cooldown, but it never
+//     contributes to the all-declined verdict.
 //   - dead: this connection's leios-fetch request slot is permanently
 //     abandoned. A cooldown cannot repair it, so the connection is recycled
 //     (one request per connection) and ordered last; the replacement dialled by
@@ -284,6 +309,16 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	var lastErr error
 	attempted := 0
 	declined := 0
+	// unresolved records that at least one candidate never answered the block
+	// query definitively: it was busy with another fetch, had no usable
+	// leios-fetch client, was never reached because the budget or the caller's
+	// context ended first, or answered MsgNoBlockTxs (which does not
+	// distinguish absence from in-progress diffusion -- see
+	// leiosFetchFailureTxsUnavailable). The all-peers-declined verdict below is
+	// withheld in that case: operators act on it as "no connected peer holds
+	// this endorser block", and a candidate that never answered is not evidence
+	// of that.
+	unresolved := false
 	remainingCandidates := len(order)
 	for _, connId := range order {
 		remainingCandidates--
@@ -291,11 +326,14 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			if lastErr == nil {
 				lastErr = err
 			}
+			// This candidate and every one after it goes unqueried.
+			unresolved = true
 			break
 		}
 		conn := o.connManager.GetConnectionById(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
+			unresolved = true
 			continue
 		}
 		budget := leiosBackfillAttemptBudget(
@@ -306,6 +344,8 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			if lastErr == nil {
 				lastErr = errors.New("leios backfill: fetch budget exhausted")
 			}
+			// This candidate and every one after it goes unqueried.
+			unresolved = true
 			break
 		}
 		// fetchEndorserBlockOnConn records the cooldown outcome
@@ -331,11 +371,27 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			lastErr = err
 			switch classifyLeiosFetchFailure(err) {
 			case leiosFetchFailureBusy:
-				// Not an attempt: the connection was serving another fetch.
+				// Not an attempt: the connection was serving another fetch, so
+				// this peer never answered the query for this endorser block.
+				unresolved = true
 			case leiosFetchFailureDeclined:
 				attempted++
 				declined++
-			default:
+			case leiosFetchFailureTxsUnavailable:
+				// A real attempt, but MsgNoBlockTxs is not evidence that the
+				// peer lacks the block.
+				attempted++
+				unresolved = true
+			case leiosFetchFailureNone,
+				leiosFetchFailureDead,
+				leiosFetchFailureTransient:
+				// A dead or transient failure is a real attempt that said
+				// nothing about what this peer holds. leiosFetchFailureNone
+				// cannot occur here (this block runs only for err != nil) and
+				// has no behavior of its own; it is named rather than folded
+				// into a default so the exhaustive linter reports any class
+				// added to the taxonomy later at this site instead of letting
+				// it fall silently into the attempted-but-uninformative bucket.
 				attempted++
 			}
 			continue
@@ -352,7 +408,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if lastErr == nil {
 		lastErr = errors.New("leios backfill: fetch failed")
 	}
-	if attempted > 0 && declined == attempted {
+	if attempted > 0 && declined == attempted && !unresolved {
 		return fmt.Errorf(
 			"%w: %d peer(s): %w",
 			errLeiosEndorserBlockDeclinedByAllPeers,
@@ -450,10 +506,14 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		switch classifyLeiosFetchFailure(err) {
 		case leiosFetchFailureNone:
 			g.markFetchOK()
-		case leiosFetchFailureDeclined:
-			// The peer answered correctly and simply does not hold this block;
-			// keep it a candidate for every other endorser block.
-			g.markFetchFailed(
+		case leiosFetchFailureDeclined, leiosFetchFailureTxsUnavailable:
+			// The peer completed a full protocol round trip and simply does not
+			// hold this block (or not yet all of its transactions). That is
+			// evidence the connection works, so it takes a fixed short cooldown
+			// and does not feed the consecutive-failure escalation: it must stay
+			// a candidate for every other endorser block instead of being
+			// sidelined for minutes for answering honestly.
+			g.markFetchDeclined(
 				time.Now(),
 				leiosBackfillConnDeclineCooldown,
 			)
@@ -464,7 +524,12 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				time.Now(),
 				leiosBackfillConnCooldownMax,
 			)
-		default:
+		case leiosFetchFailureBusy, leiosFetchFailureTransient:
+			// A stalled peer, a deadline overrun, wrong or incomplete bytes.
+			// leiosFetchFailureBusy cannot occur here (the TryLock guard above
+			// returns before this defer is installed) and has no behavior of
+			// its own; it is named rather than folded into a default for the
+			// same reason as in FetchEndorserBlockByPoint.
 			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
 		}
 	}()

@@ -82,9 +82,21 @@ func TestClassifyLeiosFetchFailure(t *testing.T) {
 			leiosFetchFailureDeclined,
 		},
 		{
-			"typed block-txs decline",
+			// MsgNoBlockTxs is not a definitive "I do not hold this endorser
+			// block": dingo's own leios-fetch server answers it for a manifest
+			// it holds with a still-incomplete transaction cache, so ordinary
+			// in-progress diffusion arrives here looking like absence.
+			"typed block-txs decline is not a definitive decline",
 			leiosfetch.ErrBlockTxsNotFound,
-			leiosFetchFailureDeclined,
+			leiosFetchFailureTxsUnavailable,
+		},
+		{
+			"block-txs decline wrapped by the tx fetch",
+			errors.Join(
+				errors.New("tx fetch (0/1)"),
+				leiosfetch.ErrBlockTxsNotFound,
+			),
+			leiosFetchFailureTxsUnavailable,
 		},
 		{
 			"deadline is transient",
@@ -240,6 +252,11 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 	t *testing.T,
 ) {
 	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(t, 0x52, 376038)
+	// A second, still-incomplete endorser block, so the duplicate-recycle
+	// assertion below drives a real second fetch onto the dead connection. A
+	// re-fetch of the first block would return from the complete-cache fast
+	// path and prove only that a cache hit publishes nothing.
+	_, manifestRaw2, point2, _ := leiosCertifiedRecoveryFixture(t, 0x62, 376138)
 
 	deadConn, deadDone := newLeiosFetchConversation(
 		t,
@@ -268,6 +285,20 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 						bitmap,
 						[]cbor.RawMessage{tx},
 					),
+				},
+			},
+			// The second endorser block: this peer answers that it cannot
+			// serve the transactions, so the fetch moves on to the dead
+			// connection and takes the recycle path a second time.
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgNoBlockTxs(),
 				},
 			},
 		),
@@ -303,6 +334,7 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 		EnableLeios: true,
 	})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point2, manifestRaw2, nil))
 	poisonLeiosFetchBlockTxsSlot(t, deadConn, point, bitmap)
 
 	// Make the dead connection the first candidate, so the fetch cannot succeed
@@ -341,15 +373,23 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 		"healthy connection was wrongly diagnosed as dead",
 	)
 
-	// A second fetch must not raise a second recycle request for the same
-	// connection.
-	require.NoError(
+	// A second dead fetch must not raise a second recycle request for the same
+	// connection. This one is for a different, still-incomplete endorser block,
+	// so it cannot short-circuit on the cache: the healthy peer declines its
+	// transactions and the dead connection is attempted again, returning
+	// ErrRequestSlotAbandoned from its poisoned slot.
+	err := o.FetchEndorserBlockByPoint(
+		context.Background(),
+		point2.Slot,
+		point2.Hash,
+	)
+	require.Error(t, err, "the second endorser block must not be servable")
+	require.ErrorIs(t, err, leiosfetch.ErrRequestSlotAbandoned)
+	require.NotErrorIs(
 		t,
-		o.FetchEndorserBlockByPoint(
-			context.Background(),
-			point.Slot,
-			point.Hash,
-		),
+		err,
+		errLeiosEndorserBlockDeclinedByAllPeers,
+		"a dead connection is not a peer declining to hold the block",
 	)
 	testutil.RequireNoReceive(
 		t,
@@ -369,21 +409,24 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 // be told, because it is the difference between "our peers are broken" and "the
 // certified endorser block is not obtainable from anyone we are connected to".
 func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
-	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x53, 376039)
+	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x53, 376039)
 
+	// MsgNoBlock, not MsgNoBlockTxs: only a declined manifest request is a
+	// definitive "I do not hold this endorser block". The manifest is
+	// deliberately not pre-cached so the fetch issues the block request.
 	decliningConn, decliningDone := newLeiosFetchConversation(
 		t,
 		append(
 			leiosFetchHandshake(),
 			ouroboros_mock.ConversationEntryInput{
 				ProtocolId:  leiosfetch.ProtocolId,
-				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+				MessageType: leiosfetch.MessageTypeBlockRequest,
 			},
 			ouroboros_mock.ConversationEntryOutput{
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgNoBlockTxs(),
+					leiosfetch.NewMsgNoBlock(),
 				},
 			},
 		),
@@ -415,7 +458,6 @@ func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
 		EventBus:    bus,
 		EnableLeios: true,
 	})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
 
 	err := o.FetchEndorserBlockByPoint(
 		context.Background(),
@@ -424,7 +466,7 @@ func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosEndorserBlockDeclinedByAllPeers)
-	require.ErrorIs(t, err, leiosfetch.ErrBlockTxsNotFound)
+	require.ErrorIs(t, err, leiosfetch.ErrBlockNotFound)
 
 	g := o.leiosFetchGuardFor(decliningConn.Id())
 	require.False(
@@ -457,23 +499,276 @@ func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
 // does not outlive the context the ledger hands it. Block application waits for
 // this fetch, so a fetch that ignored the budget would hold the apply loop past
 // the window the caller reserved for it.
+//
+// The peer accepts the transaction request and never answers, so the fetch is
+// parked inside the leios-fetch client when the caller's context is cancelled:
+// this exercises cancellation of an in-flight request, not the pre-flight
+// checks. The caller supplies no deadline, so a request context that did not
+// derive from the caller would fall back to the two-minute total budget and
+// park there.
 func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
-	t.Parallel()
 	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x54, 376040)
+
+	stalledConn, _ := newLeiosFetchConversation(
+		t,
+		append(
+			leiosFetchHandshake(),
+			// Accepted and never answered.
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgBlock(cbor.RawMessage(manifestRaw)),
+				},
+			},
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+			},
+		),
+	)
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},
 	)
+	require.True(t, cm.AddConnection(stalledConn, false, "stalled"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- o.FetchEndorserBlockByPoint(ctx, point.Slot, point.Hash)
+	}()
+	// The manifest lands in the cache before the transaction request is sent,
+	// so its presence means the fetch has reached the request that stalls.
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+			return ok && !data.completeTxCache()
+		},
+		2*time.Second,
+		"by-point fetch never reached the stalled transaction request",
+	)
+	cancel()
+
+	err := testutil.RequireReceive(
+		t,
+		done,
+		5*time.Second,
+		"by-point fetch ignored the cancelled caller context",
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline covers the
+// diffusion case: a peer that answers MsgNoBlockTxs may hold the manifest with
+// a still-incomplete transaction cache (dingo's own leios-fetch server answers
+// exactly that way), so reporting it as "no connected peer holds this endorser
+// block" would make the all-declined diagnostic fire during ordinary catch-up.
+func TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline(
+	t *testing.T,
+) {
+	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x55, 376041)
+
+	conn, connDone := newLeiosFetchConversation(
+		t,
+		append(
+			leiosFetchHandshake(),
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgNoBlockTxs(),
+				},
+			},
+		),
+	)
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	require.True(t, cm.AddConnection(conn, false, "diffusing"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+
 	o := newOuroboros(OuroborosConfig{
 		ConnManager: cm,
 		EnableLeios: true,
 	})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := o.FetchEndorserBlockByPoint(ctx, point.Slot, point.Hash)
-	// No leios-fetch connection is registered, so the fetch reports that
-	// rather than parking; the point is that it returns rather than waiting on
-	// a cancelled budget.
+	err := o.FetchEndorserBlockByPoint(
+		context.Background(),
+		point.Slot,
+		point.Hash,
+	)
 	require.Error(t, err)
+	require.ErrorIs(t, err, leiosfetch.ErrBlockTxsNotFound)
+	require.NotErrorIs(
+		t,
+		err,
+		errLeiosEndorserBlockDeclinedByAllPeers,
+		"MsgNoBlockTxs is indistinguishable from in-progress diffusion and "+
+			"must not be reported as no peer holding the endorser block",
+	)
+	requireLeiosFetchConversationDone(t, connDone)
+}
+
+// TestFetchEndorserBlockByPointBusyCandidateSuppressesDeclineVerdict verifies
+// the all-declined verdict is withheld when a candidate never answered the
+// query. Operators act on that error as "no connected peer holds this endorser
+// block"; a peer that was busy serving another fetch is no evidence of that.
+func TestFetchEndorserBlockByPointBusyCandidateSuppressesDeclineVerdict(
+	t *testing.T,
+) {
+	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x56, 376042)
+
+	decliningConn, decliningDone := newLeiosFetchConversation(
+		t,
+		append(
+			leiosFetchHandshake(),
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgNoBlock(),
+				},
+			},
+		),
+	)
+	// Never asked anything: its fetch guard is held for the whole call.
+	busyConn, busyDone := newLeiosFetchConversation(t, leiosFetchHandshake())
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	require.True(t, cm.AddConnection(decliningConn, false, "declining"))
+	require.True(t, cm.AddConnection(busyConn, false, "busy"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+	busyGuard := o.leiosFetchGuardFor(busyConn.Id())
+	busyGuard.mu.Lock()
+
+	err := o.FetchEndorserBlockByPoint(
+		context.Background(),
+		point.Slot,
+		point.Hash,
+	)
+	busyGuard.mu.Unlock()
+	require.Error(t, err)
+	require.NotErrorIs(
+		t,
+		err,
+		errLeiosEndorserBlockDeclinedByAllPeers,
+		"a busy candidate never answered, so not every peer declined",
+	)
+	require.False(
+		t,
+		busyGuard.inCooldown(time.Now()),
+		"a busy connection is not a failed attempt",
+	)
+	requireLeiosFetchConversationDone(t, decliningDone)
+	requireLeiosFetchConversationDone(t, busyDone)
+}
+
+// TestFetchEndorserBlockByPointDeclineDoesNotEscalateCooldown verifies repeated
+// typed declines keep the short fixed decline cooldown. A peer that answers
+// promptly and correctly that it does not hold an endorser block is healthy: if
+// each decline escalated the cooldown like a stall does, a small peer set would
+// be sidelined for leiosBackfillConnCooldownMax and every later endorser block
+// would lose candidates that are working fine.
+func TestFetchEndorserBlockByPointDeclineDoesNotEscalateCooldown(
+	t *testing.T,
+) {
+	const declines = 3
+	conversation := leiosFetchHandshake()
+	points := make([]ocommon.Point, 0, declines)
+	for i := range declines {
+		//nolint:gosec // small test fixture seed
+		_, _, point, _ := leiosCertifiedRecoveryFixture(
+			t,
+			byte(0x70+i),
+			376050+uint64(i),
+		)
+		points = append(points, point)
+		conversation = append(
+			conversation,
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgNoBlock(),
+				},
+			},
+		)
+	}
+	conn, connDone := newLeiosFetchConversation(t, conversation)
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	require.True(t, cm.AddConnection(conn, false, "declining"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+	for _, point := range points {
+		err := o.FetchEndorserBlockByPoint(
+			context.Background(),
+			point.Slot,
+			point.Hash,
+		)
+		require.ErrorIs(t, err, leiosfetch.ErrBlockNotFound)
+	}
+
+	g := o.leiosFetchGuardFor(conn.Id())
+	require.True(t, g.inCooldown(time.Now()))
+	require.False(
+		t,
+		g.inCooldown(
+			time.Now().Add(leiosBackfillConnDeclineCooldown + time.Second),
+		),
+		"repeated typed declines escalated a healthy peer's cooldown",
+	)
+	requireLeiosFetchConversationDone(t, connDone)
 }
