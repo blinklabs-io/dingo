@@ -3653,6 +3653,22 @@ queued primary chain, so late bodies from an abandoned fetch cannot seed its
 producer window. Its diagnostic database probes are also capped per block
 while the blockfetch pipeline lock is held; this keeps the audit bounded and
 non-blocking for pathological transaction counts.
+Replay recovery engages only for the failure it can repair. `txValidationError`
+carries every referenced input of the failing transaction regardless of what
+the transaction failed on, so a failure with nothing missing — a script data
+hash mismatch, say — arrived at the candidate search with a full input list.
+`resolveReplayRecoveryProducer` returns a nil producer both for an input that
+is present in the UTxO set (nothing to find) and for one that is missing with
+no producer locatable, and folding the two together made every input of such a
+transaction look unresolved: recovery rewound, the deterministic failure
+reproduced on replay, and the pipeline looped without converging and without
+halting (issue #3805). The two are now distinguished — a present input is
+reported as present and skipped — so a transaction whose inputs all resolve
+yields no candidate and the branch is rejected instead. Presence is asked of
+`Database.UtxoExists`, which does not materialize the output's CBOR: `UtxoByRef`
+reconstructs it by decoding the producing block on a blob miss, which turned a
+UTxO that demonstrably exists into a hard error out of recovery.
+
 The unresolved-producer fallback also tracks the applied ledger high-water
 mark across attempts. Different candidate continuations can move the failing
 block forward slightly while rebuilding to the same applied tip, so failure
