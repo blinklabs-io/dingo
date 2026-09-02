@@ -310,6 +310,24 @@ func (s *Store) GetAccountsByCredential(
 	if len(refs) == 0 {
 		return ret, nil
 	}
+	// Deduplicate before querying. The OR-chain this replaced matched each
+	// account row at most once regardless of how many OR-clauses hit it, but
+	// the derived-table join below emits one row per v-row, so a duplicate
+	// ref would join against the same account twice -- harmless for this
+	// map-shaped result (the second assignment just overwrites the first
+	// with identical data) but wasted derived-table rows and chunk capacity
+	// for a caller that passes duplicates.
+	seen := make(map[string]struct{}, len(refs))
+	deduped := refs[:0:0]
+	for _, ref := range refs {
+		key := ref.MapKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, ref)
+	}
+	refs = deduped
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err

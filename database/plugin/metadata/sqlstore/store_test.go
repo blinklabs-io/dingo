@@ -210,6 +210,34 @@ CREATE TABLE reward_live_stake (
 	require.Equal(t, uint64(1), delegators[string(pool)])
 }
 
+// TestGetAccountsByCredentialDeduplicatesRepeatedRefs guards against a
+// review finding on PR #3782: the derived-table UNION ALL join emits one row
+// per v-row, so a caller passing the same (credential_tag, staking_key) ref
+// twice would otherwise join against the same account row twice. Harmless
+// for this map-shaped result on its own, but wasted derived-table rows and
+// chunk capacity -- GetAccountsByCredential deduplicates refs before
+// querying to avoid it.
+func TestGetAccountsByCredentialDeduplicatesRepeatedRefs(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := bytes.Repeat([]byte{0x07}, 28)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey:    key,
+		CredentialTag: 0,
+		Active:        true,
+	}))
+
+	ref := models.NewStakeCredentialRef(0, key)
+	result, err := store.GetAccountsByCredential(
+		[]models.StakeCredentialRef{ref, ref, ref},
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	require.Contains(t, result, ref.MapKey())
+}
+
 func TestRebuildRewardLiveStakeBatchesCredentials(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)

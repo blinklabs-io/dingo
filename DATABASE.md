@@ -1584,6 +1584,11 @@ Measured against a real migrated schema: 50,000 refs went from ~139s to
 ~2.8s, and 300,000 refs (a chunked case the OR-chain form never completed
 within 45 minutes) to ~93s. Refs with no matching account row are silently
 absent from the result, matching `GetUtxosByRefs`'s contract above.
+`refs` is deduplicated before querying: the derived-table join emits one row
+per `v`-row, so a repeated `(credential_tag, staking_key)` ref would
+otherwise join against the same account twice -- harmless for this
+map-keyed result on its own, but wasted derived-table rows and chunk
+capacity for a caller that passes duplicates.
 
 ### `GetTransactionsByAddress` and `CountTransactionsByAddress`
 
