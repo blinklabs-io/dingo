@@ -774,8 +774,15 @@ func (lv *LedgerView) proposedCommitteeMember(
 	if err != nil {
 		return nil, fmt.Errorf("get active governance proposals: %w", err)
 	}
+	// NoConfidence and UpdateCommittee chain off the same committee root, so
+	// the root must be the latest enacted member of the pair. Querying only
+	// UpdateCommittee returns a stale root once a NoConfidence is enacted,
+	// which drops every pending member chained off it.
 	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(
-		[]uint8{uint8(lcommon.GovActionTypeUpdateCommittee)}, lv.txn,
+		governancePurposeActionTypes(
+			uint8(lcommon.GovActionTypeUpdateCommittee),
+		),
+		lv.txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get committee proposal root: %w", err)

@@ -49,10 +49,29 @@ type MinPoolMarginProvider interface {
 	MinPoolMargin() *big.Rat
 }
 
+// errCommitteeStateUnavailable reports that the ledger state cannot
+// authoritatively answer committee queries for the validation snapshot, as
+// distinct from authoritatively reporting no such member. Committee validation
+// fails closed on it: an unanswerable lookup must reject rather than accept.
+//
+// This mirrors gouroboros conway.CommitteeStateUnavailableError, which the
+// pinned release does not yet export. Replace it with the upstream error when
+// the pin advances past that release.
+var errCommitteeStateUnavailable = errors.New("committee state unavailable")
+
 // CommitteeCredentialState is the optional ledger-state capability used by
 // Dingo's Conway and Dijkstra validation compositions to preserve key/script
-// credential tags. The upstream LedgerState committee methods expose hashes
-// only, which cannot distinguish credentials that share a hash.
+// credential tags. The legacy hash-only LedgerState committee methods cannot
+// distinguish credentials that share a hash.
+//
+// The method set is identical to gouroboros
+// ledger/common.CommitteeCredentialState, so the compile-time assertions
+// against this interface (ledger.LedgerView, conformance DingoStateProvider)
+// also prove those types satisfy the upstream capability. Keep the two in
+// sync: the upstream Conway rules type-assert for it and fail closed when the
+// assertion misses, so a signature drift here would silently disable committee
+// validation rather than fail to build. Once the gouroboros pin exports it,
+// alias this to the upstream type instead of redeclaring it.
 type CommitteeCredentialState interface {
 	CommitteeStateAvailable() (bool, error)
 	CommitteeCredentialMember(
@@ -140,13 +159,34 @@ func validateCommitteeCertificates(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	// Committee certificates belong to the CERTS state transition. A
+	// phase-2-invalid transaction only applies its collateral effects, so it
+	// must not inspect or reject against committee state.
+	if !tx.IsValid() {
+		return nil
+	}
 	state, ok := ls.(CommitteeCredentialState)
 	if !ok {
 		return conway.UtxoValidateCommitteeCertificates(tx, slot, ls, pp)
 	}
-	available, err := state.CommitteeStateAvailable()
-	if err != nil {
-		return err
+	// Availability is resolved on the first lookup rather than up front, so a
+	// transaction carrying no committee certificate is never rejected for
+	// unavailable committee state.
+	availabilityChecked := false
+	committeeMember := func(
+		coldCredential lcommon.Credential,
+	) (*lcommon.CommitteeMember, error) {
+		if !availabilityChecked {
+			available, err := state.CommitteeStateAvailable()
+			if err != nil {
+				return nil, err
+			}
+			if !available {
+				return nil, errCommitteeStateUnavailable
+			}
+			availabilityChecked = true
+		}
+		return state.CommitteeCredentialMember(coldCredential)
 	}
 	for _, cert := range tx.Certificates() {
 		var (
@@ -165,20 +205,22 @@ func validateCommitteeCertificates(
 		default:
 			continue
 		}
-		member, err := state.CommitteeCredentialMember(credential)
+		member, err := committeeMember(credential)
 		if err != nil {
 			return conway.CommitteeMemberLookupError{
 				Credential: credential.Credential,
 				Err:        err,
 			}
 		}
-		if member == nil && available {
+		// Fails closed: past the lookup, committee state is authoritative, so
+		// an absent member means the credential is genuinely not a member.
+		if member == nil {
 			return conway.NotCommitteeMemberError{
 				Credential: credential.Credential,
 				Operation:  operation,
 			}
 		}
-		if authorize && member != nil && member.Resigned {
+		if authorize && member.Resigned {
 			return conway.ResignedCommitteeMemberHotKeyError{
 				ColdKey: credential.Credential,
 			}
@@ -196,6 +238,11 @@ func validateUnknownVoters(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	// Votes belong to the GOV state transition, which a phase-2-invalid
+	// transaction does not apply.
+	if !tx.IsValid() {
+		return nil
+	}
 	state, ok := ls.(CommitteeCredentialState)
 	if !ok {
 		return conway.UtxoValidateUnknownVoters(tx, slot, ls, pp)
@@ -204,9 +251,24 @@ func validateUnknownVoters(
 	if len(votes) == 0 {
 		return nil
 	}
-	available, err := state.CommitteeStateAvailable()
-	if err != nil {
-		return err
+	// Resolved on the first committee voter rather than up front, so a
+	// transaction with only DRep or pool votes is never rejected for
+	// unavailable committee state.
+	availabilityChecked := false
+	committeeHotMember := func(
+		hotCredential lcommon.Credential,
+	) (*lcommon.CommitteeMember, error) {
+		if !availabilityChecked {
+			available, err := state.CommitteeStateAvailable()
+			if err != nil {
+				return nil, err
+			}
+			if !available {
+				return nil, errCommitteeStateUnavailable
+			}
+			availabilityChecked = true
+		}
+		return state.CommitteeHotCredentialMember(hotCredential)
 	}
 	for voter := range votes {
 		if voter == nil {
@@ -235,17 +297,20 @@ func validateUnknownVoters(
 				lcommon.VoterTypeConstitutionalCommitteeHotScriptHash {
 				credentialType = uint(lcommon.CredentialTypeScriptHash)
 			}
-			member, err := state.CommitteeHotCredentialMember(
-				lcommon.Credential{
-					CredType:   credentialType,
-					Credential: lcommon.NewBlake2b224(voter.Hash[:]),
-				},
-			)
-			if err != nil {
-				return err
+			hotCredential := lcommon.Credential{
+				CredType:   credentialType,
+				Credential: lcommon.Blake2b224(voter.Hash),
 			}
-			if (member == nil && available) ||
-				(member != nil && member.Resigned) {
+			member, err := committeeHotMember(hotCredential)
+			if err != nil {
+				return conway.CommitteeMemberLookupError{
+					Credential: hotCredential.Credential,
+					Err:        err,
+				}
+			}
+			// Fails closed: past the lookup, committee state is
+			// authoritative, so an absent member is genuinely unknown.
+			if member == nil || member.Resigned {
 				return conway.UnknownVoterError{Voter: *voter}
 			}
 		default:

@@ -707,6 +707,9 @@ func TestConwayCommitteeCertificateRulePreservesCredentialTag(t *testing.T) {
 		},
 	}
 	tx := &conway.ConwayTransaction{
+		// Committee certificates are only inspected for a phase-2-valid
+		// transaction, so the fixture must declare validity.
+		TxIsValid: true,
 		Body: conway.ConwayTransactionBody{
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
@@ -747,6 +750,8 @@ func TestConwayUnknownVoterRulePreservesCredentialTag(t *testing.T) {
 		Hash: [28]byte(hash),
 	}
 	tx := &conway.ConwayTransaction{
+		// Votes are only inspected for a phase-2-valid transaction.
+		TxIsValid: true,
 		Body: conway.ConwayTransactionBody{
 			TxVotingProcedures: lcommon.VotingProcedures{
 				voter: {},

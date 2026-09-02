@@ -484,8 +484,14 @@ func (p *DingoStateProvider) proposedCommitteeMember(
 	if err != nil {
 		return nil, fmt.Errorf("lookup pending committee proposals: %w", err)
 	}
+	// Mirrors the production committee-root lookup: NoConfidence and
+	// UpdateCommittee share the committee root, so the root is the latest
+	// enacted member of the pair.
 	root, err := p.manager.db.GetLastEnactedGovernanceProposal(
-		[]uint8{uint8(common.GovActionTypeUpdateCommittee)}, nil,
+		[]uint8{
+			uint8(common.GovActionTypeNoConfidence),
+			uint8(common.GovActionTypeUpdateCommittee),
+		}, nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee proposal root: %w", err)
@@ -726,6 +732,13 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	hotCredential common.Credential,
 ) (*common.CommitteeMember, error) {
+	// Converted before the authorizations load so an unsupported tag is
+	// rejected even when the committee has no active authorizations, matching
+	// the production ordering in LedgerView.CommitteeHotCredentialMember.
+	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
+	}
 	authorizations, err := withBadConnRetry(
 		func() ([]*models.AuthCommitteeHot, error) {
 			return p.manager.db.GetActiveCommitteeMembers(nil)
@@ -735,10 +748,6 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		return nil, fmt.Errorf("lookup active committee hot credentials: %w", err)
 	}
 	for _, authorization := range authorizations {
-		hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
-		if err != nil {
-			return nil, fmt.Errorf("invalid committee hot credential: %w", err)
-		}
 		if authorization.HotCredentialTag != hotTag ||
 			common.NewBlake2b224(authorization.HotCredential) !=
 				hotCredential.Credential {

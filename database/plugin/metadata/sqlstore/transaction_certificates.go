@@ -346,15 +346,30 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.AuthCommitteeHotCertificate:
+		// CredType is decoded from CBOR without a range check. Storing it raw
+		// would write a tag the validated uint8 writers can never match, so
+		// the member would silently drop out of the active committee.
+		coldTag, err := models.CredentialTagFromUint(
+			cert.ColdCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
+		hotTag, err := models.CredentialTagFromUint(
+			cert.HotCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
 		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO auth_committee_hot (
     cold_credential_tag, cold_credential, hot_credential_tag,
     host_credential, certificate_id, added_slot
 ) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
-			cert.ColdCredential.CredType,
+			coldTag,
 			cert.ColdCredential.Credential[:],
-			cert.HotCredential.CredType,
+			hotTag,
 			cert.HotCredential.Credential[:],
 			certificateID,
 			slot,
@@ -367,6 +382,12 @@ RETURNING id`,
 			anchorURL = cert.Anchor.Url
 			anchorHash = cert.Anchor.DataHash[:]
 		}
+		coldTag, err := models.CredentialTagFromUint(
+			cert.ColdCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
 		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO resign_committee_cold (
     anchor_url, cold_credential_tag, cold_credential, anchor_hash,
@@ -374,7 +395,7 @@ INSERT INTO resign_committee_cold (
 ) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
 			anchorURL,
-			cert.ColdCredential.CredType,
+			coldTag,
 			cert.ColdCredential.Credential[:],
 			anchorHash,
 			certificateID,

@@ -32,7 +32,8 @@ type Runner struct {
 	Logger   *slog.Logger
 	Now      func() time.Time
 	// Rebind converts ? placeholders to the dialect's own form for data-driven
-	// backfills. Leave nil for a dialect that takes ? directly.
+	// backfills. Leave nil to use the runner's own Dialect-derived rebinder;
+	// an identity default would feed ? straight to a dialect that rejects it.
 	Rebind func(string) string
 }
 
@@ -228,7 +229,7 @@ func (r *Runner) runBackfill(
 		}
 		rebind := r.Rebind
 		if rebind == nil {
-			rebind = func(query string) string { return query }
+			rebind = r.rebind
 		}
 		result, err := migration.Backfill(
 			ctx,
