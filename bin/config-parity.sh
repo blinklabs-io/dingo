@@ -52,6 +52,18 @@ dingo_only=(
 	"preview/README.md"
 )
 
+# These files are shipped by cardano-configs but are intentionally not embedded
+# by dingo. Keep the allowlist explicit so any new upstream file still fails.
+upstream_only=(
+	"preview/db-sync-config.json"
+	"preview/tracer-config.json"
+	"mainnet/db-sync-config.json"
+	"mainnet/tracer-config.json"
+	"preprod/db-sync-config.json"
+	"preprod/tracer-config.json"
+	"musashi/tracer-config.json"
+)
+
 configs_dir="${CARDANO_CONFIGS_DIR:-}"
 configs_ref="${CARDANO_CONFIGS_REF:-}"
 source_desc=""
@@ -139,7 +151,7 @@ for network in "${networks[@]}"; do
 	done < <(git ls-files "config/cardano/${network}")
 	while IFS= read -r relative; do
 		skip=0
-		for allowed in "${dingo_only[@]}"; do
+		for allowed in "${upstream_only[@]}"; do
 			[[ "${network}/${relative}" == "${allowed}" ]] && skip=1 && break
 		done
 		[[ ${skip} -eq 1 ]] && continue
