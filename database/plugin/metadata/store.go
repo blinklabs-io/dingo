@@ -1967,6 +1967,12 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
 
+	// ClearDelegationsToRetiredPool removes every account delegation pointing
+	// at the given reaped pool, stamping added_slot with the epoch-boundary
+	// slot so the clear is rollback-safe. The delegation half of POOLREAP; see
+	// the sqlstore implementation for why the import baseline is left alone.
+	ClearDelegationsToRetiredPool([]byte, uint64, types.Txn) error
+
 	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
 	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
 	// tombstoned via the active flag. Credentials that match no row are ignored.
