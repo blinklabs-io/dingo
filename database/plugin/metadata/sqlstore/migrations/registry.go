@@ -244,9 +244,9 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 		if havePrevious {
 			retirement, found := latestPoolRetirement(rets, reg.position)
 			if found && poolDepositPositionBeforeOrEqual(previous.position, retirement.position) {
-				epoch, resolved, err := poolDepositEpochAtSlot(ctx, batch, reg.position.slot)
-				if err != nil {
-					return err
+				epoch, resolved, epochErr := poolDepositEpochAtSlot(ctx, batch, reg.position.slot)
+				if epochErr != nil {
+					return epochErr
 				}
 				if !resolved {
 					return fmt.Errorf("pool %d registration %d: cannot determine whether retirement epoch %d was reaped; resync required", poolID, reg.id, retirement.epoch)
