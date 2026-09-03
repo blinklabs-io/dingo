@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
+	"runtime"
 
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -372,11 +374,13 @@ func buildIndexedUtxoValidationRules(
 	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
 	skipRuleId lcommon.UtxoValidationRuleId,
+	expected ...map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc,
 ) []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRulesWithSkips(
 		descriptors,
 		rules,
 		[]lcommon.UtxoValidationRuleId{skipRuleId},
+		expected...,
 	)
 }
 
@@ -384,13 +388,19 @@ func buildIndexedUtxoValidationRulesWithSkips(
 	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
 	skipRuleIds []lcommon.UtxoValidationRuleId,
+	expected ...map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc,
 ) []indexedUtxoValidationRule {
 	skipIndexes := make(map[int]struct{}, len(skipRuleIds))
+	var expectedByID map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc
+	if len(expected) > 0 {
+		expectedByID = expected[0]
+	}
 	for _, skipRuleId := range skipRuleIds {
 		resolvedIndex := resolveUtxoValidationSkipIndex(
 			descriptors,
 			rules,
 			skipRuleId,
+			expectedByID[skipRuleId],
 		)
 		skipIndexes[resolvedIndex] = struct{}{}
 	}
@@ -426,6 +436,7 @@ func resolveUtxoValidationSkipIndex(
 	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
 	skipRuleId lcommon.UtxoValidationRuleId,
+	expected ...lcommon.UtxoValidationRuleFunc,
 ) int {
 	if skipRuleId == "" {
 		panic("UTxO validation skip rule Id is empty")
@@ -466,7 +477,28 @@ func resolveUtxoValidationSkipIndex(
 			found,
 		))
 	}
+	if len(expected) > 0 && expected[0] != nil &&
+		utxoValidationRuleFunctionName(descriptors[found].Validator) !=
+			utxoValidationRuleFunctionName(expected[0]) {
+		panic(fmt.Sprintf(
+			"UTxO validation rule %q resolves to validator %s, expected %s",
+			skipRuleId,
+			utxoValidationRuleFunctionName(descriptors[found].Validator),
+			utxoValidationRuleFunctionName(expected[0]),
+		))
+	}
 	return found
+}
+
+func utxoValidationRuleFunctionName(fn lcommon.UtxoValidationRuleFunc) string {
+	if fn == nil {
+		return ""
+	}
+	pc := reflect.ValueOf(fn).Pointer()
+	if runtimeFn := runtime.FuncForPC(pc); runtimeFn != nil {
+		return runtimeFn.Name()
+	}
+	return fmt.Sprintf("%x", pc)
 }
 
 // SafeAddExUnits adds two ExUnits values with

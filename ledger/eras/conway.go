@@ -284,6 +284,13 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		descriptors,
 		conway.UtxoValidationRules,
 		skipRuleIds,
+		map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc{
+			lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2: conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
+			lcommon.UtxoValidationRuleFeeTooSmall:                  conway.UtxoValidateFeeTooSmallUtxo,
+			lcommon.UtxoValidationRulePlutusScripts:                conway.UtxoValidatePlutusScripts,
+			lcommon.UtxoValidationRuleCommitteeCertificates:        conway.UtxoValidateCommitteeCertificates,
+			lcommon.UtxoValidationRuleUnknownVoters:                conway.UtxoValidateUnknownVoters,
+		},
 	)
 	ret = append(ret, indexedUtxoValidationRule{
 		index:          indexes[0],

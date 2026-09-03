@@ -308,6 +308,11 @@ func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 		descriptors,
 		gdijkstra.UtxoValidationRules,
 		skipRuleIds,
+		map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc{
+			lcommon.UtxoValidationRulePlutusScripts:         gdijkstra.UtxoValidatePlutusScripts,
+			lcommon.UtxoValidationRuleCommitteeCertificates: conway.UtxoValidateCommitteeCertificates,
+			lcommon.UtxoValidationRuleUnknownVoters:         conway.UtxoValidateUnknownVoters,
+		},
 	)
 	ret = append(ret,
 		indexedUtxoValidationRule{

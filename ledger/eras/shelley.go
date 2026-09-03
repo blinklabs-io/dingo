@@ -196,6 +196,10 @@ func buildShelleyValidationRules() []indexedUtxoValidationRule {
 			lcommon.UtxoValidationRuleFeeTooSmall,
 			lcommon.UtxoValidationRuleMaxTxSize,
 		},
+		map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc{
+			lcommon.UtxoValidationRuleFeeTooSmall: shelley.UtxoValidateFeeTooSmallUtxo,
+			lcommon.UtxoValidationRuleMaxTxSize:   shelley.UtxoValidateMaxTxSizeUtxo,
+		},
 	)
 }
 

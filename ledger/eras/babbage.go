@@ -442,6 +442,9 @@ func buildBabbageValidationRules() []indexedUtxoValidationRule {
 		babbage.UtxoValidationRuleDescriptors(),
 		babbage.UtxoValidationRules,
 		lcommon.UtxoValidationRulePlutusScripts,
+		map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc{
+			lcommon.UtxoValidationRulePlutusScripts: babbage.UtxoValidatePlutusScripts,
+		},
 	)
 }
 

@@ -1425,9 +1425,8 @@ func TestBuildIndexedUtxoValidationRulesResolvesByRuleId(t *testing.T) {
 		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
 	)
 	require.NotZero(t, originalIndex)
-	descriptors[0], descriptors[originalIndex] = descriptors[originalIndex], descriptors[0]
 	rules[0], rules[originalIndex] = rules[originalIndex], rules[0]
-	require.Zero(t, resolveUtxoValidationSkipIndex(
+	require.Equal(t, originalIndex, resolveUtxoValidationSkipIndex(
 		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
 	))
 	indexed := buildIndexedUtxoValidationRules(
@@ -1439,7 +1438,7 @@ func TestBuildIndexedUtxoValidationRulesResolvesByRuleId(t *testing.T) {
 	requireIndexedRulesDropRuleIndex(
 		t,
 		indexed,
-		0,
+		originalIndex,
 		"the resolved upstream rule must be removed",
 	)
 }

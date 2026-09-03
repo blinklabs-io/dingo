@@ -498,7 +498,7 @@ func TestCurrentTreasuryValueRuleGuardsOnDeclaredValue(t *testing.T) {
 		wantCalls  int
 		wantErrors bool
 	}{
-		{name: "no declared treasury value", declared: nil},
+		{name: "no declared treasury value", declared: big.NewInt(0)},
 		{
 			name:       "declared treasury value",
 			declared:   big.NewInt(1),

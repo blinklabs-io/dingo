@@ -352,6 +352,9 @@ func buildAlonzoValidationRules() []indexedUtxoValidationRule {
 		alonzo.UtxoValidationRuleDescriptors(),
 		alonzo.UtxoValidationRules,
 		lcommon.UtxoValidationRulePlutusScripts,
+		map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc{
+			lcommon.UtxoValidationRulePlutusScripts: alonzo.UtxoValidatePlutusScripts,
+		},
 	)
 }
 

@@ -167,6 +167,10 @@ func buildAllegraValidationRules() []indexedUtxoValidationRule {
 			lcommon.UtxoValidationRuleFeeTooSmall,
 			lcommon.UtxoValidationRuleMaxTxSize,
 		},
+		map[lcommon.UtxoValidationRuleId]lcommon.UtxoValidationRuleFunc{
+			lcommon.UtxoValidationRuleFeeTooSmall: allegra.UtxoValidateFeeTooSmallUtxo,
+			lcommon.UtxoValidationRuleMaxTxSize:   allegra.UtxoValidateMaxTxSizeUtxo,
+		},
 	)
 }
 
