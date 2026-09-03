@@ -254,6 +254,32 @@ func TestLeiosNeededBitmap(t *testing.T) {
 	require.Len(t, leiosNeededBitmap(result, 600, 100), 9)
 }
 
+// buildBitmapResponseTxs serves every index named by bitmaps: it decodes them
+// in ascending order, sets the matching bit of the served response bitmap for
+// each (MSB-first, see leiosWindowNeededMask), and encodes each transaction's
+// absolute index as its CBOR body (see requireTxsInIndexOrder). It is the
+// single source of truth for "serve everything requested, in full", shared by
+// every fake relay below that needs that baseline behavior.
+func buildBitmapResponseTxs(
+	bitmaps map[uint16]uint64,
+) (map[uint16]uint64, []cbor.RawMessage, error) {
+	requested := leiosBitmapTxIndices(bitmaps)
+	slices.Sort(requested)
+	served := map[uint16]uint64{}
+	txs := make([]cbor.RawMessage, 0, len(requested))
+	for _, idx := range requested {
+		served[uint16(idx/64)] |= 1 << uint(
+			63-(idx%64),
+		) // MSB-first, see leiosWindowNeededMask
+		enc, err := cbor.Encode(idx)
+		if err != nil {
+			return nil, nil, err
+		}
+		txs = append(txs, cbor.RawMessage(enc))
+	}
+	return served, txs, nil
+}
+
 // servingBlockTxsRequester serves every requested transaction in a single
 // response (no per-message cap), echoing the served bitmap. It records the
 // largest number of windows asked for in one request so a test can assert the
@@ -272,19 +298,9 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 	if len(bitmaps) > r.maxWindowsSeen {
 		r.maxWindowsSeen = len(bitmaps)
 	}
-	requested := leiosBitmapTxIndices(bitmaps)
-	slices.Sort(requested)
-	served := map[uint16]uint64{}
-	txs := make([]cbor.RawMessage, 0, len(requested))
-	for _, idx := range requested {
-		served[uint16(idx/64)] |= 1 << uint(
-			63-(idx%64),
-		) // MSB-first, see leiosWindowNeededMask
-		enc, err := cbor.Encode(idx)
-		if err != nil {
-			return nil, err
-		}
-		txs = append(txs, cbor.RawMessage(enc))
+	served, txs, err := buildBitmapResponseTxs(bitmaps)
+	if err != nil {
+		return nil, err
 	}
 	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
 }
@@ -307,17 +323,9 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 	point ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
-	requested := leiosBitmapTxIndices(bitmaps)
-	slices.Sort(requested)
-	served := map[uint16]uint64{}
-	txs := make([]cbor.RawMessage, 0, len(requested))
-	for _, idx := range requested {
-		served[uint16(idx/64)] |= 1 << uint(63-(idx%64))
-		enc, err := cbor.Encode(idx)
-		if err != nil {
-			return nil, err
-		}
-		txs = append(txs, cbor.RawMessage(enc))
+	served, txs, err := buildBitmapResponseTxs(bitmaps)
+	if err != nil {
+		return nil, err
 	}
 	if r.extraWindow != 0 {
 		served[r.extraWindow] = r.extraMask
