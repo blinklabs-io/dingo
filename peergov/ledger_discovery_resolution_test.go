@@ -81,9 +81,14 @@ func TestAddLedgerPeer_KnownPeerSkipsDNSResolution(t *testing.T) {
 		"an already-known ledger relay must not be re-resolved")
 
 	pg.mu.Lock()
-	_, known := pg.ledgerKnownAddrs["44.0.0.7:3001"]
+	// ledgerKnownAddrs is keyed on the pre-DNS hostname-normalized candidate
+	// form, not the peer's resolved NormalizedAddress; see
+	// addLedgerPeerContext/countLedgerPeersLocked.
+	_, known := pg.ledgerKnownAddrs["relay.example.com:3001"]
+	count := pg.countLedgerPeersLocked()
 	pg.mu.Unlock()
-	assert.True(t, known,
+	assert.True(t, known)
+	assert.Equal(t, 1, count,
 		"the retained peer must count toward the ledger target")
 }
 
@@ -112,10 +117,16 @@ func TestAddLedgerPeer_KnownPeerMatchedCaseInsensitively(t *testing.T) {
 
 	pg.mu.Lock()
 	peerCount := len(pg.peers)
-	_, known := pg.ledgerKnownAddrs["44.0.0.7:3001"]
+	// ledgerKnownAddrs is keyed on the pre-DNS hostname-normalized candidate
+	// form, not the peer's resolved NormalizedAddress; see
+	// addLedgerPeerContext/countLedgerPeersLocked.
+	_, known := pg.ledgerKnownAddrs["relay.example.com:3001"]
+	count := pg.countLedgerPeersLocked()
 	pg.mu.Unlock()
 	assert.Equal(t, 1, peerCount, "no duplicate peer for the same relay")
-	assert.True(t, known, "the retained peer must count toward the ledger target")
+	assert.True(t, known)
+	assert.Equal(t, 1, count,
+		"the retained peer must count toward the ledger target")
 }
 
 // A relay hostname already on the deny list must not be resolved. Deny

@@ -380,7 +380,7 @@ func TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart(
 			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
 			"{unNetworkMagic = 2}}",
 	}
-	if !pg.permanentlyDenyNetworkMagicMismatch(peer, address, err) {
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
 		t.Fatal("different-network refusal was not handled as permanent")
 	}
 
@@ -391,7 +391,7 @@ func TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart(
 	peerCount := len(pg.peers)
 	pg.mu.Unlock()
 	if !deniedAfterTransientExpiry {
-		t.Fatal("permanent denial expired with the transient deny list")
+		t.Fatal("network-mismatch denial expired with the transient deny list")
 	}
 	if peerCount != 0 {
 		t.Fatalf(
@@ -425,6 +425,164 @@ func TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart(
 	}
 }
 
+// TestNetworkMismatchDenialExpiresAfterDuration verifies that a
+// network-magic-mismatch denial is bounded by NetworkMismatchDenyDuration
+// rather than held for the rest of the process's life: once that duration
+// elapses, the address becomes eligible for rediscovery again without
+// requiring a restart. It also exercises the repeated-operation path: a
+// second denial of the same address after expiry re-establishes the denial
+// exactly as the first one did.
+func TestNetworkMismatchDenialExpiresAfterDuration(t *testing.T) {
+	const address = "44.0.0.20:3001"
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                      logger,
+		NetworkMismatchDenyDuration: time.Minute,
+	})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 764824073}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	pg.mu.Lock()
+	stillDenied := pg.isDeniedLocked(address)
+	pg.mu.Unlock()
+	if !stillDenied {
+		t.Fatal("network-mismatch denial expired before its bounded duration")
+	}
+
+	// Backdate the recorded expiry (white-box: same package) instead of
+	// sleeping in the test. isDeniedLocked must recognize the expiry itself,
+	// on the very next check, rather than depending on the periodic
+	// cleanupNetworkMismatchDenyList sweep (run only once per reconcile) to
+	// have already run: without its own lazy check, a caller between
+	// reconcile passes would see a stale "still denied" answer for up to a
+	// full ReconcileInterval after the bound elapsed.
+	pg.mu.Lock()
+	pg.networkMismatchDenyList[address] = time.Now().Add(-time.Minute)
+	expired := pg.isDeniedLocked(address)
+	_, deletedByLazyCheck := pg.networkMismatchDenyList[address]
+	pg.mu.Unlock()
+	if expired {
+		t.Fatal(
+			"network-mismatch denial did not expire after its bounded duration",
+		)
+	}
+	if deletedByLazyCheck {
+		t.Fatal("isDeniedLocked did not lazily remove the expired entry")
+	}
+
+	// cleanupNetworkMismatchDenyList is the separate periodic sweep
+	// (analogous to cleanupDenyList) that reconcile() calls every round; it
+	// must independently remove an expired entry that isDeniedLocked has not
+	// yet been asked about.
+	pg.mu.Lock()
+	pg.networkMismatchDenyList[address] = time.Now().Add(-time.Minute)
+	pg.cleanupNetworkMismatchDenyList()
+	_, stillTracked := pg.networkMismatchDenyList[address]
+	pg.mu.Unlock()
+	if stillTracked {
+		t.Fatal("cleanupNetworkMismatchDenyList left an expired entry behind")
+	}
+
+	// A repeated denial after expiry must re-establish it exactly like the
+	// first one did, rather than being a no-op or erroring.
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("repeated denial after expiry was not handled as permanent")
+	}
+	pg.mu.Lock()
+	redenied := pg.isDeniedLocked(address)
+	pg.mu.Unlock()
+	if !redenied {
+		t.Fatal("repeated denial after expiry did not deny the address again")
+	}
+}
+
+// TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry is the
+// end-to-end replacement counterpart to
+// TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart:
+// it proves that once NetworkMismatchDenyDuration elapses, ledger discovery
+// can actually add a real peer back at the denied address, without needing
+// a process restart to get there. TestNetworkMismatchDenialExpiresAfterDuration
+// only checks the internal isDeniedLocked/cleanup bookkeeping; this checks
+// the outward behavior operators actually care about.
+func TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry(t *testing.T) {
+	const address = "44.0.0.21:3001"
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                      logger,
+		NetworkMismatchDenyDuration: time.Minute,
+	})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 764824073}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	// Still within the bounded duration: rediscovery must be blocked.
+	if pg.addLedgerPeer(address) {
+		t.Fatal(
+			"ledger discovery re-added a peer still within its denial window",
+		)
+	}
+
+	// Backdate every recorded expiry past the bound (white-box: same
+	// package) instead of sleeping in the test.
+	pg.mu.Lock()
+	for addr := range pg.networkMismatchDenyList {
+		pg.networkMismatchDenyList[addr] = time.Now().Add(-time.Minute)
+	}
+	pg.mu.Unlock()
+
+	// Without any restart, a real peer must now be rediscoverable at the
+	// same address: this is the actual point of making the denial bounded
+	// instead of permanent.
+	if !pg.addLedgerPeer(address) {
+		t.Fatal(
+			"ledger discovery did not re-add the peer after its denial expired",
+		)
+	}
+	pg.mu.Lock()
+	peerCount := len(pg.peers)
+	pg.mu.Unlock()
+	if peerCount != 1 {
+		t.Fatalf("peer count after rediscovery = %d, want 1", peerCount)
+	}
+}
+
 func TestPermanentNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
 	t *testing.T,
 ) {
@@ -454,13 +612,13 @@ func TestPermanentNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
 			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
 			"{unNetworkMagic = 2}}",
 	}
-	if !pg.permanentlyDenyNetworkMagicMismatch(stalePeer, dialAddress, err) {
+	if !pg.denyNetworkMagicMismatch(stalePeer, dialAddress, err) {
 		t.Fatal("different-network refusal was not handled as permanent")
 	}
 
 	pg.mu.Lock()
-	_, configuredDenied := pg.permanentDenyList[configuredAddress]
-	_, normalizedDenied := pg.permanentDenyList[dialAddress]
+	_, configuredDenied := pg.networkMismatchDenyList[configuredAddress]
+	_, normalizedDenied := pg.networkMismatchDenyList[dialAddress]
 	pg.mu.Unlock()
 	if !configuredDenied || !normalizedDenied {
 		t.Fatalf(
@@ -496,15 +654,15 @@ func TestSameMagicVersionDataMismatchRemainsTransient(t *testing.T) {
 			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
 			"{unNetworkMagic = 2}, peerSharing = PeerSharingEnabled}",
 	}
-	if pg.permanentlyDenyNetworkMagicMismatch(peer, address, err) {
+	if pg.denyNetworkMagicMismatch(peer, address, err) {
 		t.Fatal("same-magic negotiation mismatch was treated as permanent")
 	}
 	pg.mu.Lock()
-	_, permanentlyDenied := pg.permanentDenyList[address]
+	_, permanentlyDenied := pg.networkMismatchDenyList[address]
 	peerCount := len(pg.peers)
 	pg.mu.Unlock()
 	if permanentlyDenied {
-		t.Fatal("same-magic mismatch populated permanent deny list")
+		t.Fatal("same-magic mismatch populated network-mismatch deny list")
 	}
 	if peerCount != 1 {
 		t.Fatalf("same-magic mismatch removed peer, count = %d", peerCount)

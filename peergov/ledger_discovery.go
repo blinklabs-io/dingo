@@ -143,6 +143,17 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	}
 
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
+
+	// Reconcile ledgerKnownAddrs against this round's actual on-chain relay
+	// set before adding anything new: an address a pool no longer registers
+	// must stop counting toward LedgerPeerTarget once the chain itself has
+	// moved on, independent of whether the peer that address matched is
+	// still connected for some other reason. pruneLedgerKnownAddrsLocked
+	// (run every reconcile) only catches the peer actually leaving the peer
+	// list, which is a different and less frequent condition than the
+	// ledger delisting a relay while its peer stays connected.
+	p.reconcileLedgerKnownAddrs(candidates)
+
 	extraAdds := 0
 	if urgent && needed <= 0 {
 		extraAdds = p.config.LedgerPeerTarget
@@ -255,7 +266,9 @@ func (p *PeerGovernor) countLedgerPeersLocked() int {
 			count++
 			continue
 		}
-		if _, ok := p.ledgerKnownAddrs[peer.NormalizedAddress]; ok {
+		// ledgerKnownAddrs is keyed on the pre-DNS hostname-normalized form
+		// (see addLedgerPeerContext), not peer.NormalizedAddress.
+		if _, ok := p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)]; ok {
 			count++
 		}
 	}
@@ -288,6 +301,44 @@ func dedupeRelayCandidates(candidates []string) []string {
 		unique = append(unique, candidate)
 	}
 	return unique
+}
+
+// reconcileLedgerKnownAddrs prunes ledgerKnownAddrs entries whose address is
+// not present in candidates, the current round's freshly fetched relay
+// addresses. This is what actually reconciles the map against current
+// ledger state: an address a pool delists (or moves to a different
+// relay) is dropped here even if the peer it used to match is still
+// connected under some other source, since that peer is no longer backed
+// by an on-chain relay registration and should no longer count toward
+// LedgerPeerTarget.
+//
+// candidates are pre-DNS "host:port" strings straight from the ledger
+// provider; comparing them via normalizeAddress (lowercasing only, no
+// lookup) against the same pre-DNS form ledgerKnownAddrs is keyed on lets
+// this run every round without re-resolving every candidate, matching the
+// no-DNS-until-necessary discipline the rest of ledger discovery follows.
+// Must NOT be called while holding p.mu.
+func (p *PeerGovernor) reconcileLedgerKnownAddrs(candidates []string) {
+	// An empty result is treated as "no information" rather than "every
+	// relay was delisted": GetPoolRelays returning zero addresses without an
+	// error is not expected on a live chain (there are always registered
+	// relays), so wiping the whole map on what is more likely a transient or
+	// degenerate provider response would be actively harmful for no benefit.
+	if len(candidates) == 0 {
+		return
+	}
+	current := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		current[p.normalizeAddress(candidate)] = struct{}{}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for addr := range p.ledgerKnownAddrs {
+		if _, ok := current[addr]; !ok {
+			delete(p.ledgerKnownAddrs, addr)
+		}
+	}
 }
 
 // addLedgerPeer adds a peer from ledger discovery with deduplication.
@@ -375,8 +426,12 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	if existingPeer != nil {
 		// The candidate is a valid ledger relay backed by a peer we already
 		// retain from another source. Record that retained peer's address so
-		// it counts toward the ledger target without adding a duplicate.
-		p.ledgerKnownAddrs[existingPeer.NormalizedAddress] = struct{}{}
+		// it counts toward the ledger target without adding a duplicate. Keyed
+		// on the pre-DNS hostname form of the candidate (rather than the
+		// resolved NormalizedAddress) so a later discovery round can
+		// reconcile this entry against the ledger's fresh relay list, which
+		// is itself pre-resolution, without re-resolving every candidate.
+		p.ledgerKnownAddrs[hostnameNormalized] = struct{}{}
 		p.mu.Unlock()
 		return false
 	}
@@ -395,8 +450,9 @@ func (p *PeerGovernor) addLedgerPeerContext(
 
 	// Record only admitted ledger addresses. Keeping duplicate or
 	// capacity-rejected candidates would make them count toward the ledger
-	// target even though the governor does not retain them as peers.
-	p.ledgerKnownAddrs[normalized] = struct{}{}
+	// target even though the governor does not retain them as peers. Keyed
+	// on the pre-DNS hostname form, matching the existingPeer branch above.
+	p.ledgerKnownAddrs[hostnameNormalized] = struct{}{}
 
 	// Add as new peer
 	newPeer := &Peer{
@@ -469,8 +525,9 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
 		}
 		// This is a valid ledger relay already retained from another source,
 		// not an unusable rejected candidate. Associate the retained peer with
-		// ledger discovery so it contributes to LedgerPeerTarget.
-		p.ledgerKnownAddrs[peer.NormalizedAddress] = struct{}{}
+		// ledger discovery so it contributes to LedgerPeerTarget. Keyed on the
+		// pre-DNS hostname form, matching addLedgerPeerContext.
+		p.ledgerKnownAddrs[hostnameNormalized] = struct{}{}
 		return true
 	}
 	return false

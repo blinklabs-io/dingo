@@ -36,8 +36,18 @@ const (
 	defaultInactivityTimeout            = 10 * time.Minute
 	defaultTestCooldown                 = 5 * time.Minute
 	defaultDenyDuration                 = 30 * time.Minute
-	defaultLedgerPeerRefreshInterval    = 1 * time.Hour
-	defaultLedgerPeerTarget             = 20
+	// defaultNetworkMismatchDenyDuration bounds how long a peer proven to be
+	// on a different Cardano network stays denied. Deliberately much longer
+	// than defaultDenyDuration, since a network-magic mismatch is a much
+	// stronger signal than an ordinary dial failure, but still bounded rather
+	// than held for the rest of the process's life: an operator who fixes a
+	// misconfigured relay, or an address later reassigned to a
+	// correct-network operator, should eventually become reachable again
+	// without requiring a restart, and a long-lived node should not retain
+	// this map forever.
+	defaultNetworkMismatchDenyDuration = 24 * time.Hour
+	defaultLedgerPeerRefreshInterval   = 1 * time.Hour
+	defaultLedgerPeerTarget            = 20
 
 	// When the node is critically short of connected upstreams, ledger-peer
 	// discovery ignores the normal (hourly) refresh interval and replenishes
@@ -158,19 +168,19 @@ const (
 )
 
 type PeerGovernor struct {
-	metrics               *peerGovernorMetrics
-	reconcileTicker       *time.Ticker
-	gossipChurnTicker     *time.Ticker
-	publicRootChurnTicker *time.Ticker
-	stopCh                chan struct{}
-	ctx                   context.Context      // Context for cancellation
-	cancel                context.CancelFunc   // Cancels the context owned by Start
-	denyList              map[string]time.Time // address -> expiry time
-	permanentDenyList     map[string]struct{}  // address -> process-lifetime denial
-	peers                 []*Peer
-	config                PeerGovernorConfig
-	lastLedgerPeerRefresh atomic.Int64        // UnixNano timestamp of last ledger peer discovery
-	ledgerKnownAddrs      map[string]struct{} // addresses seen from ledger discovery
+	metrics                 *peerGovernorMetrics
+	reconcileTicker         *time.Ticker
+	gossipChurnTicker       *time.Ticker
+	publicRootChurnTicker   *time.Ticker
+	stopCh                  chan struct{}
+	ctx                     context.Context      // Context for cancellation
+	cancel                  context.CancelFunc   // Cancels the context owned by Start
+	denyList                map[string]time.Time // address -> expiry time
+	networkMismatchDenyList map[string]time.Time // address -> expiry time (network-magic mismatch)
+	peers                   []*Peer
+	config                  PeerGovernorConfig
+	lastLedgerPeerRefresh   atomic.Int64        // UnixNano timestamp of last ledger peer discovery
+	ledgerKnownAddrs        map[string]struct{} // addresses seen from ledger discovery
 	// emergencyRefreshRounds counts consecutive emergency ledger-discovery
 	// rounds since the node last had enough upstreams. It drives the
 	// escalating emergency refresh interval and resets on recovery.
@@ -233,7 +243,12 @@ type PeerGovernorConfig struct {
 	InactivityTimeout            time.Duration
 	TestCooldown                 time.Duration // Min time between suitability tests
 	DenyDuration                 time.Duration // How long to deny failed peers
-	DisableOutbound              bool
+	// NetworkMismatchDenyDuration bounds how long a peer proven to be on a
+	// different Cardano network stays denied (0 = default 24h). Deliberately
+	// much longer than DenyDuration but still bounded, rather than held for
+	// the rest of the process's life.
+	NetworkMismatchDenyDuration time.Duration
+	DisableOutbound             bool
 
 	// Ledger peer discovery configuration
 	LedgerPeerProvider        LedgerPeerProvider // Provider for ledger peer information
@@ -339,6 +354,9 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	if cfg.DenyDuration == 0 {
 		cfg.DenyDuration = defaultDenyDuration
+	}
+	if cfg.NetworkMismatchDenyDuration == 0 {
+		cfg.NetworkMismatchDenyDuration = defaultNetworkMismatchDenyDuration
 	}
 	if cfg.LedgerPeerRefreshInterval == 0 {
 		cfg.LedgerPeerRefreshInterval = defaultLedgerPeerRefreshInterval
@@ -452,12 +470,12 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{
-		config:            cfg,
-		peers:             []*Peer{},
-		denyList:          make(map[string]time.Time),
-		permanentDenyList: make(map[string]struct{}),
-		ledgerKnownAddrs:  make(map[string]struct{}),
-		negativeDNS:       make(map[string]time.Time),
+		config:                  cfg,
+		peers:                   []*Peer{},
+		denyList:                make(map[string]time.Time),
+		networkMismatchDenyList: make(map[string]time.Time),
+		ledgerKnownAddrs:        make(map[string]struct{}),
+		negativeDNS:             make(map[string]time.Time),
 	}
 	if cfg.PromRegistry != nil {
 		p.initMetrics()

@@ -547,7 +547,7 @@ func (p *PeerGovernor) createOutboundConnection(
 			}
 			continue
 		}
-		if p.permanentlyDenyNetworkMagicMismatch(peer, dialTarget, err) {
+		if p.denyNetworkMagicMismatch(peer, dialTarget, err) {
 			return
 		}
 		failMsg := fmt.Sprintf(
@@ -1101,8 +1101,13 @@ func (p *PeerGovernor) IsDenied(address string) bool {
 // isDeniedLocked checks if a peer is on the deny list.
 // This method assumes the mutex is already held by the caller.
 func (p *PeerGovernor) isDeniedLocked(address string) bool {
-	if _, exists := p.permanentDenyList[address]; exists {
-		return true
+	if expiry, exists := p.networkMismatchDenyList[address]; exists {
+		if time.Now().After(expiry) {
+			// Expired, remove from the network-mismatch deny list.
+			delete(p.networkMismatchDenyList, address)
+		} else {
+			return true
+		}
 	}
 	expiry, exists := p.denyList[address]
 	if !exists {
@@ -1116,10 +1121,13 @@ func (p *PeerGovernor) isDeniedLocked(address string) bool {
 	return true
 }
 
-// permanentlyDenyNetworkMagicMismatch records an address-scoped denial for a
-// peer that proved it belongs to another Cardano network. The denial is held
-// only in PeerGovernor memory and therefore clears when the node restarts.
-func (p *PeerGovernor) permanentlyDenyNetworkMagicMismatch(
+// denyNetworkMagicMismatch records an address-scoped denial for a peer that
+// proved it belongs to another Cardano network. The denial is bounded by
+// NetworkMismatchDenyDuration (much longer than the ordinary DenyDuration,
+// since this signal is far stronger than a generic dial failure) rather than
+// held indefinitely, and is held only in PeerGovernor memory, so it also
+// clears early on a node restart.
+func (p *PeerGovernor) denyNetworkMagicMismatch(
 	peer *Peer,
 	dialTarget string,
 	err error,
@@ -1129,14 +1137,16 @@ func (p *PeerGovernor) permanentlyDenyNetworkMagicMismatch(
 	}
 
 	p.mu.Lock()
-	if p.permanentDenyList == nil {
-		p.permanentDenyList = make(map[string]struct{})
+	if p.networkMismatchDenyList == nil {
+		p.networkMismatchDenyList = make(map[string]time.Time)
 	}
+	expiry := time.Now().Add(p.config.NetworkMismatchDenyDuration)
 	// The peer can be removed or replaced while its dial and handshake run.
 	// Record the immutable attempt identity first so that a stale completion
 	// still suppresses rediscovery of the proven wrong-network address.
-	p.addPermanentPeerDenyKeysLocked(
+	p.addNetworkMismatchDenyKeysLocked(
 		peer,
+		expiry,
 		connmanager.NormalizePeerAddr(dialTarget),
 		p.normalizeAddress(dialTarget),
 	)
@@ -1153,7 +1163,7 @@ func (p *PeerGovernor) permanentlyDenyNetworkMagicMismatch(
 	removed := false
 	if peerIdx != -1 && p.peers[peerIdx] != nil {
 		currentPeer := p.peers[peerIdx]
-		p.addPermanentPeerDenyKeysLocked(currentPeer)
+		p.addNetworkMismatchDenyKeysLocked(currentPeer, expiry)
 		peerAddress = currentPeer.Address
 		peerSource = currentPeer.Source
 		removed = dropIfNeverConnected(peerSource)
@@ -1165,10 +1175,11 @@ func (p *PeerGovernor) permanentlyDenyNetworkMagicMismatch(
 	p.mu.Unlock()
 
 	p.config.Logger.Info(
-		"outbound: permanently denying peer on a different Cardano network",
+		"outbound: denying peer on a different Cardano network",
 		"address", peerAddress,
 		"source", peerSource.String(),
 		"error", err,
+		"deny_duration", p.config.NetworkMismatchDenyDuration,
 	)
 	if removed {
 		p.publishEvent(
@@ -1182,23 +1193,24 @@ func (p *PeerGovernor) permanentlyDenyNetworkMagicMismatch(
 	return true
 }
 
-func (p *PeerGovernor) addPermanentPeerDenyKeysLocked(
+func (p *PeerGovernor) addNetworkMismatchDenyKeysLocked(
 	peer *Peer,
+	expiry time.Time,
 	addresses ...string,
 ) {
 	for _, address := range addresses {
 		if address != "" {
-			p.permanentDenyList[address] = struct{}{}
+			p.networkMismatchDenyList[address] = expiry
 		}
 	}
 	if peer == nil {
 		return
 	}
 	if peer.NormalizedAddress != "" {
-		p.permanentDenyList[peer.NormalizedAddress] = struct{}{}
+		p.networkMismatchDenyList[peer.NormalizedAddress] = expiry
 	}
 	if peer.Address != "" {
-		p.permanentDenyList[p.normalizeAddress(peer.Address)] = struct{}{}
+		p.networkMismatchDenyList[p.normalizeAddress(peer.Address)] = expiry
 	}
 }
 
@@ -1276,6 +1288,21 @@ func (p *PeerGovernor) cleanupDenyList() {
 	for address, expiry := range p.denyList {
 		if now.After(expiry) {
 			delete(p.denyList, address)
+		}
+	}
+}
+
+// cleanupNetworkMismatchDenyList removes expired entries from the
+// network-mismatch deny list. Kept separate from cleanupDenyList so the two
+// lifecycles (ordinary dial-failure denials vs. proven wrong-network
+// denials, bounded by two different, independently configured durations)
+// stay independently readable and testable.
+// This method assumes the mutex is already held by the caller.
+func (p *PeerGovernor) cleanupNetworkMismatchDenyList() {
+	now := time.Now()
+	for address, expiry := range p.networkMismatchDenyList {
+		if now.After(expiry) {
+			delete(p.networkMismatchDenyList, address)
 		}
 	}
 }
