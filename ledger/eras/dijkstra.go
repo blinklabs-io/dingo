@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -284,12 +285,49 @@ func ValidateTxDijkstra(
 	return validatePlutusOutcome(tx, phase2Err)
 }
 
-var dijkstraPhase1UtxoValidationRules = buildIndexedUtxoValidationRules(
-	gdijkstra.UtxoValidationRules,
-	dijkstraUtxoValidatePlutusScriptsRuleIndex,
-	gdijkstra.UtxoValidatePlutusScripts,
-	"dijkstra.UtxoValidatePlutusScripts",
-)
+var dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules()
+
+func buildDijkstraValidationRules() []indexedUtxoValidationRule {
+	skips := []utxoValidationRuleSkip{
+		{
+			validationFunc: gdijkstra.UtxoValidatePlutusScripts,
+			name:           "dijkstra.UtxoValidatePlutusScripts",
+		},
+		{
+			validationFunc: conway.
+				UtxoValidateCommitteeCertificates,
+			name: "conway.UtxoValidateCommitteeCertificates",
+		},
+		{
+			validationFunc: conway.UtxoValidateUnknownVoters,
+			name:           "conway.UtxoValidateUnknownVoters",
+		},
+	}
+	indexes := make([]int, len(skips))
+	for i := range skips {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			gdijkstra.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
+		)
+	}
+	ret := buildIndexedUtxoValidationRulesWithSkips(
+		gdijkstra.UtxoValidationRules,
+		skips,
+	)
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[1],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[2],
+			validationFunc: validateUnknownVoters,
+		},
+	)
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
+	return ret
+}
 
 func dijkstraPhase1ValidationRules() []indexedUtxoValidationRule {
 	return dijkstraPhase1UtxoValidationRules

@@ -25,14 +25,21 @@ import (
 
 // GetCommitteeMember returns a committee member by cold key
 func (d *Database) GetCommitteeMember(
+	coldCredentialTag uint8,
 	coldKey []byte,
+	termStartSlot uint64,
 	txn *Txn,
 ) (*models.AuthCommitteeHot, error) {
 	if txn == nil {
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	ret, err := d.governanceStore().GetCommitteeMember(coldKey, txn.Metadata())
+	ret, err := d.governanceStore().GetCommitteeMember(
+		coldCredentialTag,
+		coldKey,
+		termStartSlot,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -55,21 +62,27 @@ func (d *Database) GetActiveCommitteeMembers(
 
 // IsCommitteeMemberResigned checks if a committee member has resigned
 func (d *Database) IsCommitteeMemberResigned(
+	coldCredentialTag uint8,
 	coldKey []byte,
+	termStartSlot uint64,
 	txn *Txn,
 ) (bool, error) {
 	if txn == nil {
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.governanceStore().
-		IsCommitteeMemberResigned(coldKey, txn.Metadata())
+	return d.governanceStore().IsCommitteeMemberResigned(
+		coldCredentialTag,
+		coldKey,
+		termStartSlot,
+		txn.Metadata(),
+	)
 }
 
-// GetResignedCommitteeMembers returns cold credentials whose latest
-// resignation follows their latest authorization.
+// GetResignedCommitteeMembers returns cold credentials with a resignation
+// record in each credential's selected membership term.
 func (d *Database) GetResignedCommitteeMembers(
-	coldKeys [][]byte,
+	coldCredentials []models.CommitteeCredential,
 	txn *Txn,
 ) (map[string]bool, error) {
 	if txn == nil {
@@ -77,7 +90,7 @@ func (d *Database) GetResignedCommitteeMembers(
 		defer txn.Release()
 	}
 	return d.governanceStore().GetResignedCommitteeMembers(
-		coldKeys,
+		coldCredentials,
 		txn.Metadata(),
 	)
 }
@@ -293,7 +306,7 @@ func (d *Database) DeleteCommitteeMembersAfterSlot(
 // SoftDeleteCommitteeMembers marks the given cold credential hashes as
 // removed. Used by UpdateCommittee action enactment to remove members.
 func (d *Database) SoftDeleteCommitteeMembers(
-	coldCredHashes [][]byte,
+	coldCredentials []models.CommitteeCredential,
 	slot uint64,
 	txn *Txn,
 ) error {
@@ -308,7 +321,7 @@ func (d *Database) SoftDeleteCommitteeMembers(
 		}()
 	}
 	if err := d.governanceStore().SoftDeleteCommitteeMembers(
-		coldCredHashes, slot, txn.Metadata(),
+		coldCredentials, slot, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
 			"failed to soft-delete committee members: %w", err,

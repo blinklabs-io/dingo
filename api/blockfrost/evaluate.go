@@ -209,12 +209,51 @@ func (b *Blockfrost) evaluateTransaction(
 	}
 	result, err := b.node.TransactionEvaluate(txCbor)
 	if err != nil {
+		// Evaluation reads the UTxO set, so a storage fault returns on the
+		// same path as a transaction that cannot be evaluated. Answering it
+		// 400 would tell the caller to fix a transaction the node never
+		// managed to look at, and would hide an outage from anyone
+		// retrying.
+		if errors.Is(err, ErrLedgerUnavailable) {
+			b.logger.Error(
+				"transaction evaluation failed on ledger storage",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"ledger state unavailable",
+			)
+			return
+		}
 		if errors.Is(err, ErrInvalidTransaction) {
 			writeError(
 				w,
 				http.StatusBadRequest,
 				"Bad Request",
 				"Invalid transaction CBOR.",
+			)
+			return
+		}
+		// A transaction that decoded but could not be evaluated is a
+		// different failure, and reporting it as malformed CBOR sends
+		// callers looking in the wrong place. Log the cause: it is the
+		// only record of why evaluation failed, and the response body
+		// deliberately does not leak ledger internals. Debug is the level
+		// handleEpochParams uses for expected client-facing answers; a
+		// failing script is one of those, and at Error level a caller
+		// iterating on a transaction fills the log with alerts.
+		if errors.Is(err, ErrTransactionEvaluation) {
+			b.logger.Debug(
+				"failed to evaluate transaction",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Transaction could not be evaluated.",
 			)
 			return
 		}
