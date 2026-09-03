@@ -249,9 +249,14 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 					return epochErr
 				}
 				if !resolved {
-					return fmt.Errorf("pool %d registration %d: cannot determine whether retirement epoch %d was reaped; resync required", poolID, reg.id, retirement.epoch)
+					// Preserve the pre-migration behavior when epoch history is
+					// unavailable. The registration's protocol deposit is the only
+					// value available, and the backfill remains resumable.
+					held, err = parsePoolDepositValue(reg.amount)
+				} else if epoch >= retirement.epoch {
+					held, err = parsePoolDepositValue(reg.amount)
 				}
-				if epoch < retirement.epoch {
+				if resolved && epoch < retirement.epoch {
 					held, err = previousHeld(previous)
 				}
 			}
@@ -304,7 +309,9 @@ FROM pool_retirement rt
 LEFT JOIN certs c ON c.id = rt.certificate_id
 LEFT JOIN "transaction" t ON t.id = c.transaction_id
 WHERE rt.pool_id = ?
-ORDER BY rt.added_slot, COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)`), poolID)
+	ORDER BY rt.added_slot, COALESCE(t.block_index, 0),
+		CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END,
+		COALESCE(c.cert_index, 0)`), poolID)
 	if err != nil {
 		return nil, err
 	}
