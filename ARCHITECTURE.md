@@ -9035,16 +9035,22 @@ deferring the emit until after `ls.rollback` returns (outside
 `ledger.tx` event land first on the same ordered lane, reopening exactly
 what holding `transactionEventMutex` across the emit prevents.
 
-The window is bounded, not permanent: `ls.rollback` fails only on a
-genuine DB error, logged at ERROR with this exact inconsistency called
-out, and the next reconciliation attempt lands in the "ledger tip ahead of
-primary chain tip" branch below (see its own doc comment), which retries
-both the (idempotent) undo notification and this same rollback — proven by
-`TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure`,
-which forces a real `ls.rollback` failure and confirms the next attempt
-completes it. A true durable, atomic handoff across every rollback path in
-this file, not a fix scoped to this one reconciler, is tracked as issue
-#3817.
+The window is narrowed, not merely bounded: both branches now pre-check
+the one deterministic rejection `ls.rollback` could otherwise hit — the
+Mithril boundary — before ever resolving or emitting an undo, the same way
+`rollbackChainAndState` checks it before calling
+`validateAndEmitRollbackUndo` at all. Proven by
+`TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`:
+a target below the boundary is declined immediately, with no undo
+published and no primary-chain truncation attempted either. That leaves
+`ls.rollback`'s only remaining failure mode a genuine, unpredictable DB
+error, logged at ERROR with the inconsistency called out if it happens; the
+next reconciliation attempt then lands in the "ledger tip ahead of primary
+chain tip" branch below (see its own doc comment), which retries both the
+(idempotent) undo notification and this same rollback — proven by
+`TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit`.
+A true durable, atomic handoff across every rollback path in this file,
+not a fix scoped to this one reconciler, is tracked as issue #3817.
 
 That resolution is also where the reconciler's undo events diverge from
 `blocksAboveSlot`'s: by the time this rewind runs, chain selection has

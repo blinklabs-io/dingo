@@ -7895,7 +7895,23 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			defer ls.transactionEventMutex.Unlock()
 			ls.RLock()
 			currentLedgerTip := ls.currentTip
+			mithrilLedgerSlot := ls.mithrilLedgerSlot
 			ls.RUnlock()
+			// Pre-check the one deterministic rejection ls.rollback
+			// below can still hit, the same way rollbackChainAndState
+			// checks it before ever calling validateAndEmitRollbackUndo
+			// (wolf31o2 review, PR #3611): skip the notification
+			// entirely rather than publish an undo for a rollback that
+			// is rejected outright, not merely delayed. This narrows
+			// ls.rollback's remaining failure mode below to a genuine,
+			// unpredictable DB I/O error -- the same residual risk
+			// validateAndEmitRollbackUndo's own doc comment already
+			// accepts for the canonical path (issue #3817 tracks
+			// closing that fully).
+			if mithrilLedgerSlot > 0 &&
+				chainTip.Point.Slot < mithrilLedgerSlot {
+				return
+			}
 			undoBlocks := ls.reconciliationUndoBlocks(
 				chainTip.Point,
 				currentLedgerTip.Point.Slot,
@@ -8046,7 +8062,22 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// emitRollbackTransactionEvents must still avoid (see below).
 		ls.RLock()
 		currentLedgerTip := ls.currentTip
+		mithrilLedgerSlot := ls.mithrilLedgerSlot
 		ls.RUnlock()
+		// Pre-check the one deterministic rejection ls.rollback below
+		// can still hit, the same way rollbackChainAndState checks it
+		// before ever calling validateAndEmitRollbackUndo (wolf31o2
+		// review, PR #3611): skip straight to the rewind without
+		// resolving or emitting an undo for a rollback that is
+		// rejected outright, not merely delayed. This narrows
+		// ls.rollback's remaining failure mode below to a genuine,
+		// unpredictable DB I/O error -- the same residual risk
+		// validateAndEmitRollbackUndo's own doc comment already
+		// accepts for the canonical path (issue #3817 tracks closing
+		// that fully).
+		if mithrilLedgerSlot > 0 && ancestor.Slot < mithrilLedgerSlot {
+			return ErrRollbackExceedsMithrilBoundary
+		}
 		undoBlocks := ls.reconciliationUndoBlocks(
 			ancestor,
 			currentLedgerTip.Point.Slot,
@@ -8132,12 +8163,19 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// would let a concurrent forward apply's ledger.tx event land
 		// first on the same ordered lane, reopening exactly what holding
 		// transactionEventMutex across this emit prevents. The window is
-		// bounded rather than permanent here: ls.rollback failing only
-		// on a genuine DB error, and the next reconciliation attempt
-		// lands in the "ledger tip ahead of primary chain tip" branch
-		// below, which retries both the (idempotent) undo notification
-		// and this same rollback (proven by
-		// TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure).
+		// bounded rather than permanent here: the one deterministic
+		// rejection ls.rollback could otherwise hit (the Mithril
+		// boundary) is pre-checked above, before this emit, exactly
+		// as rollbackChainAndState pre-checks it before
+		// validateAndEmitRollbackUndo (proven by
+		// TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting),
+		// so ls.rollback's only remaining failure mode here is a
+		// genuine, unpredictable DB error. If it still fails, the
+		// next reconciliation attempt lands in the "ledger tip ahead
+		// of primary chain tip" branch below, which retries both the
+		// (idempotent) undo notification and this same rollback
+		// (proven by
+		// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit).
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
 		ls.emitRollbackTransactionEvents(undoBlocks)

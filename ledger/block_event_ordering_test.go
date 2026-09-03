@@ -983,16 +983,21 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	require.Equal(t, fixture.ancestorTip, ls.currentTip)
 }
 
-// TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure
-// covers wolf31o2's escalation on PR #3611: a comment describing the
-// emit-before-ls.rollback window as self-healing on the next
-// reconciliation attempt is an assertion, not proof -- this exercises a
-// real ls.rollback failure (ErrRollbackExceedsMithrilBoundary, a genuine,
-// deterministic failure path, not a fault-injection double) and confirms
-// the very next reconciliation attempt actually completes the rollback
-// and redelivers the undo notification, rather than merely claiming it
-// would.
-func TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure(
+// TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting
+// covers wolf31o2's fourth-round review on PR #3611: rollbackChainAndState
+// pre-checks the Mithril boundary before it ever calls
+// validateAndEmitRollbackUndo, so its own ls.rollback call can never
+// observe ErrRollbackExceedsMithrilBoundary in practice. This reconciler
+// did not have the matching pre-check, so it could reach an emit for a
+// rollback ls.rollback would then deterministically reject -- exactly the
+// predictable half of the "emit before ls.rollback can fail" finding.
+// Adding the same pre-check here closes that predictable half outright
+// (proven below: no undo published, no primary-chain truncation
+// attempted, ls.currentTip untouched) and leaves only a genuine,
+// unpredictable DB error as ls.rollback's residual failure mode -- see
+// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit
+// for that remaining case's retry/redelivery proof.
+func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting(
 	t *testing.T,
 ) {
 	fixture := newChainsyncRollbackFixture(t)
@@ -1007,7 +1012,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure(
 	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
 
 	// Diverge the primary chain exactly as the sibling tests above.
-	forkHash := testHashBytes("reconcile-undo-rollback-failure-fork")
+	forkHash := testHashBytes("reconcile-mithril-boundary-fork")
 	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
 	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
 		{
@@ -1020,60 +1025,34 @@ func TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure(
 		},
 	}))
 
-	// Force ls.rollback to fail on this attempt: the ancestor sits below
-	// this Mithril boundary, so RewindPrimaryChainToPoint (the primary
-	// chain truncation) still succeeds, but ls.rollback (the ledger's own
-	// metadata truncation, called afterward) returns
-	// ErrRollbackExceedsMithrilBoundary before ever updating ls.currentTip.
+	// The ancestor sits below this Mithril boundary, so ls.rollback would
+	// reject this target deterministically -- the same rejection
+	// rollbackChainAndState pre-checks before it ever calls
+	// validateAndEmitRollbackUndo. reconcilePrimaryChainTipWithLedgerTip
+	// must pre-check it the same way, before resolving or emitting any
+	// undo event, and before ever calling RewindPrimaryChainToPoint.
 	ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
 	err := ls.reconcilePrimaryChainTipWithLedgerTip()
 	require.ErrorIs(t, err, ErrRollbackExceedsMithrilBoundary)
 
-	// The undo notification was already published even though the
-	// metadata rollback that should have followed it failed -- this is
-	// the exact inconsistency window the review flagged.
-	evt := testutil.RequireReceive(
-		t, errCh, 2*time.Second,
-		"the undo notification must have been published before the "+
-			"ls.rollback failure",
+	// No undo notification for a rollback that is rejected outright, not
+	// merely delayed -- publishing one here would tell subscribers about
+	// an undo that never happens at all.
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"a deterministically rejected rollback must not publish an undo "+
+			"notification at all",
 	)
-	le, ok := evt.Data.(LedgerErrorEvent)
-	require.True(t, ok, "unexpected payload %T", evt.Data)
-	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
-	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
 
 	require.Equal(
 		t, fixture.currentTip, ls.currentTip,
-		"a failed ls.rollback must not have moved ls.currentTip",
+		"a declined rollback must not have moved ls.currentTip",
 	)
 	require.Equal(
-		t, fixture.ancestorTip.Point, ls.chain.Tip().Point,
-		"the primary chain truncation must still have succeeded",
-	)
-
-	// Resolve whatever made ls.rollback fail, exactly as a real Mithril
-	// config update or restart onto a differently configured node would,
-	// and let the next reconciliation attempt run -- the same call every
-	// caller already makes on its own retry schedule (ledgerReadChain's
-	// loop, the live divergence reconciler, or the next process startup).
-	ls.mithrilLedgerSlot = 0
-
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
-
-	evt = testutil.RequireReceive(
-		t, errCh, 2*time.Second,
-		"the retry must redeliver the undo notification, not skip it "+
-			"because it believes this was already handled",
-	)
-	le, ok = evt.Data.(LedgerErrorEvent)
-	require.True(t, ok, "unexpected payload %T", evt.Data)
-	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
-	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
-
-	require.Equal(
-		t, fixture.ancestorTip, ls.currentTip,
-		"the retry must actually complete the metadata rollback this time",
+		t, forkHash, ls.chain.Tip().Point.Hash,
+		"a declined rollback must not have touched the primary chain "+
+			"either -- the pre-check runs before RewindPrimaryChainToPoint",
 	)
 }
 
