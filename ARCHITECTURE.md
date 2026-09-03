@@ -550,10 +550,12 @@ views make a live decoded block substantially larger than its wire bytes.
 
 A batch is fetched for the header queue that existed when it was requested, so
 `LedgerState` binds each batch to a chain-rollback generation, bumped before
-every primary-chain rollback (the rollback paths hold `chainsyncMutex` while
-the blockfetch handlers hold `chainsyncBlockfetchMutex`, so publishing the new
-generation before the chain moves is what keeps a concurrent flush from
-applying to a chain that no longer wants the bodies). Bodies still arriving for
+every primary-chain rollback. `rollbackChain` takes `chainsyncBlockfetchMutex`
+for the rollback, so it cannot interleave with a flush, and publishes the
+generation before the chain changes so the discard stays correct for a reader
+that does not hold that mutex. Callers must not already hold it: every rollback
+entry point takes `chainsyncMutex` first and leaves the blockfetch mutex to the
+restart that follows. Bodies still arriving for
 an older generation are dropped instead of being handed to chain insertion:
 fork resolution rolls back, re-queues the winning peer's header path and only
 then restarts blockfetch, and a body from the losing fork reaching insertion

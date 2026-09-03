@@ -3270,12 +3270,18 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 // #3771). Bumping the generation here lets flushPendingBlockfetchBlocks drop
 // them instead.
 //
-// The generation is published before the chain changes, not after. The
-// blockfetch handlers run under chainsyncBlockfetchMutex while the rollback
-// paths run under chainsyncMutex, so a flush can land between the two; seeing
-// the new generation before the chain moves discards a batch that was about to
-// be superseded anyway, while seeing the old generation after it has moved
-// applies bodies to a chain that no longer wants them.
+// The rollback is serialized against blockfetch insertion by taking
+// chainsyncBlockfetchMutex for its duration, so it cannot land between two
+// insertions of the same flush. The generation is still published before the
+// chain changes rather than after: that ordering is what makes any chain
+// change a rollback caused observable as a moved generation to a reader that
+// does not hold the mutex, so the discard stays correct on its own terms.
+//
+// Callers must not already hold chainsyncBlockfetchMutex. Every rollback entry
+// point takes chainsyncMutex first and leaves the blockfetch mutex to the
+// restart that follows the rollback (tryResolveFork,
+// handleEventChainsyncBlockHeaderWithPending, RecoverAfterLocalRollback), so
+// the lock order stays chainsyncMutex -> chainsyncBlockfetchMutex.
 //
 // It is bumped for every attempted rollback rather than only for one that
 // moved the block tip: a rollback onto a queued header truncates the queue
@@ -3283,8 +3289,7 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 // requesting a chainsync resync, so in both cases discarding the in-flight
 // batch is at worst one re-fetch of a partially buffered batch.
 func (ls *LedgerState) rollbackChain(point ocommon.Point) error {
-	// Serialize rollback with blockfetch insertion. A generation check alone
-	// cannot protect the gap before AddBlockWithPoint acquires the chain lock.
+	// Serialize rollback with blockfetch insertion; see the lock note above.
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	ls.chainRollbackGeneration.Add(1)

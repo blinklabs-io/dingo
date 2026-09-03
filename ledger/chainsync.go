@@ -4329,9 +4329,11 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 // blockfetchBatchSuperseded reports whether the primary chain has rolled back
 // since the batch that produced the buffered blocks was requested.
 //
-// rollbackChain publishes the new generation before it changes the chain, so a
-// caller that has already observed a chain change caused by that rollback is
-// guaranteed to observe the new generation here.
+// rollbackChain takes chainsyncBlockfetchMutex, so a rollback cannot interleave
+// with a flush that holds it, and it publishes the new generation before it
+// changes the chain. A reader that has observed a chain change caused by a
+// rollback therefore always observes the new generation here, whether it read
+// under that mutex or not.
 func (ls *LedgerState) blockfetchBatchSuperseded() bool {
 	return ls.blockfetchBatchChainGeneration !=
 		ls.chainRollbackGeneration.Load()
@@ -4374,10 +4376,11 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
 	// lookups hit uncommitted state.
 	for i, pendingEvent := range pending {
-		// The rollback paths run under chainsyncMutex, not the mutex this
-		// flush holds, so a rollback can land between two blocks of the same
-		// batch. Re-read before every insertion rather than trusting the
-		// check above for the whole loop.
+		// rollbackChain holds chainsyncBlockfetchMutex for the whole
+		// rollback, so it cannot land between two insertions of this loop
+		// while the flush holds the same mutex. Re-read anyway: the check is
+		// one atomic load, and it keeps the loop correct on its own terms
+		// rather than on a locking arrangement two files away.
 		if ls.blockfetchBatchSuperseded() {
 			ls.logDiscardedBlockfetchBlocks(len(pending) - i)
 			break
@@ -4429,13 +4432,13 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 			),
 		)
 		if errors.As(addBlockErr, &notMatchErr) {
-			// Dropping the queue is only right when the queue this batch was
-			// fetching is still the one in place. A rollback that lands
-			// between this insertion and the check publishes its generation
-			// before it touches the chain, so a mismatch caused by a
-			// replacement queue is always observed here as a generation that
-			// has already moved -- and clearing then would wipe exactly the
-			// headers fork resolution just queued (issue #3771).
+			// Dropping the queue is only right when the queue this batch
+			// was fetching is still the one in place: clearing a
+			// replacement queue fork resolution has just filled is the
+			// #3771 wedge itself. rollbackChain publishes its generation
+			// before it touches the chain, so any mismatch a rollback
+			// caused is observed here as a generation that has already
+			// moved, with or without the mutex it holds.
 			if !ls.blockfetchBatchSuperseded() {
 				ls.clearQueuedHeaders()
 			}
