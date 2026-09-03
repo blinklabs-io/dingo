@@ -67,7 +67,15 @@ groups:
         # same rolling hour is a much stronger signal of a persistent, real
         # bug rather than one-off transient disagreement, and is worth
         # paging critical for.
-        expr: increase(node_parity_divergence_total{network=~".+"}[1h]) > 1
+        #
+        # >= 2, not > 1: increase() extrapolates a counter's observed slope
+        # out to the full window's boundaries, so even a genuine single
+        # event can evaluate to slightly more than 1 (e.g. ~1.008 with a 1h
+        # window and 15s scrapes) -- ">1" would let that extrapolation
+        # noise page critical on exactly the one-off case this rule exists
+        # to exclude. ">= 2" tolerates that slop while still requiring the
+        # increase to be genuinely at least two.
+        expr: increase(node_parity_divergence_total{network=~".+"}[1h]) >= 2
         for: 0m
         labels:
           severity: critical

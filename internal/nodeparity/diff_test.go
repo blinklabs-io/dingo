@@ -135,6 +135,38 @@ func TestDiffSnapshots_StakeDistributionVrfKeyDiffers(t *testing.T) {
 	assert.Contains(t, d.StakeDistribution[0], "VRF key differs")
 }
 
+// TestDiffSnapshots_StakeDistributionBothFieldsDiffer covers a pool
+// diverging in both its fraction and its VRF key at once: both must be
+// reported as separate lines. A switch statement checking the fraction
+// first and the VRF key second (mutually exclusive cases) would report
+// only the fraction mismatch, silently shadowing the VRF divergence for
+// that pool -- exactly the class of pool this test targets.
+func TestDiffSnapshots_StakeDistributionBothFieldsDiffer(t *testing.T) {
+	a := emptySnapshot()
+	b := emptySnapshot()
+
+	pool := poolID(0x11)
+	var vrfA, vrfB ledger.Blake2b256
+	vrfA[0] = 0xAA
+	vrfB[0] = 0xBB
+	a.StakeDistribution[pool] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(1, 2), VrfHash: vrfA,
+	}
+	b.StakeDistribution[pool] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(1, 3), VrfHash: vrfB,
+	}
+
+	d := DiffSnapshots(a, b)
+	require.Len(
+		t, d.StakeDistribution, 2,
+		"a pool differing in both fields must report both divergences, got %v",
+		d.StakeDistribution,
+	)
+	joined := fmt.Sprint(d.StakeDistribution)
+	assert.Contains(t, joined, "fraction differs")
+	assert.Contains(t, joined, "VRF key differs")
+}
+
 // TestDiffSnapshots_UTxOSetDiffers is the UTxO-set equivalent of
 // TestDiffSnapshots_StakeDistribution: a UTxO present on both sides with a
 // different canonical encoding, one present only in a, and one present

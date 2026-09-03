@@ -188,12 +188,26 @@ func TestResetFallbackTimer_NotYetFiredGetsFullInterval(t *testing.T) {
 
 	select {
 	case <-fallback.C:
+		// A loose bound, not InDelta(50ms): elapsed includes real timer-
+		// delivery and scheduler latency on top of the nominal interval,
+		// which a tight tolerance can exceed under -race on a loaded CI
+		// runner. The property that actually matters is "rearmed for
+		// approximately the full interval, not near-instantly and not for
+		// something drastically longer" -- matching the generous
+		// (seconds-scale) tolerances internal/test/testutil's own helpers
+		// use for exactly this reason.
 		elapsed := time.Since(start)
-		assert.InDelta(
-			t, interval, elapsed, float64(50*time.Millisecond),
-			"an unfired timer must be rearmed for the full interval",
+		assert.GreaterOrEqual(
+			t, elapsed, interval,
+			"an unfired timer must not fire before the full interval elapses",
 		)
-	case <-time.After(interval + time.Second):
+		assert.Less(
+			t,
+			elapsed,
+			interval+2*time.Second,
+			"an unfired timer must be rearmed for the full interval, not something drastically longer",
+		)
+	case <-time.After(interval + 3*time.Second):
 		t.Fatal("fallback timer never fired after being reset")
 	}
 }

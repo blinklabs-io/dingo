@@ -93,24 +93,27 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 	for _, poolID := range sortedPoolIDs(a.StakeDistribution) {
 		aEntry := a.StakeDistribution[poolID]
 		bEntry, ok := b.StakeDistribution[poolID]
-		switch {
-		case !ok:
+		if !ok {
 			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
 				"stake distribution: pool %s present in a, missing in b",
 				poolID,
 			))
-		case aEntry.StakeFraction.Cmp(bEntry.StakeFraction) != 0:
+			continue
+		}
+		if aEntry.StakeFraction.Cmp(bEntry.StakeFraction) != 0 {
 			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
 				"stake distribution: pool %s fraction differs: %s (a) vs %s (b)",
 				poolID,
 				aEntry.StakeFraction.RatString(),
 				bEntry.StakeFraction.RatString(),
 			))
+		}
 		// A pool's registered VRF key is a leader-election input distinct
-		// from its stake share: two nodes agreeing on every pool's
-		// fraction while disagreeing on a registered VRF key is a real
-		// divergence a fraction-only comparison would miss entirely.
-		case aEntry.VrfHash != bEntry.VrfHash:
+		// from its stake share: checked independently of the fraction
+		// above (not as another switch case) so a pool differing in both
+		// fields is reported for both, rather than the fraction mismatch
+		// alone shadowing the VRF one.
+		if aEntry.VrfHash != bEntry.VrfHash {
 			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
 				"stake distribution: pool %s VRF key differs: %s (a) vs %s (b)",
 				poolID,
