@@ -184,24 +184,39 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 // SlotToTime. It is the wrong bound for a slot inside a block already being
 // applied: epoch length and slot length are constant within an era, so the
 // projection is exact rather than a guess.
+// The guards below mirror SlotToTime rather than delegating to it: the summary
+// is rebuilt from the epoch cache on every hardForkSummary call, and delegating
+// would build it twice on the past-horizon path -- which is the common path
+// here, and runs per transaction.
 func (c *SlotTimeConverter) SlotToTimeInEra(slot uint64) (time.Time, error) {
-	when, err := c.SlotToTime(slot)
-	if err == nil {
-		return when, nil
+	if slot > math.MaxInt64 {
+		return time.Time{}, errors.New("slot is larger than time.Duration")
 	}
-	if !errors.Is(err, hardfork.ErrPastHorizon) {
+	shelleyGenesis := c.shelleyGenesis()
+	if shelleyGenesis == nil {
+		return time.Time{}, errors.New("could not get genesis config")
+	}
+	if slot == 0 {
+		return shelleyGenesis.SystemStart, nil
+	}
+	sum, err := c.hardForkSummary()
+	if err != nil {
 		return time.Time{}, err
 	}
-	sum, sumErr := c.hardForkSummary()
-	if sumErr != nil {
-		return time.Time{}, sumErr
+	when, sumErr := sum.SlotToTime(slot)
+	if sumErr == nil {
+		return when, nil
 	}
-	if extrapolated, ok := currentEraTimeAtSlot(sum, slot); ok {
-		return extrapolated, nil
+	if errors.Is(sumErr, hardfork.ErrPastHorizon) {
+		// Unconditional, unlike SlotToTime's near-now gate: a slot inside the
+		// current era converts exactly, so there is nothing to guard against.
+		if extrapolated, ok := currentEraTimeAtSlot(sum, slot); ok {
+			return extrapolated, nil
+		}
 	}
 	// Before the current era's start, or beyond time.Duration's range: the
-	// era's parameters cannot answer, so the horizon error stands.
-	return time.Time{}, err
+	// era's parameters cannot answer, so the original error stands.
+	return time.Time{}, sumErr
 }
 
 // TimeToSlot returns the slot containing the given wall-clock time.

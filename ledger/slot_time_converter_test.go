@@ -363,3 +363,58 @@ func TestSlotTimeConverter_SlotToTimeInEraIgnoresHorizon(t *testing.T) {
 	assert.Equal(t, bounded, inside,
 		"below the horizon both paths must agree")
 }
+
+// TestSlotTimeConverter_SlotToTimeInEraBuildsSummaryOnce pins the cost of the
+// past-horizon path. HardForkSummary walks the whole epoch cache and allocates
+// on every call, and this conversion runs per transaction, so resolving a slot
+// must not build the summary twice.
+//
+// It also pins the guards SlotToTimeInEra duplicates from SlotToTime, since a
+// duplicate can drift from its original.
+func TestSlotTimeConverter_SlotToTimeInEraBuildsSummaryOnce(t *testing.T) {
+	genesis := testShelleyGenesis(t)
+	const slotLength = time.Second
+	const epochSize = 100
+	const endSlot = 500
+	sum := boundedEraSummary(
+		genesis.SystemStart,
+		slotLength,
+		epochSize,
+		endSlot,
+	)
+
+	var builds int
+	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
+		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
+		HardForkSummary: func() (*hardfork.Summary, error) {
+			builds++
+			return sum, nil
+		},
+	})
+	conv.nowFunc = func() time.Time { return genesis.SystemStart }
+
+	_, err := conv.SlotToTimeInEra(endSlot + 1_000_000)
+	require.NoError(t, err)
+	assert.Equal(t, 1, builds,
+		"the past-horizon fallback must reuse the summary it already built")
+
+	builds = 0
+	_, err = conv.SlotToTimeInEra(endSlot - 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, builds, "the in-horizon path builds it once too")
+
+	// Slot 0 answers from genesis without building a summary at all.
+	builds = 0
+	when, err := conv.SlotToTimeInEra(0)
+	require.NoError(t, err)
+	assert.Equal(t, genesis.SystemStart, when)
+	assert.Equal(t, 0, builds, "slot 0 needs no summary")
+
+	// A missing genesis is an error, matching SlotToTime.
+	noGenesis := NewSlotTimeConverter(SlotTimeConverterDeps{
+		ShelleyGenesis:  func() *shelley.ShelleyGenesis { return nil },
+		HardForkSummary: func() (*hardfork.Summary, error) { return sum, nil },
+	})
+	_, err = noGenesis.SlotToTimeInEra(1)
+	require.Error(t, err)
+}
