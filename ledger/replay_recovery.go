@@ -1296,12 +1296,16 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 			continue
 		}
 		seenInputs[inputKey] = struct{}{}
-		resolved, err := ls.resolveReplayRecoveryProducer(
+		resolved, present, err := ls.resolveReplayRecoveryProducer(
 			pending,
 			chainIndex,
 		)
 		if err != nil {
 			return nil, err
+		}
+		if present {
+			// Nothing to repair for this input; it is still in the UTxO set.
+			continue
 		}
 		if resolved == nil {
 			unresolvedInputs = append(unresolvedInputs, pending.Input)
@@ -1437,31 +1441,43 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	return index, nil
 }
 
+// resolveReplayRecoveryProducer locates the block that produced pending.Input.
+//
+// The bool reports that the input is present in the UTxO set, which is a
+// different answer from a nil producer: present means nothing about this input
+// needs repairing, while a nil producer with present false means the input is
+// missing and its producer could not be found either.
 func (ls *LedgerState) resolveReplayRecoveryProducer(
 	pending replayRecoveryPendingInput,
 	chainIndex *replayRecoveryChainIndex,
-) (*replayRecoveryResolvedProducer, error) {
-	utxo, err := ls.db.UtxoByRef(
+) (*replayRecoveryResolvedProducer, bool, error) {
+	present, err := ls.db.UtxoExists(
 		pending.Input.Id().Bytes(),
 		pending.Input.Index(),
 		nil,
 	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"lookup validation input %s: %w",
 			pending.Input.String(),
 			err,
 		)
 	}
-	if utxo != nil {
-		return nil, nil
+	if present {
+		// The input is in the UTxO set, so there is no provenance gap here
+		// whatever the transaction failed on. Reported as present rather than
+		// as a nil producer so the caller does not fold it into
+		// unresolvedInputs, which is what let a failure with nothing missing
+		// -- a script data hash mismatch, say -- drive a rewind that could
+		// never fix it (dingo #3805).
+		return nil, true, nil
 	}
 	producerTx, err := ls.db.GetTransactionByHash(
 		pending.Input.Id().Bytes(),
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"lookup producer tx %s: %w",
 			pending.Input.Id().String(),
 			err,
@@ -1470,14 +1486,14 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	if producerTx != nil && len(producerTx.BlockHash) > 0 {
 		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"lookup producer block %x: %w",
 				producerTx.BlockHash,
 				err,
 			)
 		}
 		if producerBlock.Slot >= pending.MaxSlot {
-			return nil, nil
+			return nil, false, nil
 		}
 		tx := ls.replayRecoveryResolveTxFromBlock(
 			producerBlock,
@@ -1490,17 +1506,17 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 			ProducerBlock: producerBlock,
 			Tx:            tx,
 			Strategy:      "metadata",
-		}, nil
+		}, false, nil
 	}
 	producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
 		pending.Input.Id().Bytes(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if found {
 		if producerBlock.Slot >= pending.MaxSlot {
-			return nil, nil
+			return nil, false, nil
 		}
 		tx := ls.replayRecoveryResolveTxFromBlock(
 			producerBlock,
@@ -1512,7 +1528,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 			ProducerBlock: producerBlock,
 			Tx:            tx,
 			Strategy:      "tx-blob",
-		}, nil
+		}, false, nil
 	}
 	if chainIndex != nil {
 		chainTx, ok := chainIndex.Txs[string(pending.Input.Id().Bytes())]
@@ -1522,10 +1538,10 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 				ProducerBlock: chainTx.Block,
 				Tx:            chainTx.Tx,
 				Strategy:      "chain-scan",
-			}, nil
+			}, false, nil
 		}
 	}
-	return nil, nil
+	return nil, false, nil
 }
 
 func (ls *LedgerState) replayRecoveryResolveTxFromBlock(
