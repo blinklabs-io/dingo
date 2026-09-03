@@ -140,6 +140,10 @@ func TestConwayPhase2RejectsGenuineScriptFailureNotAsBudgetOverage(
 	assert.Equal(t, scriptHash, plutusErr.ScriptHash)
 	assert.Equal(t, lcommon.RedeemerTagMint, plutusErr.Tag)
 	assert.Equal(t, uint32(0), plutusErr.Index)
+	// The wrapped error is what distinguishes the two rejection reasons, so a
+	// nil here is itself a defect; assert it rather than panicking on the
+	// dereference below.
+	require.NotNil(t, plutusErr.Err)
 	assert.NotContains(
 		t,
 		plutusErr.Err.Error(),
