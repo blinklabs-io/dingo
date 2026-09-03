@@ -1468,8 +1468,10 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 	if err != nil {
 		// The capture predates the epoch cache, so the parameter cutoff
 		// cannot be placed. Report unavailable rather than guessing; the
-		// caller falls back to the live registration.
-		return 0, false, nil
+		// caller falls back to the live registration. This is not a
+		// verification failure: an unplaceable capture means dingo cannot
+		// answer yet, the same as an absent snapshot above.
+		return 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
 	if capturedEpoch.StartSlot == 0 {
 		// Captured in the first epoch: there is no preceding epoch to take
