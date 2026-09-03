@@ -3283,6 +3283,10 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 // requesting a chainsync resync, so in both cases discarding the in-flight
 // batch is at worst one re-fetch of a partially buffered batch.
 func (ls *LedgerState) rollbackChain(point ocommon.Point) error {
+	// Serialize rollback with blockfetch insertion. A generation check alone
+	// cannot protect the gap before AddBlockWithPoint acquires the chain lock.
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	ls.chainRollbackGeneration.Add(1)
 	return ls.chain.Rollback(point)
 }
