@@ -408,30 +408,55 @@ func (ls *LedgerState) consumeDeferredHeaderValidation(
 	return true
 }
 
-// evictStaleDeferredHeadersLocked drops deferred-header entries the apply
-// cursor has already passed (issue #3727, finding 5). A canonical deferred
-// header is consumed by consumeDeferredHeaderValidation when its block is
-// applied, so an entry still present at a slot <= the applied tip is on an
-// abandoned fork (or a rollback left it behind) and can never resolve; keeping
-// it would pin its epoch's pool_stake_snapshot rows forever. Entries with an
-// unparseable key are dropped too (they can never be validated). Returns the
-// evicted map keys so the caller can delete their persisted markers. The
-// caller must hold deferredHeaderValidationMu.
-func (ls *LedgerState) evictStaleDeferredHeadersLocked() []string {
+// evictStaleDeferredHeadersLocked drops deferred-header entries that are
+// provably abandoned (issue #3727, finding 5). A canonical deferred header is
+// consumed by consumeDeferredHeaderValidation when its block is applied, so an
+// entry still present once the cursor has passed its slot is on a fork; keeping
+// it forever would pin its epoch's pool_stake_snapshot rows forever.
+//
+// Eviction is gated on the ROLLBACK HORIZON, not on the bare tip. Eviction
+// removes the durable sync_state marker as well as the in-memory entry, and
+// that marker is the only thing that makes deferredHeaderValidationRequired
+// return true at apply. If chain selection later rolls back and re-adopts a
+// fork containing an evicted point, its block applies with required == false,
+// so verifyDeferredBlockHeaderState returns nil and the block is adopted with
+// its stateful leader-eligibility check never run -- a validation bypass that
+// does not exist on main, where the entry and marker survive. Evicting only
+// below tipSlot-rollbackHorizon (the stability window, 3k/f slots, past which
+// chain selection cannot re-adopt a fork) makes "abandoned" mean unreachable
+// rather than merely behind the cursor, so no entry that a rollback could
+// resurrect is ever dropped (issue #3717 review: evicted-point re-adoption
+// skips the deferred header check).
+//
+// Entries with an unparseable key are dropped regardless of the horizon: they
+// can never be validated, so no re-adoption can make use of them. Returns the
+// evicted map keys so the caller can delete their persisted markers. The caller
+// must hold deferredHeaderValidationMu; tipSlot and rollbackHorizon are read by
+// the caller BEFORE taking it, because both ls.loadTipSnapshot's era-derived
+// window (calculateStabilityWindow) and the tip read take ls.RWMutex, and
+// taking that under deferredHeaderValidationMu would invert the order block
+// apply uses (ls lock -> deferredHeaderValidationMu).
+func (ls *LedgerState) evictStaleDeferredHeadersLocked(
+	tipSlot uint64,
+	rollbackHorizon uint64,
+) []string {
 	if len(ls.deferredHeaderValidation) == 0 {
 		return nil
 	}
-	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	// The whole chain is still inside the horizon, so nothing is unreachable
+	// yet. Unparseable keys are still evicted below.
+	var cutoff uint64
+	if tipSlot > rollbackHorizon {
+		cutoff = tipSlot - rollbackHorizon
+	}
 	var evicted []string
 	for key := range ls.deferredHeaderValidation {
 		slot, err := slotFromHeaderValidationKey(key)
-		// STRICTLY below the tip: a block whose slot the cursor has fully
-		// passed was applied (and its marker consumed) if canonical, so one
-		// still present is abandoned. Excluding slot == tip avoids racing the
-		// in-progress apply/consume of the block that just became the tip --
-		// its consume clears the marker itself, and it is evicted on a later
-		// pass only if it turns out to be abandoned.
-		if err != nil || slot < tipSlot {
+		// STRICTLY below the cutoff: a block that deep cannot be re-adopted,
+		// so an entry still present is abandoned and safe to forget. Anything
+		// at or above the cutoff keeps both its entry and its marker so a
+		// rollback-then-re-adopt still finds required == true at apply.
+		if err != nil || slot < cutoff {
 			evicted = append(evicted, key)
 			delete(ls.deferredHeaderValidation, key)
 		}
@@ -446,13 +471,25 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked() []string {
 //
 // It re-checks each key under deferredHeaderValidationMu and skips any that is
 // present in the in-memory set again: between eviction (which happens for a key
-// whose slot is below the chain tip) and this cleanup, that same point can be
-// re-deferred and re-persisted if it is still ahead of the (lagging) apply
-// cursor -- markDeferredHeaderValidation and persistDeferredHeaderValidation run
-// together on the chainsync path. Deleting the marker for a currently-live
-// entry would drop the durable pin for an active deferred header, so on the
-// next restart repopulate would miss it and cleanup could prune the snapshot it
-// needs (issue #3727, finding: evicted-marker delete races a re-defer).
+// whose slot is below the rollback horizon) and this cleanup, that same point
+// can be re-deferred and re-persisted -- markDeferredHeaderValidation and
+// persistDeferredHeaderValidation run together on the chainsync path. Deleting
+// the marker for a currently-live entry would drop the durable pin for an
+// active deferred header, so on the next restart repopulate would miss it and
+// cleanup could prune the snapshot it needs (issue #3727, finding:
+// evicted-marker delete races a re-defer).
+//
+// The membership test alone cannot close that window, because the lock is
+// released before the delete (see below): a re-defer landing between the test
+// and the delete would have its fresh marker deleted, and a restart would then
+// find no marker, so deferredHeaderValidationRequired returns false and
+// verifyDeferredBlockHeaderState skips the stateful check for a header that is
+// still outstanding. So the delete is made effectively conditional by
+// re-testing membership AFTER it and RE-PERSISTING the marker for any key that
+// came back, rather than by holding the lock across the delete. Re-persisting
+// is idempotent (SetSyncState of the same key/value) and runs with no lock
+// held, so it closes the window without reintroducing the lock inversion
+// (issue #3717 review / cubic P1: re-admission after the live check).
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
 		return
@@ -478,15 +515,53 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 			// Re-admitted since eviction: its marker is now backing a live pin.
 			continue
 		}
-		syncKey := deferredHeaderValidationSyncStatePrefix + k
-		if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
-			ls.config.Logger.Warn(
-				"failed to delete stale deferred-header marker",
-				"key", syncKey,
-				"error", err,
-				"component", "ledger",
-			)
-		}
+		ls.deleteDeferredMarkerUnlessReadmitted(k)
+	}
+}
+
+// deleteDeferredMarkerUnlessReadmitted deletes one evicted key's persisted
+// marker, then restores it if the key was re-admitted to the in-memory
+// deferred set while the delete was in flight.
+//
+// Neither DB call runs under deferredHeaderValidationMu (that would invert the
+// lock order against block apply — issue #3717), so the caller's membership
+// test cannot be atomic with the delete. The delete is instead made effectively
+// conditional after the fact: re-testing membership and re-persisting is
+// idempotent, and it leaves the durable marker present for exactly the keys
+// that are live when this returns. Without the restore, a point re-deferred in
+// that window keeps its in-memory entry but loses its marker, and after a
+// restart repopulateDeferredHeaderValidation misses it — so
+// deferredHeaderValidationRequired returns false and
+// verifyDeferredBlockHeaderState skips the stateful check for a header that is
+// still outstanding.
+func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) {
+	syncKey := deferredHeaderValidationSyncStatePrefix + k
+	if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+		ls.config.Logger.Warn(
+			"failed to delete stale deferred-header marker",
+			"key", syncKey,
+			"error", err,
+			"component", "ledger",
+		)
+		return
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	_, readmitted := ls.deferredHeaderValidation[k]
+	ls.deferredHeaderValidationMu.Unlock()
+	if !readmitted {
+		return
+	}
+	if err := ls.db.SetSyncState(
+		syncKey,
+		deferredHeaderValidationSyncStateValue,
+		nil,
+	); err != nil {
+		ls.config.Logger.Warn(
+			"failed to restore re-deferred header marker",
+			"key", syncKey,
+			"error", err,
+			"component", "ledger",
+		)
 	}
 }
 

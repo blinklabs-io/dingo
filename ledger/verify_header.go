@@ -1694,12 +1694,16 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 // and deadlocks the node on the single write connection (issue #3717). Under
 // the lock it, in order:
 //
-//  1. Evicts abandoned deferred headers whose slot the apply cursor has already
-//     passed. A canonical deferred header is consumed when the cursor applies
-//     it, so one still present at/below the tip is on an abandoned fork and
-//     would otherwise pin its snapshot forever (finding 5). Eviction lets the
-//     floor rise; the evicted markers' persisted rows are deleted after the
-//     lock is released (best effort — they cannot affect a resolved header).
+//  1. Evicts abandoned deferred headers that are beyond the rollback horizon
+//     (tip minus the stability window). A canonical deferred header is consumed
+//     when the cursor applies it, so one still present that deep is on a fork
+//     chain selection can no longer re-adopt and would otherwise pin its
+//     snapshot forever (finding 5). The horizon — rather than the bare tip — is
+//     what makes eviction safe: eviction also drops the durable marker, and a
+//     point evicted while still re-adoptable would apply with required == false
+//     and skip its stateful header check. Eviction lets the floor rise; the
+//     evicted markers' persisted rows are deleted after the lock is released
+//     (best effort — they cannot affect a resolved header).
 //  2. Computes the retention floor over the surviving deferred headers and
 //     lowers defaultBefore (cleanup's currentEpoch-3 pool boundary) to it when
 //     a header needs an older snapshot (or to 0 = retain everything while any
@@ -1727,12 +1731,19 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	minBefore uint64,
 	prune func(before uint64) error,
 ) error {
+	// Read BEFORE taking deferredHeaderValidationMu: both of these take
+	// ls.RWMutex (calculateStabilityWindow reads ls.currentEra under RLock),
+	// and block apply holds the ls lock before taking
+	// deferredHeaderValidationMu via consumeDeferredHeaderValidation. Taking
+	// the ls lock under this mutex would invert that order.
+	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	rollbackHorizon := ls.calculateStabilityWindow()
 	var evicted []string
 	var before uint64
 	func() {
 		ls.deferredHeaderValidationMu.Lock()
 		defer ls.deferredHeaderValidationMu.Unlock()
-		evicted = ls.evictStaleDeferredHeadersLocked()
+		evicted = ls.evictStaleDeferredHeadersLocked(tipSlot, rollbackHorizon)
 		before = defaultBefore
 		if floor, ok := ls.oldestRequiredSnapshotEpochLocked(); ok &&
 			floor < before {

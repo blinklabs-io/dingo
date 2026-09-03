@@ -975,10 +975,19 @@ therefore prunes `pool_stake_snapshot` *through a retention guard*
 (`deferredHeaderValidationMu`), held across the eviction and the floor read but
 **not** across the pool-snapshot delete, the guard:
 
-1. **Evicts abandoned headers.** A deferred header the apply cursor has already
-   passed is abandoned — a canonical one is consumed at apply — so it is dropped
-   from the set (and its persisted marker deleted) instead of pinning its
-   snapshot forever. This is what bounds retention in practice.
+1. **Evicts abandoned headers.** A deferred header beyond the *rollback horizon*
+   — below `tip - calculateStabilityWindow()` (3k/f slots, 2k in Byron) — is
+   abandoned: a canonical one is consumed at apply, and chain selection can no
+   longer re-adopt a fork that deep. It is dropped from the set and its
+   persisted marker deleted instead of pinning its snapshot forever. This is
+   what bounds retention in practice. Eviction is gated on the horizon rather
+   than on the bare tip because it deletes the durable marker too, and that
+   marker is the only thing that makes `deferredHeaderValidationRequired` return
+   true at apply: a point evicted while a rollback could still re-adopt its fork
+   would apply with `required == false`, so `verifyDeferredBlockHeaderState`
+   returns nil and the block is adopted with its stateful leader-eligibility
+   check never run. Keys whose slot cannot be parsed are evicted regardless —
+   they can never be validated.
 2. **Computes the floor** as the minimum of `StakeSnapshotEpoch(epochOf(slot))`
    over the surviving deferred headers and lowers the pool-snapshot delete
    boundary to it when it is below `current-3` (reward-table retention is
@@ -1004,7 +1013,14 @@ vs. `write-conn → mutex` on apply — and **deadlock the node on the single wr
 connection** (issue #3717). The same applies to the evicted-marker cleanup
 (`deletePersistedDeferredMarkers`), which takes the lock only to test membership
 per key and releases it before each `DeleteSyncState` (also a write-connection
-op). The earlier claim that this lock "does no I/O, so it cannot deadlock" was
+op). Because that membership test cannot be atomic with the delete, the delete
+is made conditional *after the fact*: `deleteDeferredMarkerUnlessReadmitted`
+re-tests membership once the `DeleteSyncState` returns and re-writes the marker
+(`SetSyncState`, idempotent) for a key that was re-deferred in the window.
+Without that restore, a point re-admitted between the test and the delete keeps
+its in-memory entry but loses its durable marker, so after a restart
+`repopulateDeferredHeaderValidation` misses it and the apply-time stateful check
+is skipped for a header that is still outstanding. The earlier claim that this lock "does no I/O, so it cannot deadlock" was
 wrong: the hazard is never the mutex holder's own I/O, it is the *caller on the
 other path* holding the single write connection while it waits for this mutex.
 

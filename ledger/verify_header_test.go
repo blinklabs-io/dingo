@@ -3645,3 +3645,135 @@ func TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention(
 		"floor 10 must be clamped up to the depth-cap minBefore 16",
 	)
 }
+
+// TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader is the
+// regression guard for the evicted-point re-adoption bypass (issue #3717
+// review). Eviction drops the durable sync_state marker along with the
+// in-memory entry, and that marker is the only thing that makes
+// deferredHeaderValidationRequired return true at apply. A point merely BEHIND
+// the tip is still re-adoptable -- chain selection can roll back and switch to
+// its fork -- so evicting it there means the block later applies with
+// required == false, verifyDeferredBlockHeaderState returns nil, and it is
+// adopted with its stateful leader-eligibility check never run. Eviction must
+// therefore fire only beyond the rollback horizon (tip minus the stability
+// window): a header inside the horizon keeps both its entry and its marker,
+// while one past it is still evicted so its snapshot pin is released.
+func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{
+			EpochId:       11,
+			StartSlot:     20_000,
+			LengthInSlots: 1_000,
+			Nonce:         tb.epochNonce,
+		},
+	}
+	// The test config carries no Byron genesis, so the stability window is the
+	// 50_000-slot default; with the tip at 60_000 the rollback horizon cuts off
+	// at slot 10_000.
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 60_000}}
+	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(50_000), ls.calculateStabilityWindow())
+
+	// Behind the tip but INSIDE the horizon: a rollback can still re-adopt it.
+	readoptable := ocommon.Point{Slot: 20_500, Hash: []byte{0x11}}
+	// Behind the tip and BEYOND the horizon: unreachable, safe to forget.
+	unreachable := ocommon.Point{Slot: 5_000, Hash: []byte{0x12}}
+	for _, p := range []ocommon.Point{readoptable, unreachable} {
+		ls.markDeferredHeaderValidation(p)
+		require.NoError(t, ls.persistDeferredHeaderValidation(p, nil))
+	}
+
+	var seenBefore uint64
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25, 0,
+		func(before uint64) error { seenBefore = before; return nil },
+	))
+
+	// The re-adoptable header still pins its snapshot epoch (epoch 11 -> 10).
+	assert.Equal(
+		t,
+		uint64(10),
+		seenBefore,
+		"re-adoptable header must still pin its snapshot",
+	)
+	floor, ok := ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok, "re-adoptable header must stay in the deferred set")
+	assert.Equal(t, uint64(10), floor)
+
+	// ...and it keeps its durable marker, so a rollback-then-re-adopt still
+	// finds required == true at apply instead of skipping the check.
+	marker, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(readoptable), nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		deferredHeaderValidationSyncStateValue,
+		marker,
+		"re-adoptable header's marker must survive eviction",
+	)
+
+	// The unreachable header is still evicted, marker and all.
+	gone, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(unreachable), nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(
+		t,
+		gone,
+		"header beyond the rollback horizon must still be evicted",
+	)
+}
+
+// TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete
+// closes the marker delete's TOCTOU window (issue #3717 review / cubic P1). The
+// membership test in deletePersistedDeferredMarkers cannot be atomic with the
+// delete -- holding deferredHeaderValidationMu across the DB write would invert
+// the lock order against block apply and deadlock the node -- so a point
+// re-deferred after that test and before the delete would lose the marker it
+// had just persisted. A restart would then miss it in
+// repopulateDeferredHeaderValidation, leaving deferredHeaderValidationRequired
+// false and skipping the stateful check for a header still outstanding. The
+// per-key delete must re-test membership afterwards and restore the marker for
+// a key that came back, while still removing a genuinely stale one.
+func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	readmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted, nil))
+	// Stands in for the re-defer that lands after the caller's membership test:
+	// the key is live in the set by the time the delete completes.
+	ls.markDeferredHeaderValidation(readmitted)
+
+	ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(readmitted),
+	)
+
+	marker, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(readmitted), nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		deferredHeaderValidationSyncStateValue,
+		marker,
+		"marker for a key re-admitted during the delete must be restored",
+	)
+
+	// A key that is NOT re-admitted still has its marker removed.
+	stale := ocommon.Point{Slot: 1_160, Hash: []byte{0x12}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(stale, nil))
+	ls.deleteDeferredMarkerUnlessReadmitted(headerValidationPointKey(stale))
+	gone, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(stale), nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, gone, "genuinely stale marker must be deleted")
+}

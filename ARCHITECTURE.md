@@ -7355,16 +7355,24 @@ it is the leader-eligibility basis a queued/deferred header validates against.
 `LedgerState.PrunePoolSnapshotsWithRetentionFloor`) that, under one dedicated
 lock (`deferredHeaderValidationMu`) held across the eviction and floor read but
 released before the pool-snapshot delete: (1)
-evicts deferred headers the apply cursor has already passed — abandoned, since a
-canonical one is consumed at apply — so they stop pinning their snapshots and
-their persisted markers are deleted; (2) lowers the delete boundary to the floor
+evicts deferred headers beyond the rollback horizon (below
+`tip - calculateStabilityWindow()`) — abandoned, since a canonical one is
+consumed at apply and no fork that deep can be re-adopted — so they stop pinning
+their snapshots and their persisted markers are deleted. The horizon, rather than
+the bare tip, is what makes eviction safe: eviction also drops the durable
+marker, so a point evicted while still re-adoptable would later apply with
+`required == false` and be adopted with its stateful leader-eligibility check
+never run; (2) lowers the delete boundary to the floor
 (oldest `StakeSnapshotEpoch(epochOf(slot))` over the survivors) when it is below
 `current-3`, or to 0 while any deferred slot is not yet epoch-mappable; and (3)
 clamps that boundary up to a hard depth cap (`current - 24`) so a stuck header
 can never pin snapshots without bound. The eviction+floor read is atomic (one
 lock hold), so the boundary is a coherent read of the deferred set. The lock is
 released before `prune` (and before each `DeleteSyncState` in the evicted-marker
-cleanup): `prune` opens the single SQLite write connection, and block apply holds
+cleanup, whose per-key delete then re-tests membership and re-persists the marker
+for a point re-deferred in that window, so releasing the lock cannot strand a
+live deferred header without its durable marker): `prune` opens the single SQLite
+write connection, and block apply holds
 that connection before taking this same mutex via `consumeDeferredHeaderValidation`,
 so holding the mutex across `prune` inverts the lock order and deadlocks the node
 on the single write connection (issue #3717). The hazard is not this lock's own
