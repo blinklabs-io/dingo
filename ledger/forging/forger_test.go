@@ -21,11 +21,9 @@ import (
 	"io"
 	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -47,65 +45,10 @@ func (forgerTestLeader) NextLeaderSlot(
 	return fromSlot, true
 }
 
-type forgerBlockingLeader struct {
-	entered     chan struct{}
-	release     chan struct{}
-	enteredOnce sync.Once
-
-	mu    sync.Mutex
-	calls int
-}
-
-func (l *forgerBlockingLeader) ShouldProduceBlock(uint64) bool {
-	l.mu.Lock()
-	l.calls++
-	l.mu.Unlock()
-	l.enteredOnce.Do(func() { close(l.entered) })
-	<-l.release
-	return true
-}
-
-func (l *forgerBlockingLeader) NextLeaderSlot(
-	fromSlot uint64,
-) (uint64, bool) {
-	return fromSlot, true
-}
-
-func (l *forgerBlockingLeader) callCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.calls
-}
-
-type forgerCountingLeader struct {
-	mu    sync.Mutex
-	calls int
-}
-
-func (l *forgerCountingLeader) ShouldProduceBlock(uint64) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.calls++
-	return true
-}
-
-func (l *forgerCountingLeader) NextLeaderSlot(
-	fromSlot uint64,
-) (uint64, bool) {
-	return fromSlot, true
-}
-
-func (l *forgerCountingLeader) callCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.calls
-}
-
 type forgerTestSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
 	upstreamTipSlot   uint64
-	upstreamActive    bool
 	slotsPerKESPeriod uint64
 }
 
@@ -127,581 +70,6 @@ func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
 
 func (c forgerTestSlotClock) UpstreamTipSlot() uint64 {
 	return c.upstreamTipSlot
-}
-
-func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
-	return c.upstreamTipSlot, c.upstreamActive || c.upstreamTipSlot > 0
-}
-
-func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(
-	t *testing.T,
-) {
-	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(10, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			upstreamActive:    true,
-			slotsPerKESPeriod: 100,
-		},
-		ForgeSyncToleranceSlots: 99,
-		PromRegistry:            prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Zero(t, builder.calls)
-	assert.Zero(t, broadcaster.calls)
-}
-
-func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
-	creds := setupTestCredentials(t)
-	genesis := synthGenesis(1, 2, time.Second, time.Unix(0, 0))
-	require.NoError(t, creds.ValidateKESPeriod(genesis, 0))
-
-	block := newForgerTestBlock(1, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	clock := &forgerTestSlotClock{
-		currentSlot:       1,
-		chainTipSlot:      0,
-		slotsPerKESPeriod: 1,
-	}
-	leader := &forgerCountingLeader{}
-	var logs bytes.Buffer
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
-		Credentials:      creds,
-		LeaderChecker:    leader,
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock:        clock,
-		PromRegistry:     prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	// The final period in [start, start+maxEvolutions) remains valid.
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.Equal(t, 1, leader.callCount())
-	require.Equal(t, 1, builder.calls)
-	require.Equal(t, 1, broadcaster.calls)
-	lastValidCurrent := testutil.ToFloat64(forger.metrics.currentKESPeriod)
-	lastValidRemaining := testutil.ToFloat64(
-		forger.metrics.remainingKESPeriods,
-	)
-	lastValidExpiry := testutil.ToFloat64(forger.metrics.opCertExpiryKES)
-
-	// The same loaded producer reaches the first expired period while running.
-	clock.currentSlot = 2
-	clock.chainTipSlot = 1
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.Equal(
-		t,
-		1,
-		leader.callCount(),
-		"expired period must not run leader selection",
-	)
-	require.Equal(t, 1, builder.calls, "expired period must not build a block")
-	require.Equal(
-		t,
-		1,
-		broadcaster.calls,
-		"expired period must not broadcast a block",
-	)
-	require.Contains(t, logs.String(), "operational certificate expired")
-	require.Equal(t, float64(1), lastValidCurrent)
-	require.Equal(t, float64(1), lastValidRemaining)
-	require.Equal(t, float64(2), lastValidExpiry)
-
-	require.Equal(
-		t,
-		float64(2),
-		testutil.ToFloat64(forger.metrics.currentKESPeriod),
-	)
-	require.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(forger.metrics.remainingKESPeriods),
-	)
-	require.Equal(
-		t,
-		float64(2),
-		testutil.ToFloat64(forger.metrics.opCertExpiryKES),
-	)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
-}
-
-func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
-	creds := setupTestCredentials(t)
-	creds.mu.Lock()
-	creds.generation++
-	creds.opCert.KESPeriod = 5
-	creds.opCertStartKES = 5
-	creds.maxKESEvolutions = 2
-	creds.opCertExpiryKES = 7
-	creds.opCertValidated = true
-	creds.mu.Unlock()
-
-	block := newForgerTestBlock(4, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	leiosChecker := &forgerTestLeiosChecker{reason: "not eligible"}
-	leader := &forgerCountingLeader{}
-	var logs bytes.Buffer
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
-		Credentials:      creds,
-		LeaderChecker:    leader,
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       4,
-			chainTipSlot:      3,
-			slotsPerKESPeriod: 1,
-		},
-		LeiosProduceChecker: leiosChecker,
-		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
-		LeiosMempool:        forgerTestMempoolProvider{},
-		LeiosTxValidator:    &mockTxValidator{},
-		PromRegistry:        prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(
-		t,
-		forger.checkAndForgeProduction(context.Background()),
-		"pre-start policy gate must decline before KES evolution",
-	)
-	require.Zero(
-		t,
-		leader.callCount(),
-		"pre-start period must not run leader selection",
-	)
-	require.Zero(t, leiosChecker.calls, "pre-start period must not run Leios")
-	require.Zero(t, builder.calls, "pre-start period must not build a block")
-	require.Zero(
-		t,
-		broadcaster.calls,
-		"pre-start period must not broadcast a block",
-	)
-	require.Contains(
-		t,
-		logs.String(),
-		"operational certificate is not yet valid",
-	)
-	require.Equal(
-		t,
-		float64(4),
-		testutil.ToFloat64(forger.metrics.currentKESPeriod),
-	)
-	require.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(forger.metrics.remainingKESPeriods),
-	)
-	require.Equal(
-		t,
-		float64(5),
-		testutil.ToFloat64(forger.metrics.opCertStartKES),
-	)
-	require.Equal(
-		t,
-		float64(7),
-		testutil.ToFloat64(forger.metrics.opCertExpiryKES),
-	)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
-}
-
-func TestCheckAndForgeProductionCountsKESUpdateFailure(t *testing.T) {
-	creds := setupTestCredentials(t)
-	require.NoError(t, creds.UpdateKESPeriod(1))
-
-	builder := &forgerTestBuilder{block: newForgerTestBlock(1, 2)}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       1,
-			chainTipSlot:      0,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	err = forger.checkAndForgeProduction(context.Background())
-	require.ErrorContains(t, err, "failed to update KES period")
-	require.Zero(t, builder.calls)
-	require.Zero(t, broadcaster.calls)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
-}
-
-func TestSignBlockHeaderEnforcesProtocolKESLifetime(t *testing.T) {
-	creds := setupTestCredentials(t)
-	creds.mu.Lock()
-	creds.generation++
-	creds.opCertStartKES = 0
-	creds.maxKESEvolutions = 2
-	creds.opCertExpiryKES = 2
-	creds.opCertValidated = true
-	creds.mu.Unlock()
-	require.NoError(t, creds.UpdateKESPeriod(2))
-
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: forgerTestSlotClock{
-			slotsPerKESPeriod: 1,
-		},
-	})
-	require.NoError(t, err)
-
-	signature, err := forger.SignBlockHeader(2, []byte("expired header"))
-	require.ErrorIs(t, err, errOpCertExpired)
-	require.Nil(t, signature)
-}
-
-func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
-	t *testing.T,
-) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-	creds := NewPoolCredentials()
-	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
-	require.NoError(t, creds.ValidateKESPeriod(
-		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
-		0,
-	))
-
-	leader := &forgerBlockingLeader{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	builder := &forgerTestBuilder{
-		block: newForgerTestBlock(1, 2),
-	}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    leader,
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       1,
-			chainTipSlot:      0,
-			slotsPerKESPeriod: 1,
-		},
-	})
-	require.NoError(t, err)
-
-	forgeDone := make(chan error, 1)
-	go func() {
-		forgeDone <- forger.checkAndForgeProduction(context.Background())
-	}()
-	dingotestutil.RequireReceive(t, leader.entered, time.Second, "leader entered")
-
-	alternateVRFPath := createAlternateTestVRFKey(t)
-	reloadDone := make(chan error, 1)
-	go func() {
-		reloadDone <- creds.LoadFromFiles(
-			alternateVRFPath,
-			kesPath,
-			opCertPath,
-		)
-	}()
-	reloadErr := dingotestutil.RequireReceive(
-		t,
-		reloadDone,
-		time.Second,
-		"identity-changing reload completion",
-	)
-	require.ErrorContains(t, reloadErr, "cannot change pool or VRF identity")
-	close(leader.release)
-	require.NoError(t, dingotestutil.RequireReceive(
-		t,
-		forgeDone,
-		time.Second,
-		"forge completion",
-	))
-	require.Equal(t, 1, leader.callCount())
-	require.Zero(t, builder.calls)
-	require.Zero(t, broadcaster.calls)
-}
-
-type forgerReentrantBuilder struct {
-	callback    func() error
-	callbackErr error
-	block       ledger.Block
-	cbor        []byte
-	calls       int
-}
-
-func (b *forgerReentrantBuilder) BuildBlock(
-	_ uint64,
-	_ uint64,
-) (ledger.Block, []byte, error) {
-	b.calls++
-	if b.callback != nil {
-		b.callbackErr = b.callback()
-	}
-	if b.callbackErr != nil {
-		return nil, nil, b.callbackErr
-	}
-	return b.block, b.cbor, nil
-}
-
-func TestCheckAndForgeProductionRejectsReentrantBuilderReload(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-	creds := NewPoolCredentials()
-	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
-	require.NoError(t, creds.ValidateKESPeriod(
-		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
-		0,
-	))
-
-	block := newForgerTestBlock(1, 2)
-	builder := &forgerReentrantBuilder{
-		block: block,
-		cbor:  block.cbor,
-		callback: func() error {
-			if err := creds.LoadFromFiles(
-				vrfPath,
-				kesPath,
-				opCertPath,
-			); err != nil {
-				return err
-			}
-			return creds.ValidateKESPeriod(
-				synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
-				0,
-			)
-		},
-	}
-	broadcaster := &forgerTestBroadcaster{}
-	clock := &forgerTestSlotClock{
-		currentSlot:       1,
-		chainTipSlot:      0,
-		slotsPerKESPeriod: 1,
-	}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock:        clock,
-		PromRegistry:     prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	forgeDone := make(chan error, 1)
-	go func() {
-		forgeDone <- forger.checkAndForgeProduction(context.Background())
-	}()
-	forgeErr := dingotestutil.RequireReceive(
-		t,
-		forgeDone,
-		time.Second,
-		"reentrant builder reload completion",
-	)
-	require.ErrorContains(t, forgeErr, "credential generation changed")
-	require.NoError(t, builder.callbackErr)
-	require.Equal(t, 1, builder.calls)
-	require.Zero(t, broadcaster.calls, "stale builder output must not be adopted")
-}
-
-func TestCheckAndForgeProductionRejectsReentrantLeiosRevalidation(
-	t *testing.T,
-) {
-	creds := setupTestCredentials(t)
-	genesis := synthGenesis(1, 3, time.Second, time.Unix(0, 0))
-	require.NoError(t, creds.ValidateKESPeriod(genesis, 0))
-
-	builder := &forgerTestBuilder{
-		block: newForgerTestBlock(1, 2),
-	}
-	broadcaster := &forgerTestBroadcaster{}
-	leiosChecker := &forgerTestLeiosChecker{
-		reason: "revalidated",
-		callback: func() error {
-			return creds.ValidateKESPeriod(genesis, 0)
-		},
-	}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       1,
-			chainTipSlot:      0,
-			slotsPerKESPeriod: 1,
-		},
-		LeiosProduceChecker: leiosChecker,
-		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
-		LeiosMempool:        forgerTestMempoolProvider{},
-		LeiosTxValidator:    &mockTxValidator{},
-	})
-	require.NoError(t, err)
-
-	forgeDone := make(chan error, 1)
-	go func() {
-		forgeDone <- forger.checkAndForgeProduction(context.Background())
-	}()
-	require.NoError(t, dingotestutil.RequireReceive(
-		t,
-		forgeDone,
-		time.Second,
-		"reentrant Leios revalidation completion",
-	))
-	require.NoError(t, leiosChecker.callbackErr)
-	require.Equal(t, 1, leiosChecker.calls)
-	require.Zero(t, builder.calls, "stale Leios attempt must not build")
-	require.Zero(t, broadcaster.calls, "stale Leios attempt must not be adopted")
-}
-
-func TestCheckAndForgeProductionFailsClosedAfterKESRevalidation(t *testing.T) {
-	creds := setupTestCredentials(t)
-	require.NoError(t, creds.ValidateKESPeriod(
-		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
-		0,
-	))
-
-	block := newForgerTestBlock(1, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	var logs bytes.Buffer
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       1,
-			chainTipSlot:      0,
-			slotsPerKESPeriod: 1,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	revalidationErr := creds.ValidateKESPeriod(
-		synthGenesis(1, 1, time.Second, time.Unix(0, 0)),
-		1,
-	)
-	require.ErrorContains(t, revalidationErr, "operational certificate expired")
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.Zero(t, builder.calls, "failed revalidation must disable building")
-	require.Zero(
-		t,
-		broadcaster.calls,
-		"failed revalidation must disable broadcasting",
-	)
-	require.Contains(t, logs.String(), "KES protocol lifetime is not validated")
-	require.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(forger.metrics.remainingKESPeriods),
-	)
-	require.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(forger.metrics.opCertExpiryKES),
-	)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
-}
-
-func TestNewBlockForgerRejectsUnvalidatedKESLifetime(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-	creds := NewPoolCredentials()
-	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opCertPath))
-
-	_, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: forgerTestSlotClock{
-			slotsPerKESPeriod: 1,
-		},
-	})
-	require.ErrorContains(t, err, "validated KES protocol lifetime")
-}
-
-func TestNewBlockForgerRejectsInvalidOpCertGeneration(t *testing.T) {
-	vrfPath, kesPath, _ := createTestKeys(t)
-	corrupted := strings.Replace(testOpCertJSON, "89fc9e9f", "88fc9e9f", 1)
-	require.NotEqual(t, testOpCertJSON, corrupted)
-	creds := NewPoolCredentials()
-	require.NoError(t, creds.LoadFromFiles(
-		vrfPath,
-		kesPath,
-		writeTestOpCert(t, corrupted),
-	))
-	require.ErrorContains(
-		t,
-		creds.ValidateKESPeriod(
-			synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
-			0,
-		),
-		"signature verification failed",
-	)
-
-	_, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: forgerTestSlotClock{
-			slotsPerKESPeriod: 1,
-		},
-	})
-	require.ErrorContains(t, err, "operational certificate is not validated")
 }
 
 type forgerTestBuilder struct {
@@ -812,12 +180,10 @@ func (b *forgerTestBlock) Cbor() []byte     { return b.cbor }
 func (b *forgerTestBlock) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 type forgerTestLeiosChecker struct {
-	calls       int
-	allowed     bool
-	reason      string
-	err         error
-	callback    func() error
-	callbackErr error
+	calls   int
+	allowed bool
+	reason  string
+	err     error
 }
 
 type forgerTestConfirmedTxRemover struct {
@@ -859,107 +225,10 @@ func TestCheckAndForgeProductionRemovesConfirmedTransactions(t *testing.T) {
 	require.Equal(t, []string{tx.Hash().String()}, remover.hashes)
 }
 
-func TestCheckAndForgeProductionUsesRetainedReconnectFrontier(t *testing.T) {
-	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(114220801, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       114220801,
-			chainTipSlot:      114220600,
-			upstreamTipSlot:   114220800,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Zero(t, builder.calls)
-	assert.Zero(t, broadcaster.calls)
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
-	)
-}
-
-func TestCheckAndForgeProductionWaitsForEventPairedCorroboratedTarget(
-	t *testing.T,
-) {
-	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(101, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       101,
-			chainTipSlot:      100,
-			upstreamTipSlot:   200,
-			upstreamActive:    true,
-			slotsPerKESPeriod: 100,
-		},
-		ForgeSyncToleranceSlots: 99,
-		PromRegistry:            prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Zero(t, builder.calls)
-	assert.Zero(t, broadcaster.calls)
-}
-
-func TestCheckAndForgeProductionProceedsWithoutUpstreamFrontier(t *testing.T) {
-	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(10, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-			// This is the value exposed after a close-before-switch event.
-			upstreamTipSlot: 0,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, broadcaster.calls)
-}
-
 func (c *forgerTestLeiosChecker) MayProduceEndorserBlock(
 	uint64,
 ) (bool, string, error) {
 	c.calls++
-	if c.callback != nil {
-		c.callbackErr = c.callback()
-		if c.callbackErr != nil {
-			return false, "", c.callbackErr
-		}
-	}
 	return c.allowed, c.reason, c.err
 }
 
@@ -1032,17 +301,7 @@ func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
 	return p.rbHash, p.hash, p.ok, p.err
 }
 
-// TestCheckAndForgeProductionSkipsObserverWhenNotAdopted holds the
-// contract that the blockForged observer publishes only after durable
-// acceptance. The production observer republishes the block on the event
-// bus and enqueues the Leios announcement that diffuses it to peers, so
-// running it for a block AddBlock rejected would advertise a block this
-// node never adopted.
-//
-// The forgeForged counter still increments before adoption, which is what
-// PR #2323 required: build-versus-adopt remains observable through
-// forgeForged and forgeCouldNot without publishing an unadopted block.
-func TestCheckAndForgeProductionSkipsObserverWhenNotAdopted(
+func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
 	t *testing.T,
 ) {
 	creds := setupTestCredentials(t)
@@ -1055,65 +314,6 @@ func TestCheckAndForgeProductionSkipsObserverWhenNotAdopted(
 	innerBroadcaster := &forgerTestBroadcaster{
 		err: errors.New("not adopted"),
 	}
-	var callOrder []string
-	broadcaster := &trackingBroadcaster{
-		inner: innerBroadcaster,
-		onAdd: func() { callOrder = append(callOrder, "adopt") },
-	}
-
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		BlockForged: func(
-			ledger.Block,
-			[]byte,
-			time.Duration,
-		) {
-			callOrder = append(callOrder, "observe")
-		},
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	err = forger.checkAndForgeProduction(context.Background())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "failed to add block")
-
-	assert.Equal(t, []string{"adopt"}, callOrder)
-	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, innerBroadcaster.calls)
-	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
-	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
-}
-
-// TestCheckAndForgeProductionObservesForgedBlockAfterAdoption is the
-// positive half of the contract: the observer runs, with the built block
-// and CBOR, once AddBlock has accepted the block.
-func TestCheckAndForgeProductionObservesForgedBlockAfterAdoption(
-	t *testing.T,
-) {
-	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(10, 2)
-	blockCbor := []byte{0x83, 0xaa, 0xbb}
-	builder := &forgerTestBuilder{
-		block: block,
-		cbor:  blockCbor,
-	}
-	innerBroadcaster := &forgerTestBroadcaster{}
 	var callOrder []string
 	broadcaster := &trackingBroadcaster{
 		inner: innerBroadcaster,
@@ -1151,7 +351,9 @@ func TestCheckAndForgeProductionObservesForgedBlockAfterAdoption(
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	err = forger.checkAndForgeProduction(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to add block")
 
 	require.Same(t, block, observedBlock)
 	assert.Equal(t, blockCbor, observedCbor)
@@ -1160,7 +362,7 @@ func TestCheckAndForgeProductionObservesForgedBlockAfterAdoption(
 	assert.Equal(t, 1, builder.calls)
 	assert.Equal(t, 1, innerBroadcaster.calls)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeForged))
-	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
+	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }
 
 func TestCheckAndForgeProductionRecoversBlockForgedObserverPanic(
@@ -1236,11 +438,7 @@ func TestCheckAndForgeProductionRecoversLeaderCheckPanic(t *testing.T) {
 	assert.Equal(t, 1, leader.calls)
 	assert.Equal(t, 0, builder.calls)
 	assert.Equal(t, 0, broadcaster.calls)
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeNotLeader),
-	)
+	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeNotLeader))
 	assert.Equal(
 		t,
 		float64(1),
@@ -1264,9 +462,7 @@ func TestCheckAndForgeProductionRecoversBlockValidatorPanic(t *testing.T) {
 	broadcaster := &forgerTestBroadcaster{}
 	validator := &forgerTestValidator{panic: true}
 
-	forger, clock := newForgerWithValidator(
-		t, block, nil, broadcaster, validator,
-	)
+	forger := newForgerWithValidator(t, block, nil, broadcaster, validator)
 
 	// A panic from the validator must not escape checkAndForgeProduction; it
 	// is treated as a validation failure so the block is dropped rather than
@@ -1289,10 +485,8 @@ func TestCheckAndForgeProductionRecoversBlockValidatorPanic(t *testing.T) {
 		),
 	)
 
-	// The following forge cycle proceeds normally. It runs at the next
-	// slot because the fence refuses a slot already signed for.
+	// The following forge cycle proceeds normally.
 	validator.panic = false
-	clock.currentSlot = 11
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	assert.Equal(t, 2, validator.calls)
 	assert.Equal(t, 1, broadcaster.calls)
@@ -1304,11 +498,6 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 	block := newForgerTestBlock(10, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{panic: true}
-	clock := &forgerTestSlotClock{
-		currentSlot:       10,
-		chainTipSlot:      9,
-		slotsPerKESPeriod: 100,
-	}
 
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
@@ -1317,8 +506,12 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 		LeaderChecker:    forgerTestLeader{},
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
-		SlotClock:        clock,
-		PromRegistry:     prometheus.NewRegistry(),
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 
@@ -1339,10 +532,8 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 		),
 	)
 
-	// The following forge cycle proceeds normally. It runs at the next
-	// slot because the fence refuses a slot already signed for.
+	// The following forge cycle proceeds normally.
 	broadcaster.panic = false
-	clock.currentSlot = 11
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	assert.Equal(t, 2, broadcaster.calls)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))

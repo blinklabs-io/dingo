@@ -1,65 +1,23 @@
 name: go-test
 
-# Runs on pull requests and on pushes to main. Both matter: the pull-request
-# run is where breakage should be caught, and the main run is the backstop that
-# catches anything a merge conflict, a stale base, or a paths filter let
-# through. Release-tag validation lives in publish.yml.
-#
-# Windows and macOS were dropped from pull-request CI in #3070 and race
-# instrumentation was left to release time, to reduce Actions usage. Dingo is a
-# public repository, so that traded latency for nothing billable, and it cost
-# more than it saved: go-test-platforms failed on four consecutive main pushes
-# (#3728, Windows-only DevNet breakage), and the v0.70.3 tag was abandoned when
-# the release-only race gate failed in run 33315370942 with the tag already
-# pushed. Both classes are visible on a pull request again here.
 on:
   pull_request:
-  push:
-    branches: ['main']
-  # go-test-platforms.yml carried the platform jobs and offered this so a
-  # branch could be checked before merging. The jobs run on every pull request
-  # now, but keep the manual entry point for a branch with no pull request yet.
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  # Pull-request runs still supersede themselves: a new push to the branch
-  # cancels the run for the commit it replaced, so a force-push or a rapid
-  # series of pushes cannot accumulate runners.
-  #
-  # Main pushes must not supersede each other. The previous fallback to
-  # github.ref put every main push in one group, and merges land faster than
-  # this suite finishes, so each merge cancelled the run in flight: 8 of the
-  # 10 main runs before this change ended cancelled. cancel-in-progress: false
-  # would not have fixed it, because GitHub keeps at most one pending run per
-  # group and cancels the earlier pending one, so intermediate commits would
-  # have been skipped by superseding instead of by cancellation. github.run_id
-  # is unique per run and defined on every event, so each main push and each
-  # workflow_dispatch gets a group of its own and runs to completion. That is
-  # what makes the main run a backstop for every merged commit rather than
-  # only for whichever commit happens to be last in a burst.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   # Linux job with Postgres, MySQL and MinIO (fake s3) services for integration tests
   go-test-linux:
-    # Do not add a matrix dimension to this job or rename it without updating
-    # branch protection: GitHub appends the matrix combination to a job name
-    # that contains no expression, so this renders as the required context
-    # "go-test (Linux) (1.26.x)".
     name: go-test (Linux)
     strategy:
       matrix:
         go-version: [1.26.x]
     runs-on: ubuntu-latest
-    # Backstop only, replacing GitHub's 360-minute default; the per-step
-    # -timeout values are the diagnostics. Higher than the other jobs here
-    # because this one's slow steps serialize: db-integration (10m),
-    # live-lifecycle (20m) and go-test (30m) all precede each other.
-    timeout-minutes: 120
     services:
       postgres:
         image: postgres:16
@@ -141,6 +99,8 @@ jobs:
         run: go build ./cmd/dingo
       - name: sqlc-generation-drift
         run: make sql-check
+      - name: gorm-dependency-absence
+        run: make gorm-check
       - name: install-mariadb-client
         # database/plugin/metadata/mysql's backup/restore CLI arg mapping
         # (mysqlSSLArgs) targets the mysqldump/mysql client this repo's own
@@ -167,108 +127,33 @@ jobs:
           ./database/plugin/metadata/postgres
           ./database/plugin/metadata/mysql
           -timeout 10m
-      - name: go-test-live-lifecycle
-        # These two-node tests exercise live Truncate/Restore while a real
-        # producer is forging and the syncer is connected over loopback.
-        run: make test-live-lifecycle
       - name: go-test
-        # No race instrumentation here on purpose: this is the fast Linux
-        # signal, and go-test-linux-race covers the same packages in parallel.
-        # -timeout is 30m rather than 20m because this job's service DSNs put
-        # internal/test/conformance on real Postgres and MySQL as well as
-        # SQLite, which took 917s of a 20m budget in run 33521250798.
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+        # Keep PR feedback fast by omitting race instrumentation. Release
+        # validation runs in the publish workflow before draft creation.
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 20m ./...
 
-  # Race detection on every pull request, not only on a release tag. The
-  # release-only arrangement is what abandoned v0.70.3: a genuine race-detector
-  # failure in ./ledger surfaced with the tag already pushed, and the whole
-  # publication was skipped.
+  # windows-latest also runs the full ./... suite in publish.yml's
+  # go-test-other, but only at release-tag time, after a change has already
+  # merged -- which is why the Windows-specific extraction code this job
+  # targets (mithril's NtCreateFile/NtSetInformationFile handle-relative
+  # rename and removal, see extract_handlerelative_windows.go and issue
+  # #3228) went unverified on real Windows CI before now. This job runs it on
+  # every PR instead.
   #
-  # Deliberately a separate job from go-test-linux rather than a -race flag
-  # added to it. Race instrumentation roughly doubles the suite, so folding it
-  # in would have made the one Linux gate the slowest signal on every pull
-  # request; running it alongside keeps first-failure feedback where it was.
-  #
-  # It also runs without the service containers on purpose. The Postgres and
-  # MySQL variants in internal/test/conformance gate on POSTGRES_PASSWORD /
-  # POSTGRES_DSN and MYSQL_ROOT_PASSWORD / MYSQL_DSN and t.Skip when unset (see
-  # conformance_postgres_test.go's postgresConfigured), so with no job env here
-  # that suite replays its vectors against SQLite only. go-test-linux already
-  # covers those two backends, and replaying them under race instrumentation
-  # would dominate this job -- conformance alone took 917s uninstrumented with
-  # the services attached, against 86s SQLite-only.
-  go-test-linux-race:
-    name: go-test (Linux, race)
-    strategy:
-      matrix:
-        go-version: [1.26.x]
-    runs-on: ubuntu-latest
-    # Only a backstop against a wedged runner, replacing GitHub's 360-minute
-    # default. The per-package -timeout below is what actually diagnoses a
-    # hang; this cap must stay well clear of a legitimately slow run so it
-    # cannot fail the job without naming a stuck test.
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: ${{ matrix.go-version }}
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          # Race-instrumented objects are a separate build-cache population
-          # from the plain ones, so this job keys its own entry rather than
-          # thrashing go-test-linux's.
-          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
-      - name: go-build
-        run: go build -tags dingo_extra_plugins ./cmd/dingo
-      - name: go-test-race
-        # Same command as publish.yml's tagged release gate, so a pull request
-        # cannot pass a check the release then fails. 30m rather than 20m
-        # because ./ledger alone runs 9-13 minutes under the race detector and
-        # reached the old 20m limit in run 33315370942.
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
-
-  # windows-latest and macos-latest also run the full ./... suite in
-  # publish.yml's go-test-other, but only at release-tag time, after a change
-  # has already merged. That is how the Windows-only DevNet breakage in #3728
-  # reached main four merges running, and how the Windows extraction code in
-  # mithril (NtCreateFile/NtSetInformationFile handle-relative rename and
-  # removal, see extract_handlerelative_windows.go and #3228) went unverified
-  # on real Windows CI. Both platforms run on every pull request here.
-  #
-  # These are separate jobs rather than one platform matrix so that a failure
-  # on one platform cannot cancel the other's run, and so each renders a stable
-  # check name distinct from publish.yml's go-test (windows-latest) /
-  # go-test (macos-latest).
-  # Deliberately advisory: this job is not a required branch-protection
-  # context, and must not become one while the Windows suite behaves as it
-  # does. It is the slowest and least predictable of the three platforms --
-  # 17m44s in run 33519632627 against 42m+ in run 33529462211 for the same
-  # command, and it has a history of wedging rather than failing. Tracked
-  # separately in #3746. Blocking merges on it would
-  # stall the queue on runner variance rather than on a defect.
-  #
-  # Advisory means "not required", not continue-on-error. A red X here is a
-  # real result to read, and suppressing the exit status would hide exactly
-  # the Windows-only breakage this job exists to surface.
+  # It stays scoped to ./mithril/... rather than ./..., deliberately: the
+  # release job's full-suite run currently fails on windows-latest for
+  # unrelated reasons (internal/test/devnet asserts a Unix-only UID:GID
+  # mapping; tracked separately), and running the same full suite here would
+  # block every PR on that pre-existing, unrelated breakage rather than on
+  # anything this job is meant to check. Widening this job's scope is
+  # follow-up work gated on auditing and fixing the rest of the suite for
+  # Windows, not something to do incidentally here.
   go-test-windows:
     name: go-test (Windows)
     strategy:
       matrix:
         go-version: [1.26.x]
     runs-on: windows-latest
-    # See go-test-linux-race: backstop only, per-package -timeout is the
-    # diagnostic. Bounds a wedged run at 90 minutes instead of GitHub's
-    # 360-minute default.
-    timeout-minutes: 90
-    env:
-      CGO_ENABLED: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
@@ -284,49 +169,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
       - name: go-build
-        run: go build ./...
+        run: go build ./cmd/dingo
       - name: go-test
-        # -timeout is the diagnostic: it panics with a goroutine dump naming
-        # the stuck test, which a runner-level kill does not produce. 30m
-        # matches the other jobs here; ./database was the slowest package at
-        # 737s in run 33519632627.
-        #
-        # There is deliberately no step-level cap. A step or job kill reports
-        # no stuck test, so an intermediate bound tight enough to be useful is
-        # also tight enough to kill a slow-but-healthy run and destroy the
-        # attribution this job exists to provide.
-        run: go test -ldflags="-s -w" -timeout 30m ./...
-
-  go-test-macos:
-    name: go-test (macOS)
-    strategy:
-      matrix:
-        go-version: [1.26.x]
-    runs-on: macos-latest
-    # See go-test-windows. macOS is the cheapest of the three by a wide
-    # margin -- the suite ran 4m07s in run 33519632627 -- so the same generous
-    # cap costs nothing here.
-    timeout-minutes: 90
-    env:
-      CGO_ENABLED: 0
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: ${{ matrix.go-version }}
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
-      - name: go-build
-        run: go build ./...
-      - name: go-test
-        run: go test -ldflags="-s -w" -timeout 30m ./...
+        run: go test -timeout 10m ./mithril/...
 
   govulncheck:
     name: govulncheck

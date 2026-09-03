@@ -30,14 +30,6 @@ const (
 	CategoryReferenceLag  = "reference_lag"
 	CategoryDBError       = "dingo_db_error"   // DB query returned an unexpected error
 	CategoryDBMissing     = "dingo_db_missing" // expected DB row is absent
-	// CategoryPoolDeparted marks a pool that was in epoch K's stake basis but
-	// is absent from the captured K+1 snapshot -- it left the pool set. Its
-	// epoch-K block count lives on the K+1 reward_pool_input row, which
-	// therefore never exists, so blocks_produced cannot be compared for that
-	// one epoch. Purely informational, like the account lifecycle categories
-	// below: both sides agree the pool departed, so it is a documented gap in
-	// coverage rather than a divergence (dingo #3485).
-	CategoryPoolDeparted = "pool_departed"
 
 	// CategoryAcctOnlyDingo/CategoryAcctOnlyKoios mirror
 	// CategoryPoolOnlyDingo/CategoryPoolOnlyKoios but at per-account
@@ -321,15 +313,6 @@ func CompareEpochTotals(
 // epochEndTime is the actual epoch close time (from KoiosEpochInfo.EpochEndTime);
 // zero means unknown. graceHours: if the epoch closed within this many hours and
 // Dingo has no reward_pool_input row, emit reference_lag instead of pool_only_koios.
-// departedAtParamEpoch reports whether this pool is provably absent from the
-// K+1 pool set, established from the mark pool_stake_snapshot rather than from
-// epoch_summary.SnapshotReady. That distinction matters: the snapshot writer
-// commits the epoch summary on every transition regardless of reward-input
-// availability, and deliberately omits a degraded active pool from
-// reward_pool_input while keeping it in the pool-stake snapshot. Both are
-// missing input rather than departure, so only per-pool absence from the K+1
-// pool set may downgrade the finding. False whenever membership could not be
-// established, which keeps the stricter classification (dingo #3485).
 func ComparePoolEpoch(
 	network string,
 	epoch uint64,
@@ -338,7 +321,6 @@ func ComparePoolEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
-	departedAtParamEpoch bool,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
@@ -419,67 +401,17 @@ func ComparePoolEpoch(
 				CheckedAt:  now,
 			})
 		}
-
-		// fixed_cost — reward_pool_input.cost vs Koios
-		// pool_history.fixed_cost. A mark snapshot records the pool
-		// parameters as of its own boundary, and those are the ones in force
-		// for the epoch that snapshot is the basis for, so cost and margin
-		// align with the stake epoch (K-1) rather than with blocks_produced
-		// at the param epoch (dingo #3484).
-		if koiosPool.FixedCost != "" && dingoPool.FixedCost != koiosPool.FixedCost {
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				PoolBech32: koiosPool.PoolBech32,
-				Field:      "fixed_cost",
-				DingoValue: dingoPool.FixedCost,
-				KoiosValue: koiosPool.FixedCost,
-				Category:   CategoryValueMismatch,
-				CheckedAt:  now,
-			})
-		}
-
-		// margin — compare as rationals so Koios "0.1" matches Dingo "1/10".
-		// Only guard on the Koios side being non-empty, matching fixed_cost
-		// above: an empty dingoPool.Margin here means a corrupted/partial row
-		// despite StakePresent being true (the "not ready yet" case is
-		// already handled by the outer StakePresent check), so it must be
-		// flagged as a mismatch, not silently skipped. rationalsEqual returns
-		// false (not a panic) when given an empty string.
-		if koiosPool.Margin != "" && !rationalsEqual(dingoPool.Margin, koiosPool.Margin) {
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				PoolBech32: koiosPool.PoolBech32,
-				Field:      "margin",
-				DingoValue: dingoPool.Margin,
-				KoiosValue: koiosPool.Margin,
-				Category:   CategoryValueMismatch,
-				CheckedAt:  now,
-			})
-		}
 	}
 
-	// blocks_produced comes from the reward_pool_input "param epoch" (K+1)
-	// row — see DingoPoolEpochData's doc comment. That row
+	// blocks_produced/fixed_cost/margin all come from the same reward_pool_input
+	// "param epoch" (K+1) row — see DingoPoolEpochData's doc comment. That row
 	// not existing yet is never a silent pass: within the grace window it may
 	// simply not be captured yet (reference_lag); past it, it's a genuine gap
 	// in Dingo's own computation (dingo_db_missing).
 	if !dingoPool.ParamsPresent {
 		cat := CategoryDBMissing
-		switch {
-		case dingoPool.StakePresent && departedAtParamEpoch:
-			// The pool was in this epoch's stake basis and is absent from the
-			// K+1 pool set itself, so it left the set. Its epoch-K block
-			// count is stamped onto the K+1 row that will never be written,
-			// so blocks_produced is not comparable for this one epoch.
-			// Recorded rather than skipped, so the gap is visible, but
-			// informational: both sides agree the pool departed. A pool still
-			// in the K+1 pool set whose reward-input row is absent is missing
-			// input, not a departure, and falls through to the cases below.
-			cat = CategoryPoolDeparted
-		case graceHours > 0 && !epochEndTime.IsZero() &&
-			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
+		if graceHours > 0 && !epochEndTime.IsZero() &&
+			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 			cat = CategoryReferenceLag
 		}
 		out = append(out, CheckMismatch{
@@ -508,22 +440,46 @@ func ComparePoolEpoch(
 				CheckedAt:  now,
 			})
 		}
+
+		// fixed_cost — reward_pool_input.cost vs Koios pool_history.fixed_cost.
+		if koiosPool.FixedCost != "" && dingoPool.FixedCost != koiosPool.FixedCost {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "fixed_cost",
+				DingoValue: dingoPool.FixedCost,
+				KoiosValue: koiosPool.FixedCost,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
+
+		// margin — compare as rationals so Koios "0.1" matches Dingo "1/10".
+		// Only guard on the Koios side being non-empty, matching fixed_cost
+		// above: an empty dingoPool.Margin here means a corrupted/partial row
+		// despite ParamsPresent being true (the "not ready yet" case is
+		// already handled by the outer ParamsPresent check), so it must be
+		// flagged as a mismatch, not silently skipped. rationalsEqual returns
+		// false (not a panic) when given an empty string.
+		if koiosPool.Margin != "" && !rationalsEqual(dingoPool.Margin, koiosPool.Margin) {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "margin",
+				DingoValue: dingoPool.Margin,
+				KoiosValue: koiosPool.Margin,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
 	}
 
-	// member_rewards — Dingo's spendable member reward sum vs Koios
-	// pool_history.member_rewards. Both are a direct sum of the per-delegator
-	// reward amounts actually credited (excluding the pool operator's own
-	// leader/margin cut), so, unlike pool_fees/deleg_rewards below, this is
-	// safe to compare 1:1.
-	//
-	// reward_pool_output.member_reward_total is deliberately not the Dingo
-	// side of this comparison. It sums every member reward the calculation
-	// produced, spendable or not, so it exceeds Koios's figure by exactly the
-	// pool's unspendable member rewards — amounts computed for a credential
-	// the ledger correctly never credits. Comparing it reported a
-	// value_mismatch for any pool holding one, against a node that was right
-	// (dingo #3797). The row's own unspendable column is not a usable
-	// correction either, since it accumulates unspendable leader rewards too.
+	// member_rewards — reward_pool_output.member_reward_total vs Koios
+	// pool_history.member_rewards. Both are a direct sum of per-delegator
+	// reward amounts (excluding the pool operator's own leader/margin cut),
+	// so, unlike pool_fees/deleg_rewards below, this is safe to compare 1:1.
 	//
 	// pool_fees and deleg_rewards are intentionally NOT compared against
 	// Dingo's LeaderReward/TotalReward: Koios's grest.get_pool_history_data_bulk
@@ -545,18 +501,7 @@ func ComparePoolEpoch(
 	// (dingo_db_missing, ERROR). Neither case can produce a PASS.
 	if koiosPool.MemberRewards != "" {
 		switch {
-		case !dingoPool.MemberRewardPresent,
-			!dingoPool.SpendableMemberRewardPresent &&
-				dingoPool.PoolUnspendable > 0:
-			// Either the reward calculation has not produced a
-			// reward_pool_output row for this pool/epoch, or it has and the
-			// per-account rows the comparable sum is formed from are gone
-			// while the row says something was withheld — so the two
-			// quantities provably differ and the comparison cannot be formed.
-			// Neither may read as a pass: within the grace window it may
-			// simply not be computed yet (reference_lag, ERROR); past it, it
-			// is a genuine gap in what Dingo can answer (dingo_db_missing,
-			// ERROR).
+		case !dingoPool.MemberRewardPresent:
 			cat := CategoryDBMissing
 			if graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
@@ -572,27 +517,17 @@ func ComparePoolEpoch(
 				Category:   cat,
 				CheckedAt:  now,
 			})
-		default:
-			// Prefer the per-account sum. Falling back to the pool total is
-			// only sound because PoolUnspendable is zero on this branch:
-			// nothing was withheld, so the pool's member total is its
-			// spendable member total by construction.
-			dingoValue := dingoPool.SpendableMemberRewardTotal
-			if !dingoPool.SpendableMemberRewardPresent {
-				dingoValue = dingoPool.MemberRewardTotal
-			}
-			if dingoValue != koiosPool.MemberRewards {
-				out = append(out, CheckMismatch{
-					Network:    network,
-					Epoch:      epoch,
-					PoolBech32: koiosPool.PoolBech32,
-					Field:      "member_rewards",
-					DingoValue: dingoValue,
-					KoiosValue: koiosPool.MemberRewards,
-					Category:   CategoryValueMismatch,
-					CheckedAt:  now,
-				})
-			}
+		case dingoPool.MemberRewardTotal != koiosPool.MemberRewards:
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "member_rewards",
+				DingoValue: dingoPool.MemberRewardTotal,
+				KoiosValue: koiosPool.MemberRewards,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
 		}
 	}
 
@@ -896,8 +831,7 @@ func DetermineStatus(mismatches []CheckMismatch) string {
 			hasError = true
 		case CategoryAcctZeroReward,
 			CategoryAcctNewlyRegistered,
-			CategoryAcctDeregistered,
-			CategoryPoolDeparted:
+			CategoryAcctDeregistered:
 			// Purely informational — see these categories' doc comments.
 			// Deliberately not counted toward hasError or default's FAIL: a
 			// zero-reward or lifecycle-change mismatch must never turn an

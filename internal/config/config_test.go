@@ -523,6 +523,20 @@ func TestRunMode_Validation(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_KESAgentMode(t *testing.T) {
+	cfg := &Config{ShelleyKESAgentSocket: "/run/kes-agent.sock"}
+	cfg.ApplyDefaults()
+	if cfg.ShelleyKESAgentMode != "serve-key" {
+		t.Fatalf("expected serve-key default, got %q", cfg.ShelleyKESAgentMode)
+	}
+
+	cfg.ShelleyKESAgentMode = "sign"
+	cfg.ApplyDefaults()
+	if cfg.ShelleyKESAgentMode != "sign" {
+		t.Fatalf("expected explicit sign mode to remain unchanged, got %q", cfg.ShelleyKESAgentMode)
+	}
+}
+
 func TestRunMode_IsDevMode(t *testing.T) {
 	tests := []struct {
 		mode      RunMode
@@ -1409,10 +1423,7 @@ network: "preview"
 	}
 	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled ||
 		!cfg.Midnight.AllowInsecureRemote {
-		t.Fatalf(
-			"expected environment to enable Midnight server policy: %+v",
-			cfg.Midnight,
-		)
+		t.Fatalf("expected environment to enable Midnight server policy: %+v", cfg.Midnight)
 	}
 	if cfg.Midnight.Host != "127.0.0.3" {
 		t.Fatalf(
@@ -1779,6 +1790,8 @@ func TestLoad_WithLeiosVotingConfig(t *testing.T) {
 runMode: "leios"
 network: "preview"
 leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
+leiosVoterPublicKeys:
+  "aabbcc": "ddeeff"
 `
 
 	tmpDir := t.TempDir()
@@ -1800,12 +1813,19 @@ leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
+	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
+		t.Errorf(
+			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
+			cfg.LeiosVoterPublicKeys,
+		)
+	}
 }
 
 func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 	resetGlobalConfig()
 
 	t.Setenv("DINGO_LEIOS_VOTE_SIGNING_KEY_FILE", "/env/leios-vote.skey")
+	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
 
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -1818,34 +1838,12 @@ func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
-}
-
-func TestLoad_RejectsRetiredLeiosVoterPublicKeysYAML(t *testing.T) {
-	resetGlobalConfig()
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "retired-leios-voter-keys.yaml")
-	require.NoError(t, os.WriteFile(tmpFile, []byte(`
-runMode: "leios"
-leiosVoterPublicKeys:
-  "aabbcc": "ddeeff"
-`), 0o600))
-
-	_, err := LoadConfig(tmpFile)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "field leiosVoterPublicKeys not found")
-}
-
-func TestLoad_RejectsRetiredLeiosVoterPublicKeysEnv(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
-
-	_, err := LoadConfig("")
-	require.Error(t, err)
-	assert.Contains(
-		t,
-		err.Error(),
-		"DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported",
-	)
+	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
+		t.Errorf(
+			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
+			cfg.LeiosVoterPublicKeys,
+		)
+	}
 }
 
 // GetConfig hands out snapshots, so nested plugin config values must be

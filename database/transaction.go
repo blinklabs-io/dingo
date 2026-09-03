@@ -280,30 +280,13 @@ func (d *Database) SetTransactionWithOpts(
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
-	// On the Leios endorser-block closure path (SkipConsumedInputRecovery), a
-	// consumed input already spent by a different certified endorser-block
-	// transaction is a no-op, matching the reference ledger's applyLeiosClosure
-	// (ValidateNone), rather than wedging the pipeline with ErrUtxoConflict on a
-	// legitimate cross-EB double-consume. Ranking-block application keeps the
-	// hard conflict check.
-	setTxErr := error(nil)
-	if opts.SkipConsumedInputRecovery {
-		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
-			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
-		)
-	} else {
-		setTxErr = d.transactionStore().SetTransaction(
-			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
-		)
-	}
-	if setTxErr != nil {
+	if err := d.transactionStore().SetTransaction(
+		tx, point, idx, certDeposits,
+		opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
-			tx.Hash(), idx, point.Slot, setTxErr,
+			tx.Hash(), idx, point.Slot, err,
 		)
 	}
 
@@ -1003,16 +986,13 @@ func (d *Database) recoverConsumedUtxo(
 	if err != nil {
 		return nil, fmt.Errorf("decode transaction output: %w", err)
 	}
-	ret, err := models.UtxoLedgerToModel(
+	ret := models.UtxoLedgerToModel(
 		lcommon.Utxo{
 			Id:     input,
 			Output: output,
 		},
 		addedSlot,
 	)
-	if err != nil {
-		return nil, fmt.Errorf("convert recovered utxo: %w", err)
-	}
 	// Populate the producer transaction FK so that joins on
 	// utxo.transaction_id and Preload("Outputs") from the producer
 	// Transaction see this row after a rollback reanimates it. The
@@ -1099,16 +1079,7 @@ func (d *Database) SetGenesisTransaction(
 		}
 
 		// Build model for metadata store
-		model, err := models.UtxoLedgerToModel(utxo, 0)
-		if err != nil {
-			return fmt.Errorf(
-				"convert genesis utxo %x:%d: %w",
-				bytePrefix(txId),
-				outputIdx,
-				err,
-			)
-		}
-		utxoModels[i] = model
+		utxoModels[i] = models.UtxoLedgerToModel(utxo, 0)
 	}
 
 	// Store transaction in metadata
@@ -1140,7 +1111,6 @@ func (d *Database) SetGenesisTransaction(
 func (d *Database) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
-	keyDeposit uint64,
 	blockHash []byte,
 	txn *Txn,
 ) error {
@@ -1148,7 +1118,6 @@ func (d *Database) SetGenesisStaking(
 		if err := d.metadata.SetGenesisStaking(
 			pools,
 			stakeDelegations,
-			keyDeposit,
 			blockHash,
 			nil,
 		); err != nil {
@@ -1159,7 +1128,6 @@ func (d *Database) SetGenesisStaking(
 	if err := d.metadata.SetGenesisStaking(
 		pools,
 		stakeDelegations,
-		keyDeposit,
 		blockHash,
 		txn.Metadata(),
 	); err != nil {

@@ -173,12 +173,7 @@ func TestRestoreRejectsNonEmptyStore(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(
 		t,
-		blobbackup.WriteRecord(
-			&buf,
-			[]byte("k"),
-			[]byte("v"),
-			maxBlobReadBytes,
-		),
+		blobbackup.WriteRecord(&buf, []byte("k"), []byte("v"), maxBlobReadBytes),
 	)
 	err := store.Restore(context.Background(), bytes.NewReader(
 		append(

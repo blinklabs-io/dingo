@@ -409,8 +409,7 @@ func bootstrapV2(
 		// it, and downloadAncillaryV2 returns the handle it checked. So the
 		// flag is a claim about the directory this handle refers to, which is
 		// the only thing that makes it worth anything.
-		AncillaryVerified: ancillaryTree != nil &&
-			cfg.VerifyCertificateChain,
+		AncillaryVerified:    ancillaryTree != nil && cfg.VerifyCertificateChain,
 		AncillaryDigests:     ancillaryDigests,
 		AncillaryArchivePath: ancillaryArchivePath,
 	}

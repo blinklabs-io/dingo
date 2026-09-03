@@ -17,7 +17,6 @@ package koiosparity
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -606,10 +605,7 @@ func (c *Cache) GetAccountCoverage(
 // eventually re-commit a fresh, fully consistent complete = true row —
 // no further explicit --force-refresh required. A no-op, not an error, if
 // no coverage row exists yet for this (network, epoch).
-func (c *Cache) MarkAccountCoverageIncomplete(
-	network string,
-	epoch uint64,
-) error {
+func (c *Cache) MarkAccountCoverageIncomplete(network string, epoch uint64) error {
 	_, err := c.db.Exec(
 		`UPDATE koios_account_coverage SET complete = 0 WHERE network = ? AND epoch = ?`,
 		network,
@@ -1270,110 +1266,6 @@ func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 	return ret, rows.Err()
 }
 
-// SaveAccountUniverse replaces the cached Koios /account_list crawl for
-// network with addrs, stamped fetchedAt. Written in one transaction so a
-// failure part-way cannot leave a half-replaced set that a later read would
-// treat as a complete universe.
-func (c *Cache) SaveAccountUniverse(
-	network string,
-	addrs []string,
-	fetchedAt time.Time,
-) error {
-	tx, err := c.db.Begin()
-	if err != nil {
-		return fmt.Errorf("save account universe: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(
-		`DELETE FROM koios_account_universe WHERE network = ?`,
-		network,
-	); err != nil {
-		return fmt.Errorf("save account universe: clear: %w", err)
-	}
-	stmt, err := tx.Prepare(`
-INSERT INTO koios_account_universe (network, stake_address, fetched_at)
-VALUES (?, ?, ?)
-ON CONFLICT (network, stake_address) DO UPDATE SET fetched_at = excluded.fetched_at`)
-	if err != nil {
-		return fmt.Errorf("save account universe: prepare: %w", err)
-	}
-	defer stmt.Close() //nolint:errcheck
-	saved := 0
-	for _, addr := range addrs {
-		if addr == "" {
-			continue
-		}
-		if _, err := stmt.Exec(network, addr, fetchedAt.UTC()); err != nil {
-			return fmt.Errorf("save account universe: insert: %w", err)
-		}
-		saved++
-	}
-	if _, err := tx.Exec(`
-INSERT INTO koios_account_universe_state (network, fetched_at, address_count)
-VALUES (?, ?, ?)
-ON CONFLICT (network) DO UPDATE SET
-    fetched_at = excluded.fetched_at,
-    address_count = excluded.address_count`,
-		network, fetchedAt.UTC(), saved,
-	); err != nil {
-		return fmt.Errorf("save account universe: state: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("save account universe: commit: %w", err)
-	}
-	return nil
-}
-
-// GetAccountUniverse returns the cached crawl for network, the time it was
-// taken, and whether a crawl is cached at all. The last is read from
-// koios_account_universe_state rather than inferred from the address count, so
-// a crawl that returned nothing is still a crawl; the caller decides whether
-// what is cached is fresh enough for the epoch it is checking.
-func (c *Cache) GetAccountUniverse(
-	network string,
-) ([]string, time.Time, bool, error) {
-	var fetchedAt time.Time
-	err := c.db.QueryRow(
-		`SELECT fetched_at FROM koios_account_universe_state WHERE network = ?`,
-		network,
-	).Scan(&fetchedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, time.Time{}, false, nil
-	}
-	if err != nil {
-		return nil, time.Time{}, false, fmt.Errorf(
-			"get account universe state: %w", err,
-		)
-	}
-	rows, err := c.db.Query(
-		`SELECT stake_address FROM koios_account_universe
-		WHERE network = ? ORDER BY stake_address`,
-		network,
-	)
-	if err != nil {
-		return nil, time.Time{}, false, fmt.Errorf(
-			"get account universe: %w", err,
-		)
-	}
-	defer rows.Close()
-	var addrs []string
-	for rows.Next() {
-		var addr string
-		if err := rows.Scan(&addr); err != nil {
-			return nil, time.Time{}, false, fmt.Errorf(
-				"get account universe: %w", err,
-			)
-		}
-		addrs = append(addrs, addr)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, time.Time{}, false, fmt.Errorf(
-			"get account universe: %w", err,
-		)
-	}
-	return addrs, fetchedAt, true, nil
-}
-
 func createCacheSchema(db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS koios_epoch_info (
@@ -1464,22 +1356,6 @@ func createCacheSchema(db *sql.DB) error {
 			pool_bech32 TEXT NOT NULL, stake_address TEXT NOT NULL, field TEXT NOT NULL, dingo_value TEXT NOT NULL,
 			koios_value TEXT NOT NULL, category TEXT NOT NULL, checked_at DATETIME NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_cm_net_epoch ON check_mismatches(network, epoch)`,
-		// The Koios /account_list crawl, cached across epochs. Without it the
-		// per-account fetch re-walked the whole list once per epoch — 304
-		// sequential requests for Preview's 303k accounts — which is why the
-		// in-process observer could not keep pace with a syncing node
-		// (dingo #3796). fetched_at is per row so a refresh can replace the set
-		// wholesale and the newest value still dates the crawl.
-		`CREATE TABLE IF NOT EXISTS koios_account_universe (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
-			stake_address TEXT NOT NULL, fetched_at DATETIME NOT NULL)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kau_net_addr ON koios_account_universe(network, stake_address)`,
-		// Presence of a crawl is recorded separately from its rows, so a crawl
-		// that legitimately returned no addresses is still a cached crawl
-		// rather than indistinguishable from never having run.
-		`CREATE TABLE IF NOT EXISTS koios_account_universe_state (
-			network TEXT PRIMARY KEY, fetched_at DATETIME NOT NULL,
-			address_count INTEGER NOT NULL)`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
@@ -1504,19 +1380,6 @@ func createCacheSchema(db *sql.DB) error {
 		if present {
 			_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
 		}
-	}
-
-	// A cache written before koios_account_universe_state existed carries the
-	// crawl's rows but no state row, which reads as "never crawled" and pays
-	// for a full /account_list walk on first use. Backfill the state from the
-	// rows already there instead.
-	if _, err := db.Exec(`
-INSERT INTO koios_account_universe_state (network, fetched_at, address_count)
-SELECT network, MAX(fetched_at), COUNT(*)
-FROM koios_account_universe
-WHERE network NOT IN (SELECT network FROM koios_account_universe_state)
-GROUP BY network`); err != nil {
-		return fmt.Errorf("migrate koios_account_universe_state: %w", err)
 	}
 
 	// Older cache files created before #3097 have a koios_account_rewards

@@ -25,10 +25,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // slowGovernanceTallyThreshold bounds how long the per-epoch governance
@@ -91,11 +89,8 @@ func ProcessEpoch(
 	}
 	out := &EpochOutput{UpdatedPParams: in.PParams}
 
-	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
-	if err != nil {
-		return nil, err
-	}
-	if conwayPParams == nil {
+	conwayPParams, ok := in.PParams.(*conway.ConwayProtocolParameters)
+	if !ok {
 		// Pre-Conway: nothing to do, governance state machine is
 		// not yet active.
 		return out, nil
@@ -154,11 +149,22 @@ func ProcessEpoch(
 	if err != nil {
 		return nil, fmt.Errorf("get ratified proposals: %w", err)
 	}
-	applyEnactmentResult := func(
-		proposal *models.GovernanceProposal,
-		res *EnactmentResult,
-		replay bool,
-	) {
+	enactProposal := func(proposal *models.GovernanceProposal, replay bool) error {
+		enactCtx.PParams = out.UpdatedPParams
+		res, err := EnactProposal(enactCtx, proposal)
+		if err != nil {
+			// Abort the tick: enactment may have partially applied
+			// side effects (committee changes, treasury debit), and
+			// continuing would leave the proposal unmarked-enacted,
+			// so the next tick would re-apply it. Returning the
+			// error lets the surrounding DB transaction roll back.
+			return fmt.Errorf(
+				"enact proposal %s#%d: %w",
+				shortHash(proposal.TxHash),
+				proposal.ActionIndex,
+				err,
+			)
+		}
 		if !replay {
 			out.EnactedCount++
 		}
@@ -170,109 +176,16 @@ func ProcessEpoch(
 				out.HardForkInitiated = true
 			}
 		}
+		return nil
 	}
-	enactProposal := func(
-		proposal *models.GovernanceProposal,
-		replay bool,
-	) (bool, error) {
-		// Legacy databases can contain proposals ratified before the current
-		// deterministic enactability checks existed. Classify those known
-		// semantic failures before EnactProposal performs any writes. Once this
-		// preflight succeeds, every EnactProposal error is operational and must
-		// abort the enclosing epoch transaction.
-		if !replay {
-			if _, err := ratificationEnactmentPrecondition(
-				out.UpdatedPParams,
-				in.UpdateFn,
-				proposal,
-				enactCtx.TreasuryWithdrawalRemaining,
-			); err != nil {
-				if err := in.DB.ClearGovernanceProposalRatification(
-					proposal.TxHash,
-					proposal.ActionIndex,
-					in.BoundarySlot,
-					in.Txn,
-				); err != nil {
-					return false, fmt.Errorf(
-						"return deterministically non-enactable proposal %s#%d to pending: %w",
-						shortHash(proposal.TxHash),
-						proposal.ActionIndex,
-						err,
-					)
-				}
-				proposal.RatifiedEpoch = nil
-				proposal.RatifiedSlot = nil
-				if in.Logger != nil {
-					in.Logger.Warn(
-						"governance proposal failed deterministic enactment preflight; returned it to pending",
-						"component",
-						"governance",
-						"tx_hash",
-						shortHash(proposal.TxHash),
-						"action_index",
-						proposal.ActionIndex,
-						"error",
-						err,
-						"epoch",
-						in.NewEpoch,
-					)
-				}
-				return false, nil
-			}
-		}
-
-		candidatePParams, err := cloneGovernanceProtocolParameters(
-			out.UpdatedPParams,
-		)
-		if err != nil {
-			return false, fmt.Errorf("clone enactment pparams: %w", err)
-		}
-		enactCtx.PParams = candidatePParams
-
-		res, err := EnactProposal(enactCtx, proposal)
-		if err != nil {
-			operation := "enact proposal"
-			if replay {
-				// A replay restores the side effects of a proposal already durably
-				// marked enacted at this boundary. It is fatal for the same reason
-				// as an operational error after successful preflight: continuing
-				// would commit an enacted marker without its effects.
-				operation = "replay enacted proposal"
-			}
-			return false, fmt.Errorf(
-				"%s %s#%d: %w",
-				operation,
-				shortHash(proposal.TxHash),
-				proposal.ActionIndex,
-				err,
-			)
-		}
-		applyEnactmentResult(proposal, res, replay)
-		return true, nil
-	}
-	successfullyEnacted := append(
-		make(
-			[]*models.GovernanceProposal,
-			0,
-			len(replayedEnacted)+len(ratified),
-		),
-		replayedEnacted...,
-	)
 	for _, proposal := range replayedEnacted {
-		if _, err := enactProposal(proposal, true); err != nil {
+		if err := enactProposal(proposal, true); err != nil {
 			return nil, err
 		}
 	}
 	for _, proposal := range ratified {
-		enacted, err := enactProposal(
-			proposal,
-			false,
-		)
-		if err != nil {
+		if err := enactProposal(proposal, false); err != nil {
 			return nil, err
-		}
-		if enacted {
-			successfullyEnacted = append(successfullyEnacted, proposal)
 		}
 	}
 
@@ -336,23 +249,27 @@ func ProcessEpoch(
 		}
 	}
 
-	// --- COMPETING SUBTREE REMOVAL ---------------------------------------
-	// Enactment advances a purpose chain: descendants of the enacted action
-	// remain valid, while competing siblings and their descendants are
-	// removed. Natural expiry removes descendants of the expired action.
-	expiredSeeds := append(
-		append(make([]*models.GovernanceProposal, 0,
-			len(replayedExpired)+len(expired)), replayedExpired...),
-		expired...,
+	// --- ORPHAN REMOVAL --------------------------------------------------
+	// Proposals that reference a just-enacted or just-expired proposal as
+	// their parent are "orphaned": their anchor is gone from the active
+	// pool and can never become a chain root. The spec (Conway EPOCH)
+	// calls this set `removedDueToEnactment` and requires deposits to be
+	// returned (or sent to treasury) for all of them. The sweep is
+	// transitive — orphans of orphans are also removed — so we run a BFS
+	// over the dependency graph seeded with every enacted and expired
+	// proposal from this tick.
+	orphanSeeds := make(
+		[]*models.GovernanceProposal,
+		0,
+		len(replayedEnacted)+len(ratified)+
+			len(replayedExpired)+len(expired),
 	)
+	orphanSeeds = append(orphanSeeds, replayedEnacted...)
+	orphanSeeds = append(orphanSeeds, ratified...)
+	orphanSeeds = append(orphanSeeds, replayedExpired...)
+	orphanSeeds = append(orphanSeeds, expired...)
 	orphanCount, err := removeOrphanedProposals(
-		in.DB,
-		in.Txn,
-		successfullyEnacted,
-		expiredSeeds,
-		in.NewEpoch,
-		in.BoundarySlot,
-		in.Logger,
+		in.DB, in.Txn, orphanSeeds, in.NewEpoch, in.BoundarySlot, in.Logger,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("remove orphaned proposals: %w", err)
@@ -463,28 +380,12 @@ func ProcessEpoch(
 	// HardForkInitiation), refresh the Conway pparams view so major
 	// version and threshold reads reflect the updated values.
 	if out.PParamsChanged {
-		updatedConwayPParams, err := conwayGovernanceProtocolParameters(
-			out.UpdatedPParams,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"resolve updated governance pparams: %w",
-				err,
-			)
+		if p, ok := out.UpdatedPParams.(*conway.ConwayProtocolParameters); ok {
+			conwayPParams = p
 		}
-		if updatedConwayPParams == nil {
-			return nil, fmt.Errorf(
-				"governance pparams update returned pre-Conway type %T",
-				out.UpdatedPParams,
-			)
-		}
-		conwayPParams = updatedConwayPParams
 	}
 
 	majorVersion := conwayPParams.ProtocolVersion.Major
-	// RATIFY uses the post-ENACT protocol version for both threshold
-	// selection and action-specific SPO non-voter semantics.
-	tallyCtx.MajorVersion = majorVersion
 	// Computed after ENACT and reused across the RATIFY loop. The
 	// RATIFY loop marks proposals but does not enact committee state.
 	ccQuorum, err := conwayRatifyQuorum(
@@ -498,11 +399,6 @@ func ProcessEpoch(
 	// NoConfidence and UpdateCommittee in the same tick don't both
 	// fire — the spec allows at most one ratification per purpose.
 	ratifiedThisTickByPurpose := make(map[govActionPurpose]bool)
-	// RATIFY carries the post-ENACT treasury in its enactment state. Accepted
-	// withdrawals consume this budget immediately, even though they are not
-	// enacted until a later boundary and even when an unregistered destination
-	// would leave the corresponding lovelace in Dingo's physical treasury pot.
-	ratificationTreasuryRemaining := enactCtx.TreasuryWithdrawalRemaining
 
 	sort.SliceStable(stillActive, func(i, j int) bool {
 		return govActionPriority(stillActive[i]) <
@@ -579,38 +475,40 @@ func ProcessEpoch(
 		if err != nil {
 			return nil, fmt.Errorf("tally: %w", err)
 		}
-		// Decode the action once for every action-specific ratification
-		// predicate. ParameterChange uses the touched parameter groups for
-		// threshold selection in both Conway and Dijkstra, while
-		// UpdateCommittee checks proposed member expiries against the current
-		// epoch and committee term limit.
-		action, decodeErr := decodeGovActionForPParams(
-			proposal.GovActionCbor,
-			proposal.ActionType,
-			out.UpdatedPParams,
-		)
-		if decodeErr != nil {
-			if in.Logger != nil {
-				in.Logger.Error(
-					"skipping proposal: failed to decode governance action",
-					"tx_hash",
-					shortHash(proposal.TxHash),
-					"action_index",
-					proposal.ActionIndex,
-					"action_type",
-					proposal.ActionType,
-					"error",
-					decodeErr,
-					"component",
-					"governance",
-				)
-			}
-			continue
-		}
-		var parameterChange lcommon.ParameterChangeGovAction
+		// For ParameterChange, decode the action so thresholds can
+		// take the touched parameter groups into account (especially
+		// so SPOs only gate security-group changes, and DReps select
+		// the most restrictive touched group).
+		var paramUpdate *conway.ConwayProtocolParameterUpdate
 		if lcommon.GovActionType(proposal.ActionType) ==
 			lcommon.GovActionTypeParameterChange {
-			a, ok := action.(lcommon.ParameterChangeGovAction)
+			action, decodeErr := decodeGovAction(
+				proposal.GovActionCbor, proposal.ActionType,
+			)
+			if decodeErr != nil {
+				// A decode failure means we cannot tell which
+				// parameter groups are touched; silently falling
+				// through with paramUpdate==nil would let SPO
+				// checks return nil and allow security-group
+				// changes to ratify without SPO approval. Skip
+				// this proposal and surface the error so it is
+				// investigated.
+				if in.Logger != nil {
+					in.Logger.Error(
+						"skipping proposal: failed to decode parameter change action",
+						"tx_hash",
+						shortHash(proposal.TxHash),
+						"action_index",
+						proposal.ActionIndex,
+						"error",
+						decodeErr,
+						"component",
+						"governance",
+					)
+				}
+				continue
+			}
+			a, ok := action.(*conway.ConwayParameterChangeGovAction)
 			if !ok {
 				if in.Logger != nil {
 					in.Logger.Error(
@@ -627,14 +525,12 @@ func ProcessEpoch(
 				}
 				continue
 			}
-			parameterChange = a
+			paramUpdate = &a.ParamUpdate
 		}
 		decision := ShouldRatify(RatifyInputs{
 			Tally:                 tally,
 			PParams:               conwayPParams,
-			ParameterChange:       parameterChange,
-			GovAction:             action,
-			CurrentEpoch:          in.NewEpoch,
+			ParamUpdate:           paramUpdate,
 			ActiveDRepCount:       activeDRepCount,
 			ActiveCCCount:         activeCCCount,
 			CCQuorum:              ccQuorum,
@@ -642,26 +538,6 @@ func ProcessEpoch(
 			CommitteeNoConfidence: ccInNoConfidence,
 		})
 		if !decision.Ratified {
-			continue
-		}
-		nextTreasuryRemaining, enactabilityErr := ratificationEnactmentPrecondition(
-			out.UpdatedPParams,
-			in.UpdateFn,
-			proposal,
-			ratificationTreasuryRemaining,
-		)
-		if enactabilityErr != nil {
-			if in.Logger != nil {
-				in.Logger.Warn(
-					"skipping proposal: enactment precondition failed",
-					"component", "governance",
-					"tx_hash", shortHash(proposal.TxHash),
-					"action_index", proposal.ActionIndex,
-					"action_type", proposal.ActionType,
-					"error", enactabilityErr,
-					"epoch", in.NewEpoch,
-				)
-			}
 			continue
 		}
 		// Per CIP-1694, the deposit is returned at enactment (or
@@ -679,7 +555,6 @@ func ProcessEpoch(
 		if purpose != purposeNone {
 			ratifiedThisTickByPurpose[purpose] = true
 		}
-		ratificationTreasuryRemaining = nextTreasuryRemaining
 		out.RatifiedCount++
 		if isDelayingActionPurpose(purpose) {
 			break
@@ -709,132 +584,6 @@ func ProcessEpoch(
 	}
 
 	return out, nil
-}
-
-func cloneGovernanceProtocolParameters(
-	pparams lcommon.ProtocolParameters,
-) (lcommon.ProtocolParameters, error) {
-	return eras.CloneGovernanceProtocolParameters(pparams)
-}
-
-// ratificationEnactmentPrecondition checks the deterministic failure surfaces
-// required before RATIFY may accept a proposal. It also returns the running
-// treasury budget after accepting a treasury withdrawal. Database writes are
-// deliberately not attempted here. Once this preflight succeeds, an error from
-// the later ENACT pass is treated as operational and aborts the epoch.
-func ratificationEnactmentPrecondition(
-	pparams lcommon.ProtocolParameters,
-	updateFn func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error),
-	proposal *models.GovernanceProposal,
-	treasuryRemaining uint64,
-) (uint64, error) {
-	if proposal == nil {
-		return treasuryRemaining, errors.New("nil proposal")
-	}
-	if proposal.Deposit > 0 {
-		if _, _, err := rewardAccountStakeCredential(
-			proposal.ReturnAddress,
-		); err != nil {
-			return treasuryRemaining, fmt.Errorf(
-				"proposal deposit return: %w",
-				err,
-			)
-		}
-	}
-	action, err := decodeGovActionForPParams(
-		proposal.GovActionCbor,
-		proposal.ActionType,
-		pparams,
-	)
-	if err != nil {
-		return treasuryRemaining, fmt.Errorf("decode gov action: %w", err)
-	}
-
-	switch a := action.(type) {
-	case *conway.ConwayParameterChangeGovAction:
-		candidate, err := cloneGovernanceProtocolParameters(pparams)
-		if err != nil {
-			return treasuryRemaining, err
-		}
-		if _, err := updateFn(candidate, a.ParamUpdate); err != nil {
-			return treasuryRemaining, fmt.Errorf("apply param update: %w", err)
-		}
-	case *gdijkstra.DijkstraParameterChangeGovAction:
-		candidate, err := cloneGovernanceProtocolParameters(pparams)
-		if err != nil {
-			return treasuryRemaining, err
-		}
-		if _, err := updateFn(candidate, a.ParamUpdate); err != nil {
-			return treasuryRemaining, fmt.Errorf("apply param update: %w", err)
-		}
-	case *lcommon.HardForkInitiationGovAction:
-		candidate, err := cloneGovernanceProtocolParameters(pparams)
-		if err != nil {
-			return treasuryRemaining, err
-		}
-		if _, err := setProtocolVersion(
-			candidate,
-			a.ProtocolVersion.Major,
-			a.ProtocolVersion.Minor,
-		); err != nil {
-			return treasuryRemaining, fmt.Errorf("schedule hard fork: %w", err)
-		}
-	case *lcommon.TreasuryWithdrawalGovAction:
-		total, err := treasuryWithdrawalTotal(a)
-		if err != nil {
-			return treasuryRemaining, err
-		}
-		if total > treasuryRemaining {
-			return treasuryRemaining, fmt.Errorf(
-				"treasury withdrawal of %d exceeds running ratification budget %d",
-				total,
-				treasuryRemaining,
-			)
-		}
-		for rewardAddr := range a.Withdrawals {
-			if rewardAddr == nil {
-				return treasuryRemaining, errors.New(
-					"nil treasury withdrawal reward address",
-				)
-			}
-			rewardAddrBytes, err := rewardAddr.Bytes()
-			if err != nil {
-				return treasuryRemaining, fmt.Errorf(
-					"encode treasury withdrawal reward address: %w",
-					err,
-				)
-			}
-			if _, _, err := rewardAccountStakeCredential(
-				rewardAddrBytes,
-			); err != nil {
-				return treasuryRemaining, fmt.Errorf(
-					"treasury withdrawal reward account: %w",
-					err,
-				)
-			}
-		}
-		return treasuryRemaining - total, nil
-	case *lcommon.UpdateCommitteeGovAction:
-		if a.Quorum.Rat == nil || a.Quorum.Sign() <= 0 {
-			return treasuryRemaining, errors.New(
-				"committee quorum must be positive",
-			)
-		}
-	case *lcommon.InfoGovAction:
-		// RATIFY rejects Info actions before calling this preflight. A legacy
-		// row can nevertheless already carry a ratification marker, and the
-		// existing ENACT path finalizes that row without action-specific side
-		// effects. It is therefore not a deterministic EnactProposal failure.
-	case *lcommon.NoConfidenceGovAction,
-		*lcommon.NewConstitutionGovAction:
-		// These actions have no additional deterministic local precondition.
-	default:
-		return treasuryRemaining, fmt.Errorf(
-			"unsupported gov action type %T",
-			action,
-		)
-	}
-	return treasuryRemaining, nil
 }
 
 // stakeEpochFor returns the epoch whose "mark" snapshot should be used
@@ -971,108 +720,76 @@ func refundProposalDeposit(
 	return nil
 }
 
-// removeOrphanedProposals removes the losing branches of governance purpose
-// chains. Descendants of enacted proposals remain eligible to follow the new
-// root. Active siblings that share the enacted proposal's former parent and
-// purpose are removed with their full subtrees. Expired proposals instead
-// remove their own descendant subtrees.
+// removeOrphanedProposals performs a BFS over the live proposal dependency
+// graph starting from seeds (enacted + expired proposals from this tick).
+// For each seed it finds active proposals that reference it as their parent.
+// Those dependents are "orphaned" — their anchor is no longer pending and can
+// never become a chain root — so their deposits are refunded and they are
+// marked expired at the boundary slot (using expired_epoch/expired_slot so
+// the existing slot-based rollback path reverts this tick cleanly). The sweep
+// is transitive: each newly-orphaned proposal is itself added to the queue so
+// its dependents are also swept.
 func removeOrphanedProposals(
 	db *database.Database,
 	txn *database.Txn,
-	enacted []*models.GovernanceProposal,
-	expired []*models.GovernanceProposal,
+	seeds []*models.GovernanceProposal,
 	epoch uint64,
 	slot uint64,
 	logger *slog.Logger,
 ) (int, error) {
-	active, err := db.GetActiveGovernanceProposals(epoch, txn)
-	if err != nil {
-		return 0, fmt.Errorf("get active governance proposals: %w", err)
-	}
-	children := make(map[string][]*models.GovernanceProposal)
-	for _, proposal := range active {
-		children[proposalParentKey(proposal)] = append(
-			children[proposalParentKey(proposal)],
-			proposal,
-		)
-	}
-	queue := make([]*models.GovernanceProposal, 0)
-	for _, proposal := range expired {
-		queue = append(queue, children[proposalIdentityKey(proposal)]...)
-	}
-	for _, winner := range enacted {
-		winnerPurpose := govActionPurposeOf(
-			lcommon.GovActionType(winner.ActionType),
-		)
-		if winnerPurpose == purposeNone {
-			continue
-		}
-		for _, sibling := range children[proposalParentKey(winner)] {
-			if govActionPurposeOf(
-				lcommon.GovActionType(sibling.ActionType),
-			) == winnerPurpose {
-				queue = append(queue, sibling)
-			}
-		}
-	}
-	removed := make(map[string]struct{})
+	queue := append(make([]*models.GovernanceProposal, 0, len(seeds)), seeds...)
 	count := 0
 	for len(queue) > 0 {
-		proposal := queue[0]
+		parent := queue[0]
 		queue = queue[1:]
-		identity := proposalIdentityKey(proposal)
-		if _, ok := removed[identity]; ok {
-			continue
-		}
-		removed[identity] = struct{}{}
-		if err := refundProposalDeposit(db, txn, proposal, slot); err != nil {
+		children, err := db.GetChildGovernanceProposals(
+			parent.TxHash, parent.ActionIndex, txn,
+		)
+		if err != nil {
 			return count, fmt.Errorf(
-				"refund removed proposal deposit %s#%d: %w",
-				shortHash(proposal.TxHash), proposal.ActionIndex, err,
+				"get children of proposal %s#%d: %w",
+				shortHash(parent.TxHash),
+				parent.ActionIndex,
+				err,
 			)
 		}
-		expiredEpoch := epoch
-		expiredSlot := slot
-		proposal.ExpiredEpoch = &expiredEpoch
-		proposal.ExpiredSlot = &expiredSlot
-		if err := db.SetGovernanceProposal(proposal, txn); err != nil {
-			return count, fmt.Errorf(
-				"mark removed proposal expired %s#%d: %w",
-				shortHash(proposal.TxHash), proposal.ActionIndex, err,
-			)
+		for _, child := range children {
+			if err := refundProposalDeposit(db, txn, child, slot); err != nil {
+				return count, fmt.Errorf(
+					"refund orphaned proposal deposit %s#%d: %w",
+					shortHash(child.TxHash),
+					child.ActionIndex,
+					err,
+				)
+			}
+			expiredEpoch := epoch
+			expiredSlot := slot
+			child.ExpiredEpoch = &expiredEpoch
+			child.ExpiredSlot = &expiredSlot
+			if err := db.SetGovernanceProposal(child, txn); err != nil {
+				return count, fmt.Errorf(
+					"mark orphaned proposal expired %s#%d: %w",
+					shortHash(child.TxHash),
+					child.ActionIndex,
+					err,
+				)
+			}
+			if logger != nil {
+				logger.Info(
+					"removed orphaned governance proposal",
+					"component", "governance",
+					"tx_hash", shortHash(child.TxHash),
+					"action_index", child.ActionIndex,
+					"parent_tx_hash", shortHash(parent.TxHash),
+					"parent_action_index", parent.ActionIndex,
+					"epoch", epoch,
+				)
+			}
+			queue = append(queue, child)
+			count++
 		}
-		if logger != nil {
-			logger.Info(
-				"removed competing governance proposal",
-				"component", "governance",
-				"tx_hash", shortHash(proposal.TxHash),
-				"action_index", proposal.ActionIndex,
-				"epoch", epoch,
-			)
-		}
-		queue = append(queue, children[identity]...)
-		count++
 	}
 	return count, nil
-}
-
-func proposalIdentityKey(proposal *models.GovernanceProposal) string {
-	if proposal == nil {
-		return ""
-	}
-	return fmt.Sprintf("%x#%d", proposal.TxHash, proposal.ActionIndex)
-}
-
-func proposalParentKey(proposal *models.GovernanceProposal) string {
-	if proposal == nil || len(proposal.ParentTxHash) == 0 ||
-		proposal.ParentActionIdx == nil {
-		return "root"
-	}
-	return fmt.Sprintf(
-		"%x#%d",
-		proposal.ParentTxHash,
-		*proposal.ParentActionIdx,
-	)
 }
 
 func rewardAccountStakeCredential(returnAddress []byte) (uint8, []byte, error) {

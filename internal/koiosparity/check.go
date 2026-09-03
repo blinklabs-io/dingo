@@ -313,8 +313,7 @@ const preStakingThroughEpoch = 1
 // reward_pool_input's stake fields exactly. See ARCHITECTURE.md's Koios
 // Parity Tracker "Epoch alignment" section for the full derivation and
 // koiosParamEpoch below for the distinct offset reward_pool_input's
-// BlocksProduced field needs instead. Margin/FixedCost share this stake-epoch
-// offset rather than that one (dingo #3484).
+// BlocksProduced/Margin/FixedCost fields need instead.
 //
 // ok is false for koiosEpoch <= preStakingThroughEpoch (0 and 1), neither of
 // which has a valid stake epoch (checkEpoch never reaches this for those
@@ -331,29 +330,13 @@ func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 }
 
 // koiosParamEpoch returns the Dingo reward_pool_input epoch whose
-// BlocksProduced field describes Koios reporting epoch koiosEpoch ("K+1").
-// ledger/snapshot/rotation.go's buildRewardStateInputs stamps it from
-// evt.PreviousEpoch (the just-ended epoch) onto the row captured for the
-// *new* epoch — one epoch after the epoch it describes — independent of the
-// stake-epoch offset above, which governs the same row's DelegatedStake/
-// DelegatorCount/Margin/Cost instead. BlocksProduced is the only field read
-// at this offset: a mark snapshot records the pool parameters as of its own
-// boundary, so Margin/FixedCost belong with the stake epoch (dingo #3484).
-// See koiosStakeEpoch's doc comment and ARCHITECTURE.md.
-// poolDepartedAtParamEpoch reports whether keyHex is provably absent from the
-// K+1 pool set. It is false whenever membership could not be established, so
-// an unresolved read never downgrades a missing reward-input row from ERROR.
-func poolDepartedAtParamEpoch(
-	paramEpochPools map[string]struct{},
-	keyHex string,
-) bool {
-	if len(paramEpochPools) == 0 {
-		return false
-	}
-	_, present := paramEpochPools[keyHex]
-	return !present
-}
-
+// BlocksProduced and pool Margin/FixedCost fields describe Koios reporting
+// epoch koiosEpoch ("K+1"). ledger/snapshot/rotation.go's
+// buildRewardStateInputs stamps these fields from evt.PreviousEpoch (the just
+// -ended epoch) onto the row captured for the *new* epoch — one epoch after
+// the epoch they describe — independent of the stake-epoch offset above,
+// which governs the same row's DelegatedStake/DelegatorCount instead. See
+// koiosStakeEpoch's doc comment and ARCHITECTURE.md.
 func koiosParamEpoch(koiosEpoch uint64) uint64 {
 	return koiosEpoch + 1
 }
@@ -493,8 +476,8 @@ func checkEpoch(
 	)
 
 	// 2. Bulk-load all pool reward data for this epoch from Dingo's DB,
-	// spread across stakeEpoch (active stake/delegator count/member rewards,
-	// plus margin/fixed cost) and paramEpoch (blocks produced) — see
+	// spread across stakeEpoch (active stake/delegator count/member rewards)
+	// and paramEpoch (blocks produced/margin/fixed cost) — see
 	// GetPoolEpochDataMap's doc comment. Two-to-three queries regardless of
 	// how many pools Koios knows about.
 	var dingoPoolMap map[string]*DingoPoolEpochData
@@ -507,112 +490,6 @@ func checkEpoch(
 		)
 	} else {
 		dingoPoolErr = epochErr
-	}
-
-	// Pool-set membership at K+1, used to tell a pool that left the pool set
-	// from one whose reward inputs are missing or incomplete.
-	//
-	// epoch_summary.SnapshotReady cannot answer this. It is epoch-level, and
-	// ledger/snapshot/rotation.go writes the epoch summary and the mark
-	// pool_stake_snapshot on every transition "regardless of reward-input
-	// availability" — so a ready summary is compatible with the entire
-	// reward-input bundle having been skipped. buildRewardStateInputs also
-	// deliberately omits a degraded active pool from reward_pool_input while
-	// keeping it in PoolStakeSnapshot. Both cases are genuine missing input,
-	// not departure, and both would pass under an epoch-level flag.
-	//
-	// pool_stake_snapshot is written in both of those cases, so per-pool
-	// absence from it is the evidence that the pool really did leave the set.
-	// Resolved once here so every pool in this epoch is judged against the
-	// same read. A lookup error or an empty set leaves membership unproven,
-	// which keeps the stricter dingo_db_missing classification (dingo #3485).
-	// Absence is only departure proof when the set it is measured against is
-	// known complete. A non-empty read is not enough on its own: if the K+1
-	// summary declares two pools and only one mark row comes back, the
-	// missing one would look departed and hide a dingo_db_missing. The
-	// epoch summary's TotalPoolCount is written from the same
-	// StakeDistribution as those rows (rotation.go), so equality between the
-	// two is what establishes completeness. Anything short of that -- a read
-	// error, an empty set, no ready summary, a zero count, or a count that
-	// disagrees -- leaves membership unproven and keeps the stricter
-	// dingo_db_missing classification (dingo #3485).
-	var paramEpochPools map[string]struct{}
-	var declaredParamPools uint64
-	paramSummary, sErr := dingo.GetEpochData(ctx, paramEpoch)
-	switch {
-	case sErr != nil:
-		logger.Debug(
-			"koiosparity: could not resolve param-epoch pool count",
-			"network", network,
-			"epoch", epoch,
-			"param_epoch", paramEpoch,
-			"error", sErr,
-		)
-	case paramSummary == nil:
-		// No ready summary, so no declared count to verify against.
-	default:
-		declaredParamPools = paramSummary.TotalPoolCount
-	}
-	members, membersErr := dingo.GetPoolStakeSnapshotMembers(ctx, paramEpoch)
-	switch {
-	case membersErr != nil:
-		logger.Debug(
-			"koiosparity: could not resolve param-epoch pool-set membership",
-			"network", network,
-			"epoch", epoch,
-			"param_epoch", paramEpoch,
-			"error", membersErr,
-		)
-	case len(members) == 0:
-		// Cannot distinguish "captured, no pools" from "not captured", and
-		// retention deletes the rows outright — see the reward-input fallback
-		// below.
-	case declaredParamPools == 0:
-		// No ready summary, or no declared count to verify against.
-	case uint64(len(members)) != declaredParamPools:
-		logger.Debug(
-			"koiosparity: param-epoch pool set is incomplete",
-			"network", network,
-			"epoch", epoch,
-			"param_epoch", paramEpoch,
-			"members", len(members),
-			"declared", declaredParamPools,
-		)
-	default:
-		paramEpochPools = members
-	}
-	// pool_stake_snapshot is pruned to currentEpoch-3 by
-	// Manager.cleanupOldSnapshots (ledger/snapshot/rotation.go), so an observer
-	// running behind the node loses that evidence for every epoch it checks
-	// and every departed pool becomes a strict-mode halt. epoch_summary and
-	// reward_pool_input are both retained for the life of the database, and
-	// the same completeness argument applies to them: a K+1 reward-input set
-	// whose size equals the K+1 summary's declared pool count accounts for
-	// every pool in that pool set, so absence from it is departure. Anything
-	// short of an exact match — a degraded pool omitted from reward_pool_input
-	// while it stays in the pool set, a skipped bundle, an unread pool map —
-	// leaves membership unproven and keeps the stricter classification
-	// (dingo #3795, preserving #3485's direction).
-	if paramEpochPools == nil && declaredParamPools > 0 && dingoPoolErr == nil {
-		paramInputs := make(map[string]struct{}, len(dingoPoolMap))
-		for keyHex, dingoPool := range dingoPoolMap {
-			if dingoPool != nil && dingoPool.ParamsPresent {
-				paramInputs[keyHex] = struct{}{}
-			}
-		}
-		if uint64(len(paramInputs)) == declaredParamPools {
-			paramEpochPools = paramInputs
-		} else {
-			logger.Debug(
-				"koiosparity: param-epoch reward-input set does not account "+
-					"for the declared pool set",
-				"network", network,
-				"epoch", epoch,
-				"param_epoch", paramEpoch,
-				"reward_inputs", len(paramInputs),
-				"declared", declaredParamPools,
-			)
-		}
 	}
 	if dingoPoolErr != nil {
 		// Record the DB failure and skip all per-pool comparisons.
@@ -670,7 +547,6 @@ func checkEpoch(
 				now,
 				graceHours,
 				epochEndTime,
-				poolDepartedAtParamEpoch(paramEpochPools, keyHex),
 			)
 			allMismatches = append(allMismatches, poolMismatches...)
 
@@ -687,19 +563,7 @@ func checkEpoch(
 	// Convert key-hash hex back to bech32 so PoolBech32 is consistently formatted.
 	var onlyDingo []string
 	if dingoPoolErr == nil {
-		for keyHex, dingoPool := range dingoPoolMap {
-			// GetPoolEpochDataMap returns the union of the stake-epoch
-			// (K-1) and param-epoch (K+1) reads, so a pool that registered
-			// during K appears here through its param-epoch row alone: its
-			// first mark snapshot is captured at the boundary into K+1, and
-			// it is not part of K's active-stake basis at all. Koios has no
-			// pool_history row for it until K+2, so comparing presence at K
-			// would report a divergence where both sides agree the pool did
-			// not yet exist. Only a pool actually in K's stake basis can be
-			// present-only-in-Dingo (dingo #3483).
-			if !dingoPool.StakePresent {
-				continue
-			}
+		for keyHex := range dingoPoolMap {
 			if _, inKoios := koiosKeySet[keyHex]; !inKoios {
 				poolBech32, bechErr := PoolKeyHashHexToBech32(keyHex)
 				if bechErr != nil {

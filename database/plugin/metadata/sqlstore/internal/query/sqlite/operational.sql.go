@@ -390,11 +390,10 @@ func (q *Queries) CreateMidnightRegistration(ctx context.Context, arg CreateMidn
 const createPoolStakeSnapshot = `-- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    delegator_count, captured_slot, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -406,8 +405,6 @@ type CreatePoolStakeSnapshotParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
-	LeiosKeyPublic                []byte
-	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -422,8 +419,6 @@ func (q *Queries) CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolSta
 		arg.StakeDenominator,
 		arg.DelegatorCount,
 		arg.CapturedSlot,
-		arg.LeiosKeyPublic,
-		arg.LeiosKeyPossessionProof,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -1507,8 +1502,7 @@ func (q *Queries) GetBlockSlotRangeStats(ctx context.Context, arg GetBlockSlotRa
 }
 
 const getCommitteeMembers = `-- name: GetCommitteeMembers :many
-SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       term_start_slot_set, added_slot, deleted_slot
+SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
 FROM committee_member
 WHERE deleted_slot IS NULL
 ORDER BY id
@@ -1525,11 +1519,8 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 		var i CommitteeMember
 		if err := rows.Scan(
 			&i.ID,
-			&i.ColdCredentialTag,
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
-			&i.TermStartSlot,
-			&i.TermStartSlotSet,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -1547,8 +1538,7 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 }
 
 const getCommitteeMembersIncludeDeleted = `-- name: GetCommitteeMembersIncludeDeleted :many
-SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       term_start_slot_set, added_slot, deleted_slot
+SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
 FROM committee_member
 ORDER BY id
 `
@@ -1564,11 +1554,8 @@ func (q *Queries) GetCommitteeMembersIncludeDeleted(ctx context.Context) ([]Comm
 		var i CommitteeMember
 		if err := rows.Scan(
 			&i.ID,
-			&i.ColdCredentialTag,
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
-			&i.TermStartSlot,
-			&i.TermStartSlotSet,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -2730,7 +2717,6 @@ func (q *Queries) GetPParams(ctx context.Context, arg GetPParamsParams) ([]Ppara
 const getPoolStakeSnapshot = `-- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
-       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2755,8 +2741,6 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 		&i.StakeDenominator,
 		&i.DelegatorCount,
 		&i.CapturedSlot,
-		&i.LeiosKeyPublic,
-		&i.LeiosKeyPossessionProof,
 		&i.CalculationVersion,
 		&i.RewardAccountAutoVote,
 		&i.RewardAccountAutoVoteResolved,
@@ -2767,7 +2751,6 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 const getPoolStakeSnapshotsByEpoch = `-- name: GetPoolStakeSnapshotsByEpoch :many
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
-       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2798,8 +2781,6 @@ func (q *Queries) GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolS
 			&i.StakeDenominator,
 			&i.DelegatorCount,
 			&i.CapturedSlot,
-			&i.LeiosKeyPublic,
-			&i.LeiosKeyPossessionProof,
 			&i.CalculationVersion,
 			&i.RewardAccountAutoVote,
 			&i.RewardAccountAutoVoteResolved,
@@ -3915,18 +3896,15 @@ func (q *Queries) SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryPara
 const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    delegator_count, captured_slot, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
     delegator_count = excluded.delegator_count,
     captured_slot = excluded.captured_slot,
-    leios_key_public = excluded.leios_key_public,
-    leios_key_possession_proof = excluded.leios_key_possession_proof,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -3942,8 +3920,6 @@ type SavePoolStakeSnapshotParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
-	LeiosKeyPublic                []byte
-	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -3958,8 +3934,6 @@ func (q *Queries) SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSn
 		arg.StakeDenominator,
 		arg.DelegatorCount,
 		arg.CapturedSlot,
-		arg.LeiosKeyPublic,
-		arg.LeiosKeyPossessionProof,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -4326,35 +4300,26 @@ func (q *Queries) SetBlockNonce(ctx context.Context, arg SetBlockNonceParams) er
 
 const setCommitteeMember = `-- name: SetCommitteeMember :one
 INSERT INTO committee_member (
-    cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-    term_start_slot_set, added_slot, deleted_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (cold_credential_tag, cold_cred_hash, added_slot) DO UPDATE SET
+    cold_cred_hash, expires_epoch, added_slot, deleted_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (cold_cred_hash) DO UPDATE SET
     expires_epoch = excluded.expires_epoch,
-    term_start_slot = excluded.term_start_slot,
-    term_start_slot_set = excluded.term_start_slot_set,
     added_slot = excluded.added_slot,
     deleted_slot = excluded.deleted_slot
 RETURNING id
 `
 
 type SetCommitteeMemberParams struct {
-	ColdCredentialTag int64
-	ColdCredHash      []byte
-	ExpiresEpoch      int64
-	TermStartSlot     int64
-	TermStartSlotSet  bool
-	AddedSlot         int64
-	DeletedSlot       sql.NullInt64
+	ColdCredHash []byte
+	ExpiresEpoch int64
+	AddedSlot    int64
+	DeletedSlot  sql.NullInt64
 }
 
 func (q *Queries) SetCommitteeMember(ctx context.Context, arg SetCommitteeMemberParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, setCommitteeMember,
-		arg.ColdCredentialTag,
 		arg.ColdCredHash,
 		arg.ExpiresEpoch,
-		arg.TermStartSlot,
-		arg.TermStartSlotSet,
 		arg.AddedSlot,
 		arg.DeletedSlot,
 	)
@@ -4674,17 +4639,16 @@ func (q *Queries) SoftDeleteAllCommitteeMembers(ctx context.Context, deletedSlot
 const softDeleteCommitteeMember = `-- name: SoftDeleteCommitteeMember :exec
 UPDATE committee_member
 SET deleted_slot = ?
-WHERE cold_credential_tag = ? AND cold_cred_hash = ? AND deleted_slot IS NULL
+WHERE cold_cred_hash = ? AND deleted_slot IS NULL
 `
 
 type SoftDeleteCommitteeMemberParams struct {
-	DeletedSlot       sql.NullInt64
-	ColdCredentialTag int64
-	ColdCredHash      []byte
+	DeletedSlot  sql.NullInt64
+	ColdCredHash []byte
 }
 
 func (q *Queries) SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteCommitteeMemberParams) error {
-	_, err := q.db.ExecContext(ctx, softDeleteCommitteeMember, arg.DeletedSlot, arg.ColdCredentialTag, arg.ColdCredHash)
+	_, err := q.db.ExecContext(ctx, softDeleteCommitteeMember, arg.DeletedSlot, arg.ColdCredHash)
 	return err
 }
 

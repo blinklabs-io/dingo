@@ -73,13 +73,9 @@ type ChainsyncEvent struct {
 	ArrivalTime time.Time
 	Point       ocommon.Point  // Chain point for roll forward/backward
 	Tip         ochainsync.Tip // Upstream chain tip
-	// SyncTarget is the event-paired, policy-approved target eligible for
-	// publication only after this header is admitted.
-	SyncTarget        ochainsync.Tip
-	SyncTargetTrusted bool
-	BlockNumber       uint64
-	Type              uint // Block or header type ID
-	Rollback          bool // Set to true for a Rollback event
+	BlockNumber uint64
+	Type        uint // Block or header type ID
+	Rollback    bool // Set to true for a Rollback event
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports

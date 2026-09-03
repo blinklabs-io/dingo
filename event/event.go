@@ -55,18 +55,6 @@ var ErrEventBusStopped = errors.New("event bus stopped")
 
 var errChannelSubscriberClosed = errors.New("channel subscriber closed")
 
-// ErrEventSubscriberStalled is returned by PublishBlocking when an ordinary
-// in-memory subscriber stays full past the delivery bound and is detached.
-var ErrEventSubscriberStalled = errors.New("event subscriber stalled")
-
-// channelDeliveryTimeout bounds how long an in-memory subscriber may keep a
-// publisher parked after its buffer fills. The ordinary policy detaches a
-// subscriber that cannot drain in this interval, so it cannot indefinitely
-// stall the remaining subscribers of that event type. Tests shorten it through
-// this package-local variable; production uses the same bound as remote
-// delivery.
-var channelDeliveryTimeout = RemoteDeliverTimeout
-
 // deliveryStallWarnInterval is how long a single delivery may wait for
 // subscriber capacity before the subscriber is reported as stalled, and how
 // often that report repeats while the wait continues. Backpressure is normal
@@ -79,26 +67,6 @@ type EventType string
 type EventSubscriberId int
 
 type EventHandlerFunc func(Event)
-
-// SubscriberBackpressurePolicy decides what happens when a channel-backed
-// subscriber stays full past the delivery timeout.
-type SubscriberBackpressurePolicy uint8
-
-const (
-	// SubscriberBackpressureDetach removes a subscriber that is no longer
-	// making progress. It is the default for ordinary asynchronous consumers.
-	SubscriberBackpressureDetach SubscriberBackpressurePolicy = iota
-	// SubscriberBackpressureBlock keeps a lossless subscriber attached until it
-	// drains or normal lifecycle cancellation closes it. Use this for a stream
-	// whose omission would make the owning component unable to recover safely.
-	SubscriberBackpressureBlock
-)
-
-// EventPanicHandler is invoked by SubscribeFuncStrict, on the subscription's
-// own dispatch goroutine, after a handler panic has been recovered and
-// logged. It receives the event that was being processed and the recovered
-// panic value.
-type EventPanicHandler func(Event, any)
 
 type Event struct {
 	Timestamp time.Time
@@ -271,16 +239,9 @@ type channelSubscriber struct {
 	// capacity. Set once at subscribe time, before the subscriber is
 	// reachable by any publisher.
 	onBlocked func()
-	// onStalled reports an in-memory subscriber detached after the delivery
-	// timeout. Set while subscribing, before the subscriber is published.
-	onStalled func()
-	// backpressurePolicy decides whether a full channel is detached after the
-	// timeout or remains lossless until its lifecycle closes it.
-	backpressurePolicy SubscriberBackpressurePolicy
-	closeOnce          sync.Once
-	mu                 sync.RWMutex
-	closed             bool
-	closeCause         atomic.Int32
+	closeOnce sync.Once
+	mu        sync.RWMutex
+	closed    bool
 
 	// eventType is the type this subscriber was registered under —
 	// checked in unsubscribe against the eventType a caller passes in,
@@ -350,19 +311,12 @@ func newChannelSubscriber(
 	eventType EventType,
 	buffer int,
 	logger *slog.Logger,
-	backpressurePolicies ...SubscriberBackpressurePolicy,
 ) *channelSubscriber {
-	backpressurePolicy := SubscriberBackpressureDetach
-	if len(backpressurePolicies) > 0 &&
-		backpressurePolicies[0] == SubscriberBackpressureBlock {
-		backpressurePolicy = backpressurePolicies[0]
-	}
 	return &channelSubscriber{
-		ch:                 make(chan Event, buffer),
-		logger:             logger,
-		closeReq:           make(chan struct{}),
-		eventType:          eventType,
-		backpressurePolicy: backpressurePolicy,
+		ch:        make(chan Event, buffer),
+		logger:    logger,
+		closeReq:  make(chan struct{}),
+		eventType: eventType,
 	}
 }
 
@@ -424,15 +378,6 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 	if c.closed {
 		return errChannelSubscriberClosed
 	}
-	// A stalled delivery requests closure before EventBus.unsubscribe can take
-	// the subscriber out of its snapshot. Do not let a concurrent publisher
-	// refill a channel in that small interval: the subscriber has already been
-	// detached from the delivery contract.
-	select {
-	case <-c.closeReq:
-		return c.closedDeliveryError()
-	default:
-	}
 
 	select {
 	case c.ch <- evt:
@@ -448,61 +393,19 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 	defer c.stallWaiters.Add(-1)
 	stall := time.NewTimer(deliveryStallWarnInterval)
 	defer stall.Stop()
-	var deliveryTimeout <-chan time.Time
-	var stopDeliveryTimeout func()
-	if c.backpressurePolicy == SubscriberBackpressureDetach {
-		timeout := time.NewTimer(channelDeliveryTimeout)
-		deliveryTimeout = timeout.C
-		stopDeliveryTimeout = func() { timeout.Stop() }
-	}
-	if stopDeliveryTimeout != nil {
-		defer stopDeliveryTimeout()
-	}
 	for {
 		select {
 		case c.ch <- evt:
 			return nil
 		case <-c.closeReq:
-			return c.closedDeliveryError()
+			return errChannelSubscriberClosed
 		case <-c.busStop:
 			return errChannelSubscriberClosed
-		case <-deliveryTimeout:
-			// Close the request channel before returning. Publish removes the
-			// subscriber immediately after this error, but every concurrent
-			// publisher must already see the detachment while that removal is
-			// in flight.
-			if c.requestClose(stalledSubscriberCloseCause) {
-				c.reportStalled(evt.Type)
-			}
-			return c.closedDeliveryError()
 		case <-stall.C:
 			c.warnStalled(evt.Type)
 			stall.Reset(deliveryStallWarnInterval)
 		}
 	}
-}
-
-func (c *channelSubscriber) closedDeliveryError() error {
-	if c.closeCause.Load() == stalledSubscriberCloseCause {
-		return ErrEventSubscriberStalled
-	}
-	return errChannelSubscriberClosed
-}
-
-func (c *channelSubscriber) reportStalled(eventType EventType) {
-	if c.onStalled != nil {
-		c.onStalled()
-	}
-	if c.logger == nil {
-		return
-	}
-	c.logger.Warn(
-		"event subscriber detached after delivery timeout",
-		"type", eventType,
-		"buffer", cap(c.ch),
-		"timeout", channelDeliveryTimeout,
-		"blocked_publishers", c.stallWaiters.Load(),
-	)
 }
 
 // Deliver waits for subscriber capacity and reports success even when the
@@ -526,26 +429,13 @@ func (c *channelSubscriber) Close() {
 	c.close(false)
 }
 
-const (
-	normalSubscriberCloseCause int32 = iota + 1
-	stalledSubscriberCloseCause
-)
-
-func (c *channelSubscriber) requestClose(cause int32) bool {
-	if !c.closeCause.CompareAndSwap(0, cause) {
-		return false
-	}
-	c.closeOnce.Do(func() {
-		close(c.closeReq)
-	})
-	return true
-}
-
 func (c *channelSubscriber) close(discardQueued bool) {
 	// Release waiting sends before asking for the write lock; they hold the
 	// read lock, so the write lock would otherwise wait on a wait that only
 	// Close can end.
-	_ = c.requestClose(normalSubscriberCloseCause)
+	c.closeOnce.Do(func() {
+		close(c.closeReq)
+	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -571,7 +461,6 @@ func (e *EventBus) subscribeInternal(
 	eventType EventType,
 	buffer int,
 	withDone bool,
-	backpressurePolicy SubscriberBackpressurePolicy,
 ) (EventSubscriberId, *channelSubscriber) {
 	if buffer <= 0 {
 		buffer = DefaultSubscriberBuffer
@@ -584,21 +473,13 @@ func (e *EventBus) subscribeInternal(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Create channel-backed subscriber
-	chSub := newChannelSubscriber(
-		eventType,
-		buffer,
-		e.Logger,
-		backpressurePolicy,
-	)
+	chSub := newChannelSubscriber(eventType, buffer, e.Logger)
 	chSub.busStop = busStop
 	if e.metrics != nil {
 		chSub.onBlocked = func() {
 			e.metrics.deliveryBlocked.WithLabelValues(
 				string(eventType), "in-memory",
 			).Inc()
-		}
-		chSub.onStalled = func() {
-			e.metrics.deliveryTimeouts.WithLabelValues(string(eventType)).Inc()
 		}
 	}
 	if withDone {
@@ -655,32 +536,12 @@ func (e *EventBus) SubscribeWithBuffer(
 	eventType EventType,
 	buffer int,
 ) (EventSubscriberId, <-chan Event) {
-	return e.SubscribeWithBufferPolicy(
-		eventType,
-		buffer,
-		SubscriberBackpressureDetach,
-	)
-}
-
-// SubscribeWithBufferPolicy is SubscribeWithBuffer with an explicit stalled
-// subscriber policy. Use SubscriberBackpressureBlock only when detaching the
-// subscriber would leave its owning component unable to recover safely.
-func (e *EventBus) SubscribeWithBufferPolicy(
-	eventType EventType,
-	buffer int,
-	backpressurePolicy SubscriberBackpressurePolicy,
-) (EventSubscriberId, <-chan Event) {
 	e.stopMu.RLock()
 	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
 		return 0, nil
 	}
-	subId, chSub := e.subscribeInternal(
-		eventType,
-		buffer,
-		false,
-		backpressurePolicy,
-	)
+	subId, chSub := e.subscribeInternal(eventType, buffer, false)
 	e.stopMu.RUnlock()
 	return subId, chSub.ch
 }
@@ -705,24 +566,6 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 	buffer int,
 	handlerFunc EventHandlerFunc,
 ) EventSubscriberId {
-	return e.SubscribeFuncWithBufferPolicy(
-		eventType,
-		buffer,
-		SubscriberBackpressureDetach,
-		handlerFunc,
-	)
-}
-
-// SubscribeFuncWithBufferPolicy is SubscribeFuncWithBuffer with an explicit
-// stalled subscriber policy. Use SubscriberBackpressureBlock only when
-// detaching the subscriber would leave its owning component unable to recover
-// safely.
-func (e *EventBus) SubscribeFuncWithBufferPolicy(
-	eventType EventType,
-	buffer int,
-	backpressurePolicy SubscriberBackpressurePolicy,
-	handlerFunc EventHandlerFunc,
-) EventSubscriberId {
 	// Hold stopMu.RLock through Add(1) to prevent Stop() from calling Wait()
 	// before we increment the counter. This prevents the race where:
 	// 1. Stop() sets stopped=true and proceeds to subscriberWg.Wait()
@@ -739,12 +582,7 @@ func (e *EventBus) SubscribeFuncWithBufferPolicy(
 	// subscribeInternal has already returned and released e.mu) is
 	// required for a concurrent Unsubscribe/UnsubscribeAndWait to always
 	// observe a non-nil done once the subId is visible at all.
-	subId, chSub := e.subscribeInternal(
-		eventType,
-		buffer,
-		true,
-		backpressurePolicy,
-	)
+	subId, chSub := e.subscribeInternal(eventType, buffer, true)
 	e.subscriberWg.Add(1)
 	e.stopMu.RUnlock()
 
@@ -770,95 +608,7 @@ func (e *EventBus) SubscribeFuncWithBufferPolicy(
 			if e.terminalClosing.Load() {
 				return
 			}
-			e.safeHandlerCall(handlerFunc, evt, nil)
-		}
-	}(
-		chSub.ch,
-		handlerFunc,
-		chSub.done,
-	)
-	return subId
-}
-
-// SubscribeFuncStrict is like SubscribeFuncWithBufferPolicy, but for handlers
-// that implement state-machine logic where silently continuing past a failed
-// event is unsafe -- e.g. a handler that mutates state derived from a
-// monotonic stream of chain events, where the next event's correctness
-// depends on the previous one having actually been applied. A handler panic
-// is never absorbed the way it is for a plain SubscribeFunc handler:
-//
-//   - it is still recovered and logged, so it cannot crash the node;
-//   - onPanic (if non-nil) is invoked with the event and the recovered panic
-//     value, on the subscription's own dispatch goroutine, so the owning
-//     component can react (log with its own context, alert, mark itself
-//     degraded);
-//   - the subscription is then torn down and its dispatch goroutine exits,
-//     so no further event is delivered into (and silently dropped by) a
-//     handler that just proved its state may be inconsistent.
-//
-// backpressurePolicy is independent of the panic behavior above and must be
-// chosen deliberately: SubscriberBackpressureDetach can silently drop this
-// subscription on ordinary backpressure alone, with the same permanent loss
-// of future events as a panic would cause, since nothing here re-subscribes.
-// Use SubscriberBackpressureBlock for an ordering-critical stream whose
-// omission would leave the owning component's state stale in a way it cannot
-// safely recover from -- chainselection.NewChainSelector's PeerRollbackEvent
-// subscription is the concrete example.
-//
-// Use SubscribeFunc/SubscribeFuncWithBuffer instead for handlers that are
-// safe to keep retrying on the next event -- internal/dblifecycle.Manager is
-// the concrete example this distinction exists for: a panic in one epoch's
-// snapshot attempt must not stop automatic snapshots for every later epoch,
-// so it deliberately relies on the plain SubscribeFunc behavior instead.
-func (e *EventBus) SubscribeFuncStrict(
-	eventType EventType,
-	buffer int,
-	backpressurePolicy SubscriberBackpressurePolicy,
-	handlerFunc EventHandlerFunc,
-	onPanic EventPanicHandler,
-) EventSubscriberId {
-	e.stopMu.RLock()
-	if e.stopped || e.closed {
-		e.stopMu.RUnlock()
-		return 0
-	}
-	subId, chSub := e.subscribeInternal(
-		eventType,
-		buffer,
-		true,
-		backpressurePolicy,
-	)
-	e.subscriberWg.Add(1)
-	e.stopMu.RUnlock()
-
-	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {
-		defer close(done)
-		defer e.subscriberWg.Done()
-		// Self-cleans its own channelSubsById entry for the same reason
-		// SubscribeFuncWithBufferPolicy's dispatch goroutine does -- see its
-		// matching comment above. The panic path below additionally calls
-		// Unsubscribe itself, which removes the e.subscribers/snapshot
-		// entries immediately; this defer only ever needs to cover the
-		// channelSubsById bookkeeping unsubscribe() defers to it.
-		defer func() {
-			e.mu.Lock()
-			delete(e.channelSubsById, subId)
-			e.mu.Unlock()
-		}()
-		for {
-			evt, ok := <-evtCh
-			if !ok {
-				return
-			}
-			if e.terminalClosing.Load() {
-				return
-			}
-			if e.safeHandlerCall(handlerFunc, evt, onPanic) {
-				// The handler panicked: stop delivering events to it rather
-				// than looping back for the next one as if nothing failed.
-				e.Unsubscribe(eventType, subId)
-				return
-			}
+			e.safeHandlerCall(handlerFunc, evt)
 		}
 	}(
 		chSub.ch,
@@ -869,95 +619,25 @@ func (e *EventBus) SubscribeFuncStrict(
 }
 
 // safeHandlerCall invokes a SubscribeFunc handler with panic recovery so that
-// a misbehaving handler cannot crash the node. Returns true if the handler
-// panicked. onPanic, when non-nil, runs after the panic is recovered and
-// logged.
+// a misbehaving handler cannot crash the node.
 func (e *EventBus) safeHandlerCall(
 	handlerFunc EventHandlerFunc,
 	evt Event,
-	onPanic EventPanicHandler,
-) (panicked bool) {
+) {
 	defer func() {
 		if r := recover(); r != nil {
-			panicked = true
-			e.reportHandlerPanic(evt, r, onPanic)
+			logger := e.Logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Error(
+				"SubscribeFunc handler panicked",
+				"event_type", evt.Type,
+				"panic", r,
+			)
 		}
 	}()
 	handlerFunc(evt)
-	return false
-}
-
-// reportHandlerPanic logs a recovered SubscribeFunc handler panic and invokes
-// onPanic, each under its own nested recovery. It always runs from inside
-// safeHandlerCall's deferred recover, which has already consumed the
-// handler's own panic -- nothing further up the call stack can catch a
-// second one. Without containing it here, a misbehaving Logger or onPanic
-// hook panicking would propagate out of safeHandlerCall as a brand new,
-// unrecovered panic: safeHandlerCall would never return at all (so
-// SubscribeFuncStrict never observes panicked=true and never tears the
-// subscription down), and the panic would keep unwinding past the dispatch
-// goroutine's remaining defers with nothing left to catch it, crashing the
-// entire process over what should have been a single bad event.
-func (e *EventBus) reportHandlerPanic(
-	evt Event,
-	r any,
-	onPanic EventPanicHandler,
-) {
-	func() {
-		defer func() {
-			if r2 := recover(); r2 != nil {
-				// The configured Logger just proved unusable; fall back to
-				// the stdlib default rather than risk calling it again.
-				// safeLog, not a direct call: the fallback itself must not
-				// be the thing that finally lets a panic escape.
-				safeLog(
-					slog.Default(),
-					"panic while logging a SubscribeFunc handler panic",
-					"event_type", evt.Type,
-					"original_panic", r,
-					"logging_panic", r2,
-				)
-			}
-		}()
-		logger := e.Logger
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Error(
-			"SubscribeFunc handler panicked",
-			"event_type", evt.Type,
-			"panic", r,
-		)
-	}()
-	if onPanic == nil {
-		return
-	}
-	func() {
-		defer func() {
-			if r2 := recover(); r2 != nil {
-				safeLog(
-					slog.Default(),
-					"panic in SubscribeFuncStrict onPanic hook",
-					"event_type", evt.Type,
-					"original_panic", r,
-					"hook_panic", r2,
-				)
-			}
-		}()
-		onPanic(evt, r)
-	}()
-}
-
-// safeLog calls logger.Error, discarding any panic instead of letting it
-// propagate. Used only as the last-resort step inside a panic-recovery path
-// that has nothing left above it to catch a further panic -- e.g. reporting
-// that the configured Logger itself panicked, via slog.Default() instead.
-// Even that fallback must not be the thing that finally lets a panic escape,
-// so this is the floor: it stops here, silently, rather than one level
-// deeper.
-func safeLog(logger *slog.Logger, msg string, args ...any) {
-	defer func() { _ = recover() }()
-	logger.Error(msg, args...)
 }
 
 // Unsubscribe stops delivery of events for a particular type for an existing subscriber
@@ -1089,10 +769,11 @@ func (e *EventBus) unsubscribe(
 }
 
 // deliverWithTimeout calls sub.Deliver with a timeout for non-channel
-// subscribers. channel subscribers enforce their own timeout in deliverWait,
-// so their stalled send can synchronously request detachment without leaving a
-// delivery goroutine behind. For other (e.g. network-backed) implementations,
-// the call is bounded by RemoteDeliverTimeout to prevent worker stalls.
+// subscribers. channelSubscriber.Deliver is called directly: it waits for
+// buffer capacity by design, and bounding that wait would put the drop this
+// package no longer performs back into the delivery path. For other (e.g.
+// network-backed) implementations, the call is bounded by
+// RemoteDeliverTimeout to prevent worker stalls.
 //
 // Bounded goroutine leak on timeout: when the timeout fires, the
 // goroutine running sub.Deliver remains alive until Deliver returns.

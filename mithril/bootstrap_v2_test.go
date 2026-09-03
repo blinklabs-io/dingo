@@ -219,30 +219,7 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(pastEra), cbor.RawMessage(currentEra),
 	})
 	require.NoError(t, err)
-	neutralNonce, err := cbor.Encode([]any{uint64(0)})
-	require.NoError(t, err)
-	praosState, err := cbor.Encode([]any{
-		uint64(0),
-		cbor.RawMessage(emptyMap),
-		cbor.RawMessage(neutralNonce),
-		cbor.RawMessage(neutralNonce),
-		cbor.RawMessage(neutralNonce),
-		cbor.RawMessage(neutralNonce),
-		cbor.RawMessage(neutralNonce),
-		cbor.RawMessage(neutralNonce),
-	})
-	require.NoError(t, err)
-	praosCurrentEra, err := cbor.Encode([]any{
-		cbor.RawMessage(bound), cbor.RawMessage(praosState),
-	})
-	require.NoError(t, err)
-	praosTelescope, err := cbor.Encode([]any{
-		cbor.RawMessage(pastEra), cbor.RawMessage(praosCurrentEra),
-	})
-	require.NoError(t, err)
-	headerState, err := cbor.Encode([]any{
-		[]any{}, cbor.RawMessage(praosTelescope),
-	})
+	headerState, err := cbor.Encode([]any{[]any{}, []any{}})
 	require.NoError(t, err)
 	snapshot, err := cbor.Encode([]any{
 		cbor.RawMessage(telescope), cbor.RawMessage(headerState),
@@ -1017,9 +994,7 @@ func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 	cfg := BootstrapConfig{
 		VerifyCertificateChain:   true,
 		AncillaryVerificationKey: mithrilJSONHexKey(t, pub),
-		Logger: slog.New(
-			slog.NewTextHandler(io.Discard, nil),
-		),
+		Logger:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	downloadDir := t.TempDir()

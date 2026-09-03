@@ -26,10 +26,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=compose-project.sh
-source "${SCRIPT_DIR}/compose-project.sh"
-devnet_compose_project
-devnet_topology_dir
 
 # Mode selection precedence: CLI, COMPOSE_PROFILES, then dingo.
 MODE=""
@@ -56,8 +52,7 @@ case "${MODE}" in
     ;;
 esac
 
-echo "Stopping DevNet containers and removing volumes (mode: ${MODE}, project: ${COMPOSE_PROJECT_NAME})..."
+echo "Stopping DevNet containers and removing volumes (mode: ${MODE})..."
 docker compose -f "${SCRIPT_DIR}/docker-compose.yml" down -v
-rm -rf "${DEVNET_TOPOLOGY_DIR}" || true
 
 echo "DevNet stopped."

@@ -382,11 +382,7 @@ Database Workers:
 			case config.RunModeLoad:
 				// Validate() has already enforced that ImmutableDbPath
 				// is set for load mode
-				return loadRun(
-					cmd.Context(),
-					[]string{cfg.ImmutableDbPath},
-					cfg,
-				)
+				return loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
 			case config.RunModeServe, config.RunModeDev, config.RunModeLeios:
 				// serve, dev, and leios modes all run the server
 				return serveRun(cmd, args, cfg)

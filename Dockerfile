@@ -6,7 +6,7 @@
 # uses it in place of the image's own go1.26.3. Advance this tag when
 # blinklabs-io/docker-go publishes a newer one; never lower the go.mod floor to
 # match it.
-FROM ghcr.io/blinklabs-io/go:1.26.7-1 AS build
+FROM ghcr.io/blinklabs-io/go:1.26.3-1 AS build
 
 ARG VERSION
 ARG COMMIT_HASH
@@ -22,7 +22,6 @@ COPY . .
 RUN make build
 
 FROM build AS antithesis-build
-RUN apk add --no-cache bash
 RUN go get github.com/antithesishq/antithesis-sdk-go@latest
 RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-instrumentor@latest
 RUN make mod-tidy
@@ -33,9 +32,9 @@ WORKDIR /antithesis/customer
 RUN make build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.0.0.0-1 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20260829-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20260817-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/nview:0.15.0 AS nview
-FROM ghcr.io/blinklabs-io/txtop:0.16.0 AS txtop
+FROM ghcr.io/blinklabs-io/txtop:0.15.0 AS txtop
 
 FROM debian:bookworm-slim AS dingo
 # pg_dump/pg_restore version compatibility is asymmetric and narrower than

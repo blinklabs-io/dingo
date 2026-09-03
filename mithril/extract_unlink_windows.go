@@ -53,11 +53,7 @@ func removeExtractedFile(root *os.Root, name, fullPath string) error {
 	}
 	defer dirFile.Close()
 
-	handle, err := openRelativeForDeletion(
-		dir,
-		base,
-		windows.FILE_NON_DIRECTORY_FILE,
-	)
+	handle, err := openRelativeForDeletion(dir, base, windows.FILE_NON_DIRECTORY_FILE)
 	if err != nil {
 		return &os.PathError{Op: "unlink", Path: fullPath, Err: err}
 	}

@@ -357,84 +357,6 @@ func TestParsePoolParamsMapAcceptsPoolDistrEntry(t *testing.T) {
 	require.Equal(t, vrfHash[:], pool.VrfKeyHash)
 }
 
-func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
-	t *testing.T,
-) {
-	poolHash := toFixed28([]byte("w32 snapshot pool key hash"))
-	credentialHash := toFixed28([]byte("w32 snapshot credential"))
-	rewardHash := toFixed28([]byte("w32 snapshot reward account"))
-	vrfHash := [32]byte{}
-	copy(vrfHash[:], []byte("w32 snapshot vrf key hash"))
-	publicKey := make([]byte, 96)
-	copy(publicKey, []byte("w32 snapshot Leios public key"))
-	possessionProof := make([]byte, 48)
-	copy(possessionProof, []byte("w32 snapshot Leios possession proof"))
-
-	poolMap := encodeCredentialMapEntry(
-		t,
-		poolHash[:],
-		[]any{
-			uint64(42),
-			&cbor.Rat{Rat: big.NewRat(1, 1)},
-			[]any{},
-			uint64(0),
-			vrfHash[:],
-			[]any{[]any{publicKey, possessionProof}},
-			uint64(1),
-			uint64(2),
-			&cbor.Rat{Rat: big.NewRat(1, 100)},
-			uint64(1),
-			[]any{uint64(0), rewardHash[:]},
-		},
-	)
-	pools, err := parsePoolParamsMap(poolMap)
-	require.NoError(t, err)
-	pool := pools[hex.EncodeToString(poolHash[:])]
-	require.NotNil(t, pool)
-	require.Equal(t, publicKey, pool.LeiosKeyPublic)
-	require.Equal(t, possessionProof, pool.LeiosKeyPossessionProof)
-
-	credentialHex := hex.EncodeToString(credentialHash[:])
-	rows := AggregatePoolStake(&ParsedSnapShot{
-		Stake:       map[string]uint64{credentialHex: 42},
-		Delegations: map[string][]byte{credentialHex: poolHash[:]},
-		PoolParams:  pools,
-	}, 9, "mark", 99)
-	require.Len(t, rows, 1)
-	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
-	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
-
-	// The row owns its bytes independently of the decoded pool parameters.
-	pool.LeiosKeyPublic[0] ^= 0xff
-	pool.LeiosKeyPossessionProof[0] ^= 0xff
-	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
-	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
-}
-
-func TestParseW32SnapshotPoolParamsRejectsMalformedLeiosKey(t *testing.T) {
-	poolHash := toFixed28([]byte("malformed snapshot pool key"))
-	vrfHash := make([]byte, 32)
-	rewardHash := toFixed28([]byte("malformed snapshot reward"))
-	record, err := cbor.Encode([]any{
-		uint64(42),
-		&cbor.Rat{Rat: big.NewRat(1, 1)},
-		[]any{},
-		uint64(0),
-		vrfHash,
-		[]any{[]any{[]byte{0x01}, make([]byte, 48)}},
-		uint64(1),
-		uint64(2),
-		&cbor.Rat{Rat: big.NewRat(1, 100)},
-		uint64(1),
-		[]any{uint64(0), rewardHash[:]},
-	})
-	require.NoError(t, err)
-	fields, err := decodeRawArray(record)
-	require.NoError(t, err)
-	_, err = parseSnapshotPoolParams(poolHash[:], fields)
-	require.ErrorContains(t, err, "decoding Leios key")
-}
-
 func TestParseActivePoolDistribution(t *testing.T) {
 	poolHash := toFixed28([]byte("active pool distribution"))
 	vrfHash := [32]byte{}
@@ -484,41 +406,6 @@ func TestParseActivePoolDistributionContainer(t *testing.T) {
 	require.Equal(t, uint64(3), pools[0].StakeNumerator)
 	require.Equal(t, uint64(10), pools[0].StakeDenominator)
 	require.Equal(t, vrfHash[:], pools[0].VrfKeyHash)
-}
-
-func TestParseW32ActivePoolDistributionCarriesLeiosKey(t *testing.T) {
-	poolHash := toFixed28([]byte("w32 active pool distribution"))
-	vrfHash := make([]byte, 32)
-	copy(vrfHash, []byte("w32 active vrf key hash"))
-	publicKey := make([]byte, 96)
-	copy(publicKey, []byte("w32 active Leios public key"))
-	possessionProof := make([]byte, 48)
-	copy(possessionProof, []byte("w32 active Leios proof"))
-
-	poolMap := encodeCredentialMapEntry(
-		t,
-		poolHash[:],
-		[]any{
-			&cbor.Rat{Rat: big.NewRat(3, 10)},
-			uint64(3),
-			vrfHash,
-			[]any{[]any{publicKey, possessionProof}},
-		},
-	)
-	totalStake, err := cbor.Encode(uint64(10))
-	require.NoError(t, err)
-	data := append([]byte{0x82}, poolMap...)
-	data = append(data, totalStake...)
-
-	pools, err := ParseActivePoolDistribution(data)
-	require.NoError(t, err)
-	require.Len(t, pools, 1)
-	require.Equal(t, publicKey, pools[0].LeiosKeyPublic)
-	require.Equal(t, possessionProof, pools[0].LeiosKeyPossessionProof)
-	rows := ActivePoolDistributionSnapshots(pools, 12, 120)
-	require.Len(t, rows, 1)
-	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
-	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
 }
 
 func TestParseActivePoolDistributionContainerRejectsStakeMismatch(
@@ -583,7 +470,7 @@ func TestParseActivePoolDistributionRejectsMalformedEntry(t *testing.T) {
 	)
 
 	_, err := ParseActivePoolDistribution(data)
-	require.ErrorContains(t, err, "expected 2, 3, or 4")
+	require.ErrorContains(t, err, "expected 2 or 3")
 }
 
 func TestVerifySnapshotDigest(t *testing.T) {

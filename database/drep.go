@@ -81,8 +81,7 @@ func (d *Database) GetDrep(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	ret, err := d.governanceStore().
-		GetDrep(cred, includeInactive, txn.Metadata())
+	ret, err := d.governanceStore().GetDrep(cred, includeInactive, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}

@@ -128,47 +128,6 @@ type MapEntry struct {
 // decodeMapEntriesLimit directly (test-only) to exercise the
 // boundary check against a smaller limit without constructing
 // mainnet-scale fixtures.
-// firstMapEntry returns the first key-value pair of a definite- or
-// indefinite-length CBOR map without walking or allocating the rest. Callers
-// classifying a map by its value shape use this instead of decodeMapEntries,
-// which would materialize a mainnet-scale map to answer a question the first
-// entry already settles.
-func firstMapEntry(data []byte) (MapEntry, bool) {
-	if len(data) == 0 {
-		return MapEntry{}, false
-	}
-	pos := 0
-	if data[0] == 0xbf {
-		pos = 1
-	} else {
-		if data[0]>>5 != 5 {
-			return MapEntry{}, false
-		}
-		count, headerLen, err := cborArgument(data)
-		if err != nil || count == 0 {
-			return MapEntry{}, false
-		}
-		pos = headerLen
-	}
-	if pos >= len(data) || data[pos] == 0xff {
-		return MapEntry{}, false
-	}
-	keySize, err := cborItemSize(data[pos:])
-	if err != nil || pos+keySize > len(data) {
-		return MapEntry{}, false
-	}
-	keyRaw := data[pos : pos+keySize]
-	pos += keySize
-	if pos >= len(data) {
-		return MapEntry{}, false
-	}
-	valSize, err := cborItemSize(data[pos:])
-	if err != nil || pos+valSize > len(data) {
-		return MapEntry{}, false
-	}
-	return MapEntry{KeyRaw: keyRaw, ValueRaw: data[pos : pos+valSize]}, true
-}
-
 func decodeMapEntries(data []byte) ([]MapEntry, error) {
 	return decodeMapEntriesLimit(data, maxMapEntries)
 }

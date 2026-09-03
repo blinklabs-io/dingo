@@ -91,11 +91,7 @@ func (b *recordForgedBlockTestBlock) BlockBodyHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
 }
 
-// TestRecordForgedBlockRecordsMetricsAndPublishes covers the observer in
-// isolation: when invoked it counts the block and publishes the forged
-// event. The forger decides when to invoke it, and does so only after
-// AddBlock has accepted the block.
-func TestRecordForgedBlockRecordsMetricsAndPublishes(t *testing.T) {
+func TestRecordForgedBlockIncrementsCounterBeforeAdoption(t *testing.T) {
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 	_, events := eb.Subscribe(event.BlockForgedEventType)

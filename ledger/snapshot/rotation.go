@@ -211,35 +211,16 @@ func (m *Manager) saveSnapshotInTxn(
 		0,
 		len(distribution.PoolStakes),
 	)
-	leiosKeys, err := m.snapshotLeiosKeys(
-		distribution,
-		evt,
-		meta,
-		metaTxn,
-	)
-	if err != nil {
-		return fmt.Errorf("resolve snapshot Leios keys: %w", err)
-	}
 	for poolKeyHash, stake := range distribution.PoolStakes {
 		delegators := distribution.DelegatorCount[poolKeyHash]
-		leiosKey := leiosKeys[string(poolKeyHash[:])]
-		var leiosKeyPublic, leiosKeyPossessionProof []byte
-		if leiosKey != nil {
-			leiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
-			leiosKeyPossessionProof = append(
-				[]byte(nil), leiosKey.PossessionProof...,
-			)
-		}
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:                   epoch,
-			SnapshotType:            snapshotType,
-			PoolKeyHash:             poolKeyHash[:], // Convert [28]byte to []byte
-			TotalStake:              types.Uint64(stake),
-			DelegatorCount:          delegators,
-			CapturedSlot:            distribution.Slot,
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
-			CalculationVersion:      models.RewardStakeCalculationVersion,
+			Epoch:              epoch,
+			SnapshotType:       snapshotType,
+			PoolKeyHash:        poolKeyHash[:], // Convert [28]byte to []byte
+			TotalStake:         types.Uint64(stake),
+			DelegatorCount:     delegators,
+			CapturedSlot:       distribution.Slot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
 
@@ -306,66 +287,6 @@ func (m *Manager) saveSnapshotInTxn(
 	}
 
 	return nil
-}
-
-// snapshotLeiosKeys resolves the pool parameters that were effective during
-// the epoch ending at this SNAP boundary. A registration submitted during the
-// ended epoch is still a future parameter until POOLREAP, so reading the live
-// pool row (or simply the latest registration at distribution.Slot) would
-// freeze a key one epoch too early. This is the same historical selection used
-// by buildRewardStateInputs for the rest of the snapshotted pool parameters.
-//
-// Missing legacy epoch metadata leaves the affected seats keyless. It must not
-// fall back to current pool state: doing so would make an old snapshot resolve
-// differently after a key rotation.
-func (m *Manager) snapshotLeiosKeys(
-	distribution *StakeDistribution,
-	evt event.EpochTransitionEvent,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
-) (map[string]*lcommon.LeiosKey, error) {
-	ret := make(map[string]*lcommon.LeiosKey)
-	if distribution == nil || len(distribution.PoolStakes) == 0 {
-		return ret, nil
-	}
-	endedEpoch, err := meta.GetEpoch(evt.PreviousEpoch, metaTxn)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"get ended epoch %d: %w", evt.PreviousEpoch, err,
-		)
-	}
-	if endedEpoch == nil {
-		return ret, nil
-	}
-	poolKeys := make([]lcommon.PoolKeyHash, 0, len(distribution.PoolStakes))
-	for poolKey := range distribution.PoolStakes {
-		poolKeys = append(poolKeys, poolKey)
-	}
-	registrations, err := meta.GetPoolRegistrationsEffectiveForEpoch(
-		poolKeys,
-		endedEpoch.StartSlot,
-		evt.PreviousEpoch,
-		distribution.Slot,
-		metaTxn,
-	)
-	if err != nil {
-		return nil, err
-	}
-	for _, registration := range registrations {
-		if len(registration.LeiosKeyPublic) == 0 ||
-			len(registration.LeiosKeyPossessionProof) == 0 {
-			continue
-		}
-		ret[string(registration.PoolKeyHash)] = &lcommon.LeiosKey{
-			PublicKey: append(
-				[]byte(nil), registration.LeiosKeyPublic...,
-			),
-			PossessionProof: append(
-				[]byte(nil), registration.LeiosKeyPossessionProof...,
-			),
-		}
-	}
-	return ret, nil
 }
 
 // rewardStateBundle is the fully computed reward-state capture for one epoch

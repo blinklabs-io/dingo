@@ -447,11 +447,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		genesisCertificate,
 		nil,
 	)
-	require.Greater(
-		t,
-		beforeActivation.SlotNumber(),
-		scheduleActivation.SlotNumber(),
-	)
+	require.Greater(t, beforeActivation.SlotNumber(), scheduleActivation.SlotNumber())
 	require.Equal(t, scheduleActivation.Hash(), beforeActivation.PrevHash())
 	state, err = ls.advanceByronPBFTState(state, beforeActivation, true)
 	require.NoError(t, err)

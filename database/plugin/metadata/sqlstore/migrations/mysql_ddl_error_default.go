@@ -52,12 +52,6 @@ func isMySQLDDLAlreadyAppliedOnConn(
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	// 1060 is a duplicate column, which an ADD COLUMN expand statement raises
-	// when the phase replays after a crash between the DDL and the phase
-	// advance. 1061/1826 are duplicate index/constraint.
-	if strings.Contains(message, "error 1060") {
-		return mysqlColumnAlreadyPresentDefault(ctx, conn, statement)
-	}
 	if !strings.Contains(message, "error 1061") &&
 		!strings.Contains(message, "error 1826") {
 		return false
@@ -95,26 +89,6 @@ LIMIT 1`, definition[3], definition[2]).Scan(&nonUnique); err != nil {
 		return false
 	}
 	return (definition[1] != "") == (nonUnique == 0)
-}
-
-// mysqlColumnAlreadyPresentDefault confirms the column an ADD COLUMN
-// statement names is already in the schema before the duplicate-column error
-// is treated as an idempotent replay.
-func mysqlColumnAlreadyPresentDefault(
-	ctx context.Context,
-	conn *sql.Conn,
-	statement string,
-) bool {
-	table, column, ok := parseAddColumnStatement(statement)
-	if !ok {
-		return false
-	}
-	var exists int
-	return conn.QueryRowContext(ctx, `
-SELECT 1
-FROM information_schema.columns
-WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
-LIMIT 1`, table, column).Scan(&exists) == nil && exists == 1
 }
 
 func mysqlIndexExistsDefault(

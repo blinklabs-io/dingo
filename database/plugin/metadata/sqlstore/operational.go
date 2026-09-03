@@ -48,17 +48,9 @@ func (s *Store) GetTip(txn types.Txn) (ochainsync.Tip, error) {
 	if err != nil {
 		return tip, fmt.Errorf("get tip: %w", err)
 	}
-	slot, err := checkedUint64(row.Slot.Int64)
-	if err != nil {
-		return tip, fmt.Errorf("get tip slot: %w", err)
-	}
-	blockNumber, err := checkedUint64(row.BlockNumber.Int64)
-	if err != nil {
-		return tip, fmt.Errorf("get tip block number: %w", err)
-	}
-	tip.Point.Slot = slot
+	tip.Point.Slot = uint64(row.Slot.Int64)
 	tip.Point.Hash = row.Hash
-	tip.BlockNumber = blockNumber
+	tip.BlockNumber = uint64(row.BlockNumber.Int64)
 	return tip, nil
 }
 
@@ -165,15 +157,11 @@ func (s *Store) GetNetworkState(
 	if err != nil {
 		return nil, fmt.Errorf("get network state reserves: %w", err)
 	}
-	slot, err := checkedUint64(row.Slot)
-	if err != nil {
-		return nil, fmt.Errorf("get network state slot: %w", err)
-	}
 	return &models.NetworkState{
 		ID:       uint(row.ID),
 		Treasury: types.Uint64(treasury),
 		Reserves: types.Uint64(reserves),
-		Slot:     slot,
+		Slot:     uint64(row.Slot),
 	}, nil
 }
 
@@ -258,7 +246,7 @@ func (s *Store) GetEpoch(
 	if err != nil {
 		return nil, fmt.Errorf("get epoch: %w", err)
 	}
-	epoch, err := epochFromValues(
+	return epochFromValues(
 		row.ID,
 		row.EpochID,
 		row.StartSlot,
@@ -269,11 +257,7 @@ func (s *Store) GetEpoch(
 		row.EraID,
 		row.SlotLength,
 		row.LengthInSlots,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get epoch: %w", err)
-	}
-	return epoch, nil
+	), nil
 }
 
 func (s *Store) GetEpochsByEra(
@@ -298,7 +282,7 @@ func (s *Store) GetEpochsByEra(
 	}
 	ret := make([]models.Epoch, 0, len(rows))
 	for _, row := range rows {
-		epoch, err := epochFromValues(
+		ret = append(ret, *epochFromValues(
 			row.ID,
 			row.EpochID,
 			row.StartSlot,
@@ -309,11 +293,7 @@ func (s *Store) GetEpochsByEra(
 			row.EraID,
 			row.SlotLength,
 			row.LengthInSlots,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("get epochs by era: %w", err)
-		}
-		ret = append(ret, *epoch)
+		))
 	}
 	return ret, nil
 }
@@ -330,7 +310,7 @@ func (s *Store) GetEpochs(txn types.Txn) ([]models.Epoch, error) {
 	}
 	ret := make([]models.Epoch, 0, len(rows))
 	for _, row := range rows {
-		epoch, err := epochFromValues(
+		ret = append(ret, *epochFromValues(
 			row.ID,
 			row.EpochID,
 			row.StartSlot,
@@ -341,11 +321,7 @@ func (s *Store) GetEpochs(txn types.Txn) ([]models.Epoch, error) {
 			row.EraID,
 			row.SlotLength,
 			row.LengthInSlots,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("get epochs: %w", err)
-		}
-		ret = append(ret, *epoch)
+		))
 	}
 	return ret, nil
 }
@@ -379,7 +355,7 @@ func (s *Store) GetEpochBySlot(
 	if err != nil {
 		return nil, fmt.Errorf("get epoch by slot: %w", err)
 	}
-	epoch, err := epochFromValues(
+	return epochFromValues(
 		row.ID,
 		row.EpochID,
 		row.StartSlot,
@@ -390,11 +366,7 @@ func (s *Store) GetEpochBySlot(
 		row.EraID,
 		row.SlotLength,
 		row.LengthInSlots,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get epoch by slot: %w", err)
-	}
-	return epoch, nil
+	), nil
 }
 
 func (s *Store) DeleteEpochsAfterSlot(slot uint64, txn types.Txn) error {
@@ -564,15 +536,11 @@ func (s *Store) GetBlockNoncesInSlotRange(
 	}
 	ret := make([]models.BlockNonce, 0, len(rows))
 	for _, row := range rows {
-		slot, err := checkedUint64(row.Slot.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("get block nonces in slot range: %w", err)
-		}
 		ret = append(ret, models.BlockNonce{
 			Hash:         row.Hash,
 			Nonce:        row.Nonce,
 			ID:           uint(row.ID),
-			Slot:         slot,
+			Slot:         uint64(row.Slot.Int64),
 			IsCheckpoint: row.IsCheckpoint.Bool,
 		})
 	}
@@ -637,14 +605,7 @@ func (s *Store) GetLatestBlockNonce(
 		return models.BlockNonce{}, false, err
 	}
 	if slot.Valid {
-		s, err := checkedUint64(slot.Int64)
-		if err != nil {
-			return models.BlockNonce{}, false, fmt.Errorf(
-				"get latest block nonce: %w",
-				err,
-			)
-		}
-		ret.Slot = s
+		ret.Slot = uint64(slot.Int64)
 	}
 	if checkpoint.Valid {
 		ret.IsCheckpoint = checkpoint.Bool
@@ -735,15 +696,11 @@ func (s *Store) GetDatum(
 	if err != nil {
 		return nil, err
 	}
-	addedSlot, err := checkedUint64(row.AddedSlot)
-	if err != nil {
-		return nil, fmt.Errorf("get datum: %w", err)
-	}
 	return &models.Datum{
 		Hash:      row.Hash,
 		RawDatum:  row.RawDatum,
 		ID:        uint(row.ID),
-		AddedSlot: addedSlot,
+		AddedSlot: uint64(row.AddedSlot),
 	}, nil
 }
 
@@ -791,20 +748,12 @@ func (s *Store) GetScript(
 	if err != nil {
 		return nil, err
 	}
-	createdSlot, err := checkedUint64(row.CreatedSlot.Int64)
-	if err != nil {
-		return nil, fmt.Errorf("get script: %w", err)
-	}
-	scriptType, err := checkedUint8(row.Type.Int64)
-	if err != nil {
-		return nil, fmt.Errorf("get script: %w", err)
-	}
 	return &models.Script{
 		Hash:        row.Hash,
 		Content:     row.Content,
 		ID:          uint(row.ID),
-		CreatedSlot: createdSlot,
-		Type:        scriptType,
+		CreatedSlot: uint64(row.CreatedSlot.Int64),
+		Type:        uint8(row.Type.Int64),
 	}, nil
 }
 
@@ -838,24 +787,12 @@ func (s *Store) GetPParams(
 	}
 	ret := make([]models.PParams, 0, len(rows))
 	for _, row := range rows {
-		addedSlot, err := checkedUint64(row.AddedSlot.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("get pparams: %w", err)
-		}
-		epoch, err := checkedUint64(row.Epoch.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("get pparams: %w", err)
-		}
-		eraId, err := checkedUint(row.EraID.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("get pparams: %w", err)
-		}
 		ret = append(ret, models.PParams{
 			Cbor:      row.Cbor,
 			ID:        uint(row.ID),
-			AddedSlot: addedSlot,
-			Epoch:     epoch,
-			EraId:     eraId,
+			AddedSlot: uint64(row.AddedSlot.Int64),
+			Epoch:     uint64(row.Epoch.Int64),
+			EraId:     uint(row.EraID.Int64),
 		})
 	}
 	return ret, nil
@@ -896,20 +833,12 @@ func (s *Store) GetPParamUpdates(
 	}
 	ret := make([]models.PParamUpdate, 0, len(rows))
 	for _, row := range rows {
-		addedSlot, err := checkedUint64(row.AddedSlot.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("get pparam updates: %w", err)
-		}
-		epoch, err := checkedUint64(row.Epoch.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("get pparam updates: %w", err)
-		}
 		ret = append(ret, models.PParamUpdate{
 			GenesisHash: row.GenesisHash,
 			Cbor:        row.Cbor,
 			ID:          uint(row.ID),
-			AddedSlot:   addedSlot,
-			Epoch:       epoch,
+			AddedSlot:   uint64(row.AddedSlot.Int64),
+			Epoch:       uint64(row.Epoch.Int64),
 		})
 	}
 	return ret, nil
@@ -1166,39 +1095,19 @@ func epochFromValues(
 	epochID, startSlot sql.NullInt64,
 	nonce, evolvingNonce, candidateNonce, lastEpochBlockNonce []byte,
 	eraID, slotLength, lengthInSlots sql.NullInt64,
-) (*models.Epoch, error) {
-	epochId, err := checkedUint64(epochID.Int64)
-	if err != nil {
-		return nil, fmt.Errorf("epoch id: %w", err)
-	}
-	startSlotVal, err := checkedUint64(startSlot.Int64)
-	if err != nil {
-		return nil, fmt.Errorf("epoch start slot: %w", err)
-	}
-	eraIdVal, err := checkedUint(eraID.Int64)
-	if err != nil {
-		return nil, fmt.Errorf("epoch era id: %w", err)
-	}
-	slotLengthVal, err := checkedUint(slotLength.Int64)
-	if err != nil {
-		return nil, fmt.Errorf("epoch slot length: %w", err)
-	}
-	lengthInSlotsVal, err := checkedUint(lengthInSlots.Int64)
-	if err != nil {
-		return nil, fmt.Errorf("epoch length in slots: %w", err)
-	}
+) *models.Epoch {
 	return &models.Epoch{
 		Nonce:               nonce,
 		EvolvingNonce:       evolvingNonce,
 		CandidateNonce:      candidateNonce,
 		LastEpochBlockNonce: lastEpochBlockNonce,
 		ID:                  uint(id),
-		EpochId:             epochId,
-		StartSlot:           startSlotVal,
-		EraId:               eraIdVal,
-		SlotLength:          slotLengthVal,
-		LengthInSlots:       lengthInSlotsVal,
-	}, nil
+		EpochId:             uint64(epochID.Int64),
+		StartSlot:           uint64(startSlot.Int64),
+		EraId:               uint(eraID.Int64),
+		SlotLength:          uint(slotLength.Int64),
+		LengthInSlots:       uint(lengthInSlots.Int64),
+	}
 }
 
 func checkedInt64(value uint64) (int64, error) {
@@ -1206,43 +1115,4 @@ func checkedInt64(value uint64) (int64, error) {
 		return 0, fmt.Errorf("unsigned SQL value %d exceeds int64", value)
 	}
 	return int64(value), nil
-}
-
-// checkedUint64 is the reverse of checkedInt64: SQLite's INTEGER columns
-// are signed, so a row corrupted or tampered with outside normal writes can
-// surface a negative value here. Converting that directly to uint64 would
-// silently produce a near-MaxUint64 chain point instead of failing.
-func checkedUint64(value int64) (uint64, error) {
-	if value < 0 {
-		return 0, fmt.Errorf("signed SQL value %d is negative", value)
-	}
-	return uint64(value), nil
-}
-
-// checkedUint8 narrows a signed SQL column to uint8. script.type is an
-// unconstrained SQLite INTEGER, so a row corrupted or tampered with
-// outside normal writes can hold a value outside [0, 255]; converting
-// that directly would silently wrap instead of failing.
-func checkedUint8(value int64) (uint8, error) {
-	if value < 0 || value > math.MaxUint8 {
-		return 0, fmt.Errorf("signed SQL value %d does not fit in uint8", value)
-	}
-	return uint8(value), nil
-}
-
-// checkedUint narrows a signed SQL column to uint. Several columns (era
-// id, slot length, length in slots) are unconstrained SQLite INTEGERs
-// read into a plain uint: a negative stored value would otherwise
-// reinterpret its bit pattern as unsigned (e.g. -1 silently becoming
-// MaxUint) instead of failing, and on a 32-bit build uint is only 32 bits
-// wide, so the upper bound is checked against this platform's actual
-// uint width (via ^uint(0), not a hardcoded 64-bit assumption).
-func checkedUint(value int64) (uint, error) {
-	if value < 0 {
-		return 0, fmt.Errorf("signed SQL value %d is negative", value)
-	}
-	if uint64(value) > uint64(^uint(0)) {
-		return 0, fmt.Errorf("signed SQL value %d exceeds uint width", value)
-	}
-	return uint(value), nil
 }

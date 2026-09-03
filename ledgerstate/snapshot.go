@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ErrLedgerDirNotFound is returned when the ledger directory cannot
@@ -402,18 +401,15 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	// HeaderState = [WithOrigin AnnTip, ChainDepState telescope]
 	nonces, nonceErr := parsePraosNonces(outer[1])
 	if nonceErr != nil {
-		if result.EraIndex >= EraShelley {
-			return nil, fmt.Errorf(
-				"extracting Praos HeaderState: %w", nonceErr,
-			)
-		}
-		slog.Debug("nonce extraction skipped for pre-Praos state")
+		slog.Debug(
+			"nonce extraction failed (non-fatal)",
+			"error", nonceErr,
+		)
 	} else if nonces != nil {
 		result.EpochNonce = nonces.EpochNonce
 		result.EvolvingNonce = nonces.EvolvingNonce
 		result.CandidateNonce = nonces.CandidateNonce
 		result.LastEpochBlockNonce = nonces.LastEpochBlockNonce
-		result.OpCertCounters = nonces.OpCertCounters
 	}
 
 	return result, nil
@@ -776,9 +772,6 @@ func parseBound(data []byte) (uint64, uint64, error) {
 // praosNonces holds the nonces extracted from the PraosState in the
 // HeaderState's ChainDepState telescope.
 type praosNonces struct {
-	// OpCertCounters is the certified per-pool operational-certificate counter
-	// state. Keys are 28-byte pool cold-key hashes encoded as strings.
-	OpCertCounters map[string]uint64
 	// EvolvingNonce is the rolling nonce (eta_v) updated with each
 	// block's VRF output. This is needed as the starting nonce for
 	// block processing after a mithril snapshot restore.
@@ -934,12 +927,7 @@ func extractPraosNonces(praosState [][]byte) (*praosNonces, error) {
 		)
 	}
 
-	opCertCounters, err := decodeOpCertCounters(praosState[1])
-	if err != nil {
-		return nil, fmt.Errorf("decoding opcert counters: %w", err)
-	}
-
-	result := &praosNonces{OpCertCounters: opCertCounters}
+	result := &praosNonces{}
 
 	evolvingNonce, err := decodeNonce(praosState[2])
 	if err != nil {
@@ -999,39 +987,6 @@ func extractPraosNonces(praosState [][]byte) (*praosNonces, error) {
 	}
 	result.LastEpochBlockNonce = lastEpochBlockNonce
 
-	return result, nil
-}
-
-// decodeOpCertCounters decodes the Praos ocertCounters map. Every key is a
-// BlockIssuer key hash and must therefore be a 28-byte byte string. Rejecting
-// malformed and duplicate entries keeps the certified HeaderState an
-// unambiguous baseline for subsequent block validation.
-func decodeOpCertCounters(data []byte) (map[string]uint64, error) {
-	entries, err := decodeMapEntries(data)
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]uint64, len(entries))
-	for i, entry := range entries {
-		var poolKeyHash []byte
-		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
-			return nil, fmt.Errorf("decoding key %d: %w", i, err)
-		}
-		if len(poolKeyHash) != 28 {
-			return nil, fmt.Errorf(
-				"key %d has length %d, expected 28", i, len(poolKeyHash),
-			)
-		}
-		var counter uint64
-		if _, err := cbor.Decode(entry.ValueRaw, &counter); err != nil {
-			return nil, fmt.Errorf("decoding value %d: %w", i, err)
-		}
-		key := string(poolKeyHash)
-		if _, exists := result[key]; exists {
-			return nil, fmt.Errorf("duplicate pool key at entry %d", i)
-		}
-		result[key] = counter
-	}
 	return result, nil
 }
 
@@ -1236,8 +1191,7 @@ func parseSnapShot(
 }
 
 // ParseActivePoolDistribution decodes NewEpochState.pool-distr:
-// map[PoolKeyHash][UnitInterval, active stake, VrfKeyHash, LeiosKey]. Older
-// states omit active stake and/or LeiosKey. The UnitInterval is the exact
+// map[PoolKeyHash][UnitInterval, VrfKeyHash]. The UnitInterval is the exact
 // active stake fraction (sigma) used by Praos leader eligibility.
 func ParseActivePoolDistribution(
 	data cbor.RawMessage,
@@ -1283,9 +1237,9 @@ func ParseActivePoolDistribution(
 				err,
 			)
 		}
-		if len(fields) < 2 || len(fields) > 4 {
+		if len(fields) != 2 && len(fields) != 3 {
 			return nil, fmt.Errorf(
-				"active pool distribution entry %d: value has %d fields, expected 2, 3, or 4",
+				"active pool distribution entry %d: value has %d fields, expected 2 or 3",
 				idx,
 				len(fields),
 			)
@@ -1300,7 +1254,7 @@ func ParseActivePoolDistribution(
 		}
 
 		vrfFieldIdx := 1
-		if len(fields) >= 3 {
+		if len(fields) == 3 {
 			vrfFieldIdx = 2
 			var activeStake uint64
 			if _, err := cbor.Decode(fields[1], &activeStake); err != nil {
@@ -1346,32 +1300,11 @@ func ParseActivePoolDistribution(
 			)
 		}
 
-		var leiosKey *lcommon.LeiosKey
-		if len(fields) == 4 {
-			leiosKey, err = decodeOptionalLeiosKey(fields[3])
-			if err != nil {
-				return nil, fmt.Errorf(
-					"active pool distribution entry %d: %w",
-					idx,
-					err,
-				)
-			}
-		}
-		var leiosKeyPublic, leiosKeyPossessionProof []byte
-		if leiosKey != nil {
-			leiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
-			leiosKeyPossessionProof = append(
-				[]byte(nil), leiosKey.PossessionProof...,
-			)
-		}
-
 		result = append(result, ParsedActivePoolStake{
-			PoolKeyHash:             slices.Clone(poolKeyHash),
-			StakeNumerator:          stakeNumerator,
-			StakeDenominator:        stakeDenominator,
-			VrfKeyHash:              slices.Clone(vrfKeyHash),
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
+			PoolKeyHash:      slices.Clone(poolKeyHash),
+			StakeNumerator:   stakeNumerator,
+			StakeDenominator: stakeDenominator,
+			VrfKeyHash:       slices.Clone(vrfKeyHash),
 		})
 	}
 	return result, nil
@@ -1699,25 +1632,14 @@ func AggregatePoolStake(
 			continue
 		}
 
-		pool := snap.PoolParams[poolHex]
-		var leiosKeyPublic, leiosKeyPossessionProof []byte
-		if pool != nil {
-			leiosKeyPublic = append([]byte(nil), pool.LeiosKeyPublic...)
-			leiosKeyPossessionProof = append(
-				[]byte(nil), pool.LeiosKeyPossessionProof...,
-			)
-		}
-
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:                   epoch,
-			SnapshotType:            snapshotType,
-			PoolKeyHash:             poolKeyHash,
-			TotalStake:              types.Uint64(agg.totalStake),
-			DelegatorCount:          agg.delegatorCount,
-			CapturedSlot:            capturedSlot,
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
-			CalculationVersion:      models.RewardStakeCalculationVersion,
+			Epoch:              epoch,
+			SnapshotType:       snapshotType,
+			PoolKeyHash:        poolKeyHash,
+			TotalStake:         types.Uint64(agg.totalStake),
+			DelegatorCount:     agg.delegatorCount,
+			CapturedSlot:       capturedSlot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
 

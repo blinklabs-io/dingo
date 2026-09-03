@@ -131,6 +131,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: func() error { n.blockForger.Stop(); return nil },
 		})
 	}
+	if n.kesAgentClient != nil {
+		stops = append(stops, namedStop{
+			name: "KES agent client",
+			stop: func() error { n.kesAgentClient.Close(); return nil },
+		})
+	}
 	if n.leaderElection != nil {
 		stops = append(stops, namedStop{
 			name: "leader election",
@@ -995,7 +1001,6 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	ouroborosCfg := n.ouroborosConfig
 	ouroborosCfg.LedgerState = n.ledgerState
-	ouroborosCfg.LeiosAnnouncementLedger = n.ledgerState
 	ouroborosCfg.Mempool = n.mempool
 	ouroborosCfg.ChainsyncState = n.chainsyncState
 	ouroborosCfg.ConnManager = n.connManager

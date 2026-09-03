@@ -597,10 +597,9 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 				_ func(*database.Txn, event.EpochTransitionEvent) error,
 			) error {
 				hookCalled = true
-				rollbackErr = loadConfig.ChainManager.PrimaryChain().
-					ValidateRollback(
-						ocommon.NewPoint(0, nil),
-					)
+				rollbackErr = loadConfig.ChainManager.PrimaryChain().ValidateRollback(
+					ocommon.NewPoint(0, nil),
+				)
 				return stopAfterRollbackValidation
 			}
 			t.Cleanup(func() {

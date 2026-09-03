@@ -55,10 +55,7 @@ func leaderThresholdMargin(leaderValue, threshold *big.Int) float64 {
 	diff := new(big.Int).Sub(threshold, leaderValue)
 	margin := new(big.Float).SetPrec(leaderThresholdMarginPrecision).Quo(
 		new(big.Float).SetPrec(leaderThresholdMarginPrecision).SetInt(diff),
-		new(
-			big.Float,
-		).SetPrec(leaderThresholdMarginPrecision).
-			SetInt(threshold),
+		new(big.Float).SetPrec(leaderThresholdMarginPrecision).SetInt(threshold),
 	)
 	result, _ := margin.Float64()
 	return result

@@ -31,10 +31,6 @@ type Runner struct {
 	Locker   Locker
 	Logger   *slog.Logger
 	Now      func() time.Time
-	// Rebind converts ? placeholders to the dialect's own form for data-driven
-	// backfills. Leave nil to use the runner's own Dialect-derived rebinder;
-	// an identity default would feed ? straight to a dialect that rejects it.
-	Rebind func(string) string
 }
 
 type state struct {
@@ -227,15 +223,9 @@ func (r *Runner) runBackfill(
 		if err != nil {
 			return cursor, err
 		}
-		rebind := r.backfillRebind()
 		result, err := migration.Backfill(
 			ctx,
-			Batch{
-				Tx:     tx,
-				Cursor: cursor,
-				Limit:  limit,
-				Rebind: rebind,
-			},
+			Batch{Tx: tx, Cursor: cursor, Limit: limit},
 		)
 		if err != nil {
 			_ = tx.Rollback()
@@ -577,17 +567,6 @@ func (r *Runner) cursorColumn() string {
 	return "cursor"
 }
 
-// backfillRebind returns the placeholder rewriter a data-driven backfill must
-// use. An explicit Rebind wins; otherwise the runner's own Dialect-derived
-// rebinder applies, because an identity default would feed ? placeholders to a
-// dialect that rejects them and fail the backfill.
-func (r *Runner) backfillRebind() func(string) string {
-	if r.Rebind != nil {
-		return r.Rebind
-	}
-	return r.rebind
-}
-
 func (r *Runner) rebind(query string) string {
 	if r.Dialect != "postgres" {
 		return query
@@ -630,109 +609,10 @@ func execDDL(
 				isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
 				continue
 			}
-			if dialect == "sqlite" &&
-				isSQLiteDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
-				continue
-			}
-			if dialect == "postgres" &&
-				isPostgresDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
-				continue
-			}
 			return fmt.Errorf("statement %d: %w", index+1, err)
 		}
 	}
 	return nil
-}
-
-// parseAddColumnStatement extracts the table and column named by an
-// ALTER TABLE <table> ADD COLUMN <column> ... statement. Identifier quoting
-// differs per dialect, so every supported quote character is trimmed.
-func parseAddColumnStatement(statement string) (string, string, bool) {
-	fields := strings.Fields(strings.TrimSuffix(strings.TrimSpace(statement), ";"))
-	if len(fields) < 6 ||
-		!strings.EqualFold(fields[0], "ALTER") ||
-		!strings.EqualFold(fields[1], "TABLE") ||
-		!strings.EqualFold(fields[3], "ADD") ||
-		!strings.EqualFold(fields[4], "COLUMN") {
-		return "", "", false
-	}
-	table := strings.Trim(fields[2], "`\"")
-	column := strings.Trim(fields[5], "`\"")
-	if table == "" || column == "" {
-		return "", "", false
-	}
-	return table, column, true
-}
-
-// isPostgresDDLAlreadyAppliedOnConn reports whether an ADD COLUMN statement
-// failed only because a previous run of the same expand phase already added
-// the column.
-//
-// The runner records PhaseExpand before running the DDL and advances to
-// PhaseBackfill after, and each statement commits in autocommit, so a process
-// that dies between the two replays the whole expand phase on the next start.
-// PostgreSQL has no ADD COLUMN IF NOT EXISTS that can be used here: the
-// migration checksum covers the dialect-translated statements, so rewriting
-// released SQL would trip checksum drift on every existing database.
-//
-// The column is confirmed present before the error is treated as benign, so an
-// unrelated "already exists" failure is never silently swallowed. Matching is
-// on message text rather than a pgconn error type because the postgres driver
-// is only linked under the dingo_extra_plugins build tag.
-func isPostgresDDLAlreadyAppliedOnConn(
-	ctx context.Context,
-	conn *sql.Conn,
-	statement string,
-	err error,
-) bool {
-	if !strings.Contains(strings.ToLower(err.Error()), "already exists") {
-		return false
-	}
-	if conn == nil {
-		// Without a connection the column cannot be confirmed; never turn an
-		// unrelated duplicate-definition error into a no-op.
-		return false
-	}
-	table, column, ok := parseAddColumnStatement(statement)
-	if !ok {
-		return false
-	}
-	var found int
-	if queryErr := conn.QueryRowContext(
-		ctx,
-		`SELECT 1 FROM information_schema.columns
-WHERE table_name = $1 AND column_name = $2`,
-		table,
-		column,
-	).Scan(&found); queryErr != nil {
-		return false
-	}
-	return found == 1
-}
-
-func isSQLiteDDLAlreadyAppliedOnConn(
-	ctx context.Context,
-	conn *sql.Conn,
-	statement string,
-	err error,
-) bool {
-	if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
-		return false
-	}
-	table, column, ok := parseAddColumnStatement(statement)
-	if !ok {
-		return false
-	}
-	var found int
-	if queryErr := conn.QueryRowContext(
-		ctx,
-		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-		table,
-		column,
-	).Scan(&found); queryErr != nil {
-		return false
-	}
-	return found == 1
 }
 
 func boundedCursor(cursor string) string {

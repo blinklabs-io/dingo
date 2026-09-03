@@ -423,7 +423,9 @@ func TestGetBlock_AcceptsVerifiedArchiveBlock(t *testing.T) {
 }
 
 // realEraBlock loads a block produced by the reference implementation for the
-// named era fixture, returning its CBOR and true block type.
+// named era fixture, returning its CBOR and true block type. Generated blocks
+// are no use here: cross-era decoding has to be exercised against bytes whose
+// header layout is genuinely shared between eras.
 func realEraBlock(t *testing.T, name string) ([]byte, uint) {
 	t.Helper()
 	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
@@ -441,44 +443,8 @@ func realEraBlock(t *testing.T, name string) ([]byte, uint) {
 	return raw, blockType
 }
 
-type eraChainGenerator func(
-	uint64,
-	lcommon.Blake2b256,
-	uint64,
-	uint64,
-	int,
-) ([]gledger.Block, error)
-
-func generatedEraBlock(
-	t *testing.T,
-	generate eraChainGenerator,
-	blockType uint,
-) ([]byte, uint) {
-	t.Helper()
-	blocks, err := generate(1, lcommon.Blake2b256{}, 2, 1, 1)
-	require.NoError(t, err)
-	require.Len(t, blocks, 1)
-	return blocks[0].Cbor(), blockType
-}
-
-func generatedUnclassifiableBabbageBlock(t *testing.T) ([]byte, uint) {
-	t.Helper()
-	blocks, err := fixtures.GenerateBabbageChainWithProtocolVersion(
-		1,
-		lcommon.Blake2b256{},
-		2,
-		1,
-		99,
-		0,
-		1,
-	)
-	require.NoError(t, err)
-	require.Len(t, blocks, 1)
-	return blocks[0].Cbor(), gledger.BlockTypeBabbage
-}
-
 // TestGetBlock_RejectsArchiveBlockTypeMismatch covers an archive that serves
-// valid block bytes while misreporting their era.
+// genuine block bytes while misreporting their era.
 //
 // The block hash for Shelley and later is taken over the header alone, and
 // adjacent eras share that header layout, so the same bytes decode under more
@@ -488,58 +454,35 @@ func generatedUnclassifiableBabbageBlock(t *testing.T) ([]byte, uint) {
 func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 	tests := []struct {
 		name     string
-		block    func(*testing.T) ([]byte, uint)
+		fixture  string
 		claimed  archive.BlockType
 		claimedN uint
-		wantErr  error
 	}{
 		{
-			name: "babbage served as conway",
-			block: func(t *testing.T) ([]byte, uint) {
-				return generatedEraBlock(
-					t,
-					fixtures.GenerateBabbageChain,
-					gledger.BlockTypeBabbage,
-				)
-			},
+			name:     "babbage served as conway",
+			fixture:  "Block_Babbage",
 			claimed:  archive.BlockType_BLOCK_TYPE_CONWAY,
 			claimedN: gledger.BlockTypeConway,
-			wantErr:  ErrArchiveBlockTypeMismatch,
 		},
 		{
-			name: "shelley served as mary",
-			block: func(t *testing.T) ([]byte, uint) {
-				return generatedEraBlock(
-					t,
-					fixtures.GenerateShelleyChain,
-					gledger.BlockTypeShelley,
-				)
-			},
+			name:     "shelley served as mary",
+			fixture:  "Block_Shelley",
 			claimed:  archive.BlockType_BLOCK_TYPE_MARY,
 			claimedN: gledger.BlockTypeMary,
-			wantErr:  ErrArchiveBlockTypeMismatch,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, trueType := tc.block(t)
+			raw, trueType := realEraBlock(t, tc.fixture)
 			require.NotEqual(t, trueType, tc.claimedN,
 				"fixture era must differ from the claimed era")
 
-			decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+			// The misreported era must still decode, otherwise the test
+			// would pass for the wrong reason.
+			decoded, err := gledger.NewBlockFromCbor(tc.claimedN, raw)
 			require.NoError(t, err,
-				"fixture must decode in its genuine era")
+				"cross-era decode must succeed for this test to be meaningful")
 			hash := decoded.Hash()
-			if tc.wantErr == ErrArchiveBlockTypeMismatch {
-				// The misreported era must still decode, otherwise the test
-				// would pass for the wrong reason.
-				_, err = gledger.NewBlockFromCbor(tc.claimedN, raw)
-				require.NoError(
-					t,
-					err,
-					"cross-era decode must succeed for this test to be meaningful",
-				)
-			}
 
 			db := newTestDB(t)
 			baseURL, fakeArch, httpClient := startFakeArchive(
@@ -555,7 +498,7 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			t.Cleanup(func() { _ = rTxn.Rollback() })
 
 			_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-			require.ErrorIs(t, err, tc.wantErr)
+			require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
 		})
 	}
 }
@@ -627,13 +570,13 @@ func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
 // TestGetBlock_RejectsUnclassifiableEra pins the fail-closed behaviour when a
 // block's era cannot be derived from its header.
 //
-// The generated Babbage block carries a structurally valid header with a
-// protocol version that DetermineBlockType does not map, which stands in for a
-// block from an era this node does not know. Trusting the archive's claim in
-// that case would hand era selection straight back to it, so the fetch is
-// refused. A node that cannot classify a block could not process it anyway.
+// The consensus golden fixtures carry synthetic protocol versions that
+// DetermineBlockType does not map, which stands in for a block from an era
+// this node does not know. Trusting the archive's claim in that case would
+// hand era selection straight back to it, so the fetch is refused. A node that
+// cannot classify a block could not process it anyway.
 func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
-	raw, trueType := generatedUnclassifiableBabbageBlock(t)
+	raw, trueType := realEraBlock(t, "Block_Babbage")
 	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
 	require.NoError(t, err)
 	hash := decoded.Hash()

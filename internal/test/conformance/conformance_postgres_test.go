@@ -17,19 +17,11 @@
 package conformance
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/storagetest"
-	"github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
-	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -90,37 +82,8 @@ func postgresConformanceDSN() string {
 
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
-		storagetest.EscapeLibpqValue(host),
-		storagetest.EscapeLibpqValue(port),
-		storagetest.EscapeLibpqValue(user),
-		storagetest.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")),
-		storagetest.EscapeLibpqValue(database),
-		storagetest.EscapeLibpqValue(sslMode),
+		host, port, user, os.Getenv("POSTGRES_PASSWORD"), database, sslMode,
 	)
-}
-
-// TestPostgresConformanceDSNEscapesSpecialCharacterPassword proves
-// postgresConformanceDSN survives a legal libpq password containing a
-// space, a quote, and a backslash -- exactly the class of credential
-// storagetest.EscapeLibpqValue exists to handle, and exactly what a
-// reviewer's probe found broken here before every DSN component was passed
-// through it: an unquoted, unescaped keyword/value pair ends at the first
-// whitespace, so pgx.ParseConfig(postgresConformanceDSN()) silently
-// truncated this password to just "review" -- a real POSTGRES_PASSWORD
-// value like this would authenticate with the wrong (truncated) password
-// against a live server rather than fail DSN parsing outright.
-func TestPostgresConformanceDSNEscapesSpecialCharacterPassword(t *testing.T) {
-	const specialPassword = "review pass'word\\tail"
-	t.Setenv("POSTGRES_DSN", "")
-	t.Setenv("POSTGRES_PASSWORD", specialPassword)
-
-	cfg, err := pgx.ParseConfig(postgresConformanceDSN())
-	require.NoError(
-		t,
-		err,
-		"postgresConformanceDSN produced an unparseable DSN",
-	)
-	require.Equal(t, specialPassword, cfg.Password)
 }
 
 // newTestPostgresConformanceManager creates a Postgres-backed
@@ -135,245 +98,100 @@ func newTestPostgresConformanceManager(t *testing.T) *DingoStateManager {
 	return sm
 }
 
-var (
-	postgresCorpusOnce sync.Once
-	postgresCorpusRun  corpusRun
-)
-
-// postgresCorpusResults returns the Postgres backend's memoized corpus replay.
-// Callers must have already skipped when Postgres is not configured.
-func postgresCorpusResults(t *testing.T) []conformance.VectorResult {
-	t.Helper()
-	postgresCorpusOnce.Do(func() {
-		// Construct here rather than through
-		// newTestPostgresConformanceManager: that helper reports a
-		// construction failure with require.NoError on its own
-		// *testing.T, and sync.Once marks itself done even when its
-		// function unwinds through t.FailNow's runtime.Goexit. A later
-		// consumer in the same process would then read a zero-value
-		// corpusRun -- nil results and nil error -- pass its
-		// require.NoError, and fail in assertCorpus with a misleading
-		// "produced no vectors" instead of the construction failure.
-		// Storing the error keeps corpusRun's documented contract, and
-		// matches sqliteCorpusResults.
-		sm, err := NewDingoPostgresStateManager(postgresConformanceDSN())
-		if err != nil {
-			postgresCorpusRun = corpusRun{
-				err: fmt.Errorf("new postgres state manager: %w", err),
-			}
-			return
-		}
-		defer sm.Close()
-		postgresCorpusRun = replayCorpus(sm)
-	})
-	require.NoError(t, postgresCorpusRun.err, "postgres corpus replay")
-	return postgresCorpusRun.results
-}
-
-// TestRulesConformanceVectorsPostgres is the pass/fail gate for the
-// Postgres-backed DingoStateManager, and also reports the progress statistics
-// and the SQLite comparison that previously each cost their own corpus replay.
-//
-// The corpus exercises gouroboros ledger rules, which do not vary by storage
-// backend, so this run is not here for rule coverage -- it is here to drive
-// Dingo's storage layer through Postgres' dialect. See corpus_test.go for the
-// two real bugs that found and for why one pass per dialect is the right
-// amount.
+// TestRulesConformanceVectorsPostgres is the strict pass/fail gate for the
+// Postgres-backed DingoStateManager: it fails immediately on the first
+// vector mismatch (via harness.RunAllVectors), mirroring
+// TestRulesConformanceVectors in conformance_test.go.
 func TestRulesConformanceVectorsPostgres(t *testing.T) {
 	skipIfPostgresConformanceNotConfigured(t)
 
-	results := postgresCorpusResults(t)
-	reportCorpus(t, "postgres", results)
-	assertBackendMatchesSqlite(t, "postgres", results)
-	assertCorpus(t, "postgres", results)
-}
+	testdataRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
+	require.NoError(t, err, "failed to extract embedded testdata")
 
-// TestNewDingoPostgresStateManagerRestartSurvivesReopen proves state
-// committed through a real Postgres-backed DingoStateManager survives
-// closing that manager and opening a new one against the same DSN/schema
-// -- the Postgres analog of
-// TestDingoStateManagerRestartSurvivesReopen (state_manager_backend_test.go).
-// Unlike the sqlite case there is no local file to reopen: the state lives
-// on the Postgres server itself, so "restart" here means a fresh manager
-// instance pointed at the same database/schema.
-func TestNewDingoPostgresStateManagerRestartSurvivesReopen(t *testing.T) {
-	skipIfPostgresConformanceNotConfigured(t)
+	sm := newTestPostgresConformanceManager(t)
+	defer sm.Close()
 
-	// Both manager instances share one local blob directory: the local
-	// Badger blob store and the remote Postgres metadata store are paired
-	// at construction (see newDingoPostgresStateManagerAtSchema's doc
-	// comment), so m2 must reuse m1's blob directory to reopen against the
-	// same already-populated metadata store without tripping that pairing
-	// check. NewDingoPostgresStateManager shares one schema/blob-directory
-	// pair across every call in its process and never drops the schema on
-	// Close (see postgresProcessSchema's doc comment in
-	// state_manager_postgres.go) -- reusing it here would work today, but
-	// only by accident, since nothing stops a sibling test elsewhere in this
-	// same process from resetting it concurrently. Manage a schema
-	// explicitly instead, unique to this test run so it cannot collide with
-	// postgresProcessSchema or any other test's schema, and clean it up once
-	// both managers are done.
-	blobDataDir := t.TempDir()
-	dsn := postgresConformanceDSN()
-
-	schema := fmt.Sprintf("conformance_restart_%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		if err := dropPostgresSchema(dsn, schema); err != nil {
-			t.Errorf("drop postgres restart-test schema %q: %v", schema, err)
-		}
+	harness := conformance.NewHarness(sm, conformance.HarnessConfig{
+		TestdataRoot: testdataRoot,
+		Debug:        testing.Verbose(),
 	})
 
-	m1, err := newDingoPostgresStateManagerAtSchema(dsn, blobDataDir, schema)
-	require.NoError(t, err)
-
-	pp := &conway.ConwayProtocolParameters{}
-	require.NoError(t, m1.LoadInitialState(
-		&conformance.ParsedInitialState{CurrentEpoch: 0},
-		pp,
-	))
-
-	cred := common.Credential{
-		CredType:   common.CredentialTypeAddrKeyHash,
-		Credential: testHash28(0xa1),
-	}
-	tx, err := syntheticTransaction(
-		"pg-restart-stake-registration",
-		[]common.Certificate{
-			&common.StakeRegistrationCertificate{
-				CertType:        uint(common.CertificateTypeStakeRegistration),
-				StakeCredential: cred,
-			},
-		},
-	)
-	require.NoError(t, err)
-	require.NoError(t, m1.ApplyTransaction(tx, 100))
-	require.NoError(t, m1.Close())
-
-	m2, err := newDingoPostgresStateManagerAtSchema(dsn, blobDataDir, schema)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, m2.Close()) }()
-
-	provider := m2.GetStateProvider()
-	require.True(
-		t,
-		provider.IsStakeCredentialRegistered(cred),
-		"stake registration committed by m1 must be visible from a fresh manager pointed at the same schema",
-	)
+	harness.RunAllVectors(t)
 }
 
-// TestNewDingoPostgresStateManagerRollbackDiscardsWrites is the Postgres
-// analog of TestDingoStateManagerRollbackDiscardsWrites: a write inside a
-// real, rolled-back Postgres transaction is not visible via a fresh read.
-func TestNewDingoPostgresStateManagerRollbackDiscardsWrites(t *testing.T) {
+// TestRulesConformanceVectorsWithResultsPostgres runs the harness against
+// both the SQLite-backed and Postgres-backed state managers in the same
+// test and compares them, rather than asserting a hardcoded vector count:
+// the two runs should exercise the identical number of vectors with
+// identical pass counts, and the comparison stays correct even as the
+// embedded ouroboros-mock vector corpus grows or shrinks.
+func TestRulesConformanceVectorsWithResultsPostgres(t *testing.T) {
 	skipIfPostgresConformanceNotConfigured(t)
 
-	m := newTestPostgresConformanceManager(t)
-	defer func() { require.NoError(t, m.Close()) }()
+	sqliteRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
+	require.NoError(t, err, "failed to extract embedded testdata")
 
-	cred := testHash28(0xa2)
+	sqliteSm, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer sqliteSm.Close()
 
-	txn := m.db.Transaction(true)
-	defer txn.Release()
-	account := &models.Account{
-		StakingKey:    cred[:],
-		CredentialTag: 0,
-		Active:        true,
+	sqliteHarness := conformance.NewHarness(sqliteSm, conformance.HarnessConfig{
+		TestdataRoot: sqliteRoot,
+	})
+	sqliteResults, err := sqliteHarness.RunAllVectorsWithResults()
+	require.NoError(t, err, "failed to run sqlite vectors")
+
+	pgRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
+	require.NoError(t, err, "failed to extract embedded testdata")
+
+	pgSm := newTestPostgresConformanceManager(t)
+	defer pgSm.Close()
+
+	pgHarness := conformance.NewHarness(pgSm, conformance.HarnessConfig{
+		TestdataRoot: pgRoot,
+	})
+	pgResults, err := pgHarness.RunAllVectorsWithResults()
+	require.NoError(t, err, "failed to run postgres vectors")
+
+	var pgPassed, pgFailed int
+	for _, result := range pgResults {
+		if result.Success {
+			pgPassed++
+		} else {
+			pgFailed++
+		}
 	}
-	require.NoError(t, m.db.CreateAccount(txn, account))
-	require.NoError(t, txn.Rollback())
 
-	got, err := m.db.GetAccountByCredential(0, cred[:], false, nil)
-	require.ErrorIs(t, err, models.ErrAccountNotFound)
-	require.Nil(t, got)
-}
-
-// TestNewDingoPostgresStateManagerUnreachableHostFails proves an
-// unreachable Postgres host fails DingoStateManager construction with a
-// real, bounded-time error -- not a hang and not a silently-successful
-// no-op backend -- mirroring
-// database/plugin/metadata/postgres's own
-// TestMetadataStoreUnreachableHostFailsWithoutHanging. No live Postgres
-// server is required for this test: it points at a closed local port with
-// a short connect_timeout.
-func TestNewDingoPostgresStateManagerUnreachableHostFails(t *testing.T) {
-	dsn := "host=127.0.0.1 port=1 user=postgres password=x " +
-		"dbname=x sslmode=disable connect_timeout=3"
-
-	start := time.Now()
-	m, err := NewDingoPostgresStateManager(dsn)
-	require.Error(t, err)
-	require.Nil(t, m)
-	require.Less(
-		t,
-		time.Since(start),
-		15*time.Second,
-		"an unreachable host should fail within the connect timeout, not hang",
-	)
-}
-
-// TestNewDingoPostgresStateManagerBadCredentialsFails proves a reachable
-// Postgres server that rejects the supplied credentials fails
-// DingoStateManager construction cleanly, mirroring
-// database/plugin/metadata/postgres's own
-// TestMetadataStoreBadCredentialsFailsCleanly. It requires a real,
-// reachable server (unlike the unreachable-host case above) so the
-// failure is specifically credential rejection.
-func TestNewDingoPostgresStateManagerBadCredentialsFails(t *testing.T) {
-	skipIfPostgresConformanceNotConfigured(t)
-	if os.Getenv("POSTGRES_DSN") != "" {
-		t.Skip(
-			"Skipping postgres bad-credentials test: POSTGRES_DSN is an " +
-				"opaque override this test cannot safely mutate a password into",
+	t.Logf("Conformance Test Results (PostgreSQL):")
+	t.Logf("  Total vectors: %d", len(pgResults))
+	t.Logf("  Passed: %d", pgPassed)
+	t.Logf("  Failed: %d", pgFailed)
+	if len(pgResults) > 0 {
+		t.Logf(
+			"  Pass rate: %.1f%%",
+			float64(pgPassed)/float64(len(pgResults))*100,
 		)
 	}
+	if pgFailed > 0 && testing.Verbose() {
+		t.Log("First failures:")
+		failCount := 0
+		for _, result := range pgResults {
+			if !result.Success && failCount < 5 {
+				t.Logf("  %s: %v", result.Title, result.Error)
+				failCount++
+			}
+		}
+		if pgFailed > 5 {
+			t.Logf("  ... and %d more failures", pgFailed-5)
+		}
+	}
 
-	host := "localhost"
-	if v := os.Getenv("POSTGRES_HOST"); v != "" {
-		host = v
-	}
-	port := "5432"
-	if v := os.Getenv("POSTGRES_PORT"); v != "" {
-		port = v
-	}
-	database := "dingo_test"
-	if v := os.Getenv("POSTGRES_DATABASE"); v != "" {
-		database = v
-	}
-	dsn := fmt.Sprintf(
-		"host=%s port=%s user=postgres password=storagetest-wrong-password "+
-			"dbname=%s sslmode=disable",
-		storagetest.EscapeLibpqValue(host),
-		storagetest.EscapeLibpqValue(port),
-		storagetest.EscapeLibpqValue(database),
+	require.Equal(
+		t,
+		len(sqliteResults),
+		len(pgResults),
+		"postgres backend exercised a different number of vectors than "+
+			"sqlite; vector discovery/extraction should be backend-invariant",
 	)
-
-	m, err := NewDingoPostgresStateManager(dsn)
-	require.Error(t, err)
-	require.Nil(t, m)
-}
-
-// dropPostgresSchema drops schema (and everything in it) over an ordinary,
-// unscoped connection to dsn. Used to tear down the restart test's own
-// explicitly managed schema (see
-// TestNewDingoPostgresStateManagerRestartSurvivesReopen) and, by TestMain
-// (conformance_main_test.go), this whole process's postgresProcessSchema
-// once every test has finished. Either way cleanup is a plain drop rather
-// than truncatePostgresConformanceSchema's in-place empty: nothing else
-// needs the schema to keep existing afterward.
-func dropPostgresSchema(dsn, schema string) error {
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return fmt.Errorf("open postgres admin connection: %w", err)
-	}
-	defer db.Close()
-	// schema is always Go-generated (a process-and-time-derived unique
-	// name), never operator/DSN input, so string concatenation here
-	// carries no injection risk -- same reasoning as
-	// ensurePostgresConformanceSchema.
-	if _, err := db.Exec(
-		"DROP SCHEMA IF EXISTS " + schema + " CASCADE",
-	); err != nil {
-		return fmt.Errorf("drop postgres schema %q: %w", schema, err)
-	}
-	return nil
+	require.Zero(t, pgFailed, "postgres backend failed vectors sqlite passed")
 }

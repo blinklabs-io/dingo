@@ -39,19 +39,17 @@ func TestShouldVerifyChainsyncHeaderCryptoKeepsAdmissionGate(
 	ls.publishSnapshotsLocked()
 
 	slot := tb.block.SlotNumber()
-	verifyNow, _ := ls.chainsyncHeaderCryptoPolicy(slot)
 	require.True(
 		t,
-		verifyNow,
+		ls.shouldVerifyChainsyncHeaderCrypto(slot),
 		"sanity: the crypto pre-check runs without a validating pipeline",
 	)
 
 	ls.blockPipeline = pipeline.NewBlockPipeline()
 	ls.config.BlockPipelineValidateEnabled = true
-	verifyNow, _ = ls.chainsyncHeaderCryptoPolicy(slot)
 	assert.True(
 		t,
-		verifyNow,
+		ls.shouldVerifyChainsyncHeaderCrypto(slot),
 		"pipeline validation must not replace the admission-time crypto gate",
 	)
 }

@@ -183,8 +183,8 @@ func ValidateEbCertificate(
 // sigChecked reports whether the aggregate signature was verified; it is
 // false when one or more signers have no resolvable key (a keyless
 // committee seat, or a key registered on-chain that this call was not
-// given -- registry here is deliberately limited to private-harness keys,
-// not the on-chain resolution VoteManager performs). See
+// given -- registry here is deliberately limited to locally configured
+// keys, not the on-chain resolution VoteManager performs). See
 // ValidateEbCertificate's doc comment for the same caveat about callers
 // needing to check sigChecked -- nothing here enforces that they do.
 func ValidatePrototypeEbCertificate(

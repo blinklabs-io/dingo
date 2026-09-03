@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -131,7 +130,7 @@ func EnactProposal(
 		}
 
 	case *lcommon.UpdateCommitteeGovAction:
-		if err := applyUpdateCommittee(ctx, a, proposal.AddedSlot); err != nil {
+		if err := applyUpdateCommittee(ctx, a); err != nil {
 			return nil, fmt.Errorf("update committee: %w", err)
 		}
 
@@ -192,7 +191,7 @@ func decodeGovActionForPParams(
 		lcommon.GovActionTypeParameterChange {
 		if _, ok := pparams.(*gdijkstra.DijkstraProtocolParameters); ok {
 			var a gdijkstra.DijkstraParameterChangeGovAction
-			if err := decodeStoredGovAction(data, actionType, &a); err != nil {
+			if _, err := cbor.Decode(data, &a); err != nil {
 				return nil, err
 			}
 			return &a, nil
@@ -240,9 +239,12 @@ func applyTreasuryWithdrawal(
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	total, err := treasuryWithdrawalTotal(a)
-	if err != nil {
-		return err
+	var total uint64
+	for _, amount := range a.Withdrawals {
+		if total > ^uint64(0)-amount {
+			return errors.New("treasury withdrawal amount overflow")
+		}
+		total += amount
 	}
 	if !ctx.TreasuryWithdrawalRemainingSet {
 		ctx.TreasuryWithdrawalRemaining = treasury
@@ -302,25 +304,6 @@ func applyTreasuryWithdrawal(
 		ctx.Slot,
 		metaTxn,
 	)
-}
-
-// treasuryWithdrawalTotal returns the amount an ENACT transition would remove
-// from its running treasury budget. Dingo stores lovelace in uint64, so an
-// action whose mathematical sum is outside that range is not enactable.
-func treasuryWithdrawalTotal(
-	a *lcommon.TreasuryWithdrawalGovAction,
-) (uint64, error) {
-	if a == nil {
-		return 0, errors.New("nil treasury withdrawal action")
-	}
-	var total uint64
-	for _, amount := range a.Withdrawals {
-		if total > ^uint64(0)-amount {
-			return 0, errors.New("treasury withdrawal amount overflow")
-		}
-		total += amount
-	}
-	return total, nil
 }
 
 // CreditRegisteredRewardAccountAfterSnapshot credits a reward account for an
@@ -464,22 +447,14 @@ func AddUnclaimedToTreasury(
 func applyUpdateCommittee(
 	ctx *EnactmentContext,
 	a *lcommon.UpdateCommitteeGovAction,
-	termStartSlot uint64,
 ) error {
-	removeCredentials := make([]models.CommitteeCredential, 0, len(a.Credentials))
+	removeHashes := make([][]byte, 0, len(a.Credentials))
 	for _, c := range a.Credentials {
-		credentialTag, err := models.CredentialTagFromUint(c.CredType)
-		if err != nil {
-			return fmt.Errorf("remove member credential: %w", err)
-		}
 		hash := c.Credential
-		removeCredentials = append(removeCredentials, models.CommitteeCredential{
-			CredentialTag: credentialTag,
-			Credential:    hash[:],
-		})
+		removeHashes = append(removeHashes, hash[:])
 	}
 	if err := ctx.DB.SoftDeleteCommitteeMembers(
-		removeCredentials, ctx.Slot, ctx.Txn,
+		removeHashes, ctx.Slot, ctx.Txn,
 	); err != nil {
 		return fmt.Errorf("remove members: %w", err)
 	}
@@ -497,32 +472,22 @@ func applyUpdateCommittee(
 			continue
 		}
 		hash := cred.Credential
-		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
-		if err != nil {
-			return fmt.Errorf("add member credential: %w", err)
-		}
 		members = append(members, &models.CommitteeMember{
-			ColdCredentialTag: credentialTag,
-			ColdCredHash:      hash[:],
-			ExpiresEpoch:      uint64(expiry),
-			TermStartSlot:     termStartSlot,
-			TermStartSlotSet:  true,
-			AddedSlot:         ctx.Slot,
+			ColdCredHash: hash[:],
+			ExpiresEpoch: uint64(expiry),
+			AddedSlot:    ctx.Slot,
 		})
 	}
 	if len(members) == 0 {
 		return nil
 	}
-	// Sort by full cold credential identity so the auto-increment ID assigned
+	// Sort by cold credential hash so the auto-increment ID assigned
 	// by the DB is stable across nodes (Go map iteration is random).
 	sort.Slice(members, func(i, j int) bool {
-		if cmp := bytes.Compare(
+		return bytes.Compare(
 			members[i].ColdCredHash,
 			members[j].ColdCredHash,
-		); cmp != 0 {
-			return cmp < 0
-		}
-		return members[i].ColdCredentialTag < members[j].ColdCredentialTag
+		) < 0
 	})
 	return ctx.DB.SetCommitteeMembers(members, ctx.Txn)
 }
@@ -534,113 +499,75 @@ func decodeGovAction(
 	data []byte,
 	actionType uint8,
 ) (lcommon.GovAction, error) {
-	var action lcommon.GovAction
-	switch lcommon.GovActionType(actionType) {
-	case lcommon.GovActionTypeParameterChange:
-		action = &conway.ConwayParameterChangeGovAction{}
-	case lcommon.GovActionTypeHardForkInitiation:
-		action = &lcommon.HardForkInitiationGovAction{}
-	case lcommon.GovActionTypeTreasuryWithdrawal:
-		action = &lcommon.TreasuryWithdrawalGovAction{}
-	case lcommon.GovActionTypeNoConfidence:
-		action = &lcommon.NoConfidenceGovAction{}
-	case lcommon.GovActionTypeUpdateCommittee:
-		action = &lcommon.UpdateCommitteeGovAction{}
-	case lcommon.GovActionTypeNewConstitution:
-		action = &lcommon.NewConstitutionGovAction{}
-	case lcommon.GovActionTypeInfo:
-		action = &lcommon.InfoGovAction{}
-	default:
-		return nil, fmt.Errorf("unknown action type: %d", actionType)
-	}
-	if err := decodeStoredGovAction(data, actionType, action); err != nil {
-		return nil, err
-	}
-	return action, nil
-}
-
-func decodeStoredGovAction(
-	data []byte,
-	actionType uint8,
-	target lcommon.GovAction,
-) error {
 	if len(data) == 0 {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"empty gov action cbor (action type %d)",
 			actionType,
 		)
 	}
-	consumed, err := cbor.Decode(data, target)
-	if err != nil {
-		return fmt.Errorf("decode gov action type %d: %w", actionType, err)
+	switch lcommon.GovActionType(actionType) {
+	case lcommon.GovActionTypeParameterChange:
+		var a conway.ConwayParameterChangeGovAction
+		if _, err := cbor.Decode(data, &a); err != nil {
+			return nil, err
+		}
+		return &a, nil
+	case lcommon.GovActionTypeHardForkInitiation:
+		var a lcommon.HardForkInitiationGovAction
+		if _, err := cbor.Decode(data, &a); err != nil {
+			return nil, err
+		}
+		return &a, nil
+	case lcommon.GovActionTypeTreasuryWithdrawal:
+		var a lcommon.TreasuryWithdrawalGovAction
+		if _, err := cbor.Decode(data, &a); err != nil {
+			return nil, err
+		}
+		return &a, nil
+	case lcommon.GovActionTypeNoConfidence:
+		var a lcommon.NoConfidenceGovAction
+		if _, err := cbor.Decode(data, &a); err != nil {
+			return nil, err
+		}
+		return &a, nil
+	case lcommon.GovActionTypeUpdateCommittee:
+		var a lcommon.UpdateCommitteeGovAction
+		if _, err := cbor.Decode(data, &a); err != nil {
+			return nil, err
+		}
+		return &a, nil
+	case lcommon.GovActionTypeNewConstitution:
+		var a lcommon.NewConstitutionGovAction
+		if _, err := cbor.Decode(data, &a); err != nil {
+			return nil, err
+		}
+		return &a, nil
+	case lcommon.GovActionTypeInfo:
+		var a lcommon.InfoGovAction
+		if _, err := cbor.Decode(data, &a); err != nil {
+			return nil, err
+		}
+		return &a, nil
 	}
-	if consumed != len(data) {
-		return fmt.Errorf(
-			"decode gov action type %d: consumed %d of %d bytes",
-			actionType,
-			consumed,
-			len(data),
-		)
-	}
-	embeddedType, err := govActionDiscriminator(target)
-	if err != nil {
-		return err
-	}
-	if embeddedType != uint(actionType) {
-		return fmt.Errorf(
-			"governance action type mismatch: stored %d, embedded %d",
-			actionType,
-			embeddedType,
-		)
-	}
-	return nil
+	return nil, fmt.Errorf("unknown action type: %d", actionType)
 }
 
-func govActionDiscriminator(action lcommon.GovAction) (uint, error) {
-	switch a := action.(type) {
-	case *conway.ConwayParameterChangeGovAction:
-		return a.Type, nil
-	case *gdijkstra.DijkstraParameterChangeGovAction:
-		return a.Type, nil
-	case *lcommon.HardForkInitiationGovAction:
-		return a.Type, nil
-	case *lcommon.TreasuryWithdrawalGovAction:
-		return a.Type, nil
-	case *lcommon.NoConfidenceGovAction:
-		return a.Type, nil
-	case *lcommon.UpdateCommitteeGovAction:
-		return a.Type, nil
-	case *lcommon.NewConstitutionGovAction:
-		return a.Type, nil
-	case *lcommon.InfoGovAction:
-		return a.Type, nil
-	default:
-		return 0, fmt.Errorf("unsupported governance action value %T", action)
-	}
-}
-
-// setProtocolVersion deep-clones the pparams before changing only the
-// protocol version, preserving immutable epoch snapshots held by readers.
+// setProtocolVersion rebuilds the pparams with a new protocol version
+// using the era's update function. We construct a minimal update that
+// only touches the protocol version.
 func setProtocolVersion(
 	current lcommon.ProtocolParameters,
 	major, minor uint,
 ) (lcommon.ProtocolParameters, error) {
-	cloned, err := eras.CloneGovernanceProtocolParameters(current)
-	if err != nil {
-		return nil, err
-	}
-	switch p := cloned.(type) {
+	switch p := current.(type) {
 	case *conway.ConwayProtocolParameters:
-		p.ProtocolVersion.Major = major
-		p.ProtocolVersion.Minor = minor
-		return p, nil
-	case *gdijkstra.DijkstraProtocolParameters:
-		p.ProtocolVersion.Major = major
-		p.ProtocolVersion.Minor = minor
-		return p, nil
+		updated := *p
+		updated.ProtocolVersion.Major = major
+		updated.ProtocolVersion.Minor = minor
+		return &updated, nil
 	}
 	return nil, fmt.Errorf(
 		"protocol version update unsupported for pparams type %T",
-		cloned,
+		current,
 	)
 }

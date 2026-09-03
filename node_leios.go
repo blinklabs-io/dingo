@@ -55,14 +55,13 @@ func (a *leiosStakeDistributionAdapter) GetStakeDistribution(
 // resolving registered Leios keys for exactly the pools the caller names
 // (the same set VoteManager already fetched a stake distribution for). It
 // returns raw (unverified) keys -- VoteManager itself checks proof of
-// possession before trusting one. Keys come from the same historical Mark
-// snapshot as the committee stake.
+// possession before trusting one. This is a current-state lookup (see
+// leios.LeiosKeyProvider's doc comment), not frozen to a snapshot epoch.
 type leiosKeyProviderAdapter struct {
 	ledgerState *ledger.LedgerState
 }
 
 func (a *leiosKeyProviderAdapter) GetLeiosKeys(
-	snapshotEpoch uint64,
 	poolKeyHashesHex []string,
 ) (_ map[string]*lcommon.LeiosKey, err error) {
 	if a.ledgerState == nil {
@@ -98,10 +97,7 @@ func (a *leiosKeyProviderAdapter) GetLeiosKeys(
 			)
 		}
 	}()
-	return a.ledgerState.NewView(txn).GetLeiosKeys(
-		snapshotEpoch,
-		poolKeyHashes,
-	)
+	return a.ledgerState.NewView(txn).GetLeiosKeys(poolKeyHashes)
 }
 
 // leiosCommitteeParamsAdapter adapts ledger.LedgerState to
@@ -190,9 +186,13 @@ func leiosCommitteeParamsFromPParams(
 }
 
 // initLeiosVoteManager builds and starts the Leios vote manager and wires
-// it into the ouroboros component's protocol handlers. The ledger key provider
-// is authoritative; production composition does not install a static registry.
+// it into the ouroboros component's protocol handlers. Invalid voter
+// registry entries are fatal at startup.
 func (n *Node) initLeiosVoteManager(ctx context.Context) error {
+	registry, err := leios.NewVoterRegistry(n.config.leiosVoterPublicKeys)
+	if err != nil {
+		return fmt.Errorf("invalid leios voter public keys: %w", err)
+	}
 	stakeAdapter := &leiosStakeDistributionAdapter{
 		inner: stakeDistributionAdapter{
 			ledgerState: n.ledgerState,
@@ -220,6 +220,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// timing the pipeline manager uses, so the two components admit
 		// votes over the same window and cannot drift.
 		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
+		Registry:        registry,
 		PromRegistry:    n.config.promRegistry,
 	})
 	if err != nil {
@@ -346,51 +347,24 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if err != nil {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
-	status, err := n.leiosVoteManager.ConfigureVoting(poolKeyHash, key)
-	if err != nil {
+	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
+		// ValidateVotingKey's own error already names which sources it
+		// checked (the on-chain registration and leiosVoterPublicKeys) and
+		// whether the problem was "not found" or "found but mismatched," so
+		// no remedy is added here: the on-chain key takes precedence over
+		// leiosVoterPublicKeys, so directing every failure at the static
+		// registry would be wrong advice whenever the real problem is a key
+		// that no longer matches the pool's on-chain registration.
 		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
-	switch status {
-	case leios.VotingConfigurationEnabled:
-		n.config.logger.Info(
-			"leios voting enabled",
-			"component", "node",
-			"pool_id", poolID.String(),
-		)
-	case leios.VotingConfigurationAwaitingKey:
-		n.config.logger.Info(
-			"leios voting deferred until the configured key is available in the on-chain snapshot",
-			"component",
-			"node",
-			"pool_id",
-			poolID.String(),
-		)
-	case leios.VotingConfigurationRetryPending:
-		n.config.logger.Warn(
-			"leios voting activation preparation failed; voting remains disabled until the next epoch-transition retry",
-			"component",
-			"node",
-			"pool_id",
-			poolID.String(),
-		)
-	case leios.VotingConfigurationSuperseded:
-		n.config.logger.Info(
-			"leios voting configuration was superseded by a newer configuration or retry",
-			"component",
-			"node",
-			"pool_id",
-			poolID.String(),
-		)
-	case leios.VotingConfigurationFailed:
-		return errors.New(
-			"leios voting configuration failed without an error",
-		)
-	default:
-		return fmt.Errorf(
-			"unexpected leios voting configuration status: %d",
-			status,
-		)
+	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
+		return fmt.Errorf("enable leios voting: %w", err)
 	}
+	n.config.logger.Info(
+		"leios voting enabled",
+		"component", "node",
+		"pool_id", poolID.String(),
+	)
 	return nil
 }
 

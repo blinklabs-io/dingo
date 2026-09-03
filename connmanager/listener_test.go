@@ -622,10 +622,7 @@ func TestAcceptLoopDoesNotBlockOnSilentHandshake(t *testing.T) {
 
 	// Stop must close pending handshakes instead of waiting for the production
 	// timeout. The accept worker is tracked and must exit cleanly.
-	stopCtx, stopCancel := context.WithTimeout(
-		context.Background(),
-		2*time.Second,
-	)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()
 	require.NoError(t, cm.Stop(stopCtx))
 }

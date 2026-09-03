@@ -154,21 +154,3 @@ func TestFoldEndSlotForTip(t *testing.T) {
 		"the maximum slot saturates rather than wrapping to zero, which "+
 			"would fold nothing and report the epoch's opening values")
 }
-
-func TestComputeCandidateNonceFastRejectsMalformedNonceRows(t *testing.T) {
-	db := newTestDB(t)
-	hash := bytes.Repeat([]byte{0x71}, 32)
-	require.NoError(t, db.BlockCreate(models.Block{
-		Slot: 100, Hash: hash, PrevHash: bytes.Repeat([]byte{0x72}, 32),
-		Cbor: []byte{0x80}, Number: 1, Type: byron.BlockTypeByronMain,
-	}, nil))
-	require.NoError(t, db.SetBlockNonce(hash, 100, []byte{0x01}, false, nil))
-	ls := &LedgerState{db: db}
-	err := db.Transaction(false).Do(func(txn *database.Txn) error {
-		_, _, err := ls.computeCandidateNonceFast(txn,
-			bytes.Repeat([]byte{0x73}, 32), bytes.Repeat([]byte{0x74}, 32),
-			0, 101, 101)
-		return err
-	})
-	require.ErrorIs(t, err, errNoncesMissing)
-}

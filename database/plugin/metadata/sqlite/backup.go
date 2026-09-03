@@ -104,11 +104,7 @@ func openSQLiteBackupDB(
 	ctx context.Context,
 	databasePath string,
 ) (*sql.DB, error) {
-	db, err := sqlstore.OpenDB(
-		"sqlite",
-		backupSourceDSN(databasePath),
-		"sqlite",
-	)
+	db, err := sqlstore.OpenDB("sqlite", backupSourceDSN(databasePath), "sqlite")
 	if err != nil {
 		return nil, err
 	}

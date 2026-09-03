@@ -156,18 +156,21 @@ func CertDepositAllegra(
 
 var allegraUtxoValidationRules = buildAllegraValidationRules()
 
-// buildAllegraValidationRules mirrors buildShelleyValidationRules. The local
-// fee and max-size checks keep Allegra validation on the shared TxSizeForFee
-// path, including for transactions rebuilt from block components.
+// buildAllegraValidationRules mirrors buildShelleyValidationRules: Allegra
+// reuses ShelleyProtocolParameterUpdate and AllegraTransactionBody also lacks
+// MarshalCBOR, so an Allegra protocol-update transaction rebuilt from block
+// components is sized the same 210 bytes too large.
 func buildAllegraValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRulesWithSkips(
 		allegra.UtxoValidationRules,
 		[]utxoValidationRuleSkip{
 			{
+				index:          allegraUtxoValidateFeeTooSmallRuleIndex,
 				validationFunc: allegra.UtxoValidateFeeTooSmallUtxo,
 				name:           "allegra.UtxoValidateFeeTooSmallUtxo",
 			},
 			{
+				index:          allegraUtxoValidateMaxTxSizeRuleIndex,
 				validationFunc: allegra.UtxoValidateMaxTxSizeUtxo,
 				name:           "allegra.UtxoValidateMaxTxSizeUtxo",
 			},

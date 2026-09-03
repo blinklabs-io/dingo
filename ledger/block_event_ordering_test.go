@@ -77,41 +77,6 @@ func loadTestBlocksWithTxs(t *testing.T, want int) []models.Block {
 	return blocks
 }
 
-type stalledBlockSubscriber struct{}
-
-func (stalledBlockSubscriber) Deliver(event.Event) error {
-	return event.ErrEventSubscriberStalled
-}
-
-func (stalledBlockSubscriber) Close() {}
-
-// TestPublishBlockEventIgnoresOptionalSubscriberDetachment ensures an
-// ordinary optional block-event consumer cannot turn its own detachment into
-// a node-wide fatal error. The EventBus has already isolated and removed the
-// stalled subscriber when it returns this error.
-func TestPublishBlockEventIgnoresOptionalSubscriberDetachment(t *testing.T) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
-	require.NotZero(
-		t,
-		bus.RegisterSubscriber(BlockEventType, stalledBlockSubscriber{}),
-	)
-
-	fatalCalled := false
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus: bus,
-			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-			FatalErrorFunc: func(error) {
-				fatalCalled = true
-			},
-		},
-	}
-
-	ls.publishBlockEvent(BlockActionApply, models.Block{})
-	require.False(t, fatalCalled)
-}
-
 // TestChainUpdateHandlerPublishesNoTransactionEvents pins the structural
 // invariant the ordering guarantee rests on: the chain-update handler must not
 // be a ledger.tx producer.
@@ -386,35 +351,23 @@ func TestBlockApplyCandidatePointUsesLastExaminedBlock(t *testing.T) {
 		wantHash []byte
 	}{
 		{
-			name:   "chunk without boundary",
-			blocks: blocks,
-			epoch: models.Epoch{
-				StartSlot:     0,
-				LengthInSlots: 20,
-				SlotLength:    1,
-			},
+			name:     "chunk without boundary",
+			blocks:   blocks,
+			epoch:    models.Epoch{StartSlot: 0, LengthInSlots: 20, SlotLength: 1},
 			wantSlot: 11,
 			wantHash: blockHash(11),
 		},
 		{
-			name:   "boundary before suffix",
-			blocks: blocks,
-			epoch: models.Epoch{
-				StartSlot:     0,
-				LengthInSlots: 10,
-				SlotLength:    1,
-			},
+			name:     "boundary before suffix",
+			blocks:   blocks,
+			epoch:    models.Epoch{StartSlot: 0, LengthInSlots: 10, SlotLength: 1},
 			wantSlot: 10,
 			wantHash: blockHash(10),
 		},
 		{
-			name:   "boundary at offset zero",
-			blocks: blocks[1:],
-			epoch: models.Epoch{
-				StartSlot:     0,
-				LengthInSlots: 10,
-				SlotLength:    1,
-			},
+			name:     "boundary at offset zero",
+			blocks:   blocks[1:],
+			epoch:    models.Epoch{StartSlot: 0, LengthInSlots: 10, SlotLength: 1},
 			wantSlot: 10,
 			wantHash: blockHash(10),
 		},

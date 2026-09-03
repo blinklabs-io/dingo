@@ -90,38 +90,6 @@ func TestChainsyncClientRollForwardRecordsHeaderArrival(t *testing.T) {
 	require.False(t, data.ArrivalTime.After(after))
 }
 
-func TestChainsyncClientRollForwardCarriesPolicyTargetWithAdmittedEvent(
-	t *testing.T,
-) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Close)
-	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
-	connID := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
-	header := newTestBlockHeader(100, 1, 0xaa)
-	advertised := ochainsync.Tip{
-		Point:       ocommon.NewPoint(200, []byte("corroborated-target")),
-		BlockNumber: 2,
-	}
-	o := newOuroboros(OuroborosConfig{
-		EventBus:                 bus,
-		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
-		ChainsyncSyncTarget: func(update chainselection.PeerTipUpdateEvent) (ochainsync.Tip, bool) {
-			require.Equal(t, uint64(100), update.ObservedTip.Point.Slot)
-			require.Equal(t, advertised, update.Tip)
-			return advertised, true
-		},
-	})
-	require.NoError(t, o.chainsyncClientRollForward(
-		ochainsync.CallbackContext{ConnectionId: connID}, 0, header, advertised,
-	))
-	evt := testutil.RequireReceive(t, ledgerCh, 2*time.Second, "ledger event")
-	data, ok := evt.Data.(ledger.ChainsyncEvent)
-	require.True(t, ok)
-	require.True(t, data.SyncTargetTrusted)
-	require.Equal(t, uint64(100), data.Point.Slot)
-	require.Equal(t, advertised, data.SyncTarget)
-}
-
 func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 	t *testing.T,
 ) {

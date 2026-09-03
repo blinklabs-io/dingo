@@ -19,10 +19,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -115,32 +113,6 @@ func TestDeleteBlocksAfterNoopWhenTipAtOrBelowThreshold(t *testing.T) {
 
 	_, err = db.BlockByIndex(1, nil)
 	require.NoError(t, err)
-}
-
-// TestDeleteBlocksAfterStopsAtMaxUint64TipWithoutWrapping guards a
-// regression batchEnd's extraction could reintroduce: once the batch
-// whose end equals tipID finishes, advancing via start = end + 1 wraps to
-// 0 when tipID is math.MaxUint64. An unguarded loop would then reopen a
-// batch spanning [0, batchSize-1] and keep walking upward indefinitely,
-// deleting blocks far below afterID along the way. Block 1 sits well
-// below afterID here and must survive; a bounded context turns a
-// reintroduced wraparound into a fast, clear failure instead of a hang.
-func TestDeleteBlocksAfterStopsAtMaxUint64TipWithoutWrapping(t *testing.T) {
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	tipID := uint64(math.MaxUint64)
-	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
-		ctx, db, tipID-1, tipID, 0,
-	)
-	require.NoError(t, err)
-	require.Zero(t, blocksDeleted)
-
-	_, err = db.BlockByIndex(1, nil)
-	require.NoError(t, err, "block 1 is far below afterID and must survive")
 }
 
 // TestDeleteBlocksAfterRespectsSmallBatchSize verifies that a batch size

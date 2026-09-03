@@ -114,7 +114,6 @@ var logPlainConfigFields = []string{
 	"BackfillBatchSize",
 	"BarkClientCAFilePath",
 	"BarkHost",
-	"BarkOperatorCertificateFingerprints",
 	"BarkPort",
 	"BindAddr",
 	"BlockPipelineEnabled",
@@ -172,6 +171,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.Strict",
 	"LedgerCatchupTimeout",
 	"LeiosVoteSigningKeyFile",
+	"LeiosVoterPublicKeys",
 	"Logging.Format",
 	"Logging.Level",
 	"MaxConnectionsPerIP",
@@ -227,6 +227,13 @@ var logPlainConfigFields = []string{
 	"ReconcileInterval",
 	"RelayPort",
 	"RunMode",
+	// The agent socket is a filesystem path, classified the same way as the
+	// key and certificate paths below it: the path is not the secret, the
+	// material behind it is, and an operator diagnosing a misconfigured
+	// socket needs to see which path failed.
+	"ShelleyKESAgentMode",
+	"ShelleyKESAgentSignTimeout",
+	"ShelleyKESAgentSocket",
 	"ShelleyKESKey",
 	"ShelleyOperationalCertificate",
 	"ShelleyVRFKey",

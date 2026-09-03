@@ -34,9 +34,6 @@ func (d *testDB) Create(value any) testResult {
 	case *models.RewardAccountOutput:
 		query = `INSERT INTO reward_account_output (staking_key,pool_key_hash,reward_type,epoch,credential_tag,amount,spendable,guarded,captured_slot,boundary_slot) VALUES (?,?,?,?,?,?,?,?,?,?)`
 		args = []any{v.StakingKey, v.PoolKeyHash, v.RewardType, v.Epoch, v.CredentialTag, v.Amount, v.Spendable, v.Guarded, v.CapturedSlot, v.BoundarySlot}
-	case *models.PoolStakeSnapshot:
-		query = `INSERT INTO pool_stake_snapshot (epoch,snapshot_type,pool_key_hash,total_stake,stake_denominator,delegator_count,captured_slot) VALUES (?,?,?,?,?,?,?)`
-		args = []any{v.Epoch, v.SnapshotType, v.PoolKeyHash, v.TotalStake, v.StakeDenominator, v.DelegatorCount, v.CapturedSlot}
 	default:
 		return testResult{Error: fmt.Errorf("unsupported test row %T", value)}
 	}
@@ -78,7 +75,6 @@ type testingT interface {
 
 func testSchema(includePools bool) []string {
 	ret := []string{
-		`CREATE TABLE pool_stake_snapshot (id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL, snapshot_type TEXT NOT NULL, pool_key_hash BLOB NOT NULL, total_stake TEXT NOT NULL, stake_denominator TEXT NOT NULL DEFAULT '0', delegator_count INTEGER NOT NULL DEFAULT 0, captured_slot INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE epoch_summary (id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL UNIQUE, total_active_stake TEXT NOT NULL, total_pool_count INTEGER NOT NULL DEFAULT 0, total_delegators INTEGER NOT NULL DEFAULT 0, epoch_nonce BLOB, boundary_slot INTEGER NOT NULL DEFAULT 0, snapshot_ready NUMERIC NOT NULL DEFAULT 0)`,
 		`CREATE TABLE reward_ada_pots (id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL UNIQUE, treasury TEXT NOT NULL, reserves TEXT NOT NULL, fees TEXT NOT NULL, rewards TEXT NOT NULL, captured_slot INTEGER NOT NULL DEFAULT 0)`,
 		// reward_account_output is created unconditionally (not gated behind

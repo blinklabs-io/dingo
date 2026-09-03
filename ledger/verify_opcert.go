@@ -24,26 +24,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
-)
-
-// LeiosAnnouncementOCINStaleness reports whether an otherwise-valid dangling
-// Leios announcement uses an operational-certificate issue number accepted by
-// the chain-dependent state at the immutable tip.
-type LeiosAnnouncementOCINStaleness uint8
-
-const (
-	// LeiosAnnouncementFreshOCIN means the announcement counter is equal to or
-	// ahead of the immutable-tip counter and may be processed and relayed.
-	LeiosAnnouncementFreshOCIN LeiosAnnouncementOCINStaleness = iota
-	// LeiosAnnouncementStaleOCIN means the announcement counter is lower than
-	// the immutable-tip counter, or its issuer is unknown at that point. The
-	// peer message is accepted, but networking must not process or relay it.
-	LeiosAnnouncementStaleOCIN
 )
 
 // opCertFromHeader extracts the operational certificate from a Praos/TPraos
@@ -168,81 +152,6 @@ func validateOpCertCounter(
 		)
 	}
 	return nil
-}
-
-// ValidateLeiosAnnouncementHeader validates the announcement's header crypto
-// before classifying its op-cert counter against the selected primary chain's
-// immutable-tip state. Counter equality and arbitrary forward movement are
-// fresh because this lagging view cannot enforce an upper bound. A lower or
-// as-yet-unknown counter is stale, not invalid.
-//
-// The result is deliberately a ledger verdict only. The Ouroboros composition
-// layer owns whether a stale peer message is recorded, published, or relayed.
-func (ls *LedgerState) ValidateLeiosAnnouncementHeader(
-	header ledger.BlockHeader,
-) (LeiosAnnouncementOCINStaleness, error) {
-	if err := ls.ValidateBlockHeaderCrypto(header); err != nil {
-		return LeiosAnnouncementFreshOCIN, err
-	}
-	return ls.leiosAnnouncementOCINStaleness(header)
-}
-
-func (ls *LedgerState) leiosAnnouncementOCINStaleness(
-	header ledger.BlockHeader,
-) (LeiosAnnouncementOCINStaleness, error) {
-	opCert, ok := opCertFromHeader(header)
-	if !ok || opCert == nil {
-		return LeiosAnnouncementFreshOCIN, errors.New(
-			"leios announcement header has no operational certificate",
-		)
-	}
-	ls.RLock()
-	primaryChain := ls.chain
-	eraID := ls.currentEra.Id
-	ls.RUnlock()
-	if primaryChain == nil {
-		return LeiosAnnouncementFreshOCIN, errors.New(
-			"primary chain unavailable for leios announcement validation",
-		)
-	}
-	if ls.db == nil {
-		return LeiosAnnouncementFreshOCIN, errors.New(
-			"database unavailable for leios announcement validation",
-		)
-	}
-	k, ok := ls.securityParamForEra(eraID)
-	if !ok {
-		return LeiosAnnouncementFreshOCIN, errors.New(
-			"security parameter unavailable for leios announcement validation",
-		)
-	}
-	immutablePoint, found, err := primaryChain.PointAtDepth(k)
-	if err != nil {
-		return LeiosAnnouncementFreshOCIN, fmt.Errorf(
-			"resolve immutable tip for leios announcement: %w",
-			err,
-		)
-	}
-	if !found {
-		return LeiosAnnouncementStaleOCIN, nil
-	}
-	poolKeyHash := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
-	stored, found, err := ls.db.LatestPoolOpCertSequenceAtOrBefore(
-		poolKeyHash,
-		immutablePoint.Slot,
-		nil,
-	)
-	if err != nil {
-		return LeiosAnnouncementFreshOCIN, fmt.Errorf(
-			"read immutable-tip opcert counter for pool %x: %w",
-			poolKeyHash,
-			err,
-		)
-	}
-	if !found || opCert.IssueNumber < stored {
-		return LeiosAnnouncementStaleOCIN, nil
-	}
-	return LeiosAnnouncementFreshOCIN, nil
 }
 
 const (

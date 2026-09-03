@@ -230,20 +230,25 @@ func ValidateTxConway(
 	); err != nil {
 		return fmt.Errorf("conway plutus redeemer validation: %w", err)
 	}
+	// Skip script evaluation (Phase-2) if TX is marked as not valid.
+	// These transactions failed script validation on-chain; collateral
+	// is consumed instead of regular inputs.
+	if !tx.IsValid() {
+		return nil
+	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
-	phase2Err := validateTxPlutusConwayWithContext(
+	if err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		tmpPparams,
 		plutusCtx,
 		false,
-	)
-	if phase2Err != nil {
-		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
+	); err != nil {
+		return fmt.Errorf("conway plutus validation: %w", err)
 	}
-	return validatePlutusOutcome(tx, phase2Err)
+	return nil
 }
 
 var (
@@ -263,51 +268,30 @@ func conwayValidationRules(
 func buildConwayValidationRules() []indexedUtxoValidationRule {
 	skips := []utxoValidationRuleSkip{
 		{
+			index: conwayUtxoValidateConwayFeaturesRuleIndex,
 			validationFunc: conway.
 				UtxoValidateConwayFeaturesWithPlutusV1V2,
 			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
 		},
 		{
+			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
 			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
 			name:           "conway.UtxoValidateFeeTooSmallUtxo",
 		},
 		{
+			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
 			validationFunc: conway.UtxoValidatePlutusScripts,
 			name:           "conway.UtxoValidatePlutusScripts",
 		},
-		{
-			validationFunc: conway.UtxoValidateCommitteeCertificates,
-			name:           "conway.UtxoValidateCommitteeCertificates",
-		},
-		{
-			validationFunc: conway.UtxoValidateUnknownVoters,
-			name:           "conway.UtxoValidateUnknownVoters",
-		},
-	}
-	indexes := make([]int, len(skips))
-	for i := range skips {
-		indexes[i] = resolveUtxoValidationSkipIndex(
-			conway.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
-		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
 		conway.UtxoValidationRules,
 		skips,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
-		index:          indexes[0],
+		index:          conwayUtxoValidateConwayFeaturesRuleIndex,
 		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
 	})
-	ret = append(ret,
-		indexedUtxoValidationRule{
-			index:          indexes[3],
-			validationFunc: validateCommitteeCertificates,
-		},
-		indexedUtxoValidationRule{
-			index:          indexes[4],
-			validationFunc: validateUnknownVoters,
-		},
-	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
 		return a.index - b.index
 	})
@@ -470,18 +454,20 @@ func validateTxPlutusConway(
 	pp *conway.ConwayProtocolParameters,
 	validateRequiredRedeemers bool,
 ) error {
+	if !tx.IsValid() {
+		return nil
+	}
 	plutusCtx, err := newConwayPlutusValidationContext(tx, ls)
 	if err != nil {
 		return err
 	}
-	phase2Err := validateTxPlutusConwayWithContext(
+	return validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		pp,
 		plutusCtx,
 		validateRequiredRedeemers,
 	)
-	return validatePlutusOutcome(tx, phase2Err)
 }
 
 func validateTxPlutusConwayWithContext(
@@ -719,8 +705,7 @@ func validateConwayRequiredPlutusRedeemers(
 	}
 	withdrawalAddrs := sortedConwayWithdrawalAddresses(tx.Withdrawals())
 	for idx, addr := range withdrawalAddrs {
-		stakeCredential, ok := addr.StakeCredential()
-		if !ok || stakeCredential.CredType != lcommon.CredentialTypeScriptHash {
+		if (addr.Type() & lcommon.AddressTypeScriptBit) == 0 {
 			continue
 		}
 		key := lcommon.RedeemerKey{
@@ -730,7 +715,10 @@ func validateConwayRequiredPlutusRedeemers(
 		if err := checkRequired(
 			key,
 			script.ScriptPurposeRewarding{
-				StakeCredential: stakeCredential,
+				StakeCredential: lcommon.Credential{
+					CredType:   lcommon.CredentialTypeScriptHash,
+					Credential: addr.StakeKeyHash(),
+				},
 			},
 		); err != nil {
 			return err
@@ -1017,7 +1005,6 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
-			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
@@ -1036,7 +1023,6 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
-			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV2{}, conway.ScriptContextConstructionError{

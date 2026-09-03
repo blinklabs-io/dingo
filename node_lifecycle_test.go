@@ -31,12 +31,12 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -54,6 +54,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// liveLifecycleTestDataDir returns the immutable testdata directory used
+// elsewhere in the repo (internal/integration, database package tests) —
+// real preview-testnet blocks.
+func liveLifecycleTestDataDir() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(
+		filepath.Dir(thisFile),
+		"database",
+		"immutable",
+		"testdata",
+	)
+}
 
 // newLiveLifecycleTestNode hand-builds a partial but real *Node — real
 // database, chain manager, ledger state (loaded with real blocks), event
@@ -249,19 +262,32 @@ func newLiveLifecycleTestNodeWithGenesis(
 	return n, points
 }
 
-// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c.
-// The lifecycle tests configure the Babbage hard-fork override where needed.
+// loadLiveLifecycleTestBlocks loads numBlocks real blocks from the
+// immutable testdata into c, mirroring
+// internal/integration.loadBlocksFromImmutable (a different package, so
+// not directly reusable).
 func loadLiveLifecycleTestBlocks(
 	t *testing.T,
 	c *chain.Chain,
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
+	imm, err := immutable.New(liveLifecycleTestDataDir())
 	require.NoError(t, err)
 
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
+	require.NoError(t, err)
+	defer iter.Close()
+
 	var points []ocommon.Point
-	for _, block := range blocks {
+	for range numBlocks {
+		immBlock, err := iter.Next()
+		require.NoError(t, err)
+		if immBlock == nil {
+			break
+		}
+		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
 		require.NoError(t, c.AddBlock(block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
@@ -269,19 +295,51 @@ func loadLiveLifecycleTestBlocks(
 		})
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
-	require.Len(t, points, numBlocks)
+	if len(points) < numBlocks {
+		t.Skipf(
+			"not enough blocks in testdata: got %d, need %d",
+			len(points),
+			numBlocks,
+		)
+	}
 	return points
 }
 
-// loadRawLiveLifecycleTestBlocks loads generated blocks without adding them to
-// a chain, so callers can feed them in one at a time later.
+// loadRawLiveLifecycleTestBlocks loads the first numBlocks real blocks from
+// the immutable testdata WITHOUT adding them to any chain, so a caller can
+// feed them in one at a time later (e.g. to simulate new blocks arriving
+// live after a truncate/restore, extending from whatever tip the operation
+// left rather than from the original full chain).
 func loadRawLiveLifecycleTestBlocks(
 	t *testing.T,
 	numBlocks int,
 ) []gledger.Block {
 	t.Helper()
-	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
+	imm, err := immutable.New(liveLifecycleTestDataDir())
 	require.NoError(t, err)
+
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var blocks []gledger.Block
+	for range numBlocks {
+		immBlock, err := iter.Next()
+		require.NoError(t, err)
+		if immBlock == nil {
+			break
+		}
+		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		blocks = append(blocks, block)
+	}
+	if len(blocks) < numBlocks {
+		t.Skipf(
+			"not enough blocks in testdata: got %d, need %d",
+			len(blocks),
+			numBlocks,
+		)
+	}
 	return blocks
 }
 
@@ -1142,11 +1200,7 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 
 	err := n.stopForPendingRestoreRollback(pendingErr, nil)
 	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
-	require.Error(
-		t,
-		n.ctx.Err(),
-		"node must stop instead of reopening unsafe stores",
-	)
+	require.Error(t, n.ctx.Err(), "node must stop instead of reopening unsafe stores")
 }
 
 // TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a
@@ -1299,8 +1353,13 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 // used to unconditionally dereference n.ouroboros to pause the Leios
 // persist writer, panicking if quiesce ever ran against a node that isn't
 // fully initialized (e.g. a partially-constructed Node, or a future call
-// site). This also verifies that an empty connection manager shuts down
-// cleanly when quiesce is called on a partially constructed node.
+// site); (2) a connManager.Stop failure -- meaning it could not confirm
+// every connection/listener goroutine actually exited -- was not escalated
+// to errStorageDrainUnconfirmed, even though PauseLeiosPersistWriterFor-
+// LiveLifecycleOp's own safety (see its doc comment) depends on
+// connManager.Stop having actually succeeded: an unconfirmed shutdown means
+// a straggling connection could still call enqueueLeiosPersist concurrently
+// with the reset PauseLeiosPersistWriterForLiveLifecycleOp performs.
 func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedConnShutdown(
 	t *testing.T,
 ) {
@@ -1314,8 +1373,12 @@ func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedCon
 		connManager: cm,
 	}
 
-	// An empty connection manager may complete cleanly or report the expired
-	// context, depending on which select case wins; either result is safe.
+	// Already past its deadline before quiesceForLiveLifecycleOp ever calls
+	// connManager.Stop(ctx), so Stop's own select reliably takes its
+	// ctx.Done() branch (ready from the moment this context was created)
+	// well before its closeDone/goroutineDone goroutines could plausibly
+	// finish, forcing Stop to return its own unconfirmed-shutdown error
+	// deterministically rather than racing a real timer.
 	ctx, cancel := context.WithDeadline(
 		context.Background(), time.Now().Add(-time.Hour),
 	)
@@ -1325,9 +1388,8 @@ func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedCon
 	require.NotPanics(t, func() {
 		err = n.quiesceForLiveLifecycleOp(ctx)
 	})
-	if err != nil {
-		require.ErrorIs(t, err, errStorageDrainUnconfirmed)
-	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
 }
 
 func newSwapTestNode(t *testing.T, dataDir string) *Node {
@@ -1624,13 +1686,6 @@ func smallEpochGenesisCfgForLifecycleTest(
 	cfg := newNodeTestCardanoNodeCfg(t)
 	require.NotNil(t, cfg.ShelleyGenesis())
 	cfg.ShelleyGenesis().EpochLength = 100
-	// The generated lifecycle blocks are valid Babbage blocks. Enable the
-	// Babbage-era test override so the live ledger pipeline accepts them after
-	// a truncate; preview otherwise stops at Alonzo.
-	enabled := true
-	epoch := uint64(0)
-	cfg.ExperimentalHardForksEnabled = &enabled
-	cfg.TestBabbageHardForkAtEpoch = &epoch
 	return cfg
 }
 

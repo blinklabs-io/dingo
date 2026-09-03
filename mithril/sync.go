@@ -352,10 +352,7 @@ func markSyncInProgress(db *database.Database, storageMode string) error {
 // download + verify + extract a snapshot, import ledger state and immutable
 // blocks, close the volatile gap, backfill metadata, and mark the sync
 // complete. The resulting database is servable by dingo.Node.Run.
-func Sync(
-	ctx context.Context,
-	cfg SyncConfig,
-) (syncResult SyncResult, syncErr error) {
+func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -579,7 +576,7 @@ func Sync(
 	}
 
 	cfg.emit(SyncProgress{Phase: PhaseBootstrap, Active: true})
-	bootstrapResult, err := Bootstrap(
+	result, err := Bootstrap(
 		ctx,
 		BootstrapConfig{
 			OnChunkContiguous:      chunkHook,
@@ -661,8 +658,8 @@ func Sync(
 	// a run that keeps the tree for a later sync still must not leak the
 	// descriptors. This runs after the import errgroup is joined, which is what
 	// makes clearing the fields safe against the goroutines that read them.
-	defer bootstrapResult.CloseHandles()
-	certifiedImmutable, err := openBootstrappedImmutable(bootstrapResult)
+	defer result.CloseHandles()
+	certifiedImmutable, err := openBootstrappedImmutable(result)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -674,8 +671,8 @@ func Sync(
 	// database incomplete.
 	if catchUp {
 		targetImmutable := uint64(0)
-		if bootstrapResult.Snapshot != nil {
-			targetImmutable = bootstrapResult.Snapshot.Beacon.ImmutableFileNumber
+		if result.Snapshot != nil {
+			targetImmutable = result.Snapshot.Beacon.ImmutableFileNumber
 		}
 		// A resuming run (sync_status still in_progress) never maps
 		// local-ahead to up-to-date: it must fall through to the import so the
@@ -692,7 +689,7 @@ func Sync(
 		}
 		if upToDate {
 			if cfg.CleanupAfterLoad {
-				bootstrapResult.Cleanup(logger)
+				result.Cleanup(logger)
 			}
 			return SyncResult{}, nil
 		}
@@ -721,7 +718,6 @@ func Sync(
 				"sync did not complete; "+
 					"re-run 'dingo mithril sync' to resume",
 				"component", "mithril",
-				"error", syncErr,
 			)
 		}
 	}()
@@ -770,7 +766,7 @@ func Sync(
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
 		slot, hash, importErr := importLedgerState(
-			gctx, db, logger, nodeCfg, bootstrapResult, catchUp,
+			gctx, db, logger, nodeCfg, result, catchUp,
 			certifiedTip.Slot,
 			func(p ledgerstate.ImportProgress) {
 				cfg.emit(SyncProgress{
@@ -806,11 +802,11 @@ func Sync(
 		logger.Info(
 			"loading ImmutableDB blocks into blob store",
 			"component", "mithril",
-			"immutable_dir", bootstrapResult.ImmutableDir,
+			"immutable_dir", result.ImmutableDir,
 		)
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
-			gctx, nil, logger, bootstrapResult.ImmutableDir, db,
+			gctx, nil, logger, result.ImmutableDir, db,
 			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
@@ -1203,9 +1199,9 @@ func Sync(
 	// skip already-present archives and anchor its intersection check. Written
 	// after updateMithrilReadyState clears sync_state, so it survives. Set on
 	// both bootstrap and catch-up. Non-fatal.
-	if bootstrapResult.Snapshot != nil {
+	if result.Snapshot != nil {
 		if markerErr := setImmutableImportMarker(
-			db, bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
+			db, result.Snapshot.Beacon.ImmutableFileNumber,
 		); markerErr != nil {
 			logger.Warn(
 				"failed to record Mithril immutable-import marker",
@@ -1218,25 +1214,20 @@ func Sync(
 
 	// Clean up temporary files after a successful complete load.
 	if cfg.CleanupAfterLoad {
-		bootstrapResult.Cleanup(logger)
+		result.Cleanup(logger)
 	}
 
 	logger.Info(
 		"Mithril bootstrap complete",
-		"component",
-		"mithril",
-		"epoch",
-		bootstrapResult.Snapshot.Beacon.Epoch,
-		"immutable_file_number",
-		bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
-		"index_rebuild_elapsed",
-		indexRebuildElapsed,
-		"lazy_index_rebuild_mode",
-		"maintenance",
+		"component", "mithril",
+		"epoch", result.Snapshot.Beacon.Epoch,
+		"immutable_file_number", result.Snapshot.Beacon.ImmutableFileNumber,
+		"index_rebuild_elapsed", indexRebuildElapsed,
+		"lazy_index_rebuild_mode", "maintenance",
 	)
 
 	return SyncResult{
-		Snapshot:   bootstrapResult.Snapshot,
+		Snapshot:   result.Snapshot,
 		LedgerSlot: ledgerStateSlot,
 	}, nil
 }

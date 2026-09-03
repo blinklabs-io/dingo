@@ -17,24 +17,12 @@ package dingo
 import (
 	"time"
 
-	"github.com/blinklabs-io/dingo/chainselection"
-	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
-
-func (n *Node) chainsyncSyncTarget(
-	update chainselection.PeerTipUpdateEvent,
-) (ochainsync.Tip, bool) {
-	if n.chainSelector == nil {
-		return update.ObservedTip, update.ObservedTip.Point.Slot != 0 ||
-			update.ObservedTip.BlockNumber != 0
-	}
-	return n.chainSelector.SyncTargetForPeerTipUpdate(update)
-}
 
 // ledgerStateConfig builds the ledger.LedgerStateConfig for this node.
 //
@@ -64,7 +52,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		EventBus:           n.eventBus,
 		Logger:             n.config.logger,
 		CardanoNodeConfig:  n.config.cardanoNodeConfig,
-		Network:            n.config.network,
 		PromRegistry:       n.config.promRegistry,
 		ForgeBlocks:        n.config.isDevMode(),
 		ValidateHistorical: n.config.validateHistorical,
@@ -153,44 +140,35 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			origin ouroboros.ConnectionId,
 			point ocommon.Point,
 		) []ouroboros.ConnectionId {
-			var peers []ouroboros.ConnectionId
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				peers = state.PeersWithBlock(origin, point)
-			})
-			return peers
+			if n.chainsyncState == nil {
+				return nil
+			}
+			return n.chainsyncState.PeersWithBlock(origin, point)
 		},
 		RecordBlockfetchLatencyFunc: func(
 			connId ouroboros.ConnectionId,
 			latency time.Duration,
 		) {
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				state.RecordBlockfetchLatency(
+			if n.chainsyncState != nil {
+				n.chainsyncState.RecordBlockfetchLatency(
 					connId,
 					latency,
 				)
-			})
+			}
 		},
 		BlockfetchLatencyFunc: func(
 			connId ouroboros.ConnectionId,
 		) (time.Duration, bool) {
-			var (
-				latency time.Duration
-				ok      bool
-			)
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				latency, ok = state.BlockfetchLatency(connId)
-			})
-			return latency, ok
+			if n.chainsyncState == nil {
+				return 0, false
+			}
+			return n.chainsyncState.BlockfetchLatency(connId)
 		},
 		BlockfetchLatencyMedianFunc: func() (time.Duration, int) {
-			var (
-				latency time.Duration
-				count   int
-			)
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				latency, count = state.BlockfetchLatencyMedian()
-			})
-			return latency, count
+			if n.chainsyncState == nil {
+				return 0, 0
+			}
+			return n.chainsyncState.BlockfetchLatencyMedian()
 		},
 		DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
 		GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
@@ -198,11 +176,10 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			// blockfetch fallback. Headers can arrive from any eligible
 			// peer, but rollbacks and retry selection still need a
 			// current best connection.
-			var active *ouroboros.ConnectionId
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				active = state.GetClientConnId()
-			})
-			return active
+			if n.chainsyncState != nil {
+				return n.chainsyncState.GetClientConnId()
+			}
+			return nil
 		},
 		GetPeerObservedTipFunc: func(
 			connId ouroboros.ConnectionId,
@@ -216,14 +193,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return peerTip.SelectionTip(), true
 		},
-		GetPeerSyncTargetFunc: func(
-			connId ouroboros.ConnectionId,
-		) (ochainsync.Tip, bool) {
-			if n.chainSelector == nil {
-				return ochainsync.Tip{}, false
-			}
-			return n.chainSelector.GetPeerSyncTarget(connId)
-		},
 		ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil
@@ -232,32 +201,28 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			// Retain older seen-header history so a switched peer
 			// can replay only the post-tip segment from the local
 			// intersect point without re-delivering older headers.
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				if n.ledgerState == nil {
-					return
-				}
-				state.ClearSeenHeadersFrom(
+			if n.chainsyncState != nil && n.ledgerState != nil {
+				n.chainsyncState.ClearSeenHeadersFrom(
 					n.ledgerState.Tip().Point.Slot,
 				)
-			})
+			}
 		},
 		ClearSeenHeadersFromFunc: func(fromSlot uint64) {
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				state.ClearSeenHeadersFrom(fromSlot)
-			})
+			if n.chainsyncState != nil {
+				n.chainsyncState.ClearSeenHeadersFrom(fromSlot)
+			}
 		},
 		PeerHeaderLookupFunc: func(
 			connId ouroboros.ConnectionId,
 			hash []byte,
 		) (ledger.ChainsyncEvent, []byte, bool) {
-			var (
-				h        chainsync.ObservedHeader
-				prevHash []byte
-				ok       bool
+			if n.chainsyncState == nil {
+				return ledger.ChainsyncEvent{}, nil, false
+			}
+			h, prevHash, ok := n.chainsyncState.LookupObservedHeader(
+				connId,
+				hash,
 			)
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				h, prevHash, ok = state.LookupObservedHeader(connId, hash)
-			})
 			if !ok {
 				return ledger.ChainsyncEvent{}, nil, false
 			}

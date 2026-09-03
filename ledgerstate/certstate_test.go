@@ -68,8 +68,8 @@ func TestParseCredentialMapConwayAccountState(t *testing.T) {
 	if acct.Reward != 101 {
 		t.Fatalf("expected reward 101, got %d", acct.Reward)
 	}
-	if acct.Deposit == nil || *acct.Deposit != 202 {
-		t.Fatalf("expected deposit 202, got %v", acct.Deposit)
+	if acct.Deposit != 202 {
+		t.Fatalf("expected deposit 202, got %d", acct.Deposit)
 	}
 	if !bytes.Equal(acct.PoolKeyHash, poolHash) {
 		t.Fatalf("pool hash mismatch: %x", acct.PoolKeyHash)
@@ -112,8 +112,8 @@ func TestParseCredentialMapShelleyAccountState(t *testing.T) {
 	if acct.Reward != 303 {
 		t.Fatalf("expected reward 303, got %d", acct.Reward)
 	}
-	if acct.Deposit == nil || *acct.Deposit != 404 {
-		t.Fatalf("expected deposit 404, got %v", acct.Deposit)
+	if acct.Deposit != 404 {
+		t.Fatalf("expected deposit 404, got %d", acct.Deposit)
 	}
 	if !bytes.Equal(acct.PoolKeyHash, poolHash) {
 		t.Fatalf("pool hash mismatch: %x", acct.PoolKeyHash)
@@ -149,54 +149,14 @@ func TestParseCredentialMapLegacyUMElem(t *testing.T) {
 	if acct.Reward != 505 {
 		t.Fatalf("expected reward 505, got %d", acct.Reward)
 	}
-	if acct.Deposit == nil || *acct.Deposit != 606 {
-		t.Fatalf("expected deposit 606, got %v", acct.Deposit)
+	if acct.Deposit != 606 {
+		t.Fatalf("expected deposit 606, got %d", acct.Deposit)
 	}
 	if !bytes.Equal(acct.PoolKeyHash, poolHash) {
 		t.Fatalf("pool hash mismatch: %x", acct.PoolKeyHash)
 	}
 	if acct.DRepCred.Type != CredentialTypeAbstain {
 		t.Fatalf("expected abstain drep, got type %d", acct.DRepCred.Type)
-	}
-}
-
-func TestParseCredentialMapLegacyRewardOnlyDepositIsUnknown(t *testing.T) {
-	stakingKey := bytes.Repeat([]byte{0x78}, 28)
-	data := encodeCredentialMapEntry(
-		t,
-		testCredentialKey{Type: 0, Hash: toFixed28(stakingKey)},
-		[]any{[]uint64{707}},
-	)
-
-	accounts, err := parseCredentialMap(data)
-	if err != nil {
-		t.Fatalf("parseCredentialMap failed: %v", err)
-	}
-	if len(accounts) != 1 {
-		t.Fatalf("expected 1 account, got %d", len(accounts))
-	}
-	if accounts[0].Deposit != nil {
-		t.Fatalf("expected unknown deposit, got %d", *accounts[0].Deposit)
-	}
-}
-
-func TestParseCredentialMapPresentZeroDeposit(t *testing.T) {
-	stakingKey := bytes.Repeat([]byte{0x79}, 28)
-	data := encodeCredentialMapEntry(
-		t,
-		testCredentialKey{Type: 0, Hash: toFixed28(stakingKey)},
-		[]any{uint64(808), uint64(0)},
-	)
-
-	accounts, err := parseCredentialMap(data)
-	if err != nil {
-		t.Fatalf("parseCredentialMap failed: %v", err)
-	}
-	if len(accounts) != 1 {
-		t.Fatalf("expected 1 account, got %d", len(accounts))
-	}
-	if accounts[0].Deposit == nil || *accounts[0].Deposit != 0 {
-		t.Fatalf("expected present zero deposit, got %v", accounts[0].Deposit)
 	}
 }
 
@@ -469,226 +429,8 @@ func encodeCredentialMapEntry(t *testing.T, key any, value any) []byte {
 	return data
 }
 
-func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
-	keyHash := bytes.Repeat([]byte{0x11}, 28)
-	scriptHash := bytes.Repeat([]byte{0x22}, 28)
-	hotHash := bytes.Repeat([]byte{0x33}, 28)
-	keyCredential, err := cbor.Encode([]any{uint64(0), keyHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	scriptCredential, err := cbor.Encode([]any{uint64(1), scriptHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hotCredential, err := cbor.Encode([]any{uint64(1), hotHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hotMap := append([]byte{0xa1}, keyCredential...)
-	hotMap = append(hotMap, hotCredential...)
-	resignMap := append([]byte{0xa1}, scriptCredential...)
-	resignMap = append(resignMap, 0xf5)
-	hotKeys, resignations := parseCommitteeVState(
-		[][]byte{hotMap, resignMap},
-	)
-	if len(hotKeys) != 1 || len(resignations) != 1 {
-		t.Fatalf("unexpected committee state: %d authorizations, %d resignations", len(hotKeys), len(resignations))
-	}
-	if hotKeys[0].Cold.Type != CredentialTypeKey || hotKeys[0].Hot.Type != CredentialTypeScript {
-		t.Fatalf("credential tags were not preserved: %#v", hotKeys[0])
-	}
-	if resignations[0].Type != CredentialTypeScript {
-		t.Fatalf("resignation credential tag was not preserved: %#v", resignations[0])
-	}
-}
-
 func toFixed28(src []byte) [28]byte {
 	var dst [28]byte
 	copy(dst[:], src)
 	return dst
-}
-
-// committeeVStateFixture builds a committee hot-key map and resignation map
-// with distinguishable credential tags.
-func committeeVStateFixture(t *testing.T) (hotMap, resignMap []byte) {
-	t.Helper()
-	keyHash := bytes.Repeat([]byte{0x44}, 28)
-	scriptHash := bytes.Repeat([]byte{0x55}, 28)
-	hotHash := bytes.Repeat([]byte{0x66}, 28)
-	keyCredential, err := cbor.Encode([]any{uint64(0), keyHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	scriptCredential, err := cbor.Encode([]any{uint64(1), scriptHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hotCredential, err := cbor.Encode([]any{uint64(0), hotHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hotMap = append([]byte{0xa1}, keyCredential...)
-	hotMap = append(hotMap, hotCredential...)
-	resignMap = append([]byte{0xa1}, scriptCredential...)
-	resignMap = append(resignMap, 0xf5)
-	return hotMap, resignMap
-}
-
-// A nested committee state followed by a dormant-epoch field must still be
-// unwrapped; the field count cannot be the signal.
-func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(t *testing.T) {
-	hotMap, resignMap := committeeVStateFixture(t)
-	nested := append([]byte{0x82}, hotMap...)
-	nested = append(nested, resignMap...)
-
-	hotKeys, resignations := parseCommitteeVState(
-		// [committeeState, dormantEpoch]
-		[][]byte{nested, {0x00}},
-	)
-	if len(hotKeys) != 1 || len(resignations) != 1 {
-		t.Fatalf(
-			"nested committee state was dropped: %d authorizations, %d resignations",
-			len(hotKeys),
-			len(resignations),
-		)
-	}
-	if hotKeys[0].Cold.Type != CredentialTypeKey {
-		t.Fatalf("cold credential tag not preserved: %#v", hotKeys[0])
-	}
-	if resignations[0].Type != CredentialTypeScript {
-		t.Fatalf("resignation tag not preserved: %#v", resignations[0])
-	}
-}
-
-// The flattened Conway CertState inlines the VState fields, so committee state
-// must be recovered there too rather than silently dropped.
-func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
-	hotMap, resignMap := committeeVStateFixture(t)
-	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
-
-	drepHash := bytes.Repeat([]byte{0x88}, 28)
-	drepCredential, err := cbor.Encode([]any{uint64(0), drepHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	drepMap := append([]byte{0xa1}, drepCredential...)
-	drepMap = append(drepMap, 0x80)
-
-	// DState must be the largest credential-keyed map so it is identified
-	// ahead of the DRep and committee maps.
-	dstate := []byte{0xa2}
-	for _, tag := range []byte{0x77, 0x78} {
-		delegatorCredential, err := cbor.Encode(
-			[]any{uint64(0), bytes.Repeat([]byte{tag}, 28)},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dstate = append(dstate, delegatorCredential...)
-		dstate = append(dstate, 0x80)
-	}
-
-	certState := [][]byte{
-		drepMap,
-		hotMap,
-		resignMap,
-		poolState,
-		dstate,
-		{0x00},
-	}
-	result, err := parseCertStateConway(certState)
-	if err != nil {
-		t.Logf("parse warnings: %v", err)
-	}
-	if result == nil {
-		t.Fatal("no parsed cert state")
-	}
-	if len(result.CommitteeHotKeys) != 1 {
-		t.Fatalf(
-			"committee authorizations were dropped: %#v",
-			result.CommitteeHotKeys,
-		)
-	}
-	if len(result.CommitteeResignations) != 1 {
-		t.Fatalf(
-			"committee resignations were dropped: %#v",
-			result.CommitteeResignations,
-		)
-	}
-	if result.CommitteeHotKeys[0].Cold.Type != CredentialTypeKey {
-		t.Fatalf(
-			"cold credential tag not preserved: %#v",
-			result.CommitteeHotKeys[0],
-		)
-	}
-	if result.CommitteeResignations[0].Type != CredentialTypeScript {
-		t.Fatalf(
-			"resignation tag not preserved: %#v",
-			result.CommitteeResignations[0],
-		)
-	}
-}
-
-// DState and ccHotKeys are both credential-keyed, so picking DState by map size
-// alone claimed the committee map whenever DState was empty or smaller.
-func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
-	hotMap, resignMap := committeeVStateFixture(t)
-	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
-	drepHash := bytes.Repeat([]byte{0x8a}, 28)
-	drepCredential, err := cbor.Encode([]any{uint64(0), drepHash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	drepMap := append([]byte{0xa1}, drepCredential...)
-	drepMap = append(drepMap, 0x80)
-
-	smallDState := func(t *testing.T) []byte {
-		t.Helper()
-		delegator, err := cbor.Encode(
-			[]any{uint64(0), bytes.Repeat([]byte{0x8b}, 28)},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out := append([]byte{0xa1}, delegator...)
-		return append(out, 0x80)
-	}
-
-	for _, test := range []struct {
-		name   string
-		dstate []byte
-	}{
-		{name: "empty DState", dstate: []byte{0xa0}},
-		{name: "DState smaller than the committee map", dstate: smallDState(t)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			result, err := parseCertStateConway([][]byte{
-				drepMap,
-				hotMap,
-				resignMap,
-				poolState,
-				test.dstate,
-				{0x00},
-			})
-			if err != nil {
-				t.Logf("parse warnings: %v", err)
-			}
-			if result == nil {
-				t.Fatal("no parsed cert state")
-			}
-			if len(result.CommitteeHotKeys) != 1 {
-				t.Fatalf(
-					"committee authorizations were dropped: %#v",
-					result.CommitteeHotKeys,
-				)
-			}
-			if len(result.CommitteeResignations) != 1 {
-				t.Fatalf(
-					"committee resignations were dropped: %#v",
-					result.CommitteeResignations,
-				)
-			}
-		})
-	}
 }

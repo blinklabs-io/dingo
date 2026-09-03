@@ -142,53 +142,6 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 	)
 }
 
-// ShouldVerifyChainSelectionHeaderCrypto reports whether a header at the
-// given slot is eligible to have its cryptography verified right now via
-// ValidateChainSelectionHeaderCrypto. It mirrors the same exemptions the
-// ledger's own chainsync header-queue path already applies
-// (shouldVerifyChainsyncHeaderCrypto): verification is skipped while bulk
-// historical/catch-up loading has not yet enabled live validation, and for
-// slots already covered by an imported Mithril snapshot, since those slots
-// were authenticated by the certificate chain during import and the
-// restored database does not retain every historical epoch nonce. A caller
-// that skips verification because this returns false must still treat the
-// header as eligible, not reject it -- the same trust boundary the ledger's
-// own pipeline already extends to this data.
-func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
-	slot uint64,
-) bool {
-	return ls.shouldVerifyChainsyncHeaderCrypto(slot)
-}
-
-// ValidateChainSelectionHeaderCrypto verifies a header's VRF/KES cryptography
-// and, where the local ledger's stake/pool state has already caught up to
-// the header's epoch, its leader eligibility. It lets chain selection require
-// that a peer-reported header has passed the same checks as the applied
-// chain before the header is allowed to influence Genesis density or
-// corroboration (dingo #3517), independent of whether that header will ever
-// be applied to the ledger.
-//
-// It never advances the shared epoch cache (matching ValidateBlockHeaderCrypto's
-// no-mutation contract for header-only validation), but unlike
-// ValidateBlockHeaderCrypto it tolerates ledger state that has not yet caught
-// up to the header's slot: that is the normal condition for a peer
-// legitimately racing ahead of local ledger application during fast sync or
-// Genesis bootstrap. Use IsHeaderVerificationDeferred to distinguish that
-// case (the header must still be treated as eligible) from a header this
-// node can already prove is invalid.
-func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
-	header ledger.BlockHeader,
-) error {
-	if header == nil {
-		return errors.New("nil block header")
-	}
-	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
-		headerOnlyBlock{header: header},
-		false,
-		true,
-	)
-}
-
 // verifyBlockHeader performs cryptographic verification of a block header.
 // This includes VRF proof verification and KES signature verification.
 // Byron-era blocks are skipped here because this helper has only Praos
@@ -241,13 +194,6 @@ func verifyBlockHeaderHex(
 		return fmt.Errorf(
 			"block header verification failed at slot %d: "+
 				"normalize VRF fields from header body CBOR: %w",
-			block.SlotNumber(),
-			err,
-		)
-	}
-	if err := verifyTPraosNonceVrfHex(header, epochNonceHex); err != nil {
-		return fmt.Errorf(
-			"block header verification failed at slot %d: %w",
 			block.SlotNumber(),
 			err,
 		)
@@ -853,9 +799,10 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
 	if ls.db != nil {
 		era, ok := ls.eraById(paramsEraID)
 		if ok && era != nil && era.DecodePParamsFunc != nil {
-			if pparams, pparamsErr := ls.loadPersistedProtocolParameters(
+			if pparams, pparamsErr := ls.db.GetPParams(
 				paramsEpoch,
-				*era,
+				paramsEraID,
+				era.DecodePParamsFunc,
 				nil,
 			); pparamsErr == nil && pparams != nil {
 				return pparams

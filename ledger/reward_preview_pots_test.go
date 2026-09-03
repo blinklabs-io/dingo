@@ -52,15 +52,6 @@ const (
 	previewEpoch2Treasury = uint64(17_994_600_087_558)
 	previewEpoch2Reserves = uint64(14_982_005_400_350_235)
 
-	// Epoch 1 collected 206597 lovelace in fees, which the 2->3 boundary
-	// folds into the reward pot. Preview's decentralisation is 1 at epochs 0
-	// and 1 and 0 from epoch 2 onward, so the 2->3 round -- whose parameters
-	// come from performance epoch 1 -- still takes the d >= 0.8 short circuit
-	// and expands by the full rho * reserves.
-	previewEpoch2Fees     = uint64(206_597)
-	previewEpoch3Treasury = uint64(26_983_803_369_087)
-	previewEpoch3Reserves = uint64(14_973_016_197_275_303)
-
 	previewEpochLength = uint64(86_400)
 )
 
@@ -109,19 +100,8 @@ func newPreviewRewardPotsTestLedger(
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
 
-	// Preview's decentralisation drops from 1 to 0 at epoch 2, so each epoch
-	// is seeded with its own protocol parameters.
-	decentralizedPParams := *pparams
-	decentralizedPParams.Decentralization = rewardCalcRat(0, 1)
-	decentralizedCbor, err := cbor.Encode(&decentralizedPParams)
-	require.NoError(t, err)
-
 	meta := db.Metadata()
-	for _, epoch := range []uint64{0, 1, 2} {
-		epochPParamsCbor := pparamsCbor
-		if epoch >= 2 {
-			epochPParamsCbor = decentralizedCbor
-		}
+	for _, epoch := range []uint64{0, 1} {
 		startSlot := epoch * previewEpochLength
 		require.NoError(t, meta.SetEpoch(
 			startSlot,
@@ -136,7 +116,7 @@ func newPreviewRewardPotsTestLedger(
 			nil,
 		))
 		require.NoError(t, db.SetPParams(
-			epochPParamsCbor,
+			pparamsCbor,
 			startSlot,
 			epoch,
 			eras.AlonzoEraDesc.Id,
@@ -287,45 +267,4 @@ INSERT INTO "transaction" (
 	require.NotNil(t, state)
 	require.Equal(t, previewEpoch2Treasury, uint64(state.Treasury))
 	require.Equal(t, previewEpoch2Reserves, uint64(state.Reserves))
-}
-
-// TestApplyStakeRewardsPreviewEpoch3Pots pins the 2->3 boundary, where
-// preview's decentralisation differs between the round's performance epoch (1,
-// d = 1) and its calculation epoch (2, d = 0).
-//
-// cardano-ledger's startStep builds the whole reward update from
-// prevPParams -- the parameters in force during the epoch whose blocks are
-// counted, which is dingo's performance epoch -- so d is 1 here and eta takes
-// the d >= 0.8 short circuit. Reading d from the calculation epoch instead
-// gives d = 0, no short circuit, and an eta of zero against an empty epoch-0
-// mark snapshot, which drops the monetary expansion entirely and moves only
-// the fee pot (dingo #3481).
-func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
-	ls, db := newPreviewRewardPotsTestLedger(t)
-	meta := db.Metadata()
-
-	require.NoError(t, meta.SetNetworkState(
-		previewEpoch2Treasury,
-		previewEpoch2Reserves,
-		2*previewEpochLength,
-		nil,
-	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-		Epoch:        2,
-		Treasury:     types.Uint64(previewEpoch2Treasury),
-		Reserves:     types.Uint64(previewEpoch2Reserves),
-		Fees:         types.Uint64(previewEpoch2Fees),
-		CapturedSlot: 2 * previewEpochLength,
-	}, nil))
-
-	txn := db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 3, 3*previewEpochLength)
-	}))
-
-	state, err := meta.GetNetworkState(nil)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.Equal(t, previewEpoch3Treasury, uint64(state.Treasury))
-	require.Equal(t, previewEpoch3Reserves, uint64(state.Reserves))
 }

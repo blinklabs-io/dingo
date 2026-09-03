@@ -724,6 +724,22 @@ func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
 	assert.Equal(t, "/keys/leios-vote.skey", cfg.cfg.LeiosVoteSigningKeyFile)
 }
 
+func TestWithLeiosVoterPublicKeys(t *testing.T) {
+	cfg := &Config{cfg: &internalconfig.Config{}}
+	assert.Nil(t, cfg.cfg.LeiosVoterPublicKeys)
+	keys := map[string]string{"aabbcc": "ddeeff"}
+	WithLeiosVoterPublicKeys(keys)(cfg)
+	assert.Equal(
+		t,
+		map[string]string{"aabbcc": "ddeeff"},
+		cfg.cfg.LeiosVoterPublicKeys,
+	)
+	// The option copies the map: later caller mutations must not
+	// change live config
+	keys["aabbcc"] = "mutated"
+	assert.Equal(t, "ddeeff", cfg.cfg.LeiosVoterPublicKeys["aabbcc"])
+}
+
 // TestWithKoiosParityAccountsNilDefaultsToEnabled locks in
 // KoiosParityConfig.Accounts's *bool semantics: an unset (nil) Accounts
 // pointer must default to enabled (true), matching

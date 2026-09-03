@@ -31,10 +31,7 @@ VALUES ('a', '61', 'p', 'f1', 1, 10, '18446744073709551615'),
 		"first":  {{ID: 10}},
 		"second": {{ID: 20}},
 	}
-	require.NoError(
-		t,
-		store.loadUtxoAssetsBatch(t.Context(), store.writeDB, utxos),
-	)
+	require.NoError(t, store.loadUtxoAssetsBatch(t.Context(), store.writeDB, utxos))
 	first := utxos["first"]
 	second := utxos["second"]
 	if len(first) == 0 || len(second) == 0 {
@@ -75,10 +72,7 @@ VALUES ('a', '61', 'p', 'f1', 1, 10, '1')`)
 	for i := range utxos {
 		pointers[i] = &utxos[i]
 	}
-	require.NoError(
-		t,
-		store.loadUtxoAssets(t.Context(), store.writeDB, pointers),
-	)
+	require.NoError(t, store.loadUtxoAssets(t.Context(), store.writeDB, pointers))
 	for i := range utxos {
 		require.Len(t, utxos[i].Assets, 1)
 	}

@@ -96,10 +96,7 @@ jobs:
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: go-test
-        # The ledger package legitimately approaches 20 minutes under the race
-        # detector on hosted runners. Keep a finite package-level hang guard
-        # while leaving enough headroom for the complete release suite.
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 20m ./...
       - name: govulncheck
         run: make govulncheck
 
@@ -163,10 +160,9 @@ jobs:
   go-test-other:
     # Deliberately unnamed, so GitHub generates `go-test-other (<platform>,
     # <go-version>)`. A custom `name:` carrying matrix references collided with
-    # the platform jobs in go-test.yml, which render on a tag's own main-branch
-    # push, and branch protection matches a check by name — two workflows
-    # claiming one context make a required check ambiguous. It also rendered
-    # literally as
+    # go-test-platforms.yml, which renders the same string on a tag, and branch
+    # protection matches a check by name — two workflows claiming one context
+    # make a required check ambiguous. It also rendered literally as
     # `go-test (${{ matrix.platform }}) (${{ matrix.go-version }})` on every
     # non-tag push, because this job is skipped there and a skipped matrix job
     # never expands its matrix.

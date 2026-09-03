@@ -52,10 +52,8 @@ func TestExtractPraosNonces_LastEpochBlockNonceIs8FieldShape(t *testing.T) {
 
 	lastSlot, err := cbor.Encode(uint64(123456))
 	require.NoError(t, err)
-	poolKeyHash := bytes.Repeat([]byte{0x42}, 28)
-	ocertCounters := encodeTestOpCertCounters(t, map[string]uint64{
-		string(poolKeyHash): 490,
-	})
+	ocertCounters, err := cbor.Encode(map[uint64]uint64{})
+	require.NoError(t, err)
 
 	praosState := [][]byte{
 		lastSlot,
@@ -80,7 +78,6 @@ func TestExtractPraosNonces_LastEpochBlockNonceIs8FieldShape(t *testing.T) {
 			"(index 7); reading index 6 picks up labNonce and "+
 			"breaks VRF on every header in the next epoch",
 	)
-	require.Equal(t, uint64(490), got.OpCertCounters[string(poolKeyHash)])
 	require.NotEqual(
 		t, lab, got.LastEpochBlockNonce,
 		"sanity: parser must not return labNonce as "+
@@ -100,7 +97,8 @@ func TestExtractPraosNonces_LastEpochBlockNonceIs7FieldShape(t *testing.T) {
 
 	lastSlot, err := cbor.Encode(uint64(123456))
 	require.NoError(t, err)
-	ocertCounters := encodeTestOpCertCounters(t, nil)
+	ocertCounters, err := cbor.Encode(map[uint64]uint64{})
+	require.NoError(t, err)
 
 	praosState := [][]byte{
 		lastSlot,
@@ -118,31 +116,4 @@ func TestExtractPraosNonces_LastEpochBlockNonceIs7FieldShape(t *testing.T) {
 	require.Equal(t, candidate, got.CandidateNonce)
 	require.Equal(t, epoch, got.EpochNonce)
 	require.Equal(t, lastEpochBlock, got.LastEpochBlockNonce)
-}
-
-func encodeTestOpCertCounters(
-	t *testing.T,
-	counters map[string]uint64,
-) []byte {
-	t.Helper()
-	if len(counters) > 23 {
-		t.Fatal("test helper supports at most 23 counters")
-	}
-	ret := []byte{0xa0 | byte(len(counters))}
-	for poolKey, counter := range counters {
-		key, err := cbor.Encode([]byte(poolKey))
-		require.NoError(t, err)
-		value, err := cbor.Encode(counter)
-		require.NoError(t, err)
-		ret = append(ret, key...)
-		ret = append(ret, value...)
-	}
-	return ret
-}
-
-func TestDecodeOpCertCountersRejectsInvalidPoolKeyLength(t *testing.T) {
-	_, err := decodeOpCertCounters(encodeTestOpCertCounters(
-		t, map[string]uint64{string(make([]byte, 27)): 1},
-	))
-	require.ErrorContains(t, err, "expected 28")
 }

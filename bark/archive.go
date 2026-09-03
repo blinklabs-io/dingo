@@ -17,7 +17,6 @@ package bark
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math"
 
@@ -40,23 +39,6 @@ func (a *archiveServiceHandler) FetchBlock(
 	req *connect.Request[archive.FetchBlockRequest],
 ) (*connect.Response[archive.FetchBlockResponse], error) {
 	resp := &archive.FetchBlockResponse{}
-	blocks := req.Msg.GetBlocks()
-	if len(blocks) == 0 {
-		return nil, connect.NewError(
-			connect.CodeInvalidArgument,
-			errors.New("at least one block reference is required"),
-		)
-	}
-	if len(blocks) > DefaultMaxFetchBlockRefs {
-		return nil, connect.NewError(
-			connect.CodeResourceExhausted,
-			fmt.Errorf(
-				"block reference count %d exceeds maximum %d",
-				len(blocks),
-				DefaultMaxFetchBlockRefs,
-			),
-		)
-	}
 
 	db, release, err := a.bark.Acquire()
 	if err != nil {
@@ -64,7 +46,7 @@ func (a *archiveServiceHandler) FetchBlock(
 	}
 	defer release()
 
-	for _, b := range blocks {
+	for _, b := range req.Msg.GetBlocks() {
 		hash, err := hex.DecodeString(b.GetHash())
 		if err != nil {
 			return nil,

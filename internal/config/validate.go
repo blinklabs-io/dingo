@@ -15,8 +15,6 @@
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -37,7 +35,40 @@ import (
 const (
 	minUnprivilegedPort = 1024
 	maxPort             = 65535
+	// maxKESAgentSignTimeout is exclusive. A sign-mode request blocks the
+	// slot-aligned forging loop, so it must finish before the next mainnet slot.
+	maxKESAgentSignTimeout = time.Second
 )
+
+// ValidateKESKeySources rejects a block producer that names both a local KES
+// signing key file and a KES agent socket.
+//
+// It lives here, rather than inline in Validate, because both the CLI path and
+// the programmatic Node path have to enforce it. Only the CLI path used to: a
+// library consumer that set both got kesAgentEnabled() true, the agent silently
+// preferred, and the local key file ignored — the operator's explicit choice of
+// key source discarded without a word.
+func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
+	if kesKeyPath != "" && kesAgentSocket != "" {
+		return errors.New(
+			"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		)
+	}
+	return nil
+}
+
+// ValidateKESAgentSignTimeout accepts zero as the documented default selector,
+// or an explicit positive timeout shorter than one mainnet slot.
+func ValidateKESAgentSignTimeout(timeout time.Duration) error {
+	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
+		return fmt.Errorf(
+			"shelleyKesAgentSignTimeout (%s) must be zero (use default) or positive and less than %s",
+			timeout,
+			maxKESAgentSignTimeout,
+		)
+	}
+	return nil
+}
 
 // AcceptedChainsyncStrategies mirrors
 // chainsync.AcceptedHeaderSyncStrategyNames (the accepted-name list
@@ -426,43 +457,22 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, err)
 	}
 
-	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
-	// directory configured. Every method must authenticate its caller, and its
-	// destructive methods additionally require explicit operator authorization.
-	// Validate both policies here rather than failing deep in Bark.Start.
+	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
+	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
+	// whenever bark is enabled with a snapshot directory configured —
+	// exactly node.go's Run() gating for lifecycleEnabled. Those RPCs must
+	// never be reachable without a way to authenticate callers, regardless
+	// of bind address (BarkHost/effectiveBarkHost is a network control, not
+	// an identity one), so a client CA is required upfront here rather than
+	// left to fail deep inside bark.Bark.Start at startup.
 	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
 		c.BarkClientCAFilePath == "" {
 		errs = append(errs, errors.New(
 			"barkClientCaFilePath is required when bark is enabled "+
 				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
-				"DatabaseService RPCs must not be mounted without a way to "+
-				"authenticate callers",
+				"destructive DatabaseService RPCs must not be mounted "+
+				"without a way to authenticate callers",
 		))
-	}
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		len(c.BarkOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkOperatorCertificateFingerprints requires at least one SHA-256 "+
-				"client certificate fingerprint when bark is enabled (barkPort) "+
-				"alongside databaseLifecycle.snapshotDir: verified identity alone "+
-				"does not authorize destructive DatabaseService RPCs",
-		))
-	}
-	for idx, fingerprint := range c.BarkOperatorCertificateFingerprints {
-		normalized := strings.ReplaceAll(
-			strings.TrimSpace(fingerprint),
-			":",
-			"",
-		)
-		decoded, err := hex.DecodeString(normalized)
-		if err != nil || len(decoded) != sha256.Size {
-			errs = append(errs, fmt.Errorf(
-				"barkOperatorCertificateFingerprints[%d] must be a %d-byte "+
-					"SHA-256 certificate fingerprint encoded as hexadecimal",
-				idx,
-				sha256.Size,
-			))
-		}
 	}
 	// mTLS client verification also needs the server's own TLS pair --
 	// without it, bark.Bark.Start's own equivalent check (independent of
@@ -528,8 +538,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		if c.ShelleyVRFKey == "" {
 			missing = append(missing, "shelleyVrfKey")
 		}
-		if c.ShelleyKESKey == "" {
+		// The KES signing key is only required when the key is local. With a
+		// KES agent socket configured the key lives with the agent, which is
+		// the whole point of that flag; requiring both made the agent-only
+		// configuration impossible to start.
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
 			missing = append(missing, "shelleyKesKey")
+		}
+		if err := ValidateKESKeySources(
+			c.ShelleyKESKey,
+			c.ShelleyKESAgentSocket,
+		); err != nil {
+			errs = append(errs, err)
 		}
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
@@ -540,6 +560,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				missing,
 			))
 		}
+	}
+	if c.ShelleyKESAgentMode != "" &&
+		c.ShelleyKESAgentMode != "serve-key" &&
+		c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"invalid shelleyKesAgentMode %q: must be \"serve-key\" or \"sign\"",
+			c.ShelleyKESAgentMode,
+		))
+	}
+	if err := ValidateKESAgentSignTimeout(
+		c.ShelleyKESAgentSignTimeout,
+	); err != nil {
+		errs = append(errs, err)
 	}
 
 	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].

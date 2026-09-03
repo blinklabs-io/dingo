@@ -871,11 +871,7 @@ func TestFetchAccountRewardsForEpochForceRefreshDowngradesCoverageOnPostDispatch
 		t.Context(), k, cache, "preview", 980, addrs, time.Time{}, 0,
 		1, 0, true, nil,
 	)
-	require.Error(
-		t,
-		err,
-		"the broken commit step must surface as a real failure",
-	)
+	require.Error(t, err, "the broken commit step must surface as a real failure")
 	require.ErrorContains(t, err, "commit account rewards")
 
 	covAfter, err := cache.GetAccountCoverage("preview", 980)

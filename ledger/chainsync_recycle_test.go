@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -141,13 +140,6 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 		ConnectionId: connId,
 		BlockHeader:  header,
 		Point:        point,
-		Tip: ochainsync.Tip{
-			Point: ocommon.NewPoint(
-				point.Slot+1,
-				[]byte("unbound-tip"),
-			),
-			BlockNumber: header.BlockNumber() + 1,
-		},
 	})
 	require.NoError(t, err)
 
@@ -159,7 +151,6 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 	)
 	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
-	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }
 
 func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
@@ -220,13 +211,6 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 		ConnectionId: connId,
 		BlockHeader:  header,
 		Point:        point,
-		Tip: ochainsync.Tip{
-			Point: ocommon.NewPoint(
-				point.Slot+1,
-				[]byte("unbound-tip"),
-			),
-			BlockNumber: header.BlockNumber() + 1,
-		},
 	})
 	require.NoError(t, err)
 
@@ -245,39 +229,6 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	)
 	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
-	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
-}
-
-func TestChainsyncHeaderVerificationMithrilCoverageAdvancesFrontier(
-	t *testing.T,
-) {
-	header := mockHeader{slot: 1000, blockNumber: 100}
-	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
-	testChain := &chain.Chain{}
-	ls := &LedgerState{
-		validationEnabled:            true,
-		mithrilLedgerSlot:            point.Slot,
-		chain:                        testChain,
-		chainsyncBlockfetchReadyChan: make(chan struct{}),
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-	ls.publishSnapshotsLocked()
-
-	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-		ConnectionId: testRecycleConnId(),
-		BlockHeader:  header,
-		Point:        point,
-		Tip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(point.Slot+1, []byte("peer-tip")),
-			BlockNumber: header.BlockNumber() + 1,
-		},
-	}))
-
-	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
-	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
-	assert.Equal(t, point.Slot, ls.syncUpstreamTipSlot.Load())
 }
 
 // TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent verifies that

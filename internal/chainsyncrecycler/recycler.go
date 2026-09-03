@@ -153,9 +153,7 @@ func New(cfg Config) *Recycler {
 // is missing or the tick interval is not positive.
 func (r *Recycler) Start(ctx context.Context) error {
 	if r.config.Components == nil {
-		return errors.New(
-			"chainsync stall recycler: components must not be nil",
-		)
+		return errors.New("chainsync stall recycler: components must not be nil")
 	}
 	if r.config.EventBus == nil {
 		return errors.New("chainsync stall recycler: event bus must not be nil")
@@ -557,16 +555,11 @@ func (r *Recycler) checkLocalTipPlateau(
 		// being masked as a chainsync stall.
 		r.logger.Info(
 			"local tip plateau is a ledger-application backlog; header chain already caught up, not recycling chainsync",
-			"connection_id",
-			connKey,
-			"applied_tip_slot",
-			localTipSlot,
-			"primary_chain_tip_slot",
-			primaryChainTipSlot,
-			"best_peer_tip_slot",
-			bestPeerTipSlot,
-			"plateau_duration",
-			now.Sub(st.lastProgressAt),
+			"connection_id", connKey,
+			"applied_tip_slot", localTipSlot,
+			"primary_chain_tip_slot", primaryChainTipSlot,
+			"best_peer_tip_slot", bestPeerTipSlot,
+			"plateau_duration", now.Sub(st.lastProgressAt),
 		)
 		// Reset the plateau clock so we re-evaluate only after another full
 		// plateau window instead of every tick while the ledger pipeline
@@ -686,10 +679,8 @@ func (r *Recycler) processDueRecycles(
 		if eligibleCount <= 1 && !tracked.ObservabilityOnly {
 			r.logger.Warn(
 				"chainsync client stalled but is only eligible peer, skipping recycle",
-				"connection_id",
-				connKey,
-				"stall_timeout",
-				r.config.StallTimeout,
+				"connection_id", connKey,
+				"stall_timeout", r.config.StallTimeout,
 			)
 			st.recycleAt[connKey] = now.Add(r.config.Grace)
 			continue
@@ -701,14 +692,10 @@ func (r *Recycler) processDueRecycles(
 			// indefinite stalls.
 			r.logger.Warn(
 				"chainsync client stalled with no active selection, recycling connection",
-				"connection_id",
-				connKey,
-				"stall_timeout",
-				r.config.StallTimeout,
-				"grace_period",
-				r.config.Grace,
-				"recycle_cooldown",
-				r.config.Cooldown,
+				"connection_id", connKey,
+				"stall_timeout", r.config.StallTimeout,
+				"grace_period", r.config.Grace,
+				"recycle_cooldown", r.config.Cooldown,
 			)
 			r.publishConnectionRecycle(
 				connId,

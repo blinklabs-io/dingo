@@ -40,7 +40,6 @@ func TestPostgresSQLStoreIntegration(t *testing.T) {
 		"pgx",
 		postgresDSNWithSearchPath(t, dsn, schema),
 		"postgres",
-		schema,
 	)
 }
 
@@ -64,7 +63,6 @@ func TestMySQLSQLStoreIntegration(t *testing.T) {
 		"mysql",
 		mysqlDSNWithDatabase(t, dsn, database),
 		"mysql",
-		database,
 	)
 }
 
@@ -86,10 +84,7 @@ func mysqlDSNWithDatabase(t *testing.T, dsn, database string) string {
 	return parsed.FormatDSN()
 }
 
-func testSQLStoreIntegration(
-	t *testing.T,
-	driver, dsn, dialectName, lockNamespace string,
-) {
+func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	t.Helper()
 	db, err := OpenDB(driver, dsn, dialectName)
 	require.NoError(t, err)
@@ -101,11 +96,19 @@ func testSQLStoreIntegration(
 	case "postgres":
 		dialect = PostgresDialect()
 		registry, err = migrations.PostgresRegistry()
-		locker = integrationMigrationLocker("postgres", lockNamespace)
+		locker = migrations.NewAdvisoryLocker(
+			"postgres",
+			0x64696e676f6d6574,
+			time.Second,
+		)
 	case "mysql":
 		dialect = MySQLDialect()
 		registry, err = migrations.MySQLRegistry()
-		locker = integrationMigrationLocker("mysql", lockNamespace)
+		locker = migrations.NewAdvisoryLocker(
+			"mysql",
+			0x64696e676f6d6574,
+			time.Second,
+		)
 	}
 	require.NoError(t, err)
 	store, err := New(Config{

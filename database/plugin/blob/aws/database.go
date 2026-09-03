@@ -1160,11 +1160,7 @@ type reverseKeyFile struct {
 }
 
 func writeReverseKey(file *os.File, key string) error {
-	// len(key) is compared as int64 rather than directly against the
-	// untyped constant math.MaxUint32: on a 32-bit platform int is 32
-	// bits wide and that constant does not fit in it, so the naive
-	// comparison fails to compile.
-	if int64(len(key)) > math.MaxUint32 {
+	if len(key) > math.MaxUint32 {
 		return fmt.Errorf("key length %d exceeds uint32 maximum", len(key))
 	}
 	length := make([]byte, 4)

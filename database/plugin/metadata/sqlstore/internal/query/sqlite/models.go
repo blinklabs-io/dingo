@@ -80,14 +80,11 @@ type CommitTimestamp struct {
 }
 
 type CommitteeMember struct {
-	ID                int64
-	ColdCredentialTag int64
-	ColdCredHash      []byte
-	ExpiresEpoch      int64
-	TermStartSlot     int64
-	TermStartSlotSet  bool
-	AddedSlot         int64
-	DeletedSlot       sql.NullInt64
+	ID           int64
+	ColdCredHash []byte
+	ExpiresEpoch int64
+	AddedSlot    int64
+	DeletedSlot  sql.NullInt64
 }
 
 type CommitteeQuorum struct {
@@ -296,8 +293,6 @@ type PoolStakeSnapshot struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
-	LeiosKeyPublic                []byte
-	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool

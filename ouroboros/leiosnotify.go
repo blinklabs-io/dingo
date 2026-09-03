@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -38,18 +37,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 )
-
-// LeiosAnnouncementLedger is the synchronous, read-only ledger boundary used
-// when a LeiosNotify peer sends a dangling ranking-block announcement.
-// Implementations validate all header crypto before returning only the OCIN
-// freshness fact; Ouroboros retains ownership of record and relay policy.
-type LeiosAnnouncementLedger interface {
-	CurrentSlot() (uint64, error)
-	SlotToTime(uint64) (time.Time, error)
-	ValidateLeiosAnnouncementHeader(
-		gledger.BlockHeader,
-	) (ledger.LeiosAnnouncementOCINStaleness, error)
-}
 
 // leiosForgedEBEntry holds one locally-forged endorser block ready to
 // be announced to peers via LeiosNotify.
@@ -581,30 +568,12 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		client := conn.LeiosFetch().Client
 		point := m.Point
-		declaredSize := m.Size
 		// The relay offers each endorser block on every connection. The
 		// manifest is content-addressed, so once any peer's copy is cached a
 		// refetch returns identical bytes: skip it instead of spending a fetch
 		// slot and the manifest's bandwidth once per connected peer. Mirrors
 		// the same guard on the txs offer below.
 		if _, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
-			return nil
-		}
-		// Reject an offer that already declares more than the cache's
-		// per-entry byte budget instead of spending a fetch on a body
-		// storeLeiosEndorserBlock would reject anyway.
-		// leiosEndorserBlockCacheMaxEntryBytes is a non-negative byte budget
-		// (16 MiB default; only tests lower it, always to a positive value).
-		if declaredSize > uint64(leiosEndorserBlockCacheMaxEntryBytes) { // #nosec G115
-			o.config.Logger.Debug(
-				"rejecting leios EB offer exceeding max entry size",
-				"component", "network",
-				"protocol", "leios-notify",
-				"connection_id", connId,
-				"slot", point.Slot,
-				"declared_size", declaredSize,
-				"max_size", leiosEndorserBlockCacheMaxEntryBytes,
-			)
 			return nil
 		}
 		// Fetch the manifest off the handler so a slow fetch cannot head-of-line
@@ -617,12 +586,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// error must not tear down the shared connection.
 		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
 			reqCtx, cancel := leiosFetchRequestContext(time.Time{})
-			blockRaw, err := fetchAndValidateLeiosEbManifest(
-				reqCtx,
-				client,
-				point,
-				declaredSize,
-			)
+			resp, err := client.BlockRequest(reqCtx, point)
 			cancel()
 			if err != nil {
 				o.config.Logger.Debug(
@@ -633,9 +597,19 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				)
 				return
 			}
+			respBlock, ok := resp.(*leiosfetch.MsgBlock)
+			if !ok {
+				o.config.Logger.Debug(
+					"unexpected leios-fetch Block response type",
+					"type", fmt.Sprintf("%T", resp),
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
 			if err := o.storeLeiosEndorserBlock(
 				point,
-				blockRaw,
+				respBlock.BlockRaw,
 				nil,
 			); err != nil {
 				o.config.Logger.Debug(
@@ -655,7 +629,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 					"fetched EB manifest %d.%x size %d txs %d",
 					point.Slot,
 					point.Hash,
-					len(blockRaw),
+					len(respBlock.BlockRaw),
 					txCount,
 				),
 				"component", "network",
@@ -846,50 +820,6 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 	}
 	return nil
-}
-
-// leiosBlockRequester is the subset of the leios-fetch client used to fetch an
-// endorser block's manifest in response to a MsgBlockOffer. It mirrors
-// leiosBlockTxsRequester below so fetchAndValidateLeiosEbManifest can be
-// unit-tested without a live connection.
-type leiosBlockRequester interface {
-	BlockRequest(
-		ctx context.Context,
-		point ocommon.Point,
-	) (protocol.Message, error)
-}
-
-// fetchAndValidateLeiosEbManifest fetches the endorser-block manifest offered
-// by a MsgBlockOffer and binds the fetched body to the offer's declared size
-// before the caller stores it. A peer that offers one size and serves another
-// is a fetch/serving mismatch, not a cacheable result, so it is rejected here
-// rather than admitted under a byte budget the offer misrepresented (issue
-// #3512).
-func fetchAndValidateLeiosEbManifest(
-	ctx context.Context,
-	client leiosBlockRequester,
-	point ocommon.Point,
-	declaredSize uint64,
-) ([]byte, error) {
-	resp, err := client.BlockRequest(ctx, point)
-	if err != nil {
-		return nil, fmt.Errorf("leios-fetch block request: %w", err)
-	}
-	respBlock, ok := resp.(*leiosfetch.MsgBlock)
-	if !ok {
-		return nil, fmt.Errorf(
-			"unexpected leios-fetch Block response type: %T",
-			resp,
-		)
-	}
-	if actualSize := uint64(len(respBlock.BlockRaw)); actualSize != declaredSize {
-		return nil, fmt.Errorf(
-			"leios EB manifest size mismatch with offer: declared %d, got %d",
-			declaredSize,
-			actualSize,
-		)
-	}
-	return respBlock.BlockRaw, nil
 }
 
 // leiosBlockTxsRequester is the subset of the leios-fetch client used to fetch
@@ -1103,11 +1033,10 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 // per-attempt deadline. When deadline is non-zero the fetch abandons the attempt
 // and returns the contiguous prefix fetched so far (with a deadline error) once
 // it elapses, instead of continuing to re-request from a slow-but-alive relay
-// that keeps dribbling transactions yet never promptly completes. The check is
-// between request rounds — each individual round is bounded by the request context from
-// leiosFetchRequestContext, not by a protocol state timeout (leios-fetch
-// deliberately has none for Block/BlockTxs) — so an attempt overshoots the
-// deadline by at most one round;
+// that keeps dribbling transactions within the leios-fetch protocol timeout (so
+// that timeout never fires) yet never promptly completes. The check is between
+// request rounds — each individual round is still bounded by the underlying
+// protocol timeout — so an attempt overshoots the deadline by at most one round;
 // this lets the by-point backfill fail over to another connection rather than
 // parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
 // disables the bound, preserving the tip-path behavior.
@@ -1164,13 +1093,13 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 	// against the cached block (below) and seeded back here, so a re-offer
 	// requests only the still-missing tail instead of re-fetching transactions
 	// dingo already has (issue #2629).
-	o.seedLeiosPartialTxs(point.Hash, result, validate)
+	o.seedLeiosPartialTxs(point.Hash, result)
 	// Retain whatever this attempt ends up holding, so an attempt that stops
 	// short (tail budget, per-attempt deadline, protocol error) leaves the
 	// connection free while its progress survives for the next offer. A
 	// completing attempt's caller stores the whole set, which clears this.
 	defer func() {
-		o.retainLeiosPartialTxs(point.Hash, result, validate)
+		o.retainLeiosPartialTxs(point.Hash, result)
 	}()
 	// The no-progress guard below guarantees termination (each non-final round
 	// places at least one new transaction, and there are txCount of them); this
@@ -1216,16 +1145,6 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 		if !ok {
 			return leiosCollectTxs(result), fmt.Errorf(
 				"unexpected leios-fetch BlockTxs response type %T", resp,
-			)
-		}
-		if err := validateLeiosTxBitmap(txCount, respTxs.Bitmaps); err != nil {
-			// A relay-declared bitmap referencing an index beyond this
-			// endorser block's txCount is rejected before it is expanded: a
-			// small txCount must not license decoding a disproportionately
-			// large index list (issue #3523).
-			return leiosCollectTxs(result), fmt.Errorf(
-				"leios-fetch response bitmap: %w",
-				err,
 			)
 		}
 		served := leiosBitmapTxIndices(respTxs.Bitmaps)
@@ -1393,9 +1312,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	source string,
 	deferVerification bool,
 ) error {
-	if isNilInterface(o.leiosAnnouncementLedger) {
+	if o.ledgerState == nil {
 		return errors.New(
-			"cannot accept leios announcement without announcement ledger",
+			"cannot accept leios announcement without ledger state",
 		)
 	}
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
@@ -1408,7 +1327,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"ranking-block header has no valid endorser-block announcement",
 		)
 	}
-	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
+	currentSlot, slotErr := o.ledgerState.CurrentSlot()
 	if slotErr != nil {
 		return fmt.Errorf(
 			"read current slot for announcement validation: %w",
@@ -1422,9 +1341,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			currentSlot,
 		)
 	}
-	announcementStart, timeErr := o.leiosAnnouncementLedger.SlotToTime(
-		header.SlotNumber(),
-	)
+	announcementStart, timeErr := o.ledgerState.SlotToTime(header.SlotNumber())
 	if timeErr != nil {
 		return fmt.Errorf("read announcement slot time: %w", timeErr)
 	}
@@ -1438,24 +1355,11 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if age > leiosNotifyMaxAnnouncementAge {
 		return fmt.Errorf("announcement is stale by %s", age)
 	}
-	staleness, err := o.leiosAnnouncementLedger.ValidateLeiosAnnouncementHeader(
-		header,
-	)
-	if err != nil {
+	if err := o.ledgerState.ValidateBlockHeaderCrypto(header); err != nil {
 		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
 			o.deferLeiosAnnouncement(header, raw, source)
 		}
 		return fmt.Errorf("validate ranking-block header: %w", err)
-	}
-	if staleness == ledger.LeiosAnnouncementStaleOCIN {
-		o.config.Logger.Debug(
-			"ignoring leios announcement with stale opcert counter",
-			"component", "network",
-			"protocol", "leios-notify",
-			"connection_id", source,
-			"slot", header.SlotNumber(),
-		)
-		return nil
 	}
 	// Drop announcements that can no longer affect the acceptance window
 	// before adding this one. This is deliberately done for local and peer
@@ -1542,14 +1446,14 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 // rebuilt from the retained announcements so an old EB cannot keep its size
 // invariant alive after its announcements expire.
 func (o *Ouroboros) pruneLeiosAnnouncements() {
-	if isNilInterface(o.leiosAnnouncementLedger) {
+	if o.ledgerState == nil {
 		return
 	}
 	now := time.Now()
 	o.leiosAnnouncementsMu.Lock()
 	defer o.leiosAnnouncementsMu.Unlock()
 	for key, announcement := range o.leiosAnnouncements {
-		start, err := o.leiosAnnouncementLedger.SlotToTime(announcement.slot)
+		start, err := o.ledgerState.SlotToTime(announcement.slot)
 		if err != nil || now.Sub(start) > leiosNotifyMaxAnnouncementAge {
 			delete(o.leiosAnnouncements, key)
 		}

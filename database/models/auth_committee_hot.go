@@ -21,14 +21,12 @@ import (
 var ErrCommitteeMemberNotFound = errors.New("committee member not found")
 
 type AuthCommitteeHot struct {
-	ColdCredentialTag uint8
-	ColdCredential    []byte
+	ColdCredential []byte
 	// Column is "host_credential" for backward compatibility with
 	// existing databases; the Go field uses the canonical Cardano
 	// terminology ("hot credential" for committee voting keys).
-	HotCredentialTag uint8
-	HotCredential    []byte
-	ID               uint
-	CertificateID    uint
-	AddedSlot        uint64
+	HotCredential []byte
+	ID            uint
+	CertificateID uint
+	AddedSlot     uint64
 }

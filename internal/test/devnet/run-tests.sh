@@ -19,7 +19,7 @@
 # This script:
 #   1. Starts the DevNet (configurator + all nodes)
 #   2. Waits for all nodes to become healthy
-#   3. Runs the Go integration tests tagged with //go:build linux && devnet
+#   3. Runs the Go integration tests tagged with //go:build devnet
 #   4. Tears down the DevNet and reports results
 #
 # Usage:
@@ -42,11 +42,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
-# shellcheck source=compose-project.sh
-source "${SCRIPT_DIR}/compose-project.sh"
-devnet_compose_project
-devnet_render_topology
-devnet_ports
 
 # Parse arguments
 KEEP_UP=false
@@ -106,14 +101,12 @@ export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
 # The scenario stops and starts containers, and captures compose logs and
 # status on failure.
 export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"
-export DEVNET_COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME}"
 
 # Failure evidence goes here and is preserved when the run fails. A
 # caller-supplied directory is used as-is and never deleted; only one this
 # script created is cleaned up on success, so a passing run cannot destroy
 # a shared or pre-existing path.
 ARTIFACT_DIR_IS_OURS=false
-STAKE_KEYS_HOST_DIR_IS_OURS=false
 if [[ -z "${DEVNET_ARTIFACT_DIR:-}" ]]; then
   DEVNET_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-artifacts.XXXXXX")"
   ARTIFACT_DIR_IS_OURS=true
@@ -147,7 +140,6 @@ collect_failure_artifacts() {
   # volume; copy them out while the volume still exists.
   local configs_volume
   configs_volume="$(docker volume ls \
-    --filter label=com.docker.compose.project="${COMPOSE_PROJECT_NAME}" \
     --filter label=com.docker.compose.volume=p1-configs \
     --format '{{.Name}}' | head -n1)"
   if [[ -n "${configs_volume}" ]]; then
@@ -169,7 +161,7 @@ cleanup() {
   set +e
   if [[ "${KEEP_UP}" == "true" ]] && [[ ${exit_code} -eq 0 ]]; then
     log "Tests passed. DevNet left running (--keep-up)."
-    log "To stop:  COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} docker compose -f ${COMPOSE_FILE} down -v"
+    log "To stop:  docker compose -f ${COMPOSE_FILE} down -v"
     exit "${exit_code}"
   fi
   if [[ ${exit_code} -ne 0 ]]; then
@@ -181,9 +173,7 @@ cleanup() {
   fi
   log "Tearing down DevNet..."
   docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
-  rm -rf "${DEVNET_TOPOLOGY_DIR}"
-  if [[ "${STAKE_KEYS_HOST_DIR_IS_OURS}" == "true" ]] &&
-    [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
+  if [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
     rm -rf "${STAKE_KEYS_HOST_DIR}"
   fi
   exit "${exit_code}"
@@ -207,8 +197,6 @@ fi
 # --------------------------------------------------------------------------- #
 
 log "Mode: ${MODE}$([[ "${ACCELERATED}" == "true" ]] && echo ' (accelerated)')"
-log "Compose project: ${COMPOSE_PROJECT_NAME}"
-log "Compose network: ${DEVNET_NET_BASE}.0/24"
 log "Network spec: ${ACTIVE_SPEC}"
 
 log "Building DevNet Docker images..."
@@ -217,8 +205,7 @@ log "Building DevNet Docker images..."
 docker compose -f "${COMPOSE_FILE}" build
 
 log "Starting DevNet containers..."
-devnet_compose_up "${COMPOSE_FILE}"
-log "Compose network (final): ${DEVNET_NET_BASE}.0/24"
+docker compose -f "${COMPOSE_FILE}" up -d
 
 # --------------------------------------------------------------------------- #
 # Wait for all nodes to become healthy
@@ -231,8 +218,7 @@ ELAPSED=0
 while [[ ${ELAPSED} -lt ${MAX_WAIT} ]]; do
   HEALTHY=0
   for svc in "${HEALTH_SERVICES[@]}"; do
-    container_id=$(docker compose -f "${COMPOSE_FILE}" ps --quiet "${svc}" 2>/dev/null || true)
-    status=$(docker inspect --format='{{.State.Health.Status}}' "${container_id}" 2>/dev/null || echo "missing")
+    status=$(docker inspect --format='{{.State.Health.Status}}' "${svc}" 2>/dev/null || echo "missing")
     if [[ "${status}" == "healthy" ]]; then
       HEALTHY=$((HEALTHY + 1))
     fi
@@ -276,16 +262,12 @@ log "txpump is running"
 
 if [[ "${MODE}" == "dingo" ]]; then
   log "Copying genesis stake keys from the utxo-keys volume..."
-  UTXO_KEYS_VOLUME="${COMPOSE_PROJECT_NAME}_utxo-keys"
+  UTXO_KEYS_VOLUME="devnet_utxo-keys"
   if ! docker volume inspect "${UTXO_KEYS_VOLUME}" &>/dev/null; then
     warn "Docker volume ${UTXO_KEYS_VOLUME} not found; discovering by compose label"
-    UTXO_KEYS_VOLUME=$(docker volume ls \
-      --filter label=com.docker.compose.project="${COMPOSE_PROJECT_NAME}" \
-      --filter label=com.docker.compose.volume=utxo-keys \
-      --format '{{.Name}}' | head -n1)
+    UTXO_KEYS_VOLUME=$(docker volume ls --filter label=com.docker.compose.volume=utxo-keys --format '{{.Name}}' | head -n1)
   fi
   STAKE_KEYS_HOST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-stake-keys.XXXXXX")"
-  STAKE_KEYS_HOST_DIR_IS_OURS=true
   if [[ -z "${UTXO_KEYS_VOLUME}" ]]; then
     warn "Unable to locate the utxo-keys Docker volume; skipping stake-keys copy"
   else

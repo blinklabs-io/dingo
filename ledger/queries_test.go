@@ -228,12 +228,7 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 	require.Len(t, arr, 1)
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
-	require.Len(
-		t,
-		m,
-		2,
-		"must include UTxOs for both addresses, not just addrs[0]",
-	)
+	require.Len(t, m, 2, "must include UTxOs for both addresses, not just addrs[0]")
 }
 
 func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {

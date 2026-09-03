@@ -22,12 +22,12 @@ import (
 	"testing"
 	"time"
 
-	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -568,11 +568,7 @@ func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 		func() (int, error) { panic("simulated decode panic") },
 		func(isMiss bool) { outcomes = append(outcomes, isMiss) },
 	)
-	require.Error(
-		t,
-		err,
-		"a decodeFn panic must be returned as a normal error, not propagated",
-	)
+	require.Error(t, err, "a decodeFn panic must be returned as a normal error, not propagated")
 	require.Contains(t, err.Error(), "decode panicked")
 
 	require.Equal(
@@ -854,18 +850,36 @@ func testOuroborosForDecodeCache(tb testing.TB) *Ouroboros {
 
 func conwayBlockFixtureBytes(t *testing.T) (blockType uint, raw []byte) {
 	t.Helper()
-	blocks, err := testfixtures.GenerateConwayChain(1)
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
 	require.NoError(t, err)
-	require.Len(t, blocks, 1)
-	return uint(blocks[0].Type()), blocks[0].Cbor()
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Block_Conway",
+	)
+	require.NoError(t, err)
+	blockType, err = fixture.LedgerBlockType()
+	require.NoError(t, err)
+	raw, err = fixture.LedgerBlockBytes()
+	require.NoError(t, err)
+	return blockType, raw
 }
 
 func conwayHeaderFixtureBytes(t *testing.T) (headerType uint, raw []byte) {
 	t.Helper()
-	blocks, err := testfixtures.GenerateConwayChain(1)
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
 	require.NoError(t, err)
-	require.Len(t, blocks, 1)
-	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Header_Conway",
+	)
+	require.NoError(t, err)
+	headerType, err = fixture.LedgerHeaderType()
+	require.NoError(t, err)
+	raw, err = fixture.LedgerHeaderBytes()
+	require.NoError(t, err)
+	return headerType, raw
 }
 
 func TestBlockDecodeCacheIntegrationRealConwayBlock(t *testing.T) {
@@ -1113,8 +1127,10 @@ func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 	t *testing.T,
 ) {
 	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
-	blockType, _ := conwayBlockFixtureBytes(t)
-	badRaw := []byte{0x00}
+	blockType, raw := conwayBlockFixtureBytes(t)
+	badRaw := make([]byte, len(raw))
+	copy(badRaw, raw)
+	badRaw[len(badRaw)/2] ^= 0xFF
 	ctx := blockfetch.CallbackContext{}
 
 	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badRaw))

@@ -128,6 +128,7 @@ type DefaultBlockBuilder struct {
 	chainTip        ChainTipProvider
 	epochNonce      EpochNonceProvider
 	creds           *PoolCredentials
+	kes             KESSigner
 	txValidator     TxValidator
 }
 
@@ -139,6 +140,12 @@ type BlockBuilderConfig struct {
 	ChainTip        ChainTipProvider
 	EpochNonce      EpochNonceProvider
 	Credentials     *PoolCredentials
+	// KESSigner sources KES signatures and the operational certificate for
+	// the block header. When nil, Credentials is used (the default local
+	// key-file path). Set to a KES-agent client to source the KES key from
+	// an external agent; the VRF key and pool ID still come from
+	// Credentials.
+	KESSigner KESSigner
 	// TxValidator optionally re-validates each transaction against
 	// the current ledger state before including it in a block.
 	// When nil, ledger-level re-validation is skipped (but
@@ -168,6 +175,10 @@ func NewDefaultBlockBuilder(
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	kesSigner := cfg.KESSigner
+	if kesSigner == nil {
+		kesSigner = cfg.Credentials
+	}
 
 	return &DefaultBlockBuilder{
 		logger:          cfg.Logger,
@@ -176,6 +187,7 @@ func NewDefaultBlockBuilder(
 		chainTip:        cfg.ChainTip,
 		epochNonce:      cfg.EpochNonce,
 		creds:           cfg.Credentials,
+		kes:             kesSigner,
 		txValidator:     cfg.TxValidator,
 	}, nil
 }
@@ -186,9 +198,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	slot uint64,
 	kesPeriod uint64,
 ) (ledger.Block, []byte, error) {
-	generation := b.creds.acquireCredentialGeneration()
-	defer generation.release()
-	return b.buildBlock(slot, kesPeriod, LeiosBlockData{}, generation)
+	return b.buildBlock(slot, kesPeriod, LeiosBlockData{})
 }
 
 // BlockForger.buildBlock discovers the Leios capability with a runtime type
@@ -196,10 +206,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 // misses, so drift in BuildBlockWithLeios would break Leios forging at forge
 // time rather than at build time. Unlike the session-provider assertion above
 // this one is loud, but it is the same class of defect the guard prevents.
-var (
-	_ LeiosBlockBuilder                = (*DefaultBlockBuilder)(nil)
-	_ credentialGenerationBlockBuilder = (*DefaultBlockBuilder)(nil)
-)
+var _ LeiosBlockBuilder = (*DefaultBlockBuilder)(nil)
 
 // BuildBlockWithLeios creates a Dijkstra block with Leios prototype
 // announcement or certificate data committed into the block body/header.
@@ -208,18 +215,7 @@ func (b *DefaultBlockBuilder) BuildBlockWithLeios(
 	kesPeriod uint64,
 	leios LeiosBlockData,
 ) (ledger.Block, []byte, error) {
-	generation := b.creds.acquireCredentialGeneration()
-	defer generation.release()
-	return b.buildBlock(slot, kesPeriod, leios, generation)
-}
-
-func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
-	slot uint64,
-	kesPeriod uint64,
-	leios LeiosBlockData,
-	generation *credentialGeneration,
-) (ledger.Block, []byte, error) {
-	return b.buildBlock(slot, kesPeriod, leios, generation)
+	return b.buildBlock(slot, kesPeriod, leios)
 }
 
 // errParentChangedDuringBuild indicates the chain tip moved while
@@ -244,25 +240,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 	slot uint64,
 	kesPeriod uint64,
 	leios LeiosBlockData,
-	credentials *credentialGeneration,
 ) (ledger.Block, []byte, error) {
-	// Keep the protocol lifetime guard inside the generation-backed path so
-	// both exported builder entrypoints and BlockForger fail before reading the
-	// mempool, chain state, VRF key, or Leios inputs.
-	if err := credentials.validateKESPeriod(kesPeriod); err != nil {
-		return nil, nil, fmt.Errorf(
-			"cannot build block outside operational certificate lifetime: %w",
-			err,
-		)
-	}
-	// Evolve both the selected snapshot and the still-current owner before any
-	// provider callback. The snapshot remains independently usable while a
-	// callback reloads credentials; a changed owner generation is rejected
-	// before the resulting block can escape this method.
-	if err := credentials.updateKESPeriod(kesPeriod); err != nil {
-		return nil, nil, fmt.Errorf("failed to update KES period: %w", err)
-	}
-
 	// Get current chain tip
 	currentTip := b.chainTip.Tip()
 
@@ -739,7 +717,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 	}
 
 	// Get VRF key from credentials
-	vrfVKey := credentials.vrfVKey()
+	vrfVKey := b.creds.GetVRFVKey()
 	if len(vrfVKey) == 0 {
 		return nil, nil, errors.New("VRF verification key not loaded")
 	}
@@ -795,7 +773,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 				err,
 			)
 		}
-		nonceProof, nonceOutput, err := credentials.vrfProve(nonceInput)
+		nonceProof, nonceOutput, err := b.creds.VRFProve(nonceInput)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"failed to generate TPraos nonce VRF proof: %w",
@@ -813,7 +791,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 				err,
 			)
 		}
-		leaderProof, leaderOutput, err := credentials.vrfProve(leaderInput)
+		leaderProof, leaderOutput, err := b.creds.VRFProve(leaderInput)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"failed to generate TPraos leader VRF proof: %w",
@@ -827,15 +805,15 @@ func (b *DefaultBlockBuilder) buildBlock(
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
 		}
-		vrfProof, vrfOutput, err := credentials.vrfProve(alpha)
+		vrfProof, vrfOutput, err := b.creds.VRFProve(alpha)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to generate VRF proof: %w", err)
 		}
 		praosVrf = lcommon.VrfResult{Output: vrfOutput, Proof: vrfProof}
 	}
 
-	// Get OpCert from credentials
-	opCert := credentials.opCert()
+	// Get OpCert from the KES signer (file credentials or the KES agent)
+	opCert := b.kes.GetOpCert()
 	if opCert == nil {
 		return nil, nil, errors.New("operational certificate not loaded")
 	}
@@ -964,7 +942,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 		return nil, nil, fmt.Errorf("failed to encode header body: %w", err)
 	}
 
-	signature, err := credentials.kesSign(kesPeriod, headerBodyCbor)
+	signature, err := b.kes.KESSign(kesPeriod, headerBodyCbor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to sign block header: %w", err)
 	}
@@ -1037,12 +1015,6 @@ func (b *DefaultBlockBuilder) buildBlock(
 		"total_memory", totalExUnits.Memory,
 		"total_steps", totalExUnits.Steps,
 	)
-	if err := credentials.ensureCurrent(); err != nil {
-		return nil, nil, fmt.Errorf(
-			"credentials changed during block assembly: %w",
-			err,
-		)
-	}
 
 	return ledgerBlock, blockCbor, nil
 }

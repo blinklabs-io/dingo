@@ -89,12 +89,8 @@ func TestBoundaryEraForBlockDoesNotAdvanceFromHeaderAlone(t *testing.T) {
 		eras.BabbageEraDesc.MinMajorVersion,
 		true,
 	)
-	require.Equal(
-		t,
-		eras.AlonzoEraDesc.Id,
-		target,
-		"an Alonzo block remains Alonzo even when its header advertises protocol major 7",
-	)
+	require.Equal(t, eras.AlonzoEraDesc.Id, target,
+		"an Alonzo block remains Alonzo even when its header advertises protocol major 7")
 	require.False(t, allowTwoTransitions)
 }
 
@@ -341,9 +337,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 		t.Fatal("epoch rollover returned no result")
 	}
 
-	wantSlotLength, wantEpochLength, err := eras.AllegraEraDesc.EpochLengthFunc(
-		ls.config.CardanoNodeConfig,
-	)
+	wantSlotLength, wantEpochLength, err := eras.AllegraEraDesc.EpochLengthFunc(ls.config.CardanoNodeConfig)
 	require.NoError(t, err)
 	require.Equal(t, wantSlotLength, result.NewCurrentEpoch.SlotLength)
 	require.Equal(t, wantEpochLength, result.NewCurrentEpoch.LengthInSlots)

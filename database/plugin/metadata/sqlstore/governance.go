@@ -19,8 +19,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -185,26 +183,9 @@ func (s *Store) SetGovernanceProposal(
 	if proposal == nil {
 		return errors.New("set governance proposal: nil proposal")
 	}
-	if (proposal.RatifiedEpoch == nil) != (proposal.RatifiedSlot == nil) {
-		return errors.New(
-			"set governance proposal: ratified epoch and slot must both be set or both be nil",
-		)
-	}
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			var previousEpoch, previousSlot sql.NullInt64
-			previousErr := db.QueryRowContext(ctx, `
-SELECT ratified_epoch, ratified_slot
-FROM governance_proposal
-WHERE tx_hash = ? AND action_index = ?`,
-				proposal.TxHash,
-				proposal.ActionIndex,
-			).Scan(&previousEpoch, &previousSlot)
-			if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
-				return previousErr
-			}
-
 			var id uint
 			err := db.QueryRowContext(ctx, `
 INSERT INTO governance_proposal (
@@ -268,93 +249,9 @@ RETURNING id`,
 				proposal.AddedSlot,
 				proposal.DeletedSlot,
 			).Scan(&id)
-			if err != nil {
-				return err
+			if err == nil {
+				proposal.ID = id
 			}
-			proposal.ID = id
-
-			if proposal.RatifiedEpoch == nil {
-				return nil
-			}
-			if previousErr == nil && previousEpoch.Valid &&
-				previousSlot.Valid &&
-				previousEpoch.Int64 >= 0 &&
-				previousSlot.Int64 >= 0 &&
-				uint64(previousEpoch.Int64) == *proposal.RatifiedEpoch &&
-				uint64(previousSlot.Int64) == *proposal.RatifiedSlot {
-				return nil
-			}
-			_, err = db.ExecContext(ctx, `
-INSERT INTO governance_proposal_ratification_history (
-    proposal_id, transition_slot, ratified_epoch, ratified_slot
-) VALUES (?, ?, ?, ?)`,
-				id,
-				*proposal.RatifiedSlot,
-				*proposal.RatifiedEpoch,
-				*proposal.RatifiedSlot,
-			)
-			return err
-		},
-	)
-}
-
-func (s *Store) ClearGovernanceProposalRatification(
-	txHash []byte,
-	actionIndex uint32,
-	transitionSlot uint64,
-	txn types.Txn,
-) error {
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			var (
-				id            uint
-				ratifiedEpoch sql.NullInt64
-				ratifiedSlot  sql.NullInt64
-			)
-			if err := db.QueryRowContext(ctx, `
-SELECT id, ratified_epoch, ratified_slot
-FROM governance_proposal
-WHERE tx_hash = ? AND action_index = ?`,
-				txHash,
-				actionIndex,
-			).Scan(&id, &ratifiedEpoch, &ratifiedSlot); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return errors.New(
-						"clear proposal ratification: expected 1 row, found 0",
-					)
-				}
-				return err
-			}
-			if !ratifiedEpoch.Valid && !ratifiedSlot.Valid {
-				return nil
-			}
-			if ratifiedEpoch.Valid != ratifiedSlot.Valid {
-				return errors.New(
-					"clear proposal ratification: inconsistent ratification marker",
-				)
-			}
-			result, err := db.ExecContext(ctx, `
-UPDATE governance_proposal
-SET ratified_epoch = NULL, ratified_slot = NULL
-WHERE id = ?`, id)
-			if err != nil {
-				return err
-			}
-			rows, err := result.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if rows != 1 {
-				return fmt.Errorf(
-					"clear proposal ratification: expected 1 row, updated %d",
-					rows,
-				)
-			}
-			_, err = db.ExecContext(ctx, `
-INSERT INTO governance_proposal_ratification_history (
-    proposal_id, transition_slot, ratified_epoch, ratified_slot
-) VALUES (?, ?, NULL, NULL)`, id, transitionSlot)
 			return err
 		},
 	)
@@ -442,58 +339,25 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			queries := []struct {
-				query string
-				args  []any
-			}{
-				{
-					query: "DELETE FROM governance_proposal WHERE added_slot > ?",
-					args:  []any{slot},
-				},
-				{
-					query: `UPDATE governance_proposal SET deleted_slot = NULL
+			queries := []string{
+				"DELETE FROM governance_proposal WHERE added_slot > ?",
+				`UPDATE governance_proposal SET deleted_slot = NULL
 				 WHERE deleted_slot > ?`,
-					args: []any{slot},
-				},
-				{
-					query: `DELETE FROM governance_proposal_ratification_history
-				 WHERE transition_slot > ?`,
-					args: []any{slot},
-				},
-				{
-					query: `UPDATE governance_proposal
-				 SET ratified_epoch = (
-				     SELECT history.ratified_epoch
-				     FROM governance_proposal_ratification_history AS history
-				     WHERE history.proposal_id = governance_proposal.id
-				     ORDER BY history.transition_slot DESC, history.id DESC
-				     LIMIT 1
-				 ), ratified_slot = (
-				     SELECT history.ratified_slot
-				     FROM governance_proposal_ratification_history AS history
-				     WHERE history.proposal_id = governance_proposal.id
-				     ORDER BY history.transition_slot DESC, history.id DESC
-				     LIMIT 1
-				 )`,
-				},
-				{
-					query: `UPDATE governance_proposal
+				`UPDATE governance_proposal
+				 SET ratified_epoch = NULL, ratified_slot = NULL
+				 WHERE ratified_slot > ?`,
+				`UPDATE governance_proposal
 				 SET enacted_epoch = NULL, enacted_slot = NULL
 				 WHERE enacted_slot > ?`,
-					args: []any{slot},
-				},
-				{
-					query: `UPDATE governance_proposal
+				`UPDATE governance_proposal
 				 SET expired_epoch = NULL, expired_slot = NULL
 				 WHERE expired_slot > ?`,
-					args: []any{slot},
-				},
 			}
 			for _, query := range queries {
 				if _, err := db.ExecContext(
 					ctx,
-					query.query,
-					query.args...,
+					query,
+					slot,
 				); err != nil {
 					return err
 				}
@@ -617,9 +481,7 @@ func scanGovernanceVote(row rowScanner) (*models.GovernanceVote, error) {
 }
 
 func (s *Store) GetCommitteeMember(
-	coldCredentialTag uint8,
 	coldKey []byte,
-	termStartSlot uint64,
 	txn types.Txn,
 ) (*models.AuthCommitteeHot, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
@@ -628,19 +490,14 @@ func (s *Store) GetCommitteeMember(
 	}
 	var member models.AuthCommitteeHot
 	err = db.QueryRowContext(ctx, `
-SELECT cold_credential_tag, cold_credential, hot_credential_tag,
-       host_credential, id, certificate_id, added_slot
+SELECT cold_credential, host_credential, id, certificate_id, added_slot
 FROM auth_committee_hot
-WHERE cold_credential_tag = ? AND cold_credential = ? AND added_slot >= ?
+WHERE cold_credential = ?
 ORDER BY added_slot DESC, certificate_id DESC
 LIMIT 1`,
-		coldCredentialTag,
 		coldKey,
-		termStartSlot,
 	).Scan(
-		&member.ColdCredentialTag,
 		&member.ColdCredential,
-		&member.HotCredentialTag,
 		&member.HotCredential,
 		&member.ID,
 		&member.CertificateID,
@@ -660,28 +517,25 @@ func (s *Store) GetActiveCommitteeMembers(
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT auth.cold_credential_tag, auth.cold_credential,
-       auth.hot_credential_tag, auth.host_credential, auth.id,
+SELECT auth.cold_credential, auth.host_credential, auth.id,
        auth.certificate_id, auth.added_slot
-FROM committee_member committee
-JOIN (
-    SELECT cold_credential_tag, cold_credential, hot_credential_tag,
-           host_credential, id, certificate_id, added_slot,
+FROM (
+    SELECT cold_credential, host_credential, id, certificate_id, added_slot,
            ROW_NUMBER() OVER (
-               PARTITION BY cold_credential_tag, cold_credential
+               PARTITION BY cold_credential
                ORDER BY added_slot DESC, certificate_id DESC
            ) rn
     FROM auth_committee_hot
-) auth ON auth.cold_credential_tag = committee.cold_credential_tag
-      AND auth.cold_credential = committee.cold_cred_hash
-WHERE committee.deleted_slot IS NULL
-  AND auth.rn = 1
-  AND auth.added_slot >= committee.term_start_slot
+) auth
+WHERE auth.rn = 1
   AND NOT EXISTS (
       SELECT 1 FROM resign_committee_cold resign
-      WHERE resign.cold_credential_tag = auth.cold_credential_tag
-        AND resign.cold_credential = auth.cold_credential
-        AND resign.added_slot >= committee.term_start_slot
+      WHERE resign.cold_credential = auth.cold_credential
+        AND (
+            resign.added_slot > auth.added_slot
+            OR (resign.added_slot = auth.added_slot
+                AND resign.certificate_id > auth.certificate_id)
+        )
   )`)
 	if err != nil {
 		return nil, err
@@ -691,9 +545,7 @@ WHERE committee.deleted_slot IS NULL
 	for rows.Next() {
 		var member models.AuthCommitteeHot
 		if err := rows.Scan(
-			&member.ColdCredentialTag,
 			&member.ColdCredential,
-			&member.HotCredentialTag,
 			&member.HotCredential,
 			&member.ID,
 			&member.CertificateID,
@@ -707,9 +559,7 @@ WHERE committee.deleted_slot IS NULL
 }
 
 func (s *Store) IsCommitteeMemberResigned(
-	coldCredentialTag uint8,
 	coldKey []byte,
-	termStartSlot uint64,
 	txn types.Txn,
 ) (bool, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
@@ -718,87 +568,93 @@ func (s *Store) IsCommitteeMemberResigned(
 	}
 	var resigned bool
 	err = db.QueryRowContext(ctx, `
+WITH latest_auth AS (
+    SELECT added_slot, certificate_id
+    FROM auth_committee_hot
+    WHERE cold_credential = ?
+    ORDER BY added_slot DESC, certificate_id DESC
+    LIMIT 1
+),
+latest_resign AS (
+    SELECT added_slot, certificate_id
+    FROM resign_committee_cold
+    WHERE cold_credential = ?
+    ORDER BY added_slot DESC, certificate_id DESC
+    LIMIT 1
+)
 SELECT EXISTS (
-    SELECT 1 FROM resign_committee_cold
-    WHERE cold_credential_tag = ? AND cold_credential = ? AND added_slot >= ?
+    SELECT 1 FROM latest_auth auth
+    JOIN latest_resign resign
+      ON resign.added_slot > auth.added_slot
+      OR (resign.added_slot = auth.added_slot
+          AND resign.certificate_id > auth.certificate_id)
 )`,
-		coldCredentialTag,
 		coldKey,
-		termStartSlot,
+		coldKey,
 	).Scan(&resigned)
 	return resigned, err
 }
 
 func (s *Store) GetResignedCommitteeMembers(
-	coldCredentials []models.CommitteeCredential,
+	coldKeys [][]byte,
 	txn types.Txn,
 ) (map[string]bool, error) {
 	ret := make(map[string]bool)
-	if len(coldCredentials) == 0 {
+	if len(coldKeys) == 0 {
 		return ret, nil
 	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	// One round trip per member turns an epoch voting-state load into a query
-	// per committee seat, so fetch the latest resignation slot for the whole
-	// set at once. EXISTS(added_slot >= termStart) is equivalent to
-	// MAX(added_slot) >= termStart, so the term comparison still happens per
-	// credential, just in Go.
-	latest := make(map[string]uint64, len(coldCredentials))
-	chunkSize := s.dialect.ParameterLimit() / 2
-	if chunkSize < 1 {
-		chunkSize = 1
-	}
-	for start := 0; start < len(coldCredentials); start += chunkSize {
-		end := min(start+chunkSize, len(coldCredentials))
-		chunk := coldCredentials[start:end]
-		predicates := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk)*2)
-		for _, credential := range chunk {
-			predicates = append(
-				predicates,
-				"(cold_credential_tag = ? AND cold_credential = ?)",
-			)
-			args = append(args, credential.CredentialTag, credential.Credential)
+	for start := 0; start < len(coldKeys); start += 400 {
+		end := min(start+400, len(coldKeys))
+		args := make([]any, 0, end-start)
+		for _, key := range coldKeys[start:end] {
+			args = append(args, key)
 		}
-		query := `
-SELECT cold_credential_tag, cold_credential, MAX(added_slot)
-FROM resign_committee_cold
-WHERE (` + strings.Join(predicates, " OR ") + `)
-GROUP BY cold_credential_tag, cold_credential`
-		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
+		rows, err := db.QueryContext(ctx, `
+WITH latest_auth AS (
+    SELECT cold_credential, added_slot, certificate_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM auth_committee_hot
+    WHERE cold_credential IN (`+bindPlaceholders(len(args))+`)
+),
+latest_resign AS (
+    SELECT cold_credential, added_slot, certificate_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM resign_committee_cold
+    WHERE cold_credential IN (`+bindPlaceholders(len(args))+`)
+)
+SELECT resign.cold_credential
+FROM latest_resign resign
+JOIN latest_auth auth
+  ON auth.cold_credential = resign.cold_credential
+ AND auth.rn = 1 AND resign.rn = 1
+WHERE resign.added_slot > auth.added_slot
+   OR (resign.added_slot = auth.added_slot
+       AND resign.certificate_id > auth.certificate_id)`,
+			append(args, args...)...,
+		)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
-			var tag uint8
-			var credential []byte
-			var addedSlot uint64
-			if err := rows.Scan(&tag, &credential, &addedSlot); err != nil {
+			var key []byte
+			if err := rows.Scan(&key); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			key := models.CommitteeCredential{
-				CredentialTag: tag,
-				Credential:    credential,
-			}.Key()
-			if existing, ok := latest[key]; !ok || addedSlot > existing {
-				latest[key] = addedSlot
-			}
+			ret[string(key)] = true
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		if err := rows.Close(); err != nil {
 			return nil, err
-		}
-		rows.Close()
-	}
-	for _, credential := range coldCredentials {
-		key := credential.Key()
-		if addedSlot, ok := latest[key]; ok &&
-			addedSlot >= credential.TermStartSlot {
-			ret[key] = true
 		}
 	}
 	return ret, nil

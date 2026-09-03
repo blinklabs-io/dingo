@@ -1,5 +1,3 @@
-//go:build linux
-
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -143,37 +141,10 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 				"stake-key copy did not use the host uid:gid")
 			assert.Empty(t, result.stakeDirs,
 				"runner left its stake-key temp tree behind\n%s", result.output)
-			assert.Len(
-				t,
-				result.artifactDirs,
-				test.wantArtifactCount,
-				"runner did not apply its artifact retention policy\n%s",
-				result.output,
-			)
+			assert.Len(t, result.artifactDirs, test.wantArtifactCount,
+				"runner did not apply its artifact retention policy\n%s", result.output)
 		})
 	}
-}
-
-// TestRunTestsPreservesCallerOwnedStakeDirectory verifies cleanup ownership:
-// the runner may inherit STAKE_KEYS_HOST_DIR from its caller, but it must only
-// remove a stake-key directory that this invocation created with mktemp.
-func TestRunTestsPreservesCallerOwnedStakeDirectory(t *testing.T) {
-	callerDir := t.TempDir()
-	marker := filepath.Join(callerDir, "keep")
-	require.NoError(t, os.WriteFile(marker, []byte("caller-owned"), 0o600))
-
-	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
-		"MODE":                "conformance",
-		"STAKE_KEYS_HOST_DIR": callerDir,
-	})
-	require.Equal(t, 0, result.exitCode, result.output)
-	contents, err := os.ReadFile(marker)
-	require.NoError(
-		t,
-		err,
-		"runner removed a stake directory it did not create",
-	)
-	assert.Equal(t, "caller-owned", string(contents))
 }
 
 func runFakeDevnet(
@@ -183,36 +154,18 @@ func runFakeDevnet(
 	runnerArgs ...string,
 ) fakeDevnetResult {
 	t.Helper()
-	return runFakeDevnetWithEnv(t, testExit, failRm, nil, runnerArgs...)
-}
-
-// runFakeDevnetWithEnv runs the shell harness against fake Docker and Go
-// binaries while allowing a test to model inherited runner state. Keeping the
-// overrides inside cleanRunnerEnv prevents the developer's real environment
-// from accidentally deciding which directory the cleanup trap removes.
-func runFakeDevnetWithEnv(
-	t *testing.T,
-	testExit int,
-	failRm bool,
-	envOverrides map[string]string,
-	runnerArgs ...string,
-) fakeDevnetResult {
-	t.Helper()
 
 	root := repoRootDir(t)
 	tempRoot := t.TempDir()
 	// A fail-before run intentionally leaves a read-only directory behind.
 	// Restore owner permissions before testing.TempDir performs final cleanup.
 	t.Cleanup(func() {
-		_ = filepath.Walk(
-			tempRoot,
-			func(path string, info os.FileInfo, err error) error {
-				if err == nil && info.IsDir() {
-					_ = os.Chmod(path, 0o700)
-				}
-				return nil
-			},
-		)
+		_ = filepath.Walk(tempRoot, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
 	})
 
 	fakeBin := filepath.Join(tempRoot, "bin")
@@ -231,21 +184,13 @@ func runFakeDevnetWithEnv(
 	args = append(args, runnerArgs...)
 	cmd := exec.CommandContext(ctx, "bash", args...)
 	cmd.Dir = root
-	env := map[string]string{
+	cmd.Env = cleanRunnerEnv(map[string]string{
 		"FAKE_DOCKER_LOG": filepath.Join(tempRoot, "docker.log"),
 		"FAKE_GO_EXIT":    strconv.Itoa(testExit),
 		"MODE":            "dingo",
-		"PATH": fakeBin + string(
-			os.PathListSeparator,
-		) + os.Getenv(
-			"PATH",
-		),
-		"TMPDIR": tempRoot,
-	}
-	for key, value := range envOverrides {
-		env[key] = value
-	}
-	cmd.Env = cleanRunnerEnv(env)
+		"PATH":            fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TMPDIR":          tempRoot,
+	})
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -297,7 +242,6 @@ func cleanRunnerEnv(overrides map[string]string) []string {
 		"FAKE_GO_EXIT":        {},
 		"MODE":                {},
 		"PATH":                {},
-		"STAKE_KEYS_HOST_DIR": {},
 		"TMPDIR":              {},
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides))

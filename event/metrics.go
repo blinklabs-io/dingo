@@ -55,7 +55,7 @@ func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) {
 	e.metrics.deliveryTimeouts = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_delivery_timeouts_total",
-			Help: "total subscriber delivery timeouts by event type",
+			Help: "total remote subscriber delivery timeouts by event type",
 		},
 		[]string{"type"},
 	)

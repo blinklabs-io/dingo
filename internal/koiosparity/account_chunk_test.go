@@ -30,25 +30,15 @@ func TestDefaultAccountChunkPlanFitsKoiosPublicRequestLimit(t *testing.T) {
 
 	addrs := make([]string, koiosAccountChunkSize)
 	for i := range addrs {
-		addrs[i] = "stake_test1" + strings.Repeat(
-			"q",
-			52,
-		) + fmt.Sprintf(
-			"%03d",
-			i,
-		)
+		addrs[i] = "stake_test1" + strings.Repeat("q", 52) + fmt.Sprintf("%03d", i)
 	}
 	groups := chunkAddressesByCountAndSize(
 		addrs,
 		koiosAccountChunkSize,
 		koiosAccountChunkMaxBytesDefault-koiosAccountRequestEnvelopeOverhead,
 	)
-	require.Greater(
-		t,
-		len(groups),
-		1,
-		"the default must split the 100-address request that Koios rejected live",
-	)
+	require.Greater(t, len(groups), 1,
+		"the default must split the 100-address request that Koios rejected live")
 	for _, group := range groups {
 		body, err := json.Marshal(struct {
 			StakeAddresses []string `json:"_stake_addresses"`
@@ -58,12 +48,8 @@ func TestDefaultAccountChunkPlanFitsKoiosPublicRequestLimit(t *testing.T) {
 			EpochNo:        2,
 		})
 		require.NoError(t, err)
-		require.Less(
-			t,
-			len(body),
-			koiosPublicRequestLimit,
-			"default request body must stay below Koios's public 5120-byte limit",
-		)
+		require.Less(t, len(body), koiosPublicRequestLimit,
+			"default request body must stay below Koios's public 5120-byte limit")
 	}
 }
 

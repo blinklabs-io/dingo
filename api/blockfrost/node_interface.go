@@ -120,10 +120,6 @@ type BlockfrostNode interface {
 	// TransactionSubmit submits raw signed transaction CBOR to the mempool.
 	TransactionSubmit(txCbor []byte) (string, error)
 
-	// TransactionEvaluate evaluates script execution units for raw transaction
-	// CBOR without submitting the transaction.
-	TransactionEvaluate(txCbor []byte) (TransactionEvaluationResponse, error)
-
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
 	TransactionCBOR(hash []byte) ([]byte, error)
 

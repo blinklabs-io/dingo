@@ -234,16 +234,6 @@ type GovernanceStore interface {
 		types.Txn,
 	) error
 
-	// ClearGovernanceProposalRatification moves a proposal back to the active,
-	// pending state at transitionSlot after a deterministic enactment
-	// precondition failure.
-	ClearGovernanceProposalRatification(
-		txHash []byte,
-		actionIndex uint32,
-		transitionSlot uint64,
-		txn types.Txn,
-	) error
-
 	// GetChildGovernanceProposals returns all active proposals whose parent
 	// is the given proposal (matched by txHash + actionIndex). Only returns
 	// proposals not yet enacted, expired, or soft-deleted. Used during
@@ -271,9 +261,7 @@ type GovernanceStore interface {
 
 	// GetCommitteeMember retrieves a committee member by cold key.
 	GetCommitteeMember(
-		uint8, // cold credential tag
 		[]byte, // coldKey
-		uint64, // committee term start slot
 		types.Txn,
 	) (*models.AuthCommitteeHot, error)
 
@@ -282,16 +270,14 @@ type GovernanceStore interface {
 
 	// IsCommitteeMemberResigned checks if a committee member has resigned.
 	IsCommitteeMemberResigned(
-		uint8, // cold credential tag
 		[]byte, // coldKey
-		uint64, // committee term start slot
 		types.Txn,
 	) (bool, error)
 
-	// GetResignedCommitteeMembers returns cold credentials with a resignation
-	// recorded during each credential's selected membership term.
+	// GetResignedCommitteeMembers returns the cold credentials whose
+	// latest resignation is after their latest authorization.
 	GetResignedCommitteeMembers(
-		[]models.CommitteeCredential,
+		[][]byte, // coldKeys
 		types.Txn,
 	) (map[string]bool, error)
 
@@ -301,10 +287,9 @@ type GovernanceStore interface {
 
 	// Snapshot-imported committee member methods
 
-	// SetCommitteeMembers stores committee members, both those imported from a
-	// Mithril snapshot and those enacted by governance. The tagged cold
-	// credential and added slot identify a historical membership row; later
-	// removal and re-election create a new term.
+	// SetCommitteeMembers upserts committee members imported from a
+	// Mithril snapshot. On conflict (same cold_cred_hash), the
+	// expires_epoch and added_slot are updated.
 	SetCommitteeMembers(
 		[]*models.CommitteeMember,
 		types.Txn,
@@ -344,11 +329,11 @@ type GovernanceStore interface {
 	// soft-deleted after that slot. Used during chain rollbacks.
 	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
 
-	// SoftDeleteCommitteeMembers marks the given cold credentials
+	// SoftDeleteCommitteeMembers marks the given cold credential hashes
 	// as removed by setting deleted_slot. Used by governance enactment
 	// to remove members (UpdateCommittee/NoConfidence action).
 	SoftDeleteCommitteeMembers(
-		coldCredentials []models.CommitteeCredential,
+		coldCredHashes [][]byte,
 		slot uint64,
 		txn types.Txn,
 	) error
@@ -664,16 +649,6 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.UtxoWithOrdering, error)
 
-	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
-	// matching q's coarse SQL predicate, without materializing rows. It
-	// errors if q's address patterns require CBOR-based exact-address
-	// filtering (see models.RequiresExactAddressFilter), since the coarse
-	// predicate alone would over-count. See models.UtxoWithOrderingQuery.
-	CountUtxosByAddressWithOrdering(
-		*models.UtxoWithOrderingQuery,
-		types.Txn,
-	) (int, error)
-
 	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
 	GetUtxosByAddressAtSlot(
 		models.UtxoAddressPattern,
@@ -907,21 +882,6 @@ type TransactionStore interface {
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
 		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
-		types.Txn,
-	) error
-
-	// SetTransactionLeiosClosure stores a transaction on the Leios
-	// endorser-block closure path. Identical to SetTransaction except a
-	// consumed input already spent by a different transaction is a no-op
-	// instead of ErrUtxoConflict, matching the reference ledger's
-	// applyLeiosClosure (ValidateNone) on a legitimate cross-EB double-consume
-	// (see BatchedTxIngestOpts.SkipConsumedInputRecovery).
-	SetTransactionLeiosClosure(
-		lcommon.Transaction,
-		ocommon.Point,
-		uint32, // idx
-		map[int]uint64, // certDeposits
-		bool, // skipWithdrawalWitness
 		types.Txn,
 	) error
 
@@ -1304,13 +1264,6 @@ type MetadataStore interface {
 	// ImportAccount upserts an account (insert or update delegation
 	// fields on conflict).
 	ImportAccount(*models.Account, types.Txn) error
-	// GetAccountImportRegistrationByCredential returns the virtual
-	// registration captured by an imported account baseline.
-	GetAccountImportRegistrationByCredential(
-		uint8,
-		[]byte,
-		types.Txn,
-	) (*models.AccountImportRegistration, error)
 
 	// ImportPool upserts a pool and creates a registration record.
 	ImportPool(
@@ -1651,24 +1604,6 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
-	// LatestPoolOpCertSequenceAfter returns the highest observed op-cert
-	// sequence for a pool strictly after the given slot.
-	LatestPoolOpCertSequenceAfter(
-		lcommon.PoolKeyHash,
-		uint64, // afterSlot
-		types.Txn,
-	) (uint64, bool, error)
-
-	// LatestPoolOpCertSequenceAtOrBefore returns the highest op-cert sequence
-	// observed for a pool no later than the supplied canonical-chain slot.
-	// This is the chain-dependent counter view at a historical point; pools
-	// with no issuer row by that point are absent rather than counter zero.
-	LatestPoolOpCertSequenceAtOrBefore(
-		lcommon.PoolKeyHash,
-		uint64, // slot
-		types.Txn,
-	) (uint64, bool, error)
-
 	// LatestPoolOpCertSequences returns the highest observed op-cert sequence
 	// for every pool that has issued a block, keyed by pool key hash. Pools
 	// that have never issued one are absent rather than reported as zero.
@@ -1967,12 +1902,6 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
 
-	// ClearDelegationsToRetiredPool removes every account delegation pointing
-	// at the given reaped pool, stamping added_slot with the epoch-boundary
-	// slot so the clear is rollback-safe. The delegation half of POOLREAP; see
-	// the sqlstore implementation for why the import baseline is left alone.
-	ClearDelegationsToRetiredPool([]byte, uint64, types.Txn) error
-
 	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
 	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
 	// tombstoned via the active flag. Credentials that match no row are ignored.
@@ -2124,7 +2053,6 @@ type MetadataStore interface {
 	SetGenesisStaking(
 		pools map[string]lcommon.PoolRegistrationCertificate,
 		stakeDelegations map[string]string,
-		keyDeposit uint64,
 		blockHash []byte,
 		txn types.Txn,
 	) error

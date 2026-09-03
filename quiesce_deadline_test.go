@@ -24,6 +24,7 @@ import (
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -125,6 +126,7 @@ func TestStopWithDeadlineIgnoresCallerCancellation(t *testing.T) {
 func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 	n := &Node{
 		blockForger:          &forging.BlockForger{},
+		kesAgentClient:       &kesagent.Client{},
 		leaderElection:       &leader.Election{},
 		leiosPipelineManager: &leios.PipelineManager{},
 		leiosVoteManager:     &leios.VoteManager{},
@@ -138,6 +140,7 @@ func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 	}
 	assert.Equal(t, []string{
 		"block forger",
+		"KES agent client",
 		"leader election",
 		"leios pipeline manager",
 		"leios vote manager",

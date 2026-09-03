@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -38,7 +37,6 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1807,67 +1805,6 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	)
 }
 
-func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
-	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Close)
-	ls.config.EventBus = bus
-	validation := func() *txValidationError {
-		return &txValidationError{
-			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
-			TxHash:     testHashBytes("reward-withdrawal-mismatch-tx"),
-			Cause: fmt.Errorf(
-				"amount 78446537 exceeds account balance 78446536: %w",
-				models.ErrRewardWithdrawalExceedsBalance,
-			),
-		}
-	}
-
-	recovered, err := ls.tryRecoverFromTxValidationError(validation())
-	require.NoError(t, err)
-	require.True(t, recovered)
-
-	recovered, err = ls.tryRecoverFromTxValidationError(validation())
-	require.ErrorIs(t, err, errHaltLedgerPipeline)
-	require.False(t, recovered)
-}
-
-func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
-	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Close)
-	resyncCh := deterministicResyncChannel(t, ls, bus)
-
-	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
-		BlockPoint: ocommon.NewPoint(
-			160,
-			testHashBytes("plutus-failing-block"),
-		),
-		TxHash: testHashBytes("plutus-failing-tx"),
-		Cause: conway.PlutusScriptFailedError{
-			ScriptHash: lcommon.Blake2b224Hash([]byte("plutus-script")),
-			Tag:        lcommon.RedeemerTagMint,
-			Index:      0,
-			Err: errors.New(
-				"local evaluator disagrees with declared validity",
-			),
-		},
-	})
-	require.NoError(t, err)
-	require.True(t, recovered)
-	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
-	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
-	assert.Nil(t, ls.lastAtTipRecovery)
-
-	resync := testutil.RequireReceive(
-		t,
-		resyncCh,
-		2*time.Second,
-		"deterministic Plutus rejection must request a fresh ChainSync intersection",
-	)
-	assert.Equal(t, ls.Tip().Point, resync.Point)
-}
-
 // A duplicate-input failure reaching the deterministic branch while the node
 // is at tip takes that branch rather than recoverAtTipFromTxValidationError's
 // escalating-depth schedule. Deepening the rewind cannot change a verdict that
@@ -2273,168 +2210,4 @@ func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
 			)
 		})
 	}
-}
-
-// TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs is the
-// dingo #3805 regression.
-//
-// Replay recovery exists to repair one thing: a transaction spending an input
-// whose producer is missing from the applied chain. txValidationError carries
-// every referenced input of the failing transaction regardless of why it
-// failed, so a failure that has nothing to do with input provenance -- a script
-// data hash mismatch, say -- arrived here with a full input list and was
-// diagnosed as inconsistent local state.
-//
-// The failure is deterministic, so replaying after the rewind fails identically
-// and the pipeline loops. Observed on preview: 230 rewinds over 45 minutes at a
-// frozen tip, with the "missing" input present and unspent in the node's own
-// UTxO set the whole time.
-//
-// An input that resolves is not evidence of a gap. With every input resolvable
-// there is no candidate, and the caller rejects the branch instead.
-func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
-	t *testing.T,
-) {
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-	})
-	require.NoError(t, err)
-
-	cm, err := chain.NewManager(db, nil)
-	require.NoError(t, err)
-
-	parentBlock := testRawBlock("resolvable-parent", 100, 1, nil)
-	producerBlock := testRawBlock(
-		"resolvable-producer",
-		120,
-		2,
-		parentBlock.Hash,
-	)
-	currentBlock := testRawBlock(
-		"resolvable-current",
-		160,
-		3,
-		producerBlock.Hash,
-	)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
-		[]chain.RawBlock{parentBlock, producerBlock, currentBlock},
-	))
-
-	ls, err := NewLedgerState(LedgerStateConfig{
-		Database:          db,
-		ChainManager:      cm,
-		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	ls.metrics.init(prometheus.NewRegistry())
-
-	currentTip := ochainsync.Tip{
-		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
-		BlockNumber: currentBlock.BlockNumber,
-	}
-	require.NoError(t, db.SetBlockNonce(
-		currentTip.Point.Hash, currentTip.Point.Slot,
-		[]byte("nonce-current"), false, nil,
-	))
-	require.NoError(t, db.SetTip(currentTip, nil))
-	ls.currentTip = currentTip
-	ls.currentTipBlockNonce = []byte("nonce-current")
-	ls.publishSnapshotsLocked()
-
-	// The producer transaction is on the applied chain and its output is in
-	// the UTxO set, unspent -- exactly the state the preview node was in while
-	// it rewound 230 times.
-	producerTxHash := testHashBytes("resolvable-producer-tx")
-	seedReplayRecoveryTransaction(
-		t, db, producerTxHash, producerBlock.Hash, producerBlock.Slot,
-	)
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-		TxId:      producerTxHash,
-		OutputIdx: 1,
-		Amount:    types.Uint64(11688720),
-		AddedSlot: producerBlock.Slot,
-	}))
-
-	validationErr := &txValidationError{
-		BlockPoint: currentTip.Point,
-		TxHash:     testHashBytes("script-data-hash-failing-tx"),
-		Inputs: []lcommon.TransactionInput{
-			&replayRecoveryInput{txId: producerTxHash, index: 1},
-		},
-		Cause: errors.New(
-			"script data hash mismatch: declared aa, computed bb",
-		),
-	}
-
-	// No candidate: with every referenced input present there is nothing for a
-	// rewind to repair, whatever the transaction failed on.
-	candidate, err := ls.findReplayRecoveryCandidate(validationErr)
-	require.NoError(t, err)
-	assert.Nil(t, candidate,
-		"a present input must not be folded into unresolvedInputs")
-
-	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
-	require.NoError(t, err)
-	assert.False(t, recovered,
-		"a failure whose inputs all resolve is a rejected block, not a local state gap")
-	assert.Equal(t, currentTip, ls.currentTip,
-		"nothing was rewound")
-	assert.Equal(t, currentTip, ls.chain.Tip())
-}
-
-// TestResolveReplayRecoveryProducerReportsPresentInput pins the distinction the
-// candidate search depends on. resolveReplayRecoveryProducer returns a nil
-// producer for two unrelated situations — the input is present so there is
-// nothing to find, and the input is missing and its producer could not be
-// located — and folding both into unresolvedInputs is what let a failure with
-// nothing missing drive a rewind (dingo #3805).
-func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
-	require.NoError(t, err)
-	ls, err := NewLedgerState(LedgerStateConfig{
-		Database:          db,
-		ChainManager:      cm,
-		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	ls.metrics.init(prometheus.NewRegistry())
-
-	presentTx := testHashBytes("present-producer-tx")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-		TxId:      presentTx,
-		OutputIdx: 0,
-		Amount:    types.Uint64(1_000_000),
-		AddedSlot: 10,
-	}))
-
-	index := &replayRecoveryChainIndex{
-		Txs: make(map[string]replayRecoveryChainTx),
-	}
-
-	resolved, present, err := ls.resolveReplayRecoveryProducer(
-		replayRecoveryPendingInput{
-			Input:   &replayRecoveryInput{txId: presentTx, index: 0},
-			MaxSlot: 100,
-		},
-		index,
-	)
-	require.NoError(t, err)
-	assert.True(t, present, "a live UTxO is present")
-	assert.Nil(t, resolved, "and so has no producer to recover")
-
-	// A reference with no UTxO and no producer anywhere is the genuine gap.
-	resolved, present, err = ls.resolveReplayRecoveryProducer(
-		replayRecoveryPendingInput{
-			Input:   &replayRecoveryInput{txId: testHashBytes("absent"), index: 0},
-			MaxSlot: 100,
-		},
-		index,
-	)
-	require.NoError(t, err)
-	assert.False(t, present, "a missing UTxO is not present")
-	assert.Nil(t, resolved)
 }

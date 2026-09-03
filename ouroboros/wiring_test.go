@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -102,13 +101,12 @@ func newWiringTestDeps(t *testing.T) OuroborosConfig {
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
 	return OuroborosConfig{
-		Logger:                  logger,
-		EventBus:                bus,
-		LedgerState:             ls,
-		LeiosAnnouncementLedger: ls,
-		Mempool:                 &mempool.FIFO{Mempool: m},
-		ChainsyncState:          chainsync.NewState(bus, ls),
-		ConnManager:             connManager,
+		Logger:         logger,
+		EventBus:       bus,
+		LedgerState:    ls,
+		Mempool:        &mempool.FIFO{Mempool: m},
+		ChainsyncState: chainsync.NewState(bus, ls),
+		ConnManager:    connManager,
 		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
 			Logger:      logger,
 			EventBus:    bus,
@@ -129,10 +127,7 @@ func newWiringTestOuroboros(t *testing.T) *Ouroboros {
 // so its dispatch goroutines do not outlive the test.
 func newWiringTestEventBus(t *testing.T) *event.EventBus {
 	t.Helper()
-	bus := event.NewEventBus(
-		nil,
-		slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	)
+	bus := event.NewEventBus(nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	t.Cleanup(bus.Close)
 	return bus
 }
@@ -162,17 +157,6 @@ func TestNewOuroborosRejectsMissingRequiredDependency(t *testing.T) {
 			require.Contains(t, err.Error(), tc.name)
 		})
 	}
-}
-
-func TestNewOuroborosRequiresAnnouncementLedgerWhenLeiosEnabled(t *testing.T) {
-	cfg := newWiringTestDeps(t)
-	cfg.EnableLeios = true
-	cfg.LeiosAnnouncementLedger = nil
-
-	o, err := NewOuroboros(cfg)
-	require.Nil(t, o)
-	require.ErrorIs(t, err, ErrMissingDependency)
-	require.ErrorContains(t, err, "LeiosAnnouncementLedger")
 }
 
 // TestNewOuroborosExposesDependencies checks the happy path, and that the
@@ -237,16 +221,6 @@ func TestRejectsTypedNilDependencies(t *testing.T) {
 		require.Nil(t, o)
 		require.ErrorIs(t, err, ErrMissingDependency)
 		require.Contains(t, err.Error(), "Mempool")
-	})
-	t.Run("LeiosAnnouncementLedger", func(t *testing.T) {
-		cfg := newWiringTestDeps(t)
-		cfg.EnableLeios = true
-		var typedNil *ledger.LedgerState
-		cfg.LeiosAnnouncementLedger = typedNil
-		o, err := NewOuroboros(cfg)
-		require.Nil(t, o)
-		require.ErrorIs(t, err, ErrMissingDependency)
-		require.Contains(t, err.Error(), "LeiosAnnouncementLedger")
 	})
 	t.Run("LeiosVotes", func(t *testing.T) {
 		o := newWiringTestOuroboros(t)

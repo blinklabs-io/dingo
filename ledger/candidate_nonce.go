@@ -245,12 +245,12 @@ func (ls *LedgerState) computeCandidateNonceFast(
 				"get nonce for last epoch block: %w", err,
 			)
 		}
-		if len(nonce) != 32 {
+		if len(nonce) == 0 {
 			// The last block in the blob store has no committed
-			// block_nonce row yet, or its row is malformed — the
-			// metadata pipeline is behind or has stale data. Force
-			// the slow path so we recompute the epoch's evolving
-			// nonce from CBOR with all blocks included.
+			// block_nonce row yet — the metadata pipeline is
+			// behind. Force the slow path so we recompute the
+			// epoch's evolving nonce from CBOR with all blocks
+			// included.
 			return nil, nil, errNoncesMissing
 		}
 		evolvingNonce = nonce
@@ -298,7 +298,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 					err,
 				)
 			}
-			if len(nonce) != 32 {
+			if len(nonce) == 0 {
 				return nil, nil, errNoncesMissing
 			}
 			candidateNonce = nonce

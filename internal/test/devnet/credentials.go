@@ -1,4 +1,4 @@
-//go:build linux && devnet
+//go:build devnet
 
 // Copyright 2026 Blink Labs Software
 //

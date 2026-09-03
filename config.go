@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"runtime"
@@ -219,7 +220,6 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
-	barkOperatorCertificateFingerprints                                                 []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	koiosParity                                                                         KoiosParityConfig
@@ -247,6 +247,8 @@ type Config struct {
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
+	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
+	shelleyKESAgentSignTimeout                                                          time.Duration
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
@@ -258,6 +260,7 @@ type Config struct {
 	delegatorInactivityEnabled                                                          bool
 	delegatorInactivity                                                                 uint64
 	leiosVoteSigningKeyFile                                                             string
+	leiosVoterPublicKeys                                                                map[string]string
 	midnight                                                                            MidnightConfig
 	chainsyncMaxClients                                                                 int
 	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
@@ -520,6 +523,23 @@ func (n *Node) configValidate() error {
 			internalconfig.StartEraDijkstra,
 		)
 	}
+	// Mutually exclusive KES key sources. The CLI rejects this combination in
+	// internalconfig.Config.Validate, which this path never calls, so a
+	// programmatic block producer that set both had its local key file silently
+	// ignored in favour of the agent.
+	if n.config.cfg.BlockProducer {
+		if err := internalconfig.ValidateKESKeySources(
+			n.config.cfg.ShelleyKESKey,
+			n.config.cfg.ShelleyKESAgentSocket,
+		); err != nil {
+			return err
+		}
+	}
+	if err := internalconfig.ValidateKESAgentSignTimeout(
+		n.config.cfg.ShelleyKESAgentSignTimeout,
+	); err != nil {
+		return err
+	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",
@@ -735,9 +755,6 @@ func (c *Config) syncCompatFields() {
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
-	c.barkOperatorCertificateFingerprints = slices.Clone(
-		c.cfg.BarkOperatorCertificateFingerprints,
-	)
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
@@ -831,13 +848,15 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
+	c.shelleyKESAgentSocket, c.shelleyKESAgentMode = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode
+	c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
-	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
+	c.leiosVoteSigningKeyFile, c.leiosVoterPublicKeys = c.cfg.LeiosVoteSigningKeyFile, c.cfg.LeiosVoterPublicKeys
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
@@ -1427,6 +1446,45 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	}
 }
 
+// WithShelleyKESAgentSocket sources the KES signing key from a running bursa
+// KES agent over the given Unix-domain service socket instead of a local
+// --shelley-kes-key file (CARDANO_SHELLEY_KES_AGENT_SOCKET). The VRF key and
+// operational certificate flags still apply. Mirrors cardano-node's
+// --shelley-kes-agent-socket. When empty (default), the file-based KES key is
+// used and forging behavior is unchanged.
+func WithShelleyKESAgentSocket(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentSocket = path
+		c.shelleyKESAgentSocket = path
+	}
+}
+
+// WithShelleyKESAgentMode selects the KES agent service mode:
+// "serve-key" (default; the agent pushes the evolving KES sign key and the
+// node signs headers locally) or "sign" (the node forwards header bodies and
+// the agent returns signatures; the key never enters the node)
+// (CARDANO_SHELLEY_KES_AGENT_MODE). Only meaningful together with
+// WithShelleyKESAgentSocket.
+func WithShelleyKESAgentMode(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentMode = mode
+		c.shelleyKESAgentMode = mode
+	}
+}
+
+// WithShelleyKESAgentSignTimeout bounds one sign-mode round trip to the KES
+// agent (CARDANO_SHELLEY_KES_AGENT_SIGN_TIMEOUT). It must stay below a slot:
+// block production calls the signer synchronously on the slot-aligned loop, so
+// a longer timeout parks forging for several slots when the agent stops
+// answering. Zero uses the client default (500ms). Only meaningful together
+// with WithShelleyKESAgentSocket in sign mode.
+func WithShelleyKESAgentSignTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentSignTimeout = d
+		c.shelleyKESAgentSignTimeout = d
+	}
+}
+
 // WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
 // Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
 // block producer whose pool is a Leios committee member, the node emits
@@ -1434,6 +1492,18 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosVoteSigningKeyFile = path
+	}
+}
+
+// WithLeiosVoterPublicKeys specifies the static Leios voter public key
+// registry (DINGO_LEIOS_VOTER_PUBLIC_KEYS): hex pool key hash to
+// hex-encoded BLS12-381 public key. Stands in for CIP-0164 key
+// registration, which is not yet specified. Experimental, leios runMode
+// only.
+func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
+	return func(c *Config) {
+		// Copy so later caller mutations cannot change live config
+		c.cfg.LeiosVoterPublicKeys = maps.Clone(keys)
 	}
 }
 
@@ -1514,24 +1584,14 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
-// every DatabaseService caller. Destructive methods additionally require an
-// allowlisted fingerprint set by WithBarkOperatorCertificateFingerprints.
+// WithBarkClientCAFilePath sets the PEM CA bundle Bark verifies client
+// certificates (mTLS) against. Required whenever the database lifecycle
+// service is mounted — see BarkConfig.TlsClientCAFilePath's doc comment in
+// bark/bark.go for what this gates.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
-	}
-}
-
-// WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
-// fingerprints authorized to invoke destructive DatabaseService RPCs.
-func WithBarkOperatorCertificateFingerprints(
-	fingerprints []string,
-) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.BarkOperatorCertificateFingerprints = slices.Clone(fingerprints)
-		c.barkOperatorCertificateFingerprints = slices.Clone(fingerprints)
 	}
 }
 
@@ -1826,12 +1886,6 @@ func (c *Config) BarkBaseUrl() string {
 // BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
-}
-
-// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
-// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
-func (c *Config) BarkOperatorCertificateFingerprints() []string {
-	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
 }
 
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
@@ -2207,6 +2261,11 @@ func (c *Config) ValidateForgedBlock() bool {
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
+}
+
+// LeiosVoterPublicKeys returns the Leios voter public key registry.
+func (c *Config) LeiosVoterPublicKeys() map[string]string {
+	return c.cfg.LeiosVoterPublicKeys
 }
 
 // PeerSharing returns the peer sharing configuration.

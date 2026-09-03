@@ -47,11 +47,8 @@ func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 
 	epochs, err := cache.GetEpochsNeedingCheck("preview", true)
 	require.NoError(t, err)
-	require.Empty(
-		t,
-		epochs,
-		"pre-staking epochs never have account coverage and must not be requeued for its absence",
-	)
+	require.Empty(t, epochs,
+		"pre-staking epochs never have account coverage and must not be requeued for its absence")
 }
 
 // TestCommitEpochDataWithTotals exercises the actual SQL generated for the
@@ -346,31 +343,14 @@ func TestCommitEpochMismatchesRollsBackOnFailedInsert(t *testing.T) {
 	require.NoError(t, err)
 
 	replacement := []CheckMismatch{
-		{
-			Network:   network,
-			Epoch:     epoch,
-			Field:     "ok_row",
-			Category:  CategoryDBError,
-			CheckedAt: now,
-		},
-		{
-			Network:   network,
-			Epoch:     epoch,
-			Field:     "force_fail",
-			Category:  CategoryDBError,
-			CheckedAt: now,
-		},
+		{Network: network, Epoch: epoch, Field: "ok_row", Category: CategoryDBError, CheckedAt: now},
+		{Network: network, Epoch: epoch, Field: "force_fail", Category: CategoryDBError, CheckedAt: now},
 	}
 	err = cache.CommitEpochMismatches(network, epoch, replacement)
 	require.Error(t, err)
 
 	got, err := cache.GetMismatches(network, epoch, "")
 	require.NoError(t, err)
-	require.Len(
-		t,
-		got,
-		1,
-		"a failed replacement must leave the prior evidence intact",
-	)
+	require.Len(t, got, 1, "a failed replacement must leave the prior evidence intact")
 	require.Equal(t, "prior_evidence", got[0].Field)
 }

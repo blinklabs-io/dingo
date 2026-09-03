@@ -1,4 +1,4 @@
-//go:build dingo_db_integration
+//go:build dingo_live_lifecycle_integration
 
 // Copyright 2026 Blink Labs Software
 //
@@ -92,10 +92,6 @@ const devnetTestEpochLength = 100
 // making progress. Polling remains condition-based and returns immediately
 // once the requested tip is reached.
 const liveNodeSyncTimeout = 5 * time.Minute
-
-// liveNodeStartupTimeout covers database initialization on loaded race-enabled
-// runners before the test begins polling node state.
-const liveNodeStartupTimeout = 30 * time.Second
 
 // devnetCardanoConfig loads the embedded devnet network config: sub-second
 // slots and activeSlotsCoeff=1.0, tuned for fast in-process iteration. The
@@ -315,7 +311,7 @@ func startTwoNodeDevnet(
 
 	select {
 	case <-forgerDBReady:
-	case <-time.After(liveNodeStartupTimeout):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for forger node's database to initialize")
 	}
 
@@ -332,7 +328,7 @@ func startTwoNodeDevnet(
 
 	select {
 	case <-syncerDBReady:
-	case <-time.After(liveNodeStartupTimeout):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for syncer node's database to initialize")
 	}
 

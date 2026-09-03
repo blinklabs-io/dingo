@@ -668,12 +668,7 @@ func TestExtractArchiveMergeAccumulates(t *testing.T) {
 		"immutable/00001.chunk": "chunk1",
 	} {
 		data, err := os.ReadFile(filepath.Join(destDir, name))
-		require.NoError(
-			t,
-			err,
-			"%s should have survived both extractions",
-			name,
-		)
+		require.NoError(t, err, "%s should have survived both extractions", name)
 		assert.Equal(t, want, string(data))
 	}
 }
@@ -922,15 +917,8 @@ func TestRemoveEmptyExtractDirRefusesFile(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.Error(
-		t,
-		removeEmptyExtractDir(
-			parentRoot,
-			"theirs",
-			filepath.Join(parent, "theirs"),
-		),
-		"a directory-only removal must refuse a file",
-	)
+	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs", filepath.Join(parent, "theirs")),
+		"a directory-only removal must refuse a file")
 
 	data, err := os.ReadFile(filepath.Join(parent, "theirs"))
 	require.NoError(t, err, "the file must not have been unlinked")
@@ -952,14 +940,7 @@ func TestRemoveEmptyExtractDirRefusesPopulatedDir(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.Error(
-		t,
-		removeEmptyExtractDir(
-			parentRoot,
-			"theirs",
-			filepath.Join(parent, "theirs"),
-		),
-	)
+	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs", filepath.Join(parent, "theirs")))
 
 	data, err := os.ReadFile(filepath.Join(dir, "keep.txt"))
 	require.NoError(t, err)
@@ -976,14 +957,7 @@ func TestRemoveEmptyExtractDirRemovesEmptyDir(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.NoError(
-		t,
-		removeEmptyExtractDir(
-			parentRoot,
-			"stale",
-			filepath.Join(parent, "stale"),
-		),
-	)
+	require.NoError(t, removeEmptyExtractDir(parentRoot, "stale", filepath.Join(parent, "stale")))
 	_, statErr := os.Stat(dir)
 	assert.True(t, os.IsNotExist(statErr))
 }

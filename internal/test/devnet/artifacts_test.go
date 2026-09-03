@@ -1,5 +1,3 @@
-//go:build linux
-
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -59,9 +57,15 @@ func (f *fakeArtifactSource) Logs(
 }
 
 // requireSinglePathSegment asserts that name addresses exactly one entry
-// directly inside root without hard-coding a path separator. Both sides use
-// filepath so this Linux-only harness still emits paths that portable
-// artifact tooling can consume safely.
+// directly inside root, and does so without depending on the platform's
+// separator. A literal would: filepath.Join normalizes through Clean,
+// whose documented last step replaces every slash with filepath.Separator,
+// so on Windows filepath.Dir(filepath.Join("/root", name)) is `\root` and
+// never equals a "/root" literal. This file carries no build tag, so it
+// runs under the untagged `go test ./...` that release validation runs on
+// windows-latest; an assertion that only holds on one separator fails
+// there and blocks the release. Both sides are built with filepath here,
+// so they normalize identically on every platform.
 func requireSinglePathSegment(
 	t *testing.T,
 	root, name string,
@@ -314,9 +318,10 @@ func TestWriteFailureArtifactsBoundsCapturedLogs(t *testing.T) {
 // arrive that way, but ArtifactName is exported and NodeControl's
 // caller passes a name of its own, so it is covered too; ':' '*' '?' '"'
 // '<' '>' '|' and a trailing dot all survive t.Run untouched. They are
-// here to hold the portable encoding contract in the Linux unit suite:
-// distinct names stay distinct, each one stays a single path segment, and
-// each one names a directory the filesystem will actually create.
+// here to hold the encoding to its contract on every platform the
+// untagged tests run on: distinct names stay distinct, each one stays a
+// single path segment, and each one names a directory the filesystem
+// will actually create.
 var artifactNameCorpus = []string{
 	"TestSustainedConsensus",
 	"accelerated-timeline",
@@ -383,11 +388,13 @@ func TestArtifactNameLeavesPlainScenarioNamesAlone(t *testing.T) {
 }
 
 // TestArtifactNamesCreateDistinctDirectories checks that every name in
-// artifactNameCorpus creates a directory of its own on the supported Linux
-// filesystem rather than checking only that the encodings differ as strings.
-// Lexical injectivity is not the same guarantee: a filesystem that rewrites a
-// name stores two distinct encodings in one directory, and a filesystem that
-// rejects one stores neither.
+// artifactNameCorpus creates a directory of its own on the filesystem
+// under test, rather than checking that the encodings differ as
+// strings. Lexical injectivity is not the same guarantee: a filesystem
+// that rewrites a name stores two distinct encodings in one directory,
+// and a filesystem that rejects one stores neither. Windows does both,
+// so this is where that shows up rather than in
+// TestArtifactNameIsInjective.
 //
 // The corpus is the scope of the claim. It leaves out names differing
 // only in case, which do share a directory where the filesystem folds
@@ -439,8 +446,8 @@ func TestArtifactNamesCreateDistinctDirectories(t *testing.T) {
 // and trailing-space escapes directly. Windows removes both from the end
 // of a name, so an encoding that ended in either would be stored under a
 // shorter name -- and two encodings that differ only there would become
-// one directory. The explicit lexical assertion keeps that property covered
-// even though the DevNet package is not built on Windows.
+// one directory. The filesystem test above only catches this when it runs
+// on Windows; this one holds everywhere.
 func TestArtifactNameNeverEndsInAStrippedCharacter(t *testing.T) {
 	for _, name := range artifactNameCorpus {
 		got := ArtifactName(name)

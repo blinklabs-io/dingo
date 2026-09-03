@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -943,31 +942,11 @@ func (k *KoiosClient) GetPoolEpochHistory(
 func (k *KoiosClient) GetAllAccountAddresses(
 	ctx context.Context,
 ) ([]string, error) {
-	return k.getAllAccountAddresses(ctx, nil)
-}
-
-// GetAllAccountAddressesWithProgress is GetAllAccountAddresses with a progress
-// line every accountListLogEveryPages pages. The logger is a parameter rather
-// than a client field because the same client serves the concurrent chunk
-// fetchers, and a field written here would be read by them (dingo #3796).
-func (k *KoiosClient) GetAllAccountAddressesWithProgress(
-	ctx context.Context,
-	logger *slog.Logger,
-) ([]string, error) {
-	return k.getAllAccountAddresses(ctx, logger)
-}
-
-func (k *KoiosClient) getAllAccountAddresses(
-	ctx context.Context,
-	logger *slog.Logger,
-) ([]string, error) {
 	type listItem struct {
 		StakeAddress string `json:"stake_address"`
 	}
 	seen := make(map[string]bool)
 	var addrs []string
-	total := 0
-	pages := 0
 	for start := 0; ; start += koiosPageSize {
 		end := start + koiosPageSize - 1
 		resp, err := k.get(
@@ -979,7 +958,6 @@ func (k *KoiosClient) getAllAccountAddresses(
 		if err != nil {
 			return nil, err
 		}
-
 		if resp.StatusCode != http.StatusOK &&
 			resp.StatusCode != http.StatusPartialContent {
 			return nil, fmt.Errorf(
@@ -1001,34 +979,16 @@ func (k *KoiosClient) getAllAccountAddresses(
 				addrs = append(addrs, item.StakeAddress)
 			}
 		}
-		// Preview answers 303k accounts in 304 sequential pages. Without a
-		// progress line the whole walk is silent, which is indistinguishable
-		// from a stalled fetch (dingo #3796). Emitted after the page is
-		// folded in, so a crawl ending on exactly a milestone page still
-		// reports it before the loop breaks below.
-		pages++
-		if logger != nil && pages%accountListLogEveryPages == 0 {
-			logger.Info(
-				"koiosparity: crawling Koios account list",
-				"pages", pages,
-				"fetched", len(addrs),
-				"total", total,
-			)
-		}
 		if len(page) < koiosPageSize {
 			break
 		}
-		total = parseTotalFromContentRange(resp.Header.Get("Content-Range"))
+		total := parseTotalFromContentRange(resp.Header.Get("Content-Range"))
 		if total > 0 && start+len(page) >= total {
 			break
 		}
 	}
 	return addrs, nil
 }
-
-// accountListLogEveryPages is how many /account_list pages pass between
-// progress lines during the universe crawl.
-const accountListLogEveryPages = 50
 
 // KoiosAccountRewardHistoryItem is one row from /account_reward_history,
 // covering every documented field. PoolIDBech32 is null for reward types with

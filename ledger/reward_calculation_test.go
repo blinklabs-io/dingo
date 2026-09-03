@@ -4715,20 +4715,7 @@ func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
 	}, epochs)
 }
 
-// TestRewardParametersSplitCalculationAndPerformanceEpochInputs pins where
-// each reward parameter is read from when the two epochs disagree.
-//
-// The epoch length is the calculation epoch's: it stands in for the
-// slotsPerEpoch the RUPD rule passes for the epoch it runs in. Every
-// protocol-parameter value is the performance epoch's, because
-// cardano-ledger's startStep binds `pr = es ^. prevPParamsEpochStateL` and
-// derives d, rho, tau and the pool-level parameters it passes to
-// mkPoolRewardInfo from that. Reading tau or d from the calculation epoch
-// instead silently changes reward amounts on any network where the parameters
-// move across the boundary (dingo #3481).
-func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
-	t *testing.T,
-) {
+func TestRewardParametersUseRUPDCalculationEpochLength(t *testing.T) {
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -4807,31 +4794,10 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 		&models.RewardAdaPots{Reserves: 100_000_000},
 	)
 	require.NoError(t, err)
-	require.Equal(
-		t,
-		uint64(1_000),
-		params.EpochLength,
-		"epoch length comes from the calculation epoch",
-	)
-	require.Equal(
-		t,
-		big.NewRat(0, 1),
-		params.TreasuryExpansion,
-		"tau comes from the performance epoch",
-	)
-	require.Equal(
-		t,
-		big.NewRat(1, 2),
-		params.Decentralization,
-		"d comes from the performance epoch",
-	)
-	require.Equal(
-		t,
-		params.Decentralization,
-		performanceDecentralization,
-		"the block-count decentralization is the same value the "+
-			"calculation uses",
-	)
+	require.Equal(t, uint64(1_000), params.EpochLength)
+	require.Equal(t, big.NewRat(1, 5), params.TreasuryExpansion)
+	require.Equal(t, big.NewRat(0, 1), params.Decentralization)
+	require.Equal(t, big.NewRat(1, 2), performanceDecentralization)
 }
 
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(

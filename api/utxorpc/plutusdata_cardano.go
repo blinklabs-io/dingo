@@ -35,10 +35,7 @@ func plutusDatumCBORToCardano(raw []byte) (*cardano.PlutusData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode plutus data: %w", err)
 	}
-	proto, err := plutusDataToCardano(pd)
-	if err != nil {
-		return nil, fmt.Errorf("convert plutus data: %w", err)
-	}
+	proto := plutusDataToCardano(pd)
 	if proto == nil {
 		return nil, errors.New(
 			"unsupported PlutusData type for utxorpc mapping",
@@ -70,45 +67,26 @@ func redeemerPlutusDataByKey(
 }
 
 // plutusDataToCardano maps plutigo Plutus data to utxorpc.cardano PlutusData.
-func plutusDataToCardano(d pdata.PlutusData) (*cardano.PlutusData, error) {
-	return plutusDataToCardanoChecked(d)
-}
-
-func plutusDataToCardanoChecked(
-	d pdata.PlutusData,
-) (*cardano.PlutusData, error) {
+func plutusDataToCardano(d pdata.PlutusData) *cardano.PlutusData {
 	if d == nil {
-		return nil, nil
+		return nil
 	}
 	switch v := d.(type) {
 	case *pdata.Constr:
 		if v == nil {
-			return nil, nil
-		}
-		if v.Tag != nil && !v.Tag.IsUint64() {
-			return nil, fmt.Errorf(
-				"constructor tag %s is outside the Word64 CBOR range",
-				v.Tag,
-			)
+			return nil
 		}
 		fields := make([]*cardano.PlutusData, len(v.Fields))
 		for i, f := range v.Fields {
-			var err error
-			fields[i], err = plutusDataToCardanoChecked(f)
-			if err != nil {
-				return nil, err
-			}
+			fields[i] = plutusDataToCardano(f)
 		}
 		var tag uint32
 		var anyAlt uint64
-		if v.Tag != nil {
-			constructorTag := v.Tag.Uint64()
-			if constructorTag > 127 {
-				tag = 0
-				anyAlt = constructorTag
-			} else {
-				tag = uint32(constructorTag)
-			}
+		if v.Tag > 127 {
+			tag = 0
+			anyAlt = uint64(v.Tag)
+		} else {
+			tag = uint32(v.Tag)
 		}
 		return &cardano.PlutusData{
 			PlutusData: &cardano.PlutusData_Constr{
@@ -118,26 +96,18 @@ func plutusDataToCardanoChecked(
 					Fields:         fields,
 				},
 			},
-		}, nil
+		}
 	case *pdata.Map:
 		if v == nil {
-			return nil, nil
+			return nil
 		}
 		pairs := make([]*cardano.PlutusDataPair, 0, len(v.Pairs))
 		for _, p := range v.Pairs {
-			key, err := plutusDataToCardanoChecked(p[0])
-			if err != nil {
-				return nil, err
-			}
-			value, err := plutusDataToCardanoChecked(p[1])
-			if err != nil {
-				return nil, err
-			}
 			pairs = append(
 				pairs,
 				&cardano.PlutusDataPair{
-					Key:   key,
-					Value: value,
+					Key:   plutusDataToCardano(p[0]),
+					Value: plutusDataToCardano(p[1]),
 				},
 			)
 		}
@@ -145,45 +115,41 @@ func plutusDataToCardanoChecked(
 			PlutusData: &cardano.PlutusData_Map{
 				Map: &cardano.PlutusDataMap{Pairs: pairs},
 			},
-		}, nil
+		}
 	case *pdata.Integer:
 		if v == nil {
-			return nil, nil
+			return nil
 		}
 		return &cardano.PlutusData{
 			PlutusData: &cardano.PlutusData_BigInt{
 				BigInt: bigIntToCardano(v.Inner),
 			},
-		}, nil
+		}
 	case *pdata.ByteString:
 		if v == nil {
-			return nil, nil
+			return nil
 		}
 		b := append([]byte(nil), v.Inner...)
 		return &cardano.PlutusData{
 			PlutusData: &cardano.PlutusData_BoundedBytes{
 				BoundedBytes: b,
 			},
-		}, nil
+		}
 	case *pdata.List:
 		if v == nil {
-			return nil, nil
+			return nil
 		}
 		items := make([]*cardano.PlutusData, len(v.Items))
 		for i, it := range v.Items {
-			var err error
-			items[i], err = plutusDataToCardanoChecked(it)
-			if err != nil {
-				return nil, err
-			}
+			items[i] = plutusDataToCardano(it)
 		}
 		return &cardano.PlutusData{
 			PlutusData: &cardano.PlutusData_Array{
 				Array: &cardano.PlutusDataArray{Items: items},
 			},
-		}, nil
+		}
 	default:
-		return nil, nil
+		return nil
 	}
 }
 

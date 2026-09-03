@@ -238,16 +238,6 @@ func mustAddConsumer(
 	return consumer
 }
 
-func retainedConsumerCacheBytes(consumer *MempoolConsumer) int64 {
-	consumer.cacheMutex.Lock()
-	defer consumer.cacheMutex.Unlock()
-	var ret int64
-	for _, tx := range consumer.cache {
-		ret += int64(len(tx.Cbor))
-	}
-	return ret
-}
-
 // newTestMempoolWithValidator creates a mempool with a specific validator
 func newTestMempoolWithValidator(
 	t *testing.T,
@@ -1271,215 +1261,6 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 	assert.Equal(t, txs[2].Hash, third.Hash)
 	assert.NotNil(t, consumer.GetTxFromCache(txs[2].Hash))
 	assert.Len(t, consumer.cache, 2)
-}
-
-// TestMempoolConsumer_CacheIsBoundedByRetainedBytes verifies that temporary
-// per-consumer byte pressure preserves the cursor until retained bytes are
-// released, while keeping every advertised body available for retransmission.
-func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           event.NewEventBus(nil, nil),
-		PromRegistry:       prometheus.NewRegistry(),
-		Validator:          newMockValidator(),
-		MempoolCapacity:    10,
-		ConsumerCacheSize:  10,
-		ConsumerCacheBytes: 6,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
-
-	txs := []*MempoolTransaction{
-		{Hash: "small", Cbor: make([]byte, 4)},
-		{Hash: "large", Cbor: make([]byte, 3)},
-	}
-	m.transactions = append(m.transactions, txs...)
-	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
-
-	first := consumer.NextTx(false)
-	require.NotNil(t, first)
-	require.Equal(t, "small", first.Hash)
-	assert.Nil(t, consumer.NextTx(false), "7 retained bytes exceed the per-consumer limit")
-	assert.Equal(t, int64(4), retainedConsumerCacheBytes(consumer))
-	assert.Equal(t, 1, consumer.nextTxIdx, "unadvertised tx stays at the cursor")
-	assert.NotNil(t, consumer.GetTxFromCache("small"))
-
-	consumer.RemoveTxFromCache("small")
-	next := consumer.NextTx(false)
-	require.NotNil(t, next)
-	assert.Equal(t, "large", next.Hash)
-	assert.Equal(t, int64(3), retainedConsumerCacheBytes(consumer))
-	assert.NotNil(t, consumer.GetTxFromCache("large"))
-}
-
-// TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor verifies that a
-// body which can never fit the consumer budget is skipped instead of wedging
-// blocking or non-blocking consumers behind it.
-func TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           event.NewEventBus(nil, nil),
-		PromRegistry:       prometheus.NewRegistry(),
-		Validator:          newMockValidator(),
-		MempoolCapacity:    10,
-		ConsumerCacheSize:  10,
-		ConsumerCacheBytes: 4,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
-
-	m.transactions = append(m.transactions,
-		&MempoolTransaction{Hash: "oversized", Cbor: make([]byte, 5)},
-		&MempoolTransaction{Hash: "relayable", Cbor: make([]byte, 3)},
-	)
-
-	nonBlocking := mustAddConsumer(t, m, newTestConnectionId(10))
-	tx := nonBlocking.NextTx(false)
-	require.NotNil(t, tx)
-	assert.Equal(t, "relayable", tx.Hash)
-	assert.Equal(t, 2, nonBlocking.nextTxIdx)
-	assert.Nil(t, nonBlocking.GetTxFromCache("oversized"))
-
-	blocking := mustAddConsumer(t, m, newTestConnectionId(11))
-	tx = blocking.NextTx(true)
-	require.NotNil(t, tx)
-	assert.Equal(t, "relayable", tx.Hash)
-	assert.Equal(t, 2, blocking.nextTxIdx)
-}
-
-// TestMempoolConsumer_DefaultCacheBudgetHasFloor verifies that the
-// per-consumer byte budget derived from MempoolCapacity (ConsumerCacheBytes
-// left at zero) cannot truncate below minConsumerCacheBytes. Without the
-// floor, a realistic-but-small MempoolCapacity yields a derived budget
-// smaller than an ordinary transaction body, and NextTx would then skip it
-// forever.
-func TestMempoolConsumer_DefaultCacheBudgetHasFloor(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:          event.NewEventBus(nil, nil),
-		PromRegistry:      prometheus.NewRegistry(),
-		Validator:         newMockValidator(),
-		MempoolCapacity:   1000,
-		ConsumerCacheSize: 10,
-		// ConsumerCacheBytes intentionally left at zero: the naive derivation
-		// (MempoolCapacity/4 = 250) is smaller than the 300-byte body below.
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
-
-	tx := &MempoolTransaction{Hash: "typical", Cbor: make([]byte, 300)}
-	m.transactions = append(m.transactions, tx)
-	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
-
-	require.Greater(
-		t, consumer.cacheLimitBytes, int64(300),
-		"unfloored derivation (capacity/4=250) would permanently skip this body",
-	)
-
-	skippedBefore := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
-	got := consumer.NextTx(false)
-	require.NotNil(t, got, "a realistic-size body must not be skipped forever")
-	assert.Equal(t, "typical", got.Hash)
-	skippedAfter := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
-	assert.Equal(
-		t, skippedBefore, skippedAfter,
-		"a relayed body must not also be counted as skipped",
-	)
-}
-
-// TestMempoolConsumer_OversizedSkipIsObservable verifies that a permanently
-// skipped oversized body increments the consumerCacheBytesSkipped counter,
-// so this failure mode is visible instead of looking like a healthy idle
-// relay.
-func TestMempoolConsumer_OversizedSkipIsObservable(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           event.NewEventBus(nil, nil),
-		PromRegistry:       prometheus.NewRegistry(),
-		Validator:          newMockValidator(),
-		MempoolCapacity:    10,
-		ConsumerCacheSize:  10,
-		ConsumerCacheBytes: 4,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
-
-	m.transactions = append(m.transactions,
-		&MempoolTransaction{Hash: "oversized", Cbor: make([]byte, 5)},
-	)
-	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
-
-	skippedBefore := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
-	assert.Nil(t, consumer.NextTx(false))
-	skippedAfter := testutil.ToFloat64(m.metrics.consumerCacheBytesSkipped)
-	assert.Equal(t, skippedBefore+1, skippedAfter)
-}
-
-// TestMempoolConsumer_CachesShareAggregateByteLimit verifies that retained
-// copies across consumers share one aggregate budget and that releasing one
-// consumer's copy allows another consumer to advertise the transaction.
-func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           event.NewEventBus(nil, nil),
-		PromRegistry:       prometheus.NewRegistry(),
-		Validator:          newMockValidator(),
-		MempoolCapacity:    10,
-		ConsumerCacheSize:  10,
-		ConsumerCacheBytes: 10,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
-
-	tx := &MempoolTransaction{Hash: "shared", Cbor: make([]byte, 6)}
-	m.transactions = append(m.transactions, tx)
-	firstID := newTestConnectionId(1)
-	secondID := newTestConnectionId(2)
-	first := mustAddConsumer(t, m, firstID)
-	second := mustAddConsumer(t, m, secondID)
-
-	require.NotNil(t, first.NextTx(false))
-	assert.Nil(t, second.NextTx(false), "two retained copies exceed aggregate limit")
-	assert.Equal(t, 0, second.nextTxIdx, "aggregate backpressure preserves cursor")
-	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
-	assert.NotNil(t, first.GetTxFromCache(tx.Hash), "advertised body is retransmittable")
-
-	first.RemoveTxFromCache(tx.Hash)
-	require.NotNil(t, second.NextTx(false))
-	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
-	assert.NotNil(t, second.GetTxFromCache(tx.Hash))
-
-	m.RemoveConsumer(secondID)
-	assert.Equal(t, int64(0), retainedConsumerCacheBytes(second), "consumer removal releases bytes")
-}
-
-// TestMempoolConsumer_RemovalRejectsLaterCacheWrites directly verifies the
-// cacheTransaction cancellation guard: a removed consumer cannot reserve bytes
-// or repopulate its cache even if an insertion is attempted after cancellation.
-func TestMempoolConsumer_RemovalRejectsLaterCacheWrites(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry:       prometheus.NewRegistry(),
-		Validator:          newMockValidator(),
-		MempoolCapacity:    10,
-		ConsumerCacheBytes: 10,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
-
-	connID := newTestConnectionId(3)
-	consumer := mustAddConsumer(t, m, connID)
-	m.RemoveConsumer(connID)
-
-	cached, _ := consumer.cacheTransaction(&MempoolTransaction{
-		Hash: "after-removal",
-		Cbor: make([]byte, 6),
-	})
-	assert.False(t, cached, "cancelled consumer must reject cache writes")
-	assert.Equal(t, int64(0), retainedConsumerCacheBytes(consumer))
-	m.relayCacheMutex.Lock()
-	assert.Equal(t, int64(0), m.relayCacheBytes)
-	m.relayCacheMutex.Unlock()
 }
 
 func TestMempoolConsumer_ClearCache(t *testing.T) {
@@ -4084,16 +3865,6 @@ func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilValidator)
 }
 
-// TestAddTransactionReturnsErrNilValidator pins that admission reports the
-// missing validator with the package sentinel, matching rebuildOverlay and
-// the constructor. A bare error here is indistinguishable from a rejected
-// transaction, and the API surfaces have to answer the two differently.
-func TestAddTransactionReturnsErrNilValidator(t *testing.T) {
-	m := &Mempool{}
-	err := m.AddTransaction(0, nil)
-	require.ErrorIs(t, err, ErrNilValidator)
-}
-
 // TestNewMempool_RejectsNilValidator pins that the constructor returns
 // ErrNilValidator rather than panicking when the validator is missing.
 func TestNewMempool_RejectsNilValidator(t *testing.T) {
@@ -4286,60 +4057,6 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnConsumerRemoval(t *testing.T) {
 	))
 }
 
-// TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes verifies the
-// concurrent-removal end state: a NextTx blocked on a full cache is released
-// without another advertisement, and the final clear releases both byte
-// counters. TestMempoolConsumer_RemovalRejectsLaterCacheWrites separately
-// exercises the post-cancellation cacheTransaction guard.
-func TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:          event.NewEventBus(nil, nil),
-		PromRegistry:      prometheus.NewRegistry(),
-		Validator:         newMockValidator(),
-		MempoolCapacity:   1024 * 1024,
-		ConsumerCacheSize: 1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, m.Start(context.Background()))
-	t.Cleanup(func() { require.NoError(t, m.Stop(context.Background())) })
-
-	addMockTransactions(t, m, 2)
-	connID := newTestConnectionId(1)
-	consumer := mustAddConsumer(t, m, connID)
-	require.NotNil(t, consumer.NextTx(false))
-
-	got := make(chan *MempoolTransaction, 1)
-	go func() { got <- consumer.NextTx(true) }()
-	dingotestutil.RequireNoReceive(t, got, 100*time.Millisecond, "cache is full")
-
-	cacheCleared := make(chan struct{})
-	releaseClear := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseClear) }) }
-	defer release()
-	consumer.onCacheCleared = func() {
-		close(cacheCleared)
-		<-releaseClear
-	}
-	removed := make(chan struct{})
-	go func() {
-		m.RemoveConsumer(connID)
-		close(removed)
-	}()
-	dingotestutil.RequireReceive(t, cacheCleared, 2*time.Second, "final cache clear")
-
-	assert.Nil(t, dingotestutil.RequireReceive(
-		t, got, 2*time.Second, "blocking NextTx released by removal",
-	), "cancelled consumer must not advertise another transaction")
-	release()
-	dingotestutil.RequireReceive(t, removed, 2*time.Second, "consumer removal")
-	assert.Equal(t, int64(0), retainedConsumerCacheBytes(consumer))
-	m.relayCacheMutex.Lock()
-	assert.Equal(t, int64(0), m.relayCacheBytes)
-	m.relayCacheMutex.Unlock()
-}
-
 // blockingRejectingValidator blocks until released like
 // blockingSessionValidator, then reports one designated transaction invalid so
 // a test can observe whether revalidation actually published its result.
@@ -4509,14 +4226,9 @@ func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
 		for _, round := range []int{0, 1, 17, 1_000, 100_000} {
 			for _, pending := range []int{1, 2, 63, 64, 65, 1 << 20} {
 				got := catchupBudget(round, pending, deltaCap)
-				assert.Greater(
-					t,
-					got,
-					round,
+				assert.Greater(t, got, round,
 					"deltaCap=%d round=%d pending=%d: a pending backlog must leave headroom",
-					deltaCap,
-					round,
-					pending,
+					deltaCap, round, pending,
 				)
 			}
 		}

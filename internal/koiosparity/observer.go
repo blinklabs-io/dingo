@@ -678,15 +678,7 @@ func (o *Observer) fetchAccountsIfNeeded(
 	var lastErr error
 	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
 		if !addrsResolved {
-			// The epoch's own end time is what the cached crawl has to be
-			// no older than; see ResolveKoiosAccountUniverseCached.
-			var notBefore time.Time
-			if info != nil {
-				notBefore = info.EpochEndTime
-			}
-			addrs, err := ResolveKoiosAccountUniverseCached(
-				ctx, o.koios, o.cache, o.cfg.Network, notBefore, o.cfg.Logger,
-			)
+			addrs, err := ResolveKoiosAccountUniverse(ctx, o.koios)
 			if err != nil {
 				if errors.Is(err, ErrKoiosPermanent) {
 					return err

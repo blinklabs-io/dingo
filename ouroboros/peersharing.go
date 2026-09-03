@@ -87,56 +87,37 @@ func (o *Ouroboros) peersharingShareRequest(
 	if o.peerGov == nil {
 		return []opeersharing.PeerAddress{}, nil
 	}
-	if amount <= 0 {
-		return []opeersharing.PeerAddress{}, nil
-	}
 
-	peers := make([]opeersharing.PeerAddress, 0, amount)
+	peers := []opeersharing.PeerAddress{}
+	shared := 0
 	for _, peer := range o.peerGov.GetPeers() {
 		if !peer.Sharable {
 			continue
 		}
-		if len(peers) >= amount {
+		if shared >= amount {
 			break
 		}
-		address := peer.NormalizedAddress
-		if address == "" {
-			address = peer.Address
-		}
-		host, port, err := net.SplitHostPort(address)
+		host, port, err := net.SplitHostPort(peer.Address)
 		if err != nil {
-			o.config.Logger.Debug(
-				"failed to split peer address, skipping",
-				"address", address,
-				"error", err,
-			)
-			continue
-		}
-		ip := net.ParseIP(host)
-		if ip == nil {
-			o.config.Logger.Debug(
-				"peer address has no serializable IP, skipping",
-				"address", address,
-			)
+			// Skip on error
+			o.config.Logger.Debug("failed to split peer address, skipping")
 			continue
 		}
 		portNum, err := strconv.ParseUint(port, 10, 16)
 		if err != nil {
-			o.config.Logger.Debug(
-				"failed to parse peer port, skipping",
-				"address", address,
-				"error", err,
-			)
+			// Skip on error
+			o.config.Logger.Debug("failed to parse peer port, skipping")
 			continue
 		}
 		o.config.Logger.Debug(
 			"adding peer for sharing: " + peer.Address,
 		)
 		peers = append(peers, opeersharing.PeerAddress{
-			IP:   ip,
+			IP:   net.ParseIP(host),
 			Port: uint16(portNum),
 		},
 		)
+		shared++
 	}
 	return peers, nil
 }

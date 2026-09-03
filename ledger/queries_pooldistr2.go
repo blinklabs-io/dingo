@@ -69,11 +69,5 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 			VrfHash:        pool.VrfKeyHash,
 		}
 	}
-	// Client.GetPoolDistr2 decodes the wire reply directly into a
-	// PoolDistr2Result (client.go's runQuery does a plain cbor.Decode with no
-	// extra wrapping), so the two fields must be the top-level array here.
-	// Returning the struct itself would let its own StructAsArray encoding
-	// nest inside this slice's, producing a spurious extra array layer that
-	// no real NtC client can decode.
-	return []any{result.Pools, result.TotalActiveStake}, nil
+	return []any{result}, nil
 }

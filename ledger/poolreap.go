@@ -101,24 +101,6 @@ func (ls *LedgerState) applyPoolRetirements(
 				)
 			}
 		}
-		// The delegation half of POOLREAP. cardano-ledger domain-restricts
-		// the delegation map by the reaped pools, so no account is left
-		// delegated to a pool that no longer exists. Deriving the active pool
-		// set from certificates hides the omission while the pool stays gone,
-		// and surfaces it the moment the same pool re-registers: the stale
-		// rows rejoin the pool distribution, the node's total active stake
-		// exceeds the network's, and every other pool's VRF leader threshold
-		// comes out too small (dingo #3794).
-		if err := ls.db.Metadata().ClearDelegationsToRetiredPool(
-			refund.PoolKeyHash,
-			boundarySlot,
-			txn.Metadata(),
-		); err != nil {
-			return fmt.Errorf(
-				"clear delegations to retired pool %x: %w",
-				refund.PoolKeyHash, err,
-			)
-		}
 		ls.config.Logger.Debug(
 			"applied pool retirement deposit refund",
 			"pool", hex.EncodeToString(refund.PoolKeyHash),

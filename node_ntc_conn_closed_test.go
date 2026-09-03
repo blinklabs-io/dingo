@@ -15,26 +15,14 @@
 package dingo
 
 import (
-	"io"
-	"log/slog"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
-	"github.com/blinklabs-io/dingo/connmanager"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/mempool"
-	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
-	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,9 +76,7 @@ func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
 // NtC connection. Without handleConnManagerClosed wired as the connection
 // manager's ConnClosedFunc, this assertion fails: the client state
 // registered by AddClient is still present after the simulated close.
-func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
-	t *testing.T,
-) {
+func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(t *testing.T) {
 	n := newHandleConnManagerClosedTestNode(t)
 	connId := newNtCTestConnId(1)
 
@@ -139,98 +125,5 @@ func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
 	n := &Node{}
 	require.NotPanics(t, func() {
 		n.handleConnManagerClosed(newNtCTestConnId(3), true, nil)
-	})
-}
-
-// TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters covers the node
-// half of the issue #3514 wiring. The connection manager's ConnClosedFunc is
-// the only close notification an NtC connection gets, and it is what wakes a
-// chainsync server callback parked waiting for a certified endorser closure --
-// the protocol's own done channel cannot close while that callback is running.
-// Without the ReleaseLeiosServeWaiters call in handleConnManagerClosed the
-// registered waiter survives the close and this fails.
-//
-// The Ouroboros instance is built through the validating constructor with the
-// full dependency set, and the connection is registered with its connection
-// manager, so the waiter passes the liveness check the same way a live serve
-// does.
-func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	n := newHandleConnManagerClosedTestNode(t)
-	bus := event.NewEventBus(nil, logger)
-	t.Cleanup(bus.Stop)
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
-	require.NoError(t, err)
-	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: chainManager,
-		Logger:       logger,
-	})
-	require.NoError(t, err)
-	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
-		Logger:          logger,
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       ledgerState,
-		MempoolCapacity: 1024 * 1024,
-	})
-	require.NoError(t, err)
-	connManager := connmanager.NewConnectionManager(
-		connmanager.ConnectionManagerConfig{Logger: logger},
-	)
-	o, err := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
-		Logger:         logger,
-		EventBus:       bus,
-		LedgerState:    ledgerState,
-		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
-		ChainsyncState: chainsync.NewState(bus, ledgerState),
-		ConnManager:    connManager,
-		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
-			Logger:      logger,
-			EventBus:    bus,
-			ConnManager: connManager,
-		}),
-	})
-	require.NoError(t, err)
-	n.ouroborosRef.Store(o)
-
-	// Register a connection so the waiter is not short-circuited by the
-	// already-closed liveness check.
-	conn, err := ouroboros.NewConnection()
-	require.NoError(t, err)
-	require.True(t, connManager.AddConnection(conn, true, "127.0.0.1:3002"))
-	connId := conn.Id()
-
-	done, cancel := o.RegisterLeiosServeWaiterForTesting(connId)
-	t.Cleanup(cancel)
-
-	testutil.RequireNoReceive(
-		t,
-		done,
-		50*time.Millisecond,
-		"waiter must not be released before the close",
-	)
-
-	n.handleConnManagerClosed(connId, true, nil)
-
-	testutil.RequireReceive(
-		t,
-		done,
-		time.Second,
-		"NtC close must release the parked Leios endorser-closure serving wait",
-	)
-}
-
-// TestHandleConnManagerClosed_NilOuroboros guards the same restore window as
-// TestHandleConnManagerClosed_NilChainsyncState for the added ouroboros
-// dereference: n.ouroboros() is nil before Run wires it.
-func TestHandleConnManagerClosed_NilOuroboros(t *testing.T) {
-	n := newHandleConnManagerClosedTestNode(t)
-	require.Nil(t, n.ouroboros())
-	require.NotPanics(t, func() {
-		n.handleConnManagerClosed(newNtCTestConnId(5), true, nil)
 	})
 }

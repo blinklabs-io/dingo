@@ -84,7 +84,7 @@ func TestAddLedgerPeer_KnownPeerSkipsDNSResolution(t *testing.T) {
 	_, known := pg.ledgerKnownAddrs["44.0.0.7:3001"]
 	pg.mu.Unlock()
 	assert.True(t, known,
-		"the retained peer must count toward the ledger target")
+		"skipping resolution must still record the peer as ledger-known")
 }
 
 // Peer.Address is stored verbatim, so a topology or gossip peer can hold the
@@ -112,10 +112,8 @@ func TestAddLedgerPeer_KnownPeerMatchedCaseInsensitively(t *testing.T) {
 
 	pg.mu.Lock()
 	peerCount := len(pg.peers)
-	_, known := pg.ledgerKnownAddrs["44.0.0.7:3001"]
 	pg.mu.Unlock()
 	assert.Equal(t, 1, peerCount, "no duplicate peer for the same relay")
-	assert.True(t, known, "the retained peer must count toward the ledger target")
 }
 
 // A relay hostname already on the deny list must not be resolved. Deny

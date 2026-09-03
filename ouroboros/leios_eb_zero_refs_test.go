@@ -23,17 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type recordingLeiosPipelineHandler struct {
-	observed int
-}
-
-func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
-	uint64,
-	lcommon.Blake2b256,
-) {
-	h.observed++
-}
-
 // Investigation for dingo #2729.
 //
 // A from-genesis musashi Leios sync stalls in the epoch-15 endorser-block
@@ -198,10 +187,6 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 	point := ocommon.NewPoint(15, hash.Bytes())
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	votes := &fakeLeiosVoteHandler{}
-	pipeline := &recordingLeiosPipelineHandler{}
-	o.leiosVotes = votes
-	o.leiosPipeline = pipeline
 	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
 	require.Error(t, err)
 	require.ErrorContains(
@@ -209,10 +194,6 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 		err,
 		"must contain at least one transaction reference",
 	)
-	_, cached := o.lookupLeiosEndorserBlock(point.Hash)
-	require.False(t, cached)
-	require.Empty(t, votes.ebs)
-	require.Zero(t, pipeline.observed)
 }
 
 // TestStoreLeiosEndorserBlockValidManifestStillStores confirms the reordered

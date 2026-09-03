@@ -309,15 +309,15 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Endpoint:   "/pool_history",
 		Field:      "margin",
 		Class:      CoverageDerivedMatch,
-		DingoField: "reward_pool_input.margin at K-1",
+		DingoField: "reward_pool_input.margin at K+1",
 		Reason:     "compared as equivalent rational numbers",
 	},
 	{
 		Endpoint:   "/pool_history",
 		Field:      "fixed_cost",
 		Class:      CoverageDerivedMatch,
-		DingoField: "reward_pool_input.cost at K-1",
-		Reason:     "exact lovelace equality after stake-epoch alignment",
+		DingoField: "reward_pool_input.cost at K+1",
+		Reason:     "exact lovelace equality after parameter-epoch alignment",
 	},
 	{
 		Endpoint: "/pool_history",

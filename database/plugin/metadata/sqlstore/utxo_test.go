@@ -15,16 +15,9 @@
 package sqlstore
 
 import (
-	"math"
-	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/mary"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,112 +72,4 @@ func TestDedupeUtxoIDs_CrossChunkDuplicate(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, count, "duplicate ref must appear exactly once")
-}
-
-// TestAddUtxosRejectsOverflowAssetWithoutMutation covers the acceptance
-// criterion that a rejected conversion must not mutate metadata: given a
-// UTxO carrying a native-asset amount that overflows uint64,
-// AddUtxos must fail and leave the utxo/asset tables empty, not insert a
-// row with a silently wrapped amount.
-func TestAddUtxosRejectsOverflowAssetWithoutMutation(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-
-	var policyId lcommon.Blake2b224
-	policyId[0] = 0xee
-	overflowAmount := new(big.Int).SetUint64(math.MaxUint64)
-	overflowAmount.Add(overflowAmount, big.NewInt(1))
-	multiAsset := lcommon.NewMultiAsset[lcommon.MultiAssetTypeOutput](
-		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeOutput{
-			policyId: {
-				cbor.NewByteString([]byte("asset")): overflowAmount,
-			},
-		},
-	)
-
-	utxo := ledger.Utxo{
-		Id: shelley.NewShelleyTransactionInput(
-			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-			0,
-		),
-		Output: &mary.MaryTransactionOutput{
-			OutputAmount: mary.MaryTransactionOutputValue{
-				Amount: 1_000_000,
-				Assets: &multiAsset,
-			},
-		},
-	}
-
-	err := store.AddUtxos(
-		[]models.UtxoSlot{{Utxo: utxo, Slot: 1}},
-		nil,
-	)
-	require.Error(t, err)
-
-	var utxoCount, assetCount int
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM utxo",
-	).Scan(&utxoCount))
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM asset",
-	).Scan(&assetCount))
-	require.Equal(t, 0, utxoCount)
-	require.Equal(t, 0, assetCount)
-}
-
-// TestGetUtxosByAddressWithOrderingSkipAssets proves SkipAssets omits a
-// row's native assets from the result without affecting which rows are
-// returned. Callers that only need row identity or ordering (an
-// exact-address candidate scan, a reference-only lookup) use this to avoid
-// paying for asset joins that would be immediately discarded.
-func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-
-	var policyId lcommon.Blake2b224
-	policyId[0] = 0xaa
-	multiAsset := lcommon.NewMultiAsset[lcommon.MultiAssetTypeOutput](
-		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeOutput{
-			policyId: {
-				cbor.NewByteString([]byte("token")): big.NewInt(5),
-			},
-		},
-	)
-	utxo := ledger.Utxo{
-		Id: shelley.NewShelleyTransactionInput(
-			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-			0,
-		),
-		Output: &mary.MaryTransactionOutput{
-			OutputAmount: mary.MaryTransactionOutputValue{
-				Amount: 1_000_000,
-				Assets: &multiAsset,
-			},
-		},
-	}
-	require.NoError(
-		t,
-		store.AddUtxos([]models.UtxoSlot{{Utxo: utxo, Slot: 1}}, nil),
-	)
-
-	withAssets, err := store.GetUtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{MatchAllAddresses: true},
-		nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, withAssets, 1)
-	require.Len(t, withAssets[0].Assets, 1)
-
-	skipped, err := store.GetUtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{
-			MatchAllAddresses: true,
-			SkipAssets:        true,
-		},
-		nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, skipped, 1)
-	require.Empty(t, skipped[0].Assets)
-	// Row identity is unaffected by SkipAssets.
-	require.Equal(t, withAssets[0].TxId, skipped[0].TxId)
 }

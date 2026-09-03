@@ -242,13 +242,10 @@ WHERE deleted_slot > ?;
 
 -- name: SetCommitteeMember :one
 INSERT INTO committee_member (
-    cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-    term_start_slot_set, added_slot, deleted_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (cold_credential_tag, cold_cred_hash, added_slot) DO UPDATE SET
+    cold_cred_hash, expires_epoch, added_slot, deleted_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (cold_cred_hash) DO UPDATE SET
     expires_epoch = excluded.expires_epoch,
-    term_start_slot = excluded.term_start_slot,
-    term_start_slot_set = excluded.term_start_slot_set,
     added_slot = excluded.added_slot,
     deleted_slot = excluded.deleted_slot
 RETURNING id;
@@ -265,22 +262,20 @@ ORDER BY added_slot DESC, id DESC
 LIMIT 1;
 
 -- name: GetCommitteeMembers :many
-SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       term_start_slot_set, added_slot, deleted_slot
+SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
 FROM committee_member
 WHERE deleted_slot IS NULL
 ORDER BY id;
 
 -- name: GetCommitteeMembersIncludeDeleted :many
-SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
-       term_start_slot_set, added_slot, deleted_slot
+SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
 FROM committee_member
 ORDER BY id;
 
 -- name: SoftDeleteCommitteeMember :exec
 UPDATE committee_member
 SET deleted_slot = ?
-WHERE cold_credential_tag = ? AND cold_cred_hash = ? AND deleted_slot IS NULL;
+WHERE cold_cred_hash = ? AND deleted_slot IS NULL;
 
 -- name: SoftDeleteAllCommitteeMembers :exec
 UPDATE committee_member
@@ -303,28 +298,24 @@ WHERE deleted_slot > ?;
 -- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    delegator_count, captured_slot, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    delegator_count, captured_slot, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
     delegator_count = excluded.delegator_count,
     captured_slot = excluded.captured_slot,
-    leios_key_public = excluded.leios_key_public,
-    leios_key_possession_proof = excluded.leios_key_possession_proof,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -334,7 +325,6 @@ RETURNING id;
 -- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
-       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -343,7 +333,6 @@ WHERE epoch = ? AND snapshot_type = ? AND pool_key_hash = ?;
 -- name: GetPoolStakeSnapshotsByEpoch :many
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
-       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
