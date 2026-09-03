@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -27,10 +28,13 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gconnection "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -198,10 +202,21 @@ func newMusashiBlockfetchPeer(
 	o *Ouroboros,
 ) *musashiBlockfetchPeer {
 	t.Helper()
+	return newBlockfetchPeerWithOpts(t, o.blockfetchClientConnOpts()...)
+}
+
+// newBlockfetchPeerWithOpts is newMusashiBlockfetchPeer with the client
+// configuration supplied directly, so the capability probe can drive the same
+// real client with a bare raw callback instead of Dingo's dispatch.
+func newBlockfetchPeerWithOpts(
+	t *testing.T,
+	opts ...oblockfetch.BlockFetchOptionFunc,
+) *musashiBlockfetchPeer {
+	t.Helper()
 	clientConn, peerConn := net.Pipe()
 	m := muxer.New(clientConn)
 	errChan := make(chan error, 4)
-	cfg := blockfetchConfig(o.blockfetchClientConnOpts()...)
+	cfg := blockfetchConfig(opts...)
 	client := oblockfetch.NewClient(
 		protocol.ProtocolOptions{
 			ConnectionId: gconnection.ConnectionId{
@@ -251,6 +266,67 @@ func (p *musashiBlockfetchPeer) send(t *testing.T, msg protocol.Message) {
 	require.NoError(t, err)
 }
 
+// sendErr is send without the test-fatal assertions, for the capability
+// probe: its server half runs on its own goroutine and the connection is
+// expected to be torn down under it when the capability is absent, so a write
+// error there is an observation, not a test failure. require.NoError off the
+// test goroutine would instead call FailNow on a finished test.
+func (p *musashiBlockfetchPeer) sendErr(msg protocol.Message) error {
+	data, err := cbor.Encode(msg)
+	if err != nil {
+		return err
+	}
+	segment := muxer.NewSegment(oblockfetch.ProtocolId, data, true)
+	if segment == nil {
+		return errors.New("nil muxer segment")
+	}
+	buf := &bytes.Buffer{}
+	if err := binary.Write(
+		buf,
+		binary.BigEndian,
+		segment.SegmentHeader,
+	); err != nil {
+		return err
+	}
+	if _, err := buf.Write(segment.Payload); err != nil {
+		return err
+	}
+	if err := p.peerConn.SetWriteDeadline(
+		time.Now().Add(5 * time.Second),
+	); err != nil {
+		return err
+	}
+	_, err = p.peerConn.Write(buf.Bytes())
+	return err
+}
+
+// readRequestRangeErr is readRequestRange without the test-fatal assertions.
+// See sendErr.
+func (p *musashiBlockfetchPeer) readRequestRangeErr() error {
+	if err := p.peerConn.SetReadDeadline(
+		time.Now().Add(5 * time.Second),
+	); err != nil {
+		return err
+	}
+	header := muxer.SegmentHeader{}
+	if err := binary.Read(
+		p.peerConn,
+		binary.BigEndian,
+		&header,
+	); err != nil {
+		return err
+	}
+	payload := make([]byte, header.PayloadLength)
+	if _, err := io.ReadFull(p.peerConn, payload); err != nil {
+		return err
+	}
+	_, err := oblockfetch.NewMsgFromCbor(
+		oblockfetch.MessageTypeRequestRange,
+		payload,
+	)
+	return err
+}
+
 // readRequestRange consumes the MsgRequestRange the client sends, so the
 // server half only replies to a request the client actually made.
 func (p *musashiBlockfetchPeer) readRequestRange(t *testing.T) {
@@ -272,23 +348,134 @@ func (p *musashiBlockfetchPeer) readRequestRange(t *testing.T) {
 	require.IsType(t, &oblockfetch.MsgRequestRange{}, msg)
 }
 
-// TestBlockfetchClientDeliversMusashiType7Block is the regression for #3798.
+// rawDeliveryOfUnrepresentableBlockSupported reports whether the linked
+// gouroboros delivers a block its typed decoder cannot represent to
+// BlockRawFunc rather than failing the request (gouroboros #2186).
 //
-// A Musashi block below the type-8 transition arrives tagged as block type 7
-// in a five-component Conway layout with a twelve-field Leios header body.
-// gouroboros' block-fetch client decodes every block with
-// ledger.NewBlockFromCbor before delivering it, so the strict Conway decoder
-// rejected these bytes and failed the request -- tearing down the connection
-// before Dingo's WithBlockRawFunc callback, and therefore
-// decodeBlockfetchBlock's Musashi fallback, ever ran. Every from-genesis sync
-// stalled at origin with no selectable peer.
+// This is a behavioral probe, not a version comparison: it drives the real
+// block-fetch client with a bare recording raw callback -- not Dingo's
+// dispatch -- and reports whether the bytes arrive. A backport, a fork, or a
+// later refactor that keeps the behavior therefore reads as supported, and one
+// that loses it reads as unsupported, which a version string cannot do.
 //
-// Direct decoder tests could not catch this: models.DecodeConwayBlock decodes
-// these bytes correctly and always did. The failure was in the dispatch that
-// never reached it, so this test drives the real client.
-func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
+// The probe asks only "does gouroboros hand undecodable bytes to the raw
+// callback"; the tests that consult it assert what Dingo then decodes and
+// publishes, so the probe does not stand in for their assertions.
+func rawDeliveryOfUnrepresentableBlockSupported(t *testing.T) bool {
+	t.Helper()
 	blockRaw := readHexFixture(t, musashiType7BlockFixture)
 	headerRaw := readHexFixture(t, musashiType7HeaderFixture)
+	// Assert the premise the probe rests on: these bytes are exactly the case
+	// the raw callback exists for -- a payload the typed decoder for the wire
+	// tag cannot represent at all.
+	_, strictErr := gledger.NewBlockFromCbor(
+		gledger.BlockTypeConway,
+		blockRaw,
+	)
+	require.Error(
+		t,
+		strictErr,
+		"probe premise: the type-7 fixture must fail the strict Conway decode",
+	)
+
+	header, err := gledger.NewBlockHeaderFromCbor(
+		gledger.BlockTypeDijkstra,
+		headerRaw,
+	)
+	require.NoError(t, err)
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+
+	delivered := make(chan []byte, 1)
+	peer := newBlockfetchPeerWithOpts(
+		t,
+		oblockfetch.WithBlockRawFunc(
+			func(
+				_ oblockfetch.CallbackContext,
+				_ uint,
+				raw []byte,
+			) error {
+				select {
+				case delivered <- raw:
+				default:
+				}
+				return nil
+			},
+		),
+		oblockfetch.WithBatchDoneFunc(
+			func(_ oblockfetch.CallbackContext) error { return nil },
+		),
+	)
+
+	wrapped, err := cbor.Encode(oblockfetch.WrappedBlock{
+		Type:     gledger.BlockTypeConway,
+		RawBlock: cbor.RawMessage(blockRaw),
+	})
+	require.NoError(t, err)
+
+	// The server half runs on its own goroutine because net.Pipe is
+	// synchronous, and it never touches t: when the capability is absent the
+	// client fails the request and closes the pipe under it, so its writes
+	// are expected to fail. serverDone is awaited before returning so the
+	// goroutine cannot outlive the probe.
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		if err := peer.readRequestRangeErr(); err != nil {
+			return
+		}
+		for _, msg := range []protocol.Message{
+			oblockfetch.NewMsgStartBatch(),
+			oblockfetch.NewMsgBlock(wrapped),
+			oblockfetch.NewMsgBatchDone(),
+		} {
+			if err := peer.sendErr(msg); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { <-serverDone }()
+	if err := peer.client.GetBlockRange(point, point); err != nil {
+		return false
+	}
+	select {
+	case raw := <-delivered:
+		return bytes.Equal(raw, blockRaw)
+	case <-peer.errChan:
+		return false
+	case <-time.After(10 * time.Second):
+		return false
+	}
+}
+
+// requireRawDeliverySupport skips when the linked gouroboros still fails the
+// request before BlockRawFunc. Dingo pins a released tag, and the fix landed
+// on gouroboros main after v0.202.5, so this is a real state of the module
+// graph rather than a test defect. Dingo's own dispatch stays covered without
+// it: TestDecodeBlockfetchBlockMusashiWireTypes asserts the type-7 and type-8
+// decode unconditionally.
+func requireRawDeliverySupport(t *testing.T) {
+	t.Helper()
+	if rawDeliveryOfUnrepresentableBlockSupported(t) {
+		return
+	}
+	t.Skip(
+		"linked gouroboros fails the block-fetch request before BlockRawFunc; " +
+			"needs a release carrying gouroboros #2186",
+	)
+}
+
+// runMusashiBlockfetchClientDelivery drives Dingo's real block-fetch client
+// config over a real muxer with one Musashi block, and returns the block the
+// production dispatch published on the event bus.
+func runMusashiBlockfetchClientDelivery(
+	t *testing.T,
+	blockType uint,
+	blockPath string,
+	headerPath string,
+) (gledger.Block, gledger.BlockHeader, []byte) {
+	t.Helper()
+	blockRaw := readHexFixture(t, blockPath)
+	headerRaw := readHexFixture(t, headerPath)
 
 	eventBus := event.NewEventBus(nil, nil)
 	blockKey, blockCh := eventBus.Subscribe(ledger.BlockfetchEventType)
@@ -302,12 +489,12 @@ func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
 	// The point the client asks for is the one chain-sync derived from the
 	// paired header, so range correlation in the client is exercised with
 	// real values rather than with the block's own decode output.
-	header, err := o.decodeChainsyncHeader(gledger.BlockTypeConway, headerRaw)
+	header, err := o.decodeChainsyncHeader(blockType, headerRaw)
 	require.NoError(t, err)
 	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
 
 	wrapped, err := cbor.Encode(oblockfetch.WrappedBlock{
-		Type:     gledger.BlockTypeConway,
+		Type:     blockType,
 		RawBlock: cbor.RawMessage(blockRaw),
 	})
 	require.NoError(t, err)
@@ -332,13 +519,176 @@ func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
 			bfEvt.Block,
 			"block-fetch delivered a batch-done before the block",
 		)
-		require.Equal(t, header.Hash().String(), bfEvt.Block.Hash().String())
-		require.Equal(t, header.SlotNumber(), bfEvt.Block.SlotNumber())
-		require.Equal(t, blockRaw, bfEvt.Block.Cbor())
+		<-serverDone
+		return bfEvt.Block, header, blockRaw
 	case err := <-peer.errChan:
 		t.Fatalf("block-fetch client failed the request: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for the block-fetch block event")
 	}
-	<-serverDone
+	return nil, nil, nil
+}
+
+// TestBlockfetchClientDeliversMusashiType7Block is the regression for the
+// symptom reported in #3798.
+//
+// A Musashi block below the type-8 transition arrives tagged as block type 7
+// in a five-component Conway layout with a twelve-field Leios header body.
+// gouroboros' block-fetch client decoded every block with
+// ledger.NewBlockFromCbor before delivering it, so the strict Conway decoder
+// rejected these bytes and failed the request -- tearing down the connection
+// before Dingo's WithBlockRawFunc callback, and therefore
+// decodeBlockfetchBlock's Musashi fallback, ever ran. Every from-genesis sync
+// stalled at origin with no selectable peer, with the error #3798 quotes.
+//
+// Direct decoder tests could not catch this: models.DecodeConwayBlock decodes
+// these bytes correctly and always did. The failure was in the dispatch that
+// never reached it, so this test drives the real client.
+func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
+	requireRawDeliverySupport(t)
+	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
+		t,
+		gledger.BlockTypeConway,
+		musashiType7BlockFixture,
+		musashiType7HeaderFixture,
+	)
+	require.Equal(t, header.Hash().String(), block.Hash().String())
+	require.Equal(t, header.SlotNumber(), block.SlotNumber())
+	require.Equal(t, blockRaw, block.Cbor())
+}
+
+// TestBlockfetchClientDeliversMusashiType8Block covers the type-8 input #3798
+// names, through the same production dispatch.
+//
+// It needs no raw-delivery support and is not skipped, which is the point:
+// gouroboros dispatches block type 8 to its Dijkstra decoder, that decoder
+// accepts the Musashi twelve-field Leios header body, so the typed decode
+// succeeds and BlockRawFunc is reached even on a gouroboros without #2186.
+// Type 8 was never gated out of the Musashi fallback in a way that mattered --
+// the strict decoder for type 8 is the Dijkstra decoder. The error #3798
+// quotes names conway.tmpConwayBlock, which only the type-7 route can produce.
+func TestBlockfetchClientDeliversMusashiType8Block(t *testing.T) {
+	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
+		t,
+		gledger.BlockTypeDijkstra,
+		musashiType8BlockFixture,
+		musashiType8HeaderFixture,
+	)
+	require.Equal(t, header.Hash().String(), block.Hash().String())
+	require.Equal(t, header.SlotNumber(), block.SlotNumber())
+	require.Equal(t, blockRaw, block.Cbor())
+}
+
+// TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks is the negative case for
+// the Musashi type-7 route: a standard ten-field-header Conway block must
+// still decode, as Conway, both on Musashi and on a real Conway network. The
+// Musashi fallback only runs after the strict decode fails, so a genuine
+// Conway block must never reach it.
+func TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks(t *testing.T) {
+	blockRaw := testutil.BuildDecodableConwayBlockBytes(t, 42, 7)
+	for _, tc := range []struct {
+		name  string
+		magic uint32
+	}{
+		{"musashi", musashiNetworkMagic},
+		{"mainnet", 764824073},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := newOuroboros(OuroborosConfig{
+				Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				NetworkMagic: tc.magic,
+			})
+			block, err := o.decodeBlockfetchBlock(
+				gledger.BlockTypeConway,
+				blockRaw,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, block)
+			require.EqualValues(t, conway.EraIdConway, block.Era().Id)
+			require.Equal(t, uint64(42), block.SlotNumber())
+			require.Equal(t, blockRaw, block.Cbor())
+		})
+	}
+}
+
+// TestDecodeBlockfetchBlockType8NeedsNoMusashiScope pins the fact #3798 got
+// wrong: block type 8 decodes through gouroboros' own dispatch, so it needs no
+// network-scoped fallback and behaves identically on Musashi and on a network
+// that has never seen a Musashi block. Widening the Musashi gate to type 8, or
+// widening models.hasDijkstraLeiosShape, would change nothing here except to
+// loosen a decoder for no observed input.
+func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
+	blockRaw := readHexFixture(t, musashiType8BlockFixture)
+	var hashes []string
+	for _, magic := range []uint32{musashiNetworkMagic, 764824073} {
+		o := newOuroboros(OuroborosConfig{
+			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			NetworkMagic: magic,
+		})
+		block, err := o.decodeBlockfetchBlock(
+			gledger.BlockTypeDijkstra,
+			blockRaw,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, block)
+		require.EqualValues(t, dijkstra.EraIdDijkstra, block.Era().Id)
+		hashes = append(hashes, block.Hash().String())
+	}
+	require.Equal(t, hashes[0], hashes[1])
+}
+
+// TestMusashiDispatchEraAgreement records the era each production dispatch
+// path assigns to the same Musashi block, for both wire types. #3761 was the
+// header and block paths disagreeing, so the mapping is asserted rather than
+// assumed.
+//
+// The hashes agree for both types. The eras do not for type 7: its
+// five-component Conway envelope is only representable as a Conway block, so
+// models.DecodeConwayBlock returns Conway era, while the header decodes
+// through the Dijkstra header decoder and reports Dijkstra. The block declares
+// protocol version 12 (Dijkstra), so the header is the accurate one. This is a
+// gouroboros representability limit, not a dispatch choice Dingo can make
+// differently, and it is pinned here so a change to either path is visible.
+func TestMusashiDispatchEraAgreement(t *testing.T) {
+	o := newMusashiOuroboros(t, nil)
+	for _, tc := range []struct {
+		name         string
+		blockType    uint
+		blockPath    string
+		headerPath   string
+		wantBlockEra uint
+	}{
+		{
+			name:         "type7_conway_layout",
+			blockType:    gledger.BlockTypeConway,
+			blockPath:    musashiType7BlockFixture,
+			headerPath:   musashiType7HeaderFixture,
+			wantBlockEra: conway.EraIdConway,
+		},
+		{
+			name:         "type8_dijkstra_layout",
+			blockType:    gledger.BlockTypeDijkstra,
+			blockPath:    musashiType8BlockFixture,
+			headerPath:   musashiType8HeaderFixture,
+			wantBlockEra: dijkstra.EraIdDijkstra,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block, err := o.decodeBlockfetchBlock(
+				tc.blockType,
+				readHexFixture(t, tc.blockPath),
+			)
+			require.NoError(t, err)
+			header, err := o.decodeChainsyncHeader(
+				tc.blockType,
+				readHexFixture(t, tc.headerPath),
+			)
+			require.NoError(t, err)
+			// Both Musashi wire types carry the same twelve-field Leios
+			// header body, so the header path reports Dijkstra for both.
+			require.EqualValues(t, dijkstra.EraIdDijkstra, header.Era().Id)
+			require.EqualValues(t, tc.wantBlockEra, block.Era().Id)
+			require.Equal(t, header.Hash().String(), block.Hash().String())
+		})
+	}
 }
