@@ -6057,6 +6057,13 @@ func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
 		ls.config.SkipDijkstraTxValidation
 }
 
+// dijkstraEraGate uses the pparams-derived active era. A Musashi block may
+// decode through the Conway wire type while carrying a Dijkstra header; block
+// and header era values are not authoritative for ledger-era gates.
+func dijkstraEraGate(currentEra eras.EraDesc) bool {
+	return currentEra.Id == dijkstra.EraIdDijkstra
+}
+
 func (ls *LedgerState) ledgerProcessBlock(
 	txn *database.Txn,
 	point ocommon.Point,
@@ -6173,7 +6180,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// resolution, availability, decode, and apply failures abort the block.
 	// Storage-phase failures always abort the DB transaction so a partial
 	// endorser-block application cannot be committed.
-	if currentEra.Id == dijkstra.EraIdDijkstra {
+	if dijkstraEraGate(currentEra) {
 		if ls.config.EndorserBlockProvider == nil {
 			if certifier, ok := block.Header().(leiosEndorserBlockCertifier); ok {
 				if certified, present := certifier.LeiosCertified(); present &&

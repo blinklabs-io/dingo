@@ -17,6 +17,7 @@ package ledger
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -123,4 +124,9 @@ func TestDijkstraTxValidationErrorsArePrototypeOnly(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestDijkstraEraGateUsesCurrentEra(t *testing.T) {
+	assert.True(t, dijkstraEraGate(eras.DijkstraEraDesc))
+	assert.False(t, dijkstraEraGate(eras.ConwayEraDesc))
 }

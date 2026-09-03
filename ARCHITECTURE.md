@@ -7513,6 +7513,11 @@ The flag also scopes acceptance through
 and trusts a Dijkstra validation disagreement. Standard Leios profiles run the
 Dijkstra rules and reject invalid transactions.
 
+Ledger-era gates use the active era derived from protocol parameters
+(`currentEra`) as their sole authority. Musashi type-7 blocks can decode
+through the Conway wire type while carrying Dijkstra protocol state; block and
+header-derived era values are not used for ledger-era gates.
+
 Because these two settings make a node accept blocks and transactions a
 validating ledger would reject, the profile boundary is enforced and
 documented here.
