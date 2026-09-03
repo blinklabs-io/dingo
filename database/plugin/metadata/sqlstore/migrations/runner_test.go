@@ -465,8 +465,8 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 two, and v8 one.
-	const shippedAddColumns = 8
+	// v2 adds four columns, v5 two, and v7/v8 one each.
+	const shippedAddColumns = 14
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after
@@ -474,9 +474,12 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	// confirm what information_schema and pragma_table_info report for it and
 	// extend columnTypeAliases when the two differ.
 	verifiedColumnTypes := map[string]struct{}{
-		"blob":  {},
-		"bytea": {},
-		"text":  {},
+		"blob":    {},
+		"boolean": {},
+		"bytea":   {},
+		"bigint":  {},
+		"integer": {},
+		"text":    {},
 	}
 	for _, dialect := range []struct {
 		name string

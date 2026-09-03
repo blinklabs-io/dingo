@@ -116,6 +116,7 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			eras.DijkstraEraDesc,
 			pparams,
 			nil,
+			0,
 		)
 		return err
 	})

@@ -271,7 +271,9 @@ type GovernanceStore interface {
 
 	// GetCommitteeMember retrieves a committee member by cold key.
 	GetCommitteeMember(
+		uint8, // cold credential tag
 		[]byte, // coldKey
+		uint64, // committee term start slot
 		types.Txn,
 	) (*models.AuthCommitteeHot, error)
 
@@ -280,14 +282,16 @@ type GovernanceStore interface {
 
 	// IsCommitteeMemberResigned checks if a committee member has resigned.
 	IsCommitteeMemberResigned(
+		uint8, // cold credential tag
 		[]byte, // coldKey
+		uint64, // committee term start slot
 		types.Txn,
 	) (bool, error)
 
-	// GetResignedCommitteeMembers returns the cold credentials whose
-	// latest resignation is after their latest authorization.
+	// GetResignedCommitteeMembers returns cold credentials with a resignation
+	// recorded during each credential's selected membership term.
 	GetResignedCommitteeMembers(
-		[][]byte, // coldKeys
+		[]models.CommitteeCredential,
 		types.Txn,
 	) (map[string]bool, error)
 
@@ -297,9 +301,10 @@ type GovernanceStore interface {
 
 	// Snapshot-imported committee member methods
 
-	// SetCommitteeMembers upserts committee members imported from a
-	// Mithril snapshot. On conflict (same cold_cred_hash), the
-	// expires_epoch and added_slot are updated.
+	// SetCommitteeMembers stores committee members, both those imported from a
+	// Mithril snapshot and those enacted by governance. The tagged cold
+	// credential and added slot identify a historical membership row; later
+	// removal and re-election create a new term.
 	SetCommitteeMembers(
 		[]*models.CommitteeMember,
 		types.Txn,
@@ -339,11 +344,11 @@ type GovernanceStore interface {
 	// soft-deleted after that slot. Used during chain rollbacks.
 	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
 
-	// SoftDeleteCommitteeMembers marks the given cold credential hashes
+	// SoftDeleteCommitteeMembers marks the given cold credentials
 	// as removed by setting deleted_slot. Used by governance enactment
 	// to remove members (UpdateCommittee/NoConfidence action).
 	SoftDeleteCommitteeMembers(
-		coldCredHashes [][]byte,
+		coldCredentials []models.CommitteeCredential,
 		slot uint64,
 		txn types.Txn,
 	) error
@@ -1964,6 +1969,12 @@ type MetadataStore interface {
 	GetActiveAccountCredentials(
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
+
+	// ClearDelegationsToRetiredPool removes every account delegation pointing
+	// at the given reaped pool, stamping added_slot with the epoch-boundary
+	// slot so the clear is rollback-safe. The delegation half of POOLREAP; see
+	// the sqlstore implementation for why the import baseline is left alone.
+	ClearDelegationsToRetiredPool([]byte, uint64, types.Txn) error
 
 	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
 	// by Mithril v2 catch-up reconciliation; rows are never deleted, only

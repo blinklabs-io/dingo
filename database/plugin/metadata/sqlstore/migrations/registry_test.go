@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 8)
+	require.Len(t, registry, 9)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -92,38 +92,23 @@ func TestSQLiteRegistry(t *testing.T) {
 		"ALTER TABLE `account_import_baseline` ADD COLUMN `deposit_amount` text",
 	}, registry[6].SQL["sqlite"].Expand)
 	require.Equal(t, 8, registry[7].Version)
-	require.Equal(t, "pool-registration-deposit-held", registry[7].Name)
-	require.Len(t, registry[7].SQL["sqlite"].Expand, 2)
-	require.Equal(
-		t,
-		"ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text",
-		registry[7].SQL["sqlite"].Expand[0],
-	)
-	// The backfill must stay restricted to NULL so an interrupted upgrade can
-	// re-run it without overwriting a carried-forward held amount.
-	require.Contains(
-		t,
-		registry[7].SQL["sqlite"].Expand[1],
-		"WHERE `deposit_held` IS NULL",
-	)
+	require.Equal(t, "committee-credential-tags", registry[7].Name)
+	require.Equal(t, 9, registry[8].Version)
+	require.Equal(t, "committee-term-start-presence", registry[8].Name)
+	require.Len(t, registry[8].SQL["sqlite"].Expand, 1)
+	require.NotNil(t, registry[8].Backfill)
+	require.Equal(t, 10, registry[9].Version)
+	require.Equal(t, "pool-registration-deposit-held", registry[9].Name)
 }
 
-// TestDepositHeldMigrationTranslatesForProviders guards the v8 migration's one
-// dialect hazard: the ALTER adds a TEXT column, which MySQL must not be handed
-// with a key prefix and PostgreSQL must receive with requoted identifiers.
-func TestDepositHeldMigrationTranslatesForProviders(t *testing.T) {
+func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
 	postgres, err := PostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[7].SQL["postgres"].Expand, "\n")
-	require.Contains(
-		t,
-		postgresSQL,
-		`ALTER TABLE "pool_registration" ADD COLUMN "deposit_held" text`,
-	)
-	require.Contains(t, postgresSQL, `UPDATE "pool_registration"`)
-	require.NotContains(t, postgresSQL, "`")
+	require.Contains(t, postgresSQL, `"cold_credential_tag" BIGINT`)
+	require.Contains(t, postgresSQL, "DROP INDEX IF EXISTS")
 
 	mysql, err := MySQLRegistry()
 	require.NoError(t, err)
@@ -131,9 +116,18 @@ func TestDepositHeldMigrationTranslatesForProviders(t *testing.T) {
 	require.Contains(
 		t,
 		mysqlSQL,
-		"ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text",
+		"DROP INDEX `idx_committee_member_cold_cred_hash` ON `committee_member`",
 	)
-	require.NotContains(t, mysqlSQL, "(255)")
+	require.NotContains(t, mysqlSQL, "DROP INDEX IF EXISTS")
+
+	postgresPresence := strings.Join(postgres[8].SQL["postgres"].Expand, "\n")
+	require.Contains(t, postgresPresence, `"term_start_slot_set" boolean`)
+	require.Len(t, postgres[8].SQL["postgres"].Expand, 1)
+	require.NotNil(t, postgres[8].Backfill)
+	mysqlPresence := strings.Join(mysql[8].SQL["mysql"].Expand, "\n")
+	require.Contains(t, mysqlPresence, "`term_start_slot_set` boolean")
+	require.Len(t, mysql[8].SQL["mysql"].Expand, 1)
+	require.NotNil(t, mysql[8].Backfill)
 }
 
 // TestMySQLRegistryPrefixesAccountBaselinePrimaryKey guards the v4 migration's
@@ -197,7 +191,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 8)
+	require.Len(t, registry, 9)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

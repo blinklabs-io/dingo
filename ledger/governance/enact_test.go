@@ -189,6 +189,38 @@ func TestDecodeGovAction_UnknownType(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestDecodeGovActionRejectsStoredAndEmbeddedTypeMismatch(t *testing.T) {
+	encoded, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+		Type: uint(lcommon.GovActionTypeUpdateCommittee),
+	})
+	require.NoError(t, err)
+	_, err = decodeGovAction(
+		encoded,
+		uint8(lcommon.GovActionTypeNoConfidence),
+	)
+	require.ErrorContains(t, err, "type mismatch")
+}
+
+func TestDecodeGovActionRejectsTruncatedAndTrailingData(t *testing.T) {
+	encoded, err := cbor.Encode(&lcommon.InfoGovAction{
+		Type: uint(lcommon.GovActionTypeInfo),
+	})
+	require.NoError(t, err)
+	require.Greater(t, len(encoded), 1)
+
+	_, err = decodeGovAction(
+		encoded[:len(encoded)-1],
+		uint8(lcommon.GovActionTypeInfo),
+	)
+	require.Error(t, err)
+
+	_, err = decodeGovAction(
+		append(append([]byte(nil), encoded...), 0x00),
+		uint8(lcommon.GovActionTypeInfo),
+	)
+	require.ErrorContains(t, err, "consumed")
+}
+
 func TestSetProtocolVersion_ConwayParams(t *testing.T) {
 	pparams := &conway.ConwayProtocolParameters{}
 	pparams.ProtocolVersion.Major = 9
@@ -518,6 +550,7 @@ func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
 	err := applyUpdateCommittee(
 		&EnactmentContext{DB: db, Slot: 4242},
 		action,
+		4000,
 	)
 	require.NoError(t, err)
 
@@ -525,6 +558,97 @@ func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, 0, got.Cmp(big.NewRat(3, 5)))
+}
+
+func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	coldHash := testBytes(28, 41)
+	oldHotHash := testBytes(28, 42)
+	newHotHash := testBytes(28, 43)
+	coldCredential := &lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(coldHash),
+	}
+	require.NoError(t, store.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(coldCredential.CredType),
+			ColdCredHash:      coldHash,
+			ExpiresEpoch:      20,
+			TermStartSlot:     10,
+			AddedSlot:         10,
+		}},
+		nil,
+	))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldHash,
+		HotCredential:  oldHotHash,
+		CertificateID:  1,
+		AddedSlot:      20,
+	})
+	seedTallyCommitteeResignation(t, store, models.ResignCommitteeCold{
+		ColdCredential: coldHash,
+		CertificateID:  2,
+		AddedSlot:      30,
+	})
+
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 40},
+		&lcommon.UpdateCommitteeGovAction{
+			Credentials: []lcommon.Credential{*coldCredential},
+			Quorum:      cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		35,
+	))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldHash,
+		HotCredential:  newHotHash,
+		CertificateID:  3,
+		AddedSlot:      60,
+	})
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 70},
+		&lcommon.UpdateCommitteeGovAction{
+			CredEpochs: map[*lcommon.Credential]uint{
+				coldCredential: 30,
+			},
+			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		50,
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, uint64(50), members[0].TermStartSlot)
+	assert.Equal(t, uint64(70), members[0].AddedSlot)
+	resigned, err := db.IsCommitteeMemberResigned(
+		uint8(coldCredential.CredType), coldHash, 50, nil,
+	)
+	require.NoError(t, err)
+	assert.False(t, resigned)
+	authorization, err := db.GetCommitteeMember(
+		uint8(coldCredential.CredType), coldHash, 50, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, newHotHash, authorization.HotCredential)
+
+	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(65, nil))
+	members, err = db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	assert.Empty(t, members)
+
+	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(35, nil))
+	members, err = db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, uint64(10), members[0].TermStartSlot)
+	resigned, err = db.IsCommitteeMemberResigned(
+		uint8(coldCredential.CredType), coldHash, 10, nil,
+	)
+	require.NoError(t, err)
+	assert.True(t, resigned)
 }
 
 func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
@@ -569,6 +693,31 @@ func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 	got, err := db.GetCommitteeQuorum(nil)
 	require.NoError(t, err)
 	assert.Nil(t, got, "NoConfidence should clear the enacted quorum")
+}
+
+func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+	credential := &lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(testBytes(28, 0x7a)),
+	}
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 50},
+		&lcommon.UpdateCommitteeGovAction{
+			CredEpochs: map[*lcommon.Credential]uint{credential: 20},
+			Quorum:     cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		0,
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	require.Zero(
+		t,
+		members[0].TermStartSlot,
+		"slot zero is a valid membership term start, not an unset marker",
+	)
 }
 
 func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(

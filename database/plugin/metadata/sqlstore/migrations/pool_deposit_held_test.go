@@ -28,7 +28,7 @@ import (
 
 // depositHeldBackfillDB returns a database migrated to the version before the
 // pool deposit-held column exists, so a test can seed the legacy registration
-// rows the v8 backfill reads.
+// rows the v10 backfill reads.
 func depositHeldBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func(versions []migrations.Migration)) {
@@ -40,7 +40,7 @@ func depositHeldBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 8)
+	require.Len(t, registry, 10)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -52,7 +52,7 @@ func depositHeldBackfillDB(
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	runTo(registry[:6])
+	runTo(registry[:9])
 	return db, runTo
 }
 
@@ -217,7 +217,7 @@ func TestDepositHeldExpandPhaseReplaysAfterInterruptedUpgrade(t *testing.T) {
 	_, err = db.ExecContext(ctx, `
 UPDATE schema_migrations
 SET phase = 'expand', dirty = 1, completed_at = NULL
-WHERE version = 8`)
+WHERE version = 10`)
 	require.NoError(t, err)
 	_, err = db.ExecContext(
 		ctx,
@@ -240,7 +240,7 @@ WHERE version = 8`)
 	var dirty bool
 	var completed sql.NullInt64
 	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 8`,
+SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 10`,
 	).Scan(&phase, &dirty, &completed))
 	require.Equal(t, "complete", phase)
 	require.False(t, dirty)

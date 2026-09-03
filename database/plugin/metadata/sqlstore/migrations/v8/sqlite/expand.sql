@@ -1,24 +1,26 @@
--- The pool deposit a registration retains, as distinct from `deposit_amount`,
--- which is what the block era's certificate deposit function computed from the
--- protocol parameters in force at that registration's slot. The two differ for
--- a re-registration: cardano-ledger's POOL rule charges a deposit only when the
--- pool is not already registered, so a re-registration leaves `psDeposits`
--- alone and the pool keeps holding the deposit its first registration paid.
--- POOLREAP refunds `psDeposits`, so refunding `deposit_amount` created or
--- destroyed ledger value whenever a poolDeposit parameter change landed between
--- a pool's first and last registration.
-ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text;
--- Backfill for a database written before this column existed. A legacy
--- registration is credited with its own `deposit_amount`, which is exactly the
--- value the pre-change refund path read from the latest registration, so the
--- migration reproduces the refund the node would already have applied and
--- neither creates nor destroys value on existing data. Carry-forward semantics
--- apply from this migration forward; a network that changed poolDeposit before
--- the upgrade must resync from genesis for byte-exact agreement with a
--- genesis-synced node. `COALESCE` covers legacy rows written with a NULL
--- deposit (genesis and Mithril-import registrations), which hold nothing.
--- Restricting the write to NULL keeps the statement re-runnable after an
--- interrupted upgrade without overwriting a carried-forward value.
-UPDATE `pool_registration`
-SET `deposit_held` = COALESCE(`deposit_amount`, '0')
-WHERE `deposit_held` IS NULL;
+-- Preserve key/script credential tags for committee membership,
+-- authorization, and resignation state. Existing rows are key credentials.
+ALTER TABLE `committee_member`
+    ADD COLUMN `cold_credential_tag` integer NOT NULL DEFAULT 0;
+ALTER TABLE `committee_member`
+    ADD COLUMN `term_start_slot` integer NOT NULL DEFAULT 0;
+UPDATE `committee_member` SET `term_start_slot` = `added_slot`;
+DROP INDEX IF EXISTS `idx_committee_member_cold_cred_hash`;
+CREATE UNIQUE INDEX IF NOT EXISTS `idx_committee_member_cold_credential`
+    ON `committee_member`(
+        `cold_credential_tag`,`cold_cred_hash`,`added_slot`
+    );
+
+ALTER TABLE `auth_committee_hot`
+    ADD COLUMN `cold_credential_tag` integer NOT NULL DEFAULT 0;
+ALTER TABLE `auth_committee_hot`
+    ADD COLUMN `hot_credential_tag` integer NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS `idx_auth_committee_hot_cold_credential_identity`
+    ON `auth_committee_hot`(`cold_credential_tag`,`cold_credential`);
+CREATE INDEX IF NOT EXISTS `idx_auth_committee_hot_hot_credential_identity`
+    ON `auth_committee_hot`(`hot_credential_tag`,`host_credential`);
+
+ALTER TABLE `resign_committee_cold`
+    ADD COLUMN `cold_credential_tag` integer NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS `idx_resign_committee_cold_credential_identity`
+    ON `resign_committee_cold`(`cold_credential_tag`,`cold_credential`);

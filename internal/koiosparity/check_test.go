@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"log/slog"
 	"math/big"
@@ -1452,4 +1453,132 @@ func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, mismatches, 1)
 	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckDepartedPoolSurvivesSnapshotRetentionPrune covers a departure
+// checked after `pool_stake_snapshot` retention has already removed the K+1
+// mark rows. `Manager.cleanupOldSnapshots` (ledger/snapshot/rotation.go) prunes
+// that table to `currentEpoch - 3`, and a Preview genesis replay closes an
+// epoch roughly every 25 seconds, so an observer only has to run about 75
+// seconds behind the node to lose the evidence for every epoch it checks.
+//
+// Absence of the mark rows is not evidence of anything, so departure has to be
+// established from state that outlives them: `epoch_summary` and
+// `reward_pool_input` are both retained for the life of the database, and a K+1
+// reward-input set whose size matches the K+1 summary's declared pool count
+// accounts for every pool in that pool set. A pool missing from a complete set
+// left it (dingo #3795).
+func TestCheckDepartedPoolSurvivesSnapshotRetentionPrune(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixture(
+		t, network, koiosEpoch, false,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"pruned snapshots must not turn a departure into an ERROR",
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryPoolDeparted, mismatches[0].Category)
+}
+
+// TestCheckIncompleteRewardInputSetStillErrorsAfterPrune is the fail-closed
+// half. With the mark rows pruned and the K+1 reward-input set short of the
+// declared pool count, some pool in that pool set has no reward-input row, so
+// absence proves nothing and the strict classification has to stand.
+func TestCheckIncompleteRewardInputSetStillErrorsAfterPrune(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// Two pools declared at K+1, but only the one reward-input row the prune
+	// helper writes, so the set is incomplete.
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(t, result.ErrorEpochs, koiosEpoch)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// pruneParamEpochSnapshots reproduces what snapshot retention leaves behind at
+// paramEpoch: the mark pool_stake_snapshot rows are gone, and the durable
+// reward_pool_input row for the pool that stayed in the set remains. The
+// subject pool of the departure fixture deliberately gets no row.
+func pruneParamEpochSnapshots(
+	t *testing.T,
+	dingoDir string,
+	paramEpoch uint64,
+) {
+	t.Helper()
+	path := filepath.Join(dingoDir, "metadata.sqlite")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+	_, err = db.Exec(
+		`DELETE FROM pool_stake_snapshot WHERE epoch = ?`,
+		paramEpoch,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+INSERT INTO reward_pool_input (
+    pool_key_hash, epoch, blocks_produced, total_blocks_in_epoch
+) VALUES (?, ?, ?, ?)`,
+		testPoolKeyHash(t, 0x0a),
+		paramEpoch,
+		3,
+		100,
+	)
+	require.NoError(t, err)
+	// The omitted columns are either nullable (margin, reward_account),
+	// auto-generated (id), or NOT NULL with a default (pledge,
+	// delegated_stake, owner_stake, cost, delegator_count,
+	// reward_account_credential_tag, captured_slot, boundary_slot), so the
+	// partial insert above is a complete row. Asserted rather than assumed — a
+	// fixture that silently wrote nothing would make the departure tests pass
+	// for the wrong reason.
+	var rows, params int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*), COUNT(blocks_produced) FROM reward_pool_input
+		 WHERE epoch = ?`,
+		paramEpoch,
+	).Scan(&rows, &params))
+	require.Equal(t, 1, rows, "the param-epoch reward input must exist")
+	require.Equal(t, 1, params, "with its block count populated")
+	var snapshots int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM pool_stake_snapshot WHERE epoch = ?`,
+		paramEpoch,
+	).Scan(&snapshots))
+	require.Zero(t, snapshots, "the mark rows must be gone")
 }
