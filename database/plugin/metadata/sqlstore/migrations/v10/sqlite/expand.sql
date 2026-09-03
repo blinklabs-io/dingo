@@ -8,6 +8,3 @@
 -- destroyed ledger value whenever a poolDeposit parameter change landed between
 -- a pool's first and last registration.
 ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text;
-UPDATE `pool_registration`
-SET `deposit_held` = COALESCE(`deposit_amount`, '0')
-WHERE `deposit_held` IS NULL;

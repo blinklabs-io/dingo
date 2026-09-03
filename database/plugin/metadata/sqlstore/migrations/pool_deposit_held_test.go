@@ -18,7 +18,6 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
@@ -130,6 +129,33 @@ func TestDepositHeldBackfillCreditsZeroForNullDeposit(t *testing.T) {
 	require.Equal(t, "0", held.String)
 }
 
+// A re-registration does not pay a second deposit. The backfill must carry
+// forward the first registration's retained amount when the protocol deposit
+// changed before the later registration.
+func TestDepositHeldBackfillCarriesInitialDepositAcrossReregistration(t *testing.T) {
+	t.Parallel()
+	db, runTo := depositHeldBackfillDB(t)
+	keyHash := []byte("legacy-pool-key-hash-0000005")
+	seedLegacyPoolRegistration(t, db, keyHash, 100, "500000000")
+	var poolID int64
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		"SELECT id FROM pool WHERE pool_key_hash = ?", keyHash).Scan(&poolID))
+	_, err := db.ExecContext(context.Background(), `
+INSERT INTO pool_registration (pool_id, pool_key_hash, added_slot, deposit_amount)
+VALUES (?, ?, ?, ?)`, poolID, keyHash, 200, "800000000")
+	require.NoError(t, err)
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	var held string
+	require.NoError(t, db.QueryRowContext(context.Background(), `
+SELECT deposit_held FROM pool_registration
+WHERE pool_key_hash = ? ORDER BY added_slot DESC LIMIT 1`, keyHash).Scan(&held))
+	require.Equal(t, "500000000", held)
+}
+
 // The backfill statement is re-runnable: an upgrade interrupted after the
 // backfill committed but before its phase row advanced replays it, and it must
 // not overwrite a held amount that carry-forward has since written.
@@ -152,47 +178,16 @@ WHERE pool_key_hash = ?`,
 	)
 	require.NoError(t, err)
 
-	// Replay the backfill statement on its own, so this asserts its NULL guard
-	// rather than the runner's handling of the rest of the expand phase.
-	_, err = db.ExecContext(
-		context.Background(),
-		depositHeldBackfillStatement(t, registry),
-	)
+	_, err = db.ExecContext(context.Background(), `
+UPDATE schema_migrations
+SET phase = 'backfill', cursor = '', dirty = 1, completed_at = NULL
+WHERE version = 10`)
 	require.NoError(t, err)
+	runTo(registry)
 
 	held := depositHeldValue(t, db, keyHash)
 	require.True(t, held.Valid)
 	require.Equal(t, "500000000", held.String)
-}
-
-// depositHeldBackfillStatement resolves the deposit-held backfill by migration
-// name and statement content rather than by position, so adding or reordering a
-// statement in v8/sqlite/expand.sql fails this lookup instead of silently
-// pointing the test at a different statement.
-func depositHeldBackfillStatement(
-	t *testing.T,
-	registry []migrations.Migration,
-) string {
-	t.Helper()
-	var found []string
-	for _, migration := range registry {
-		if migration.Name != "pool-registration-deposit-held" {
-			continue
-		}
-		for _, statement := range migration.SQL["sqlite"].Expand {
-			if strings.HasPrefix(statement, "UPDATE `pool_registration`") &&
-				strings.Contains(statement, "`deposit_held`") {
-				found = append(found, statement)
-			}
-		}
-	}
-	require.Len(
-		t,
-		found,
-		1,
-		"the deposit-held migration must contain exactly one backfill statement",
-	)
-	return found[0]
 }
 
 // An upgrade interrupted after the expand phase's ALTER TABLE committed but
@@ -211,12 +206,12 @@ func TestDepositHeldExpandPhaseReplaysAfterInterruptedUpgrade(t *testing.T) {
 	runTo(registry)
 
 	ctx := context.Background()
-	// Rewind version 8 to the durable state such an interruption leaves: the
+	// Rewind version 10 to the durable state such an interruption leaves: the
 	// column exists because its ALTER committed, the phase row still says
 	// expand, and the backfill has not run.
 	_, err = db.ExecContext(ctx, `
 UPDATE schema_migrations
-SET phase = 'expand', dirty = 1, completed_at = NULL
+SET phase = 'expand', cursor = '', dirty = 1, completed_at = NULL
 WHERE version = 10`)
 	require.NoError(t, err)
 	_, err = db.ExecContext(
