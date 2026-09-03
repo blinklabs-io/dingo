@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -368,4 +370,53 @@ func TestRootPeerTargetComposition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestKoiosParityConfigForwardsEveryField pins that the serve path hands the
+// node every KoiosParity setting.
+//
+// internal/node builds the dingo.KoiosParityConfig by hand, so a field added to
+// internal/config is silently dropped until someone remembers to add it here —
+// which is exactly what happened to AccountChunkSize and AccountChunkMaxBytes,
+// and then to BaseURL. A dropped field does not fail: the option keeps its
+// package default and the operator's setting is ignored with no diagnostic,
+// which for BaseURL meant a run aimed at a self-hosted host silently querying
+// the public one.
+func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
+	src := reflect.TypeOf(config.KoiosParityConfig{})
+	dst := reflect.TypeOf(dingo.KoiosParityConfig{})
+
+	for i := range src.NumField() {
+		name := src.Field(i).Name
+		if _, ok := dst.FieldByName(name); !ok {
+			continue // not part of the node-facing config
+		}
+		if !strings.Contains(nodeSourceForKoiosParity(t), name+":") {
+			t.Errorf(
+				"internal/config KoiosParityConfig.%s is not forwarded in "+
+					"WithKoiosParity; the operator's setting would be "+
+					"silently ignored",
+				name,
+			)
+		}
+	}
+}
+
+// nodeSourceForKoiosParity returns the WithKoiosParity call site's source.
+func nodeSourceForKoiosParity(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("node.go")
+	if err != nil {
+		t.Fatalf("read node.go: %v", err)
+	}
+	s := string(b)
+	start := strings.Index(s, "dingo.WithKoiosParity(")
+	if start < 0 {
+		t.Fatal("WithKoiosParity call not found in node.go")
+	}
+	end := strings.Index(s[start:], "}),")
+	if end < 0 {
+		t.Fatal("WithKoiosParity call not terminated")
+	}
+	return s[start : start+end]
 }

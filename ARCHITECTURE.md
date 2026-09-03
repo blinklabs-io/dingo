@@ -6152,9 +6152,16 @@ never the reverse.
   would silently generate wrong-network stake addresses for. The override
   itself is validated too: a custom host must be `https`, since `get` and
   `post` attach the API key as a Bearer token to every request and forged
-  reference data can make a comparison report a false PASS. `AllowInsecureHTTP`
-  (`--koios-parity-allow-insecure-http`) is the local dev/test escape hatch,
-  mirroring `Mithril.AllowInsecureHTTP`. `KoiosParity.BaseURL` is classified as
+  reference data can make a comparison report a false PASS. `AllowInsecureHTTP` is the local dev/test escape
+  hatch, mirroring `Mithril.AllowInsecureHTTP` —
+  `--koios-parity-allow-insecure-http` on the node, and
+  `--koios-allow-insecure-http` / `KOIOS_ALLOW_INSECURE_HTTP` on the standalone
+  CLI, where an explicitly-set flag beats the environment per CLAUDE.md's
+  CLI > env rule. A custom root must also carry no query string or fragment,
+  since `get` and `post` append an endpoint path and their own query to it and
+  would otherwise reach a different endpoint than intended. Validation errors
+  never echo the URL, because the value they describe is the one
+  `logURIConfigFields` exists to keep out of logs. `KoiosParity.BaseURL` is classified as
   a URI field for logging (`logURIConfigFields`), not a plain one, because an
   operator can embed credentials in it.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_

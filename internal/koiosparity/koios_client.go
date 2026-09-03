@@ -250,7 +250,13 @@ func NewKoiosClient(
 			return nil, err
 		}
 		base = trimmed
-		burstLimit = 0
+		// The cap is dropped for a custom deployment, not for a custom
+		// spelling of the public one. An override naming a koios.rest host is
+		// still subject to that host's published window, and dropping the cap
+		// there would earn avoidable 429 cooldowns.
+		if !isPublicKoiosHost(trimmed) {
+			burstLimit = 0
+		}
 	}
 	return &KoiosClient{
 		baseURL: base,
@@ -265,6 +271,21 @@ func NewKoiosClient(
 	}, nil
 }
 
+// isPublicKoiosHost reports whether a base URL names a koios.rest deployment,
+// whose published tier window applies however the URL was spelled -- as a
+// built-in default or as an override naming the same host.
+func isPublicKoiosHost(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// Unparseable never reaches here (validateKoiosBaseURL runs first),
+		// but treat it as public so an unexpected shape keeps the cap rather
+		// than losing it.
+		return true
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "koios.rest" || strings.HasSuffix(host, ".koios.rest")
+}
+
 // validateKoiosBaseURL rejects a custom host this client must not send an API
 // key to, or trust reference data from.
 //
@@ -277,12 +298,28 @@ func NewKoiosClient(
 func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("parse koios base URL %q: %w", rawURL, err)
+		// rawURL is never echoed: an operator can put credentials in it as
+		// userinfo or as a credential-shaped query parameter, and a validation
+		// error is written to the same log the URI redaction protects.
+		return fmt.Errorf("parse koios base URL: %w", redactURLError(err))
 	}
 	if parsed.Host == "" {
-		return fmt.Errorf(
-			"koios base URL %q has no host; give the full v1 API root, e.g. https://host/api/v1",
-			rawURL,
+		return errors.New(
+			"koios base URL has no host; give the full v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	// get and post build an endpoint by appending a path and its own query to
+	// this root. A root that already carries a query or fragment would put the
+	// appended path after that delimiter, so the request would silently reach
+	// a different endpoint than intended.
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return errors.New(
+			"koios base URL must not carry a query string; give the bare v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	if parsed.Fragment != "" {
+		return errors.New(
+			"koios base URL must not carry a fragment; give the bare v1 API root, e.g. https://host/api/v1",
 		)
 	}
 	switch parsed.Scheme {
@@ -292,17 +329,26 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 		if allowInsecureHTTP {
 			return nil
 		}
-		return fmt.Errorf(
-			"koios base URL %q uses plain HTTP, which would send the API key in cleartext and leave the reference data tamperable; use https or set allowInsecureHttp for local dev/test",
-			rawURL,
+		return errors.New(
+			"koios base URL uses plain HTTP, which would send the API key in cleartext and leave the reference data tamperable; use https or set allowInsecureHttp for local dev/test",
 		)
 	default:
 		return fmt.Errorf(
-			"koios base URL %q must use http or https, got scheme %q",
-			rawURL,
+			"koios base URL must use http or https, got scheme %q",
 			parsed.Scheme,
 		)
 	}
+}
+
+// redactURLError strips the URL from a *url.Error so a parse failure cannot
+// carry credentials into a log. url.Parse wraps the offending string in the
+// error it returns, which is exactly the value being kept out of logs.
+func redactURLError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
+	}
+	return errors.New("invalid URL")
 }
 
 // burstLimiter enforces a sliding-window request budget matching Koios's

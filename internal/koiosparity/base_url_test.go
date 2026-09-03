@@ -152,3 +152,63 @@ func TestNewKoiosClientPlainHTTPGuardDoesNotAffectPublicHost(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(client.baseURL, "https://"))
 }
+
+// TestNewKoiosClientKeepsBurstCapForPublicHostOverride covers an override that
+// names koios.rest explicitly. The cap is dropped for a custom deployment, not
+// for a custom spelling of the public one — that host's published window
+// applies however the URL was written, and ignoring it earns 429 cooldowns.
+func TestNewKoiosClientKeepsBurstCapForPublicHostOverride(t *testing.T) {
+	for _, raw := range []string{
+		"https://preview.koios.rest/api/v1",
+		"https://PREPROD.KOIOS.REST/api/v1",
+		"https://koios.rest/api/v1",
+	} {
+		client, err := NewKoiosClient("preview", "", raw, false)
+		require.NoError(t, err)
+		require.NotNil(t, client.limiter)
+		assert.Equal(t, koiosBurstLimitSafe, client.limiter.limit,
+			"override %q names the public host and keeps its cap", raw)
+	}
+
+	// A host that merely mentions the string is not the public host.
+	client, err := NewKoiosClient(
+		"preview", "", "https://koios.rest.example.com/api/v1", false,
+	)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, client.limiter.limit, 0)
+}
+
+// TestNewKoiosClientRejectsQueryOrFragment covers a root that already carries a
+// delimiter. get and post append an endpoint path and their own query to this
+// value, so a root ending in "?x=1" or "#frag" would put the appended path
+// after that delimiter and silently reach a different endpoint.
+func TestNewKoiosClientRejectsQueryOrFragment(t *testing.T) {
+	for _, raw := range []string{
+		"https://host.example/api/v1?token=abc",
+		"https://host.example/api/v1#frag",
+		"https://host.example/api/v1?",
+	} {
+		_, err := NewKoiosClient("preview", "", raw, false)
+		require.Error(t, err, "base URL %q must be rejected", raw)
+	}
+}
+
+// TestValidateKoiosBaseURLErrorsOmitTheURL covers the errors themselves. An
+// operator can put credentials in the URL as userinfo or as a
+// credential-shaped query parameter, and a validation error is written to the
+// same log that logURIConfigFields exists to protect — so the raw value must
+// never appear in it.
+func TestValidateKoiosBaseURLErrorsOmitTheURL(t *testing.T) {
+	const secret = "SENTINEL-URL-PASSWORD"
+	for _, raw := range []string{
+		"http://dingo:" + secret + "@host.example/api/v1",
+		"ftp://dingo:" + secret + "@host.example/api/v1",
+		"https://host.example/api/v1?api_key=" + secret,
+		"://dingo:" + secret + "@broken",
+	} {
+		err := validateKoiosBaseURL(raw, false)
+		require.Error(t, err, "base URL %q must be rejected", raw)
+		assert.NotContains(t, err.Error(), secret,
+			"validation error must not echo the URL's credentials")
+	}
+}

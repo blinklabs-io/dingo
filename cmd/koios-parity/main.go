@@ -426,18 +426,27 @@ func koiosAPIKey(cmd *cobra.Command) string {
 // koiosBaseURL returns the Koios v1 API root override from flag or
 // environment. Empty selects the public host for the network.
 func koiosBaseURL(cmd *cobra.Command) string {
-	if url, _ := cmd.Flags().GetString("koios-url"); url != "" {
+	if cmd.Flags().Changed("koios-url") {
+		url, _ := cmd.Flags().GetString("koios-url")
 		return url
 	}
 	return os.Getenv("KOIOS_URL")
 }
 
 // koiosAllowInsecureHTTP reports whether a plain-HTTP --koios-url is permitted.
+// An explicitly-set flag always wins over the environment, per CLAUDE.md's
+// CLI > env rule -- checking only the flag's value would let
+// KOIOS_ALLOW_INSECURE_HTTP=true defeat an explicit
+// --koios-allow-insecure-http=false and silently keep the escape hatch open.
 func koiosAllowInsecureHTTP(cmd *cobra.Command) bool {
-	if ok, _ := cmd.Flags().GetBool("koios-allow-insecure-http"); ok {
-		return true
+	if cmd.Flags().Changed("koios-allow-insecure-http") {
+		ok, _ := cmd.Flags().GetBool("koios-allow-insecure-http")
+		return ok
 	}
-	return strings.EqualFold(os.Getenv("KOIOS_ALLOW_INSECURE_HTTP"), "true")
+	return strings.EqualFold(
+		strings.TrimSpace(os.Getenv("KOIOS_ALLOW_INSECURE_HTTP")),
+		"true",
+	)
 }
 
 // addKoiosURLFlag registers the self-hosted-instance override, shared by
