@@ -1762,9 +1762,13 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	// it before each DB delete, for the same lock-order reason) so it can skip
 	// any point re-deferred (and re-persisted) since eviction, keeping the
 	// sync_state table free of dead markers without dropping a marker that now
-	// backs a live pin.
-	ls.deletePersistedDeferredMarkers(evicted)
-	return err
+	// backs a live pin. A restore failure for a point re-admitted during its
+	// delete is a lost DURABLE pin: it is joined onto the prune result so the
+	// retention guard's caller (cleanupOldSnapshots) surfaces the failed cleanup
+	// rather than continuing with a marker a restart would miss (issue #3717
+	// review).
+	cleanupErr := ls.deletePersistedDeferredMarkers(evicted)
+	return errors.Join(err, cleanupErr)
 }
 
 // slotFromHeaderValidationKey extracts the slot from a deferred-header map key,

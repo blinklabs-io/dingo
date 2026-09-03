@@ -2400,6 +2400,55 @@ at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
 decision until ledger apply when even the forecast cannot resolve it; full
 historical validation and the normal leader checks remain enabled.
 
+**Why deferring a `d=1` overlay header is a real fix, not a suppression.** With
+`d = 1` (full federation — every early Shelley epoch, and epoch 0 on every
+network) `classifyGenesisOverlaySlot` returns `genesisOverlayActive` or
+`genesisOverlayNonActive` for *every* slot, never `genesisOverlayNone`: with
+`position = ceil(relativeSlot·d) = relativeSlot`, the position always advances by
+one per slot, and `position % activeSlotCoeffInverse == 0` selects the active
+overlay slots. So under `d=1` the genesis-delegate path — not the Praos
+leader-eligibility path — is authoritative, and a header **not** issued by the
+overlay slot's assigned active genesis delegate is rejected (`genesis overlay
+slot assigned to delegate …, got issuer …`, or the non-active-slot rejection).
+There is therefore no reference-node case in which cardano-node *accepts* a
+non-genesis-delegate block at a `d=1` overlay slot, and the defer never makes
+dingo accept one either: `verifyGenesisDelegateHeader` defers only while
+`allowStateDefer && ledgerTipBehindSlot(slot)`, and at ledger apply
+`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderStateWithEpochAdvance(
+block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — with the defer
+switch off, so the stateful genesis-delegate check runs to an authoritative
+accept/reject verdict before the block can be adopted. The deferral moves *when*
+the verdict is computed, not *whether* it is enforced; the marker
+(`deferred_header_validation:<slot>:<hash>`, in memory and in `sync_state`) is
+what forces that apply-time recheck, so its retention is load-bearing (see the
+retention-floor, eviction-horizon, and marker-restore invariants below and in
+`DATABASE.md`).
+
+The concrete acceptance case the defer *does* exist for is a genesis-delegate
+**reassignment** that the apply cursor has not reached yet. A
+`GenesisKeyDelegationCertificate` rewrites a genesis key's active delegate/VRF
+hash; `Store.GetGenesisDelegationForSlot` returns the latest
+`genesis_delegation` row with `added_slot < blockSlot`, and that row is written
+only when the block carrying the certificate is *applied*
+(`transaction_certificates.go`). During catch-up the header chain runs ahead of
+the applied tip, so at header-verification time the reassignment row can be
+absent — `activeGenesisDelegationForSlot` then falls back to the Shelley-genesis
+default delegate — while at apply time the row is present and names the new
+delegate. A block legitimately produced by the reassigned delegate would be
+*rejected at header time* (issuer ≠ genesis-default delegate) but *accepted at
+apply* (issuer == reassigned delegate), exactly as cardano-node accepts it, so
+deferring the `d=1` overlay decision until apply is what keeps dingo from
+recycling an honest peer over a valid block. This is why the current premise is
+keyed on the observable `ledgerTipBehindSlot(slot)` state rather than on
+`epoch == 0`: the stale state that motivates the defer is the unapplied
+genesis-key-delegation row, which is not epoch-0-specific. (Empirical note: this
+is substantiated from the certificate/overlay code paths and TPraos overlay
+semantics; a specific on-chain instance — network, slot, and the reassigning
+transaction — has not been pinned here and must not be invented. If a concrete
+witness is wanted for the PR record, it is the one open item for the author to
+supply; the safety argument above does not depend on it, because apply-time
+re-validation is authoritative regardless.)
+
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
 already materialized epoch directly from the immutable epoch cache before

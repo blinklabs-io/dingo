@@ -490,9 +490,9 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 // is idempotent (SetSyncState of the same key/value) and runs with no lock
 // held, so it closes the window without reintroducing the lock inversion
 // (issue #3717 review / cubic P1: re-admission after the live check).
-func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
+func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
-		return
+		return nil
 	}
 	// The membership test is taken under the lock, but the lock is RELEASED
 	// before DeleteSyncState: that delete opens the single sqlite write
@@ -507,6 +507,7 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 	// could be dropped, and solely if the re-defer lands in that narrow window
 	// AND the node then restarts before the next cleanup re-persists it. That
 	// residual is accepted in exchange for never inverting the lock order.
+	var cleanupErr error
 	for _, k := range mapKeys {
 		ls.deferredHeaderValidationMu.Lock()
 		_, live := ls.deferredHeaderValidation[k]
@@ -515,9 +516,36 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 			// Re-admitted since eviction: its marker is now backing a live pin.
 			continue
 		}
-		ls.deleteDeferredMarkerUnlessReadmitted(k)
+		// A restore failure inside deleteDeferredMarkerUnlessReadmitted (a point
+		// re-admitted during its delete whose marker could not be re-persisted)
+		// is a LOST DURABLE PIN and must not be swallowed (issue #3717 review):
+		// it is joined and propagated so the caller
+		// (PrunePoolSnapshotsWithRetentionFloor -> the retention guard ->
+		// cleanupOldSnapshots) surfaces the failed cleanup instead of continuing
+		// with a marker that a restart would miss. Remaining keys are still
+		// processed so one failure does not leak the other stale markers.
+		if err := ls.deleteDeferredMarkerUnlessReadmitted(k); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
+	return cleanupErr
 }
+
+// afterDeferredMarkerDeleteHook is a test seam. It is nil in production (a
+// single nil-check, zero cost) and, when set, runs inside
+// deleteDeferredMarkerUnlessReadmitted immediately AFTER DeleteSyncState returns
+// and BEFORE the membership re-test. It lets a test inject a re-admission
+// (markDeferredHeaderValidation) that lands DURING the delete window rather than
+// before the call, so the TOCTOU restore path is actually exercised: an
+// implementation that tested membership before deleting and skipped the delete
+// would not restore the marker and must fail such a test (issue #3717 review).
+var afterDeferredMarkerDeleteHook func()
+
+// deferredMarkerRestoreMaxAttempts bounds the retry on re-persisting the marker
+// for a point re-admitted during its delete. A handful of attempts rides out a
+// transient sqlite-busy without spinning; exhausting them is treated as a lost
+// durable pin and propagated.
+const deferredMarkerRestoreMaxAttempts = 3
 
 // deleteDeferredMarkerUnlessReadmitted deletes one evicted key's persisted
 // marker, then restores it if the key was re-admitted to the in-memory
@@ -534,7 +562,18 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) {
 // deferredHeaderValidationRequired returns false and
 // verifyDeferredBlockHeaderState skips the stateful check for a header that is
 // still outstanding.
-func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) {
+//
+// A failed DeleteSyncState leaves the durable marker in place, so the retention
+// pin is NOT lost — the stale row is simply re-cleaned on a later pass — and is
+// logged best-effort. A failed RESTORE is different: it drops the durable pin
+// for a header that is live again in the in-memory set, so after a restart the
+// stateful check would be skipped. It is retried a bounded number of times and,
+// if it still fails, PROPAGATED to the caller (issue #3717 review: a restoration
+// failure must not pass silently). The in-memory entry survives regardless, so
+// the running process keeps the pin; propagation surfaces the lost DURABLE pin
+// so the node fails the cleanup rather than continuing toward a restart that
+// would lose it.
+func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	syncKey := deferredHeaderValidationSyncStatePrefix + k
 	if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
 		ls.config.Logger.Warn(
@@ -543,26 +582,41 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) {
 			"error", err,
 			"component", "ledger",
 		)
-		return
+		return nil
+	}
+	if hook := afterDeferredMarkerDeleteHook; hook != nil {
+		hook()
 	}
 	ls.deferredHeaderValidationMu.Lock()
 	_, readmitted := ls.deferredHeaderValidation[k]
 	ls.deferredHeaderValidationMu.Unlock()
 	if !readmitted {
-		return
+		return nil
 	}
-	if err := ls.db.SetSyncState(
-		syncKey,
-		deferredHeaderValidationSyncStateValue,
-		nil,
-	); err != nil {
+	var restoreErr error
+	for attempt := 1; attempt <= deferredMarkerRestoreMaxAttempts; attempt++ {
+		restoreErr = ls.db.SetSyncState(
+			syncKey,
+			deferredHeaderValidationSyncStateValue,
+			nil,
+		)
+		if restoreErr == nil {
+			return nil
+		}
 		ls.config.Logger.Warn(
-			"failed to restore re-deferred header marker",
+			"failed to restore re-deferred header marker; retrying",
 			"key", syncKey,
-			"error", err,
+			"attempt", attempt,
+			"error", restoreErr,
 			"component", "ledger",
 		)
 	}
+	return fmt.Errorf(
+		"restore re-deferred header marker %q after %d attempts: %w",
+		syncKey,
+		deferredMarkerRestoreMaxAttempts,
+		restoreErr,
+	)
 }
 
 // repopulateDeferredHeaderValidation rebuilds the in-memory deferred-header set

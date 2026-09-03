@@ -1303,6 +1303,122 @@ func TestVerifyDeferredBlockHeaderStateSurvivesRestartMarker(
 	require.Empty(t, value)
 }
 
+// TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply is the
+// apply-path regression for the d=1 / genesis-overlay defer (issue #3717 review,
+// wolf, verify_header.go ~560). A header at a d=1 overlay slot is deferred at
+// header-verification time because the in-memory protocol parameters (and the
+// active genesis delegation) can still describe the previous epoch while
+// blockfetch verifies ahead of apply. The classifier verdict alone is not the
+// safety property; what makes the defer safe is that the STATEFUL genesis-
+// delegate check re-runs at apply with allowStateDefer=false. This drives a
+// deferred genesis-overlay header through verifyDeferredBlockHeaderState (the
+// apply path, state.go) and proves:
+//
+//   - a header from the WRONG issuer at a d=1 overlay slot is REJECTED at apply
+//     (headerValidationError), so it cannot be adopted with the check skipped;
+//   - a header from the correct genesis delegate is re-validated and accepted,
+//     and its markers cleared; and
+//   - the marker is the sole gate: with required==false (no marker) the apply
+//     path returns nil WITHOUT running the check. That is exactly the silent-
+//     adoption a lost pin would cause, which is why marker retention (Items 1 &
+//     2 / eviction horizon) must be durable. It is NOT a validity verdict.
+//
+// Under d=1 with activeSlotsCoeff 0.99 every slot classifies as an ACTIVE
+// overlay slot (position%1==0, single genesis key), so the genesis-delegate
+// path -- not the Praos leader-eligibility path -- is authoritative here.
+func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{90}, 0, tamperNone)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	delegateHash := tb.block.IssuerVkey().Hash()
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	vrfHash := lcommon.Blake2b256Hash(vrfKey)
+
+	// REJECT: the deferred header's issuer is NOT the assigned genesis delegate.
+	t.Run("wrong issuer rejected at apply", func(t *testing.T) {
+		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		wrongDelegate := make([]byte, lcommon.Blake2b224Size)
+		wrongDelegate[0] = 0xAB
+		ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
+			t,
+			hex.EncodeToString(wrongDelegate),
+			hex.EncodeToString(vrfHash.Bytes()),
+		)
+		ls.currentPParams = &shelley.ShelleyProtocolParameters{
+			Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+		}
+		ls.publishSnapshotsLocked()
+
+		// No marker -> required == false -> the check is SKIPPED and nil is
+		// returned. This is the lost-pin silent-adoption path, asserted here so
+		// the gate is explicit; it is not a statement that the block is valid.
+		require.NoError(
+			t,
+			ls.verifyDeferredBlockHeaderState(nil, point, tb.block),
+			"no marker: required==false, stateful check skipped (lost-pin bypass)",
+		)
+
+		// With the marker present the stateful genesis-delegate check runs at
+		// apply and rejects the wrong issuer; the block cannot be adopted.
+		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+		ls.markDeferredHeaderValidation(point)
+		err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+		require.Error(t, err)
+		var hve *headerValidationError
+		require.ErrorAs(t, err, &hve)
+		assert.Contains(
+			t,
+			err.Error(),
+			"genesis overlay slot assigned to delegate",
+		)
+		// The persisted marker is NOT cleared on rejection: the header stays
+		// outstanding (its rejection is terminal via the typed rewind), never
+		// silently resolved.
+		marker, gerr := db.GetSyncState(
+			deferredHeaderValidationSyncStateKey(point), nil,
+		)
+		require.NoError(t, gerr)
+		assert.Equal(
+			t,
+			deferredHeaderValidationSyncStateValue,
+			marker,
+			"rejected header's marker must not be cleared",
+		)
+	})
+
+	// ACCEPT: the correct genesis delegate re-validates at apply and clears.
+	t.Run("correct delegate revalidated and cleared", func(t *testing.T) {
+		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
+			t,
+			hex.EncodeToString(delegateHash.Bytes()),
+			hex.EncodeToString(vrfHash.Bytes()),
+		)
+		ls.currentPParams = &shelley.ShelleyProtocolParameters{
+			Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+		}
+		ls.publishSnapshotsLocked()
+		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+		ls.markDeferredHeaderValidation(point)
+
+		require.NoError(
+			t,
+			ls.verifyDeferredBlockHeaderState(nil, point, tb.block),
+			"correct genesis delegate must re-validate at apply",
+		)
+		// Resolved: in-memory entry consumed and the persisted marker cleared.
+		assert.False(t, ls.consumeDeferredHeaderValidation(point))
+		v, gerr := db.GetSyncState(
+			deferredHeaderValidationSyncStateKey(point), nil,
+		)
+		require.NoError(t, gerr)
+		assert.Empty(t, v, "resolved header's persisted marker must be cleared")
+	})
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache verifies that
 // verification rejects blocks when the epoch cache is completely empty.
 func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
@@ -3740,6 +3856,16 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 // false and skipping the stateful check for a header still outstanding. The
 // per-key delete must re-test membership afterwards and restore the marker for
 // a key that came back, while still removing a genuinely stale one.
+//
+// The re-admission is injected via the afterDeferredMarkerDeleteHook seam so it
+// lands DURING the delete window -- after DeleteSyncState, before the membership
+// re-test -- rather than before the call (wolf, verify_header_test.go review).
+// The point is NOT in the in-memory set when the call begins: the caller
+// (deletePersistedDeferredMarkers) already tested membership, saw it absent, and
+// passed the key here to be deleted. An implementation that instead tested
+// membership before deleting and skipped the delete when present would never run
+// the delete-then-restore path this asserts, and would fail it (verified by
+// removing the restore block: the marker read comes back empty).
 func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete(
 	t *testing.T,
 ) {
@@ -3748,13 +3874,17 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDele
 
 	readmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
 	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted, nil))
-	// Stands in for the re-defer that lands after the caller's membership test:
-	// the key is live in the set by the time the delete completes.
-	ls.markDeferredHeaderValidation(readmitted)
 
-	ls.deleteDeferredMarkerUnlessReadmitted(
+	// The re-defer lands DURING the delete window, via the seam. Cleared before
+	// the stale sub-case below and on test exit.
+	t.Cleanup(func() { afterDeferredMarkerDeleteHook = nil })
+	afterDeferredMarkerDeleteHook = func() {
+		ls.markDeferredHeaderValidation(readmitted)
+	}
+
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
 		headerValidationPointKey(readmitted),
-	)
+	))
 
 	marker, err := db.GetSyncState(
 		deferredHeaderValidationSyncStateKey(readmitted), nil,
@@ -3764,16 +3894,76 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDele
 		t,
 		deferredHeaderValidationSyncStateValue,
 		marker,
-		"marker for a key re-admitted during the delete must be restored",
+		"marker for a key re-admitted DURING the delete must be restored",
 	)
 
-	// A key that is NOT re-admitted still has its marker removed.
+	// A key that is NOT re-admitted (hook cleared) still has its marker removed.
+	afterDeferredMarkerDeleteHook = nil
 	stale := ocommon.Point{Slot: 1_160, Hash: []byte{0x12}}
 	require.NoError(t, ls.persistDeferredHeaderValidation(stale, nil))
-	ls.deleteDeferredMarkerUnlessReadmitted(headerValidationPointKey(stale))
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(stale),
+	))
 	gone, err := db.GetSyncState(
 		deferredHeaderValidationSyncStateKey(stale), nil,
 	)
 	require.NoError(t, err)
 	assert.Empty(t, gone, "genuinely stale marker must be deleted")
+}
+
+// TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates proves a
+// failed restore of a re-admitted marker is NOT swallowed (issue #3717 review,
+// wolf, chainsync.go review). If the delete of a stale marker succeeds but the
+// point is re-deferred during the delete and its marker cannot be re-persisted,
+// the durable retention pin is lost: a restart would miss it, the snapshot could
+// be pruned, and the stateful header check skipped. The failure must therefore
+// propagate out of deleteDeferredMarkerUnlessReadmitted (and, through
+// deletePersistedDeferredMarkers, out of PrunePoolSnapshotsWithRetentionFloor)
+// so the node fails the cleanup rather than continuing toward that lost pin. The
+// in-memory entry must survive so the running process still holds the pin.
+func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{75}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+
+	readmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	key := headerValidationPointKey(readmitted)
+	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted, nil))
+
+	// During the delete window: re-admit the point (so the restore path runs)
+	// and close the metadata store so the restore's SetSyncState fails
+	// deterministically. DeleteSyncState has already committed by the time the
+	// hook fires, so the delete succeeds and only the restore fails.
+	t.Cleanup(func() { afterDeferredMarkerDeleteHook = nil })
+	afterDeferredMarkerDeleteHook = func() {
+		ls.markDeferredHeaderValidation(readmitted)
+		require.NoError(t, ls.db.Metadata().Close())
+	}
+
+	err := ls.deleteDeferredMarkerUnlessReadmitted(key)
+	require.Error(t, err, "a lost durable pin must not be swallowed")
+	assert.Contains(t, err.Error(), "restore re-deferred header marker")
+
+	// The running process still holds the pin: the in-memory entry survives, so
+	// the retention floor keeps covering it until a later cleanup re-persists it.
+	assert.True(
+		t,
+		ls.consumeDeferredHeaderValidation(readmitted),
+		"in-memory deferred entry must survive a restore failure",
+	)
+
+	// The same failure surfaces through the cleanup batch entry point.
+	ls2, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	require.NoError(t, ls2.persistDeferredHeaderValidation(readmitted, nil))
+	afterDeferredMarkerDeleteHook = func() {
+		ls2.markDeferredHeaderValidation(readmitted)
+		require.NoError(t, ls2.db.Metadata().Close())
+	}
+	batchErr := ls2.deletePersistedDeferredMarkers([]string{key})
+	require.Error(
+		t,
+		batchErr,
+		"deletePersistedDeferredMarkers must propagate the lost-pin error",
+	)
 }
