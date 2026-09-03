@@ -838,9 +838,10 @@ func (c *Chain) rollbackPointBlock(
 // findQueuedHeader scans queued headers backward for the rollback point
 // without mutating them, and returns one of three outcomes:
 //   - (index, nil) if a queued header matches point exactly.
-//   - (-1, nil) if every queued header is ahead of point, meaning point
-//     predates the queue and rollback must fall through to the
-//     block-committed chain.
+//   - (-1, nil) if every queued header is strictly ahead of point, or if
+//     point's slot matches the oldest queued header's under a different
+//     hash — either way point is not a queued header, so rollback falls
+//     through to the block-committed chain.
 //   - (-1, models.ErrBlockNotFound) if point falls strictly between two
 //     queued headers, or beyond the newest one without matching it — a
 //     target that is not a valid rollback point.
