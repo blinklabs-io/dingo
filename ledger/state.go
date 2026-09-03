@@ -3258,31 +3258,33 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 	)
 }
 
-// rollbackChain rolls the primary chain back to point and, when that actually
-// moved the chain tip, invalidates the blockfetch batch in flight.
+// rollbackChain rolls the primary chain back to point, invalidating the
+// blockfetch batch in flight.
 //
 // A batch is requested for the header queue that existed when it started, and
-// Chain.rollbackLocked discards that queue whenever it rewinds past it. Blocks
-// the peer is still streaming for the old queue therefore chain onto a tip the
-// node no longer has: applying them is impossible, and letting them reach
+// Chain.rollbackLocked discards or truncates that queue. Blocks the peer is
+// still streaming for the old queue therefore continue a chain the node has
+// abandoned: applying them is impossible, and letting them reach
 // Chain.addBlockLocked against a queue that fork resolution has meanwhile
 // refilled makes the first of them clear those replacement headers (issue
 // #3771). Bumping the generation here lets flushPendingBlockfetchBlocks drop
 // them instead.
 //
-// A rollback that resolves to a queued header leaves the tip (and the blocks
-// already requested for it) alone, so the generation only moves when the tip
-// itself did.
+// The generation is published before the chain changes, not after. The
+// blockfetch handlers run under chainsyncBlockfetchMutex while the rollback
+// paths run under chainsyncMutex, so a flush can land between the two; seeing
+// the new generation before the chain moves discards a batch that was about to
+// be superseded anyway, while seeing the old generation after it has moved
+// applies bodies to a chain that no longer wants them.
+//
+// It is bumped for every attempted rollback rather than only for one that
+// moved the block tip: a rollback onto a queued header truncates the queue
+// without moving the tip, and a rollback that fails leaves the caller
+// requesting a chainsync resync, so in both cases discarding the in-flight
+// batch is at worst one re-fetch of a partially buffered batch.
 func (ls *LedgerState) rollbackChain(point ocommon.Point) error {
-	before := ls.chain.Tip().Point
-	if err := ls.chain.Rollback(point); err != nil {
-		return err
-	}
-	after := ls.chain.Tip().Point
-	if after.Slot != before.Slot || !bytes.Equal(after.Hash, before.Hash) {
-		ls.chainRollbackGeneration.Add(1)
-	}
-	return nil
+	ls.chainRollbackGeneration.Add(1)
+	return ls.chain.Rollback(point)
 }
 
 // rollbackChainAndState rewinds the primary chain and then synchronizes the

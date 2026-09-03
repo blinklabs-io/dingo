@@ -3715,9 +3715,6 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
-	// If this block is the one a tracked range was failing to obtain, that
-	// range is fetchable after all and its failure record is stale.
-	ls.noteBlockfetchRangeProgress(e.Point)
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
 			return err
@@ -3884,11 +3881,16 @@ func (s blockfetchRangeFailureState) matches(point ocommon.Point) bool {
 }
 
 // noteBlockfetchRangeProgress discards the failure record when the range it
-// was tracking has now been delivered. Earlier misses against a range that
+// was tracking has now extended the chain. Earlier misses against a range that
 // turned out to be fetchable must not combine with a later unrelated miss, so
-// a peer that was only briefly behind is never punished. Deliveries for any
+// a peer that was only briefly behind is never punished. Applications of any
 // other range leave the record alone: they say nothing about whether the stuck
 // range can be obtained.
+//
+// Callers must have applied the block, not merely received it. A body that is
+// delivered and then discarded or rejected has not obtained the range, and
+// clearing the record on arrival kept the failure streak at zero for exactly
+// the batches the bound exists to catch.
 func (ls *LedgerState) noteBlockfetchRangeProgress(point ocommon.Point) {
 	if ls.blockfetchRangeFailure.matches(point) {
 		ls.blockfetchRangeFailure = blockfetchRangeFailureState{}
@@ -4362,6 +4364,13 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 		)
 		if addBlockErr == nil {
 			ls.batchBlocksApplied++
+			// If this block is the one a tracked range was failing to
+			// obtain, that range is fetchable after all and its failure
+			// record is stale. Receipt is not enough: a body that is
+			// delivered and then discarded or rejected has not obtained the
+			// range, and clearing the record on arrival stopped the streak
+			// from ever reaching its bound.
+			ls.noteBlockfetchRangeProgress(pendingEvent.Point)
 			// Audit only after the body has extended the queued chain. A body
 			// from an abandoned fetch may still be delivered after a fork
 			// restart; auditing it here would poison producedTxs with stale

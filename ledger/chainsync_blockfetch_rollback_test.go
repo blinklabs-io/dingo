@@ -387,3 +387,63 @@ func TestNonFittingBodyStillRejectedWhenTipDidNotMove(t *testing.T) {
 		"nothing rolled back, so the discard path must not run",
 	)
 }
+
+// A body that is delivered and then discarded has not obtained the range it
+// was fetched for, so it must not clear that range's failure record. Clearing
+// on arrival kept the streak at zero for exactly the batches the bound exists
+// to catch: every round recorded one failure and the next round's delivery
+// erased it.
+func TestDiscardedBodyDoesNotCountAsRangeProgress(t *testing.T) {
+	f := newBlockfetchRollbackFixture(t)
+	f.queueForkAHeaderAndStartBatch(t)
+	forkAPoint := ocommon.NewPoint(
+		f.currentTip.Point.Slot+10,
+		f.forkAHash.Bytes(),
+	)
+
+	// A batch that ends without obtaining the queued range records the
+	// failure against that range's start point, and starts a fresh batch for
+	// the same range.
+	var pending pendingPublishes
+	require.NoError(t, handleEventBlockfetchBatchDoneForTest(
+		f.ls,
+		BlockfetchEvent{ConnectionId: f.connId, BatchDone: true},
+		&pending,
+	))
+	pending.flush()
+	require.True(
+		t,
+		f.ls.blockfetchRangeFailure.matches(forkAPoint),
+		"the unobtained range must be tracked before this test can prove "+
+			"anything about clearing it",
+	)
+	require.Len(t, f.requests, 2)
+
+	// Supersede the batch that is now in flight, then let the peer deliver
+	// the tracked range's own start block into it.
+	f.ls.chainsyncMutex.Lock()
+	var rollbackPending pendingPublishes
+	rollbackErr := f.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: f.connId,
+			Rollback:     true,
+			Point:        f.ancestorTip.Point,
+		},
+		&rollbackPending,
+	)
+	f.ls.chainsyncMutex.Unlock()
+	rollbackPending.flush()
+	require.NoError(t, rollbackErr)
+	f.deliverForkABody(t)
+
+	f.ls.chainsyncBlockfetchMutex.Lock()
+	err := f.ls.flushPendingBlockfetchBlocks()
+	f.ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+
+	assert.True(
+		t,
+		f.ls.blockfetchRangeFailure.matches(forkAPoint),
+		"a discarded body must leave the range's failure record intact",
+	)
+}

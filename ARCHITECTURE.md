@@ -549,15 +549,20 @@ time. These bounds matter for Dijkstra bodies, whose nested canonical-CBOR
 views make a live decoded block substantially larger than its wire bytes.
 
 A batch is fetched for the header queue that existed when it was requested, so
-`LedgerState` binds each batch to a chain-rollback generation. A rollback that
-moves the chain tip discards that header queue, so bodies still arriving for
-the older generation are dropped instead of being handed to chain insertion:
+`LedgerState` binds each batch to a chain-rollback generation, bumped before
+every primary-chain rollback (the rollback paths hold `chainsyncMutex` while
+the blockfetch handlers hold `chainsyncBlockfetchMutex`, so publishing the new
+generation before the chain moves is what keeps a concurrent flush from
+applying to a chain that no longer wants the bodies). Bodies still arriving for
+an older generation are dropped instead of being handed to chain insertion:
 fork resolution rolls back, re-queues the winning peer's header path and only
 then restarts blockfetch, and a body from the losing fork reaching insertion
 against that replacement queue would clear it. A batch that ends without
 extending the chain, while headers stay queued, feeds the same bounded
 same-range failure streak a `NoBlocks` reply feeds, so an unobtainable
 continuation is dropped and re-intersected rather than re-requested forever.
+That streak is only cleared by a body that actually extends the chain, not by
+one that merely arrives.
 
 Opening that iterator is also what decides whether the range is servable at
 all, so `chain`'s forward and reverse iterator constructors require the start
