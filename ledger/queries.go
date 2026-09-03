@@ -1134,7 +1134,16 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 		if len(history) == 0 || history[0].Action != "registered" {
 			continue
 		}
-		ret[cred] = history[0].Deposit
+		// StakeDelegDeposits has no representation for an unknown deposit,
+		// so a NULL is reported as 0 here, preserving the existing
+		// local-state-query wire behaviour. Value conservation reads the same
+		// row through LedgerView.StakeCredentialDeposit, where the nil is
+		// preserved and falls back to KeyDeposit.
+		if history[0].Deposit != nil {
+			ret[cred] = *history[0].Deposit
+		} else {
+			ret[cred] = 0
+		}
 	}
 	return []any{ret}, nil
 }
